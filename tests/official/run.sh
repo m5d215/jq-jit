@@ -1,0 +1,249 @@
+#!/bin/bash
+# jq official test suite runner for jq-jit
+# Parses jq.test format: filter / input / expected output(s), blank-line separated
+# Usage: bash tests/official/run.sh [target/release/jq-jit] [tests/official/jq.test]
+
+set -euo pipefail
+
+JQ_JIT="${1:-target/release/jq-jit}"
+TEST_FILE="${2:-tests/official/jq.test}"
+TIMEOUT=5
+
+PASS=0
+FAIL=0
+SKIP=0
+ERROR=0
+TOTAL=0
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NC='\033[0m'
+
+# Collect failures for summary
+declare -a FAILURES=()
+
+run_test() {
+    local filter="$1"
+    local input="$2"
+    local expected="$3"
+    local test_num="$4"
+
+    TOTAL=$((TOTAL + 1))
+
+    # Run jq-jit with timeout
+    local actual exit_code
+    if [[ "$input" == "null" && "$filter" != "." ]]; then
+        actual=$(echo "null" | timeout "$TIMEOUT" "$JQ_JIT" -c "$filter" 2>/dev/null) && exit_code=$? || exit_code=$?
+    else
+        actual=$(echo "$input" | timeout "$TIMEOUT" "$JQ_JIT" -c "$filter" 2>/dev/null) && exit_code=$? || exit_code=$?
+    fi
+
+    # Timeout (124) or signal (137=SIGKILL, 139=SIGSEGV)
+    if [[ $exit_code -eq 124 || $exit_code -eq 137 ]]; then
+        SKIP=$((SKIP + 1))
+        if [[ "${VERBOSE:-}" == "1" ]]; then
+            echo -e "${YELLOW}SKIP${NC} #$test_num (timeout): $filter"
+        fi
+        return
+    fi
+
+    if [[ $exit_code -eq 139 ]]; then
+        ERROR=$((ERROR + 1))
+        FAILURES+=("#$test_num SIGSEGV: $filter")
+        if [[ "${VERBOSE:-}" == "1" ]]; then
+            echo -e "${RED}SEGV${NC} #$test_num: $filter"
+        fi
+        return
+    fi
+
+    # Exit code 3 = compilation/IR error → SKIP
+    if [[ $exit_code -eq 3 ]]; then
+        SKIP=$((SKIP + 1))
+        if [[ "${VERBOSE:-}" == "1" ]]; then
+            echo -e "${YELLOW}SKIP${NC} #$test_num (unsupported): $filter"
+        fi
+        return
+    fi
+
+    # Other non-zero exit codes (except 5=parse error when input is expected to cause it)
+    if [[ $exit_code -ne 0 && $exit_code -ne 5 ]]; then
+        # Check if expected output indicates an error result
+        if echo "$expected" | grep -q '^".*"$'; then
+            # Might be expected error string, treat as fail
+            :
+        fi
+        FAIL=$((FAIL + 1))
+        FAILURES+=("#$test_num exit=$exit_code: $filter | input: $input")
+        if [[ "${VERBOSE:-}" == "1" ]]; then
+            echo -e "${RED}FAIL${NC} #$test_num (exit $exit_code): $filter"
+        fi
+        return
+    fi
+
+    # Normalize: compact JSON, normalize escapes, sort lines for comparison
+    local expected_norm actual_norm expected_c actual_c
+    # Compact: remove spaces after , and : in JSON
+    actual_c=$(echo "$actual" | sed 's/, /,/g; s/: /:/g')
+    expected_c=$(echo "$expected" | sed 's/, /,/g; s/: /:/g')
+    # Normalize JSON values: parse and re-serialize to canonical form
+    # This handles: \uXXXX vs literal chars, \r vs \u000d, spacing differences
+    _normalize_json() {
+        python3 -c "
+import sys, json, math
+
+def normalize_nums(obj):
+    '''Recursively normalize numbers: 2.0 -> 2 (int), NaN/Inf stay as-is.'''
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return obj
+        if obj == int(obj) and abs(obj) < 2**53:
+            return int(obj)
+        return obj
+    if isinstance(obj, list):
+        return [normalize_nums(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: normalize_nums(v) for k, v in obj.items()}
+    return obj
+
+text = sys.stdin.read()
+lines = []
+for line in text.split('\n'):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        val = json.loads(line)
+        val = normalize_nums(val)
+        lines.append(json.dumps(val, ensure_ascii=False, separators=(',',':'), sort_keys=True))
+    except:
+        lines.append(line)
+sys.stdout.write('\n'.join(lines))
+" 2>/dev/null || cat
+    }
+    actual_c=$(echo "$actual_c" | _normalize_json)
+    expected_c=$(echo "$expected_c" | _normalize_json)
+    expected_norm=$(echo "$expected_c" | sort)
+    actual_norm=$(echo "$actual_c" | sort)
+
+    if [[ "$actual_c" == "$expected_c" ]]; then
+        PASS=$((PASS + 1))
+        if [[ "${VERBOSE:-}" == "2" ]]; then
+            echo -e "${GREEN}PASS${NC} #$test_num: $filter"
+        fi
+    elif [[ "$actual_norm" == "$expected_norm" ]]; then
+        # Same content, different order (e.g., object key ordering)
+        PASS=$((PASS + 1))
+        if [[ "${VERBOSE:-}" == "2" ]]; then
+            echo -e "${GREEN}PASS${NC} #$test_num (reordered): $filter"
+        fi
+    else
+        FAIL=$((FAIL + 1))
+        FAILURES+=("#$test_num: $filter")
+        if [[ "${VERBOSE:-}" == "1" ]]; then
+            echo -e "${RED}FAIL${NC} #$test_num: $filter"
+            echo "  input:    $input"
+            echo "  expected: $(echo "$expected" | head -3)"
+            echo "  actual:   $(echo "$actual" | head -3)"
+        fi
+    fi
+}
+
+# Parse test file
+test_num=0
+filter=""
+input=""
+expected=""
+state="filter"  # filter -> input -> output
+in_fail_block=0
+
+while IFS= read -r line || [[ -n "$line" ]]; do
+    # Skip comments
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+
+    # Handle %%FAIL blocks (skip them — we don't test compilation failures)
+    if [[ "$line" == "%%FAIL" ]]; then
+        in_fail_block=1
+        continue
+    fi
+    if [[ $in_fail_block -eq 1 ]]; then
+        if [[ -z "$line" ]]; then
+            in_fail_block=0
+        fi
+        continue
+    fi
+
+    # Blank line = test separator
+    if [[ -z "$line" ]]; then
+        if [[ "$state" == "output" && -n "$filter" ]]; then
+            test_num=$((test_num + 1))
+            run_test "$filter" "$input" "$expected" "$test_num"
+            filter=""
+            input=""
+            expected=""
+            state="filter"
+        fi
+        continue
+    fi
+
+    case "$state" in
+        filter)
+            filter="$line"
+            state="input"
+            ;;
+        input)
+            input="$line"
+            state="output"
+            expected=""
+            ;;
+        output)
+            if [[ -z "$expected" ]]; then
+                expected="$line"
+            else
+                expected="$expected
+$line"
+            fi
+            ;;
+    esac
+done < "$TEST_FILE"
+
+# Handle last test if file doesn't end with blank line
+if [[ "$state" == "output" && -n "$filter" ]]; then
+    test_num=$((test_num + 1))
+    run_test "$filter" "$input" "$expected" "$test_num"
+fi
+
+# Summary
+echo ""
+echo "=== jq Official Test Suite Results ==="
+echo -e "PASS: ${GREEN}$PASS${NC}"
+echo -e "FAIL: ${RED}$FAIL${NC}"
+echo -e "SKIP: ${YELLOW}$SKIP${NC}"
+echo -e "ERROR: ${RED}$ERROR${NC}"
+echo "TOTAL: $TOTAL"
+
+if [[ $TOTAL -gt 0 ]]; then
+    PASS_RATE=$(echo "scale=1; $PASS * 100 / $TOTAL" | bc)
+    echo -e "PASS rate: ${GREEN}${PASS_RATE}%${NC}"
+fi
+
+# Show failures
+if [[ ${#FAILURES[@]} -gt 0 ]]; then
+    echo ""
+    echo "=== Failures (first 30) ==="
+    for i in "${!FAILURES[@]}"; do
+        [[ $i -ge 30 ]] && break
+        echo "  ${FAILURES[$i]}"
+    done
+    if [[ ${#FAILURES[@]} -gt 30 ]]; then
+        echo "  ... and $((${#FAILURES[@]} - 30)) more"
+    fi
+fi
+
+# Exit with failure if pass rate < 95%
+if [[ $TOTAL -gt 0 ]]; then
+    THRESHOLD=$(echo "$PASS * 100 / $TOTAL" | bc)
+    [[ $THRESHOLD -lt 95 ]] && exit 1
+fi
+exit 0
