@@ -39,7 +39,7 @@ use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, Linkage, Module, default_libcall_names};
-use cranelift_object::{ObjectBuilder, ObjectModule};
+use cranelift_object::{ObjectBuilder, ObjectModule, ObjectProduct};
 
 use crate::cps_ir::{BinOp, ClosureOp, Expr, Literal, UnaryOp};
 use crate::runtime;
@@ -428,7 +428,8 @@ pub fn compile_to_shared_object(expr: &Expr, output_path: &std::path::Path) -> R
     let (_func_id, literals, _clif) = build_filter(&mut module, &mut ctx, &mut func_ctx, expr, ptr_ty)?;
 
     // 4. Emit object file (.o)
-    let product = module.finish();
+    let mut product = module.finish();
+    set_macho_build_version(&mut product);
     let obj_bytes = product.emit()
         .map_err(|e| anyhow::anyhow!("failed to emit object file: {}", e))?;
 
@@ -581,7 +582,8 @@ pub fn compile_to_object(expr: &Expr) -> Result<Vec<u8>> {
     module.clear_context(&mut ctx);
 
     // 7. Finish and emit the object file bytes
-    let product = module.finish();
+    let mut product = module.finish();
+    set_macho_build_version(&mut product);
     let obj_bytes = product
         .emit()
         .map_err(|e| anyhow::anyhow!("failed to emit object file: {}", e))?;
@@ -5300,3 +5302,17 @@ fn literal_to_value(expr: &Expr) -> Option<Value> {
         _ => None,
     }
 }
+
+/// Set Mach-O `LC_BUILD_VERSION` on the object product to suppress
+/// `ld: warning: no platform load command found` on macOS.
+#[cfg(target_os = "macos")]
+fn set_macho_build_version(product: &mut ObjectProduct) {
+    use cranelift_object::object::write::MachOBuildVersion;
+    let mut ver = MachOBuildVersion::default();
+    ver.platform = cranelift_object::object::macho::PLATFORM_MACOS;
+    ver.minos = 0x000b0000; // macOS 11.0
+    product.object.set_macho_build_version(ver);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_macho_build_version(_product: &mut ObjectProduct) {}
