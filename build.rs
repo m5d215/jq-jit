@@ -1,15 +1,20 @@
 fn main() {
-    // Homebrew library search path (macOS ARM64)
-    println!("cargo:rustc-link-search=native=/opt/homebrew/lib");
+    // Homebrew library/include search path (macOS)
+    if cfg!(target_os = "macos") {
+        if std::path::Path::new("/opt/homebrew/lib").exists() {
+            println!("cargo:rustc-link-search=native=/opt/homebrew/lib");
+            println!("cargo:include=/opt/homebrew/include");
+        } else if std::path::Path::new("/usr/local/lib").exists() {
+            println!("cargo:rustc-link-search=native=/usr/local/lib");
+            println!("cargo:include=/usr/local/include");
+        }
+    }
 
     // Link libjq (dynamic)
     println!("cargo:rustc-link-lib=dylib=jq");
 
     // Link oniguruma (jq dependency for regex support)
     println!("cargo:rustc-link-lib=dylib=onig");
-
-    // Include path for jq headers (used by bindgen in task 1-2)
-    println!("cargo:include=/opt/homebrew/include");
 
     // Capture native static libs for AOT linking
     // Use `rustc --print native-static-libs` to discover what system libraries

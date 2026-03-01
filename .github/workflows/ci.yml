@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libjq-dev libonig-dev
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Run differential tests
+        run: cargo run --release --bin jq-jit-test
+
+      - name: Run CLI compatibility tests
+        run: bash tests/compat.sh target/release/jq-jit
+
+      - name: Run jq official test suite
+        run: bash tests/official/run.sh target/release/jq-jit tests/official/jq.test

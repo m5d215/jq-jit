@@ -420,9 +420,13 @@ fn compile_aot(filter: &str, output: &str) -> i32 {
     // gets pulled in, but including them is harmless when not needed.
     cmd.args(["-ljq", "-lonig"]);
 
-    // Homebrew library path on macOS ARM64
+    // Homebrew library path on macOS
     if cfg!(target_os = "macos") {
-        cmd.arg("-L/opt/homebrew/lib");
+        if std::path::Path::new("/opt/homebrew/lib").exists() {
+            cmd.arg("-L/opt/homebrew/lib");
+        } else if std::path::Path::new("/usr/local/lib").exists() {
+            cmd.arg("-L/usr/local/lib");
+        }
     }
 
     eprintln!("jq-jit: linking: {:?}", cmd);
