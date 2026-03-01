@@ -37,6 +37,19 @@ CLI wall-clock (hyperfine):
 
 詳細: [docs/usecase-benchmark.md](docs/usecase-benchmark.md)
 
+## Installation
+
+### Prerequisites
+
+jq-jit dynamically links against libjq and liboniguruma:
+
+- **macOS**: `brew install jq oniguruma`
+- **Ubuntu/Debian**: `sudo apt install libjq-dev libonig-dev`
+
+### Download
+
+Pre-built binaries are available on the [Releases](https://github.com/m5d215/jq-jit/releases) page.
+
 ## Usage
 
 ```bash
