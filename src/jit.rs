@@ -9,7 +9,7 @@
 //! direct computation; generators compile to loops with Yield operations.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use anyhow::{Result, bail};
@@ -111,7 +111,7 @@ fn is_scalar(expr: &Expr) -> bool {
         Expr::CallBuiltin { name, args } => {
             // Filter-argument builtins can't be treated as scalar
             match (name.as_str(), args.len()) {
-                ("walk", _) | ("pick", _) | ("skip", _) => false,
+                ("walk", _) | ("pick", _) | ("skip", _) | ("del", _) => false,
                 ("add", 1) => false,
                 _ => args.iter().all(|a| is_scalar(a)),
             }
@@ -272,6 +272,8 @@ struct Flattener {
     limit_state: Option<(u32, u32, u32, LabelId, u32)>,
     /// Closure ops: key expressions for sort_by/group_by/etc.
     closure_ops: Vec<Expr>,
+    /// Track which functions are currently being expanded (cycle detection)
+    expanding_funcs: HashSet<usize>,
 }
 
 impl Flattener {
@@ -279,7 +281,8 @@ impl Flattener {
         Flattener { ops: Vec::new(), next_slot: 0, next_label: 0, next_var: 0,
                      collect_depth: 0, try_depth: 0, try_catch_target: None,
                      label_targets: HashMap::new(), funcs: Vec::new(),
-                     limit_state: None, closure_ops: Vec::new() }
+                     limit_state: None, closure_ops: Vec::new(),
+                     expanding_funcs: HashSet::new() }
     }
 
     /// Create a test Flattener inheriting compile-time context from self.
@@ -292,6 +295,7 @@ impl Flattener {
         t.funcs = self.funcs.clone();
         t.limit_state = self.limit_state;
         t.closure_ops = self.closure_ops.clone();
+        t.expanding_funcs = self.expanding_funcs.clone();
         t
     }
 
@@ -787,14 +791,17 @@ impl Flattener {
                 self.emit(JitOp::CollectFinish { dst: out });
                 out
             }
-            Expr::FuncCall { func_id, args } if *func_id < self.funcs.len() => {
+            Expr::FuncCall { func_id, args } if *func_id < self.funcs.len() && !self.expanding_funcs.contains(func_id) => {
+                self.expanding_funcs.insert(*func_id);
                 let func = &self.funcs[*func_id].clone();
                 let body = if !func.param_vars.is_empty() && !args.is_empty() {
                     crate::eval::substitute_params(&func.body, &func.param_vars, args)
                 } else {
                     func.body.clone()
                 };
-                self.flatten_scalar(&body, input_slot)
+                let result = self.flatten_scalar(&body, input_slot);
+                self.expanding_funcs.remove(func_id);
+                result
             }
             // Assign with simple path: setpath(path, value)
             Expr::Assign { path_expr, value_expr } => {
@@ -1581,13 +1588,18 @@ impl Flattener {
 
             Expr::FuncCall { func_id, args } => {
                 if *func_id >= self.funcs.len() { return false; }
+                // Detect recursive function calls — not JIT-compilable
+                if self.expanding_funcs.contains(func_id) { return false; }
+                self.expanding_funcs.insert(*func_id);
                 let func = &self.funcs[*func_id].clone();
                 let body = if !func.param_vars.is_empty() && !args.is_empty() {
                     crate::eval::substitute_params(&func.body, &func.param_vars, args)
                 } else {
                     func.body.clone()
                 };
-                self.flatten_gen(&body, input_slot)
+                let result = self.flatten_gen(&body, input_slot);
+                self.expanding_funcs.remove(func_id);
+                result
             }
 
             Expr::AlternativeDestructure { alternatives } => {
@@ -1670,7 +1682,7 @@ impl Flattener {
             // Filter-argument builtins: delegate to eval (not JIT-compilable)
             Expr::CallBuiltin { name, args } if matches!(
                 (name.as_str(), args.len()),
-                ("walk", _) | ("pick", _) | ("skip", _) | ("add", 1)
+                ("walk", _) | ("pick", _) | ("skip", _) | ("add", 1) | ("del", _)
             ) => {
                 return false;
             }
@@ -2574,9 +2586,23 @@ impl Flattener {
         }
         self.emit(JitOp::Jump { label: done_lbl });
 
-        // Other
+        // Other (non-iterable)
         self.emit(JitOp::Label { id: other_lbl });
-        if !is_opt { self.emit(JitOp::ReturnError); }
+        if !is_opt {
+            // Set error: "Cannot iterate over TYPE (VALUE)"
+            let err_slot = self.alloc_slot();
+            self.emit(JitOp::CallBuiltin {
+                dst: err_slot,
+                name: "__each_error__".to_string(),
+                args: vec![container],
+            });
+            self.emit(JitOp::Drop { slot: err_slot });
+            if let Some((catch_label, error_slot)) = self.try_catch_target {
+                self.emit(JitOp::CheckError { error_dst: error_slot, catch_label });
+            } else {
+                self.emit(JitOp::ReturnError);
+            }
+        }
         self.emit(JitOp::Label { id: done_lbl });
     }
 
@@ -3478,6 +3504,17 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             }
             std::ptr::write(dst, Value::Obj(Rc::new(obj)));
             return 0;
+        }
+        if name == "__each_error__" {
+            // Generate "Cannot iterate over TYPE (VALUE)" error
+            if !args_vec.is_empty() {
+                let v = &args_vec[0];
+                let ty = v.type_name();
+                let json = crate::value::value_to_json(v);
+                set_jit_error(format!("Cannot iterate over {} ({})", ty, json));
+                std::ptr::write(dst, Value::Null);
+                return GEN_ERROR;
+            }
         }
         if name == "__builtins__" {
             std::ptr::write(dst, crate::runtime::rt_builtins());

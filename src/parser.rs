@@ -55,6 +55,13 @@ impl Scope {
         func_id
     }
 
+    fn update_func_body(&mut self, func_id: usize, body: Expr, param_vars: Vec<u16>) {
+        if let Some(f) = self.compiled_funcs.get_mut(func_id) {
+            f.body = body;
+            f.param_vars = param_vars;
+        }
+    }
+
     fn lookup_func(&self, name: &str, nargs: usize) -> Option<usize> {
         self.funcs.iter().rev()
             .find(|(n, _, na)| n == name && *na == nargs)
@@ -799,6 +806,9 @@ impl Parser {
             }
         }
 
+        // Pre-register the function for recursive calls (placeholder body)
+        let func_id = self.scope.define_func(&name, params.len(), Expr::Empty, param_vars.clone());
+
         let saved_funcs = self.scope.save_func_scope();
         let mut body = self.parse_pipe()?;
         self.scope.restore_func_scope(saved_funcs);
@@ -816,7 +826,8 @@ impl Parser {
             };
         }
 
-        self.scope.define_func(&name, params.len(), body, param_vars);
+        // Update the function body (replacing placeholder)
+        self.scope.update_func_body(func_id, body, param_vars);
         Ok(())
     }
 
@@ -1847,6 +1858,11 @@ impl Parser {
                                 };
                             }
                         }
+                        Token::LBracket => {
+                            // .expr.[] or .expr.[key] — handle like LBracket postfix
+                            // Don't advance — let the LBracket case handle it
+                            continue;
+                        }
                         _ => {
                             // Just a trailing dot - this shouldn't normally happen after a postfix
                             // Put back the dot context
@@ -2286,9 +2302,19 @@ impl Parser {
             }
             Token::Str(key) => {
                 self.advance();
-                self.expect(&Token::Colon)?;
-                let val = self.parse_pipe_nocomma()?;
-                Ok((Expr::Literal(Literal::Str(key)), val))
+                if self.eat(&Token::Colon) {
+                    let val = self.parse_pipe_nocomma()?;
+                    Ok((Expr::Literal(Literal::Str(key)), val))
+                } else {
+                    // Shorthand: {"foo"} = {"foo": .foo}
+                    Ok((
+                        Expr::Literal(Literal::Str(key.clone())),
+                        Expr::Index {
+                            expr: Box::new(Expr::Input),
+                            key: Box::new(Expr::Literal(Literal::Str(key))),
+                        },
+                    ))
+                }
             }
             Token::LParen => {
                 // Computed key: {(expr): value}
@@ -2568,7 +2594,7 @@ impl Parser {
             | "indices" | "index" | "rindex" | "paths" | "getpath_" | "map_values"
             | "first" | "last" | "nth" | "range" | "limit" | "until" | "while" | "repeat"
             | "select" | "map"
-            | "toboolean" | "walk" | "pick" | "bsearch" | "skip"
+            | "toboolean" | "walk" | "pick" | "bsearch" | "skip" | "del"
             | "IN" | "INDEX" | "JOIN" | "strflocaltime"
             if !matches!(self.current(), Token::LParen) => {
                 self.compile_builtin_noargs(name)
@@ -2611,6 +2637,14 @@ impl Parser {
             "true" => Ok(Expr::Literal(Literal::True)),
             "false" => Ok(Expr::Literal(Literal::False)),
             "path" => Ok(Expr::PathExpr { expr: Box::new(Expr::Input) }),
+            "first" => Ok(Expr::Index {
+                expr: Box::new(Expr::Input),
+                key: Box::new(Expr::Literal(Literal::Num(0.0, None))),
+            }),
+            "last" => Ok(Expr::Index {
+                expr: Box::new(Expr::Input),
+                key: Box::new(Expr::Literal(Literal::Num(-1.0, None))),
+            }),
             "paths" => {
                 // paths = [path(..[])] but without the empty root path
                 // Use Recurse with .[] step and then get paths via Each
@@ -2937,11 +2971,25 @@ impl Parser {
                 let generator = args.next().unwrap();
                 Ok(Expr::Limit { count: Box::new(count), generator: Box::new(generator) })
             }
+            ("first", 0) => {
+                // first = .[0]
+                Ok(Expr::Index {
+                    expr: Box::new(Expr::Input),
+                    key: Box::new(Expr::Literal(Literal::Num(0.0, None))),
+                })
+            }
             ("first", 1) => {
                 let generator = args.into_iter().next().unwrap();
                 Ok(Expr::Limit {
                     count: Box::new(Expr::Literal(Literal::Num(1.0, None))),
                     generator: Box::new(generator),
+                })
+            }
+            ("last", 0) => {
+                // last = .[-1]
+                Ok(Expr::Index {
+                    expr: Box::new(Expr::Input),
+                    key: Box::new(Expr::Literal(Literal::Num(-1.0, None))),
                 })
             }
             ("last", 1) => {
@@ -3457,6 +3505,11 @@ impl Parser {
                         }),
                     }),
                 })
+            }
+            // del/1: del(f) — delegate to eval for proper slice handling
+            ("del", 1) => {
+                let f = args.into_iter().next().unwrap();
+                Ok(Expr::CallBuiltin { name: "del".to_string(), args: vec![f] })
             }
             _ => {
                 // Check user-defined functions
