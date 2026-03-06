@@ -5,7 +5,7 @@
 use std::io::{self, BufRead, Read, Write};
 use std::process;
 
-use jq_jit2::value::{self, Value, json_to_value, value_to_json, value_to_json_precise, value_to_json_pretty};
+use jq_jit2::value::{self, Value, json_to_value, value_to_json, value_to_json_precise, value_to_json_pretty, write_value_compact};
 use jq_jit2::interpreter::Filter;
 
 fn main() {
@@ -156,11 +156,19 @@ fn main() {
                     if exit_status && !result.is_true() {
                         *any_false = true;
                     }
-                    let formatted = format_value(result);
-                    if join_output {
-                        let _ = write!(out, "{}", formatted);
+                    // Use streaming write for compact mode to avoid intermediate String allocation
+                    if compact && !raw_output {
+                        let _ = write_value_compact(out, result);
+                        if !join_output {
+                            let _ = out.write_all(b"\n");
+                        }
                     } else {
-                        let _ = writeln!(out, "{}", formatted);
+                        let formatted = format_value(result);
+                        if join_output {
+                            let _ = write!(out, "{}", formatted);
+                        } else {
+                            let _ = writeln!(out, "{}", formatted);
+                        }
                     }
                 }
             }

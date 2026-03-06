@@ -11,6 +11,9 @@ use indexmap::IndexMap;
 
 use crate::jq_ffi::{self, Jv, JvKind};
 
+/// Object map type — IndexMap with ahash for faster lookups.
+pub type ObjMap = IndexMap<String, Value, ahash::RandomState>;
+
 /// Tag discriminant constants, matching `#[repr(C, u64)]` layout.
 pub const TAG_NULL: u64 = 0;
 pub const TAG_FALSE: u64 = 1;
@@ -30,7 +33,7 @@ pub enum Value {
     Num(f64, Option<Rc<str>>),
     Str(Rc<String>),
     Arr(Rc<Vec<Value>>),
-    Obj(Rc<IndexMap<String, Value>>),
+    Obj(Rc<ObjMap>),
     Error(Rc<String>),
 }
 
@@ -114,7 +117,7 @@ impl Value {
         }
     }
 
-    pub fn as_obj(&self) -> Option<&Rc<IndexMap<String, Value>>> {
+    pub fn as_obj(&self) -> Option<&Rc<ObjMap>> {
         match self {
             Value::Obj(o) => Some(o),
             _ => None,
@@ -366,7 +369,7 @@ fn parse_json_array(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)
 fn parse_json_object(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)> {
     debug_assert_eq!(b[pos], b'{');
     let mut i = skip_ws(b, pos + 1);
-    let mut map = IndexMap::new();
+    let mut map = ObjMap::default();
     if i < b.len() && b[i] == b'}' { return Ok((Value::Obj(Rc::new(map)), i + 1)); }
     loop {
         if i >= b.len() || b[i] != b'"' { bail!("Expected string key at position {}", i); }
@@ -466,7 +469,7 @@ pub unsafe fn jv_to_value(jv: Jv) -> Result<Value> {
                 Ok(Value::Arr(Rc::new(items)))
             }
             JvKind::Object => {
-                let mut map = IndexMap::new();
+                let mut map = ObjMap::default();
                 let mut iter = jq_ffi::jv_object_iter(jv);
                 while jq_ffi::jv_object_iter_valid(jv, iter) != 0 {
                     let key_jv = jq_ffi::jv_object_iter_key(jv, iter);
@@ -649,4 +652,75 @@ fn json_encode_string(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+// ============================================================================
+// Streaming JSON output — writes directly to io::Write, avoiding intermediate Strings
+// ============================================================================
+
+use std::io;
+
+fn write_json_string(w: &mut dyn io::Write, s: &str) -> io::Result<()> {
+    w.write_all(b"\"")?;
+    for ch in s.chars() {
+        match ch {
+            '"' => w.write_all(b"\\\"")?,
+            '\\' => w.write_all(b"\\\\")?,
+            '\n' => w.write_all(b"\\n")?,
+            '\r' => w.write_all(b"\\r")?,
+            '\t' => w.write_all(b"\\t")?,
+            '\u{08}' => w.write_all(b"\\b")?,
+            '\u{0c}' => w.write_all(b"\\f")?,
+            c if (c as u32) < 0x20 => {
+                write!(w, "\\u{:04x}", c as u32)?;
+            }
+            c => {
+                let mut buf = [0u8; 4];
+                w.write_all(c.encode_utf8(&mut buf).as_bytes())?;
+            }
+        }
+    }
+    w.write_all(b"\"")?;
+    Ok(())
+}
+
+fn write_jq_number(w: &mut dyn io::Write, n: f64) -> io::Result<()> {
+    // Reuse format_jq_number to guarantee consistent output
+    w.write_all(format_jq_number(n).as_bytes())
+}
+
+/// Write a Value as compact JSON directly to an io::Write, using precise repr when available.
+pub fn write_value_compact(w: &mut dyn io::Write, v: &Value) -> io::Result<()> {
+    match v {
+        Value::Null => w.write_all(b"null"),
+        Value::False => w.write_all(b"false"),
+        Value::True => w.write_all(b"true"),
+        Value::Num(n, repr) => {
+            if let Some(r) = repr {
+                w.write_all(r.as_bytes())
+            } else {
+                write_jq_number(w, *n)
+            }
+        }
+        Value::Str(s) => write_json_string(w, s),
+        Value::Arr(a) => {
+            w.write_all(b"[")?;
+            for (i, item) in a.iter().enumerate() {
+                if i > 0 { w.write_all(b",")?; }
+                write_value_compact(w, item)?;
+            }
+            w.write_all(b"]")
+        }
+        Value::Obj(o) => {
+            w.write_all(b"{")?;
+            for (i, (k, val)) in o.iter().enumerate() {
+                if i > 0 { w.write_all(b",")?; }
+                write_json_string(w, k)?;
+                w.write_all(b":")?;
+                write_value_compact(w, val)?;
+            }
+            w.write_all(b"}")
+        }
+        Value::Error(e) => write_json_string(w, e),
+    }
 }

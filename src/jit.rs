@@ -3505,7 +3505,7 @@ extern "C" fn jit_rt_collect_finish(dst: *mut Value, env: *mut JitEnv) {
 
 // Object construction helpers
 extern "C" fn jit_rt_obj_new(dst: *mut Value) {
-    unsafe { std::ptr::write(dst, Value::Obj(Rc::new(indexmap::IndexMap::new()))); }
+    unsafe { std::ptr::write(dst, Value::Obj(Rc::new(crate::value::ObjMap::default()))); }
 }
 extern "C" fn jit_rt_obj_insert(obj: *mut Value, key: *const Value, val: *const Value) {
     unsafe {
@@ -3578,7 +3578,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             if parts.len() == 2 {
                 let line_n: i64 = parts[0].parse().unwrap_or(0);
                 let file = parts[1];
-                let mut obj = indexmap::IndexMap::new();
+                let mut obj = crate::value::ObjMap::default();
                 obj.insert("file".to_string(), Value::Str(Rc::new(file.to_string())));
                 obj.insert("line".to_string(), Value::Num(line_n as f64, None));
                 std::ptr::write(dst, Value::Obj(Rc::new(obj)));
@@ -3586,7 +3586,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             }
         }
         if name == "__env__" {
-            let mut obj = indexmap::IndexMap::new();
+            let mut obj = crate::value::ObjMap::default();
             for (k, v) in std::env::vars() {
                 obj.insert(k, Value::Str(Rc::new(v)));
             }
