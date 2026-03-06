@@ -187,6 +187,206 @@ impl fmt::Debug for Value {
 // ---------------------------------------------------------------------------
 
 pub fn json_to_value(json: &str) -> Result<Value> {
+    let bytes = json.as_bytes();
+    let mut pos = 0;
+    // Skip BOM
+    if bytes.len() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF { pos = 3; }
+    pos = skip_ws(bytes, pos);
+    if pos >= bytes.len() {
+        bail!("Invalid numeric literal at line 1, column 1 (while parsing 'jq: ')");
+    }
+    let (val, end) = parse_json_value(bytes, pos, 0)?;
+    pos = skip_ws(bytes, end);
+    if pos < bytes.len() {
+        bail!("Invalid numeric literal at line 1, column {} (while parsing 'jq: ')", pos + 1);
+    }
+    Ok(val)
+}
+
+fn skip_ws(b: &[u8], mut pos: usize) -> usize {
+    while pos < b.len() && matches!(b[pos], b' ' | b'\t' | b'\n' | b'\r') { pos += 1; }
+    pos
+}
+
+const MAX_JSON_DEPTH: usize = 10000;
+
+fn parse_json_value(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)> {
+    if pos >= b.len() { bail!("Unexpected end of JSON input"); }
+    if depth > MAX_JSON_DEPTH { bail!("Exceeds depth limit for parsing"); }
+    match b[pos] {
+        b'n' => {
+            if b.get(pos..pos+4) == Some(b"null") { Ok((Value::Null, pos + 4)) }
+            else if b.get(pos..pos+3) == Some(b"nan") { Ok((Value::Num(f64::NAN, None), pos + 3)) }
+            else { bail!("Invalid JSON at position {}", pos) }
+        }
+        b't' => {
+            if b.get(pos..pos+4) == Some(b"true") { Ok((Value::True, pos + 4)) }
+            else { bail!("Invalid JSON at position {}", pos) }
+        }
+        b'f' => {
+            if b.get(pos..pos+5) == Some(b"false") { Ok((Value::False, pos + 5)) }
+            else { bail!("Invalid JSON at position {}", pos) }
+        }
+        b'N' => {
+            if b.get(pos..pos+3) == Some(b"NaN") { Ok((Value::Num(f64::NAN, None), pos + 3)) }
+            else { bail!("Invalid JSON at position {}", pos) }
+        }
+        b'I' => {
+            if b.get(pos..pos+8) == Some(b"Infinity") { Ok((Value::Num(f64::INFINITY, None), pos + 8)) }
+            else { bail!("Invalid JSON at position {}", pos) }
+        }
+        b'"' => parse_json_string(b, pos),
+        b'[' => parse_json_array(b, pos, depth),
+        b'{' => parse_json_object(b, pos, depth),
+        b'-' => {
+            // Could be -Infinity, -NaN, or negative number
+            if b.get(pos..pos+9) == Some(b"-Infinity") { Ok((Value::Num(f64::NEG_INFINITY, None), pos + 9)) }
+            else if b.get(pos..pos+4) == Some(b"-NaN") { Ok((Value::Num(f64::NAN, None), pos + 4)) }
+            else { parse_json_number(b, pos) }
+        }
+        b'0'..=b'9' => parse_json_number(b, pos),
+        c => bail!("Unexpected character '{}' at position {}", c as char, pos),
+    }
+}
+
+fn parse_json_string(b: &[u8], pos: usize) -> Result<(Value, usize)> {
+    debug_assert_eq!(b[pos], b'"');
+    let mut i = pos + 1;
+    // Fast path: scan for end of simple string (no escapes, all ASCII)
+    let start = i;
+    let mut has_escape = false;
+    while i < b.len() {
+        match b[i] {
+            b'"' if !has_escape => {
+                let s = std::str::from_utf8(&b[start..i]).unwrap_or("").to_string();
+                return Ok((Value::Str(Rc::new(s)), i + 1));
+            }
+            b'\\' => { has_escape = true; break; }
+            b'"' => break,
+            _ => i += 1,
+        }
+    }
+    // Slow path: handle escapes and multi-byte UTF-8
+    i = pos + 1;
+    let mut buf = Vec::new();
+    while i < b.len() {
+        match b[i] {
+            b'"' => {
+                let s = String::from_utf8_lossy(&buf).into_owned();
+                return Ok((Value::Str(Rc::new(s)), i + 1));
+            }
+            b'\\' => {
+                i += 1;
+                if i >= b.len() { bail!("Unterminated string escape"); }
+                match b[i] {
+                    b'"' => buf.push(b'"'),
+                    b'\\' => buf.push(b'\\'),
+                    b'/' => buf.push(b'/'),
+                    b'b' => buf.push(0x08),
+                    b'f' => buf.push(0x0C),
+                    b'n' => buf.push(b'\n'),
+                    b'r' => buf.push(b'\r'),
+                    b't' => buf.push(b'\t'),
+                    b'u' => {
+                        if i + 4 >= b.len() { bail!("Invalid unicode escape"); }
+                        let hex = std::str::from_utf8(&b[i+1..i+5]).unwrap_or("0000");
+                        let cp = u16::from_str_radix(hex, 16).unwrap_or(0);
+                        i += 4;
+                        if (0xD800..=0xDBFF).contains(&cp) {
+                            if i + 6 <= b.len() && b[i+1] == b'\\' && b[i+2] == b'u' {
+                                let hex2 = std::str::from_utf8(&b[i+3..i+7]).unwrap_or("0000");
+                                let cp2 = u16::from_str_radix(hex2, 16).unwrap_or(0);
+                                if (0xDC00..=0xDFFF).contains(&cp2) {
+                                    let full = 0x10000 + ((cp as u32 - 0xD800) << 10) + (cp2 as u32 - 0xDC00);
+                                    if let Some(c) = char::from_u32(full) {
+                                        let mut tmp = [0u8; 4];
+                                        buf.extend_from_slice(c.encode_utf8(&mut tmp).as_bytes());
+                                    }
+                                    i += 6;
+                                } else {
+                                    buf.extend_from_slice("\u{FFFD}".as_bytes());
+                                }
+                            } else {
+                                buf.extend_from_slice("\u{FFFD}".as_bytes());
+                            }
+                        } else if let Some(c) = char::from_u32(cp as u32) {
+                            let mut tmp = [0u8; 4];
+                            buf.extend_from_slice(c.encode_utf8(&mut tmp).as_bytes());
+                        }
+                    }
+                    _ => { buf.push(b'\\'); buf.push(b[i]); }
+                }
+                i += 1;
+            }
+            c => { buf.push(c); i += 1; }
+        }
+    }
+    bail!("Unterminated string")
+}
+
+fn parse_json_number(b: &[u8], pos: usize) -> Result<(Value, usize)> {
+    let mut i = pos;
+    if i < b.len() && b[i] == b'-' { i += 1; }
+    if i < b.len() && b[i] == b'0' { i += 1; }
+    else { while i < b.len() && b[i].is_ascii_digit() { i += 1; } }
+    if i < b.len() && b[i] == b'.' { i += 1; while i < b.len() && b[i].is_ascii_digit() { i += 1; } }
+    if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+        i += 1;
+        if i < b.len() && (b[i] == b'+' || b[i] == b'-') { i += 1; }
+        while i < b.len() && b[i].is_ascii_digit() { i += 1; }
+    }
+    let num_str = std::str::from_utf8(&b[pos..i]).unwrap_or("0");
+    let n: f64 = num_str.parse().unwrap_or(0.0);
+    // Check if f64 round-trip matches the original text
+    let f64_repr = format_jq_number(n);
+    let repr = if f64_repr != num_str {
+        Some(Rc::from(num_str))
+    } else {
+        None
+    };
+    Ok((Value::Num(n, repr), i))
+}
+
+fn parse_json_array(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)> {
+    debug_assert_eq!(b[pos], b'[');
+    let mut i = skip_ws(b, pos + 1);
+    let mut items = Vec::new();
+    if i < b.len() && b[i] == b']' { return Ok((Value::Arr(Rc::new(items)), i + 1)); }
+    loop {
+        let (val, end) = parse_json_value(b, i, depth + 1)?;
+        items.push(val);
+        i = skip_ws(b, end);
+        if i >= b.len() { bail!("Unterminated array"); }
+        if b[i] == b']' { return Ok((Value::Arr(Rc::new(items)), i + 1)); }
+        if b[i] != b',' { bail!("Expected ',' or ']' at position {}", i); }
+        i = skip_ws(b, i + 1);
+    }
+}
+
+fn parse_json_object(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)> {
+    debug_assert_eq!(b[pos], b'{');
+    let mut i = skip_ws(b, pos + 1);
+    let mut map = IndexMap::new();
+    if i < b.len() && b[i] == b'}' { return Ok((Value::Obj(Rc::new(map)), i + 1)); }
+    loop {
+        if i >= b.len() || b[i] != b'"' { bail!("Expected string key at position {}", i); }
+        let (key_val, end) = parse_json_string(b, i)?;
+        let key = match key_val { Value::Str(s) => (*s).clone(), _ => unreachable!() };
+        i = skip_ws(b, end);
+        if i >= b.len() || b[i] != b':' { bail!("Expected ':' at position {}", i); }
+        i = skip_ws(b, i + 1);
+        let (val, end) = parse_json_value(b, i, depth + 1)?;
+        map.insert(key, val);
+        i = skip_ws(b, end);
+        if i >= b.len() { bail!("Unterminated object"); }
+        if b[i] == b'}' { return Ok((Value::Obj(Rc::new(map)), i + 1)); }
+        if b[i] != b',' { bail!("Expected ',' or '}}' at position {}", i); }
+        i = skip_ws(b, i + 1);
+    }
+}
+
+/// Parse JSON using libjq (for fromjson — produces libjq-compatible error messages)
+pub fn json_to_value_libjq(json: &str) -> Result<Value> {
     let c_json = CString::new(json).context("JSON string contains null byte")?;
     unsafe {
         let jv = jq_ffi::jv_parse(c_json.as_ptr());
@@ -342,8 +542,6 @@ pub fn value_to_json(v: &Value) -> String {
 pub fn value_to_json_precise(v: &Value) -> String {
     value_to_json_depth(v, 0, true)
 }
-
-const MAX_JSON_DEPTH: usize = 10000;
 
 fn value_to_json_depth(v: &Value, depth: usize, precise: bool) -> String {
     if depth > MAX_JSON_DEPTH {

@@ -150,6 +150,9 @@ enum JitOp {
     TryCatchBegin,
     TryCatchEnd,
 
+    // Error throwing
+    ThrowError { msg: SlotId },
+
     // Termination
     ReturnContinue,
     ReturnError,
@@ -406,6 +409,21 @@ impl Flattener {
         match expr {
             Expr::Empty => true,
 
+            Expr::Error { msg } => {
+                if let Some(msg_expr) = msg {
+                    if !is_scalar(msg_expr) { return false; }
+                    let msg_val = self.flatten_scalar(msg_expr, input_slot);
+                    self.emit(JitOp::ThrowError { msg: msg_val });
+                    self.emit(JitOp::Drop { slot: msg_val });
+                } else {
+                    let msg_val = self.alloc_slot();
+                    self.emit(JitOp::Clone { dst: msg_val, src: input_slot });
+                    self.emit(JitOp::ThrowError { msg: msg_val });
+                    self.emit(JitOp::Drop { slot: msg_val });
+                }
+                true
+            }
+
             Expr::Comma { left, right } => {
                 if !self.flatten_gen(left, input_slot) { return false; }
                 self.flatten_gen(right, input_slot)
@@ -601,8 +619,38 @@ impl Flattener {
             // TryCatch disabled in JIT — error propagation not yet correct
             Expr::TryCatch { .. } => false,
 
-            // Foreach disabled in JIT — needs accumulator-as-input for update, complex to get right
-            Expr::Foreach { .. } => false,
+            Expr::Foreach { source, init, var_index, acc_index, update, extract } => {
+                if !is_scalar(init) || !is_scalar(update) { return false; }
+                // Pre-check: if extract exists, it must be compilable as a generator
+                if let Some(ext) = extract.as_ref() {
+                    let mut test = Flattener::new();
+                    test.collect_depth = self.collect_depth;
+                    test.try_depth = self.try_depth;
+                    let t_in = test.alloc_slot();
+                    if !test.flatten_gen(ext, t_in) { return false; }
+                }
+
+                // Evaluate init → accumulator
+                let acc_val = self.flatten_scalar(init, input_slot);
+                let old_acc = self.alloc_slot();
+                self.emit(JitOp::GetVar { dst: old_acc, var_index: *acc_index });
+                self.emit(JitOp::SetVar { var_index: *acc_index, src: acc_val });
+                self.emit(JitOp::Drop { slot: acc_val });
+                let old_var = self.alloc_slot();
+                self.emit(JitOp::GetVar { dst: old_var, var_index: *var_index });
+
+                // The action for each source element: update acc, yield extract
+                let vi = *var_index;
+                let ai = *acc_index;
+                let ok = self.flatten_gen_with_foreach(source, vi, ai, update, extract.as_deref(), input_slot);
+
+                // Restore vars
+                self.emit(JitOp::SetVar { var_index: *var_index, src: old_var });
+                self.emit(JitOp::Drop { slot: old_var });
+                self.emit(JitOp::SetVar { var_index: *acc_index, src: old_acc });
+                self.emit(JitOp::Drop { slot: old_acc });
+                ok
+            }
 
             _ => false,
         }
@@ -611,6 +659,9 @@ impl Flattener {
     /// Handle generator | anything: emit left generator's loop with right inline.
     fn flatten_gen_pipe(&mut self, left: &Expr, right: &Expr, input_slot: SlotId) -> bool {
         match left {
+            // Empty | anything = empty (no outputs)
+            Expr::Empty => true,
+
             Expr::Each { input_expr } | Expr::EachOpt { input_expr } => {
                 let is_opt = matches!(left, Expr::EachOpt { .. });
                 if !is_scalar(input_expr) { return false; }
@@ -643,6 +694,23 @@ impl Flattener {
             }
             Expr::IfThenElse { cond, then_branch, else_branch } => {
                 if !is_scalar(cond) { return false; }
+                let then_pipe = Expr::Pipe {
+                    left: Box::new((**then_branch).clone()),
+                    right: Box::new(right.clone()),
+                };
+                let else_pipe = Expr::Pipe {
+                    left: Box::new((**else_branch).clone()),
+                    right: Box::new(right.clone()),
+                };
+                // Pre-check both branches
+                {
+                    let mut test = Flattener::new();
+                    test.collect_depth = self.collect_depth;
+                    test.try_depth = self.try_depth;
+                    let t_in = test.alloc_slot();
+                    if !test.flatten_gen(&then_pipe, t_in) { return false; }
+                    if !test.flatten_gen(&else_pipe, t_in) { return false; }
+                }
                 let cond_val = self.flatten_scalar(cond, input_slot);
                 let then_lbl = self.alloc_label();
                 let else_lbl = self.alloc_label();
@@ -651,18 +719,10 @@ impl Flattener {
                 self.emit(JitOp::Drop { slot: cond_val });
 
                 self.emit(JitOp::Label { id: then_lbl });
-                let then_pipe = Expr::Pipe {
-                    left: Box::new((**then_branch).clone()),
-                    right: Box::new(right.clone()),
-                };
                 self.flatten_gen(&then_pipe, input_slot);
                 self.emit(JitOp::Jump { label: done_lbl });
 
                 self.emit(JitOp::Label { id: else_lbl });
-                let else_pipe = Expr::Pipe {
-                    left: Box::new((**else_branch).clone()),
-                    right: Box::new(right.clone()),
-                };
                 self.flatten_gen(&else_pipe, input_slot);
                 self.emit(JitOp::Label { id: done_lbl });
                 true
@@ -670,6 +730,14 @@ impl Flattener {
             Expr::Range { from, to, step } => {
                 if !is_scalar(from) || !is_scalar(to) { return false; }
                 if let Some(s) = step { if !is_scalar(s) { return false; } }
+                // Pre-check: can we compile the body (right)?
+                {
+                    let mut test = Flattener::new();
+                    test.collect_depth = self.collect_depth;
+                    test.try_depth = self.try_depth;
+                    let t_in = test.alloc_slot();
+                    if !test.flatten_gen(right, t_in) { return false; }
+                }
                 let from_val = self.flatten_scalar(from, input_slot);
                 let to_val = self.flatten_scalar(to, input_slot);
                 let step_val = if let Some(s) = step {
@@ -914,6 +982,98 @@ impl Flattener {
         }
     }
 
+    /// Iterate source for foreach: update acc and yield extract for each element.
+    fn flatten_gen_with_foreach(&mut self, source: &Expr, var_index: u16, acc_index: u16,
+                                update: &Expr, extract: Option<&Expr>, input_slot: SlotId) -> bool {
+        // The update+extract step for each source element
+        let emit_step = |s: &mut Flattener, elem: SlotId| {
+            s.emit(JitOp::SetVar { var_index, src: elem });
+            // Load current accumulator as input to update (. refers to acc in foreach)
+            let acc = s.alloc_slot();
+            s.emit(JitOp::GetVar { dst: acc, var_index: acc_index });
+            let new_acc = s.flatten_scalar(update, acc);
+            s.emit(JitOp::Drop { slot: acc });
+            s.emit(JitOp::SetVar { var_index: acc_index, src: new_acc });
+            s.emit(JitOp::Drop { slot: new_acc });
+            // Now yield extract (evaluated with new accumulator as input)
+            if let Some(ext) = extract {
+                let ext_input = s.alloc_slot();
+                s.emit(JitOp::GetVar { dst: ext_input, var_index: acc_index });
+                s.flatten_gen(ext, ext_input);
+                s.emit(JitOp::Drop { slot: ext_input });
+            } else {
+                let acc_out = s.alloc_slot();
+                s.emit(JitOp::GetVar { dst: acc_out, var_index: acc_index });
+                s.emit_yield(acc_out);
+                s.emit(JitOp::Drop { slot: acc_out });
+            }
+        };
+
+        if is_scalar(source) {
+            let val = self.flatten_scalar(source, input_slot);
+            emit_step(self, val);
+            self.emit(JitOp::Drop { slot: val });
+            return true;
+        }
+        match source {
+            Expr::Each { input_expr } | Expr::EachOpt { input_expr } => {
+                if !is_scalar(input_expr) { return false; }
+                let is_opt = matches!(source, Expr::EachOpt { .. });
+                let container = self.flatten_scalar(input_expr, input_slot);
+                self.flatten_each_with_action(container, is_opt, &|s, elem| {
+                    emit_step(s, elem);
+                });
+                self.emit(JitOp::Drop { slot: container });
+                true
+            }
+            Expr::Comma { left, right } => {
+                if !self.flatten_gen_with_foreach(left, var_index, acc_index, update, extract, input_slot) {
+                    return false;
+                }
+                self.flatten_gen_with_foreach(right, var_index, acc_index, update, extract, input_slot)
+            }
+            Expr::Range { from, to, step } => {
+                if !is_scalar(from) || !is_scalar(to) { return false; }
+                if let Some(s) = step { if !is_scalar(s) { return false; } }
+                let from_val = self.flatten_scalar(from, input_slot);
+                let to_val = self.flatten_scalar(to, input_slot);
+                let step_val = if let Some(s) = step {
+                    self.flatten_scalar(s, input_slot)
+                } else {
+                    let s = self.alloc_slot();
+                    self.emit(JitOp::Num { dst: s, val: 1.0, repr: None });
+                    s
+                };
+                let cur = self.alloc_var();
+                let to_v = self.alloc_var();
+                let step_v = self.alloc_var();
+                let cmp = self.alloc_var();
+                self.emit(JitOp::ToF64Var { dst_var: cur, src: from_val });
+                self.emit(JitOp::ToF64Var { dst_var: to_v, src: to_val });
+                self.emit(JitOp::ToF64Var { dst_var: step_v, src: step_val });
+                self.emit(JitOp::Drop { slot: from_val });
+                self.emit(JitOp::Drop { slot: to_val });
+                self.emit(JitOp::Drop { slot: step_val });
+                let head = self.alloc_label();
+                let body = self.alloc_label();
+                let done = self.alloc_label();
+                self.emit(JitOp::Label { id: head });
+                self.emit(JitOp::RangeCheck { dst_var: cmp, cur_var: cur, to_var: to_v, step_var: step_v });
+                self.emit(JitOp::BranchOnVar { var: cmp, nonzero_label: body, zero_label: done });
+                self.emit(JitOp::Label { id: body });
+                let num = self.alloc_slot();
+                self.emit(JitOp::F64Num { dst: num, src_var: cur });
+                emit_step(self, num);
+                self.emit(JitOp::Drop { slot: num });
+                self.emit(JitOp::F64Add { dst_var: cur, a_var: cur, b_var: step_v });
+                self.emit(JitOp::Jump { label: head });
+                self.emit(JitOp::Label { id: done });
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Emit foreach loop: for each output of source, set $var, update acc, yield extract.
     fn flatten_foreach_loop(&mut self, source: &Expr, var_index: u16, acc_index: u16,
                             update: &Expr, extract: Option<&Expr>, input_slot: SlotId) {
@@ -1147,6 +1307,13 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
         }
     }
 }
+extern "C" fn jit_rt_throw_error(msg: *const Value, env: *mut JitEnv) -> i64 {
+    unsafe {
+        let env = &mut *env;
+        env.error_msg = Some(crate::value::value_to_json(&*msg));
+        GEN_ERROR
+    }
+}
 extern "C" fn jit_rt_negate(dst: *mut Value, input: *const Value) -> i64 {
     unsafe {
         match &*input {
@@ -1341,6 +1508,7 @@ pub struct JitEnv {
     pub collect_stacks: Vec<Vec<Value>>,
     pub str_bufs: Vec<String>,
     pub try_depth: u32,
+    pub error_msg: Option<String>,
 }
 
 impl JitEnv {
@@ -1350,6 +1518,7 @@ impl JitEnv {
             collect_stacks: Vec::new(),
             str_bufs: Vec::new(),
             try_depth: 0,
+            error_msg: None,
         }
     }
 }
@@ -1411,6 +1580,7 @@ impl JitCompiler {
             ("jit_rt_strbuf_finish", jit_rt_strbuf_finish as *const u8),
             ("jit_rt_try_begin", jit_rt_try_begin as *const u8),
             ("jit_rt_try_end", jit_rt_try_end as *const u8),
+            ("jit_rt_throw_error", jit_rt_throw_error as *const u8),
         ];
         for (name, ptr) in symbols {
             jit_builder.symbol(*name, *ptr);
@@ -1826,6 +1996,13 @@ impl JitCompiler {
                         b.ins().return_(&[v]);
                         terminated = true;
                     }
+                    JitOp::ThrowError { msg } => {
+                        let msg_addr = slot_addr(&mut b, *msg);
+                        let call = b.ins().call(rt["throw_error"], &[msg_addr, env_ptr]);
+                        let v = b.inst_results(call)[0];
+                        b.ins().return_(&[v]);
+                        terminated = true;
+                    }
                 }
             }
 
@@ -1899,6 +2076,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("strbuf_finish", [p, p], []);
     decl!("try_begin", [p], []);
     decl!("try_end", [p], []);
+    decl!("throw_error", [p, p], [p]);
     Ok(())
 }
 
@@ -1925,7 +2103,12 @@ pub fn execute_jit(func: JitFilterFn, input: &Value) -> Result<Vec<Value>> {
         func(input as *const Value, &mut env, collect_callback,
              &mut results as *mut Vec<Value> as *mut u8)
     };
-    if result == GEN_ERROR { bail!("JIT execution error"); }
+    if result == GEN_ERROR {
+        if let Some(msg) = env.error_msg {
+            bail!("__jqerror__:{}", msg);
+        }
+        bail!("JIT execution error");
+    }
     Ok(results)
 }
 
