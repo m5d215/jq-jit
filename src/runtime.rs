@@ -354,7 +354,25 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
 pub fn errdesc_pub(v: &Value) -> String { errdesc(v) }
 
 fn errdesc(v: &Value) -> String {
-    let json = crate::value::value_to_json(v);
+    // For numbers, use Rust's decimal Display (not scientific notation)
+    // so error messages show "12345678901234568000000000..." like jq does.
+    let json = match v {
+        Value::Num(n, _) => {
+            if n.is_nan() { "null".to_string() }
+            else if n.is_infinite() {
+                if n.is_sign_positive() { "1.7976931348623157e+308".to_string() }
+                else { "-1.7976931348623157e+308".to_string() }
+            } else if *n == 0.0 {
+                if n.is_sign_negative() { "-0".to_string() } else { "0".to_string() }
+            } else if *n == n.trunc() && n.abs() < 1e16 {
+                let i = *n as i64;
+                if i as f64 == *n { format!("{}", i) } else { format!("{}", n) }
+            } else {
+                format!("{}", n)
+            }
+        }
+        _ => crate::value::value_to_json(v),
+    };
     let tn = v.type_name();
     let jlen = json.as_bytes().len();
     if json.starts_with('"') {

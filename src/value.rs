@@ -506,7 +506,7 @@ pub unsafe fn jv_to_value(jv: Jv) -> Result<Value> {
     }
 }
 
-/// Format f64 the way jq does (%.17g equivalent).
+/// Format f64 the way jq does — shortest representation with scientific notation for large/small values.
 pub fn format_jq_number(n: f64) -> String {
     if n.is_nan() {
         return "null".to_string();
@@ -526,28 +526,64 @@ pub fn format_jq_number(n: f64) -> String {
         };
     }
 
-    // Use C-style %.17g formatting
-    // Integer values: no decimal point
-    if n == n.trunc() && n.abs() < 1e18 {
+    // Integer fast path for common values (fits in i64, reasonable length)
+    if n == n.trunc() && n.abs() < 1e16 {
         let i = n as i64;
         if i as f64 == n {
-            let int_str = format!("{}", i);
-            // %.17g uses scientific notation when significant digits > 17
-            let digit_count = int_str.chars().filter(|c| c.is_ascii_digit()).count();
-            if digit_count > 17 {
-                let sci = format!("{:e}", n);
-                let sci = if !sci.contains('+') && !sci.contains('-') {
-                    sci.replacen("e", "e+", 1)
-                } else {
-                    sci
-                };
-                return sci;
-            }
-            return int_str;
+            return format!("{}", i);
         }
     }
 
-    format!("{}", n)
+    // Use Rust's shortest-representation (like jq's jvp_dtoa)
+    let s = format!("{}", n);
+    let abs = n.abs();
+
+    // For very small numbers (abs < 1e-4), always use scientific notation (matching %g)
+    if abs != 0.0 && abs < 1e-4 {
+        return format_as_scientific(n);
+    }
+
+    // For large numbers: compare fixed vs scientific length, prefer shorter
+    if abs >= 1e16 {
+        let sci = format_as_scientific(n);
+        if sci.len() < s.len() {
+            return sci;
+        }
+    }
+
+    s
+}
+
+/// Format a number in scientific notation matching jq's style.
+fn format_as_scientific(n: f64) -> String {
+    let sci = format!("{:e}", n);
+    let sci = if sci.contains("e-") { sci } else { sci.replacen("e", "e+", 1) };
+    normalize_scientific(&sci)
+}
+
+/// Normalize scientific notation to match jq's format (e.g., e+07 not e+7 for small exponents).
+fn normalize_scientific(s: &str) -> String {
+    // Split at 'e'
+    if let Some(idx) = s.find('e') {
+        let mantissa = &s[..idx];
+        let exp_str = &s[idx+1..]; // includes sign
+        let (sign, digits) = if exp_str.starts_with('-') {
+            ("-", &exp_str[1..])
+        } else if exp_str.starts_with('+') {
+            ("+", &exp_str[1..])
+        } else {
+            ("+", exp_str)
+        };
+        // Parse exponent and re-format with at least 2 digits for < 100
+        let exp: i32 = digits.parse().unwrap_or(0);
+        if exp.abs() < 100 {
+            format!("{}e{}{:02}", mantissa, sign, exp.abs())
+        } else {
+            format!("{}e{}{}", mantissa, sign, exp.abs())
+        }
+    } else {
+        s.to_string()
+    }
 }
 
 /// Convert Value to compact JSON string (always uses f64 for numbers).
