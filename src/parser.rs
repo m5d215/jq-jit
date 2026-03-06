@@ -1177,6 +1177,10 @@ impl Parser {
             Pattern::Object(pats) => {
                 for (_, p) in pats { self.collect_pattern_var_names(p, names); }
             }
+            Pattern::VarAndSub(name, sub) => {
+                names.push(name.clone());
+                self.collect_pattern_var_names(sub, names);
+            }
         }
     }
 
@@ -1210,26 +1214,26 @@ impl Parser {
                     body: Box::new(inner),
                 })
             }
+            Pattern::VarAndSub(name, sub) => {
+                let inner = self.build_binding_with_varmap(value_expr.clone(), sub, var_map, body)?;
+                let var_idx = var_map[name];
+                Ok(Expr::LetBinding {
+                    var_index: var_idx,
+                    value: Box::new(value_expr),
+                    body: Box::new(inner),
+                })
+            }
         }
     }
 
     fn build_array_destructure_varmap(&mut self, value: Expr, pats: &[Pattern], var_map: &std::collections::HashMap<String, u16>, body: Expr) -> Result<Expr> {
         let mut result = body;
         for (i, pat) in pats.iter().enumerate().rev() {
-            match pat {
-                Pattern::Var(name) => {
-                    let var_idx = var_map[name];
-                    result = Expr::LetBinding {
-                        var_index: var_idx,
-                        value: Box::new(Expr::Index {
-                            expr: Box::new(value.clone()),
-                            key: Box::new(Expr::Literal(Literal::Num(i as f64, None))),
-                        }),
-                        body: Box::new(result),
-                    };
-                }
-                _ => bail!("nested destructuring not yet supported"),
-            }
+            let elem_expr = Expr::Index {
+                expr: Box::new(value.clone()),
+                key: Box::new(Expr::Literal(Literal::Num(i as f64, None))),
+            };
+            result = self.build_pattern_binding_varmap(pat, elem_expr, var_map, result)?;
         }
         Ok(result)
     }
@@ -1237,22 +1241,55 @@ impl Parser {
     fn build_object_destructure_varmap(&mut self, value: Expr, pats: &[(String, Pattern)], var_map: &std::collections::HashMap<String, u16>, body: Expr) -> Result<Expr> {
         let mut result = body;
         for (key, pat) in pats.iter().rev() {
-            match pat {
-                Pattern::Var(name) => {
-                    let var_idx = var_map[name];
-                    result = Expr::LetBinding {
-                        var_index: var_idx,
-                        value: Box::new(Expr::Index {
-                            expr: Box::new(value.clone()),
-                            key: Box::new(Expr::Literal(Literal::Str(key.clone()))),
-                        }),
-                        body: Box::new(result),
-                    };
-                }
-                _ => bail!("nested destructuring not yet supported"),
-            }
+            let field_expr = Expr::Index {
+                expr: Box::new(value.clone()),
+                key: Box::new(Expr::Literal(Literal::Str(key.clone()))),
+            };
+            result = self.build_pattern_binding_varmap(pat, field_expr, var_map, result)?;
         }
         Ok(result)
+    }
+
+    fn build_pattern_binding_varmap(&mut self, pat: &Pattern, value: Expr, var_map: &std::collections::HashMap<String, u16>, body: Expr) -> Result<Expr> {
+        match pat {
+            Pattern::Var(name) => {
+                let var_idx = var_map[name];
+                Ok(Expr::LetBinding {
+                    var_index: var_idx,
+                    value: Box::new(value),
+                    body: Box::new(body),
+                })
+            }
+            Pattern::Array(sub_pats) => {
+                let tmp_idx = self.scope.alloc_var("__destruct_tmp__");
+                let tmp_ref = Expr::LoadVar { var_index: tmp_idx };
+                let inner = self.build_array_destructure_varmap(tmp_ref, sub_pats, var_map, body)?;
+                Ok(Expr::LetBinding {
+                    var_index: tmp_idx,
+                    value: Box::new(value),
+                    body: Box::new(inner),
+                })
+            }
+            Pattern::Object(sub_pats) => {
+                let tmp_idx = self.scope.alloc_var("__destruct_tmp__");
+                let tmp_ref = Expr::LoadVar { var_index: tmp_idx };
+                let inner = self.build_object_destructure_varmap(tmp_ref, sub_pats, var_map, body)?;
+                Ok(Expr::LetBinding {
+                    var_index: tmp_idx,
+                    value: Box::new(value),
+                    body: Box::new(inner),
+                })
+            }
+            Pattern::VarAndSub(name, sub) => {
+                let inner = self.build_pattern_binding_varmap(sub, value.clone(), var_map, body)?;
+                let var_idx = var_map[name];
+                Ok(Expr::LetBinding {
+                    var_index: var_idx,
+                    value: Box::new(value),
+                    body: Box::new(inner),
+                })
+            }
+        }
     }
 
     fn build_binding(&mut self, value_expr: Expr, pattern: Pattern, allocs: Vec<u16>, body: Expr) -> Result<Expr> {
@@ -1285,6 +1322,14 @@ impl Parser {
                     body: Box::new(inner),
                 })
             }
+            Pattern::VarAndSub(_, sub) => {
+                let inner = self.build_binding(value_expr.clone(), *sub, allocs[1..].to_vec(), body)?;
+                Ok(Expr::LetBinding {
+                    var_index: allocs[0],
+                    value: Box::new(value_expr),
+                    body: Box::new(inner),
+                })
+            }
         }
     }
 
@@ -1299,6 +1344,11 @@ impl Parser {
             }
             Pattern::Object(pats) => {
                 pats.iter().flat_map(|(_, p)| self.alloc_pattern_vars(p)).collect()
+            }
+            Pattern::VarAndSub(name, sub) => {
+                let mut vars = vec![self.scope.alloc_var(name)];
+                vars.extend(self.alloc_pattern_vars(sub));
+                vars
             }
         }
     }
@@ -1339,9 +1389,34 @@ impl Parser {
         match self.current().clone() {
             Token::Variable(name) => {
                 self.advance();
-                Ok((name.clone(), Pattern::Var(name)))
+                if self.eat(&Token::Colon) {
+                    // $var: pattern — key is variable name, bind $var AND destructure
+                    let sub_pat = self.parse_pattern()?;
+                    Ok((name.clone(), Pattern::VarAndSub(name, Box::new(sub_pat))))
+                } else {
+                    // $var shorthand — key is variable name, bind to $var
+                    Ok((name.clone(), Pattern::Var(name)))
+                }
             }
             Token::Ident(key) | Token::Str(key) => {
+                self.advance();
+                self.expect(&Token::Colon)?;
+                let pat = self.parse_pattern()?;
+                Ok((key, pat))
+            }
+            Token::LParen => {
+                // Computed key pattern: (expr): $var
+                self.advance();
+                let key_expr = self.parse_pipe()?;
+                self.expect(&Token::RParen)?;
+                self.expect(&Token::Colon)?;
+                let pat = self.parse_pattern()?;
+                // Try to evaluate key as a constant string
+                let key = self.try_eval_const_string(&key_expr)?;
+                Ok((key, pat))
+            }
+            ref tok if Self::keyword_as_string(tok).is_some() => {
+                let key = Self::keyword_as_string(tok).unwrap().to_string();
                 self.advance();
                 self.expect(&Token::Colon)?;
                 let pat = self.parse_pattern()?;
@@ -1351,26 +1426,30 @@ impl Parser {
         }
     }
 
+    /// Try to evaluate a constant string expression at parse time.
+    fn try_eval_const_string(&self, expr: &Expr) -> Result<String> {
+        match expr {
+            Expr::Literal(Literal::Str(s)) => Ok(s.clone()),
+            Expr::BinOp { op: BinOp::Add, lhs, rhs } => {
+                let l = self.try_eval_const_string(lhs)?;
+                let r = self.try_eval_const_string(rhs)?;
+                Ok(format!("{}{}", l, r))
+            }
+            _ => bail!("cannot evaluate computed key pattern at parse time"),
+        }
+    }
+
     fn build_array_destructure(&mut self, value: Expr, pats: &[Pattern], allocs: &[u16], body: Expr) -> Result<Expr> {
         let mut result = body;
         let mut alloc_idx = allocs.len();
         for (i, pat) in pats.iter().enumerate().rev() {
             let count = self.count_pattern_vars(pat);
             alloc_idx -= count;
-            let var_idx = allocs[alloc_idx];
-            match pat {
-                Pattern::Var(_) => {
-                    result = Expr::LetBinding {
-                        var_index: var_idx,
-                        value: Box::new(Expr::Index {
-                            expr: Box::new(value.clone()),
-                            key: Box::new(Expr::Literal(Literal::Num(i as f64, None))),
-                        }),
-                        body: Box::new(result),
-                    };
-                }
-                _ => bail!("nested destructuring not yet supported"),
-            }
+            let elem_expr = Expr::Index {
+                expr: Box::new(value.clone()),
+                key: Box::new(Expr::Literal(Literal::Num(i as f64, None))),
+            };
+            result = self.build_pattern_binding(pat, elem_expr, &allocs[alloc_idx..alloc_idx+count], result)?;
         }
         Ok(result)
     }
@@ -1381,22 +1460,55 @@ impl Parser {
         for (key, pat) in pats.iter().rev() {
             let count = self.count_pattern_vars(pat);
             alloc_idx -= count;
-            let var_idx = allocs[alloc_idx];
-            match pat {
-                Pattern::Var(_) => {
-                    result = Expr::LetBinding {
-                        var_index: var_idx,
-                        value: Box::new(Expr::Index {
-                            expr: Box::new(value.clone()),
-                            key: Box::new(Expr::Literal(Literal::Str(key.clone()))),
-                        }),
-                        body: Box::new(result),
-                    };
-                }
-                _ => bail!("nested destructuring not yet supported"),
-            }
+            let field_expr = Expr::Index {
+                expr: Box::new(value.clone()),
+                key: Box::new(Expr::Literal(Literal::Str(key.clone()))),
+            };
+            result = self.build_pattern_binding(pat, field_expr, &allocs[alloc_idx..alloc_idx+count], result)?;
         }
         Ok(result)
+    }
+
+    /// Recursively build bindings for a pattern. Handles nested arrays and objects.
+    fn build_pattern_binding(&mut self, pat: &Pattern, value: Expr, allocs: &[u16], body: Expr) -> Result<Expr> {
+        match pat {
+            Pattern::Var(_) => {
+                Ok(Expr::LetBinding {
+                    var_index: allocs[0],
+                    value: Box::new(value),
+                    body: Box::new(body),
+                })
+            }
+            Pattern::Array(sub_pats) => {
+                let tmp_idx = self.scope.alloc_var("__destruct_tmp__");
+                let tmp_ref = Expr::LoadVar { var_index: tmp_idx };
+                let inner = self.build_array_destructure(tmp_ref, sub_pats, allocs, body)?;
+                Ok(Expr::LetBinding {
+                    var_index: tmp_idx,
+                    value: Box::new(value),
+                    body: Box::new(inner),
+                })
+            }
+            Pattern::Object(sub_pats) => {
+                let tmp_idx = self.scope.alloc_var("__destruct_tmp__");
+                let tmp_ref = Expr::LoadVar { var_index: tmp_idx };
+                let inner = self.build_object_destructure(tmp_ref, sub_pats, allocs, body)?;
+                Ok(Expr::LetBinding {
+                    var_index: tmp_idx,
+                    value: Box::new(value),
+                    body: Box::new(inner),
+                })
+            }
+            Pattern::VarAndSub(_, sub) => {
+                // Bind $var to the whole value, then destructure via sub-pattern
+                let inner = self.build_pattern_binding(sub, value.clone(), &allocs[1..], body)?;
+                Ok(Expr::LetBinding {
+                    var_index: allocs[0],
+                    value: Box::new(value),
+                    body: Box::new(inner),
+                })
+            }
+        }
     }
 
     fn count_pattern_vars(&self, pattern: &Pattern) -> usize {
@@ -1404,6 +1516,7 @@ impl Parser {
             Pattern::Var(_) => 1,
             Pattern::Array(pats) => pats.iter().map(|p| self.count_pattern_vars(p)).sum(),
             Pattern::Object(pats) => pats.iter().map(|(_, p)| self.count_pattern_vars(p)).sum(),
+            Pattern::VarAndSub(_, sub) => 1 + self.count_pattern_vars(sub),
         }
     }
 
@@ -2284,61 +2397,141 @@ impl Parser {
     }
 
     fn parse_reduce(&mut self) -> Result<Expr> {
-        // reduce SOURCE as $VAR (INIT; UPDATE)
-        let source = self.parse_postfix()?;
+        // reduce SOURCE as $VAR|PATTERN (INIT; UPDATE)
+        let source = self.parse_or()?;
         self.expect(&Token::As)?;
-        let var_name = match self.advance() {
-            Token::Variable(name) => name,
-            t => bail!("expected $variable in reduce, got {:?}", t),
-        };
-        let var_idx = self.scope.alloc_var(&var_name);
-        let acc_idx = self.scope.alloc_var("__acc__");
 
-        self.expect(&Token::LParen)?;
-        let init = self.parse_pipe()?;
-        self.expect(&Token::Semicolon)?;
-        let update = self.parse_pipe()?;
-        self.expect(&Token::RParen)?;
+        if matches!(self.current(), Token::Variable(_)) && !matches!(self.peek(), Token::Comma | Token::Colon) {
+            // Simple variable binding
+            let var_name = match self.advance() {
+                Token::Variable(name) => name,
+                _ => unreachable!(),
+            };
+            let var_idx = self.scope.alloc_var(&var_name);
+            let acc_idx = self.scope.alloc_var("__acc__");
 
-        Ok(Expr::Reduce {
-            source: Box::new(source),
-            init: Box::new(init),
-            var_index: var_idx,
-            acc_index: acc_idx,
-            update: Box::new(update),
-        })
+            self.expect(&Token::LParen)?;
+            let init = self.parse_pipe()?;
+            self.expect(&Token::Semicolon)?;
+            let update = self.parse_pipe()?;
+            self.expect(&Token::RParen)?;
+
+            Ok(Expr::Reduce {
+                source: Box::new(source),
+                init: Box::new(init),
+                var_index: var_idx,
+                acc_index: acc_idx,
+                update: Box::new(update),
+            })
+        } else {
+            // Destructuring pattern
+            let pattern = self.parse_pattern()?;
+            let allocs = self.alloc_pattern_vars(&pattern);
+            let tmp_var = self.scope.alloc_var("__reduce_item__");
+            let acc_idx = self.scope.alloc_var("__acc__");
+
+            self.expect(&Token::LParen)?;
+            let init = self.parse_pipe()?;
+            self.expect(&Token::Semicolon)?;
+            let update_raw = self.parse_pipe()?;
+            self.expect(&Token::RParen)?;
+
+            let update = self.build_binding(
+                Expr::LoadVar { var_index: tmp_var },
+                pattern,
+                allocs,
+                update_raw,
+            )?;
+
+            Ok(Expr::Reduce {
+                source: Box::new(source),
+                init: Box::new(init),
+                var_index: tmp_var,
+                acc_index: acc_idx,
+                update: Box::new(update),
+            })
+        }
     }
 
     fn parse_foreach(&mut self) -> Result<Expr> {
-        // foreach SOURCE as $VAR (INIT; UPDATE [; EXTRACT])
-        let source = self.parse_postfix()?;
+        // foreach SOURCE as $VAR|PATTERN (INIT; UPDATE [; EXTRACT])
+        let source = self.parse_or()?;
         self.expect(&Token::As)?;
-        let var_name = match self.advance() {
-            Token::Variable(name) => name,
-            t => bail!("expected $variable in foreach, got {:?}", t),
-        };
-        let var_idx = self.scope.alloc_var(&var_name);
-        let acc_idx = self.scope.alloc_var("__acc__");
 
-        self.expect(&Token::LParen)?;
-        let init = self.parse_pipe()?;
-        self.expect(&Token::Semicolon)?;
-        let update = self.parse_pipe()?;
-        let extract = if self.eat(&Token::Semicolon) {
-            Some(Box::new(self.parse_pipe()?))
+        // Support both $var and destructuring patterns
+        if matches!(self.current(), Token::Variable(_)) && !matches!(self.peek(), Token::Comma | Token::Colon) {
+            // Simple variable binding
+            let var_name = match self.advance() {
+                Token::Variable(name) => name,
+                _ => unreachable!(),
+            };
+            let var_idx = self.scope.alloc_var(&var_name);
+            let acc_idx = self.scope.alloc_var("__acc__");
+
+            self.expect(&Token::LParen)?;
+            let init = self.parse_pipe()?;
+            self.expect(&Token::Semicolon)?;
+            let update = self.parse_pipe()?;
+            let extract = if self.eat(&Token::Semicolon) {
+                Some(Box::new(self.parse_pipe()?))
+            } else {
+                None
+            };
+            self.expect(&Token::RParen)?;
+
+            Ok(Expr::Foreach {
+                source: Box::new(source),
+                init: Box::new(init),
+                var_index: var_idx,
+                acc_index: acc_idx,
+                update: Box::new(update),
+                extract,
+            })
         } else {
-            None
-        };
-        self.expect(&Token::RParen)?;
+            // Destructuring pattern
+            let pattern = self.parse_pattern()?;
+            let allocs = self.alloc_pattern_vars(&pattern);
+            let tmp_var = self.scope.alloc_var("__foreach_item__");
+            let acc_idx = self.scope.alloc_var("__acc__");
 
-        Ok(Expr::Foreach {
-            source: Box::new(source),
-            init: Box::new(init),
-            var_index: var_idx,
-            acc_index: acc_idx,
-            update: Box::new(update),
-            extract,
-        })
+            self.expect(&Token::LParen)?;
+            let init = self.parse_pipe()?;
+            self.expect(&Token::Semicolon)?;
+            let update_raw = self.parse_pipe()?;
+            let extract_raw = if self.eat(&Token::Semicolon) {
+                Some(self.parse_pipe()?)
+            } else {
+                None
+            };
+            self.expect(&Token::RParen)?;
+
+            // Wrap update in pattern binding
+            let update = self.build_binding(
+                Expr::LoadVar { var_index: tmp_var },
+                pattern.clone(),
+                allocs.clone(),
+                update_raw,
+            )?;
+            let extract = if let Some(extract_expr) = extract_raw {
+                Some(Box::new(self.build_binding(
+                    Expr::LoadVar { var_index: tmp_var },
+                    pattern,
+                    allocs,
+                    extract_expr,
+                )?))
+            } else {
+                None
+            };
+
+            Ok(Expr::Foreach {
+                source: Box::new(source),
+                init: Box::new(init),
+                var_index: tmp_var,
+                acc_index: acc_idx,
+                update: Box::new(update),
+                extract,
+            })
+        }
     }
 
     fn parse_funcall_or_builtin(&mut self, name: &str) -> Result<Expr> {
@@ -3141,10 +3334,13 @@ impl Parser {
 // Helper types
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 enum Pattern {
     Var(String),
     Array(Vec<Pattern>),
     Object(Vec<(String, Pattern)>),
+    /// $var: sub_pattern — binds $var to whole value AND destructures via sub_pattern
+    VarAndSub(String, Box<Pattern>),
 }
 
 fn make_type_select(type_name: &str) -> Expr {

@@ -302,8 +302,9 @@ pub fn eval(
                     })
                 }
                 _ => {
-                    eval(lhs, input.clone(), env, &mut |lval| {
-                        eval(rhs, input.clone(), env, &mut |rval| {
+                    // jq evaluates rhs as outer generator, lhs as inner
+                    eval(rhs, input.clone(), env, &mut |rval| {
+                        eval(lhs, input.clone(), env, &mut |lval| {
                             cb(eval_binop(op, &lval, &rval)?)
                         })
                     })
