@@ -552,18 +552,23 @@ impl Flattener {
                 out
             }
             Expr::Index { expr: base_expr, key: key_expr } | Expr::IndexOpt { expr: base_expr, key: key_expr } => {
-                let base = self.flatten_scalar(base_expr, input_slot);
+                // Optimization: if base is Input, borrow the input slot directly (skip clone+drop)
+                let (base, base_owned) = if matches!(base_expr.as_ref(), Expr::Input) {
+                    (input_slot, false)
+                } else {
+                    (self.flatten_scalar(base_expr, input_slot), true)
+                };
                 // Optimization: if key is a string literal, use IndexField
                 if let Expr::Literal(Literal::Str(s)) = key_expr.as_ref() {
                     let out = self.alloc_slot();
                     self.emit(JitOp::IndexField { dst: out, base, field: s.clone() });
-                    self.emit(JitOp::Drop { slot: base });
+                    if base_owned { self.emit(JitOp::Drop { slot: base }); }
                     out
                 } else {
                     let key = self.flatten_scalar(key_expr, input_slot);
                     let out = self.alloc_slot();
                     self.emit(JitOp::Index { dst: out, base, key });
-                    self.emit(JitOp::Drop { slot: base });
+                    if base_owned { self.emit(JitOp::Drop { slot: base }); }
                     self.emit(JitOp::Drop { slot: key });
                     out
                 }
@@ -992,7 +997,11 @@ impl Flattener {
             }
 
             Expr::Each { input_expr } => {
-                if is_scalar(input_expr) {
+                if matches!(input_expr.as_ref(), Expr::Input) {
+                    // Borrow input directly — skip clone+drop
+                    self.flatten_each_yield(input_slot, false);
+                    true
+                } else if is_scalar(input_expr) {
                     let container = self.flatten_scalar(input_expr, input_slot);
                     self.flatten_each_yield(container, false);
                     self.emit(JitOp::Drop { slot: container });
@@ -1002,7 +1011,10 @@ impl Flattener {
                 }
             }
             Expr::EachOpt { input_expr } => {
-                if is_scalar(input_expr) {
+                if matches!(input_expr.as_ref(), Expr::Input) {
+                    self.flatten_each_yield(input_slot, true);
+                    true
+                } else if is_scalar(input_expr) {
                     let container = self.flatten_scalar(input_expr, input_slot);
                     self.flatten_each_yield(container, true);
                     self.emit(JitOp::Drop { slot: container });
@@ -2152,14 +2164,22 @@ impl Flattener {
 
             Expr::Each { input_expr } | Expr::EachOpt { input_expr } => {
                 let is_opt = matches!(left, Expr::EachOpt { .. });
-                if !is_scalar(input_expr) { return false; }
-                let container = self.flatten_scalar(input_expr, input_slot);
-                // Emit loop, applying right to each element
-                if !self.flatten_each_with_body(container, is_opt, right, input_slot) {
-                    return false;
+                // Borrow input directly when iterating over it
+                if matches!(input_expr.as_ref(), Expr::Input) {
+                    if !self.flatten_each_with_body(input_slot, is_opt, right, input_slot) {
+                        return false;
+                    }
+                    true
+                } else if is_scalar(input_expr) {
+                    let container = self.flatten_scalar(input_expr, input_slot);
+                    if !self.flatten_each_with_body(container, is_opt, right, input_slot) {
+                        return false;
+                    }
+                    self.emit(JitOp::Drop { slot: container });
+                    true
+                } else {
+                    false
                 }
-                self.emit(JitOp::Drop { slot: container });
-                true
             }
             Expr::Comma { left, right: r } => {
                 // (A, B) | C = (A | C), (B | C)
