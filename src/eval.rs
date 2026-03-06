@@ -657,7 +657,7 @@ pub fn eval(
 }
 
 // ---------------------------------------------------------------------------
-fn eval_binop(op: BinOp, lhs: &Value, rhs: &Value) -> Result<Value> {
+pub fn eval_binop(op: BinOp, lhs: &Value, rhs: &Value) -> Result<Value> {
     match op {
         BinOp::Add => crate::runtime::rt_add(lhs, rhs),
         BinOp::Sub => crate::runtime::rt_sub(lhs, rhs),
@@ -675,7 +675,7 @@ fn eval_binop(op: BinOp, lhs: &Value, rhs: &Value) -> Result<Value> {
     }
 }
 
-fn eval_unaryop(op: UnaryOp, val: &Value) -> Result<Value> {
+pub fn eval_unaryop(op: UnaryOp, val: &Value) -> Result<Value> {
     match op {
         UnaryOp::Not => return Ok(if val.is_truthy() { Value::False } else { Value::True }),
         UnaryOp::Infinite => return Ok(Value::Num(f64::INFINITY, None)),
@@ -715,7 +715,7 @@ fn eval_unaryop(op: UnaryOp, val: &Value) -> Result<Value> {
     crate::runtime::call_builtin(name, &[val.clone()])
 }
 
-fn eval_index(base: &Value, key: &Value, optional: bool) -> std::result::Result<Value, String> {
+pub fn eval_index(base: &Value, key: &Value, optional: bool) -> std::result::Result<Value, String> {
     match (base, key) {
         (Value::Obj(o), Value::Str(k)) => Ok(o.get(k.as_str()).cloned().unwrap_or(Value::Null)),
         (Value::Arr(a), Value::Num(n, _)) => {

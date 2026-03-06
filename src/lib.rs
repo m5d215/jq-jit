@@ -8,3 +8,4 @@ pub mod runtime;
 pub mod parser;
 pub mod eval;
 pub mod module;
+pub mod jit;

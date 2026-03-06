@@ -15,6 +15,10 @@ pub struct Filter {
     program: String,
     /// Our parsed IR (if parsing succeeded).
     parsed: Option<(crate::ir::Expr, Vec<CompiledFunc>)>,
+    /// JIT-compiled function (if JIT compilation succeeded).
+    jit_fn: Option<crate::jit::JitFilterFn>,
+    /// JIT compiler kept alive to own the compiled code.
+    _jit_compiler: Option<Box<crate::jit::JitCompiler>>,
     lib_dirs: Vec<String>,
 }
 
@@ -35,15 +39,37 @@ impl Filter {
             }
         };
 
+        // Try JIT compilation for the parsed expression
+        let mut jit_fn = None;
+        let mut jit_compiler = None;
+        if let Some((ref expr, ref funcs)) = parsed {
+            // Only JIT if no user-defined functions (for now)
+            if funcs.is_empty() && crate::jit::is_jit_compilable(expr) {
+                if let Ok(mut compiler) = crate::jit::JitCompiler::new() {
+                    if let Ok(func) = compiler.compile(expr) {
+                        jit_fn = Some(func);
+                        jit_compiler = Some(Box::new(compiler));
+                    }
+                }
+            }
+        }
+
         Ok(Filter {
             program: program.to_string(),
             parsed,
+            jit_fn,
+            _jit_compiler: jit_compiler,
             lib_dirs: lib_dirs.to_vec(),
         })
     }
 
     /// Execute the filter against an input value, collecting all results.
     pub fn execute(&self, input: &Value) -> Result<Vec<Value>> {
+        // Try JIT execution first
+        if let Some(jit_fn) = self.jit_fn {
+            return crate::jit::execute_jit(jit_fn, input);
+        }
+
         if let Some((ref expr, ref funcs)) = self.parsed {
             // Use our own interpreter
             crate::eval::execute_ir_with_libs(expr, input.clone(), funcs.clone(), self.lib_dirs.clone())
