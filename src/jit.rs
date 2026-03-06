@@ -263,6 +263,24 @@ impl Flattener {
         }
     }
 
+    /// Emit a fallible op with explicit error propagation even outside try blocks.
+    fn emit_propagating(&mut self, op: JitOp) {
+        self.ops.push(op);
+        if let Some((catch_label, error_slot)) = self.try_catch_target {
+            self.ops.push(JitOp::CheckError { error_dst: error_slot, catch_label });
+        } else {
+            let error_slot = self.alloc_slot();
+            let error_label = self.alloc_label();
+            let ok_label = self.alloc_label();
+            self.ops.push(JitOp::CheckError { error_dst: error_slot, catch_label: error_label });
+            self.ops.push(JitOp::Jump { label: ok_label });
+            self.ops.push(JitOp::Label { id: error_label });
+            self.ops.push(JitOp::Drop { slot: error_slot });
+            self.ops.push(JitOp::ReturnError);
+            self.ops.push(JitOp::Label { id: ok_label });
+        }
+    }
+
     fn emit_yield(&mut self, output: SlotId) {
         if self.collect_depth > 0 {
             self.emit(JitOp::CollectPush { src: output });
@@ -1039,8 +1057,42 @@ impl Flattener {
                     self.emit(JitOp::Drop { slot: lhs_val });
                     ok
                 } else {
-                    // Both generator — fall back to interpreter for now
-                    false
+                    // Both generators: convert to nested pipe
+                    // (lhs_gen) as $__l | (rhs_gen) as $__r | $__l op $__r
+                    // Use LetBinding approach to avoid nested closure issues
+                    let lhs_var: u16 = 10100;
+                    let rhs_var: u16 = 10101;
+                    let bound = Expr::Pipe {
+                        left: Box::new(Expr::LetBinding {
+                            var_index: lhs_var,
+                            value: Box::new((**lhs).clone()),
+                            body: Box::new(Expr::LetBinding {
+                                var_index: rhs_var,
+                                value: Box::new((**rhs).clone()),
+                                body: Box::new(Expr::BinOp {
+                                    op: *op,
+                                    lhs: Box::new(Expr::LoadVar { var_index: lhs_var }),
+                                    rhs: Box::new(Expr::LoadVar { var_index: rhs_var }),
+                                }),
+                            }),
+                        }),
+                        right: Box::new(Expr::Input), // dummy, not used
+                    };
+                    // Actually simplify: just use LetBinding chain
+                    let rewritten = Expr::LetBinding {
+                        var_index: lhs_var,
+                        value: Box::new((**lhs).clone()),
+                        body: Box::new(Expr::LetBinding {
+                            var_index: rhs_var,
+                            value: Box::new((**rhs).clone()),
+                            body: Box::new(Expr::BinOp {
+                                op: *op,
+                                lhs: Box::new(Expr::LoadVar { var_index: lhs_var }),
+                                rhs: Box::new(Expr::LoadVar { var_index: rhs_var }),
+                            }),
+                        }),
+                    };
+                    self.flatten_gen(&rewritten, input_slot)
                 }
             }
 
@@ -1097,6 +1149,95 @@ impl Flattener {
                 self.emit(JitOp::SetVar { var_index: *acc_index, src: old_acc });
                 self.emit(JitOp::Drop { slot: old_acc });
                 ok
+            }
+
+            Expr::Assign { path_expr, value_expr } => {
+                if let Some(path_components) = extract_simple_path(path_expr) {
+                    if is_scalar(value_expr) {
+                        // Simple static path with scalar value
+                        let val = self.flatten_scalar(value_expr, input_slot);
+                        let path_arr = self.build_path_array(&path_components, input_slot);
+                        let inp = self.alloc_slot();
+                        self.emit(JitOp::Clone { dst: inp, src: input_slot });
+                        let out = self.alloc_slot();
+                        self.emit_propagating(JitOp::CallBuiltin { dst: out, name: "setpath".to_string(), args: vec![inp, path_arr, val] });
+                        self.emit(JitOp::Drop { slot: inp });
+                        self.emit(JitOp::Drop { slot: path_arr });
+                        self.emit(JitOp::Drop { slot: val });
+                        self.emit_yield(out);
+                        self.emit(JitOp::Drop { slot: out });
+                        return true;
+                    }
+                    // Generator value: for each value output, assign
+                    let ok = self.flatten_gen_with_each_output(value_expr, input_slot, &|s, val| {
+                        let path_arr = s.build_path_array(&path_components, input_slot);
+                        let inp = s.alloc_slot();
+                        s.emit(JitOp::Clone { dst: inp, src: input_slot });
+                        let out = s.alloc_slot();
+                        s.emit_propagating(JitOp::CallBuiltin { dst: out, name: "setpath".to_string(), args: vec![inp, path_arr, val] });
+                        s.emit(JitOp::Drop { slot: inp });
+                        s.emit(JitOp::Drop { slot: path_arr });
+                        s.emit_yield(out);
+                        s.emit(JitOp::Drop { slot: out });
+                    });
+                    return ok;
+                }
+                false
+            }
+
+            Expr::Update { path_expr, update_expr } => {
+                if let Some(path_components) = extract_simple_path(path_expr) {
+                    // Simple static path: getpath, apply update, setpath
+                    if is_scalar(update_expr) {
+                        let path_arr = self.build_path_array(&path_components, input_slot);
+                        let inp = self.alloc_slot();
+                        self.emit(JitOp::Clone { dst: inp, src: input_slot });
+                        let path_clone = self.alloc_slot();
+                        self.emit(JitOp::Clone { dst: path_clone, src: path_arr });
+                        let old_val = self.alloc_slot();
+                        self.emit_propagating(JitOp::CallBuiltin { dst: old_val, name: "getpath".to_string(), args: vec![inp, path_clone] });
+                        self.emit(JitOp::Drop { slot: inp });
+                        self.emit(JitOp::Drop { slot: path_clone });
+                        let new_val = self.flatten_scalar(update_expr, old_val);
+                        self.emit(JitOp::Drop { slot: old_val });
+                        let inp2 = self.alloc_slot();
+                        self.emit(JitOp::Clone { dst: inp2, src: input_slot });
+                        let out = self.alloc_slot();
+                        self.emit_propagating(JitOp::CallBuiltin { dst: out, name: "setpath".to_string(), args: vec![inp2, path_arr, new_val] });
+                        self.emit(JitOp::Drop { slot: inp2 });
+                        self.emit(JitOp::Drop { slot: new_val });
+                        self.emit_yield(out);
+                        self.emit(JitOp::Drop { slot: out });
+                        return true;
+                    }
+                    // Generator update_expr with simple path
+                    let path_arr = self.build_path_array(&path_components, input_slot);
+                    let inp = self.alloc_slot();
+                    self.emit(JitOp::Clone { dst: inp, src: input_slot });
+                    let path_clone = self.alloc_slot();
+                    self.emit(JitOp::Clone { dst: path_clone, src: path_arr });
+                    let old_val = self.alloc_slot();
+                    self.emit_propagating(JitOp::CallBuiltin { dst: old_val, name: "getpath".to_string(), args: vec![inp, path_clone] });
+                    self.emit(JitOp::Drop { slot: inp });
+                    self.emit(JitOp::Drop { slot: path_clone });
+                    // For each output of update_expr applied to old_val
+                    let ok = self.flatten_gen_with_each_output(update_expr, old_val, &|s, new_val| {
+                        let inp3 = s.alloc_slot();
+                        s.emit(JitOp::Clone { dst: inp3, src: input_slot });
+                        let path_c2 = s.alloc_slot();
+                        s.emit(JitOp::Clone { dst: path_c2, src: path_arr });
+                        let out = s.alloc_slot();
+                        s.emit_propagating(JitOp::CallBuiltin { dst: out, name: "setpath".to_string(), args: vec![inp3, path_c2, new_val] });
+                        s.emit(JitOp::Drop { slot: inp3 });
+                        s.emit(JitOp::Drop { slot: path_c2 });
+                        s.emit_yield(out);
+                        s.emit(JitOp::Drop { slot: out });
+                    });
+                    self.emit(JitOp::Drop { slot: old_val });
+                    self.emit(JitOp::Drop { slot: path_arr });
+                    return ok;
+                }
+                false
             }
 
             Expr::Label { var_index, body } => {
@@ -1175,10 +1316,17 @@ impl Flattener {
             Expr::Recurse { input_expr } => {
                 if !is_scalar(input_expr) { return false; }
                 // Recurse: yield input, then recurse into each child
-                // This is: def recurse: ., (.[]? | recurse); recurse
-                // We can implement using a stack-based approach via runtime helper
-                // For now, compile as a simple CallBuiltin
-                false // Complex to implement in pure JIT; fall back
+                // Collect all recursive outputs via runtime, then iterate
+                let val = self.flatten_scalar(input_expr, input_slot);
+                let arr = self.alloc_slot();
+                self.emit(JitOp::CallBuiltin { dst: arr, name: "recurse_collect".to_string(), args: vec![val] });
+                self.emit(JitOp::Drop { slot: val });
+                // Iterate the collected array, yielding each element
+                self.flatten_each_with_action(arr, false, &|s, elem| {
+                    s.emit_yield(elem);
+                });
+                self.emit(JitOp::Drop { slot: arr });
+                true
             }
 
             Expr::FuncCall { func_id, args } => {
@@ -1187,6 +1335,68 @@ impl Flattener {
                 let func = &self.funcs[*func_id].clone();
                 // Inline the function body
                 self.flatten_gen(&func.body, input_slot)
+            }
+
+            Expr::AlternativeDestructure { alternatives } => {
+                // Try each alternative until one succeeds
+                // Pre-check: all alternatives must be compilable
+                for alt in alternatives {
+                    let mut test = self.test_flattener();
+                    let t_in = test.alloc_slot();
+                    if !test.flatten_gen(alt, t_in) { return false; }
+                }
+
+                let done_label = self.alloc_label();
+                for (i, alt) in alternatives.iter().enumerate() {
+                    let is_last = i == alternatives.len() - 1;
+                    if is_last {
+                        // Last alternative: just run it (errors propagate)
+                        self.flatten_gen(alt, input_slot);
+                    } else {
+                        // Try this alternative; on error, try next
+                        let catch_label = self.alloc_label();
+                        let error_slot = self.alloc_slot();
+                        let old_target = self.try_catch_target;
+                        self.try_catch_target = Some((catch_label, error_slot));
+                        self.try_depth += 1;
+                        self.emit(JitOp::TryCatchBegin);
+                        self.flatten_gen(alt, input_slot);
+                        self.emit(JitOp::TryCatchEnd);
+                        self.try_depth -= 1;
+                        self.try_catch_target = old_target;
+                        self.emit(JitOp::Jump { label: done_label });
+                        self.emit(JitOp::Label { id: catch_label });
+                        self.emit(JitOp::TryCatchEnd);
+                        self.emit(JitOp::Drop { slot: error_slot });
+                        // Continue to next alternative
+                    }
+                }
+                self.emit(JitOp::Label { id: done_label });
+                true
+            }
+
+            Expr::PathExpr { expr: path_expr } => {
+                // path(expr): compute the paths that expr would access
+                // Delegate to runtime via a CallBuiltin that evaluates path
+                if is_scalar(path_expr) {
+                    // For scalar path expression (e.g. path(.foo.bar)):
+                    // Result is the path array
+                    if let Some(path_components) = extract_simple_path(path_expr) {
+                        let path_arr = self.build_path_array(&path_components, input_slot);
+                        self.emit_yield(path_arr);
+                        self.emit(JitOp::Drop { slot: path_arr });
+                        return true;
+                    }
+                }
+                false
+            }
+
+            // `not` as a generator (already handled as scalar but needs generator wrapper)
+            Expr::Not => {
+                let out = self.flatten_scalar(&Expr::Not, input_slot);
+                self.emit_yield(out);
+                self.emit(JitOp::Drop { slot: out });
+                true
             }
 
             _ => false,
@@ -2394,6 +2604,73 @@ impl Flattener {
         if !is_opt { self.emit(JitOp::ReturnError); }
         self.emit(JitOp::Label { id: done_lbl });
     }
+
+    /// Build a path array Value from extracted path components.
+    /// Returns a slot containing the path array.
+    fn build_path_array(&mut self, components: &[PathComponent], input_slot: SlotId) -> SlotId {
+        // Build array literal: [comp1, comp2, ...]
+        self.emit(JitOp::CollectBegin);
+        self.collect_depth += 1;
+        for comp in components {
+            match comp {
+                PathComponent::Field(name) => {
+                    let s = self.alloc_slot();
+                    self.emit(JitOp::Str { dst: s, val: name.clone() });
+                    self.ops.push(JitOp::CollectPush { src: s });
+                    self.emit(JitOp::Drop { slot: s });
+                }
+                PathComponent::Expr(e) => {
+                    let s = self.flatten_scalar(e, input_slot);
+                    self.ops.push(JitOp::CollectPush { src: s });
+                    self.emit(JitOp::Drop { slot: s });
+                }
+            }
+        }
+        self.collect_depth -= 1;
+        let arr = self.alloc_slot();
+        self.emit(JitOp::CollectFinish { dst: arr });
+        arr
+    }
+}
+
+/// Path component for simple path extraction.
+#[derive(Debug, Clone)]
+enum PathComponent {
+    Field(String),
+    Expr(Expr),
+}
+
+/// Extract simple path components from a path expression.
+/// Returns None if the path is too complex (contains generators like .[], etc.)
+fn extract_simple_path(expr: &Expr) -> Option<Vec<PathComponent>> {
+    match expr {
+        Expr::Input => Some(vec![]),
+        Expr::Index { expr: base, key } => {
+            let mut components = extract_simple_path(base)?;
+            match key.as_ref() {
+                Expr::Literal(Literal::Str(s)) => {
+                    components.push(PathComponent::Field(s.clone()));
+                    Some(components)
+                }
+                Expr::Literal(Literal::Num(n, repr)) => {
+                    components.push(PathComponent::Expr(Expr::Literal(Literal::Num(*n, repr.clone()))));
+                    Some(components)
+                }
+                other if is_scalar(other) => {
+                    components.push(PathComponent::Expr(other.clone()));
+                    Some(components)
+                }
+                _ => None, // Generator key — too complex
+            }
+        }
+        Expr::Pipe { left, right } => {
+            let mut components = extract_simple_path(left)?;
+            let right_components = extract_simple_path(right)?;
+            components.extend(right_components);
+            Some(components)
+        }
+        _ => None,
+    }
 }
 
 // ============================================================================
@@ -2672,6 +2949,33 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             std::ptr::write(dst, crate::runtime::rt_builtins());
             return 0;
         }
+        if name == "recurse_collect" {
+            // Collect all recursive descendants: ., .[]?, (.[]? | .[]?), ...
+            if !args_vec.is_empty() {
+                let mut results = Vec::new();
+                let mut stack = vec![args_vec[0].clone()];
+                while let Some(v) = stack.pop() {
+                    results.push(v.clone());
+                    match &v {
+                        Value::Arr(a) => {
+                            for item in a.iter().rev() {
+                                stack.push(item.clone());
+                            }
+                        }
+                        Value::Obj(o) => {
+                            for val in o.values().rev() {
+                                stack.push(val.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                std::ptr::write(dst, Value::Arr(Rc::new(results)));
+            } else {
+                std::ptr::write(dst, Value::Arr(Rc::new(vec![])));
+            }
+            return 0;
+        }
         if name == "debug" {
             // debug: print to stderr, return input
             if args_vec.len() >= 2 {
@@ -2739,6 +3043,13 @@ extern "C" fn jit_rt_try_begin(env: *mut JitEnv) {
 }
 extern "C" fn jit_rt_try_end(env: *mut JitEnv) {
     unsafe { (*env).try_depth -= 1; }
+}
+
+/// Transfer error from JIT_LAST_ERROR to env.error_msg for propagation.
+extern "C" fn jit_rt_propagate_error(env: *mut JitEnv) {
+    if let Some(msg) = take_jit_error() {
+        unsafe { (*env).error_msg = Some(msg); }
+    }
 }
 
 /// Check if the last operation produced an error.
@@ -2864,7 +3175,7 @@ pub struct JitCompiler {
     func_ctx: FunctionBuilderContext,
     rt_funcs: HashMap<&'static str, FuncId>,
     _string_constants: Vec<&'static str>,
-    _repr_constants: Vec<Rc<str>>,
+    _repr_constants: Vec<Box<Rc<str>>>,
 }
 
 impl JitCompiler {
@@ -2913,6 +3224,7 @@ impl JitCompiler {
             ("jit_rt_strbuf_finish", jit_rt_strbuf_finish as *const u8),
             ("jit_rt_try_begin", jit_rt_try_begin as *const u8),
             ("jit_rt_try_end", jit_rt_try_end as *const u8),
+            ("jit_rt_propagate_error", jit_rt_propagate_error as *const u8),
             ("jit_rt_has_error", jit_rt_has_error as *const u8),
             ("jit_rt_get_error", jit_rt_get_error as *const u8),
             ("jit_rt_throw_error", jit_rt_throw_error as *const u8),
@@ -3062,8 +3374,9 @@ impl JitCompiler {
                         let a = slot_addr(&mut b, *dst);
                         let n = b.ins().f64const(*val);
                         if let Some(r) = repr {
-                            self._repr_constants.push(r.clone());
-                            let rp = b.ins().iconst(ptr_ty, self._repr_constants.last().unwrap() as *const Rc<str> as i64);
+                            let boxed = Box::new(r.clone());
+                            let rp = b.ins().iconst(ptr_ty, &*boxed as *const Rc<str> as i64);
+                            self._repr_constants.push(boxed);
                             b.ins().call(rt["num_repr"], &[a, n, rp]);
                         } else {
                             b.ins().call(rt["num"], &[a, n]);
@@ -3370,6 +3683,8 @@ impl JitCompiler {
                         terminated = true;
                     }
                     JitOp::ReturnError => {
+                        // Transfer error from JIT_LAST_ERROR to env.error_msg
+                        b.ins().call(rt["propagate_error"], &[env_ptr]);
                         let v = b.ins().iconst(ptr_ty, GEN_ERROR);
                         b.ins().return_(&[v]);
                         terminated = true;
@@ -3488,6 +3803,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("strbuf_finish", [p, p], []);
     decl!("try_begin", [p], []);
     decl!("try_end", [p], []);
+    decl!("propagate_error", [p], []);
     decl!("has_error", [], [p]);  // -> 0/1
     decl!("get_error", [p], []);  // dst
     decl!("throw_error", [p, p], [p]);
