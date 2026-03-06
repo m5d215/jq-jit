@@ -252,20 +252,20 @@ fn parse_json_value(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)
     }
 }
 
-fn parse_json_string(b: &[u8], pos: usize) -> Result<(Value, usize)> {
+/// Parse a JSON string, returning the raw String and end position.
+/// Used by both parse_json_string (wraps in Value) and parse_json_object (uses String directly as key).
+fn parse_json_string_raw(b: &[u8], pos: usize) -> Result<(String, usize)> {
     debug_assert_eq!(b[pos], b'"');
     let mut i = pos + 1;
     // Fast path: scan for end of simple string (no escapes, all ASCII)
     let start = i;
-    let mut has_escape = false;
     while i < b.len() {
         match b[i] {
-            b'"' if !has_escape => {
+            b'"' => {
                 let s = std::str::from_utf8(&b[start..i]).unwrap_or("").to_string();
-                return Ok((Value::Str(Rc::new(s)), i + 1));
+                return Ok((s, i + 1));
             }
-            b'\\' => { has_escape = true; break; }
-            b'"' => break,
+            b'\\' => break,
             _ => i += 1,
         }
     }
@@ -276,7 +276,7 @@ fn parse_json_string(b: &[u8], pos: usize) -> Result<(Value, usize)> {
         match b[i] {
             b'"' => {
                 let s = String::from_utf8_lossy(&buf).into_owned();
-                return Ok((Value::Str(Rc::new(s)), i + 1));
+                return Ok((s, i + 1));
             }
             b'\\' => {
                 i += 1;
@@ -325,6 +325,11 @@ fn parse_json_string(b: &[u8], pos: usize) -> Result<(Value, usize)> {
         }
     }
     bail!("Unterminated string")
+}
+
+fn parse_json_string(b: &[u8], pos: usize) -> Result<(Value, usize)> {
+    let (s, end) = parse_json_string_raw(b, pos)?;
+    Ok((Value::Str(Rc::new(s)), end))
 }
 
 fn parse_json_number(b: &[u8], pos: usize) -> Result<(Value, usize)> {
@@ -379,8 +384,7 @@ fn parse_json_object(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize
     if i < b.len() && b[i] == b'}' { return Ok((Value::Obj(Rc::new(map)), i + 1)); }
     loop {
         if i >= b.len() || b[i] != b'"' { bail!("Expected string key at position {}", i); }
-        let (key_val, end) = parse_json_string(b, i)?;
-        let key = match key_val { Value::Str(s) => (*s).clone(), _ => unreachable!() };
+        let (key, end) = parse_json_string_raw(b, i)?;
         i = skip_ws(b, end);
         if i >= b.len() || b[i] != b':' { bail!("Expected ':' at position {}", i); }
         i = skip_ws(b, i + 1);
