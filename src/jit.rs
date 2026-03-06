@@ -780,9 +780,14 @@ impl Flattener {
                 self.emit(JitOp::CollectFinish { dst: out });
                 out
             }
-            Expr::FuncCall { func_id, .. } if *func_id < self.funcs.len() => {
+            Expr::FuncCall { func_id, args } if *func_id < self.funcs.len() => {
                 let func = &self.funcs[*func_id].clone();
-                self.flatten_scalar(&func.body, input_slot)
+                let body = if !func.param_vars.is_empty() && !args.is_empty() {
+                    crate::eval::substitute_params(&func.body, &func.param_vars, args)
+                } else {
+                    func.body.clone()
+                };
+                self.flatten_scalar(&body, input_slot)
             }
             // Assign with simple path: setpath(path, value)
             Expr::Assign { path_expr, value_expr } => {
@@ -1567,11 +1572,15 @@ impl Flattener {
                 true
             }
 
-            Expr::FuncCall { func_id, .. } => {
+            Expr::FuncCall { func_id, args } => {
                 if *func_id >= self.funcs.len() { return false; }
                 let func = &self.funcs[*func_id].clone();
-                // Inline the function body (args already substituted by parser)
-                self.flatten_gen(&func.body, input_slot)
+                let body = if !func.param_vars.is_empty() && !args.is_empty() {
+                    crate::eval::substitute_params(&func.body, &func.param_vars, args)
+                } else {
+                    func.body.clone()
+                };
+                self.flatten_gen(&body, input_slot)
             }
 
             Expr::AlternativeDestructure { alternatives } => {

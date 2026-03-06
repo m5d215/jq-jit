@@ -465,4 +465,5 @@ pub struct CompiledFunc {
     pub name: Option<String>,
     pub nargs: usize,
     pub body: Expr,
+    pub param_vars: Vec<u16>,
 }

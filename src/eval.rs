@@ -40,6 +40,228 @@ impl Env {
     }
 }
 
+/// Substitute param var references with arg expressions in a function body.
+/// This implements jq's closure semantics: each time a param is referenced,
+/// the arg filter is re-evaluated with the current input.
+pub fn substitute_params(expr: &Expr, param_vars: &[u16], args: &[Expr]) -> Expr {
+    match expr {
+        Expr::LoadVar { var_index } => {
+            for (i, pv) in param_vars.iter().enumerate() {
+                if *var_index == *pv {
+                    if let Some(arg) = args.get(i) {
+                        return arg.clone();
+                    }
+                }
+            }
+            expr.clone()
+        }
+        Expr::Pipe { left, right } => Expr::Pipe {
+            left: Box::new(substitute_params(left, param_vars, args)),
+            right: Box::new(substitute_params(right, param_vars, args)),
+        },
+        Expr::Comma { left, right } => Expr::Comma {
+            left: Box::new(substitute_params(left, param_vars, args)),
+            right: Box::new(substitute_params(right, param_vars, args)),
+        },
+        Expr::BinOp { op, lhs, rhs } => Expr::BinOp {
+            op: *op,
+            lhs: Box::new(substitute_params(lhs, param_vars, args)),
+            rhs: Box::new(substitute_params(rhs, param_vars, args)),
+        },
+        Expr::UnaryOp { op, operand } => Expr::UnaryOp {
+            op: *op,
+            operand: Box::new(substitute_params(operand, param_vars, args)),
+        },
+        Expr::Index { expr: e, key } => Expr::Index {
+            expr: Box::new(substitute_params(e, param_vars, args)),
+            key: Box::new(substitute_params(key, param_vars, args)),
+        },
+        Expr::IndexOpt { expr: e, key } => Expr::IndexOpt {
+            expr: Box::new(substitute_params(e, param_vars, args)),
+            key: Box::new(substitute_params(key, param_vars, args)),
+        },
+        Expr::Each { input_expr } => Expr::Each {
+            input_expr: Box::new(substitute_params(input_expr, param_vars, args)),
+        },
+        Expr::EachOpt { input_expr } => Expr::EachOpt {
+            input_expr: Box::new(substitute_params(input_expr, param_vars, args)),
+        },
+        Expr::IfThenElse { cond, then_branch, else_branch } => Expr::IfThenElse {
+            cond: Box::new(substitute_params(cond, param_vars, args)),
+            then_branch: Box::new(substitute_params(then_branch, param_vars, args)),
+            else_branch: Box::new(substitute_params(else_branch, param_vars, args)),
+        },
+        Expr::LetBinding { var_index, value, body } => Expr::LetBinding {
+            var_index: *var_index,
+            value: Box::new(substitute_params(value, param_vars, args)),
+            body: Box::new(substitute_params(body, param_vars, args)),
+        },
+        Expr::TryCatch { try_expr, catch_expr } => Expr::TryCatch {
+            try_expr: Box::new(substitute_params(try_expr, param_vars, args)),
+            catch_expr: Box::new(substitute_params(catch_expr, param_vars, args)),
+        },
+        Expr::Collect { generator } => Expr::Collect {
+            generator: Box::new(substitute_params(generator, param_vars, args)),
+        },
+        Expr::Negate { operand } => Expr::Negate {
+            operand: Box::new(substitute_params(operand, param_vars, args)),
+        },
+        Expr::Alternative { primary, fallback } => Expr::Alternative {
+            primary: Box::new(substitute_params(primary, param_vars, args)),
+            fallback: Box::new(substitute_params(fallback, param_vars, args)),
+        },
+        Expr::Reduce { source, init, var_index, acc_index, update } => Expr::Reduce {
+            source: Box::new(substitute_params(source, param_vars, args)),
+            init: Box::new(substitute_params(init, param_vars, args)),
+            var_index: *var_index,
+            acc_index: *acc_index,
+            update: Box::new(substitute_params(update, param_vars, args)),
+        },
+        Expr::Foreach { source, init, var_index, acc_index, update, extract } => Expr::Foreach {
+            source: Box::new(substitute_params(source, param_vars, args)),
+            init: Box::new(substitute_params(init, param_vars, args)),
+            var_index: *var_index,
+            acc_index: *acc_index,
+            update: Box::new(substitute_params(update, param_vars, args)),
+            extract: extract.as_ref().map(|e| Box::new(substitute_params(e, param_vars, args))),
+        },
+        Expr::ObjectConstruct { pairs } => Expr::ObjectConstruct {
+            pairs: pairs.iter().map(|(k, v)| (
+                substitute_params(k, param_vars, args),
+                substitute_params(v, param_vars, args),
+            )).collect(),
+        },
+        Expr::Recurse { input_expr } => Expr::Recurse {
+            input_expr: Box::new(substitute_params(input_expr, param_vars, args)),
+        },
+        Expr::Range { from, to, step } => Expr::Range {
+            from: Box::new(substitute_params(from, param_vars, args)),
+            to: Box::new(substitute_params(to, param_vars, args)),
+            step: step.as_ref().map(|s| Box::new(substitute_params(s, param_vars, args))),
+        },
+        Expr::Update { path_expr, update_expr } => Expr::Update {
+            path_expr: Box::new(substitute_params(path_expr, param_vars, args)),
+            update_expr: Box::new(substitute_params(update_expr, param_vars, args)),
+        },
+        Expr::Assign { path_expr, value_expr } => Expr::Assign {
+            path_expr: Box::new(substitute_params(path_expr, param_vars, args)),
+            value_expr: Box::new(substitute_params(value_expr, param_vars, args)),
+        },
+        Expr::PathExpr { expr: e } => Expr::PathExpr {
+            expr: Box::new(substitute_params(e, param_vars, args)),
+        },
+        Expr::SetPath { path, value } => Expr::SetPath {
+            path: Box::new(substitute_params(path, param_vars, args)),
+            value: Box::new(substitute_params(value, param_vars, args)),
+        },
+        Expr::GetPath { path } => Expr::GetPath {
+            path: Box::new(substitute_params(path, param_vars, args)),
+        },
+        Expr::DelPaths { paths } => Expr::DelPaths {
+            paths: Box::new(substitute_params(paths, param_vars, args)),
+        },
+        Expr::FuncCall { func_id, args: fargs } => Expr::FuncCall {
+            func_id: *func_id,
+            args: fargs.iter().map(|a| substitute_params(a, param_vars, args)).collect(),
+        },
+        Expr::StringInterpolation { parts } => Expr::StringInterpolation {
+            parts: parts.iter().map(|p| match p {
+                StringPart::Literal(s) => StringPart::Literal(s.clone()),
+                StringPart::Expr(e) => StringPart::Expr(substitute_params(e, param_vars, args)),
+            }).collect(),
+        },
+        Expr::Limit { count, generator } => Expr::Limit {
+            count: Box::new(substitute_params(count, param_vars, args)),
+            generator: Box::new(substitute_params(generator, param_vars, args)),
+        },
+        Expr::While { cond, update } => Expr::While {
+            cond: Box::new(substitute_params(cond, param_vars, args)),
+            update: Box::new(substitute_params(update, param_vars, args)),
+        },
+        Expr::Until { cond, update } => Expr::Until {
+            cond: Box::new(substitute_params(cond, param_vars, args)),
+            update: Box::new(substitute_params(update, param_vars, args)),
+        },
+        Expr::Repeat { update } => Expr::Repeat {
+            update: Box::new(substitute_params(update, param_vars, args)),
+        },
+        Expr::Label { var_index, body } => Expr::Label {
+            var_index: *var_index,
+            body: Box::new(substitute_params(body, param_vars, args)),
+        },
+        Expr::Break { var_index, value } => Expr::Break {
+            var_index: *var_index,
+            value: Box::new(substitute_params(value, param_vars, args)),
+        },
+        Expr::Error { msg } => Expr::Error {
+            msg: msg.as_ref().map(|m| Box::new(substitute_params(m, param_vars, args))),
+        },
+        Expr::Format { name, expr: e } => Expr::Format {
+            name: name.clone(),
+            expr: Box::new(substitute_params(e, param_vars, args)),
+        },
+        Expr::ClosureOp { op, input_expr, key_expr } => Expr::ClosureOp {
+            op: *op,
+            input_expr: Box::new(substitute_params(input_expr, param_vars, args)),
+            key_expr: Box::new(substitute_params(key_expr, param_vars, args)),
+        },
+        Expr::CallBuiltin { name, args: bargs } => Expr::CallBuiltin {
+            name: name.clone(),
+            args: bargs.iter().map(|a| substitute_params(a, param_vars, args)).collect(),
+        },
+        Expr::Slice { expr: e, from, to } => Expr::Slice {
+            expr: Box::new(substitute_params(e, param_vars, args)),
+            from: from.as_ref().map(|f| Box::new(substitute_params(f, param_vars, args))),
+            to: to.as_ref().map(|t| Box::new(substitute_params(t, param_vars, args))),
+        },
+        Expr::Debug { expr: e } => Expr::Debug {
+            expr: Box::new(substitute_params(e, param_vars, args)),
+        },
+        Expr::Stderr { expr: e } => Expr::Stderr {
+            expr: Box::new(substitute_params(e, param_vars, args)),
+        },
+        Expr::RegexTest { input_expr, re, flags } => Expr::RegexTest {
+            input_expr: Box::new(substitute_params(input_expr, param_vars, args)),
+            re: Box::new(substitute_params(re, param_vars, args)),
+            flags: Box::new(substitute_params(flags, param_vars, args)),
+        },
+        Expr::RegexMatch { input_expr, re, flags } => Expr::RegexMatch {
+            input_expr: Box::new(substitute_params(input_expr, param_vars, args)),
+            re: Box::new(substitute_params(re, param_vars, args)),
+            flags: Box::new(substitute_params(flags, param_vars, args)),
+        },
+        Expr::RegexCapture { input_expr, re, flags } => Expr::RegexCapture {
+            input_expr: Box::new(substitute_params(input_expr, param_vars, args)),
+            re: Box::new(substitute_params(re, param_vars, args)),
+            flags: Box::new(substitute_params(flags, param_vars, args)),
+        },
+        Expr::RegexScan { input_expr, re, flags } => Expr::RegexScan {
+            input_expr: Box::new(substitute_params(input_expr, param_vars, args)),
+            re: Box::new(substitute_params(re, param_vars, args)),
+            flags: Box::new(substitute_params(flags, param_vars, args)),
+        },
+        Expr::RegexSub { input_expr, re, tostr, flags } => Expr::RegexSub {
+            input_expr: Box::new(substitute_params(input_expr, param_vars, args)),
+            re: Box::new(substitute_params(re, param_vars, args)),
+            tostr: Box::new(substitute_params(tostr, param_vars, args)),
+            flags: Box::new(substitute_params(flags, param_vars, args)),
+        },
+        Expr::RegexGsub { input_expr, re, tostr, flags } => Expr::RegexGsub {
+            input_expr: Box::new(substitute_params(input_expr, param_vars, args)),
+            re: Box::new(substitute_params(re, param_vars, args)),
+            tostr: Box::new(substitute_params(tostr, param_vars, args)),
+            flags: Box::new(substitute_params(flags, param_vars, args)),
+        },
+        Expr::AlternativeDestructure { alternatives } => Expr::AlternativeDestructure {
+            alternatives: alternatives.iter().map(|a| substitute_params(a, param_vars, args)).collect(),
+        },
+        // Leaf nodes that don't contain sub-expressions
+        Expr::Input | Expr::Empty | Expr::Not | Expr::Env | Expr::Builtins
+        | Expr::ReadInput | Expr::ReadInputs | Expr::ModuleMeta | Expr::GenLabel
+        | Expr::Literal(_) | Expr::Loc { .. } => expr.clone(),
+    }
+}
+
 pub fn eval(
     expr: &Expr, input: Value, env: &EnvRef,
     cb: &mut dyn FnMut(Value) -> GenResult,
@@ -416,10 +638,16 @@ pub fn eval(
             })
         }
 
-        Expr::FuncCall { func_id, .. } => {
+        Expr::FuncCall { func_id, args } => {
             let func = env.borrow().funcs.get(*func_id).cloned();
             if let Some(f) = func {
-                eval(&f.body, input, env, cb)
+                if f.param_vars.is_empty() || args.is_empty() {
+                    eval(&f.body, input, env, cb)
+                } else {
+                    // Substitute arg expressions for param vars in body
+                    let substituted = substitute_params(&f.body, &f.param_vars, args);
+                    eval(&substituted, input, env, cb)
+                }
             } else {
                 bail!("undefined function id {}", func_id)
             }

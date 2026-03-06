@@ -43,13 +43,14 @@ impl Scope {
             .map(|(_, idx)| *idx)
     }
 
-    fn define_func(&mut self, name: &str, nargs: usize, body: Expr) -> usize {
+    fn define_func(&mut self, name: &str, nargs: usize, body: Expr, param_vars: Vec<u16>) -> usize {
         let func_id = self.compiled_funcs.len();
         self.funcs.push((name.to_string(), func_id, nargs));
         self.compiled_funcs.push(CompiledFunc {
             name: Some(name.to_string()),
             nargs,
             body,
+            param_vars,
         });
         func_id
     }
@@ -759,11 +760,13 @@ impl Parser {
             t => bail!("expected function name, got {:?}", t),
         };
 
-        let mut params: Vec<String> = Vec::new();
+        // Parse parameters: both `x` (filter param) and `$x` (value param) syntax
+        let mut params: Vec<(String, bool)> = Vec::new(); // (name, is_value_param)
         if self.eat(&Token::LParen) {
             loop {
                 match self.advance() {
-                    Token::Ident(p) => params.push(p),
+                    Token::Ident(p) => params.push((p, false)),
+                    Token::Variable(p) => params.push((p, true)),
                     Token::RParen => break,
                     Token::Semicolon => continue,
                     t => bail!("expected parameter name, got {:?}", t),
@@ -773,19 +776,42 @@ impl Parser {
 
         self.expect(&Token::Colon)?;
 
-        // Allocate variables for parameters (they become closure args)
+        // Save var scope to restore after parsing body
+        let saved_vars = self.scope.vars.len();
+
+        // Allocate variables for parameters
+        // Filter params use a special prefix to avoid collision with $vars of the same name
         let mut param_vars = Vec::new();
-        for p in &params {
-            let idx = self.scope.alloc_var(p);
-            param_vars.push(idx);
+        let mut value_param_bindings: Vec<(u16, u16)> = Vec::new(); // (filter_var, value_var)
+        for (p, is_value) in &params {
+            let fparam_name = format!("\x00fparam:{}", p);
+            let filter_idx = self.scope.alloc_var(&fparam_name);
+            param_vars.push(filter_idx);
+            if *is_value {
+                // For $x params: filter_idx is for substitution, value_idx for $x in body
+                let value_idx = self.scope.alloc_var(p);
+                value_param_bindings.push((filter_idx, value_idx));
+            }
         }
 
-        let saved = self.scope.save_func_scope();
-        let body = self.parse_pipe()?;
-        self.scope.restore_func_scope(saved);
+        let saved_funcs = self.scope.save_func_scope();
+        let mut body = self.parse_pipe()?;
+        self.scope.restore_func_scope(saved_funcs);
         self.expect(&Token::Semicolon)?;
 
-        self.scope.define_func(&name, params.len(), body);
+        // Restore var scope (remove param vars)
+        self.scope.vars.truncate(saved_vars);
+
+        // For $x params, wrap body with LetBinding to eagerly evaluate and bind
+        for (filter_var, value_var) in value_param_bindings.into_iter().rev() {
+            body = Expr::LetBinding {
+                var_index: value_var,
+                value: Box::new(Expr::LoadVar { var_index: filter_var }),
+                body: Box::new(body),
+            };
+        }
+
+        self.scope.define_func(&name, params.len(), body, param_vars);
         Ok(())
     }
 
@@ -1023,10 +1049,10 @@ impl Parser {
                 };
             }
             if namespace.is_empty() {
-                self.scope.define_func(name, *nargs, body);
+                self.scope.define_func(name, *nargs, body, func.param_vars.clone());
             } else {
                 let qualified = format!("{}::{}", namespace, name);
-                self.scope.define_func(&qualified, *nargs, body);
+                self.scope.define_func(&qualified, *nargs, body, func.param_vars.clone());
             }
         }
 
@@ -2411,11 +2437,17 @@ impl Parser {
                 if let Some(func_id) = self.scope.lookup_func(name, 0) {
                     Ok(Expr::FuncCall { func_id, args: vec![] })
                 } else {
-                    // Treat as a 0-arg builtin via runtime
-                    Ok(Expr::UnaryOp {
-                        op: name_to_unary_op(name)?,
-                        operand: Box::new(Expr::Input),
-                    })
+                    // Check for filter parameter reference (bare identifier like `x` in `def f(x):`)
+                    let fparam_name = format!("\x00fparam:{}", name);
+                    if let Some(var_idx) = self.scope.lookup_var(&fparam_name) {
+                        Ok(Expr::LoadVar { var_index: var_idx })
+                    } else {
+                        // Treat as a 0-arg builtin via runtime
+                        Ok(Expr::UnaryOp {
+                            op: name_to_unary_op(name)?,
+                            operand: Box::new(Expr::Input),
+                        })
+                    }
                 }
             }
         }
