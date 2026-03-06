@@ -43,10 +43,9 @@ impl Filter {
         let mut jit_fn = None;
         let mut jit_compiler = None;
         if let Some((ref expr, ref funcs)) = parsed {
-            // Only JIT if no user-defined functions (for now)
-            if funcs.is_empty() && crate::jit::is_jit_compilable(expr) {
+            if crate::jit::is_jit_compilable_with_funcs(expr, funcs) {
                 if let Ok(mut compiler) = crate::jit::JitCompiler::new() {
-                    if let Ok(func) = compiler.compile(expr) {
+                    if let Ok(func) = compiler.compile_with_funcs(expr, funcs) {
                         jit_fn = Some(func);
                         jit_compiler = Some(Box::new(compiler));
                     }
@@ -54,7 +53,7 @@ impl Filter {
             }
             if std::env::var("JQ_JIT_DEBUG").is_ok() {
                 let is_jit = jit_fn.is_some();
-                let compilable = funcs.is_empty() && crate::jit::is_jit_compilable(expr);
+                let compilable = crate::jit::is_jit_compilable_with_funcs(expr, funcs);
                 eprintln!("JIT: {} compilable={} jit={}", program, compilable, is_jit);
             }
         }

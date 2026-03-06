@@ -164,6 +164,8 @@ enum JitOp {
     F64Num { dst: SlotId, src_var: u32 },
     /// Range check: (step>0 && cur<to) || (step<=0 && cur>to)
     RangeCheck { dst_var: u32, cur_var: u32, to_var: u32, step_var: u32 },
+    /// Set a Cranelift variable to f64 constant (stored as i64 bits)
+    F64Const { dst_var: u32, val: f64 },
 
     // String interpolation
     StrBufNew,
@@ -200,12 +202,34 @@ struct Flattener {
     /// When inside a try block, this holds (catch_label, error_slot).
     /// After each fallible op, CheckError is emitted to branch to catch_label on error.
     try_catch_target: Option<(LabelId, SlotId)>,
+    /// Label targets for break: var_index → done_label
+    label_targets: HashMap<u16, LabelId>,
+    /// Available compiled functions for FuncCall
+    funcs: Vec<CompiledFunc>,
+    /// Limit state: when inside a `limit(n; gen)`, emit_yield increments counter and breaks.
+    /// (counter_var, limit_var, one_var, done_label)
+    /// All vars store f64 bits.
+    limit_state: Option<(u32, u32, u32, LabelId)>,
 }
 
 impl Flattener {
     fn new() -> Self {
         Flattener { ops: Vec::new(), next_slot: 0, next_label: 0, next_var: 0,
-                     collect_depth: 0, try_depth: 0, try_catch_target: None }
+                     collect_depth: 0, try_depth: 0, try_catch_target: None,
+                     label_targets: HashMap::new(), funcs: Vec::new(),
+                     limit_state: None }
+    }
+
+    /// Create a test Flattener inheriting compile-time context from self.
+    fn test_flattener(&self) -> Self {
+        let mut t = Flattener::new();
+        t.collect_depth = self.collect_depth;
+        t.try_depth = self.try_depth;
+        t.try_catch_target = self.try_catch_target;
+        t.label_targets = self.label_targets.clone();
+        t.funcs = self.funcs.clone();
+        t.limit_state = self.limit_state;
+        t
     }
 
     fn alloc_slot(&mut self) -> SlotId { let s = self.next_slot; self.next_slot += 1; s }
@@ -233,6 +257,15 @@ impl Flattener {
             self.emit(JitOp::CollectPush { src: output });
         } else {
             self.emit(JitOp::Yield { output });
+        }
+        // If inside a limit, check counter after yield (all vars are f64-encoded)
+        if let Some((counter_var, limit_var, one_var, done_label)) = self.limit_state {
+            self.ops.push(JitOp::F64Add { dst_var: counter_var, a_var: counter_var, b_var: one_var });
+            let cmp = self.alloc_var();
+            self.ops.push(JitOp::F64Less { dst_var: cmp, a_var: counter_var, b_var: limit_var });
+            let cont_label = self.alloc_label();
+            self.ops.push(JitOp::BranchOnVar { var: cmp, nonzero_label: cont_label, zero_label: done_label });
+            self.ops.push(JitOp::Label { id: cont_label });
         }
     }
 
@@ -684,10 +717,7 @@ impl Flattener {
             Expr::IfThenElse { cond, then_branch, else_branch } => {
                 // Pre-check: ensure both branches can be JIT-compiled
                 {
-                    let mut test = Flattener::new();
-                    test.collect_depth = self.collect_depth;
-                    test.try_depth = self.try_depth;
-                    test.try_catch_target = self.try_catch_target;
+                    let mut test = self.test_flattener();
                     let t_in = test.alloc_slot();
                     if !test.flatten_gen(then_branch, t_in) { return false; }
                     if !test.flatten_gen(else_branch, t_in) { return false; }
@@ -747,19 +777,24 @@ impl Flattener {
             }
 
             Expr::ObjectConstruct { pairs } => {
-                if !pairs.iter().all(|(k, v)| is_scalar(k) && is_scalar(v)) { return false; }
-                let out = self.alloc_slot();
-                self.emit(JitOp::ObjNew { dst: out });
-                for (k, v) in pairs {
-                    let kv = self.flatten_scalar(k, input_slot);
-                    let vv = self.flatten_scalar(v, input_slot);
-                    self.emit(JitOp::ObjInsert { obj: out, key: kv, val: vv });
-                    self.emit(JitOp::Drop { slot: kv });
-                    self.emit(JitOp::Drop { slot: vv });
+                if pairs.iter().all(|(k, v)| is_scalar(k) && is_scalar(v)) {
+                    let out = self.alloc_slot();
+                    self.emit(JitOp::ObjNew { dst: out });
+                    for (k, v) in pairs {
+                        let kv = self.flatten_scalar(k, input_slot);
+                        let vv = self.flatten_scalar(v, input_slot);
+                        self.emit(JitOp::ObjInsert { obj: out, key: kv, val: vv });
+                        self.emit(JitOp::Drop { slot: kv });
+                        self.emit(JitOp::Drop { slot: vv });
+                    }
+                    self.emit_yield(out);
+                    self.emit(JitOp::Drop { slot: out });
+                    true
+                } else {
+                    // Has generator key/value: expand via recursive flattening
+                    // For each pair with a generator, iterate its outputs
+                    self.flatten_obj_construct_gen(pairs, 0, input_slot)
                 }
-                self.emit_yield(out);
-                self.emit(JitOp::Drop { slot: out });
-                true
             }
 
             Expr::StringInterpolation { parts } => {
@@ -810,9 +845,15 @@ impl Flattener {
             }
 
             Expr::Range { from, to, step } => {
-                if !is_scalar(from) || !is_scalar(to) { return false; }
-                if let Some(s) = step {
-                    if !is_scalar(s) { return false; }
+                let step_scalar = step.as_ref().map_or(true, |s| is_scalar(s));
+                if !is_scalar(from) || !is_scalar(to) || !step_scalar {
+                    // Convert to nested evaluation:
+                    // range(A; B; C) where some are generators =
+                    //   A as from_val | B as to_val | C as step_val | range_scalar(from_val, to_val, step_val)
+                    // We handle this by converting each generator arg into a
+                    // Comma generator and evaluating as nested flatten_gen_with_each_output.
+                    // But closures are tricky, so just delegate to a helper.
+                    return self.flatten_range_gen(from, to, step.as_deref(), input_slot);
                 }
                 let from_val = self.flatten_scalar(from, input_slot);
                 let to_val = self.flatten_scalar(to, input_slot);
@@ -823,30 +864,10 @@ impl Flattener {
                     self.emit(JitOp::Num { dst: s, val: 1.0, repr: None });
                     s
                 };
-                let cur_var = self.alloc_var();
-                let to_var = self.alloc_var();
-                let step_var = self.alloc_var();
-                let cmp_var = self.alloc_var();
-                self.emit(JitOp::ToF64Var { dst_var: cur_var, src: from_val });
-                self.emit(JitOp::ToF64Var { dst_var: to_var, src: to_val });
-                self.emit(JitOp::ToF64Var { dst_var: step_var, src: step_val });
+                self.emit_range_loop(from_val, to_val, step_val);
                 self.emit(JitOp::Drop { slot: from_val });
                 self.emit(JitOp::Drop { slot: to_val });
                 self.emit(JitOp::Drop { slot: step_val });
-                let head = self.alloc_label();
-                let body = self.alloc_label();
-                let done = self.alloc_label();
-                self.emit(JitOp::Label { id: head });
-                self.emit(JitOp::RangeCheck { dst_var: cmp_var, cur_var, to_var, step_var });
-                self.emit(JitOp::BranchOnVar { var: cmp_var, nonzero_label: body, zero_label: done });
-                self.emit(JitOp::Label { id: body });
-                let num_slot = self.alloc_slot();
-                self.emit(JitOp::F64Num { dst: num_slot, src_var: cur_var });
-                self.emit_yield(num_slot);
-                self.emit(JitOp::Drop { slot: num_slot });
-                self.emit(JitOp::F64Add { dst_var: cur_var, a_var: cur_var, b_var: step_var });
-                self.emit(JitOp::Jump { label: head });
-                self.emit(JitOp::Label { id: done });
                 true
             }
 
@@ -961,10 +982,7 @@ impl Flattener {
                 if !is_scalar(init) || !is_scalar(update) { return false; }
                 // Pre-check: if extract exists, it must be compilable as a generator
                 if let Some(ext) = extract.as_ref() {
-                    let mut test = Flattener::new();
-                    test.collect_depth = self.collect_depth;
-                    test.try_depth = self.try_depth;
-                    test.try_catch_target = self.try_catch_target;
+                    let mut test = self.test_flattener();
                     let t_in = test.alloc_slot();
                     if !test.flatten_gen(ext, t_in) { return false; }
                 }
@@ -989,6 +1007,96 @@ impl Flattener {
                 self.emit(JitOp::SetVar { var_index: *acc_index, src: old_acc });
                 self.emit(JitOp::Drop { slot: old_acc });
                 ok
+            }
+
+            Expr::Label { var_index, body } => {
+                let done_label = self.alloc_label();
+                self.label_targets.insert(*var_index, done_label);
+                let ok = self.flatten_gen(body, input_slot);
+                self.label_targets.remove(var_index);
+                self.emit(JitOp::Label { id: done_label });
+                ok
+            }
+
+            Expr::Break { var_index, .. } => {
+                if let Some(&done_label) = self.label_targets.get(var_index) {
+                    self.emit(JitOp::Jump { label: done_label });
+                    true
+                } else {
+                    false
+                }
+            }
+
+            Expr::Limit { count, generator } => {
+                if !is_scalar(count) { return false; }
+                // Pre-check: generator must be compilable
+                {
+                    let mut test = self.test_flattener();
+                    let t_in = test.alloc_slot();
+                    if !test.flatten_gen(generator, t_in) { return false; }
+                }
+                let count_val = self.flatten_scalar(count, input_slot);
+                let counter_var = self.alloc_var();
+                let limit_var = self.alloc_var();
+                let one_var = self.alloc_var();
+                let done_label = self.alloc_label();
+                // Initialize counter to f64 0.0
+                self.emit(JitOp::F64Const { dst_var: counter_var, val: 0.0 });
+                self.emit(JitOp::F64Const { dst_var: one_var, val: 1.0 });
+                self.emit(JitOp::ToF64Var { dst_var: limit_var, src: count_val });
+                self.emit(JitOp::Drop { slot: count_val });
+
+                // Check limit: if limit == 0, skip; if limit < 0, error; else start
+                let start_label = self.alloc_label();
+                let zero_label = self.alloc_label();
+                let zero_var = self.alloc_var();
+                self.emit(JitOp::F64Const { dst_var: zero_var, val: 0.0 });
+                // Check if limit > 0
+                let cmp = self.alloc_var();
+                self.emit(JitOp::F64Less { dst_var: cmp, a_var: zero_var, b_var: limit_var });
+                self.emit(JitOp::BranchOnVar { var: cmp, nonzero_label: start_label, zero_label: zero_label });
+                self.emit(JitOp::Label { id: zero_label });
+                // limit <= 0: check if negative (error) or zero (skip)
+                let neg_cmp = self.alloc_var();
+                self.emit(JitOp::F64Less { dst_var: neg_cmp, a_var: limit_var, b_var: zero_var });
+                let error_label = self.alloc_label();
+                self.emit(JitOp::BranchOnVar { var: neg_cmp, nonzero_label: error_label, zero_label: done_label });
+                self.emit(JitOp::Label { id: error_label });
+                // Negative limit: throw error
+                let err_msg = self.alloc_slot();
+                self.emit(JitOp::Str { dst: err_msg, val: "limit doesn't support negative count".to_string() });
+                self.emit(JitOp::ThrowError { msg: err_msg });
+                if self.try_catch_target.is_none() {
+                    self.ops.push(JitOp::ReturnError);
+                }
+                self.emit(JitOp::Drop { slot: err_msg });
+                self.emit(JitOp::Jump { label: done_label });
+                self.emit(JitOp::Label { id: start_label });
+
+                // Set limit_state so emit_yield checks counter after each yield
+                let old_limit = self.limit_state;
+                self.limit_state = Some((counter_var, limit_var, one_var, done_label));
+                let ok = self.flatten_gen(generator, input_slot);
+                self.limit_state = old_limit;
+                self.emit(JitOp::Label { id: done_label });
+                ok
+            }
+
+            Expr::Recurse { input_expr } => {
+                if !is_scalar(input_expr) { return false; }
+                // Recurse: yield input, then recurse into each child
+                // This is: def recurse: ., (.[]? | recurse); recurse
+                // We can implement using a stack-based approach via runtime helper
+                // For now, compile as a simple CallBuiltin
+                false // Complex to implement in pure JIT; fall back
+            }
+
+            Expr::FuncCall { func_id, args } => {
+                if *func_id >= self.funcs.len() { return false; }
+                if !args.is_empty() { return false; } // Only 0-arg functions for now
+                let func = &self.funcs[*func_id].clone();
+                // Inline the function body
+                self.flatten_gen(&func.body, input_slot)
             }
 
             _ => false,
@@ -1071,18 +1179,15 @@ impl Flattener {
     fn flatten_gen_try_catch(&mut self, try_expr: &Expr, catch_expr: &Expr, input_slot: SlotId) -> bool {
         // Pre-check: the try body must be compilable
         {
-            let mut test = Flattener::new();
-            test.collect_depth = self.collect_depth;
-            test.try_depth = self.try_depth + 1;
-            test.try_catch_target = Some((0, 0)); // dummy target for pre-check
+            let mut test = self.test_flattener();
+                    test.try_depth = self.try_depth + 1;
+                    test.try_catch_target = Some((0, 0)); // dummy target for pre-check
             let t_in = test.alloc_slot();
             if !test.flatten_gen(try_expr, t_in) { return false; }
         }
         // Pre-check: the catch body must be compilable
         {
-            let mut test = Flattener::new();
-            test.collect_depth = self.collect_depth;
-            test.try_depth = self.try_depth;
+            let mut test = self.test_flattener();
             let t_in = test.alloc_slot();
             if !test.flatten_gen(catch_expr, t_in) { return false; }
         }
@@ -1169,10 +1274,7 @@ impl Flattener {
                 };
                 // Pre-check both branches
                 {
-                    let mut test = Flattener::new();
-                    test.collect_depth = self.collect_depth;
-                    test.try_depth = self.try_depth;
-                    test.try_catch_target = self.try_catch_target;
+                    let mut test = self.test_flattener();
                     let t_in = test.alloc_slot();
                     if !test.flatten_gen(&then_pipe, t_in) { return false; }
                     if !test.flatten_gen(&else_pipe, t_in) { return false; }
@@ -1198,10 +1300,7 @@ impl Flattener {
                 if let Some(s) = step { if !is_scalar(s) { return false; } }
                 // Pre-check: can we compile the body (right)?
                 {
-                    let mut test = Flattener::new();
-                    test.collect_depth = self.collect_depth;
-                    test.try_depth = self.try_depth;
-                    test.try_catch_target = self.try_catch_target;
+                    let mut test = self.test_flattener();
                     let t_in = test.alloc_slot();
                     if !test.flatten_gen(right, t_in) { return false; }
                 }
@@ -1245,18 +1344,14 @@ impl Flattener {
             Expr::TryCatch { try_expr, catch_expr } => {
                 // Pre-check: try body and right must be compilable
                 {
-                    let mut test = Flattener::new();
-                    test.collect_depth = self.collect_depth;
+                    let mut test = self.test_flattener();
                     test.try_depth = self.try_depth + 1;
                     test.try_catch_target = Some((0, 0));
                     let t_in = test.alloc_slot();
                     if !test.flatten_gen(try_expr, t_in) { return false; }
                 }
                 {
-                    let mut test = Flattener::new();
-                    test.collect_depth = self.collect_depth;
-                    test.try_depth = self.try_depth;
-                    test.try_catch_target = self.try_catch_target;
+                    let mut test = self.test_flattener();
                     let t_in = test.alloc_slot();
                     if !test.flatten_gen(catch_expr, t_in) { return false; }
                 }
@@ -1348,19 +1443,14 @@ impl Flattener {
             Expr::Collect { generator } => {
                 // Pre-check: can we compile the generator?
                 {
-                    let mut test = Flattener::new();
+                    let mut test = self.test_flattener();
                     test.collect_depth = self.collect_depth + 1;
-                    test.try_depth = self.try_depth;
-                    test.try_catch_target = self.try_catch_target;
                     let t_in = test.alloc_slot();
                     if !test.flatten_gen(generator, t_in) { return false; }
                 }
                 // Pre-check: can we compile right?
                 {
-                    let mut test = Flattener::new();
-                    test.collect_depth = self.collect_depth;
-                    test.try_depth = self.try_depth;
-                    test.try_catch_target = self.try_catch_target;
+                    let mut test = self.test_flattener();
                     let t_in = test.alloc_slot();
                     if !test.flatten_gen(right, t_in) { return false; }
                 }
@@ -1398,6 +1488,189 @@ impl Flattener {
             }
 
             _ => false,
+        }
+    }
+
+    /// Flatten ObjectConstruct with generator pairs by converting to LetBinding chain.
+    fn flatten_obj_construct_gen(&mut self, pairs: &[(Expr, Expr)], _pair_idx: usize, input_slot: SlotId) -> bool {
+        // Only handle generator values (keys must be scalar)
+        if !pairs.iter().all(|(k, _)| is_scalar(k)) { return false; }
+
+        // Convert: {k1: gen1, k2: gen2} =>
+        //   gen1 as $__v0 | gen2 as $__v1 | {k1: $__v0, k2: $__v1}
+        // Use high var indices to avoid conflicts (starting at 10000)
+        let base_var: u16 = 10000;
+        let mut scalar_pairs = Vec::new();
+        let mut bindings = Vec::new();
+
+        for (i, (k, v)) in pairs.iter().enumerate() {
+            if is_scalar(v) {
+                scalar_pairs.push((k.clone(), v.clone()));
+            } else {
+                let var_idx = base_var + i as u16;
+                bindings.push((var_idx, v.clone()));
+                scalar_pairs.push((k.clone(), Expr::LoadVar { var_index: var_idx }));
+            }
+        }
+
+        // Build the scalar object construct
+        let mut result: Expr = Expr::ObjectConstruct { pairs: scalar_pairs };
+
+        // Wrap with LetBindings (innermost first)
+        for (var_idx, value) in bindings.into_iter().rev() {
+            result = Expr::LetBinding {
+                var_index: var_idx,
+                value: Box::new(value),
+                body: Box::new(result),
+            };
+        }
+
+        self.flatten_gen(&result, input_slot)
+    }
+
+    /// Emit a range loop from f_slot to t_slot with step s_slot. Yields numbers.
+    fn emit_range_loop(&mut self, f_slot: SlotId, t_slot: SlotId, s_slot: SlotId) {
+        let cur_var = self.alloc_var();
+        let to_var = self.alloc_var();
+        let step_var = self.alloc_var();
+        let cmp_var = self.alloc_var();
+        self.emit(JitOp::ToF64Var { dst_var: cur_var, src: f_slot });
+        self.emit(JitOp::ToF64Var { dst_var: to_var, src: t_slot });
+        self.emit(JitOp::ToF64Var { dst_var: step_var, src: s_slot });
+        let head = self.alloc_label();
+        let body = self.alloc_label();
+        let done = self.alloc_label();
+        self.emit(JitOp::Label { id: head });
+        self.emit(JitOp::RangeCheck { dst_var: cmp_var, cur_var, to_var, step_var });
+        self.emit(JitOp::BranchOnVar { var: cmp_var, nonzero_label: body, zero_label: done });
+        self.emit(JitOp::Label { id: body });
+        let num_slot = self.alloc_slot();
+        self.emit(JitOp::F64Num { dst: num_slot, src_var: cur_var });
+        self.emit_yield(num_slot);
+        self.emit(JitOp::Drop { slot: num_slot });
+        self.emit(JitOp::F64Add { dst_var: cur_var, a_var: cur_var, b_var: step_var });
+        self.emit(JitOp::Jump { label: head });
+        self.emit(JitOp::Label { id: done });
+    }
+
+    /// Handle range(from; to; step) where some args are generators.
+    fn flatten_range_gen(&mut self, from: &Expr, to: &Expr, step: Option<&Expr>, input_slot: SlotId) -> bool {
+        // Build a fully scalar range call wrapped in appropriate generator nesting
+        // For each combination of (from_val, to_val, step_val), emit range loop
+        if is_scalar(from) && is_scalar(to) && step.map_or(true, |s| is_scalar(s)) {
+            // All scalar - just emit directly
+            let fv = self.flatten_scalar(from, input_slot);
+            let tv = self.flatten_scalar(to, input_slot);
+            let sv = if let Some(s) = step {
+                self.flatten_scalar(s, input_slot)
+            } else {
+                let v = self.alloc_slot();
+                self.emit(JitOp::Num { dst: v, val: 1.0, repr: None });
+                v
+            };
+            self.emit_range_loop(fv, tv, sv);
+            self.emit(JitOp::Drop { slot: fv });
+            self.emit(JitOp::Drop { slot: tv });
+            self.emit(JitOp::Drop { slot: sv });
+            return true;
+        }
+
+        // Strategy: iterate generators as needed, calling emit_range_loop for each combo
+        // Use Comma { ... } rewriting or flatten_gen_with_each_output
+        if !is_scalar(from) {
+            // from is generator
+            let to_clone = to.clone();
+            let step_clone = step.map(|s| s.clone());
+            return self.flatten_gen_with_each_output(from, input_slot, &|this, fv| {
+                let step_ref = step_clone.as_ref();
+                this.flatten_range_gen_inner(fv, &to_clone, step_ref, input_slot);
+            });
+        }
+
+        // from is scalar, to is generator
+        let fv = self.flatten_scalar(from, input_slot);
+        if !is_scalar(to) {
+            let step_clone = step.map(|s| s.clone());
+            let ok = self.flatten_gen_with_each_output(to, input_slot, &|this, tv| {
+                let step_ref = step_clone.as_ref();
+                if let Some(s) = step_ref {
+                    if is_scalar(s) {
+                        let sv = this.flatten_scalar(s, input_slot);
+                        this.emit_range_loop(fv, tv, sv);
+                        this.emit(JitOp::Drop { slot: sv });
+                    } else {
+                        this.flatten_gen_with_each_output(s, input_slot, &|this2, sv| {
+                            this2.emit_range_loop(fv, tv, sv);
+                        });
+                    }
+                } else {
+                    let sv = this.alloc_slot();
+                    this.emit(JitOp::Num { dst: sv, val: 1.0, repr: None });
+                    this.emit_range_loop(fv, tv, sv);
+                    this.emit(JitOp::Drop { slot: sv });
+                }
+            });
+            self.emit(JitOp::Drop { slot: fv });
+            return ok;
+        }
+
+        // from and to are scalar, step is generator
+        let tv = self.flatten_scalar(to, input_slot);
+        if let Some(s) = step {
+            let ok = self.flatten_gen_with_each_output(s, input_slot, &|this, sv| {
+                this.emit_range_loop(fv, tv, sv);
+            });
+            self.emit(JitOp::Drop { slot: fv });
+            self.emit(JitOp::Drop { slot: tv });
+            return ok;
+        }
+
+        // Should not reach here
+        false
+    }
+
+    /// Inner helper for flatten_range_gen when from is already resolved.
+    fn flatten_range_gen_inner(&mut self, fv: SlotId, to: &Expr, step: Option<&Expr>, input_slot: SlotId) {
+        if is_scalar(to) {
+            let tv = self.flatten_scalar(to, input_slot);
+            if let Some(s) = step {
+                if is_scalar(s) {
+                    let sv = self.flatten_scalar(s, input_slot);
+                    self.emit_range_loop(fv, tv, sv);
+                    self.emit(JitOp::Drop { slot: sv });
+                } else {
+                    self.flatten_gen_with_each_output(s, input_slot, &|this, sv| {
+                        this.emit_range_loop(fv, tv, sv);
+                    });
+                }
+            } else {
+                let sv = self.alloc_slot();
+                self.emit(JitOp::Num { dst: sv, val: 1.0, repr: None });
+                self.emit_range_loop(fv, tv, sv);
+                self.emit(JitOp::Drop { slot: sv });
+            }
+            self.emit(JitOp::Drop { slot: tv });
+        } else {
+            let step_clone = step.map(|s| s.clone());
+            self.flatten_gen_with_each_output(to, input_slot, &|this, tv| {
+                let step_ref = step_clone.as_ref();
+                if let Some(s) = step_ref {
+                    if is_scalar(s) {
+                        let sv = this.flatten_scalar(s, input_slot);
+                        this.emit_range_loop(fv, tv, sv);
+                        this.emit(JitOp::Drop { slot: sv });
+                    } else {
+                        this.flatten_gen_with_each_output(s, input_slot, &|this2, sv| {
+                            this2.emit_range_loop(fv, tv, sv);
+                        });
+                    }
+                } else {
+                    let sv = this.alloc_slot();
+                    this.emit(JitOp::Num { dst: sv, val: 1.0, repr: None });
+                    this.emit_range_loop(fv, tv, sv);
+                    this.emit(JitOp::Drop { slot: sv });
+                }
+            });
         }
     }
 
@@ -1468,7 +1741,7 @@ impl Flattener {
     fn flatten_each_with_body(&mut self, container: SlotId, is_opt: bool, body_expr: &Expr, _original_input: SlotId) -> bool {
         // Pre-check: can we compile the body?
         {
-            let mut test = Flattener::new();
+            let mut test = self.test_flattener();
             let test_input = test.alloc_slot();
             if !test.flatten_gen(body_expr, test_input) {
                 return false;
@@ -1716,10 +1989,7 @@ impl Flattener {
     fn flatten_gen_let_binding(&mut self, var_index: u16, value: &Expr, body: &Expr, input_slot: SlotId) -> bool {
         // Pre-check: can we compile the body?
         {
-            let mut test = Flattener::new();
-            test.collect_depth = self.collect_depth;
-            test.try_depth = self.try_depth;
-            test.try_catch_target = self.try_catch_target;
+            let mut test = self.test_flattener();
             let t_in = test.alloc_slot();
             if !test.flatten_gen(body, t_in) { return false; }
         }
@@ -2504,8 +2774,13 @@ impl JitCompiler {
     }
 
     pub fn compile(&mut self, expr: &Expr) -> Result<JitFilterFn> {
+        self.compile_with_funcs(expr, &[])
+    }
+
+    pub fn compile_with_funcs(&mut self, expr: &Expr, funcs: &[CompiledFunc]) -> Result<JitFilterFn> {
         // Phase 1: Flatten
         let mut fl = Flattener::new();
+        fl.funcs = funcs.to_vec();
         let input_slot = fl.alloc_slot(); // slot 0 = input ptr (special)
         let clone_slot = fl.alloc_slot(); // slot 1 = cloned input
         fl.emit(JitOp::Clone { dst: clone_slot, src: input_slot });
@@ -2870,6 +3145,11 @@ impl JitCompiler {
                         let result = b.inst_results(call)[0];
                         b.def_var(vars[*dst_var as usize], result);
                     }
+                    JitOp::F64Const { dst_var, val } => {
+                        let bits = val.to_bits() as i64;
+                        let c = b.ins().iconst(ptr_ty, bits);
+                        b.def_var(vars[*dst_var as usize], c);
+                    }
                     JitOp::F64Num { dst, src_var } => {
                         let d = slot_addr(&mut b, *dst);
                         let bits = b.use_var(vars[*src_var as usize]);
@@ -3060,7 +3340,12 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
 // ============================================================================
 
 pub fn is_jit_compilable(expr: &Expr) -> bool {
+    is_jit_compilable_with_funcs(expr, &[])
+}
+
+pub fn is_jit_compilable_with_funcs(expr: &Expr, funcs: &[CompiledFunc]) -> bool {
     let mut fl = Flattener::new();
+    fl.funcs = funcs.to_vec();
     let input = fl.alloc_slot();
     fl.flatten_gen(expr, input)
 }
