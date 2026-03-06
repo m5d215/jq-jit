@@ -100,6 +100,7 @@ enum JitOp {
 
     // Operations (all write result to dst)
     Index { dst: SlotId, base: SlotId, key: SlotId },
+    IndexField { dst: SlotId, base: SlotId, field: String },
     BinOp { dst: SlotId, op: BinOp, lhs: SlotId, rhs: SlotId },
     UnaryOp { dst: SlotId, op: UnaryOp, src: SlotId },
     Negate { dst: SlotId, src: SlotId },
@@ -316,24 +317,22 @@ impl Flattener {
                 self.emit(JitOp::Drop { slot: val });
                 out
             }
-            Expr::Index { expr: base_expr, key: key_expr } => {
+            Expr::Index { expr: base_expr, key: key_expr } | Expr::IndexOpt { expr: base_expr, key: key_expr } => {
                 let base = self.flatten_scalar(base_expr, input_slot);
-                let key = self.flatten_scalar(key_expr, input_slot);
-                let out = self.alloc_slot();
-                self.emit(JitOp::Index { dst: out, base, key });
-                self.emit(JitOp::Drop { slot: base });
-                self.emit(JitOp::Drop { slot: key });
-                out
-            }
-            Expr::IndexOpt { expr: base_expr, key: key_expr } => {
-                // For scalar context, IndexOpt is same as Index (always produces one output)
-                let base = self.flatten_scalar(base_expr, input_slot);
-                let key = self.flatten_scalar(key_expr, input_slot);
-                let out = self.alloc_slot();
-                self.emit(JitOp::Index { dst: out, base, key });
-                self.emit(JitOp::Drop { slot: base });
-                self.emit(JitOp::Drop { slot: key });
-                out
+                // Optimization: if key is a string literal, use IndexField
+                if let Expr::Literal(Literal::Str(s)) = key_expr.as_ref() {
+                    let out = self.alloc_slot();
+                    self.emit(JitOp::IndexField { dst: out, base, field: s.clone() });
+                    self.emit(JitOp::Drop { slot: base });
+                    out
+                } else {
+                    let key = self.flatten_scalar(key_expr, input_slot);
+                    let out = self.alloc_slot();
+                    self.emit(JitOp::Index { dst: out, base, key });
+                    self.emit(JitOp::Drop { slot: base });
+                    self.emit(JitOp::Drop { slot: key });
+                    out
+                }
             }
             Expr::Pipe { left, right } => {
                 let mid = self.flatten_scalar(left, input_slot);
@@ -1581,6 +1580,21 @@ extern "C" fn jit_rt_str(dst: *mut Value, ptr: *const u8, len: usize) {
 extern "C" fn jit_rt_is_truthy(v: *const Value) -> i64 {
     unsafe { if (*v).is_truthy() { 1 } else { 0 } }
 }
+extern "C" fn jit_rt_index_field(dst: *mut Value, base: *const Value, key_ptr: *const u8, key_len: usize) -> i64 {
+    unsafe {
+        match &*base {
+            Value::Obj(o) => {
+                let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key_ptr, key_len));
+                match o.get(key) {
+                    Some(v) => { std::ptr::write(dst, v.clone()); 0 }
+                    None => { std::ptr::write(dst, Value::Null); 0 }
+                }
+            }
+            Value::Null => { std::ptr::write(dst, Value::Null); 0 }
+            _ => { std::ptr::write(dst, Value::Null); GEN_ERROR }
+        }
+    }
+}
 extern "C" fn jit_rt_index(dst: *mut Value, base: *const Value, key: *const Value) -> i64 {
     unsafe {
         match crate::eval::eval_index(&*base, &*key, false) {
@@ -1955,6 +1969,7 @@ impl JitCompiler {
             ("jit_rt_str", jit_rt_str as *const u8),
             ("jit_rt_is_truthy", jit_rt_is_truthy as *const u8),
             ("jit_rt_index", jit_rt_index as *const u8),
+            ("jit_rt_index_field", jit_rt_index_field as *const u8),
             ("jit_rt_binop", jit_rt_binop as *const u8),
             ("jit_rt_unaryop", jit_rt_unaryop as *const u8),
             ("jit_rt_negate", jit_rt_negate as *const u8),
@@ -2142,6 +2157,15 @@ impl JitCompiler {
                         let ba = slot_addr(&mut b, *base);
                         let ka = slot_addr(&mut b, *key);
                         b.ins().call(rt["index"], &[d, ba, ka]);
+                    }
+                    JitOp::IndexField { dst, base, field } => {
+                        let d = slot_addr(&mut b, *dst);
+                        let ba = slot_addr(&mut b, *base);
+                        let leaked = Box::leak(field.clone().into_boxed_str());
+                        self._string_constants.push(leaked);
+                        let fp = b.ins().iconst(ptr_ty, leaked.as_ptr() as i64);
+                        let fl = b.ins().iconst(ptr_ty, leaked.len() as i64);
+                        b.ins().call(rt["index_field"], &[d, ba, fp, fl]);
                     }
                     JitOp::BinOp { dst, op, lhs, rhs } => {
                         let d = slot_addr(&mut b, *dst);
@@ -2487,6 +2511,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("str", [p, p, p], []);
     decl!("is_truthy", [p], [p]);
     decl!("index", [p, p, p], [p]);
+    decl!("index_field", [p, p, p, p], [p]);
     decl!("binop", [p, i, p, p], [p]);
     decl!("unaryop", [p, i, p], [p]);
     decl!("negate", [p, p], [p]);
