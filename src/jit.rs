@@ -870,6 +870,68 @@ impl Flattener {
                 self.flatten_gen_try_catch(try_expr, catch_expr, input_slot)
             }
 
+            // BinOp with generator operands: iterate generators and compute BinOp for each combination
+            Expr::BinOp { op, lhs, rhs } if !matches!(op, BinOp::And | BinOp::Or) => {
+                // Convert to Pipe(generator, BinOp(Input, scalar)) patterns
+                if is_scalar(rhs) {
+                    // lhs is generator, rhs is scalar: for each output of lhs, yield lhs_out op rhs
+                    let rhs_val = self.flatten_scalar(rhs, input_slot);
+                    let gen_body = Expr::BinOp {
+                        op: *op,
+                        lhs: Box::new(Expr::Input),
+                        rhs: Box::new(Expr::Input), // placeholder
+                    };
+                    // Instead of the generic approach, manually emit:
+                    // for each output x of lhs: yield x op rhs
+                    let ok = self.flatten_gen_with_each_output(lhs, input_slot, &|s, elem| {
+                        let out = s.alloc_slot();
+                        s.emit(JitOp::BinOp { dst: out, op: *op, lhs: elem, rhs: rhs_val });
+                        s.emit_yield(out);
+                        s.emit(JitOp::Drop { slot: out });
+                    });
+                    self.emit(JitOp::Drop { slot: rhs_val });
+                    ok
+                } else if is_scalar(lhs) {
+                    // rhs is generator, lhs is scalar: for each output of rhs, yield lhs op rhs_out
+                    let lhs_val = self.flatten_scalar(lhs, input_slot);
+                    let ok = self.flatten_gen_with_each_output(rhs, input_slot, &|s, elem| {
+                        let out = s.alloc_slot();
+                        s.emit(JitOp::BinOp { dst: out, op: *op, lhs: lhs_val, rhs: elem });
+                        s.emit_yield(out);
+                        s.emit(JitOp::Drop { slot: out });
+                    });
+                    self.emit(JitOp::Drop { slot: lhs_val });
+                    ok
+                } else {
+                    // Both generator — fall back to interpreter for now
+                    false
+                }
+            }
+
+            // Negate with generator operand
+            Expr::Negate { operand } => {
+                self.flatten_gen_with_each_output(operand, input_slot, &|s, elem| {
+                    let out = s.alloc_slot();
+                    s.emit(JitOp::Negate { dst: out, src: elem });
+                    s.emit_yield(out);
+                    s.emit(JitOp::Drop { slot: out });
+                })
+            }
+
+            // Index with generator operands
+            Expr::Index { expr: base_expr, key: key_expr } if is_scalar(base_expr) && !is_scalar(key_expr) => {
+                // base is scalar, key is generator
+                let base = self.flatten_scalar(base_expr, input_slot);
+                let ok = self.flatten_gen_with_each_output(key_expr, input_slot, &|s, key| {
+                    let out = s.alloc_slot();
+                    s.emit(JitOp::Index { dst: out, base, key });
+                    s.emit_yield(out);
+                    s.emit(JitOp::Drop { slot: out });
+                });
+                self.emit(JitOp::Drop { slot: base });
+                ok
+            }
+
             Expr::Foreach { source, init, var_index, acc_index, update, extract } => {
                 if !is_scalar(init) || !is_scalar(update) { return false; }
                 // Pre-check: if extract exists, it must be compilable as a generator
@@ -905,6 +967,78 @@ impl Flattener {
             }
 
             _ => false,
+        }
+    }
+
+    /// Generic helper: iterate a generator expression and call action for each output.
+    /// Returns true if the generator can be compiled.
+    fn flatten_gen_with_each_output(&mut self, gen_expr: &Expr, input_slot: SlotId,
+                                     action: &dyn Fn(&mut Flattener, SlotId)) -> bool {
+        if is_scalar(gen_expr) {
+            let out = self.flatten_scalar(gen_expr, input_slot);
+            action(self, out);
+            self.emit(JitOp::Drop { slot: out });
+            return true;
+        }
+        match gen_expr {
+            Expr::Comma { left, right } => {
+                if !self.flatten_gen_with_each_output(left, input_slot, action) { return false; }
+                self.flatten_gen_with_each_output(right, input_slot, action)
+            }
+            Expr::Empty => true,
+            Expr::Each { input_expr } if is_scalar(input_expr) => {
+                let container = self.flatten_scalar(input_expr, input_slot);
+                self.flatten_each_with_action(container, false, action);
+                self.emit(JitOp::Drop { slot: container });
+                true
+            }
+            Expr::Pipe { left, right } if is_scalar(left) => {
+                let mid = self.flatten_scalar(left, input_slot);
+                let ok = self.flatten_gen_with_each_output(right, mid, action);
+                self.emit(JitOp::Drop { slot: mid });
+                ok
+            }
+            Expr::Range { from, to, step } if is_scalar(from) && is_scalar(to) && step.as_ref().map_or(true, |s| is_scalar(s)) => {
+                let from_val = self.flatten_scalar(from, input_slot);
+                let to_val = self.flatten_scalar(to, input_slot);
+                let step_val = if let Some(s) = step {
+                    self.flatten_scalar(s, input_slot)
+                } else {
+                    let one = self.alloc_slot();
+                    self.emit(JitOp::Num { dst: one, val: 1.0, repr: None });
+                    one
+                };
+                let cur = self.alloc_var();
+                let to_v = self.alloc_var();
+                let step_v = self.alloc_var();
+                let cmp = self.alloc_var();
+                self.emit(JitOp::ToF64Var { dst_var: cur, src: from_val });
+                self.emit(JitOp::ToF64Var { dst_var: to_v, src: to_val });
+                self.emit(JitOp::ToF64Var { dst_var: step_v, src: step_val });
+                self.emit(JitOp::Drop { slot: from_val });
+                self.emit(JitOp::Drop { slot: to_val });
+                self.emit(JitOp::Drop { slot: step_val });
+                let head = self.alloc_label();
+                let body = self.alloc_label();
+                let done = self.alloc_label();
+                self.emit(JitOp::Label { id: head });
+                self.emit(JitOp::RangeCheck { dst_var: cmp, cur_var: cur, to_var: to_v, step_var: step_v });
+                self.emit(JitOp::BranchOnVar { var: cmp, nonzero_label: body, zero_label: done });
+                self.emit(JitOp::Label { id: body });
+                let num = self.alloc_slot();
+                self.emit(JitOp::F64Num { dst: num, src_var: cur });
+                action(self, num);
+                self.emit(JitOp::Drop { slot: num });
+                self.emit(JitOp::F64Add { dst_var: cur, a_var: cur, b_var: step_v });
+                self.emit(JitOp::Jump { label: head });
+                self.emit(JitOp::Label { id: done });
+                true
+            }
+            _ => {
+                // Try to compile as a generator that yields values
+                // For unsupported patterns, return false
+                false
+            }
         }
     }
 
