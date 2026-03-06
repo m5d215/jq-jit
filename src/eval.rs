@@ -834,14 +834,14 @@ pub fn eval(
         }
 
         Expr::Loc { file, line } => {
-            let mut obj = crate::value::ObjMap::default();
+            let mut obj = crate::value::new_objmap();
             obj.insert("file".to_string(), Value::from_str(file));
             obj.insert("line".to_string(), Value::Num(*line as f64, None));
             cb(Value::Obj(Rc::new(obj)))
         }
 
         Expr::Env => {
-            let mut obj = crate::value::ObjMap::default();
+            let mut obj = crate::value::new_objmap();
             for (k, v) in std::env::vars() { obj.insert(k, Value::from_str(&v)); }
             cb(Value::Obj(Rc::new(obj)))
         }
@@ -1022,7 +1022,7 @@ fn eval_range(from: &Value, to: &Value, step: Option<&Value>, cb: &mut dyn FnMut
 }
 
 fn eval_object_construct(pairs: &[(Expr, Expr)], input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
-    eval_obj_pairs(pairs, 0, crate::value::ObjMap::default(), input, env, cb)
+    eval_obj_pairs(pairs, 0, crate::value::new_objmap(), input, env, cb)
 }
 
 fn eval_obj_pairs(pairs: &[(Expr, Expr)], idx: usize, cur: crate::value::ObjMap, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
@@ -1401,7 +1401,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 // Return a special path that indicates slicing
                 let mut p = match &bp { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
                 p.push(Value::Obj(Rc::new({
-                    let mut m = crate::value::ObjMap::default();
+                    let mut m = crate::value::new_objmap();
                     m.insert("start".to_string(), Value::Num(fi as f64, None));
                     m.insert("end".to_string(), Value::Num(ti as f64, None));
                     m
@@ -1648,7 +1648,7 @@ fn walk_value(f: &Expr, input: Value, env: &EnvRef) -> Result<Vec<Value>> {
         }
         Value::Obj(ref o) => {
             // Walk each value
-            let mut new_obj = crate::value::ObjMap::default();
+            let mut new_obj = crate::value::new_objmap();
             for (k, v) in o.iter() {
                 let walked = walk_value(f, v.clone(), env)?;
                 if walked.len() == 1 {

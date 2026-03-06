@@ -14,6 +14,24 @@ use crate::jq_ffi::{self, Jv, JvKind};
 /// Object map type — IndexMap with ahash for faster lookups.
 pub type ObjMap = IndexMap<String, Value, ahash::RandomState>;
 
+/// Create a new ObjMap using a shared hasher state (avoids per-object random key generation).
+#[inline]
+pub fn new_objmap() -> ObjMap {
+    thread_local! {
+        static SHARED_HASHER: ahash::RandomState = ahash::RandomState::default();
+    }
+    SHARED_HASHER.with(|s| IndexMap::with_hasher(s.clone()))
+}
+
+/// Create a new ObjMap with pre-allocated capacity.
+#[inline]
+pub fn new_objmap_with_capacity(cap: usize) -> ObjMap {
+    thread_local! {
+        static SHARED_HASHER: ahash::RandomState = ahash::RandomState::default();
+    }
+    SHARED_HASHER.with(|s| IndexMap::with_capacity_and_hasher(cap, s.clone()))
+}
+
 /// Tag discriminant constants, matching `#[repr(C, u64)]` layout.
 pub const TAG_NULL: u64 = 0;
 pub const TAG_FALSE: u64 = 1;
@@ -206,6 +224,23 @@ pub fn json_to_value(json: &str) -> Result<Value> {
     Ok(val)
 }
 
+/// Parse multiple JSON values from a single string, calling a callback for each.
+/// Avoids the double-scan of split_json_values + json_to_value.
+pub fn json_stream<F>(input: &str, mut cb: F) -> Result<()>
+where F: FnMut(Value) -> Result<()> {
+    let bytes = input.as_bytes();
+    let mut pos = 0;
+    // Skip BOM
+    if bytes.len() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF { pos = 3; }
+    pos = skip_ws(bytes, pos);
+    while pos < bytes.len() {
+        let (val, end) = parse_json_value(bytes, pos, 0)?;
+        cb(val)?;
+        pos = skip_ws(bytes, end);
+    }
+    Ok(())
+}
+
 fn skip_ws(b: &[u8], mut pos: usize) -> usize {
     while pos < b.len() && matches!(b[pos], b' ' | b'\t' | b'\n' | b'\r') { pos += 1; }
     pos
@@ -384,7 +419,7 @@ fn parse_json_array(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)
 fn parse_json_object(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)> {
     debug_assert_eq!(b[pos], b'{');
     let mut i = skip_ws(b, pos + 1);
-    let mut map = ObjMap::default();
+    let mut map = new_objmap_with_capacity(4);
     if i < b.len() && b[i] == b'}' { return Ok((Value::Obj(Rc::new(map)), i + 1)); }
     loop {
         if i >= b.len() || b[i] != b'"' { bail!("Expected string key at position {}", i); }
@@ -483,7 +518,7 @@ pub unsafe fn jv_to_value(jv: Jv) -> Result<Value> {
                 Ok(Value::Arr(Rc::new(items)))
             }
             JvKind::Object => {
-                let mut map = ObjMap::default();
+                let mut map = new_objmap();
                 let mut iter = jq_ffi::jv_object_iter(jv);
                 while jq_ffi::jv_object_iter_valid(jv, iter) != 0 {
                     let key_jv = jq_ffi::jv_object_iter_key(jv, iter);

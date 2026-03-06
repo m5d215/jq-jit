@@ -8,7 +8,7 @@ use std::rc::Rc;
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
 
-use crate::value::{Value, ObjMap};
+use crate::value::{Value, ObjMap, new_objmap};
 
 /// Dispatch a builtin call by name.
 pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
@@ -277,7 +277,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             // Need lib_dirs from env - they're passed through args[1] if available
             // For now, try to find module in common paths
             return Ok(Value::Obj(Rc::new({
-                let mut m = ObjMap::default();
+                let mut m = new_objmap();
                 m.insert("version".to_string(), Value::Num(0.1, None));
                 m.insert("deps".to_string(), Value::Arr(Rc::new(vec![])));
                 m.insert("defs".to_string(), Value::Arr(Rc::new(vec![])));
@@ -1012,7 +1012,7 @@ fn rt_to_entries(v: &Value) -> Result<Value> {
     match v {
         Value::Obj(o) => {
             let entries: Vec<Value> = o.iter().map(|(k, v)| {
-                let mut entry = ObjMap::default();
+                let mut entry = new_objmap();
                 entry.insert("key".to_string(), Value::from_str(k));
                 entry.insert("value".to_string(), v.clone());
                 Value::Obj(Rc::new(entry))
@@ -1026,7 +1026,7 @@ fn rt_to_entries(v: &Value) -> Result<Value> {
 fn rt_from_entries(v: &Value) -> Result<Value> {
     match v {
         Value::Arr(a) => {
-            let mut obj = ObjMap::default();
+            let mut obj = new_objmap();
             for entry in a.iter() {
                 match entry {
                     Value::Obj(o) => {
@@ -1385,7 +1385,7 @@ pub fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
                 }
                 (Value::Null, Value::Str(k)) => {
                     let new_inner = rt_setpath(&Value::Null, &rest, val)?;
-                    let mut obj = ObjMap::default();
+                    let mut obj = new_objmap();
                     obj.insert(k.as_ref().clone(), new_inner);
                     Ok(Value::Obj(Rc::new(obj)))
                 }
@@ -1550,7 +1550,7 @@ fn rt_match(v: &Value, re: &Value) -> Result<Value> {
                 .map_err(|e| anyhow::anyhow!("Invalid regex: {}", e))?;
             match regex.find(s) {
                 Some(m) => {
-                    let mut result = ObjMap::default();
+                    let mut result = new_objmap();
                     result.insert("offset".to_string(), Value::Num(m.start() as f64, None));
                     result.insert("length".to_string(), Value::Num(m.len() as f64, None));
                     result.insert("string".to_string(), Value::from_str(m.as_str()));
@@ -1559,14 +1559,14 @@ fn rt_match(v: &Value, re: &Value) -> Result<Value> {
                     if let Some(caps) = regex.captures(s) {
                         for i in 1..caps.len() {
                             if let Some(cap) = caps.get(i) {
-                                let mut c = ObjMap::default();
+                                let mut c = new_objmap();
                                 c.insert("offset".to_string(), Value::Num(cap.start() as f64, None));
                                 c.insert("length".to_string(), Value::Num(cap.len() as f64, None));
                                 c.insert("string".to_string(), Value::from_str(cap.as_str()));
                                 c.insert("name".to_string(), Value::Null);
                                 captures.push(Value::Obj(Rc::new(c)));
                             } else {
-                                let mut c = ObjMap::default();
+                                let mut c = new_objmap();
                                 c.insert("offset".to_string(), Value::Num(-1.0, None));
                                 c.insert("length".to_string(), Value::Num(0.0, None));
                                 c.insert("string".to_string(), Value::Null);
@@ -1592,7 +1592,7 @@ fn rt_capture(v: &Value, re: &Value) -> Result<Value> {
                 .map_err(|e| anyhow::anyhow!("Invalid regex: {}", e))?;
             match regex.captures(s) {
                 Some(caps) => {
-                    let mut result = ObjMap::default();
+                    let mut result = new_objmap();
                     for name in regex.capture_names().flatten() {
                         if let Some(m) = caps.name(name) {
                             result.insert(name.to_string(), Value::from_str(m.as_str()));
@@ -1812,7 +1812,7 @@ fn rt_strflocaltime_impl(input: &Value, fmt: &Value) -> Result<Value> {
 // -----------------------------------------------------------------------
 
 fn rt_env() -> Value {
-    let mut env = ObjMap::default();
+    let mut env = new_objmap();
     for (k, v) in std::env::vars() {
         env.insert(k, Value::from_string(v));
     }

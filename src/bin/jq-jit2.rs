@@ -5,7 +5,7 @@
 use std::io::{self, BufRead, Read, Write};
 use std::process;
 
-use jq_jit2::value::{self, Value, json_to_value, value_to_json, value_to_json_precise, value_to_json_pretty, write_value_compact};
+use jq_jit2::value::{self, Value, json_to_value, json_stream, value_to_json, value_to_json_precise, value_to_json_pretty, write_value_compact};
 use jq_jit2::interpreter::Filter;
 
 fn main() {
@@ -217,32 +217,22 @@ fn main() {
             if slurp {
                 // Parse all JSON values and collect into array
                 let mut values = Vec::new();
-                for json_text in split_json_values(&input_str) {
-                    match json_to_value(json_text.trim()) {
-                        Ok(v) => values.push(v),
-                        Err(e) => {
-                            eprintln!("jq: error (at <stdin>:0): {}", e);
-                            process::exit(2);
-                        }
-                    }
+                if let Err(e) = json_stream(&input_str, |v| {
+                    values.push(v);
+                    Ok(())
+                }) {
+                    eprintln!("jq: error (at <stdin>:0): {}", e);
+                    process::exit(2);
                 }
                 let arr = Value::Arr(std::rc::Rc::new(values));
                 process_input(&arr, &mut out, &mut any_output_false, &mut had_error);
             } else {
-                for json_text in split_json_values(&input_str) {
-                    let trimmed = json_text.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    match json_to_value(trimmed) {
-                        Ok(v) => {
-                            process_input(&v, &mut out, &mut any_output_false, &mut had_error);
-                        }
-                        Err(e) => {
-                            eprintln!("jq: error (at <stdin>:0): {}", e);
-                            process::exit(2);
-                        }
-                    }
+                if let Err(e) = json_stream(&input_str, |v| {
+                    process_input(&v, &mut out, &mut any_output_false, &mut had_error);
+                    Ok(())
+                }) {
+                    eprintln!("jq: error (at <stdin>:0): {}", e);
+                    process::exit(2);
                 }
             }
         }
@@ -256,20 +246,12 @@ fn main() {
                     process::exit(2);
                 }
             };
-            for json_text in split_json_values(&content) {
-                let trimmed = json_text.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                match json_to_value(trimmed) {
-                    Ok(v) => {
-                        process_input(&v, &mut out, &mut any_output_false, &mut had_error);
-                    }
-                    Err(e) => {
-                        eprintln!("jq: error: {}", e);
-                        process::exit(2);
-                    }
-                }
+            if let Err(e) = json_stream(&content, |v| {
+                process_input(&v, &mut out, &mut any_output_false, &mut had_error);
+                Ok(())
+            }) {
+                eprintln!("jq: error: {}", e);
+                process::exit(2);
             }
         }
     }
@@ -282,77 +264,6 @@ fn main() {
     if exit_status && any_output_false {
         process::exit(5);
     }
-}
-
-/// Split a string containing multiple JSON values.
-/// Handles newline-separated JSON (common jq input format).
-fn split_json_values(input: &str) -> Vec<&str> {
-    // Simple approach: try to find JSON value boundaries
-    // For most cases, each line is a complete JSON value
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return vec![];
-    }
-
-    // If the entire input parses as one JSON value, return it as-is
-    // Otherwise, split by lines and try each
-    let mut results = Vec::new();
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escape = false;
-    let mut start = 0;
-
-    for (i, ch) in trimmed.char_indices() {
-        if escape {
-            escape = false;
-            continue;
-        }
-        if in_string {
-            match ch {
-                '\\' => escape = true,
-                '"' => in_string = false,
-                _ => {}
-            }
-            continue;
-        }
-        match ch {
-            '"' => in_string = true,
-            '{' | '[' => depth += 1,
-            '}' | ']' => {
-                depth -= 1;
-                if depth == 0 {
-                    let end = i + ch.len_utf8();
-                    let segment = &trimmed[start..end];
-                    if !segment.trim().is_empty() {
-                        results.push(segment.trim());
-                    }
-                    start = end;
-                }
-            }
-            '\n' if depth == 0 => {
-                let segment = &trimmed[start..i];
-                if !segment.trim().is_empty() {
-                    results.push(segment.trim());
-                }
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-
-    // Handle remaining text
-    if start < trimmed.len() {
-        let segment = &trimmed[start..];
-        if !segment.trim().is_empty() {
-            results.push(segment.trim());
-        }
-    }
-
-    if results.is_empty() && !trimmed.is_empty() {
-        results.push(trimmed);
-    }
-
-    results
 }
 
 fn print_usage() {

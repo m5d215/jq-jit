@@ -4,7 +4,7 @@ use std::rc::Rc;
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
 
-use crate::value::{Value, ObjMap};
+use crate::value::{Value, ObjMap, new_objmap};
 
 /// Resolve a module name to a file path, searching lib_dirs.
 fn resolve_module(name: &str, lib_dirs: &[String]) -> Result<String> {
@@ -39,7 +39,7 @@ pub fn get_modulemeta(input: &Value, lib_dirs: &[String]) -> Result<Value> {
 
 /// Parse a module file to extract metadata, deps, and defs.
 fn parse_module_metadata(content: &str) -> Result<Value> {
-    let mut metadata = ObjMap::default();
+    let mut metadata = new_objmap();
     let mut deps = Vec::new();
     let mut defs = Vec::new();
 
@@ -125,7 +125,7 @@ fn parse_simple_object(s: &str) -> Result<Value> {
         bail!("not an object");
     }
     let inner = &s[1..s.len()-1];
-    let mut map = ObjMap::default();
+    let mut map = new_objmap();
 
     for part in split_top_level(inner, ',') {
         let part = part.trim();
@@ -228,7 +228,7 @@ fn parse_import_dep(chars: &[char], pos: &mut usize) -> Option<Value> {
     while *pos < chars.len() && chars[*pos].is_whitespace() { *pos += 1; }
 
     // Check for metadata {search:"..."}
-    let mut dep_map = ObjMap::default();
+    let mut dep_map = new_objmap();
     if *pos < chars.len() && chars[*pos] == '{' {
         *pos += 1;
         let mut meta_str = String::new();
@@ -276,7 +276,7 @@ fn parse_include_dep(chars: &[char], pos: &mut usize) -> Option<Value> {
     while *pos < chars.len() && chars[*pos] != ';' { *pos += 1; }
     if *pos < chars.len() { *pos += 1; }
 
-    let mut dep_map = ObjMap::default();
+    let mut dep_map = new_objmap();
     dep_map.insert("is_data".to_string(), Value::False);
     dep_map.insert("relpath".to_string(), Value::from_str(&path));
     Some(Value::Obj(Rc::new(dep_map)))
