@@ -50,7 +50,7 @@ pub fn eval(
             Literal::Null => Value::Null,
             Literal::True => Value::True,
             Literal::False => Value::False,
-            Literal::Num(n) => Value::Num(*n),
+            Literal::Num(n, repr) => Value::Num(*n, repr.clone()),
             Literal::Str(s) => Value::from_str(s),
         }),
 
@@ -282,7 +282,7 @@ pub fn eval(
         Expr::Negate { operand } => {
             eval(operand, input, env, &mut |val| {
                 match &val {
-                    Value::Num(n) => cb(Value::Num(-n)),
+                    Value::Num(n, _) => cb(Value::Num(-n, None)),
                     _ => {
                         bail!("{} cannot be negated", crate::runtime::errdesc_pub(&val))
                     }
@@ -311,7 +311,7 @@ pub fn eval(
         Expr::Label { var_index, body } => {
             let label_id = env.borrow().next_label;
             env.borrow_mut().next_label = label_id + 1;
-            env.borrow_mut().set_var(*var_index, Value::Num(label_id as f64));
+            env.borrow_mut().set_var(*var_index, Value::Num(label_id as f64, None));
             match eval(body, input, env, cb) {
                 Err(e) => {
                     let msg = format!("{}", e);
@@ -328,7 +328,7 @@ pub fn eval(
 
         Expr::Break { var_index, .. } => {
             let label = env.borrow().get_var(*var_index);
-            if let Value::Num(n) = &label { bail!("__break__:{}:", *n as u64) }
+            if let Value::Num(n, None) = &label { bail!("__break__:{}:", *n as u64) }
             else { bail!("break: invalid label") }
         }
 
@@ -431,7 +431,7 @@ pub fn eval(
 
         Expr::Limit { count, generator } => {
             eval(count, input.clone(), env, &mut |cv| {
-                if let Value::Num(n) = &cv {
+                if let Value::Num(n, None) = &cv {
                     let limit = *n as i64;
                     if limit == 0 { return Ok(true); }
                     if limit < 0 {
@@ -607,7 +607,7 @@ pub fn eval(
         Expr::Loc { file, line } => {
             let mut obj = indexmap::IndexMap::new();
             obj.insert("file".to_string(), Value::from_str(file));
-            obj.insert("line".to_string(), Value::Num(*line as f64));
+            obj.insert("line".to_string(), Value::Num(*line as f64, None));
             cb(Value::Obj(Rc::new(obj)))
         }
 
@@ -647,7 +647,7 @@ pub fn eval(
         Expr::GenLabel => {
             let id = env.borrow().next_label;
             env.borrow_mut().next_label = id + 1;
-            cb(Value::Num(id as f64))
+            cb(Value::Num(id as f64, None))
         }
 
         Expr::CallBuiltin { name, args } => {
@@ -678,8 +678,8 @@ fn eval_binop(op: BinOp, lhs: &Value, rhs: &Value) -> Result<Value> {
 fn eval_unaryop(op: UnaryOp, val: &Value) -> Result<Value> {
     match op {
         UnaryOp::Not => return Ok(if val.is_truthy() { Value::False } else { Value::True }),
-        UnaryOp::Infinite => return Ok(Value::Num(f64::INFINITY)),
-        UnaryOp::Nan => return Ok(Value::Num(f64::NAN)),
+        UnaryOp::Infinite => return Ok(Value::Num(f64::INFINITY, None)),
+        UnaryOp::Nan => return Ok(Value::Num(f64::NAN, None)),
         _ => {}
     }
     let name = match op {
@@ -718,13 +718,13 @@ fn eval_unaryop(op: UnaryOp, val: &Value) -> Result<Value> {
 fn eval_index(base: &Value, key: &Value, optional: bool) -> std::result::Result<Value, String> {
     match (base, key) {
         (Value::Obj(o), Value::Str(k)) => Ok(o.get(k.as_str()).cloned().unwrap_or(Value::Null)),
-        (Value::Arr(a), Value::Num(n)) => {
+        (Value::Arr(a), Value::Num(n, _)) => {
             if n.is_nan() { return Ok(Value::Null); }
             let idx = *n as i64;
             let i = if idx < 0 { (a.len() as i64 + idx) as usize } else { idx as usize };
             Ok(a.get(i).cloned().unwrap_or(Value::Null))
         }
-        (Value::Str(_), Value::Num(n)) => {
+        (Value::Str(_), Value::Num(n, _)) => {
             if n.fract() != 0.0 || n.is_nan() || n.is_infinite() {
                 Err(format!("Cannot index string with number ({})", crate::value::format_jq_number(*n)))
             } else if optional {
@@ -739,7 +739,7 @@ fn eval_index(base: &Value, key: &Value, optional: bool) -> std::result::Result<
             else {
                 let key_desc = match key {
                     Value::Str(s) => format!("string (\"{}\")", s),
-                    Value::Num(n) => format!("number ({})", crate::value::format_jq_number(*n)),
+                    Value::Num(n, _) => format!("number ({})", crate::value::format_jq_number(*n)),
                     _ => format!("{} ({})", key.type_name(), crate::value::value_to_json(key)),
                 };
                 Err(format!("Cannot index {} with {}", base.type_name(), key_desc))
@@ -763,13 +763,13 @@ fn eval_recurse_expr(step: &Expr, val: &Value, env: &EnvRef, cb: &mut dyn FnMut(
 }
 
 fn eval_range(from: &Value, to: &Value, step: Option<&Value>, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
-    let f = match from { Value::Num(n) => *n, _ => bail!("range: from must be number") };
-    let t = match to { Value::Num(n) => *n, _ => bail!("range: to must be number") };
-    let s = match step { Some(Value::Num(n)) => *n, Some(_) => bail!("range: step must be number"), None => 1.0 };
+    let f = match from { Value::Num(n, _) => *n, _ => bail!("range: from must be number") };
+    let t = match to { Value::Num(n, _) => *n, _ => bail!("range: to must be number") };
+    let s = match step { Some(Value::Num(n, _)) => *n, Some(_) => bail!("range: step must be number"), None => 1.0 };
     if s == 0.0 { return Ok(true); }
     let mut c = f;
-    if s > 0.0 { while c < t { if !cb(Value::Num(c))? { return Ok(false); } c += s; } }
-    else { while c > t { if !cb(Value::Num(c))? { return Ok(false); } c += s; } }
+    if s > 0.0 { while c < t { if !cb(Value::Num(c, None))? { return Ok(false); } c += s; } }
+    else { while c > t { if !cb(Value::Num(c, None))? { return Ok(false); } c += s; } }
     Ok(true)
 }
 
@@ -892,14 +892,14 @@ fn eval_slice(base: &Value, from: &Value, to: &Value) -> Result<Value> {
     match base {
         Value::Arr(a) => {
             let len = a.len() as i64;
-            let fi = match from { Value::Num(n) => slice_index_start(*n, len), Value::Null => 0, _ => bail!("slice: need number") };
-            let ti = match to { Value::Num(n) => slice_index_end(*n, len), Value::Null => len as usize, _ => bail!("slice: need number") };
+            let fi = match from { Value::Num(n, _) => slice_index_start(*n, len), Value::Null => 0, _ => bail!("slice: need number") };
+            let ti = match to { Value::Num(n, _) => slice_index_end(*n, len), Value::Null => len as usize, _ => bail!("slice: need number") };
             Ok(if fi>=ti { Value::Arr(Rc::new(vec![])) } else { Value::Arr(Rc::new(a[fi..ti].to_vec())) })
         }
         Value::Str(s) => {
             let chars: Vec<char> = s.chars().collect(); let len = chars.len() as i64;
-            let fi = match from { Value::Num(n) => slice_index_start(*n, len), Value::Null => 0, _ => bail!("slice: need number") };
-            let ti = match to { Value::Num(n) => slice_index_end(*n, len), Value::Null => len as usize, _ => bail!("slice: need number") };
+            let fi = match from { Value::Num(n, _) => slice_index_start(*n, len), Value::Null => 0, _ => bail!("slice: need number") };
+            let ti = match to { Value::Num(n, _) => slice_index_end(*n, len), Value::Null => len as usize, _ => bail!("slice: need number") };
             Ok(if fi>=ti { Value::from_str("") } else { Value::from_str(&chars[fi..ti].iter().collect::<String>()) })
         }
         Value::Null => Ok(Value::Null),
@@ -985,7 +985,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                         let mut key_val = Value::Null;
                         let _ = eval(ke, input, env, &mut |k| { key_val = k; Ok(true) });
                         let key_desc = match &key_val {
-                            Value::Num(n) => format!("element {} of", crate::value::format_jq_number(*n)),
+                            Value::Num(n, _) => format!("element {} of", crate::value::format_jq_number(*n)),
                             Value::Str(s) => format!("element \"{}\" of", s),
                             _ => format!("element {} of", crate::value::value_to_json(&key_val)),
                         };
@@ -1002,7 +1002,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 cb_called.set(true);
                 let base = crate::runtime::rt_getpath(&input, &bp).unwrap_or(Value::Null);
                 match &base {
-                    Value::Arr(a) => { for i in 0..a.len() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::Num(i as f64)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
+                    Value::Arr(a) => { for i in 0..a.len() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::Num(i as f64, None)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
                     Value::Obj(o) => { for k in o.keys() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::from_str(k)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
                     _ => Ok(true),
                 }
@@ -1036,7 +1036,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                                 let mut key_val = Value::Null;
                                 let _ = eval(key, input, env, &mut |k| { key_val = k; Ok(true) });
                                 let key_desc = match &key_val {
-                                    Value::Num(n) => format!("element {} of", crate::value::format_jq_number(*n)),
+                                    Value::Num(n, _) => format!("element {} of", crate::value::format_jq_number(*n)),
                                     Value::Str(s) => format!("element \"{}\" of", s),
                                     _ => format!("element {} of", crate::value::value_to_json(&key_val)),
                                 };
@@ -1097,14 +1097,14 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                     Value::Str(s) => s.chars().count() as i64,
                     _ => 0,
                 };
-                let fi = match &from_val { Value::Num(n) => { let i = n.floor() as i64; if i < 0 { (len + i).max(0) } else { i.min(len) } }, Value::Null => 0, _ => 0 };
-                let ti = match &to_val { Value::Num(n) => { let i = n.ceil() as i64; if i < 0 { (len + i).max(0) } else { i.min(len) } }, Value::Null => len, _ => len };
+                let fi = match &from_val { Value::Num(n, _) => { let i = n.floor() as i64; if i < 0 { (len + i).max(0) } else { i.min(len) } }, Value::Null => 0, _ => 0 };
+                let ti = match &to_val { Value::Num(n, _) => { let i = n.ceil() as i64; if i < 0 { (len + i).max(0) } else { i.min(len) } }, Value::Null => len, _ => len };
                 // Return a special path that indicates slicing
                 let mut p = match &bp { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
                 p.push(Value::Obj(Rc::new({
                     let mut m = indexmap::IndexMap::new();
-                    m.insert("start".to_string(), Value::Num(fi as f64));
-                    m.insert("end".to_string(), Value::Num(ti as f64));
+                    m.insert("start".to_string(), Value::Num(fi as f64, None));
+                    m.insert("end".to_string(), Value::Num(ti as f64, None));
                     m
                 })));
                 cb(Value::Arr(Rc::new(p)))
@@ -1154,7 +1154,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             eval_path(input_expr, input.clone(), env, &mut |bp| {
                 let base = crate::runtime::rt_getpath(&input, &bp).unwrap_or(Value::Null);
                 match &base {
-                    Value::Arr(a) => { for i in 0..a.len() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::Num(i as f64)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
+                    Value::Arr(a) => { for i in 0..a.len() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::Num(i as f64, None)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
                     Value::Obj(o) => { for k in o.keys() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::from_str(k)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
                     _ => Ok(true),
                 }
@@ -1176,7 +1176,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
 fn eval_recurse_paths(val: &Value, prefix: &Value, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
     if !cb(prefix.clone())? { return Ok(false); }
     match val {
-        Value::Arr(a) => { for (i, item) in a.iter().enumerate() { let mut p = match prefix { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::Num(i as f64)); if !eval_recurse_paths(item, &Value::Arr(Rc::new(p)), cb)? { return Ok(false); } } }
+        Value::Arr(a) => { for (i, item) in a.iter().enumerate() { let mut p = match prefix { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::Num(i as f64, None)); if !eval_recurse_paths(item, &Value::Arr(Rc::new(p)), cb)? { return Ok(false); } } }
         Value::Obj(o) => { for (k, v) in o.iter() { let mut p = match prefix { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::from_str(k)); if !eval_recurse_paths(v, &Value::Arr(Rc::new(p)), cb)? { return Ok(false); } } }
         _ => {}
     }

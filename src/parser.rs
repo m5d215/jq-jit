@@ -415,6 +415,9 @@ impl Lexer {
         Ok(())
     }
 
+}
+
+impl Lexer {
     fn read_string(&mut self) -> Result<()> {
         self.pos += 1; // skip opening quote
         // We need to handle string interpolation: "...\(expr)..."
@@ -1113,7 +1116,7 @@ impl Parser {
                         var_index: var_idx,
                         value: Box::new(Expr::Index {
                             expr: Box::new(value.clone()),
-                            key: Box::new(Expr::Literal(Literal::Num(i as f64))),
+                            key: Box::new(Expr::Literal(Literal::Num(i as f64, None))),
                         }),
                         body: Box::new(result),
                     };
@@ -1254,7 +1257,7 @@ impl Parser {
                         var_index: var_idx,
                         value: Box::new(Expr::Index {
                             expr: Box::new(value.clone()),
-                            key: Box::new(Expr::Literal(Literal::Num(i as f64))),
+                            key: Box::new(Expr::Literal(Literal::Num(i as f64, None))),
                         }),
                         body: Box::new(result),
                     };
@@ -1787,7 +1790,7 @@ impl Parser {
             Token::Null => { self.advance(); Ok(Expr::Literal(Literal::Null)) }
             Token::True => { self.advance(); Ok(Expr::Literal(Literal::True)) }
             Token::False => { self.advance(); Ok(Expr::Literal(Literal::False)) }
-            Token::Num(n) => { self.advance(); Ok(Expr::Literal(Literal::Num(n))) }
+            Token::Num(n) => { self.advance(); Ok(Expr::Literal(Literal::Num(n, None))) }
             Token::Str(s) => { self.advance(); Ok(Expr::Literal(Literal::Str(s))) }
 
             Token::Recurse => {
@@ -2229,8 +2232,8 @@ impl Parser {
             "debug" => Ok(Expr::Debug { expr: Box::new(Expr::Input) }),
             "stderr" => Ok(Expr::Stderr { expr: Box::new(Expr::Input) }),
             "modulemeta" => Ok(Expr::ModuleMeta),
-            "infinite" => Ok(Expr::Literal(Literal::Num(f64::INFINITY))),
-            "nan" => Ok(Expr::Literal(Literal::Num(f64::NAN))),
+            "infinite" => Ok(Expr::Literal(Literal::Num(f64::INFINITY, None))),
+            "nan" => Ok(Expr::Literal(Literal::Num(f64::NAN, None))),
             "null" => Ok(Expr::Literal(Literal::Null)),
             "true" => Ok(Expr::Literal(Literal::True)),
             "false" => Ok(Expr::Literal(Literal::False)),
@@ -2246,7 +2249,7 @@ impl Parser {
                         cond: Box::new(Expr::BinOp {
                             op: BinOp::Gt,
                             lhs: Box::new(Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) }),
-                            rhs: Box::new(Expr::Literal(Literal::Num(0.0))),
+                            rhs: Box::new(Expr::Literal(Literal::Num(0.0, None))),
                         }),
                         then_branch: Box::new(Expr::Input),
                         else_branch: Box::new(Expr::Empty),
@@ -2467,7 +2470,7 @@ impl Parser {
                 Ok(Expr::Pipe {
                     left: Box::new(Expr::Alternative {
                         primary: Box::new(Expr::Limit {
-                            count: Box::new(Expr::Literal(Literal::Num(1.0))),
+                            count: Box::new(Expr::Literal(Literal::Num(1.0, None))),
                             generator: Box::new(Expr::Pipe {
                                 left: Box::new(Expr::Pipe {
                                     left: Box::new(generator),
@@ -2487,7 +2490,7 @@ impl Parser {
                     }),
                     right: Box::new(Expr::Index {
                         expr: Box::new(Expr::Input),
-                        key: Box::new(Expr::Literal(Literal::Num(0.0))),
+                        key: Box::new(Expr::Literal(Literal::Num(0.0, None))),
                     }),
                 })
             }
@@ -2501,7 +2504,7 @@ impl Parser {
                 Ok(Expr::Pipe {
                     left: Box::new(Expr::Alternative {
                         primary: Box::new(Expr::Limit {
-                            count: Box::new(Expr::Literal(Literal::Num(1.0))),
+                            count: Box::new(Expr::Literal(Literal::Num(1.0, None))),
                             generator: Box::new(Expr::Pipe {
                                 left: Box::new(Expr::Pipe {
                                     left: Box::new(generator),
@@ -2521,14 +2524,14 @@ impl Parser {
                     }),
                     right: Box::new(Expr::Index {
                         expr: Box::new(Expr::Input),
-                        key: Box::new(Expr::Literal(Literal::Num(0.0))),
+                        key: Box::new(Expr::Literal(Literal::Num(0.0, None))),
                     }),
                 })
             }
             ("range", 1) => {
                 let to = args.into_iter().next().unwrap();
                 Ok(Expr::Range {
-                    from: Box::new(Expr::Literal(Literal::Num(0.0))),
+                    from: Box::new(Expr::Literal(Literal::Num(0.0, None))),
                     to: Box::new(to),
                     step: None,
                 })
@@ -2555,7 +2558,7 @@ impl Parser {
             ("first", 1) => {
                 let generator = args.into_iter().next().unwrap();
                 Ok(Expr::Limit {
-                    count: Box::new(Expr::Literal(Literal::Num(1.0))),
+                    count: Box::new(Expr::Literal(Literal::Num(1.0, None))),
                     generator: Box::new(generator),
                 })
             }
@@ -2578,11 +2581,11 @@ impl Parser {
                         cond: Box::new(Expr::BinOp {
                             op: BinOp::Gt,
                             lhs: Box::new(Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) }),
-                            rhs: Box::new(Expr::Literal(Literal::Num(0.0))),
+                            rhs: Box::new(Expr::Literal(Literal::Num(0.0, None))),
                         }),
                         then_branch: Box::new(Expr::Index {
                             expr: Box::new(Expr::Input),
-                            key: Box::new(Expr::Literal(Literal::Num(0.0))),
+                            key: Box::new(Expr::Literal(Literal::Num(0.0, None))),
                         }),
                         else_branch: Box::new(Expr::Empty),
                     }),
@@ -2608,7 +2611,7 @@ impl Parser {
                 let f = args.into_iter().next().unwrap();
                 // isempty(f) = first((f | false), true)
                 Ok(Expr::Limit {
-                    count: Box::new(Expr::Literal(Literal::Num(1.0))),
+                    count: Box::new(Expr::Literal(Literal::Num(1.0, None))),
                     generator: Box::new(Expr::Comma {
                         left: Box::new(Expr::Pipe {
                             left: Box::new(f),
@@ -2832,13 +2835,13 @@ impl Parser {
                 let cnt_var = self.scope.alloc_var("__nth_cnt__");
                 let foreach_expr = Expr::Foreach {
                     source: Box::new(generator),
-                    init: Box::new(Expr::Literal(Literal::Num(-1.0))),
+                    init: Box::new(Expr::Literal(Literal::Num(-1.0, None))),
                     var_index: x_var,
                     acc_index: cnt_var,
                     update: Box::new(Expr::BinOp {
                         op: BinOp::Add,
                         lhs: Box::new(Expr::Input),
-                        rhs: Box::new(Expr::Literal(Literal::Num(1.0))),
+                        rhs: Box::new(Expr::Literal(Literal::Num(1.0, None))),
                     }),
                     extract: Some(Box::new(Expr::IfThenElse {
                         cond: Box::new(Expr::BinOp {
@@ -2852,14 +2855,14 @@ impl Parser {
                 };
                 // first(foreach ...) to get only the first match
                 let first_match = Expr::Limit {
-                    count: Box::new(Expr::Literal(Literal::Num(1.0))),
+                    count: Box::new(Expr::Literal(Literal::Num(1.0, None))),
                     generator: Box::new(foreach_expr),
                 };
                 let body = Expr::IfThenElse {
                     cond: Box::new(Expr::BinOp {
                         op: BinOp::Lt,
                         lhs: Box::new(Expr::LoadVar { var_index: n_var }),
-                        rhs: Box::new(Expr::Literal(Literal::Num(0.0))),
+                        rhs: Box::new(Expr::Literal(Literal::Num(0.0, None))),
                     }),
                     then_branch: Box::new(Expr::Error {
                         msg: Some(Box::new(Expr::Literal(Literal::Str("nth doesn't support negative indices".to_string())))),

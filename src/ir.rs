@@ -340,7 +340,7 @@ pub enum Literal {
     Null,
     True,
     False,
-    Num(f64),
+    Num(f64, Option<std::rc::Rc<str>>),
     Str(String),
 }
 

@@ -21,21 +21,18 @@ pub const TAG_ARR: u64 = 5;
 pub const TAG_OBJ: u64 = 6;
 pub const TAG_ERROR: u64 = 7;
 
-/// A jq value. 16-byte tagged union.
-#[repr(C, u64)]
+/// A jq value.
 pub enum Value {
     Null,
     False,
     True,
-    Num(f64),
+    /// Numeric value. Optional Rc<str> preserves original representation for precision.
+    Num(f64, Option<Rc<str>>),
     Str(Rc<String>),
     Arr(Rc<Vec<Value>>),
     Obj(Rc<IndexMap<String, Value>>),
     Error(Rc<String>),
 }
-
-const _: () = assert!(std::mem::size_of::<Value>() == 16);
-const _: () = assert!(std::mem::align_of::<Value>() == 8);
 
 impl Clone for Value {
     fn clone(&self) -> Self {
@@ -43,7 +40,7 @@ impl Clone for Value {
             Value::Null => Value::Null,
             Value::False => Value::False,
             Value::True => Value::True,
-            Value::Num(n) => Value::Num(*n),
+            Value::Num(n, _) => Value::Num(*n, None),
             Value::Str(s) => Value::Str(Rc::clone(s)),
             Value::Arr(a) => Value::Arr(Rc::clone(a)),
             Value::Obj(o) => Value::Obj(Rc::clone(o)),
@@ -58,7 +55,7 @@ impl PartialEq for Value {
             (Value::Null, Value::Null) => true,
             (Value::False, Value::False) => true,
             (Value::True, Value::True) => true,
-            (Value::Num(a), Value::Num(b)) => a == b,
+            (Value::Num(a, _), Value::Num(b, _)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Arr(a), Value::Arr(b)) => a == b,
             (Value::Obj(a), Value::Obj(b)) => a == b,
@@ -69,7 +66,7 @@ impl PartialEq for Value {
 
 impl Value {
     pub fn from_f64(n: f64) -> Self {
-        Value::Num(n)
+        Value::Num(n, None)
     }
 
     pub fn from_bool(b: bool) -> Self {
@@ -98,7 +95,7 @@ impl Value {
 
     pub fn as_f64(&self) -> Option<f64> {
         match self {
-            Value::Num(n) => Some(*n),
+            Value::Num(n, _) => Some(*n),
             _ => None,
         }
     }
@@ -132,7 +129,7 @@ impl Value {
         match self {
             Value::Null => "null",
             Value::False | Value::True => "boolean",
-            Value::Num(_) => "number",
+            Value::Num(_, _) => "number",
             Value::Str(_) => "string",
             Value::Arr(_) => "array",
             Value::Obj(_) => "object",
@@ -142,16 +139,16 @@ impl Value {
 
     pub fn length(&self) -> Result<Value> {
         match self {
-            Value::Null => Ok(Value::Num(0.0)),
-            Value::False => Ok(Value::Num(0.0)),
-            Value::True => Ok(Value::Num(1.0)),
-            Value::Num(n) => Ok(Value::Num(n.abs())),
+            Value::Null => Ok(Value::Num(0.0, None)),
+            Value::False => Ok(Value::Num(0.0, None)),
+            Value::True => Ok(Value::Num(1.0, None)),
+            Value::Num(n, _) => Ok(Value::Num(n.abs(), None)),
             Value::Str(s) => {
                 // jq counts Unicode codepoints
-                Ok(Value::Num(s.chars().count() as f64))
+                Ok(Value::Num(s.chars().count() as f64, None))
             }
-            Value::Arr(a) => Ok(Value::Num(a.len() as f64)),
-            Value::Obj(o) => Ok(Value::Num(o.len() as f64)),
+            Value::Arr(a) => Ok(Value::Num(a.len() as f64, None)),
+            Value::Obj(o) => Ok(Value::Num(o.len() as f64, None)),
             Value::Error(_) => bail!("error has no length"),
         }
     }
@@ -173,7 +170,7 @@ impl fmt::Debug for Value {
             Value::Null => write!(f, "Null"),
             Value::False => write!(f, "False"),
             Value::True => write!(f, "True"),
-            Value::Num(n) => write!(f, "Num({})", n),
+            Value::Num(n, _) => write!(f, "Num({})", n),
             Value::Str(s) => write!(f, "Str({:?})", s.as_str()),
             Value::Arr(a) => write!(f, "Arr({:?})", a.as_ref()),
             Value::Obj(o) => write!(f, "Obj({:?})", o.as_ref()),
@@ -229,7 +226,7 @@ pub unsafe fn jv_to_value(jv: Jv) -> Result<Value> {
             JvKind::Number => {
                 let n = jq_ffi::jv_number_value(jv);
                 jq_ffi::jv_free(jv);
-                Ok(Value::Num(n))
+                Ok(Value::Num(n, None))
             }
             JvKind::String => {
                 let cstr = jq_ffi::jv_string_value(jq_ffi::jv_copy(jv));
@@ -332,7 +329,7 @@ fn value_to_json_depth(v: &Value, depth: usize) -> String {
         Value::Null => "null".to_string(),
         Value::False => "false".to_string(),
         Value::True => "true".to_string(),
-        Value::Num(n) => format_jq_number(*n),
+        Value::Num(n, _) => format_jq_number(*n),
         Value::Str(s) => json_encode_string(s),
         Value::Arr(a) => {
             let mut out = String::from("[");

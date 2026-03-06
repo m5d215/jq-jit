@@ -491,7 +491,7 @@ impl<'a> VM<'a> {
                 // Generate a unique label value (used for label-break)
                 static LABEL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 let label = LABEL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.data.push(Value::Num(label as f64));
+                self.data.push(Value::Num(label as f64, None));
                 self.pc += 1;
             }
 
@@ -572,7 +572,7 @@ impl<'a> VM<'a> {
                 let val = o.get(k.as_str()).cloned().unwrap_or(Value::Null);
                 self.data.push(val);
             }
-            (Value::Arr(a), Value::Num(n)) => {
+            (Value::Arr(a), Value::Num(n, _)) => {
                 let idx = *n as i64;
                 let actual_idx = if idx < 0 {
                     (a.len() as i64 + idx) as usize
@@ -753,7 +753,7 @@ impl<'a> VM<'a> {
             ForkState::Range { current, to, step, var_index } => {
                 *current += *step;
                 if (*step > 0.0 && *current < *to) || (*step < 0.0 && *current > *to) {
-                    let val = Value::Num(*current);
+                    let val = Value::Num(*current, None);
                     let vi = *var_index;
                     let depth = fork.data_depth;
                     self.data.truncate(depth);
