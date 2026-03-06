@@ -971,6 +971,16 @@ fn eval_closure_op(op: ClosureOpKind, container: &Value, key_expr: &Expr, input:
     }
 }
 
+/// Standalone closure op for JIT: evaluate closure operation with a fresh env.
+pub fn eval_closure_op_standalone(op: ClosureOpKind, container: &Value, key_expr: &Expr, env_ref: &Rc<RefCell<Env>>) -> Result<Value> {
+    let mut result = Value::Null;
+    eval_closure_op(op, container, key_expr, container, env_ref, &mut |v| {
+        result = v;
+        Ok(true)
+    })?;
+    Ok(result)
+}
+
 fn eval_interp_parts(parts: &[StringPart], idx: usize, cur: String, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
     if idx >= parts.len() { return cb(Value::from_str(&cur)); }
     match &parts[idx] {

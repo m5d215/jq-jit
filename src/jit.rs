@@ -19,6 +19,7 @@ use anyhow::{Result, bail};
 // message here. The CheckError JitOp checks this and branches to catch handlers.
 thread_local! {
     static JIT_LAST_ERROR: RefCell<Option<String>> = RefCell::new(None);
+    static JIT_CLOSURE_OPS: RefCell<Vec<Expr>> = RefCell::new(Vec::new());
 }
 
 fn set_jit_error(msg: String) {
@@ -56,6 +57,38 @@ fn is_jit_supported_unaryop(_op: UnaryOp) -> bool {
 
 /// Returns true if expr always produces exactly one output value AND the JIT can handle it inline.
 /// Conservative: only includes expressions we know the JIT handles correctly as scalars.
+/// Check if a generator expression can be safely collected into an array
+/// as a scalar operation. This is conservative: we only allow generators
+/// that we know flatten_gen can handle.
+fn can_scalar_collect(expr: &Expr) -> bool {
+    if is_scalar(expr) { return true; }
+    match expr {
+        Expr::Comma { left, right } => can_scalar_collect(left) && can_scalar_collect(right),
+        Expr::Each { input_expr } => is_scalar(input_expr),
+        Expr::EachOpt { input_expr } => is_scalar(input_expr),
+        Expr::Pipe { left, right } => {
+            if is_scalar(left) { can_scalar_collect(right) }
+            else { can_scalar_collect(left) && can_scalar_collect(right) }
+        }
+        Expr::IfThenElse { cond, then_branch, else_branch } => {
+            is_scalar(cond) && can_scalar_collect(then_branch) && can_scalar_collect(else_branch)
+        }
+        Expr::Empty => true,
+        Expr::Range { from, to, step } => {
+            is_scalar(from) && is_scalar(to) && step.as_ref().map_or(true, |s| is_scalar(s))
+        }
+        Expr::Collect { generator } => can_scalar_collect(generator),
+        Expr::LetBinding { value, body, .. } => {
+            (is_scalar(value) || can_scalar_collect(value)) && can_scalar_collect(body)
+        }
+        Expr::TryCatch { try_expr, catch_expr } => {
+            can_scalar_collect(try_expr) && can_scalar_collect(catch_expr)
+        }
+        Expr::Error { msg } => msg.as_ref().map_or(true, |m| is_scalar(m)),
+        _ => false,
+    }
+}
+
 fn is_scalar(expr: &Expr) -> bool {
     match expr {
         Expr::Input | Expr::Not => true,
@@ -82,8 +115,9 @@ fn is_scalar(expr: &Expr) -> bool {
         Expr::SetPath { path, value } => is_scalar(path) && is_scalar(value),
         Expr::GetPath { path } => is_scalar(path),
         Expr::DelPaths { paths } => is_scalar(paths),
-        // Note: Collect is NOT scalar here because flatten_scalar cannot propagate
-        // failure from the inner generator. Collect is handled in flatten_gen directly.
+        // Collect is scalar: it produces exactly one value (an array).
+        // flatten_scalar handles it via flatten_gen for the inner generator.
+        Expr::Collect { generator } => can_scalar_collect(generator),
         Expr::Loc { .. } | Expr::Env | Expr::Builtins => true,
         Expr::Debug { expr } => is_scalar(expr),
         Expr::Stderr { expr } => is_scalar(expr),
@@ -218,9 +252,11 @@ struct Flattener {
     /// Available compiled functions for FuncCall
     funcs: Vec<CompiledFunc>,
     /// Limit state: when inside a `limit(n; gen)`, emit_yield increments counter and breaks.
-    /// (counter_var, limit_var, one_var, done_label)
+    /// (counter_var, limit_var, one_var, done_label, collect_depth_at_install)
     /// All vars store f64 bits.
-    limit_state: Option<(u32, u32, u32, LabelId)>,
+    limit_state: Option<(u32, u32, u32, LabelId, u32)>,
+    /// Closure ops: key expressions for sort_by/group_by/etc.
+    closure_ops: Vec<Expr>,
 }
 
 impl Flattener {
@@ -228,7 +264,7 @@ impl Flattener {
         Flattener { ops: Vec::new(), next_slot: 0, next_label: 0, next_var: 0,
                      collect_depth: 0, try_depth: 0, try_catch_target: None,
                      label_targets: HashMap::new(), funcs: Vec::new(),
-                     limit_state: None }
+                     limit_state: None, closure_ops: Vec::new() }
     }
 
     /// Create a test Flattener inheriting compile-time context from self.
@@ -240,6 +276,7 @@ impl Flattener {
         t.label_targets = self.label_targets.clone();
         t.funcs = self.funcs.clone();
         t.limit_state = self.limit_state;
+        t.closure_ops = self.closure_ops.clone();
         t
     }
 
@@ -288,13 +325,17 @@ impl Flattener {
             self.emit(JitOp::Yield { output });
         }
         // If inside a limit, check counter after yield (all vars are f64-encoded)
-        if let Some((counter_var, limit_var, one_var, done_label)) = self.limit_state {
-            self.ops.push(JitOp::F64Add { dst_var: counter_var, a_var: counter_var, b_var: one_var });
-            let cmp = self.alloc_var();
-            self.ops.push(JitOp::F64Less { dst_var: cmp, a_var: counter_var, b_var: limit_var });
-            let cont_label = self.alloc_label();
-            self.ops.push(JitOp::BranchOnVar { var: cmp, nonzero_label: cont_label, zero_label: done_label });
-            self.ops.push(JitOp::Label { id: cont_label });
+        // Only check at the same collect_depth where the limit was installed.
+        // This avoids incorrectly triggering limit checks for inner Collect operations.
+        if let Some((counter_var, limit_var, one_var, done_label, install_depth)) = self.limit_state {
+            if self.collect_depth == install_depth {
+                self.ops.push(JitOp::F64Add { dst_var: counter_var, a_var: counter_var, b_var: one_var });
+                let cmp = self.alloc_var();
+                self.ops.push(JitOp::F64Less { dst_var: cmp, a_var: counter_var, b_var: limit_var });
+                let cont_label = self.alloc_label();
+                self.ops.push(JitOp::BranchOnVar { var: cmp, nonzero_label: cont_label, zero_label: done_label });
+                self.ops.push(JitOp::Label { id: cont_label });
+            }
         }
     }
 
@@ -720,7 +761,18 @@ impl Flattener {
                 self.emit(JitOp::Drop { slot: old_var });
                 out
             }
-            Expr::FuncCall { func_id, args } if *func_id < self.funcs.len() && args.is_empty() => {
+            Expr::Collect { generator } => {
+                // Collect is scalar: produce one array value.
+                // Use CollectBegin/flatten_gen/CollectFinish.
+                self.emit(JitOp::CollectBegin);
+                self.collect_depth += 1;
+                self.flatten_gen(generator, input_slot);
+                self.collect_depth -= 1;
+                let out = self.alloc_slot();
+                self.emit(JitOp::CollectFinish { dst: out });
+                out
+            }
+            Expr::FuncCall { func_id, .. } if *func_id < self.funcs.len() => {
                 let func = &self.funcs[*func_id].clone();
                 self.flatten_scalar(&func.body, input_slot)
             }
@@ -1057,28 +1109,10 @@ impl Flattener {
                     self.emit(JitOp::Drop { slot: lhs_val });
                     ok
                 } else {
-                    // Both generators: convert to nested pipe
+                    // Both generators: rewrite as nested LetBinding
                     // (lhs_gen) as $__l | (rhs_gen) as $__r | $__l op $__r
-                    // Use LetBinding approach to avoid nested closure issues
                     let lhs_var: u16 = 10100;
                     let rhs_var: u16 = 10101;
-                    let bound = Expr::Pipe {
-                        left: Box::new(Expr::LetBinding {
-                            var_index: lhs_var,
-                            value: Box::new((**lhs).clone()),
-                            body: Box::new(Expr::LetBinding {
-                                var_index: rhs_var,
-                                value: Box::new((**rhs).clone()),
-                                body: Box::new(Expr::BinOp {
-                                    op: *op,
-                                    lhs: Box::new(Expr::LoadVar { var_index: lhs_var }),
-                                    rhs: Box::new(Expr::LoadVar { var_index: rhs_var }),
-                                }),
-                            }),
-                        }),
-                        right: Box::new(Expr::Input), // dummy, not used
-                    };
-                    // Actually simplify: just use LetBinding chain
                     let rewritten = Expr::LetBinding {
                         var_index: lhs_var,
                         value: Box::new((**lhs).clone()),
@@ -1306,7 +1340,7 @@ impl Flattener {
 
                 // Set limit_state so emit_yield checks counter after each yield
                 let old_limit = self.limit_state;
-                self.limit_state = Some((counter_var, limit_var, one_var, done_label));
+                self.limit_state = Some((counter_var, limit_var, one_var, done_label, self.collect_depth));
                 let ok = self.flatten_gen(generator, input_slot);
                 self.limit_state = old_limit;
                 self.emit(JitOp::Label { id: done_label });
@@ -1329,11 +1363,10 @@ impl Flattener {
                 true
             }
 
-            Expr::FuncCall { func_id, args } => {
+            Expr::FuncCall { func_id, .. } => {
                 if *func_id >= self.funcs.len() { return false; }
-                if !args.is_empty() { return false; } // Only 0-arg functions for now
                 let func = &self.funcs[*func_id].clone();
-                // Inline the function body
+                // Inline the function body (args already substituted by parser)
                 self.flatten_gen(&func.body, input_slot)
             }
 
@@ -1397,6 +1430,237 @@ impl Flattener {
                 self.emit_yield(out);
                 self.emit(JitOp::Drop { slot: out });
                 true
+            }
+
+            // CallBuiltin with generator args: rewrite as nested LetBinding
+            // e.g., join(",","/") → (",","/") as $__arg | join($__arg)
+            Expr::CallBuiltin { name, args } if !args.is_empty() && args.iter().any(|a| !is_scalar(a)) => {
+                // Each generator arg gets bound to a temp var
+                let base_var: u16 = 10200;
+                let mut var_args = Vec::new();
+                let mut all_compilable = true;
+                for (i, arg) in args.iter().enumerate() {
+                    if !is_scalar(arg) {
+                        // Check if the generator arg is compilable
+                        let mut test = self.test_flattener();
+                        let t_in = test.alloc_slot();
+                        if !test.flatten_gen(arg, t_in) {
+                            all_compilable = false;
+                            break;
+                        }
+                    }
+                    var_args.push((base_var + i as u16, arg));
+                }
+                if !all_compilable { return false; }
+
+                // Build nested LetBinding: arg0 as $v0 | arg1 as $v1 | ... | CallBuiltin(name, [$v0, $v1, ...])
+                let inner = Expr::CallBuiltin {
+                    name: name.clone(),
+                    args: var_args.iter().map(|(vi, _)| Expr::LoadVar { var_index: *vi }).collect(),
+                };
+                let mut rewritten = inner;
+                for (vi, arg) in var_args.iter().rev() {
+                    if is_scalar(arg) {
+                        // Scalar arg: still use LetBinding for uniformity
+                        rewritten = Expr::LetBinding {
+                            var_index: *vi,
+                            value: Box::new((*arg).clone()),
+                            body: Box::new(rewritten),
+                        };
+                    } else {
+                        // Generator arg: wrap in LetBinding
+                        rewritten = Expr::LetBinding {
+                            var_index: *vi,
+                            value: Box::new((*arg).clone()),
+                            body: Box::new(rewritten),
+                        };
+                    }
+                }
+                self.flatten_gen(&rewritten, input_slot)
+            }
+
+            // Limit with generator count: limit(gen; body) → gen as $n | limit($n; body)
+            Expr::Limit { count, generator } if !is_scalar(count) => {
+                let count_var: u16 = 10300;
+                let rewritten = Expr::LetBinding {
+                    var_index: count_var,
+                    value: Box::new((**count).clone()),
+                    body: Box::new(Expr::Limit {
+                        count: Box::new(Expr::LoadVar { var_index: count_var }),
+                        generator: generator.clone(),
+                    }),
+                };
+                self.flatten_gen(&rewritten, input_slot)
+            }
+
+            // Alternative with generator primary:
+            // Collect non-null/false outputs. If any, yield them. If none, yield fallback.
+            Expr::Alternative { primary, fallback } if !is_scalar(primary) => {
+                // Collect all outputs of primary into an array
+                self.emit(JitOp::CollectBegin);
+                self.collect_depth += 1;
+                let ok = self.flatten_gen(primary, input_slot);
+                self.collect_depth -= 1;
+                if !ok { return false; }
+                let all_outputs = self.alloc_slot();
+                self.emit(JitOp::CollectFinish { dst: all_outputs });
+
+                // Filter: keep only non-null/non-false values
+                let has_match = self.alloc_var();
+                self.emit(JitOp::F64Const { dst_var: has_match, val: 0.0 });
+                let one_var = self.alloc_var();
+                self.emit(JitOp::F64Const { dst_var: one_var, val: 1.0 });
+
+                // Iterate and yield non-null/false values
+                self.flatten_each_with_action(all_outputs, false, &|s, elem| {
+                    let is_nf = s.alloc_var();
+                    s.emit(JitOp::IsNullOrFalse { dst_var: is_nf, src: elem });
+                    let skip_lbl = s.alloc_label();
+                    let emit_lbl = s.alloc_label();
+                    s.emit(JitOp::BranchOnVar { var: is_nf, nonzero_label: skip_lbl, zero_label: emit_lbl });
+                    s.emit(JitOp::Label { id: emit_lbl });
+                    s.emit(JitOp::F64Const { dst_var: has_match, val: 1.0 });
+                    s.emit_yield(elem);
+                    s.emit(JitOp::Label { id: skip_lbl });
+                });
+
+                // If no non-null/false values, yield fallback
+                let fb_lbl = self.alloc_label();
+                let done_lbl = self.alloc_label();
+                self.emit(JitOp::BranchOnVar { var: has_match, nonzero_label: done_lbl, zero_label: fb_lbl });
+                self.emit(JitOp::Label { id: fb_lbl });
+                if is_scalar(fallback) {
+                    let fval = self.flatten_scalar(fallback, input_slot);
+                    self.emit_yield(fval);
+                    self.emit(JitOp::Drop { slot: fval });
+                } else {
+                    if !self.flatten_gen(fallback, input_slot) {
+                        self.emit(JitOp::Drop { slot: all_outputs });
+                        return false;
+                    }
+                }
+                self.emit(JitOp::Label { id: done_lbl });
+                self.emit(JitOp::Drop { slot: all_outputs });
+                true
+            }
+
+            // StringInterpolation with generator parts
+            Expr::StringInterpolation { parts } if parts.iter().any(|p| matches!(p, StringPart::Expr(e) if !is_scalar(e))) => {
+                // Convert generator interpolation parts to LetBindings
+                let base_var: u16 = 10400;
+                let mut var_parts = Vec::new();
+                let mut all_compilable = true;
+                for (i, part) in parts.iter().enumerate() {
+                    match part {
+                        StringPart::Literal(s) => {
+                            var_parts.push(StringPart::Literal(s.clone()));
+                        }
+                        StringPart::Expr(e) => {
+                            if !is_scalar(e) {
+                                let mut test = self.test_flattener();
+                                let t_in = test.alloc_slot();
+                                if !test.flatten_gen(e, t_in) {
+                                    all_compilable = false;
+                                    break;
+                                }
+                            }
+                            let vi = base_var + i as u16;
+                            var_parts.push(StringPart::Expr(Expr::LoadVar { var_index: vi }));
+                        }
+                    }
+                }
+                if !all_compilable { return false; }
+
+                let inner = Expr::StringInterpolation { parts: var_parts };
+                let mut rewritten = inner;
+                for (i, part) in parts.iter().enumerate().rev() {
+                    if let StringPart::Expr(e) = part {
+                        let vi = base_var + i as u16;
+                        rewritten = Expr::LetBinding {
+                            var_index: vi,
+                            value: Box::new(e.clone()),
+                            body: Box::new(rewritten),
+                        };
+                    }
+                }
+                self.flatten_gen(&rewritten, input_slot)
+            }
+
+            // Foreach with generator init: foreach source as $x (gen_init; update; extract)
+            // Rewrite: gen_init as $acc | foreach source as $x ($acc; update; extract)
+            Expr::Foreach { source, init, var_index, acc_index, update, extract } if !is_scalar(init) => {
+                if !is_scalar(update) { return false; }
+                if let Some(ext) = extract.as_ref() {
+                    let mut test = self.test_flattener();
+                    let t_in = test.alloc_slot();
+                    if !test.flatten_gen(ext, t_in) { return false; }
+                }
+                let init_var: u16 = 10500;
+                let rewritten = Expr::LetBinding {
+                    var_index: init_var,
+                    value: Box::new((**init).clone()),
+                    body: Box::new(Expr::Foreach {
+                        source: source.clone(),
+                        init: Box::new(Expr::LoadVar { var_index: init_var }),
+                        var_index: *var_index,
+                        acc_index: *acc_index,
+                        update: update.clone(),
+                        extract: extract.clone(),
+                    }),
+                };
+                self.flatten_gen(&rewritten, input_slot)
+            }
+
+            // Assign/Update with .[] path: e.g., .[] = 1, .[] += 2
+            // These need runtime path evaluation
+            Expr::Assign { path_expr, value_expr } if extract_simple_path(path_expr).is_none() => {
+                // Fall back to runtime for complex path assignments
+                false
+            }
+            Expr::Update { path_expr, update_expr } if extract_simple_path(path_expr).is_none() => {
+                false
+            }
+
+            // ClosureOp: sort_by, group_by, min_by, max_by, unique_by
+            Expr::ClosureOp { op, input_expr, key_expr } => {
+                if !is_scalar(input_expr) { return false; }
+                let container = self.flatten_scalar(input_expr, input_slot);
+                let out = self.alloc_slot();
+                let op_name = match op {
+                    ClosureOpKind::SortBy => "sort_by",
+                    ClosureOpKind::GroupBy => "group_by",
+                    ClosureOpKind::UniqueBy => "unique_by",
+                    ClosureOpKind::MinBy => "min_by",
+                    ClosureOpKind::MaxBy => "max_by",
+                };
+                // Delegate to runtime via CallBuiltin with the key expression
+                // We need to evaluate key_expr for each element at runtime
+                // Create a special closure-op call
+                self.emit(JitOp::CallBuiltin {
+                    dst: out,
+                    name: format!("__closure_op__:{}:{}", op_name, self.closure_ops.len()),
+                    args: vec![container],
+                });
+                self.closure_ops.push((**key_expr).clone());
+                self.emit(JitOp::Drop { slot: container });
+                self.emit_yield(out);
+                self.emit(JitOp::Drop { slot: out });
+                true
+            }
+
+            // Slice with generator args
+            Expr::Slice { expr: base_expr, from, to } if is_scalar(base_expr) => {
+                let from_scalar = from.as_ref().map_or(true, |f| is_scalar(f));
+                let to_scalar = to.as_ref().map_or(true, |t| is_scalar(t));
+                if from_scalar && to_scalar {
+                    // Already scalar, should be handled by is_scalar. Yield once.
+                    let out = self.flatten_scalar(expr, input_slot);
+                    self.emit_yield(out);
+                    self.emit(JitOp::Drop { slot: out });
+                    true
+                } else {
+                    false
+                }
             }
 
             _ => false,
@@ -3029,6 +3293,49 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             }
         }
 
+        // __closure_op__:op_name:idx — delegate to eval-based closure operation
+        if let Some(rest) = name.strip_prefix("__closure_op__:") {
+            let parts: Vec<&str> = rest.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                let op_name = parts[0];
+                let idx: usize = parts[1].parse().unwrap_or(0);
+                if !args_vec.is_empty() {
+                    let container = &args_vec[0];
+                    let key_expr = JIT_CLOSURE_OPS.with(|c| {
+                        c.borrow().get(idx).cloned()
+                    });
+                    if let Some(key_expr) = key_expr {
+                        let op_kind = match op_name {
+                            "sort_by" => Some(ClosureOpKind::SortBy),
+                            "group_by" => Some(ClosureOpKind::GroupBy),
+                            "unique_by" => Some(ClosureOpKind::UniqueBy),
+                            "min_by" => Some(ClosureOpKind::MinBy),
+                            "max_by" => Some(ClosureOpKind::MaxBy),
+                            _ => None,
+                        };
+                        if let Some(op_kind) = op_kind {
+                            // Use eval infrastructure to perform the closure op
+                            let env = Rc::new(RefCell::new(crate::eval::Env::new(vec![])));
+                            let eval_result = crate::eval::eval_closure_op_standalone(
+                                op_kind, container, &key_expr, &env,
+                            );
+                            match eval_result {
+                                Ok(v) => { std::ptr::write(dst, v); return 0; }
+                                Err(e) => {
+                                    set_jit_error(format!("{}", e));
+                                    std::ptr::write(dst, Value::Null);
+                                    return GEN_ERROR;
+                                }
+                            }
+                        }
+                    }
+                }
+                set_jit_error(format!("closure_op error: {}", rest));
+                std::ptr::write(dst, Value::Null);
+                return GEN_ERROR;
+            }
+        }
+
         match crate::runtime::call_builtin(name, &args_vec) {
             Ok(v) => { std::ptr::write(dst, v); 0 }
             Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); GEN_ERROR }
@@ -3261,6 +3568,11 @@ impl JitCompiler {
         }
         fl.emit(JitOp::Drop { slot: clone_slot });
         fl.emit(JitOp::ReturnContinue);
+
+        // Store closure ops for runtime access
+        if !fl.closure_ops.is_empty() {
+            JIT_CLOSURE_OPS.with(|c| *c.borrow_mut() = fl.closure_ops.clone());
+        }
 
         let ops = fl.ops;
         let num_slots = fl.next_slot;
