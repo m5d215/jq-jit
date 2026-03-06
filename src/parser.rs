@@ -3,6 +3,7 @@
 //! Parses jq filter strings directly into our IR (`Expr`), bypassing libjq's
 //! bytecode entirely. This gives us full control over execution.
 
+use std::rc::Rc;
 use anyhow::{Result, bail};
 
 use crate::ir::*;
@@ -72,7 +73,7 @@ impl Scope {
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
     // Literals
-    Num(f64),
+    Num(f64, Option<Rc<str>>),
     Str(String),          // already unescaped
     Ident(String),
     Variable(String),     // $name (without the $)
@@ -411,10 +412,64 @@ impl Lexer {
         }
         let num_str: String = self.chars[start..self.pos].iter().collect();
         let n: f64 = num_str.parse().map_err(|e| anyhow::anyhow!("invalid number '{}': {}", num_str, e))?;
-        self.tokens.push(Token::Num(n));
+        // Preserve original string for numbers that lose precision in f64
+        let f64_repr = crate::value::format_jq_number(n);
+        let repr = if f64_repr != num_str {
+            Some(Rc::from(normalize_num_repr(&num_str)))
+        } else {
+            None
+        };
+        self.tokens.push(Token::Num(n, repr));
         Ok(())
     }
 
+}
+
+/// Normalize a number literal to match jq's output format.
+fn normalize_num_repr(s: &str) -> String {
+    let s = s.trim();
+    if let Some(e_pos) = s.find(|c: char| c == 'e' || c == 'E') {
+        let mantissa = &s[..e_pos];
+        let exp_str = &s[e_pos + 1..];
+        let exp: i64 = exp_str.parse().unwrap_or(0);
+
+        let (sign, mantissa_abs) = if mantissa.starts_with('-') {
+            ("-", &mantissa[1..])
+        } else {
+            ("", mantissa)
+        };
+
+        let (int_part, frac_part) = if let Some(dot) = mantissa_abs.find('.') {
+            (&mantissa_abs[..dot], &mantissa_abs[dot + 1..])
+        } else {
+            (mantissa_abs, "")
+        };
+
+        // Find position of first significant digit in combined digits
+        let all_digits: String = format!("{}{}", int_part, frac_part);
+        let digits: Vec<char> = all_digits.chars().collect();
+        let first_sig = digits.iter().position(|c| *c != '0').unwrap_or(0);
+
+        if first_sig >= digits.len() {
+            return "0".to_string();
+        }
+
+        // Compute normalized exponent
+        let new_exp = exp + (int_part.len() as i64) - 1 - (first_sig as i64);
+
+        // Build normalized mantissa from significant digits
+        let sig_digits: String = digits[first_sig..].iter().collect();
+        let sig_digits = sig_digits.trim_end_matches('0');
+
+        let exp_sign = if new_exp >= 0 { "+" } else { "" };
+        if sig_digits.len() <= 1 {
+            format!("{}{}E{}{}", sign, &sig_digits[..1], exp_sign, new_exp)
+        } else {
+            format!("{}{}.{}E{}{}", sign, &sig_digits[..1], &sig_digits[1..], exp_sign, new_exp)
+        }
+    } else {
+        s.to_string()
+    }
 }
 
 impl Lexer {
@@ -1790,7 +1845,7 @@ impl Parser {
             Token::Null => { self.advance(); Ok(Expr::Literal(Literal::Null)) }
             Token::True => { self.advance(); Ok(Expr::Literal(Literal::True)) }
             Token::False => { self.advance(); Ok(Expr::Literal(Literal::False)) }
-            Token::Num(n) => { self.advance(); Ok(Expr::Literal(Literal::Num(n, None))) }
+            Token::Num(n, repr) => { self.advance(); Ok(Expr::Literal(Literal::Num(n, repr))) }
             Token::Str(s) => { self.advance(); Ok(Expr::Literal(Literal::Str(s))) }
 
             Token::Recurse => {

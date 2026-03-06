@@ -40,7 +40,7 @@ impl Clone for Value {
             Value::Null => Value::Null,
             Value::False => Value::False,
             Value::True => Value::True,
-            Value::Num(n, _) => Value::Num(*n, None),
+            Value::Num(n, repr) => Value::Num(*n, repr.clone()),
             Value::Str(s) => Value::Str(Rc::clone(s)),
             Value::Arr(a) => Value::Arr(Rc::clone(a)),
             Value::Obj(o) => Value::Obj(Rc::clone(o)),
@@ -142,7 +142,10 @@ impl Value {
             Value::Null => Ok(Value::Num(0.0, None)),
             Value::False => Ok(Value::Num(0.0, None)),
             Value::True => Ok(Value::Num(1.0, None)),
-            Value::Num(n, _) => Ok(Value::Num(n.abs(), None)),
+            Value::Num(n, repr) => {
+                if *n >= 0.0 { Ok(Value::Num(*n, repr.clone())) }
+                else { Ok(Value::Num(n.abs(), None)) }
+            }
             Value::Str(s) => {
                 // jq counts Unicode codepoints
                 Ok(Value::Num(s.chars().count() as f64, None))
@@ -224,9 +227,25 @@ pub unsafe fn jv_to_value(jv: Jv) -> Result<Value> {
                 Ok(Value::False)
             }
             JvKind::Number => {
-                let n = jq_ffi::jv_number_value(jv);
-                jq_ffi::jv_free(jv);
-                Ok(Value::Num(n, None))
+                let n = jq_ffi::jv_number_value(jq_ffi::jv_copy(jv));
+                // Get precise string representation via jv_dump_string
+                let dump_jv = jq_ffi::jv_dump_string(jv, 0);
+                let repr = if jq_ffi::jv_get_kind(dump_jv) == JvKind::String {
+                    let cstr = jq_ffi::jv_string_value(jq_ffi::jv_copy(dump_jv));
+                    let s = CStr::from_ptr(cstr).to_string_lossy().into_owned();
+                    jq_ffi::jv_free(dump_jv);
+                    // Check if the precise repr differs from f64 round-trip
+                    let f64_repr = format_jq_number(n);
+                    if s != f64_repr {
+                        Some(Rc::from(s.as_str()))
+                    } else {
+                        None
+                    }
+                } else {
+                    jq_ffi::jv_free(dump_jv);
+                    None
+                };
+                Ok(Value::Num(n, repr))
             }
             JvKind::String => {
                 let cstr = jq_ffi::jv_string_value(jq_ffi::jv_copy(jv));
@@ -314,14 +333,19 @@ pub fn format_jq_number(n: f64) -> String {
     format!("{}", n)
 }
 
-/// Convert Value to compact JSON string.
+/// Convert Value to compact JSON string (always uses f64 for numbers).
 pub fn value_to_json(v: &Value) -> String {
-    value_to_json_depth(v, 0)
+    value_to_json_depth(v, 0, false)
+}
+
+/// Convert Value to compact JSON string, using precise repr when available.
+pub fn value_to_json_precise(v: &Value) -> String {
+    value_to_json_depth(v, 0, true)
 }
 
 const MAX_JSON_DEPTH: usize = 10000;
 
-fn value_to_json_depth(v: &Value, depth: usize) -> String {
+fn value_to_json_depth(v: &Value, depth: usize, precise: bool) -> String {
     if depth > MAX_JSON_DEPTH {
         return "\"<skipped: too deep>\"".to_string();
     }
@@ -329,7 +353,14 @@ fn value_to_json_depth(v: &Value, depth: usize) -> String {
         Value::Null => "null".to_string(),
         Value::False => "false".to_string(),
         Value::True => "true".to_string(),
-        Value::Num(n, _) => format_jq_number(*n),
+        Value::Num(n, repr) => {
+            if precise {
+                if let Some(r) = repr {
+                    return r.to_string();
+                }
+            }
+            format_jq_number(*n)
+        }
         Value::Str(s) => json_encode_string(s),
         Value::Arr(a) => {
             let mut out = String::from("[");
@@ -337,7 +368,7 @@ fn value_to_json_depth(v: &Value, depth: usize) -> String {
                 if i > 0 {
                     out.push(',');
                 }
-                out.push_str(&value_to_json_depth(item, depth + 1));
+                out.push_str(&value_to_json_depth(item, depth + 1, precise));
             }
             out.push(']');
             out
@@ -350,7 +381,7 @@ fn value_to_json_depth(v: &Value, depth: usize) -> String {
                 }
                 out.push_str(&json_encode_string(k));
                 out.push(':');
-                out.push_str(&value_to_json_depth(v, depth + 1));
+                out.push_str(&value_to_json_depth(v, depth + 1, precise));
             }
             out.push('}');
             out
@@ -396,7 +427,7 @@ pub fn value_to_json_pretty(v: &Value, indent: usize) -> String {
             out.push('}');
             out
         }
-        _ => value_to_json(v),
+        _ => value_to_json_precise(v),
     }
 }
 

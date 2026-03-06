@@ -801,7 +801,10 @@ fn rt_round(v: &Value) -> Result<Value> {
 
 fn rt_fabs(v: &Value) -> Result<Value> {
     match v {
-        Value::Num(n, _) => Ok(Value::Num(n.abs(), None)),
+        Value::Num(n, repr) => {
+            if *n >= 0.0 { Ok(Value::Num(*n, repr.clone())) }
+            else { Ok(Value::Num(n.abs(), None)) }
+        }
         // abs on non-numbers returns the value for strings, errors for others
         Value::Str(_) => Ok(v.clone()),
         Value::Null => Ok(Value::Null),

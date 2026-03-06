@@ -5,7 +5,7 @@
 use std::io::{self, BufRead, Read, Write};
 use std::process;
 
-use jq_jit2::value::{self, Value, json_to_value, value_to_json, value_to_json_pretty};
+use jq_jit2::value::{self, Value, json_to_value, value_to_json, value_to_json_precise, value_to_json_pretty};
 use jq_jit2::interpreter::Filter;
 
 fn main() {
@@ -135,7 +135,7 @@ fn main() {
             }
         }
         if compact {
-            value_to_json(v)
+            value_to_json_precise(v)
         } else if tab {
             value_to_json_pretty(v, 0).replace("  ", "\t")
         } else {
