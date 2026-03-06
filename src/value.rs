@@ -676,30 +676,52 @@ use std::io;
 
 fn write_json_string(w: &mut dyn io::Write, s: &str) -> io::Result<()> {
     w.write_all(b"\"")?;
-    for ch in s.chars() {
-        match ch {
-            '"' => w.write_all(b"\\\"")?,
-            '\\' => w.write_all(b"\\\\")?,
-            '\n' => w.write_all(b"\\n")?,
-            '\r' => w.write_all(b"\\r")?,
-            '\t' => w.write_all(b"\\t")?,
-            '\u{08}' => w.write_all(b"\\b")?,
-            '\u{0c}' => w.write_all(b"\\f")?,
-            c if (c as u32) < 0x20 => {
-                write!(w, "\\u{:04x}", c as u32)?;
-            }
-            c => {
-                let mut buf = [0u8; 4];
-                w.write_all(c.encode_utf8(&mut buf).as_bytes())?;
-            }
+    // Fast path: check if string needs any escaping
+    let bytes = s.as_bytes();
+    let needs_escape = bytes.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20);
+    if !needs_escape {
+        w.write_all(bytes)?;
+    } else {
+        // Slow path: write segments between special characters
+        let mut start = 0;
+        for (i, &b) in bytes.iter().enumerate() {
+            let escape = match b {
+                b'"' => b"\\\"",
+                b'\\' => b"\\\\",
+                b'\n' => b"\\n",
+                b'\r' => b"\\r",
+                b'\t' => b"\\t",
+                0x08 => b"\\b",
+                0x0c => b"\\f",
+                c if c < 0x20 => {
+                    // Flush pending
+                    if start < i { w.write_all(&bytes[start..i])?; }
+                    write!(w, "\\u{:04x}", c)?;
+                    start = i + 1;
+                    continue;
+                }
+                _ => { continue; }
+            };
+            if start < i { w.write_all(&bytes[start..i])?; }
+            w.write_all(escape)?;
+            start = i + 1;
         }
+        if start < bytes.len() { w.write_all(&bytes[start..])?; }
     }
     w.write_all(b"\"")?;
     Ok(())
 }
 
 fn write_jq_number(w: &mut dyn io::Write, n: f64) -> io::Result<()> {
-    // Reuse format_jq_number to guarantee consistent output
+    // Fast path for common small integers: avoid String allocation
+    if n == n.trunc() && n.abs() < 1e15 {
+        let i = n as i64;
+        if i as f64 == n {
+            let mut buf = itoa::Buffer::new();
+            return w.write_all(buf.format(i).as_bytes());
+        }
+    }
+    // Fallback: use format_jq_number for general case
     w.write_all(format_jq_number(n).as_bytes())
 }
 

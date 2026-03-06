@@ -3513,7 +3513,7 @@ extern "C" fn jit_rt_set_var(env: *mut JitEnv, idx: u32, val: *const Value) {
 
 // Collect (array construction) helpers
 extern "C" fn jit_rt_collect_begin(env: *mut JitEnv) {
-    unsafe { (*env).collect_stacks.push(Vec::new()); }
+    unsafe { (*env).collect_stacks.push(Vec::with_capacity(16)); }
 }
 extern "C" fn jit_rt_collect_push(env: *mut JitEnv, val: *const Value) {
     unsafe { (*env).collect_stacks.last_mut().unwrap().push((*val).clone()); }

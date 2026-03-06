@@ -320,6 +320,7 @@ dependencies = [
  "cranelift-module",
  "cranelift-native",
  "indexmap",
+ "itoa",
  "libc",
  "libm",
  "regex",
