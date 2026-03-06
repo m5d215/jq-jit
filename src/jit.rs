@@ -108,7 +108,14 @@ fn is_scalar(expr: &Expr) -> bool {
         Expr::LetBinding { value, body, .. } => is_scalar(value) && is_scalar(body),
         Expr::Alternative { primary, fallback } => is_scalar(primary) && is_scalar(fallback),
         Expr::Until { cond, update } => is_scalar(cond) && is_scalar(update),
-        Expr::CallBuiltin { args, .. } => args.iter().all(|a| is_scalar(a)),
+        Expr::CallBuiltin { name, args } => {
+            // Filter-argument builtins can't be treated as scalar
+            match (name.as_str(), args.len()) {
+                ("walk", _) | ("pick", _) | ("skip", _) => false,
+                ("add", 1) => false,
+                _ => args.iter().all(|a| is_scalar(a)),
+            }
+        }
         Expr::ObjectConstruct { pairs } => pairs.iter().all(|(k, v)| is_scalar(k) && is_scalar(v)),
         Expr::Slice { expr, from, to } => is_scalar(expr) && from.as_ref().map_or(true, |f| is_scalar(f)) && to.as_ref().map_or(true, |t| is_scalar(t)),
         Expr::Format { expr, .. } => is_scalar(expr),
@@ -1658,6 +1665,14 @@ impl Flattener {
                 self.emit_yield(out);
                 self.emit(JitOp::Drop { slot: out });
                 true
+            }
+
+            // Filter-argument builtins: delegate to eval (not JIT-compilable)
+            Expr::CallBuiltin { name, args } if matches!(
+                (name.as_str(), args.len()),
+                ("walk", _) | ("pick", _) | ("skip", _) | ("add", 1)
+            ) => {
+                return false;
             }
 
             // CallBuiltin with generator args: rewrite as nested LetBinding

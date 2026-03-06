@@ -290,6 +290,54 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         }
         "have_sql" => Ok(Value::False),
         "have_bom" => Ok(Value::True),
+        "toboolean" => unary_op(args, |v| {
+            match v {
+                Value::True => Ok(Value::True),
+                Value::False => Ok(Value::False),
+                Value::Str(s) => match s.as_str() {
+                    "true" => Ok(Value::True),
+                    "false" => Ok(Value::False),
+                    _ => bail!("string ({:?}) cannot be parsed as a boolean", s.as_str()),
+                },
+                _ => {
+                    let ty = v.type_name();
+                    let json = crate::value::value_to_json(v);
+                    bail!("{} ({}) cannot be parsed as a boolean", ty, json);
+                }
+            }
+        }),
+        "bsearch" => {
+            // bsearch(target): args[0] = input array, args[1] = target
+            if args.len() < 2 { bail!("bsearch requires 2 arguments"); }
+            let input = &args[0];
+            let target = &args[1];
+            match input {
+                Value::Arr(a) => {
+                    let mut lo: i64 = 0;
+                    let mut hi: i64 = a.len() as i64 - 1;
+                    while lo <= hi {
+                        let mid = (lo + hi) / 2;
+                        let cmp = compare_values(&a[mid as usize], target);
+                        match cmp {
+                            std::cmp::Ordering::Equal => return Ok(Value::Num(mid as f64, None)),
+                            std::cmp::Ordering::Less => lo = mid + 1,
+                            std::cmp::Ordering::Greater => hi = mid - 1,
+                        }
+                    }
+                    Ok(Value::Num(-(lo as f64) - 1.0, None))
+                }
+                _ => {
+                    let ty = input.type_name();
+                    let json = crate::value::value_to_json(input);
+                    bail!("{} ({}) cannot be searched from", ty, json);
+                }
+            }
+        }
+        "strflocaltime" => {
+            // strflocaltime(fmt): args[0] = input, args[1] = format string
+            if args.len() < 2 { bail!("strflocaltime requires 2 arguments"); }
+            rt_strflocaltime_impl(&args[0], &args[1])
+        }
         _ => {
             // Unknown builtin - try to handle common patterns
             bail!("unknown builtin: {} (nargs={})", name, args.len());
@@ -1710,6 +1758,34 @@ fn rt_strptime(v: &Value, fmt: &Value) -> Result<Value> {
             ])))
         }
         _ => bail!("strptime requires string and format"),
+    }
+}
+
+fn rt_strflocaltime_impl(input: &Value, fmt: &Value) -> Result<Value> {
+    let fmt_str = match fmt {
+        Value::Str(s) => s.clone(),
+        _ => bail!("strflocaltime/1 requires a string format"),
+    };
+    match input {
+        Value::Arr(a) => {
+            if !a.is_empty() {
+                if let Value::Str(_) = &a[0] {
+                    bail!("strflocaltime/1 requires parsed datetime inputs");
+                }
+            }
+            let t = time_arr_to_tm(a)?;
+            Ok(Value::from_str(&format_tm(&t, fmt_str.as_str())))
+        }
+        Value::Num(n, _) => {
+            // Convert epoch to localtime first, then format
+            let secs = *n as i64;
+            use libc::{localtime_r, time_t, tm};
+            let t_val = secs as time_t;
+            let mut t: tm = unsafe { std::mem::zeroed() };
+            unsafe { localtime_r(&t_val, &mut t) };
+            Ok(Value::from_str(&format_tm(&t, fmt_str.as_str())))
+        }
+        _ => bail!("strflocaltime/1 requires parsed datetime inputs"),
     }
 }
 

@@ -2568,6 +2568,8 @@ impl Parser {
             | "indices" | "index" | "rindex" | "paths" | "getpath_" | "map_values"
             | "first" | "last" | "nth" | "range" | "limit" | "until" | "while" | "repeat"
             | "select" | "map"
+            | "toboolean" | "walk" | "pick" | "bsearch" | "skip"
+            | "IN" | "INDEX" | "JOIN" | "strflocaltime"
             if !matches!(self.current(), Token::LParen) => {
                 self.compile_builtin_noargs(name)
             }
@@ -2721,6 +2723,9 @@ impl Parser {
             "have_decnum" | "have_decnum_" => {
                 // We don't have decimal number support
                 Ok(Expr::Literal(Literal::False))
+            }
+            "toboolean" => {
+                Ok(Expr::CallBuiltin { name: "toboolean".to_string(), args: vec![] })
             }
             _ => {
                 // Check user-defined functions
@@ -3281,6 +3286,177 @@ impl Parser {
             ("trimstr", 1) => {
                 let s = args.into_iter().next().unwrap();
                 Ok(Expr::CallBuiltin { name: "trimstr".to_string(), args: vec![s] })
+            }
+            // toboolean/0: convert to boolean
+            ("toboolean", 0) => {
+                Ok(Expr::CallBuiltin { name: "toboolean".to_string(), args: vec![] })
+            }
+            // add/1: add(f) = reduce .[] as $x (null; . + ($x | f))
+            // But it's simpler to delegate to CallBuiltin
+            ("add", 1) => {
+                let f = args.into_iter().next().unwrap();
+                Ok(Expr::CallBuiltin { name: "add".to_string(), args: vec![f] })
+            }
+            // skip/2: skip(n; gen) = limit(n; gen) | empty, limit(n; gen) outputs n items then the rest
+            // Actually: skip(n; exp) = def _skip(n; exp): if n > 0 then (exp | _skip(n-1; exp)) else ., exp end;
+            // Simpler: skip(n; exp) is like foreach range(n) as $_ (.; exp) | exp... no.
+            // jq def: def skip($n; exp): def _skip: if $n > 0 then (exp | . as $x | $n - 1 | _skip) else ., exp end; _skip;
+            // Let's use CallBuiltin and handle in eval
+            ("skip", 2) => {
+                let mut args = args.into_iter();
+                let n = args.next().unwrap();
+                let generator = args.next().unwrap();
+                Ok(Expr::CallBuiltin { name: "skip".to_string(), args: vec![n, generator] })
+            }
+            // pick/1: pick(f) extracts paths from . that f generates
+            ("pick", 1) => {
+                let f = args.into_iter().next().unwrap();
+                Ok(Expr::CallBuiltin { name: "pick".to_string(), args: vec![f] })
+            }
+            // bsearch/1: binary search
+            ("bsearch", 1) => {
+                let target = args.into_iter().next().unwrap();
+                Ok(Expr::CallBuiltin { name: "bsearch".to_string(), args: vec![target] })
+            }
+            // strflocaltime/1
+            ("strflocaltime", 1) => {
+                let fmt = args.into_iter().next().unwrap();
+                Ok(Expr::CallBuiltin { name: "strflocaltime".to_string(), args: vec![fmt] })
+            }
+            // walk/1: walk(f) recursively applies f to all values
+            ("walk", 1) => {
+                let f = args.into_iter().next().unwrap();
+                Ok(Expr::CallBuiltin { name: "walk".to_string(), args: vec![f] })
+            }
+            // IN/1: IN(s) = any(. == s; .)... actually IN(s) = . as $x | first(s | if . == $x then true else empty end) // false
+            ("IN", 1) => {
+                let s = args.into_iter().next().unwrap();
+                let x_var = self.scope.alloc_var("__in_x__");
+                Ok(Expr::LetBinding {
+                    var_index: x_var,
+                    value: Box::new(Expr::Input),
+                    body: Box::new(Expr::Alternative {
+                        primary: Box::new(Expr::Limit {
+                            count: Box::new(Expr::Literal(Literal::Num(1.0, None))),
+                            generator: Box::new(Expr::Pipe {
+                                left: Box::new(s),
+                                right: Box::new(Expr::IfThenElse {
+                                    cond: Box::new(Expr::BinOp {
+                                        op: BinOp::Eq,
+                                        lhs: Box::new(Expr::Input),
+                                        rhs: Box::new(Expr::LoadVar { var_index: x_var }),
+                                    }),
+                                    then_branch: Box::new(Expr::Literal(Literal::True)),
+                                    else_branch: Box::new(Expr::Empty),
+                                }),
+                            }),
+                        }),
+                        fallback: Box::new(Expr::Literal(Literal::False)),
+                    }),
+                })
+            }
+            // IN/2: IN(s; b) = reduce s as $x (false; . or ($x | IN(b)))
+            ("IN", 2) => {
+                let mut args = args.into_iter();
+                let s = args.next().unwrap();
+                let b = args.next().unwrap();
+                let x_var = self.scope.alloc_var("__in2_x__");
+                let acc_var = self.scope.alloc_var("__in2_acc__");
+                let check_var = self.scope.alloc_var("__in2_chk__");
+                // IN($x; b) = $x | IN(b) = $x as $chk | first(b | if . == $chk then true else empty end) // false
+                let in_check = Expr::LetBinding {
+                    var_index: check_var,
+                    value: Box::new(Expr::LoadVar { var_index: x_var }),
+                    body: Box::new(Expr::Alternative {
+                        primary: Box::new(Expr::Limit {
+                            count: Box::new(Expr::Literal(Literal::Num(1.0, None))),
+                            generator: Box::new(Expr::Pipe {
+                                left: Box::new(b),
+                                right: Box::new(Expr::IfThenElse {
+                                    cond: Box::new(Expr::BinOp {
+                                        op: BinOp::Eq,
+                                        lhs: Box::new(Expr::Input),
+                                        rhs: Box::new(Expr::LoadVar { var_index: check_var }),
+                                    }),
+                                    then_branch: Box::new(Expr::Literal(Literal::True)),
+                                    else_branch: Box::new(Expr::Empty),
+                                }),
+                            }),
+                        }),
+                        fallback: Box::new(Expr::Literal(Literal::False)),
+                    }),
+                };
+                // reduce s as $x (false; . or in_check)
+                Ok(Expr::Reduce {
+                    source: Box::new(s),
+                    init: Box::new(Expr::Literal(Literal::False)),
+                    var_index: x_var,
+                    acc_index: acc_var,
+                    update: Box::new(Expr::BinOp {
+                        op: BinOp::Or,
+                        lhs: Box::new(Expr::Input),
+                        rhs: Box::new(in_check),
+                    }),
+                })
+            }
+            // INDEX/2: INDEX(stream; f) = reduce stream as $x ({}; . + {($x|f|tostring): $x})
+            ("INDEX", 2) => {
+                let mut args = args.into_iter();
+                let stream = args.next().unwrap();
+                let f = args.next().unwrap();
+                let x_var = self.scope.alloc_var("__idx_x__");
+                let acc_var = self.scope.alloc_var("__idx_acc__");
+                Ok(Expr::Reduce {
+                    source: Box::new(stream),
+                    init: Box::new(Expr::ObjectConstruct { pairs: vec![] }),
+                    var_index: x_var,
+                    acc_index: acc_var,
+                    update: Box::new(Expr::BinOp {
+                        op: BinOp::Add,
+                        lhs: Box::new(Expr::Input),
+                        rhs: Box::new(Expr::ObjectConstruct {
+                            pairs: vec![(
+                                Expr::Pipe {
+                                    left: Box::new(Expr::LoadVar { var_index: x_var }),
+                                    right: Box::new(Expr::Pipe {
+                                        left: Box::new(f),
+                                        right: Box::new(Expr::UnaryOp { op: UnaryOp::ToString, operand: Box::new(Expr::Input) }),
+                                    }),
+                                },
+                                Expr::LoadVar { var_index: x_var },
+                            )],
+                        }),
+                    }),
+                })
+            }
+            // JOIN/2: JOIN($idx; f) = [.[] | [., $idx[f|tostring]]]
+            ("JOIN", 2) => {
+                let mut args = args.into_iter();
+                let idx_expr = args.next().unwrap();
+                let f = args.next().unwrap();
+                let idx_var = self.scope.alloc_var("__join_idx__");
+                // Bind idx to a variable, then [.[] | [., $idx[f|tostring]]]
+                Ok(Expr::LetBinding {
+                    var_index: idx_var,
+                    value: Box::new(idx_expr),
+                    body: Box::new(Expr::Collect {
+                        generator: Box::new(Expr::Pipe {
+                            left: Box::new(Expr::Each { input_expr: Box::new(Expr::Input) }),
+                            right: Box::new(Expr::Collect {
+                                generator: Box::new(Expr::Comma {
+                                    left: Box::new(Expr::Input),
+                                    right: Box::new(Expr::Index {
+                                        expr: Box::new(Expr::LoadVar { var_index: idx_var }),
+                                        key: Box::new(Expr::Pipe {
+                                            left: Box::new(f),
+                                            right: Box::new(Expr::UnaryOp { op: UnaryOp::ToString, operand: Box::new(Expr::Input) }),
+                                        }),
+                                    }),
+                                }),
+                            }),
+                        }),
+                    }),
+                })
             }
             _ => {
                 // Check user-defined functions
