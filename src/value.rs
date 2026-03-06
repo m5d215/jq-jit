@@ -329,23 +329,29 @@ fn parse_json_string(b: &[u8], pos: usize) -> Result<(Value, usize)> {
 
 fn parse_json_number(b: &[u8], pos: usize) -> Result<(Value, usize)> {
     let mut i = pos;
-    if i < b.len() && b[i] == b'-' { i += 1; }
+    let is_neg = i < b.len() && b[i] == b'-';
+    if is_neg { i += 1; }
+    let digits_start = i;
     if i < b.len() && b[i] == b'0' { i += 1; }
     else { while i < b.len() && b[i].is_ascii_digit() { i += 1; } }
-    if i < b.len() && b[i] == b'.' { i += 1; while i < b.len() && b[i].is_ascii_digit() { i += 1; } }
-    if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+    let has_dot = i < b.len() && b[i] == b'.';
+    if has_dot { i += 1; while i < b.len() && b[i].is_ascii_digit() { i += 1; } }
+    let has_exp = i < b.len() && (b[i] == b'e' || b[i] == b'E');
+    if has_exp {
         i += 1;
         if i < b.len() && (b[i] == b'+' || b[i] == b'-') { i += 1; }
         while i < b.len() && b[i].is_ascii_digit() { i += 1; }
     }
     let num_str = std::str::from_utf8(&b[pos..i]).unwrap_or("0");
     let n: f64 = num_str.parse().unwrap_or(0.0);
-    // Check if f64 round-trip matches the original text
-    let f64_repr = format_jq_number(n);
-    let repr = if f64_repr != num_str {
-        Some(Rc::from(num_str))
-    } else {
+    // Fast path: simple integers that round-trip exactly don't need repr
+    let repr = if !has_dot && !has_exp && (i - digits_start) <= 15 {
+        // Simple integer with <= 15 digits always round-trips via format_jq_number
         None
+    } else {
+        // Check if f64 round-trip matches the original text
+        let f64_repr = format_jq_number(n);
+        if f64_repr == num_str { None } else { Some(Rc::from(num_str)) }
     };
     Ok((Value::Num(n, repr), i))
 }
