@@ -58,6 +58,14 @@ impl Scope {
             .find(|(n, _, na)| n == name && *na == nargs)
             .map(|(_, id, _)| *id)
     }
+
+    fn save_func_scope(&self) -> usize {
+        self.funcs.len()
+    }
+
+    fn restore_func_scope(&mut self, saved: usize) {
+        self.funcs.truncate(saved);
+    }
 }
 
 /// Token types for the lexer.
@@ -114,7 +122,7 @@ enum Token {
     Def,
     And, Or, Not,
     Label, Break,
-    Import, Include,
+    Import, Include, Module,
     Null, True, False,
     Empty, Error,
     Recurse,              // ..
@@ -317,6 +325,7 @@ impl Lexer {
                         "break" => Token::Break,
                         "import" => Token::Import,
                         "include" => Token::Include,
+                        "module" => Token::Module,
                         "null" => Token::Null,
                         "true" => Token::True,
                         "false" => Token::False,
@@ -565,6 +574,7 @@ pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     scope: Scope,
+    lib_dirs: Vec<String>,
 }
 
 /// Result of parsing: expression + compiled functions.
@@ -575,12 +585,17 @@ pub struct ParseResult {
 
 impl Parser {
     pub fn parse(input: &str) -> Result<ParseResult> {
+        Self::parse_with_libs(input, &[])
+    }
+
+    pub fn parse_with_libs(input: &str, lib_dirs: &[String]) -> Result<ParseResult> {
         let mut lexer = Lexer::new(input);
         let tokens = lexer.tokenize()?;
         let mut parser = Parser {
             tokens,
             pos: 0,
             scope: Scope::new(),
+            lib_dirs: lib_dirs.to_vec(),
         };
 
         // Pre-register $ENV
@@ -640,15 +655,43 @@ impl Parser {
     // -----------------------------------------------------------------------
 
     fn parse_program(&mut self) -> Result<Expr> {
-        // program = funcdef* pipe_expr
-        while self.at(&Token::Def) {
-            self.parse_funcdef()?;
+        // Handle module statement (skip it)
+        if matches!(self.current(), Token::Module) {
+            self.advance();
+            // Skip metadata
+            while !self.at(&Token::Semicolon) && !self.at_eof() {
+                self.advance();
+            }
+            if self.at(&Token::Semicolon) { self.advance(); }
         }
-        // Handle import/include (skip them)
-        while matches!(self.current(), Token::Import | Token::Include) {
-            self.skip_import()?;
+
+        // Collect all top-level imports/includes and defs
+        let mut import_bindings: Vec<(u16, Expr)> = Vec::new();
+        loop {
+            if self.at(&Token::Def) {
+                self.parse_funcdef()?;
+            } else if matches!(self.current(), Token::Import) {
+                let binding = self.parse_import()?;
+                if let Some(b) = binding {
+                    import_bindings.push(b);
+                }
+            } else if matches!(self.current(), Token::Include) {
+                self.parse_include()?;
+            } else {
+                break;
+            }
         }
-        self.parse_pipe()
+        let body = self.parse_pipe()?;
+        // Wrap body in LetBindings for data imports
+        let mut result = body;
+        for (var_idx, value_expr) in import_bindings.into_iter().rev() {
+            result = Expr::LetBinding {
+                var_index: var_idx,
+                value: Box::new(value_expr),
+                body: Box::new(result),
+            };
+        }
+        Ok(result)
     }
 
     fn parse_funcdef(&mut self) -> Result<()> {
@@ -679,22 +722,256 @@ impl Parser {
             param_vars.push(idx);
         }
 
+        let saved = self.scope.save_func_scope();
         let body = self.parse_pipe()?;
+        self.scope.restore_func_scope(saved);
         self.expect(&Token::Semicolon)?;
 
         self.scope.define_func(&name, params.len(), body);
         Ok(())
     }
 
-    fn skip_import(&mut self) -> Result<()> {
-        self.advance(); // import/include
-        // Skip until semicolon
-        while !self.at(&Token::Semicolon) && !self.at_eof() {
-            self.advance();
+    /// Parse `import "path" as alias;` or `import "path" as $var;`
+    /// Returns Some((var_index, value_expr)) for data imports, None for code imports.
+    fn parse_import(&mut self) -> Result<Option<(u16, Expr)>> {
+        self.advance(); // import
+
+        // Get module path
+        let path = match self.advance() {
+            Token::Str(s) => s,
+            t => bail!("expected string after import, got {:?}", t),
+        };
+
+        // Parse optional metadata {search:"./"}
+        let mut search_path = None;
+        if self.at(&Token::LBrace) {
+            // Skip metadata but extract search if present
+            // This is simplified - just look for search:"..."
+            let start = self.pos;
+            self.advance(); // {
+            while !self.at(&Token::RBrace) && !self.at_eof() {
+                if matches!(self.current(), Token::Ident(s) if s == "search") {
+                    self.advance(); // search
+                    if self.eat(&Token::Colon) {
+                        if let Token::Str(s) = self.advance() {
+                            search_path = Some(s);
+                        }
+                    }
+                } else {
+                    self.advance();
+                }
+            }
+            if self.at(&Token::RBrace) { self.advance(); }
         }
-        if self.at(&Token::Semicolon) {
-            self.advance();
+
+        self.expect(&Token::As)?;
+
+        // Check if it's a data import ($var) or code import (alias)
+        match self.current().clone() {
+            Token::Variable(var_name) => {
+                self.advance();
+                // Parse optional metadata after alias (may contain search path)
+                if self.at(&Token::LBrace) {
+                    self.advance(); // {
+                    while !self.at(&Token::RBrace) && !self.at_eof() {
+                        if matches!(self.current(), Token::Ident(s) if s == "search") {
+                            self.advance(); // search
+                            if self.eat(&Token::Colon) {
+                                if let Token::Str(s) = self.advance() {
+                                    search_path = Some(s);
+                                }
+                            }
+                        } else {
+                            self.advance();
+                        }
+                    }
+                    if self.at(&Token::RBrace) { self.advance(); }
+                }
+                self.expect(&Token::Semicolon)?;
+
+                // Data import: load JSON file and wrap in array
+                let json_path = self.resolve_data_module(&path, search_path.as_deref())?;
+                let json_content = std::fs::read_to_string(&json_path)
+                    .map_err(|e| anyhow::anyhow!("Cannot load data module '{}': {}", path, e))?;
+                // Data modules are wrapped in an array per jq convention
+                let array_json = format!("[{}]", json_content.trim());
+                let value_expr = Expr::Literal(Literal::Str(array_json));
+                // Parse at runtime via fromjson
+                let fromjson_expr = Expr::CallBuiltin {
+                    name: "fromjson".to_string(),
+                    args: vec![],
+                };
+                let pipe_expr = Expr::Pipe {
+                    left: Box::new(value_expr),
+                    right: Box::new(fromjson_expr),
+                };
+                let var_idx = self.scope.alloc_var(&var_name);
+                Ok(Some((var_idx, pipe_expr)))
+            }
+            Token::Ident(alias) => {
+                self.advance();
+                // Parse optional metadata after alias (may contain search path)
+                if self.at(&Token::LBrace) {
+                    self.advance(); // {
+                    while !self.at(&Token::RBrace) && !self.at_eof() {
+                        if matches!(self.current(), Token::Ident(s) if s == "search") {
+                            self.advance(); // search
+                            if self.eat(&Token::Colon) {
+                                if let Token::Str(s) = self.advance() {
+                                    search_path = Some(s);
+                                }
+                            }
+                        } else {
+                            self.advance();
+                        }
+                    }
+                    if self.at(&Token::RBrace) { self.advance(); }
+                }
+                self.expect(&Token::Semicolon)?;
+
+                // Code import: load and parse module
+                let mod_path = self.resolve_code_module(&path, search_path.as_deref())?;
+                self.load_code_module(&mod_path, &alias)?;
+                Ok(None)
+            }
+            t => bail!("expected variable or identifier after 'as', got {:?}", t),
         }
+    }
+
+    /// Parse `include "path";`
+    fn parse_include(&mut self) -> Result<()> {
+        self.advance(); // include
+        let path = match self.advance() {
+            Token::Str(s) => s,
+            t => bail!("expected string after include, got {:?}", t),
+        };
+        // Skip optional metadata
+        if self.at(&Token::LBrace) {
+            while !self.at(&Token::RBrace) && !self.at_eof() { self.advance(); }
+            if self.at(&Token::RBrace) { self.advance(); }
+        }
+        self.expect(&Token::Semicolon)?;
+
+        // Load and parse the module without namespace prefix
+        let mod_path = self.resolve_code_module(&path, None)?;
+        self.load_code_module(&mod_path, "")?;
+        Ok(())
+    }
+
+    /// Resolve a data module ("name" → path/name.json)
+    fn resolve_data_module(&self, name: &str, search: Option<&str>) -> Result<String> {
+        for dir in self.search_dirs(search) {
+            let json_path = format!("{}/{}.json", dir, name);
+            if std::path::Path::new(&json_path).exists() {
+                return Ok(json_path);
+            }
+        }
+        bail!("Cannot find data module '{}'", name)
+    }
+
+    /// Resolve a code module ("name" → path/name.jq or path/name/name.jq)
+    fn resolve_code_module(&self, name: &str, search: Option<&str>) -> Result<String> {
+        for dir in self.search_dirs(search) {
+            // Try name.jq
+            let jq_path = format!("{}/{}.jq", dir, name);
+            if std::path::Path::new(&jq_path).exists() {
+                return Ok(jq_path);
+            }
+            // Try name/name.jq
+            let jq_path2 = format!("{}/{}/{}.jq", dir, name, name);
+            if std::path::Path::new(&jq_path2).exists() {
+                return Ok(jq_path2);
+            }
+        }
+        bail!("Cannot find module '{}'", name)
+    }
+
+    /// Get search directories for module resolution
+    fn search_dirs(&self, search: Option<&str>) -> Vec<String> {
+        let mut dirs: Vec<String> = Vec::new();
+        if let Some(s) = search {
+            // Relative search paths - resolve relative to each lib_dir
+            for lib_dir in &self.lib_dirs {
+                let resolved = std::path::Path::new(lib_dir).join(s);
+                dirs.push(resolved.to_string_lossy().into_owned());
+            }
+        }
+        dirs.extend(self.lib_dirs.iter().cloned());
+        dirs
+    }
+
+    /// Load and parse a code module, registering its functions with namespace prefix
+    fn load_code_module(&mut self, file_path: &str, namespace: &str) -> Result<()> {
+        let content = std::fs::read_to_string(file_path)
+            .map_err(|e| anyhow::anyhow!("Cannot load module '{}': {}", file_path, e))?;
+
+        let mut lexer = Lexer::new(&content);
+        let tokens = lexer.tokenize()?;
+
+        // Add the module's directory to lib_dirs for resolving relative imports
+        let mut mod_lib_dirs = self.lib_dirs.clone();
+        if let Some(parent) = std::path::Path::new(file_path).parent() {
+            let parent_str = parent.to_string_lossy().into_owned();
+            if !mod_lib_dirs.contains(&parent_str) {
+                mod_lib_dirs.insert(0, parent_str);
+            }
+        }
+
+        // Parse the module tokens to extract function definitions
+        let mut mod_parser = Parser {
+            tokens,
+            pos: 0,
+            scope: Scope::new(),
+            lib_dirs: mod_lib_dirs,
+        };
+
+        // Skip module statement
+        if matches!(mod_parser.current(), Token::Module) {
+            mod_parser.advance();
+            while !mod_parser.at(&Token::Semicolon) && !mod_parser.at_eof() {
+                mod_parser.advance();
+            }
+            if mod_parser.at(&Token::Semicolon) { mod_parser.advance(); }
+        }
+
+        // Parse imports and defs in the module, collecting data import bindings
+        let mut data_bindings: Vec<(u16, Expr)> = Vec::new();
+        loop {
+            if mod_parser.at(&Token::Def) {
+                mod_parser.parse_funcdef()?;
+            } else if matches!(mod_parser.current(), Token::Import) {
+                let binding = mod_parser.parse_import()?;
+                if let Some(b) = binding {
+                    data_bindings.push(b);
+                }
+            } else if matches!(mod_parser.current(), Token::Include) {
+                mod_parser.parse_include()?;
+            } else {
+                break;
+            }
+        }
+
+        // Register module's functions into our scope with namespace prefix
+        // If there are data imports, wrap each function body with LetBindings
+        for (name, _func_id, nargs) in &mod_parser.scope.funcs {
+            let func = mod_parser.scope.compiled_funcs[*_func_id].clone();
+            let mut body = func.body;
+            // Wrap function body with data import bindings (in reverse order)
+            for (var_idx, value_expr) in data_bindings.iter().rev() {
+                body = Expr::LetBinding {
+                    var_index: *var_idx,
+                    value: Box::new(value_expr.clone()),
+                    body: Box::new(body),
+                };
+            }
+            if namespace.is_empty() {
+                self.scope.define_func(name, *nargs, body);
+            } else {
+                let qualified = format!("{}::{}", namespace, name);
+                self.scope.define_func(&qualified, *nargs, body);
+            }
+        }
+
         Ok(())
     }
 
@@ -721,14 +998,154 @@ impl Parser {
 
     fn parse_as_binding(&mut self, value_expr: Expr) -> Result<Expr> {
         // 'as' $var '|' body
-        // 'as' pattern '|' body (destructuring)
-        let pattern = self.parse_pattern()?;
-        // Allocate variables from pattern BEFORE parsing the body,
-        // so that body can reference them.
-        let allocs = self.alloc_pattern_vars(&pattern);
+        // 'as' pattern ('?//' pattern)* '|' body (destructuring with alternatives)
+        let first_pattern = self.parse_pattern()?;
+
+        // Check for ?// alternative patterns
+        let mut alt_patterns: Vec<Pattern> = vec![first_pattern];
+        while self.eat(&Token::AltDestructure) {
+            alt_patterns.push(self.parse_pattern()?);
+        }
+
+        if alt_patterns.len() == 1 {
+            // No ?// alternatives - simple binding
+            let pattern = alt_patterns.into_iter().next().unwrap();
+            let allocs = self.alloc_pattern_vars(&pattern);
+            self.expect(&Token::Pipe)?;
+            let body = self.parse_pipe()?;
+            return self.build_binding(value_expr, pattern, allocs, body);
+        }
+
+        // For ?// alternatives, all patterns must bind to the same variable names.
+        // Collect unique variable names from all patterns and allocate each once.
+        let mut var_names: Vec<String> = Vec::new();
+        for pat in &alt_patterns {
+            self.collect_pattern_var_names(pat, &mut var_names);
+        }
+        // Deduplicate while preserving order
+        let mut seen = std::collections::HashSet::new();
+        let unique_vars: Vec<String> = var_names.into_iter()
+            .filter(|n| seen.insert(n.clone()))
+            .collect();
+
+        // Allocate once for shared variables
+        let mut var_map: std::collections::HashMap<String, u16> = std::collections::HashMap::new();
+        for name in &unique_vars {
+            let idx = self.scope.alloc_var(name);
+            var_map.insert(name.clone(), idx);
+        }
+
         self.expect(&Token::Pipe)?;
         let body = self.parse_pipe()?;
 
+        // Build: try (bind pattern1 | body) catch try (bind pattern2 | body) catch ... catch empty
+        let tmp_idx = self.scope.alloc_var("__altdestruct_tmp__");
+        let tmp_ref = Expr::LoadVar { var_index: tmp_idx };
+
+        let mut result = Expr::Empty; // final fallback: empty
+        for pattern in alt_patterns.into_iter().rev() {
+            let binding = self.build_binding_with_varmap(tmp_ref.clone(), &pattern, &var_map, body.clone())?;
+            result = Expr::TryCatch {
+                try_expr: Box::new(binding),
+                catch_expr: Box::new(result),
+            };
+        }
+
+        Ok(Expr::LetBinding {
+            var_index: tmp_idx,
+            value: Box::new(value_expr),
+            body: Box::new(result),
+        })
+    }
+
+    fn collect_pattern_var_names(&self, pattern: &Pattern, names: &mut Vec<String>) {
+        match pattern {
+            Pattern::Var(name) => names.push(name.clone()),
+            Pattern::Array(pats) => {
+                for p in pats { self.collect_pattern_var_names(p, names); }
+            }
+            Pattern::Object(pats) => {
+                for (_, p) in pats { self.collect_pattern_var_names(p, names); }
+            }
+        }
+    }
+
+    fn build_binding_with_varmap(&mut self, value_expr: Expr, pattern: &Pattern, var_map: &std::collections::HashMap<String, u16>, body: Expr) -> Result<Expr> {
+        match pattern {
+            Pattern::Var(name) => {
+                let var_idx = var_map[name];
+                Ok(Expr::LetBinding {
+                    var_index: var_idx,
+                    value: Box::new(value_expr),
+                    body: Box::new(body),
+                })
+            }
+            Pattern::Array(pats) => {
+                let tmp_idx = self.scope.alloc_var("__destruct_tmp__");
+                let tmp_ref = Expr::LoadVar { var_index: tmp_idx };
+                let inner = self.build_array_destructure_varmap(tmp_ref, pats, var_map, body)?;
+                Ok(Expr::LetBinding {
+                    var_index: tmp_idx,
+                    value: Box::new(value_expr),
+                    body: Box::new(inner),
+                })
+            }
+            Pattern::Object(pats) => {
+                let tmp_idx = self.scope.alloc_var("__destruct_tmp__");
+                let tmp_ref = Expr::LoadVar { var_index: tmp_idx };
+                let inner = self.build_object_destructure_varmap(tmp_ref, pats, var_map, body)?;
+                Ok(Expr::LetBinding {
+                    var_index: tmp_idx,
+                    value: Box::new(value_expr),
+                    body: Box::new(inner),
+                })
+            }
+        }
+    }
+
+    fn build_array_destructure_varmap(&mut self, value: Expr, pats: &[Pattern], var_map: &std::collections::HashMap<String, u16>, body: Expr) -> Result<Expr> {
+        let mut result = body;
+        for (i, pat) in pats.iter().enumerate().rev() {
+            match pat {
+                Pattern::Var(name) => {
+                    let var_idx = var_map[name];
+                    result = Expr::LetBinding {
+                        var_index: var_idx,
+                        value: Box::new(Expr::Index {
+                            expr: Box::new(value.clone()),
+                            key: Box::new(Expr::Literal(Literal::Num(i as f64))),
+                        }),
+                        body: Box::new(result),
+                    };
+                }
+                _ => bail!("nested destructuring not yet supported"),
+            }
+        }
+        Ok(result)
+    }
+
+    fn build_object_destructure_varmap(&mut self, value: Expr, pats: &[(String, Pattern)], var_map: &std::collections::HashMap<String, u16>, body: Expr) -> Result<Expr> {
+        let mut result = body;
+        for (key, pat) in pats.iter().rev() {
+            match pat {
+                Pattern::Var(name) => {
+                    let var_idx = var_map[name];
+                    result = Expr::LetBinding {
+                        var_index: var_idx,
+                        value: Box::new(Expr::Index {
+                            expr: Box::new(value.clone()),
+                            key: Box::new(Expr::Literal(Literal::Str(key.clone()))),
+                        }),
+                        body: Box::new(result),
+                    };
+                }
+                _ => bail!("nested destructuring not yet supported"),
+            }
+        }
+        Ok(result)
+    }
+
+    fn build_binding(&mut self, value_expr: Expr, pattern: Pattern, allocs: Vec<u16>, body: Expr) -> Result<Expr> {
         match pattern {
             Pattern::Var(name) => {
                 let var_idx = allocs[0];
@@ -739,7 +1156,6 @@ impl Parser {
                 })
             }
             Pattern::Array(pats) => {
-                // Bind value_expr to a temp var, then destructure from that
                 let tmp_idx = self.scope.alloc_var("__destruct_tmp__");
                 let tmp_ref = Expr::LoadVar { var_index: tmp_idx };
                 let inner = self.build_array_destructure(tmp_ref, &pats, &allocs, body)?;
@@ -1383,7 +1799,9 @@ impl Parser {
 
             Token::LParen => {
                 self.advance();
+                let saved = self.scope.save_func_scope();
                 let expr = self.parse_pipe()?;
+                self.scope.restore_func_scope(saved);
                 self.expect(&Token::RParen)?;
                 Ok(expr)
             }
@@ -1393,7 +1811,9 @@ impl Parser {
                 if self.eat(&Token::RBracket) {
                     Ok(Expr::Collect { generator: Box::new(Expr::Empty) })
                 } else {
+                    let saved = self.scope.save_func_scope();
                     let inner = self.parse_pipe()?;
+                    self.scope.restore_func_scope(saved);
                     self.expect(&Token::RBracket)?;
                     Ok(Expr::Collect { generator: Box::new(inner) })
                 }
@@ -1401,6 +1821,7 @@ impl Parser {
 
             Token::LBrace => {
                 self.advance();
+                let saved = self.scope.save_func_scope();
                 let mut pairs = Vec::new();
                 if !self.at(&Token::RBrace) {
                     loop {
@@ -1409,6 +1830,7 @@ impl Parser {
                         if !self.eat(&Token::Comma) { break; }
                     }
                 }
+                self.scope.restore_func_scope(saved);
                 self.expect(&Token::RBrace)?;
                 Ok(Expr::ObjectConstruct { pairs })
             }
@@ -1496,6 +1918,17 @@ impl Parser {
 
             Token::Variable(name) => {
                 self.advance();
+                // Check for $var::name (namespace access for data imports)
+                if self.at(&Token::Colon) && matches!(self.tokens.get(self.pos + 1), Some(Token::Colon)) {
+                    self.advance(); // first :
+                    self.advance(); // second :
+                    match self.advance() {
+                        Token::Ident(_member) => {
+                            // $var::name is equivalent to $var for data imports
+                        }
+                        t => bail!("expected identifier after '::', got {:?}", t),
+                    }
+                }
                 if name == "__loc__" {
                     Ok(Expr::Loc { file: "<top-level>".to_string(), line: 1 })
                 } else if name == "ENV" {
@@ -1504,8 +1937,6 @@ impl Parser {
                     match self.scope.lookup_var(&name) {
                         Some(idx) => Ok(Expr::LoadVar { var_index: idx }),
                         None => {
-                            // Allocate a new variable for unresolved references
-                            // This handles $var references in things like --arg
                             let idx = self.scope.alloc_var(&name);
                             Ok(Expr::LoadVar { var_index: idx })
                         }
@@ -1541,7 +1972,18 @@ impl Parser {
 
             Token::Ident(name) => {
                 self.advance();
-                self.parse_funcall_or_builtin(&name)
+                // Check for namespace:: prefix (e.g., foo::a)
+                let full_name = if self.at(&Token::Colon) && matches!(self.tokens.get(self.pos + 1), Some(Token::Colon)) {
+                    self.advance(); // first :
+                    self.advance(); // second :
+                    match self.advance() {
+                        Token::Ident(member) => format!("{}::{}", name, member),
+                        t => bail!("expected identifier after '::', got {:?}", t),
+                    }
+                } else {
+                    name
+                };
+                self.parse_funcall_or_builtin(&full_name)
             }
 
             Token::Def => {
@@ -2383,24 +2825,35 @@ impl Parser {
                 let mut args = args.into_iter();
                 let n_expr = args.next().unwrap();
                 let generator = args.next().unwrap_or(Expr::Each { input_expr: Box::new(Expr::Input) });
-                // nth(n; g) = n as $n | if $n < 0 then error else last(limit($n+1; g)) end
-                let var_idx = self.scope.alloc_var("__nth__");
-                let acc_idx = self.scope.alloc_var("__nth_acc__");
+                // nth(n; g) = n as $n | if $n < 0 then error
+                //   else foreach g as $x (-1; .+1; if . == $n then $x else empty end) end
                 let n_var = self.scope.alloc_var("__nth_n__");
-                let limited = Expr::Limit {
-                    count: Box::new(Expr::BinOp {
+                let x_var = self.scope.alloc_var("__nth_x__");
+                let cnt_var = self.scope.alloc_var("__nth_cnt__");
+                let foreach_expr = Expr::Foreach {
+                    source: Box::new(generator),
+                    init: Box::new(Expr::Literal(Literal::Num(-1.0))),
+                    var_index: x_var,
+                    acc_index: cnt_var,
+                    update: Box::new(Expr::BinOp {
                         op: BinOp::Add,
-                        lhs: Box::new(Expr::LoadVar { var_index: n_var }),
+                        lhs: Box::new(Expr::Input),
                         rhs: Box::new(Expr::Literal(Literal::Num(1.0))),
                     }),
-                    generator: Box::new(generator),
+                    extract: Some(Box::new(Expr::IfThenElse {
+                        cond: Box::new(Expr::BinOp {
+                            op: BinOp::Eq,
+                            lhs: Box::new(Expr::Input),
+                            rhs: Box::new(Expr::LoadVar { var_index: n_var }),
+                        }),
+                        then_branch: Box::new(Expr::LoadVar { var_index: x_var }),
+                        else_branch: Box::new(Expr::Empty),
+                    })),
                 };
-                let last_of_limited = Expr::Reduce {
-                    source: Box::new(limited),
-                    init: Box::new(Expr::Literal(Literal::Null)),
-                    var_index: var_idx,
-                    acc_index: acc_idx,
-                    update: Box::new(Expr::LoadVar { var_index: var_idx }),
+                // first(foreach ...) to get only the first match
+                let first_match = Expr::Limit {
+                    count: Box::new(Expr::Literal(Literal::Num(1.0))),
+                    generator: Box::new(foreach_expr),
                 };
                 let body = Expr::IfThenElse {
                     cond: Box::new(Expr::BinOp {
@@ -2411,9 +2864,8 @@ impl Parser {
                     then_branch: Box::new(Expr::Error {
                         msg: Some(Box::new(Expr::Literal(Literal::Str("nth doesn't support negative indices".to_string())))),
                     }),
-                    else_branch: Box::new(last_of_limited),
+                    else_branch: Box::new(first_match),
                 };
-                // Use LetBinding to bind each n value while keeping original input
                 Ok(Expr::LetBinding {
                     var_index: n_var,
                     value: Box::new(n_expr),

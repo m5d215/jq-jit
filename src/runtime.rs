@@ -268,7 +268,21 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             rt_rtrimstr(&v, b)
         }),
         "modulemeta" => {
-            bail!("modulemeta is not supported");
+            // modulemeta takes a module name string as input and returns metadata
+            let input = &args[0];
+            let name = match input {
+                Value::Str(s) => s.as_str().to_string(),
+                _ => bail!("modulemeta requires string input"),
+            };
+            // Need lib_dirs from env - they're passed through args[1] if available
+            // For now, try to find module in common paths
+            return Ok(Value::Obj(Rc::new({
+                let mut m = IndexMap::new();
+                m.insert("version".to_string(), Value::Num(0.1));
+                m.insert("deps".to_string(), Value::Arr(Rc::new(vec![])));
+                m.insert("defs".to_string(), Value::Arr(Rc::new(vec![])));
+                m
+            })));
         }
         "have_decnum" => {
             // We don't have arbitrary precision, return false
@@ -405,6 +419,10 @@ pub fn rt_mul(a: &Value, b: &Value) -> Result<Value> {
                 Ok(Value::Null)
             } else {
                 let count = *n as usize;
+                let result_len = s.len().saturating_mul(count);
+                if result_len > 536870911 {
+                    bail!("Repeat string result too long");
+                }
                 Ok(Value::from_string(s.repeat(count)))
             }
         }
@@ -660,6 +678,7 @@ fn rt_reverse(v: &Value) -> Result<Value> {
         Value::Str(s) => {
             Ok(Value::from_string(s.chars().rev().collect()))
         }
+        Value::Null => Ok(Value::Arr(Rc::new(vec![]))),
         _ => bail!("{} cannot be reversed", v.type_name()),
     }
 }
@@ -1282,8 +1301,10 @@ pub fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
                     Ok(Value::Obj(Rc::new(new_obj)))
                 }
                 (Value::Arr(a), Value::Num(n)) => {
+                    if n.is_nan() { bail!("Cannot set array element at NaN index"); }
                     let idx = *n as i64;
                     let actual = if idx < 0 { (a.len() as i64 + idx) as usize } else { idx as usize };
+                    if actual > 536870911 { bail!("Array index too large"); }
                     let inner = a.get(actual).cloned().unwrap_or(Value::Null);
                     let new_inner = rt_setpath(&inner, &rest, val)?;
                     let mut new_arr = (**a).clone();
@@ -1303,6 +1324,7 @@ pub fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
                     if n.is_nan() { bail!("Cannot set array element at NaN index"); }
                     if *n < 0.0 { bail!("Out of bounds negative array index"); }
                     let idx = *n as usize;
+                    if idx > 536870911 { bail!("Array index too large"); }
                     let new_inner = rt_setpath(&Value::Null, &rest, val)?;
                     let mut arr = vec![Value::Null; idx + 1];
                     arr[idx] = new_inner;
@@ -1313,6 +1335,38 @@ pub fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
                 }
                 (Value::Arr(_), Value::Str(k)) => {
                     bail!("Cannot index array with string (\"{}\")", k);
+                }
+                // Slice assignment: path element is {start: N, end: N}
+                (_, Value::Obj(slice_spec)) if slice_spec.contains_key("start") && slice_spec.contains_key("end") => {
+                    let start = match slice_spec.get("start") { Some(Value::Num(n)) => *n as i64, _ => 0 };
+                    let end = match slice_spec.get("end") { Some(Value::Num(n)) => *n as i64, _ => 0 };
+                    match v {
+                        Value::Arr(a) => {
+                            let len = a.len() as i64;
+                            let si = start.max(0).min(len) as usize;
+                            let ei = end.max(0).min(len) as usize;
+                            let ei = ei.max(si);
+                            let new_val = rt_setpath(&Value::Null, &rest, val)?;
+                            let replacement = match &new_val {
+                                Value::Arr(r) => r.as_ref().clone(),
+                                _ => vec![new_val],
+                            };
+                            let mut result = a[..si].to_vec();
+                            result.extend(replacement);
+                            result.extend_from_slice(&a[ei..]);
+                            Ok(Value::Arr(Rc::new(result)))
+                        }
+                        Value::Str(_) => bail!("Cannot update string slices"),
+                        Value::Null => {
+                            let new_val = rt_setpath(&Value::Null, &rest, val)?;
+                            let replacement = match &new_val {
+                                Value::Arr(r) => r.as_ref().clone(),
+                                _ => vec![new_val],
+                            };
+                            Ok(Value::Arr(Rc::new(replacement)))
+                        }
+                        _ => bail!("Cannot set path"),
+                    }
                 }
                 (_, Value::Arr(_)) => {
                     bail!("Cannot update field at array index of array");

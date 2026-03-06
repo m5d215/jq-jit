@@ -15,12 +15,17 @@ pub struct Filter {
     program: String,
     /// Our parsed IR (if parsing succeeded).
     parsed: Option<(crate::ir::Expr, Vec<CompiledFunc>)>,
+    lib_dirs: Vec<String>,
 }
 
 impl Filter {
     pub fn new(program: &str) -> Result<Self> {
+        Self::with_lib_dirs(program, &[])
+    }
+
+    pub fn with_lib_dirs(program: &str, lib_dirs: &[String]) -> Result<Self> {
         // Try our parser first
-        let parsed = match crate::parser::Parser::parse(program) {
+        let parsed = match crate::parser::Parser::parse_with_libs(program, lib_dirs) {
             Ok(result) => Some((result.expr, result.funcs)),
             Err(_e) => {
                 // Fall back to libjq for compilation check
@@ -33,6 +38,7 @@ impl Filter {
         Ok(Filter {
             program: program.to_string(),
             parsed,
+            lib_dirs: lib_dirs.to_vec(),
         })
     }
 
@@ -40,7 +46,7 @@ impl Filter {
     pub fn execute(&self, input: &Value) -> Result<Vec<Value>> {
         if let Some((ref expr, ref funcs)) = self.parsed {
             // Use our own interpreter
-            crate::eval::execute_ir(expr, input.clone(), funcs.clone())
+            crate::eval::execute_ir_with_libs(expr, input.clone(), funcs.clone(), self.lib_dirs.clone())
         } else {
             // Fall back to libjq
             execute_via_libjq(&self.program, input)

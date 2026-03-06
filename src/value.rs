@@ -319,6 +319,15 @@ pub fn format_jq_number(n: f64) -> String {
 
 /// Convert Value to compact JSON string.
 pub fn value_to_json(v: &Value) -> String {
+    value_to_json_depth(v, 0)
+}
+
+const MAX_JSON_DEPTH: usize = 10000;
+
+fn value_to_json_depth(v: &Value, depth: usize) -> String {
+    if depth > MAX_JSON_DEPTH {
+        return "\"<skipped: too deep>\"".to_string();
+    }
     match v {
         Value::Null => "null".to_string(),
         Value::False => "false".to_string(),
@@ -331,7 +340,7 @@ pub fn value_to_json(v: &Value) -> String {
                 if i > 0 {
                     out.push(',');
                 }
-                out.push_str(&value_to_json(item));
+                out.push_str(&value_to_json_depth(item, depth + 1));
             }
             out.push(']');
             out
@@ -344,7 +353,7 @@ pub fn value_to_json(v: &Value) -> String {
                 }
                 out.push_str(&json_encode_string(k));
                 out.push(':');
-                out.push_str(&value_to_json(v));
+                out.push_str(&value_to_json_depth(v, depth + 1));
             }
             out.push('}');
             out

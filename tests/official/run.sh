@@ -7,6 +7,7 @@ set -euo pipefail
 JQ_JIT="${1:-target/release/jq-jit2}"
 TEST_FILE="${2:-tests/official/jq.test}"
 TIMEOUT=5
+LIB_DIR="tests/modules"
 
 PASS=0
 FAIL=0
@@ -31,9 +32,9 @@ run_test() {
 
     local actual exit_code
     if [[ "$input" == "null" && "$filter" != "." ]]; then
-        actual=$(echo "null" | timeout "$TIMEOUT" "$JQ_JIT" -c "$filter" 2>/dev/null) && exit_code=$? || exit_code=$?
+        actual=$(echo "null" | timeout "$TIMEOUT" "$JQ_JIT" -L "$LIB_DIR" -c "$filter" 2>/dev/null) && exit_code=$? || exit_code=$?
     else
-        actual=$(echo "$input" | timeout "$TIMEOUT" "$JQ_JIT" -c "$filter" 2>/dev/null) && exit_code=$? || exit_code=$?
+        actual=$(echo "$input" | timeout "$TIMEOUT" "$JQ_JIT" -L "$LIB_DIR" -c "$filter" 2>/dev/null) && exit_code=$? || exit_code=$?
     fi
 
     if [[ $exit_code -eq 124 || $exit_code -eq 137 ]]; then
@@ -149,7 +150,7 @@ in_fail_block=0
 while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^[[:space:]]*# ]] && continue
 
-    if [[ "$line" == "%%FAIL" ]]; then
+    if [[ "$line" == "%%FAIL"* ]]; then
         in_fail_block=1
         continue
     fi

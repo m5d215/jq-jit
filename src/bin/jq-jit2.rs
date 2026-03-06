@@ -25,6 +25,7 @@ fn main() {
     let mut exit_status = false;
     let mut arg_vars: Vec<(String, Value)> = Vec::new();
     let mut argjson_vars: Vec<(String, Value)> = Vec::new();
+    let mut lib_dirs: Vec<String> = Vec::new();
 
     let mut i = 1;
     while i < args.len() {
@@ -71,6 +72,12 @@ fn main() {
                     i += 2;
                 }
             }
+            "-L" => {
+                i += 1;
+                if i < args.len() {
+                    lib_dirs.push(args[i].clone());
+                }
+            }
             "--args" => {
                 // Remaining args are positional args
                 break;
@@ -108,7 +115,7 @@ fn main() {
     };
 
     // Compile filter
-    let filter = match Filter::new(&filter_str) {
+    let filter = match Filter::with_lib_dirs(&filter_str, &lib_dirs) {
         Ok(f) => f,
         Err(e) => {
             eprintln!("jq: error: {}", e);

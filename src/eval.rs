@@ -20,11 +20,15 @@ pub struct Env {
     vars: Vec<Value>,
     funcs: Vec<CompiledFunc>,
     next_label: u64,
+    pub lib_dirs: Vec<String>,
 }
 
 impl Env {
     pub fn new(funcs: Vec<CompiledFunc>) -> Self {
-        Env { vars: vec![Value::Null; 4096], funcs, next_label: 0 }
+        Env { vars: vec![Value::Null; 4096], funcs, next_label: 0, lib_dirs: Vec::new() }
+    }
+    pub fn with_lib_dirs(funcs: Vec<CompiledFunc>, lib_dirs: Vec<String>) -> Self {
+        Env { vars: vec![Value::Null; 4096], funcs, next_label: 0, lib_dirs }
     }
     fn get_var(&self, idx: u16) -> Value {
         self.vars.get(idx as usize).cloned().unwrap_or(Value::Null)
@@ -52,11 +56,37 @@ pub fn eval(
 
         Expr::BinOp { op, lhs, rhs } => {
             let op = *op;
-            eval(lhs, input.clone(), env, &mut |lval| {
-                eval(rhs, input.clone(), env, &mut |rval| {
-                    cb(eval_binop(op, &lval, &rval)?)
-                })
-            })
+            match op {
+                BinOp::And => {
+                    eval(lhs, input.clone(), env, &mut |lval| {
+                        if !lval.is_truthy() {
+                            cb(Value::False)
+                        } else {
+                            eval(rhs, input.clone(), env, &mut |rval| {
+                                cb(Value::from_bool(rval.is_truthy()))
+                            })
+                        }
+                    })
+                }
+                BinOp::Or => {
+                    eval(lhs, input.clone(), env, &mut |lval| {
+                        if lval.is_truthy() {
+                            cb(Value::True)
+                        } else {
+                            eval(rhs, input.clone(), env, &mut |rval| {
+                                cb(Value::from_bool(rval.is_truthy()))
+                            })
+                        }
+                    })
+                }
+                _ => {
+                    eval(lhs, input.clone(), env, &mut |lval| {
+                        eval(rhs, input.clone(), env, &mut |rval| {
+                            cb(eval_binop(op, &lval, &rval)?)
+                        })
+                    })
+                }
+            }
         }
 
         Expr::UnaryOp { op, operand } => {
@@ -304,7 +334,14 @@ pub fn eval(
 
         Expr::Update { path_expr, update_expr } => {
             let mut paths = Vec::new();
-            eval_path(path_expr, input.clone(), env, &mut |p| { paths.push(p); Ok(true) })?;
+            let path_result = eval_path(path_expr, input.clone(), env, &mut |p| { paths.push(p); Ok(true) });
+            if let Err(e) = path_result {
+                let msg = format!("{}", e);
+                if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
+                    bail!("Invalid path expression with result {}", json);
+                }
+                return Err(e);
+            }
             let mut result = input.clone();
             let mut del_paths = Vec::new();
             for path in &paths {
@@ -329,7 +366,14 @@ pub fn eval(
         Expr::Assign { path_expr, value_expr } => {
             eval(value_expr, input.clone(), env, &mut |new_val| {
                 let mut paths = Vec::new();
-                eval_path(path_expr, input.clone(), env, &mut |p| { paths.push(p); Ok(true) })?;
+                let path_result = eval_path(path_expr, input.clone(), env, &mut |p| { paths.push(p); Ok(true) });
+                if let Err(e) = path_result {
+                    let msg = format!("{}", e);
+                    if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
+                        bail!("Invalid path expression with result {}", json);
+                    }
+                    return Err(e);
+                }
                 let mut result = input.clone();
                 for path in &paths {
                     result = crate::runtime::rt_setpath(&result, path, &new_val)?;
@@ -338,7 +382,19 @@ pub fn eval(
             })
         }
 
-        Expr::PathExpr { expr: path_expr } => eval_path(path_expr, input, env, cb),
+        Expr::PathExpr { expr: path_expr } => {
+            let result = eval_path(path_expr, input, env, cb);
+            match result {
+                Err(e) => {
+                    let msg = format!("{}", e);
+                    if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
+                        bail!("Invalid path expression with result {}", json);
+                    }
+                    Err(e)
+                }
+                other => other,
+            }
+        }
 
         Expr::SetPath { path, value } => {
             eval(path, input.clone(), env, &mut |pv| {
@@ -583,11 +639,9 @@ pub fn eval(
         }
 
         Expr::ModuleMeta => {
-            let mut obj = indexmap::IndexMap::new();
-            obj.insert("version".to_string(), Value::Num(0.1));
-            obj.insert("deps".to_string(), Value::Arr(Rc::new(vec![])));
-            obj.insert("defs".to_string(), Value::Arr(Rc::new(vec![])));
-            cb(Value::Obj(Rc::new(obj)))
+            let lib_dirs = env.borrow().lib_dirs.clone();
+            let result = crate::module::get_modulemeta(&input, &lib_dirs)?;
+            cb(result)
         }
 
         Expr::GenLabel => {
@@ -779,7 +833,7 @@ fn eval_format(name: &str, val: &Value) -> Result<String> {
     match name {
         "text" => Ok(s),
         "json" => Ok(serde_json::to_string(&s).unwrap_or_else(|_| format!("{:?}", s))),
-        "html" => Ok(s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('\'', "&#39;")),
+        "html" => Ok(s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('\'', "&apos;").replace('"', "&quot;")),
         "uri" => { let mut r = String::new(); for b in s.bytes() { match b { b'A'..=b'Z'|b'a'..=b'z'|b'0'..=b'9'|b'-'|b'_'|b'.'|b'~' => r.push(b as char), _ => r.push_str(&format!("%{:02X}", b)) } } Ok(r) }
         "urid" => {
             let bytes = s.as_bytes();
@@ -916,32 +970,92 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
     match expr {
         Expr::Input => cb(Value::Arr(Rc::new(vec![]))),
         Expr::Index { expr: be, key: ke } => {
-            eval_path(be, input.clone(), env, &mut |bp| {
+            let cb_called = std::cell::Cell::new(false);
+            let result = eval_path(be, input.clone(), env, &mut |bp| {
+                cb_called.set(true);
                 eval(ke, input.clone(), env, &mut |key| {
                     let mut p = match &bp { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
                     p.push(key); cb(Value::Arr(Rc::new(p)))
                 })
-            })
+            });
+            match result {
+                Err(e) if !cb_called.get() => {
+                    let msg = format!("{}", e);
+                    if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
+                        let mut key_val = Value::Null;
+                        let _ = eval(ke, input, env, &mut |k| { key_val = k; Ok(true) });
+                        let key_desc = match &key_val {
+                            Value::Num(n) => format!("element {} of", crate::value::format_jq_number(*n)),
+                            Value::Str(s) => format!("element \"{}\" of", s),
+                            _ => format!("element {} of", crate::value::value_to_json(&key_val)),
+                        };
+                        bail!("Invalid path expression near attempt to access {} {}", key_desc, json);
+                    }
+                    Err(e)
+                }
+                other => other,
+            }
         }
         Expr::Each { input_expr } => {
-            eval_path(input_expr, input.clone(), env, &mut |bp| {
+            let cb_called = std::cell::Cell::new(false);
+            let result = eval_path(input_expr, input.clone(), env, &mut |bp| {
+                cb_called.set(true);
                 let base = crate::runtime::rt_getpath(&input, &bp).unwrap_or(Value::Null);
                 match &base {
                     Value::Arr(a) => { for i in 0..a.len() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::Num(i as f64)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
                     Value::Obj(o) => { for k in o.keys() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::from_str(k)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
                     _ => Ok(true),
                 }
-            })
+            });
+            match result {
+                Err(e) if !cb_called.get() => {
+                    let msg = format!("{}", e);
+                    if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
+                        bail!("Invalid path expression near attempt to iterate through {}", json);
+                    }
+                    Err(e)
+                }
+                other => other,
+            }
         }
         Expr::Pipe { left, right } => {
-            eval_path(left, input.clone(), env, &mut |lp| {
+            let result = eval_path(left, input.clone(), env, &mut |lp| {
                 let mid = crate::runtime::rt_getpath(&input, &lp).unwrap_or(Value::Null);
-                eval_path(right, mid, env, &mut |rp| {
+                eval_path(right, mid.clone(), env, &mut |rp| {
                     let mut p = match &lp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] };
                     if let Value::Arr(rpa) = &rp { p.extend(rpa.iter().cloned()); }
                     cb(Value::Arr(Rc::new(p)))
                 })
-            })
+            });
+            match result {
+                Err(e) => {
+                    let msg = format!("{}", e);
+                    if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
+                        match right.as_ref() {
+                            Expr::Index { key, .. } | Expr::IndexOpt { key, .. } => {
+                                let mut key_val = Value::Null;
+                                let _ = eval(key, input, env, &mut |k| { key_val = k; Ok(true) });
+                                let key_desc = match &key_val {
+                                    Value::Num(n) => format!("element {} of", crate::value::format_jq_number(*n)),
+                                    Value::Str(s) => format!("element \"{}\" of", s),
+                                    _ => format!("element {} of", crate::value::value_to_json(&key_val)),
+                                };
+                                bail!("Invalid path expression near attempt to access {} {}", key_desc, json);
+                            }
+                            Expr::Each { .. } | Expr::EachOpt { .. } => {
+                                bail!("Invalid path expression near attempt to iterate through {}", json);
+                            }
+                            _ => {
+                                // Pass __pathexpr_result__ through for higher-level handlers
+                                Err(e)
+                            }
+                        }
+                    } else {
+                        Err(e)
+                    }
+                }
+                other => other,
+            }
         }
         Expr::Comma { left, right } => {
             let cont = eval_path(left, input.clone(), env, cb)?;
@@ -983,8 +1097,8 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                     Value::Str(s) => s.chars().count() as i64,
                     _ => 0,
                 };
-                let fi = match &from_val { Value::Num(n) => { let i = *n as i64; if i < 0 { (len + i).max(0) } else { i.min(len) } }, Value::Null => 0, _ => 0 };
-                let ti = match &to_val { Value::Num(n) => { let i = *n as i64; if i < 0 { (len + i).max(0) } else { i.min(len) } }, Value::Null => len, _ => len };
+                let fi = match &from_val { Value::Num(n) => { let i = n.floor() as i64; if i < 0 { (len + i).max(0) } else { i.min(len) } }, Value::Null => 0, _ => 0 };
+                let ti = match &to_val { Value::Num(n) => { let i = n.ceil() as i64; if i < 0 { (len + i).max(0) } else { i.min(len) } }, Value::Null => len, _ => len };
                 // Return a special path that indicates slicing
                 let mut p = match &bp { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
                 p.push(Value::Obj(Rc::new({
@@ -999,6 +1113,10 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
         Expr::CallBuiltin { name, args } if name == "getpath" && args.len() == 1 => {
             // In path context, getpath(p) = the path p itself
             eval(&args[0], input, env, cb)
+        }
+        Expr::GetPath { path } => {
+            // In path context, getpath(p) = the path p itself
+            eval(path, input, env, cb)
         }
         Expr::FuncCall { func_id, .. } => {
             let func = env.borrow().funcs.get(*func_id).cloned();
@@ -1024,7 +1142,34 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 }
             }
         }
-        _ => eval(expr, input, env, cb),
+        Expr::IndexOpt { expr: be, key: ke } => {
+            eval_path(be, input.clone(), env, &mut |bp| {
+                eval(ke, input.clone(), env, &mut |key| {
+                    let mut p = match &bp { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
+                    p.push(key); cb(Value::Arr(Rc::new(p)))
+                })
+            })
+        }
+        Expr::EachOpt { input_expr } => {
+            eval_path(input_expr, input.clone(), env, &mut |bp| {
+                let base = crate::runtime::rt_getpath(&input, &bp).unwrap_or(Value::Null);
+                match &base {
+                    Value::Arr(a) => { for i in 0..a.len() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::Num(i as f64)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
+                    Value::Obj(o) => { for k in o.keys() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::from_str(k)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
+                    _ => Ok(true),
+                }
+            })
+        }
+        _ => {
+            // Non-path-safe expression: evaluate and report error
+            let mut result_val = Value::Null;
+            let mut has_result = false;
+            eval(expr, input, env, &mut |val| { result_val = val; has_result = true; Ok(true) })?;
+            if has_result {
+                bail!("__pathexpr_result__:{}", crate::value::value_to_json(&result_val));
+            }
+            Ok(true)
+        }
     }
 }
 
@@ -1064,7 +1209,11 @@ fn hex_val(b: u8) -> Option<u8> {
 }
 
 pub fn execute_ir(expr: &Expr, input: Value, funcs: Vec<CompiledFunc>) -> Result<Vec<Value>> {
-    let env = Rc::new(RefCell::new(Env::new(funcs)));
+    execute_ir_with_libs(expr, input, funcs, vec![])
+}
+
+pub fn execute_ir_with_libs(expr: &Expr, input: Value, funcs: Vec<CompiledFunc>, lib_dirs: Vec<String>) -> Result<Vec<Value>> {
+    let env = Rc::new(RefCell::new(Env::with_lib_dirs(funcs, lib_dirs)));
     let mut outputs = Vec::new();
     let result = eval(expr, input, &env, &mut |val| {
         match &val { Value::Error(e) => { eprintln!("jq: error: {}", e); }, _ => { outputs.push(val); } }
@@ -1072,6 +1221,19 @@ pub fn execute_ir(expr: &Expr, input: Value, funcs: Vec<CompiledFunc>) -> Result
     });
     match result {
         Ok(_) => Ok(outputs),
-        Err(e) => { if format!("{}", e).starts_with("__break__:") { Ok(outputs) } else { Err(e) } }
+        Err(e) => {
+            let msg = format!("{}", e);
+            if msg.starts_with("__break__:") {
+                Ok(outputs)
+            } else {
+                // Report error to stderr but still return collected outputs
+                if let Some(json) = msg.strip_prefix("__jqerror__:") {
+                    eprintln!("jq: error: {}", json);
+                } else {
+                    eprintln!("jq: error: {}", msg);
+                }
+                Ok(outputs)
+            }
+        }
     }
 }

@@ -7,3 +7,4 @@ pub mod vm;
 pub mod runtime;
 pub mod parser;
 pub mod eval;
+pub mod module;
