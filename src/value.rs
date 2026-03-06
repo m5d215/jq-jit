@@ -17,22 +17,23 @@ pub type KeyStr = compact_str::CompactString;
 /// Object map type — IndexMap with ahash for faster lookups and CompactString keys.
 pub type ObjMap = IndexMap<KeyStr, Value, ahash::RandomState>;
 
+/// Process-wide shared hasher (cheaper than thread_local per access).
+static SHARED_HASHER: std::sync::OnceLock<ahash::RandomState> = std::sync::OnceLock::new();
+
+fn get_shared_hasher() -> ahash::RandomState {
+    SHARED_HASHER.get_or_init(|| ahash::RandomState::default()).clone()
+}
+
 /// Create a new ObjMap using a shared hasher state (avoids per-object random key generation).
 #[inline]
 pub fn new_objmap() -> ObjMap {
-    thread_local! {
-        static SHARED_HASHER: ahash::RandomState = ahash::RandomState::default();
-    }
-    SHARED_HASHER.with(|s| IndexMap::with_hasher(s.clone()))
+    IndexMap::with_hasher(get_shared_hasher())
 }
 
 /// Create a new ObjMap with pre-allocated capacity.
 #[inline]
 pub fn new_objmap_with_capacity(cap: usize) -> ObjMap {
-    thread_local! {
-        static SHARED_HASHER: ahash::RandomState = ahash::RandomState::default();
-    }
-    SHARED_HASHER.with(|s| IndexMap::with_capacity_and_hasher(cap, s.clone()))
+    IndexMap::with_capacity_and_hasher(cap, get_shared_hasher())
 }
 
 /// Tag discriminant constants, matching `#[repr(C, u64)]` layout.
