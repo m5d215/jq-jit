@@ -749,15 +749,34 @@ pub fn eval_index(base: &Value, key: &Value, optional: bool) -> std::result::Res
 }
 
 fn eval_recurse_expr(step: &Expr, val: &Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
-    if !cb(val.clone())? { return Ok(false); }
     if matches!(step, Expr::Input) {
-        match val {
-            Value::Arr(a) => { for item in a.iter() { if !eval_recurse_expr(step, item, env, cb)? { return Ok(false); } } }
-            Value::Obj(o) => { for v in o.values() { if !eval_recurse_expr(step, v, env, cb)? { return Ok(false); } } }
-            _ => {}
-        }
+        // Default recurse (.[]): recursive descent into arrays/objects
+        eval_recurse_default(val, cb)
     } else {
-        let _ = eval(step, val.clone(), env, &mut |next| eval_recurse_expr(step, &next, env, cb));
+        // Custom step: use explicit stack to avoid stack overflow
+        let mut work = vec![val.clone()];
+        while let Some(current) = work.pop() {
+            if !cb(current.clone())? { return Ok(false); }
+            let mut next_vals = Vec::new();
+            let _ = eval(step, current, env, &mut |next| {
+                next_vals.push(next);
+                Ok(true)
+            });
+            // Push in reverse so first output is processed first
+            for v in next_vals.into_iter().rev() {
+                work.push(v);
+            }
+        }
+        Ok(true)
+    }
+}
+
+fn eval_recurse_default(val: &Value, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
+    if !cb(val.clone())? { return Ok(false); }
+    match val {
+        Value::Arr(a) => { for item in a.iter() { if !eval_recurse_default(item, cb)? { return Ok(false); } } }
+        Value::Obj(o) => { for v in o.values() { if !eval_recurse_default(v, cb)? { return Ok(false); } } }
+        _ => {}
     }
     Ok(true)
 }
