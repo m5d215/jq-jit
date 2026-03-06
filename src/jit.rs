@@ -619,7 +619,6 @@ impl Flattener {
             Expr::EachOpt { .. } => false,
 
             Expr::IfThenElse { cond, then_branch, else_branch } => {
-                if !is_scalar(cond) { return false; }
                 // Pre-check: ensure both branches can be JIT-compiled
                 {
                     let mut test = Flattener::new();
@@ -629,21 +628,27 @@ impl Flattener {
                     if !test.flatten_gen(then_branch, t_in) { return false; }
                     if !test.flatten_gen(else_branch, t_in) { return false; }
                 }
-                let cond_val = self.flatten_scalar(cond, input_slot);
-                let then_lbl = self.alloc_label();
-                let else_lbl = self.alloc_label();
-                let done_lbl = self.alloc_label();
-                self.emit(JitOp::IfTruthy { src: cond_val, then_label: then_lbl, else_label: else_lbl });
-                self.emit(JitOp::Drop { slot: cond_val });
+                if is_scalar(cond) {
+                    let cond_val = self.flatten_scalar(cond, input_slot);
+                    let then_lbl = self.alloc_label();
+                    let else_lbl = self.alloc_label();
+                    let done_lbl = self.alloc_label();
+                    self.emit(JitOp::IfTruthy { src: cond_val, then_label: then_lbl, else_label: else_lbl });
+                    self.emit(JitOp::Drop { slot: cond_val });
 
-                self.emit(JitOp::Label { id: then_lbl });
-                self.flatten_gen(then_branch, input_slot);
-                self.emit(JitOp::Jump { label: done_lbl });
+                    self.emit(JitOp::Label { id: then_lbl });
+                    self.flatten_gen(then_branch, input_slot);
+                    self.emit(JitOp::Jump { label: done_lbl });
 
-                self.emit(JitOp::Label { id: else_lbl });
-                self.flatten_gen(else_branch, input_slot);
-                self.emit(JitOp::Label { id: done_lbl });
-                true
+                    self.emit(JitOp::Label { id: else_lbl });
+                    self.flatten_gen(else_branch, input_slot);
+                    self.emit(JitOp::Label { id: done_lbl });
+                    true
+                } else {
+                    // Generator condition: for each output of cond, evaluate then/else
+                    // Emit: flatten cond as generator, for each output check truthy and run branch
+                    self.flatten_gen_cond_if(cond, then_branch, else_branch, input_slot)
+                }
             }
 
             Expr::LetBinding { var_index, value, body } => {
@@ -658,7 +663,9 @@ impl Flattener {
                     self.emit(JitOp::Drop { slot: old });
                     ok
                 } else {
-                    false
+                    // Generator value: for each output of value, set $var and run body
+                    // body uses original input as ., not the value output
+                    self.flatten_gen_let_binding(*var_index, value, body, input_slot)
                 }
             }
 
@@ -1134,6 +1141,16 @@ impl Flattener {
             return true;
         }
         match source {
+            Expr::Comma { left, right } => {
+                if !self.flatten_gen_with_reduce(left, var_index, acc_index, update, input_slot) { return false; }
+                self.flatten_gen_with_reduce(right, var_index, acc_index, update, input_slot)
+            }
+            Expr::Pipe { left, right } if is_scalar(left) => {
+                let mid = self.flatten_scalar(left, input_slot);
+                let ok = self.flatten_gen_with_reduce(right, var_index, acc_index, update, mid);
+                self.emit(JitOp::Drop { slot: mid });
+                ok
+            }
             Expr::Each { input_expr } | Expr::EachOpt { input_expr } => {
                 if !is_scalar(input_expr) { return false; }
                 let is_opt = matches!(source, Expr::EachOpt { .. });
@@ -1272,6 +1289,92 @@ impl Flattener {
                 self.emit(JitOp::F64Add { dst_var: cur, a_var: cur, b_var: step_v });
                 self.emit(JitOp::Jump { label: head });
                 self.emit(JitOp::Label { id: done });
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Handle LetBinding with generator value.
+    /// For each output of value, set $var and run body with original input.
+    fn flatten_gen_let_binding(&mut self, var_index: u16, value: &Expr, body: &Expr, input_slot: SlotId) -> bool {
+        // Pre-check: can we compile the body?
+        {
+            let mut test = Flattener::new();
+            test.collect_depth = self.collect_depth;
+            test.try_depth = self.try_depth;
+            let t_in = test.alloc_slot();
+            if !test.flatten_gen(body, t_in) { return false; }
+        }
+
+        let old = self.alloc_slot();
+        self.emit(JitOp::GetVar { dst: old, var_index });
+
+        match value {
+            Expr::Comma { left, right } => {
+                if !self.flatten_gen_let_binding(var_index, left, body, input_slot) { return false; }
+                if !self.flatten_gen_let_binding(var_index, right, body, input_slot) { return false; }
+            }
+            _ if is_scalar(value) => {
+                let val = self.flatten_scalar(value, input_slot);
+                self.emit(JitOp::SetVar { var_index, src: val });
+                self.emit(JitOp::Drop { slot: val });
+                self.flatten_gen(body, input_slot);
+            }
+            Expr::Each { input_expr } if is_scalar(input_expr) => {
+                let container = self.flatten_scalar(input_expr, input_slot);
+                self.flatten_each_with_action(container, false, &|s, elem| {
+                    s.emit(JitOp::SetVar { var_index, src: elem });
+                    s.flatten_gen(body, input_slot);
+                });
+                self.emit(JitOp::Drop { slot: container });
+            }
+            _ => {
+                self.emit(JitOp::SetVar { var_index, src: old });
+                self.emit(JitOp::Drop { slot: old });
+                return false;
+            }
+        }
+
+        self.emit(JitOp::SetVar { var_index, src: old });
+        self.emit(JitOp::Drop { slot: old });
+        true
+    }
+
+    /// Handle if-then-else with generator condition.
+    /// For each output of cond, check truthiness, run then/else with original input.
+    fn flatten_gen_cond_if(&mut self, cond: &Expr, then_branch: &Expr, else_branch: &Expr, input_slot: SlotId) -> bool {
+        // We handle this by wrapping the if-then-else body into a
+        // "for each cond output" loop using the existing flatten_gen pipe mechanism.
+        // Semantics: for each cond_val, if truthy run then_branch(input), else run else_branch(input)
+
+        // The approach: emit the cond as a generator that yields to an inline handler
+        // For Comma { left, right }, we can directly handle it
+        match cond {
+            Expr::Comma { left, right } => {
+                // (A, B) as cond: handle A first, then B
+                let then_clone = then_branch.clone();
+                let else_clone = else_branch.clone();
+                if !self.flatten_gen_cond_if(left, &then_clone, &else_clone, input_slot) { return false; }
+                self.flatten_gen_cond_if(right, then_branch, else_branch, input_slot)
+            }
+            Expr::Empty => {
+                // empty condition = no outputs = nothing happens
+                true
+            }
+            _ if is_scalar(cond) => {
+                let cond_val = self.flatten_scalar(cond, input_slot);
+                let then_lbl = self.alloc_label();
+                let else_lbl = self.alloc_label();
+                let done_lbl = self.alloc_label();
+                self.emit(JitOp::IfTruthy { src: cond_val, then_label: then_lbl, else_label: else_lbl });
+                self.emit(JitOp::Drop { slot: cond_val });
+                self.emit(JitOp::Label { id: then_lbl });
+                self.flatten_gen(then_branch, input_slot);
+                self.emit(JitOp::Jump { label: done_lbl });
+                self.emit(JitOp::Label { id: else_lbl });
+                self.flatten_gen(else_branch, input_slot);
+                self.emit(JitOp::Label { id: done_lbl });
                 true
             }
             _ => false,
