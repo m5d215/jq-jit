@@ -52,6 +52,11 @@ impl Filter {
                     }
                 }
             }
+            if std::env::var("JQ_JIT_DEBUG").is_ok() {
+                let is_jit = jit_fn.is_some();
+                let compilable = funcs.is_empty() && crate::jit::is_jit_compilable(expr);
+                eprintln!("JIT: {} compilable={} jit={}", program, compilable, is_jit);
+            }
         }
 
         Ok(Filter {

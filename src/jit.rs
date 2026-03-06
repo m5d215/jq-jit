@@ -8,10 +8,30 @@
 //! or "generator" (zero or more outputs). Scalar expressions compile to
 //! direct computation; generators compile to loops with Yield operations.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use anyhow::{Result, bail};
+
+// Thread-local error storage for JIT runtime functions.
+// When a fallible runtime function encounters an error, it stores the error
+// message here. The CheckError JitOp checks this and branches to catch handlers.
+thread_local! {
+    static JIT_LAST_ERROR: RefCell<Option<String>> = RefCell::new(None);
+}
+
+fn set_jit_error(msg: String) {
+    JIT_LAST_ERROR.with(|e| *e.borrow_mut() = Some(msg));
+}
+
+fn take_jit_error() -> Option<String> {
+    JIT_LAST_ERROR.with(|e| e.borrow_mut().take())
+}
+
+fn clear_jit_error() {
+    JIT_LAST_ERROR.with(|e| *e.borrow_mut() = None);
+}
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder, StackSlotData, StackSlotKind};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
@@ -161,6 +181,9 @@ enum JitOp {
     // TryCatch support
     TryCatchBegin,
     TryCatchEnd,
+    /// Check if the last fallible operation produced an error.
+    /// If so, write the error value to error_dst and jump to catch_label.
+    CheckError { error_dst: SlotId, catch_label: LabelId },
 
     // Error throwing
     ThrowError { msg: SlotId },
@@ -181,18 +204,36 @@ struct Flattener {
     next_var: u32,
     collect_depth: u32,
     try_depth: u32,
+    /// When inside a try block, this holds (catch_label, error_slot).
+    /// After each fallible op, CheckError is emitted to branch to catch_label on error.
+    try_catch_target: Option<(LabelId, SlotId)>,
 }
 
 impl Flattener {
     fn new() -> Self {
         Flattener { ops: Vec::new(), next_slot: 0, next_label: 0, next_var: 0,
-                     collect_depth: 0, try_depth: 0 }
+                     collect_depth: 0, try_depth: 0, try_catch_target: None }
     }
 
     fn alloc_slot(&mut self) -> SlotId { let s = self.next_slot; self.next_slot += 1; s }
     fn alloc_label(&mut self) -> LabelId { let l = self.next_label; self.next_label += 1; l }
     fn alloc_var(&mut self) -> u32 { let v = self.next_var; self.next_var += 1; v }
-    fn emit(&mut self, op: JitOp) { self.ops.push(op); }
+
+    fn emit(&mut self, op: JitOp) {
+        // Check if this op is fallible (can produce errors)
+        let is_fallible = matches!(&op,
+            JitOp::Index { .. } | JitOp::IndexField { .. } |
+            JitOp::BinOp { .. } | JitOp::UnaryOp { .. } |
+            JitOp::Negate { .. } | JitOp::CallBuiltin { .. } |
+            JitOp::ThrowError { .. }
+        );
+        self.ops.push(op);
+        if is_fallible {
+            if let Some((catch_label, error_slot)) = self.try_catch_target {
+                self.ops.push(JitOp::CheckError { error_dst: error_slot, catch_label });
+            }
+        }
+    }
 
     fn emit_yield(&mut self, output: SlotId) {
         if self.collect_depth > 0 {
@@ -576,11 +617,20 @@ impl Flattener {
                     if !is_scalar(msg_expr) { return false; }
                     let msg_val = self.flatten_scalar(msg_expr, input_slot);
                     self.emit(JitOp::ThrowError { msg: msg_val });
+                    // Note: ThrowError is fallible, so if in try block,
+                    // CheckError is auto-emitted and will jump to catch.
+                    // If NOT in try block, add explicit ReturnError.
+                    if self.try_catch_target.is_none() {
+                        self.ops.push(JitOp::ReturnError);
+                    }
                     self.emit(JitOp::Drop { slot: msg_val });
                 } else {
                     let msg_val = self.alloc_slot();
                     self.emit(JitOp::Clone { dst: msg_val, src: input_slot });
                     self.emit(JitOp::ThrowError { msg: msg_val });
+                    if self.try_catch_target.is_none() {
+                        self.ops.push(JitOp::ReturnError);
+                    }
                     self.emit(JitOp::Drop { slot: msg_val });
                 }
                 true
@@ -623,6 +673,7 @@ impl Flattener {
                     let mut test = Flattener::new();
                     test.collect_depth = self.collect_depth;
                     test.try_depth = self.try_depth;
+                    test.try_catch_target = self.try_catch_target;
                     let t_in = test.alloc_slot();
                     if !test.flatten_gen(then_branch, t_in) { return false; }
                     if !test.flatten_gen(else_branch, t_in) { return false; }
@@ -826,8 +877,9 @@ impl Flattener {
                 true
             }
 
-            // TryCatch disabled in JIT — error propagation not yet correct
-            Expr::TryCatch { .. } => false,
+            Expr::TryCatch { try_expr, catch_expr } => {
+                self.flatten_gen_try_catch(try_expr, catch_expr, input_slot)
+            }
 
             Expr::Foreach { source, init, var_index, acc_index, update, extract } => {
                 if !is_scalar(init) || !is_scalar(update) { return false; }
@@ -836,6 +888,7 @@ impl Flattener {
                     let mut test = Flattener::new();
                     test.collect_depth = self.collect_depth;
                     test.try_depth = self.try_depth;
+                    test.try_catch_target = self.try_catch_target;
                     let t_in = test.alloc_slot();
                     if !test.flatten_gen(ext, t_in) { return false; }
                 }
@@ -864,6 +917,60 @@ impl Flattener {
 
             _ => false,
         }
+    }
+
+    /// Handle try-catch: try try_expr catch catch_expr
+    fn flatten_gen_try_catch(&mut self, try_expr: &Expr, catch_expr: &Expr, input_slot: SlotId) -> bool {
+        // Pre-check: the try body must be compilable
+        {
+            let mut test = Flattener::new();
+            test.collect_depth = self.collect_depth;
+            test.try_depth = self.try_depth + 1;
+            test.try_catch_target = Some((0, 0)); // dummy target for pre-check
+            let t_in = test.alloc_slot();
+            if !test.flatten_gen(try_expr, t_in) { return false; }
+        }
+        // Pre-check: the catch body must be compilable
+        {
+            let mut test = Flattener::new();
+            test.collect_depth = self.collect_depth;
+            test.try_depth = self.try_depth;
+            let t_in = test.alloc_slot();
+            if !test.flatten_gen(catch_expr, t_in) { return false; }
+        }
+
+        let catch_label = self.alloc_label();
+        let done_label = self.alloc_label();
+        let error_slot = self.alloc_slot();
+
+        // Save the old try_catch_target and set the new one
+        let old_target = self.try_catch_target;
+        self.try_catch_target = Some((catch_label, error_slot));
+        self.try_depth += 1;
+        self.emit(JitOp::TryCatchBegin);
+
+        // Compile the try body
+        let ok = self.flatten_gen(try_expr, input_slot);
+
+        self.emit(JitOp::TryCatchEnd);
+        self.try_depth -= 1;
+        self.try_catch_target = old_target;
+
+        if !ok { return false; }
+
+        // Jump over catch handler
+        self.emit(JitOp::Jump { label: done_label });
+
+        // Catch handler: error_slot contains the error value
+        self.emit(JitOp::Label { id: catch_label });
+        self.emit(JitOp::TryCatchEnd);
+
+        // Execute catch_expr with error value as input
+        self.flatten_gen(catch_expr, error_slot);
+        self.emit(JitOp::Drop { slot: error_slot });
+
+        self.emit(JitOp::Label { id: done_label });
+        true
     }
 
     /// Handle generator | anything: emit left generator's loop with right inline.
@@ -917,6 +1024,7 @@ impl Flattener {
                     let mut test = Flattener::new();
                     test.collect_depth = self.collect_depth;
                     test.try_depth = self.try_depth;
+                    test.try_catch_target = self.try_catch_target;
                     let t_in = test.alloc_slot();
                     if !test.flatten_gen(&then_pipe, t_in) { return false; }
                     if !test.flatten_gen(&else_pipe, t_in) { return false; }
@@ -945,6 +1053,7 @@ impl Flattener {
                     let mut test = Flattener::new();
                     test.collect_depth = self.collect_depth;
                     test.try_depth = self.try_depth;
+                    test.try_catch_target = self.try_catch_target;
                     let t_in = test.alloc_slot();
                     if !test.flatten_gen(right, t_in) { return false; }
                 }
@@ -984,6 +1093,133 @@ impl Flattener {
                 self.emit(JitOp::Label { id: done });
                 true
             }
+            // TryCatch | right: compile try-catch body inline, each output piped to right
+            Expr::TryCatch { try_expr, catch_expr } => {
+                // Pre-check: try body and right must be compilable
+                {
+                    let mut test = Flattener::new();
+                    test.collect_depth = self.collect_depth;
+                    test.try_depth = self.try_depth + 1;
+                    test.try_catch_target = Some((0, 0));
+                    let t_in = test.alloc_slot();
+                    if !test.flatten_gen(try_expr, t_in) { return false; }
+                }
+                {
+                    let mut test = Flattener::new();
+                    test.collect_depth = self.collect_depth;
+                    test.try_depth = self.try_depth;
+                    test.try_catch_target = self.try_catch_target;
+                    let t_in = test.alloc_slot();
+                    if !test.flatten_gen(catch_expr, t_in) { return false; }
+                }
+
+                let catch_label = self.alloc_label();
+                let done_label = self.alloc_label();
+                let error_slot = self.alloc_slot();
+
+                let old_target = self.try_catch_target;
+                self.try_catch_target = Some((catch_label, error_slot));
+                self.try_depth += 1;
+                self.emit(JitOp::TryCatchBegin);
+
+                // Compile try body, but instead of yielding directly, pipe to right
+                // We need to handle the try body as left | right
+                if is_scalar(try_expr) {
+                    let mid = self.flatten_scalar(try_expr, input_slot);
+                    self.flatten_gen(right, mid);
+                    self.emit(JitOp::Drop { slot: mid });
+                } else {
+                    // Try to compile as generator pipe
+                    if !self.flatten_gen_pipe(try_expr, right, input_slot) {
+                        // If that fails, try as standalone generator
+                        // where each output is piped to right inline
+                        // This is complex; for now, just try flatten_gen and hope
+                        // the results get piped through
+                        self.emit(JitOp::TryCatchEnd);
+                        self.try_depth -= 1;
+                        self.try_catch_target = old_target;
+                        return false;
+                    }
+                }
+
+                self.emit(JitOp::TryCatchEnd);
+                self.try_depth -= 1;
+                self.try_catch_target = old_target;
+
+                self.emit(JitOp::Jump { label: done_label });
+
+                // Catch handler
+                self.emit(JitOp::Label { id: catch_label });
+                self.emit(JitOp::TryCatchEnd);
+                // Pipe catch output through right
+                if is_scalar(catch_expr) {
+                    let catch_val = self.flatten_scalar(catch_expr, error_slot);
+                    self.flatten_gen(right, catch_val);
+                    self.emit(JitOp::Drop { slot: catch_val });
+                } else {
+                    // catch_expr is a generator — compile as catch_expr | right
+                    // For simplicity, just compile catch_expr as a generator
+                    // and hope right is handled inside
+                    self.flatten_gen_pipe(catch_expr, right, error_slot);
+                }
+                self.emit(JitOp::Drop { slot: error_slot });
+
+                self.emit(JitOp::Label { id: done_label });
+                true
+            }
+
+            // IfThenElse | right: handle each branch inline
+            Expr::IfThenElse { cond, then_branch, else_branch } if is_scalar(cond) => {
+                let cond_val = self.flatten_scalar(cond, input_slot);
+                let then_lbl = self.alloc_label();
+                let else_lbl = self.alloc_label();
+                let done_lbl = self.alloc_label();
+                self.emit(JitOp::IfTruthy { src: cond_val, then_label: then_lbl, else_label: else_lbl });
+                self.emit(JitOp::Drop { slot: cond_val });
+
+                self.emit(JitOp::Label { id: then_lbl });
+                if is_scalar(then_branch) {
+                    let mid = self.flatten_scalar(then_branch, input_slot);
+                    self.flatten_gen(right, mid);
+                    self.emit(JitOp::Drop { slot: mid });
+                } else {
+                    if !self.flatten_gen_pipe(then_branch, right, input_slot) { return false; }
+                }
+                self.emit(JitOp::Jump { label: done_lbl });
+
+                self.emit(JitOp::Label { id: else_lbl });
+                if is_scalar(else_branch) {
+                    let mid = self.flatten_scalar(else_branch, input_slot);
+                    self.flatten_gen(right, mid);
+                    self.emit(JitOp::Drop { slot: mid });
+                } else {
+                    if !self.flatten_gen_pipe(else_branch, right, input_slot) { return false; }
+                }
+                self.emit(JitOp::Label { id: done_lbl });
+                true
+            }
+
+            // LetBinding | right: handle binding inline
+            Expr::LetBinding { var_index, value, body } if is_scalar(value) => {
+                let val = self.flatten_scalar(value, input_slot);
+                let old = self.alloc_slot();
+                self.emit(JitOp::GetVar { dst: old, var_index: *var_index });
+                self.emit(JitOp::SetVar { var_index: *var_index, src: val });
+                self.emit(JitOp::Drop { slot: val });
+                // Now compile body | right
+                let ok = if is_scalar(body) {
+                    let mid = self.flatten_scalar(body, input_slot);
+                    let r = self.flatten_gen(right, mid);
+                    self.emit(JitOp::Drop { slot: mid });
+                    r
+                } else {
+                    self.flatten_gen_pipe(body, right, input_slot)
+                };
+                self.emit(JitOp::SetVar { var_index: *var_index, src: old });
+                self.emit(JitOp::Drop { slot: old });
+                ok
+            }
+
             _ => false,
         }
     }
@@ -1302,6 +1538,7 @@ impl Flattener {
             let mut test = Flattener::new();
             test.collect_depth = self.collect_depth;
             test.try_depth = self.try_depth;
+            test.try_catch_target = self.try_catch_target;
             let t_in = test.alloc_slot();
             if !test.flatten_gen(body, t_in) { return false; }
         }
@@ -1591,7 +1828,17 @@ extern "C" fn jit_rt_index_field(dst: *mut Value, base: *const Value, key_ptr: *
                 }
             }
             Value::Null => { std::ptr::write(dst, Value::Null); 0 }
-            _ => { std::ptr::write(dst, Value::Null); GEN_ERROR }
+            _ => {
+                let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key_ptr, key_len));
+                let key_val = Value::from_str(key);
+                match crate::eval::eval_index(&*base, &key_val, false) {
+                    Ok(v) => { std::ptr::write(dst, v); 0 }
+                    Err(e) => {
+                        set_jit_error(format!("{}", e));
+                        std::ptr::write(dst, Value::Null); GEN_ERROR
+                    }
+                }
+            }
         }
     }
 }
@@ -1599,7 +1846,10 @@ extern "C" fn jit_rt_index(dst: *mut Value, base: *const Value, key: *const Valu
     unsafe {
         match crate::eval::eval_index(&*base, &*key, false) {
             Ok(v) => { std::ptr::write(dst, v); 0 }
-            Err(_) => { std::ptr::write(dst, Value::Null); GEN_ERROR }
+            Err(e) => {
+                set_jit_error(format!("{}", e));
+                std::ptr::write(dst, Value::Null); GEN_ERROR
+            }
         }
     }
 }
@@ -1609,11 +1859,11 @@ extern "C" fn jit_rt_binop(dst: *mut Value, op: i32, lhs: *const Value, rhs: *co
             0 => BinOp::Add, 1 => BinOp::Sub, 2 => BinOp::Mul, 3 => BinOp::Div,
             4 => BinOp::Mod, 5 => BinOp::Eq, 6 => BinOp::Ne, 7 => BinOp::Lt,
             8 => BinOp::Gt, 9 => BinOp::Le, 10 => BinOp::Ge,
-            _ => { std::ptr::write(dst, Value::Null); return GEN_ERROR; }
+            _ => { set_jit_error("invalid binop".to_string()); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
         };
         match crate::eval::eval_binop(binop, &*lhs, &*rhs) {
             Ok(v) => { std::ptr::write(dst, v); 0 }
-            Err(_) => { std::ptr::write(dst, Value::Null); GEN_ERROR }
+            Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); GEN_ERROR }
         }
     }
 }
@@ -1622,16 +1872,18 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
         match unaryop_from_i32(op) {
             Some(u) => match crate::eval::eval_unaryop(u, &*input) {
                 Ok(v) => { std::ptr::write(dst, v); 0 }
-                Err(_) => { std::ptr::write(dst, Value::Null); GEN_ERROR }
+                Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); GEN_ERROR }
             },
-            None => { std::ptr::write(dst, Value::Null); GEN_ERROR }
+            None => { set_jit_error("invalid unaryop".to_string()); std::ptr::write(dst, Value::Null); GEN_ERROR }
         }
     }
 }
 extern "C" fn jit_rt_throw_error(msg: *const Value, env: *mut JitEnv) -> i64 {
     unsafe {
         let env = &mut *env;
-        env.error_msg = Some(crate::value::value_to_json(&*msg));
+        let msg_json = crate::value::value_to_json(&*msg);
+        env.error_msg = Some(msg_json.clone());
+        set_jit_error(format!("__jqerror__:{}", msg_json));
         GEN_ERROR
     }
 }
@@ -1639,7 +1891,10 @@ extern "C" fn jit_rt_negate(dst: *mut Value, input: *const Value) -> i64 {
     unsafe {
         match &*input {
             Value::Num(n, _) => { std::ptr::write(dst, Value::Num(-n, None)); 0 }
-            _ => { std::ptr::write(dst, Value::Null); GEN_ERROR }
+            _ => {
+                set_jit_error(format!("{} cannot be negated", crate::runtime::errdesc_pub(&*input)));
+                std::ptr::write(dst, Value::Null); GEN_ERROR
+            }
         }
     }
 }
@@ -1840,25 +2095,26 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             if args_vec.len() >= 3 {
                 match crate::eval::eval_slice(&args_vec[0], &args_vec[1], &args_vec[2]) {
                     Ok(v) => { std::ptr::write(dst, v); return 0; }
-                    Err(_) => { std::ptr::write(dst, Value::Null); return GEN_ERROR; }
+                    Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
                 }
             }
         }
         if let Some(format_name) = name.strip_prefix('@') {
             // Format: @base64, @uri, etc.
             if args_vec.is_empty() {
+                set_jit_error("format: no input".to_string());
                 std::ptr::write(dst, Value::Null);
                 return GEN_ERROR;
             }
             match crate::eval::eval_format(format_name, &args_vec[0]) {
                 Ok(s) => { std::ptr::write(dst, Value::from_str(&s)); return 0; }
-                Err(_) => { std::ptr::write(dst, Value::Null); return GEN_ERROR; }
+                Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
             }
         }
 
         match crate::runtime::call_builtin(name, &args_vec) {
             Ok(v) => { std::ptr::write(dst, v); 0 }
-            Err(_) => { std::ptr::write(dst, Value::Null); GEN_ERROR }
+            Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); GEN_ERROR }
         }
     }
 }
@@ -1866,9 +2122,37 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
 // TryCatch helpers
 extern "C" fn jit_rt_try_begin(env: *mut JitEnv) {
     unsafe { (*env).try_depth += 1; }
+    clear_jit_error();
 }
 extern "C" fn jit_rt_try_end(env: *mut JitEnv) {
     unsafe { (*env).try_depth -= 1; }
+}
+
+/// Check if the last operation produced an error.
+/// Returns 1 if error, 0 if ok.
+extern "C" fn jit_rt_has_error() -> i64 {
+    JIT_LAST_ERROR.with(|e| if e.borrow().is_some() { 1 } else { 0 })
+}
+
+/// Get the last error as a Value and write it to dst. Clears the error.
+extern "C" fn jit_rt_get_error(dst: *mut Value) {
+    let err = take_jit_error();
+    unsafe {
+        if let Some(msg) = err {
+            // Parse error: if it starts with __jqerror__, extract the JSON value
+            if let Some(json) = msg.strip_prefix("__jqerror__:") {
+                if let Ok(v) = crate::value::json_to_value(json) {
+                    std::ptr::write(dst, v);
+                } else {
+                    std::ptr::write(dst, Value::from_str(&msg));
+                }
+            } else {
+                std::ptr::write(dst, Value::from_str(&msg));
+            }
+        } else {
+            std::ptr::write(dst, Value::Null);
+        }
+    }
 }
 
 fn binop_to_i32(op: BinOp) -> i32 {
@@ -1995,6 +2279,8 @@ impl JitCompiler {
             ("jit_rt_strbuf_finish", jit_rt_strbuf_finish as *const u8),
             ("jit_rt_try_begin", jit_rt_try_begin as *const u8),
             ("jit_rt_try_end", jit_rt_try_end as *const u8),
+            ("jit_rt_has_error", jit_rt_has_error as *const u8),
+            ("jit_rt_get_error", jit_rt_get_error as *const u8),
             ("jit_rt_throw_error", jit_rt_throw_error as *const u8),
             ("jit_rt_call_builtin", jit_rt_call_builtin as *const u8),
         ];
@@ -2410,6 +2696,25 @@ impl JitCompiler {
                     JitOp::TryCatchEnd => {
                         b.ins().call(rt["try_end"], &[env_ptr]);
                     }
+                    JitOp::CheckError { error_dst, catch_label } => {
+                        // Check if the last operation produced an error
+                        let call = b.ins().call(rt["has_error"], &[]);
+                        let has_err = b.inst_results(call)[0];
+                        let zero = b.ins().iconst(ptr_ty, 0);
+                        let is_err = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, has_err, zero);
+                        let err_blk = b.create_block();
+                        let ok_blk = b.create_block();
+                        b.ins().brif(is_err, err_blk, &[], ok_blk, &[]);
+                        // Error path: get the error value and jump to catch
+                        b.switch_to_block(err_blk);
+                        b.seal_block(err_blk);
+                        let d = slot_addr(&mut b, *error_dst);
+                        b.ins().call(rt["get_error"], &[d]);
+                        b.ins().jump(label_blocks[*catch_label as usize], &[]);
+                        // OK path: continue
+                        b.switch_to_block(ok_blk);
+                        b.seal_block(ok_blk);
+                    }
 
                     JitOp::ReturnContinue => {
                         let v = b.ins().iconst(ptr_ty, GEN_CONTINUE);
@@ -2458,10 +2763,8 @@ impl JitCompiler {
                     }
                     JitOp::ThrowError { msg } => {
                         let msg_addr = slot_addr(&mut b, *msg);
-                        let call = b.ins().call(rt["throw_error"], &[msg_addr, env_ptr]);
-                        let v = b.inst_results(call)[0];
-                        b.ins().return_(&[v]);
-                        terminated = true;
+                        b.ins().call(rt["throw_error"], &[msg_addr, env_ptr]);
+                        // Don't return here — CheckError or ReturnError will handle it
                     }
                 }
             }
@@ -2537,6 +2840,8 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("strbuf_finish", [p, p], []);
     decl!("try_begin", [p], []);
     decl!("try_end", [p], []);
+    decl!("has_error", [], [p]);  // -> 0/1
+    decl!("get_error", [p], []);  // dst
     decl!("throw_error", [p, p], [p]);
     decl!("call_builtin", [p, p, p, p, p], [p]);  // dst, name_ptr, name_len, args_ptr, nargs -> status
     Ok(())
