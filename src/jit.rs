@@ -1274,15 +1274,16 @@ impl Flattener {
                     ok
                 } else {
                     // Both generators: rewrite as nested LetBinding
-                    // (lhs_gen) as $__l | (rhs_gen) as $__r | $__l op $__r
+                    // jq evaluates rhs as outer, lhs as inner:
+                    // (rhs_gen) as $__r | (lhs_gen) as $__l | $__l op $__r
                     let lhs_var: u16 = 10100;
                     let rhs_var: u16 = 10101;
                     let rewritten = Expr::LetBinding {
-                        var_index: lhs_var,
-                        value: Box::new((**lhs).clone()),
+                        var_index: rhs_var,
+                        value: Box::new((**rhs).clone()),
                         body: Box::new(Expr::LetBinding {
-                            var_index: rhs_var,
-                            value: Box::new((**rhs).clone()),
+                            var_index: lhs_var,
+                            value: Box::new((**lhs).clone()),
                             body: Box::new(Expr::BinOp {
                                 op: *op,
                                 lhs: Box::new(Expr::LoadVar { var_index: lhs_var }),
@@ -2937,7 +2938,12 @@ impl Flattener {
                 self.emit(JitOp::Label { id: done });
                 true
             }
-            _ => false,
+            _ => {
+                // Generic source: use flatten_gen_with_each_output as a fallback
+                self.flatten_gen_with_each_output(source, input_slot, &|s, elem| {
+                    emit_step(s, elem);
+                })
+            }
         }
     }
 
