@@ -971,26 +971,26 @@ fn eval_closure_op(op: ClosureOpKind, container: &Value, key_expr: &Expr, input:
     }
 }
 
-/// Standalone assign for JIT: evaluate path assignment with a fresh env.
+/// Standalone assign for JIT: collect all results into an array.
 pub fn eval_assign_standalone(path_expr: &Expr, value_expr: &Expr, input: Value, env_ref: &Rc<RefCell<Env>>) -> Result<Value> {
-    let mut result = Value::Null;
+    let mut results = Vec::new();
     let assign_expr = Expr::Assign {
         path_expr: Box::new(path_expr.clone()),
         value_expr: Box::new(value_expr.clone()),
     };
-    eval(&assign_expr, input, env_ref, &mut |v| { result = v; Ok(true) })?;
-    Ok(result)
+    eval(&assign_expr, input, env_ref, &mut |v| { results.push(v); Ok(true) })?;
+    Ok(Value::Arr(Rc::new(results)))
 }
 
-/// Standalone update for JIT: evaluate path update with a fresh env.
+/// Standalone update for JIT: collect all results into an array.
 pub fn eval_update_standalone(path_expr: &Expr, update_expr: &Expr, input: Value, env_ref: &Rc<RefCell<Env>>) -> Result<Value> {
-    let mut result = Value::Null;
+    let mut results = Vec::new();
     let update_expr_ir = Expr::Update {
         path_expr: Box::new(path_expr.clone()),
         update_expr: Box::new(update_expr.clone()),
     };
-    eval(&update_expr_ir, input, env_ref, &mut |v| { result = v; Ok(true) })?;
-    Ok(result)
+    eval(&update_expr_ir, input, env_ref, &mut |v| { results.push(v); Ok(true) })?;
+    Ok(Value::Arr(Rc::new(results)))
 }
 
 /// Standalone path evaluation for JIT: collect all path results into an array.

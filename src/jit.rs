@@ -862,16 +862,29 @@ impl Flattener {
             }
             // IndexOpt: produces 0 or 1 outputs (suppresses errors)
             Expr::IndexOpt { expr: base_expr, key: key_expr } => {
-                if !is_scalar(base_expr) || !is_scalar(key_expr) { return false; }
-                // Compile as: try (base[key]) catch empty
-                let try_catch = Expr::TryCatch {
-                    try_expr: Box::new(Expr::Index {
-                        expr: Box::new((**base_expr).clone()),
-                        key: Box::new((**key_expr).clone()),
+                if is_scalar(base_expr) && is_scalar(key_expr) {
+                    // Compile as: try (base[key]) catch empty
+                    let try_catch = Expr::TryCatch {
+                        try_expr: Box::new(Expr::Index {
+                            expr: Box::new((**base_expr).clone()),
+                            key: Box::new((**key_expr).clone()),
+                        }),
+                        catch_expr: Box::new(Expr::Empty),
+                    };
+                    return self.flatten_gen(&try_catch, input_slot);
+                }
+                // Non-scalar base: pipe base into try(.key) catch empty
+                let inner = Expr::Pipe {
+                    left: Box::new((**base_expr).clone()),
+                    right: Box::new(Expr::TryCatch {
+                        try_expr: Box::new(Expr::Index {
+                            expr: Box::new(Expr::Input),
+                            key: Box::new((**key_expr).clone()),
+                        }),
+                        catch_expr: Box::new(Expr::Empty),
                     }),
-                    catch_expr: Box::new(Expr::Empty),
                 };
-                self.flatten_gen(&try_catch, input_slot)
+                self.flatten_gen(&inner, input_slot)
             }
 
             Expr::IfThenElse { cond, then_branch, else_branch } => {
@@ -1154,8 +1167,32 @@ impl Flattener {
                 ok
             }
 
+            Expr::Foreach { source, init, var_index, acc_index, update, extract } if !is_scalar(init) => {
+                // Generator init: rewrite as init as $tmp | foreach source as $var ($tmp; update; extract)
+                if !is_scalar(update) { return false; }
+                if let Some(ext) = extract.as_ref() {
+                    let mut test = self.test_flattener();
+                    let t_in = test.alloc_slot();
+                    if !test.flatten_gen(ext, t_in) { return false; }
+                }
+                let init_var: u16 = 10500;
+                let rewritten = Expr::LetBinding {
+                    var_index: init_var,
+                    value: Box::new((**init).clone()),
+                    body: Box::new(Expr::Foreach {
+                        source: source.clone(),
+                        init: Box::new(Expr::LoadVar { var_index: init_var }),
+                        var_index: *var_index,
+                        acc_index: *acc_index,
+                        update: update.clone(),
+                        extract: extract.clone(),
+                    }),
+                };
+                return self.flatten_gen(&rewritten, input_slot);
+            }
+
             Expr::Foreach { source, init, var_index, acc_index, update, extract } => {
-                if !is_scalar(init) || !is_scalar(update) { return false; }
+                if !is_scalar(update) { return false; }
                 // Pre-check: if extract exists, it must be compilable as a generator
                 if let Some(ext) = extract.as_ref() {
                     let mut test = self.test_flattener();
@@ -1216,28 +1253,28 @@ impl Flattener {
                     });
                     return ok;
                 }
-                false
-            }
-
-            // Assign: delegate complex path expressions to runtime
-            Expr::Assign { path_expr, value_expr } if extract_simple_path(path_expr).is_none() => {
-                // Fall back: store expressions and delegate to runtime
-                // For now, use a runtime helper for Assign
+                // Complex path: delegate to runtime (only safe without FuncCall refs)
+                if contains_func_call(path_expr) || contains_func_call(value_expr) {
+                    return false;
+                }
                 let idx = self.closure_ops.len();
                 self.closure_ops.push((**path_expr).clone());
                 let idx2 = self.closure_ops.len();
                 self.closure_ops.push((**value_expr).clone());
                 let inp = self.alloc_slot();
                 self.emit(JitOp::Clone { dst: inp, src: input_slot });
-                let out = self.alloc_slot();
+                let arr = self.alloc_slot();
                 self.emit_propagating(JitOp::CallBuiltin {
-                    dst: out,
+                    dst: arr,
                     name: format!("__assign__:{}:{}", idx, idx2),
                     args: vec![inp],
                 });
                 self.emit(JitOp::Drop { slot: inp });
-                self.emit_yield(out);
-                self.emit(JitOp::Drop { slot: out });
+                // Result is an array of outputs; iterate and yield each
+                self.flatten_each_with_action(arr, false, &|s, elem| {
+                    s.emit_yield(elem);
+                });
+                self.emit(JitOp::Drop { slot: arr });
                 true
             }
 
@@ -1350,22 +1387,27 @@ impl Flattener {
                     self.emit(JitOp::Drop { slot: path_arr });
                     return ok;
                 }
-                // Complex path: delegate to runtime
+                // Complex path: delegate to runtime (only safe without FuncCall refs)
+                if contains_func_call(path_expr) || contains_func_call(update_expr) {
+                    return false;
+                }
                 let idx = self.closure_ops.len();
                 self.closure_ops.push((**path_expr).clone());
                 let idx2 = self.closure_ops.len();
                 self.closure_ops.push((**update_expr).clone());
                 let inp = self.alloc_slot();
                 self.emit(JitOp::Clone { dst: inp, src: input_slot });
-                let out = self.alloc_slot();
+                let arr = self.alloc_slot();
                 self.emit_propagating(JitOp::CallBuiltin {
-                    dst: out,
+                    dst: arr,
                     name: format!("__update__:{}:{}", idx, idx2),
                     args: vec![inp],
                 });
                 self.emit(JitOp::Drop { slot: inp });
-                self.emit_yield(out);
-                self.emit(JitOp::Drop { slot: out });
+                self.flatten_each_with_action(arr, false, &|s, elem| {
+                    s.emit_yield(elem);
+                });
+                self.emit(JitOp::Drop { slot: arr });
                 true
             }
 
@@ -1387,8 +1429,21 @@ impl Flattener {
                 }
             }
 
+            Expr::Limit { count, generator } if !is_scalar(count) => {
+                // Generator count: rewrite as count as $n | limit($n; body)
+                let count_var: u16 = 10300;
+                let rewritten = Expr::LetBinding {
+                    var_index: count_var,
+                    value: Box::new((**count).clone()),
+                    body: Box::new(Expr::Limit {
+                        count: Box::new(Expr::LoadVar { var_index: count_var }),
+                        generator: generator.clone(),
+                    }),
+                };
+                return self.flatten_gen(&rewritten, input_slot);
+            }
+
             Expr::Limit { count, generator } => {
-                if !is_scalar(count) { return false; }
                 // Pre-check: generator must be compilable
                 {
                     let mut test = self.test_flattener();
@@ -1589,20 +1644,6 @@ impl Flattener {
                 self.flatten_gen(&rewritten, input_slot)
             }
 
-            // Limit with generator count: limit(gen; body) → gen as $n | limit($n; body)
-            Expr::Limit { count, generator } if !is_scalar(count) => {
-                let count_var: u16 = 10300;
-                let rewritten = Expr::LetBinding {
-                    var_index: count_var,
-                    value: Box::new((**count).clone()),
-                    body: Box::new(Expr::Limit {
-                        count: Box::new(Expr::LoadVar { var_index: count_var }),
-                        generator: generator.clone(),
-                    }),
-                };
-                self.flatten_gen(&rewritten, input_slot)
-            }
-
             // Alternative with generator primary:
             // Collect non-null/false outputs. If any, yield them. If none, yield fallback.
             Expr::Alternative { primary, fallback } if !is_scalar(primary) => {
@@ -1696,40 +1737,7 @@ impl Flattener {
                 self.flatten_gen(&rewritten, input_slot)
             }
 
-            // Foreach with generator init: foreach source as $x (gen_init; update; extract)
-            // Rewrite: gen_init as $acc | foreach source as $x ($acc; update; extract)
-            Expr::Foreach { source, init, var_index, acc_index, update, extract } if !is_scalar(init) => {
-                if !is_scalar(update) { return false; }
-                if let Some(ext) = extract.as_ref() {
-                    let mut test = self.test_flattener();
-                    let t_in = test.alloc_slot();
-                    if !test.flatten_gen(ext, t_in) { return false; }
-                }
-                let init_var: u16 = 10500;
-                let rewritten = Expr::LetBinding {
-                    var_index: init_var,
-                    value: Box::new((**init).clone()),
-                    body: Box::new(Expr::Foreach {
-                        source: source.clone(),
-                        init: Box::new(Expr::LoadVar { var_index: init_var }),
-                        var_index: *var_index,
-                        acc_index: *acc_index,
-                        update: update.clone(),
-                        extract: extract.clone(),
-                    }),
-                };
-                self.flatten_gen(&rewritten, input_slot)
-            }
-
-            // Assign/Update with .[] path: e.g., .[] = 1, .[] += 2
-            // These need runtime path evaluation
-            Expr::Assign { path_expr, value_expr } if extract_simple_path(path_expr).is_none() => {
-                // Fall back to runtime for complex path assignments
-                false
-            }
-            Expr::Update { path_expr, update_expr } if extract_simple_path(path_expr).is_none() => {
-                false
-            }
+            // (dead code removed — foreach gen-init moved earlier, Assign/Update handled above)
 
             // ClosureOp: sort_by, group_by, min_by, max_by, unique_by
             Expr::ClosureOp { op, input_expr, key_expr } => {
@@ -2761,9 +2769,23 @@ impl Flattener {
                 self.emit(JitOp::Drop { slot: container });
             }
             _ => {
-                self.emit(JitOp::SetVar { var_index, src: old });
-                self.emit(JitOp::Drop { slot: old });
-                return false;
+                // Generic fallback: collect value outputs, iterate each
+                self.emit(JitOp::CollectBegin);
+                self.collect_depth += 1;
+                let ok = self.flatten_gen(value, input_slot);
+                self.collect_depth -= 1;
+                if !ok {
+                    self.emit(JitOp::SetVar { var_index, src: old });
+                    self.emit(JitOp::Drop { slot: old });
+                    return false;
+                }
+                let collected = self.alloc_slot();
+                self.emit(JitOp::CollectFinish { dst: collected });
+                self.flatten_each_with_action(collected, false, &|s, elem| {
+                    s.emit(JitOp::SetVar { var_index, src: elem });
+                    s.flatten_gen(body, input_slot);
+                });
+                self.emit(JitOp::Drop { slot: collected });
             }
         }
 
@@ -2808,7 +2830,30 @@ impl Flattener {
                 self.emit(JitOp::Label { id: done_lbl });
                 true
             }
-            _ => false,
+            _ => {
+                // Generic fallback: collect cond outputs, iterate each
+                self.emit(JitOp::CollectBegin);
+                self.collect_depth += 1;
+                let ok = self.flatten_gen(cond, input_slot);
+                self.collect_depth -= 1;
+                if !ok { return false; }
+                let collected = self.alloc_slot();
+                self.emit(JitOp::CollectFinish { dst: collected });
+                self.flatten_each_with_action(collected, false, &|s, elem| {
+                    let then_lbl = s.alloc_label();
+                    let else_lbl = s.alloc_label();
+                    let done_lbl = s.alloc_label();
+                    s.emit(JitOp::IfTruthy { src: elem, then_label: then_lbl, else_label: else_lbl });
+                    s.emit(JitOp::Label { id: then_lbl });
+                    s.flatten_gen(then_branch, input_slot);
+                    s.emit(JitOp::Jump { label: done_lbl });
+                    s.emit(JitOp::Label { id: else_lbl });
+                    s.flatten_gen(else_branch, input_slot);
+                    s.emit(JitOp::Label { id: done_lbl });
+                });
+                self.emit(JitOp::Drop { slot: collected });
+                true
+            }
         }
     }
 
@@ -3044,6 +3089,30 @@ fn extract_simple_path(expr: &Expr) -> Option<Vec<PathComponent>> {
             Some(components)
         }
         _ => None,
+    }
+}
+
+/// Check if an expression tree contains any FuncCall references.
+/// Used to guard runtime delegation (which loses function context).
+fn contains_func_call(expr: &Expr) -> bool {
+    match expr {
+        Expr::FuncCall { .. } => true,
+        Expr::Pipe { left, right } => contains_func_call(left) || contains_func_call(right),
+        Expr::Comma { left, right } => contains_func_call(left) || contains_func_call(right),
+        Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => contains_func_call(expr) || contains_func_call(key),
+        Expr::Each { input_expr } | Expr::EachOpt { input_expr } => contains_func_call(input_expr),
+        Expr::IfThenElse { cond, then_branch, else_branch } => contains_func_call(cond) || contains_func_call(then_branch) || contains_func_call(else_branch),
+        Expr::LetBinding { value, body, .. } => contains_func_call(value) || contains_func_call(body),
+        Expr::TryCatch { try_expr, catch_expr } => contains_func_call(try_expr) || contains_func_call(catch_expr),
+        Expr::Collect { generator } => contains_func_call(generator),
+        Expr::BinOp { lhs, rhs, .. } => contains_func_call(lhs) || contains_func_call(rhs),
+        Expr::UnaryOp { operand, .. } | Expr::Negate { operand } => contains_func_call(operand),
+        Expr::CallBuiltin { args, .. } => args.iter().any(|a| contains_func_call(a)),
+        Expr::Update { path_expr, update_expr } => contains_func_call(path_expr) || contains_func_call(update_expr),
+        Expr::Assign { path_expr, value_expr } => contains_func_call(path_expr) || contains_func_call(value_expr),
+        Expr::Alternative { primary, fallback } => contains_func_call(primary) || contains_func_call(fallback),
+        Expr::Slice { expr, from, to } => contains_func_call(expr) || from.as_ref().map_or(false, |f| contains_func_call(f)) || to.as_ref().map_or(false, |t| contains_func_call(t)),
+        _ => false, // Literals, Input, LoadVar, etc. are safe
     }
 }
 
