@@ -82,6 +82,8 @@ fn is_scalar(expr: &Expr) -> bool {
         Expr::SetPath { path, value } => is_scalar(path) && is_scalar(value),
         Expr::GetPath { path } => is_scalar(path),
         Expr::DelPaths { paths } => is_scalar(paths),
+        // Note: Collect is NOT scalar here because flatten_scalar cannot propagate
+        // failure from the inner generator. Collect is handled in flatten_gen directly.
         Expr::Loc { .. } | Expr::Env | Expr::Builtins => true,
         Expr::Debug { expr } => is_scalar(expr),
         Expr::Stderr { expr } => is_scalar(expr),
@@ -131,6 +133,8 @@ enum JitOp {
     ArrayGet { dst: SlotId, arr: SlotId, idx_var: u32 },
     ObjGetByIdx { dst: SlotId, obj: SlotId, idx_var: u32 },
     IncVar { var: u32 },
+    /// Reset a variable to 0 (used to reinitialize loop counters)
+    InitVar { var: u32 },
 
     // jq variables
     GetVar { dst: SlotId, var_index: u16 },
@@ -1245,44 +1249,41 @@ impl Flattener {
                 self.try_depth += 1;
                 self.emit(JitOp::TryCatchBegin);
 
-                // Compile try body, but instead of yielding directly, pipe to right
-                // We need to handle the try body as left | right
+                // Compile try body, but pipe results to right OUTSIDE the inner try scope.
+                // Semantics of (try X catch Y) | Z:
+                //   - errors in X → caught by Y
+                //   - errors in Z → propagate to outer try (not caught by Y)
                 if is_scalar(try_expr) {
                     let mid = self.flatten_scalar(try_expr, input_slot);
+                    // End inner try scope before piping to right
+                    self.emit(JitOp::TryCatchEnd);
+                    self.try_depth -= 1;
+                    self.try_catch_target = old_target;
                     self.flatten_gen(right, mid);
                     self.emit(JitOp::Drop { slot: mid });
                 } else {
-                    // Try to compile as generator pipe
-                    if !self.flatten_gen_pipe(try_expr, right, input_slot) {
-                        // If that fails, try as standalone generator
-                        // where each output is piped to right inline
-                        // This is complex; for now, just try flatten_gen and hope
-                        // the results get piped through
-                        self.emit(JitOp::TryCatchEnd);
-                        self.try_depth -= 1;
-                        self.try_catch_target = old_target;
-                        return false;
-                    }
+                    // try_expr is a generator; for each output, pipe to right outside try
+                    // This is complex: we need try scope for try_expr but not for right.
+                    // Strategy: flatten try_expr as generator, yield results, then pipe to right
+                    // Use a fresh approach: compile try_expr, each output stored, then pipe
+                    // For now, fall back if this case arises
+                    self.emit(JitOp::TryCatchEnd);
+                    self.try_depth -= 1;
+                    self.try_catch_target = old_target;
+                    return false;
                 }
-
-                self.emit(JitOp::TryCatchEnd);
-                self.try_depth -= 1;
-                self.try_catch_target = old_target;
 
                 self.emit(JitOp::Jump { label: done_label });
 
                 // Catch handler
                 self.emit(JitOp::Label { id: catch_label });
                 self.emit(JitOp::TryCatchEnd);
-                // Pipe catch output through right
+                // Pipe catch output through right (outside inner try scope)
                 if is_scalar(catch_expr) {
                     let catch_val = self.flatten_scalar(catch_expr, error_slot);
                     self.flatten_gen(right, catch_val);
                     self.emit(JitOp::Drop { slot: catch_val });
                 } else {
-                    // catch_expr is a generator — compile as catch_expr | right
-                    // For simplicity, just compile catch_expr as a generator
-                    // and hope right is handled inside
                     self.flatten_gen_pipe(catch_expr, right, error_slot);
                 }
                 self.emit(JitOp::Drop { slot: error_slot });
@@ -1320,6 +1321,38 @@ impl Flattener {
                 }
                 self.emit(JitOp::Label { id: done_lbl });
                 true
+            }
+
+            // Collect | right: collect produces exactly one array, pipe to right
+            Expr::Collect { generator } => {
+                // Pre-check: can we compile the generator?
+                {
+                    let mut test = Flattener::new();
+                    test.collect_depth = self.collect_depth + 1;
+                    test.try_depth = self.try_depth;
+                    test.try_catch_target = self.try_catch_target;
+                    let t_in = test.alloc_slot();
+                    if !test.flatten_gen(generator, t_in) { return false; }
+                }
+                // Pre-check: can we compile right?
+                {
+                    let mut test = Flattener::new();
+                    test.collect_depth = self.collect_depth;
+                    test.try_depth = self.try_depth;
+                    test.try_catch_target = self.try_catch_target;
+                    let t_in = test.alloc_slot();
+                    if !test.flatten_gen(right, t_in) { return false; }
+                }
+                self.emit(JitOp::CollectBegin);
+                self.collect_depth += 1;
+                let ok = self.flatten_gen(generator, input_slot);
+                self.collect_depth -= 1;
+                if !ok { return false; }
+                let arr = self.alloc_slot();
+                self.emit(JitOp::CollectFinish { dst: arr });
+                let r = self.flatten_gen(right, arr);
+                self.emit(JitOp::Drop { slot: arr });
+                r
             }
 
             // LetBinding | right: handle binding inline
@@ -1367,6 +1400,7 @@ impl Flattener {
             let body = self.alloc_label();
             let end = self.alloc_label();
             self.emit(JitOp::GetLen { dst_var: len, src: container });
+            self.emit(JitOp::InitVar { var: idx });
             self.emit(JitOp::Label { id: head });
             self.emit(JitOp::LoopCheck { idx_var: idx, len_var: len, body_label: body, done_label: end });
             self.emit(JitOp::Label { id: body });
@@ -1389,6 +1423,7 @@ impl Flattener {
             let body = self.alloc_label();
             let end = self.alloc_label();
             self.emit(JitOp::GetLen { dst_var: len, src: container });
+            self.emit(JitOp::InitVar { var: idx });
             self.emit(JitOp::Label { id: head });
             self.emit(JitOp::LoopCheck { idx_var: idx, len_var: len, body_label: body, done_label: end });
             self.emit(JitOp::Label { id: body });
@@ -1436,6 +1471,7 @@ impl Flattener {
             let body = self.alloc_label();
             let end = self.alloc_label();
             self.emit(JitOp::GetLen { dst_var: len, src: container });
+            self.emit(JitOp::InitVar { var: idx });
             self.emit(JitOp::Label { id: head });
             self.emit(JitOp::LoopCheck { idx_var: idx, len_var: len, body_label: body, done_label: end });
             self.emit(JitOp::Label { id: body });
@@ -1459,6 +1495,7 @@ impl Flattener {
             let body = self.alloc_label();
             let end = self.alloc_label();
             self.emit(JitOp::GetLen { dst_var: len, src: container });
+            self.emit(JitOp::InitVar { var: idx });
             self.emit(JitOp::Label { id: head });
             self.emit(JitOp::LoopCheck { idx_var: idx, len_var: len, body_label: body, done_label: end });
             self.emit(JitOp::Label { id: body });
@@ -1865,6 +1902,7 @@ impl Flattener {
             let body = self.alloc_label();
             let end = self.alloc_label();
             self.emit(JitOp::GetLen { dst_var: len, src: container });
+            self.emit(JitOp::InitVar { var: idx });
             self.emit(JitOp::Label { id: head });
             self.emit(JitOp::LoopCheck { idx_var: idx, len_var: len, body_label: body, done_label: end });
             self.emit(JitOp::Label { id: body });
@@ -1887,6 +1925,7 @@ impl Flattener {
             let body = self.alloc_label();
             let end = self.alloc_label();
             self.emit(JitOp::GetLen { dst_var: len, src: container });
+            self.emit(JitOp::InitVar { var: idx });
             self.emit(JitOp::Label { id: head });
             self.emit(JitOp::LoopCheck { idx_var: idx, len_var: len, body_label: body, done_label: end });
             self.emit(JitOp::Label { id: body });
@@ -2706,6 +2745,10 @@ impl JitCompiler {
                         let next = b.ins().iadd(v, one);
                         b.def_var(vars[*var as usize], next);
                     }
+                    JitOp::InitVar { var } => {
+                        let zero = b.ins().iconst(ptr_ty, 0);
+                        b.def_var(vars[*var as usize], zero);
+                    }
                     JitOp::GetVar { dst, var_index } => {
                         let d = slot_addr(&mut b, *dst);
                         let vi = b.ins().iconst(types::I32, *var_index as i64);
@@ -3015,10 +3058,13 @@ pub fn execute_jit(func: JitFilterFn, input: &Value) -> Result<Vec<Value>> {
              &mut results as *mut Vec<Value> as *mut u8)
     };
     if result == GEN_ERROR {
-        if let Some(msg) = env.error_msg {
-            bail!("__jqerror__:{}", msg);
-        }
-        bail!("JIT execution error");
+        // Append error as a Value::Error result (like the interpreter does)
+        let err_msg = if let Some(msg) = env.error_msg {
+            msg
+        } else {
+            "JIT execution error".to_string()
+        };
+        results.push(Value::Error(Rc::new(err_msg)));
     }
     Ok(results)
 }

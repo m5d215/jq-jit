@@ -143,10 +143,16 @@ fn main() {
         }
     };
 
-    let process_input = |input: &Value, out: &mut io::BufWriter<io::StdoutLock>, any_false: &mut bool| {
+    let mut had_error = false;
+    let process_input = |input: &Value, out: &mut io::BufWriter<io::StdoutLock>, any_false: &mut bool, had_error: &mut bool| {
         match filter.execute(input) {
             Ok(results) => {
                 for result in &results {
+                    if let Value::Error(e) = result {
+                        eprintln!("jq: error: {}", e.as_str());
+                        *had_error = true;
+                        continue;
+                    }
                     if exit_status && !result.is_true() {
                         *any_false = true;
                     }
@@ -159,13 +165,19 @@ fn main() {
                 }
             }
             Err(e) => {
-                eprintln!("jq: error: {}", e);
+                let msg = format!("{}", e);
+                if let Some(jq_msg) = msg.strip_prefix("__jqerror__:") {
+                    eprintln!("jq: error: {}", jq_msg);
+                } else {
+                    eprintln!("jq: error: {}", msg);
+                }
+                *had_error = true;
             }
         }
     };
 
     if null_input {
-        process_input(&Value::Null, &mut out, &mut any_output_false);
+        process_input(&Value::Null, &mut out, &mut any_output_false, &mut had_error);
     } else if files.is_empty() {
         // Read from stdin
         let stdin = io::stdin();
@@ -177,7 +189,7 @@ fn main() {
                         if slurp {
                             lines.push(Value::from_str(&l));
                         } else {
-                            process_input(&Value::from_str(&l), &mut out, &mut any_output_false);
+                            process_input(&Value::from_str(&l), &mut out, &mut any_output_false, &mut had_error);
                         }
                     }
                     Err(e) => {
@@ -188,7 +200,7 @@ fn main() {
             }
             if slurp {
                 let arr = Value::Arr(std::rc::Rc::new(lines));
-                process_input(&arr, &mut out, &mut any_output_false);
+                process_input(&arr, &mut out, &mut any_output_false, &mut had_error);
             }
         } else {
             let mut input_str = String::new();
@@ -207,7 +219,7 @@ fn main() {
                     }
                 }
                 let arr = Value::Arr(std::rc::Rc::new(values));
-                process_input(&arr, &mut out, &mut any_output_false);
+                process_input(&arr, &mut out, &mut any_output_false, &mut had_error);
             } else {
                 for json_text in split_json_values(&input_str) {
                     let trimmed = json_text.trim();
@@ -216,7 +228,7 @@ fn main() {
                     }
                     match json_to_value(trimmed) {
                         Ok(v) => {
-                            process_input(&v, &mut out, &mut any_output_false);
+                            process_input(&v, &mut out, &mut any_output_false, &mut had_error);
                         }
                         Err(e) => {
                             eprintln!("jq: error (at <stdin>:0): {}", e);
@@ -243,7 +255,7 @@ fn main() {
                 }
                 match json_to_value(trimmed) {
                     Ok(v) => {
-                        process_input(&v, &mut out, &mut any_output_false);
+                        process_input(&v, &mut out, &mut any_output_false, &mut had_error);
                     }
                     Err(e) => {
                         eprintln!("jq: error: {}", e);
@@ -256,6 +268,9 @@ fn main() {
 
     let _ = out.flush();
 
+    if had_error {
+        process::exit(5);
+    }
     if exit_status && any_output_false {
         process::exit(5);
     }
