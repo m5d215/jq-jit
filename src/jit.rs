@@ -299,6 +299,84 @@ impl Flattener {
         t
     }
 
+    /// Inline FuncCall nodes by substituting function bodies.
+    /// Returns the expression with FuncCall replaced by the function body.
+    /// If a recursive call is detected, returns the original expression unchanged.
+    fn inline_func_calls(&self, expr: &Expr) -> Expr {
+        match expr {
+            Expr::FuncCall { func_id, args } => {
+                if *func_id >= self.funcs.len() { return expr.clone(); }
+                if self.expanding_funcs.contains(func_id) { return expr.clone(); }
+                let func = &self.funcs[*func_id];
+                let body = if !func.param_vars.is_empty() && !args.is_empty() {
+                    crate::eval::substitute_params(&func.body, &func.param_vars, args)
+                } else {
+                    func.body.clone()
+                };
+                // Recursively inline any FuncCalls in the resulting body
+                self.inline_func_calls(&body)
+            }
+            Expr::Pipe { left, right } => Expr::Pipe {
+                left: Box::new(self.inline_func_calls(left)),
+                right: Box::new(self.inline_func_calls(right)),
+            },
+            Expr::Comma { left, right } => Expr::Comma {
+                left: Box::new(self.inline_func_calls(left)),
+                right: Box::new(self.inline_func_calls(right)),
+            },
+            Expr::Index { expr: e, key } => Expr::Index {
+                expr: Box::new(self.inline_func_calls(e)),
+                key: Box::new(self.inline_func_calls(key)),
+            },
+            Expr::IndexOpt { expr: e, key } => Expr::IndexOpt {
+                expr: Box::new(self.inline_func_calls(e)),
+                key: Box::new(self.inline_func_calls(key)),
+            },
+            Expr::Each { input_expr } => Expr::Each {
+                input_expr: Box::new(self.inline_func_calls(input_expr)),
+            },
+            Expr::EachOpt { input_expr } => Expr::EachOpt {
+                input_expr: Box::new(self.inline_func_calls(input_expr)),
+            },
+            Expr::IfThenElse { cond, then_branch, else_branch } => Expr::IfThenElse {
+                cond: Box::new(self.inline_func_calls(cond)),
+                then_branch: Box::new(self.inline_func_calls(then_branch)),
+                else_branch: Box::new(self.inline_func_calls(else_branch)),
+            },
+            Expr::LetBinding { var_index, value, body } => Expr::LetBinding {
+                var_index: *var_index,
+                value: Box::new(self.inline_func_calls(value)),
+                body: Box::new(self.inline_func_calls(body)),
+            },
+            Expr::BinOp { op, lhs, rhs } => Expr::BinOp {
+                op: *op,
+                lhs: Box::new(self.inline_func_calls(lhs)),
+                rhs: Box::new(self.inline_func_calls(rhs)),
+            },
+            Expr::Collect { generator } => Expr::Collect {
+                generator: Box::new(self.inline_func_calls(generator)),
+            },
+            Expr::Assign { path_expr, value_expr } => Expr::Assign {
+                path_expr: Box::new(self.inline_func_calls(path_expr)),
+                value_expr: Box::new(self.inline_func_calls(value_expr)),
+            },
+            Expr::Update { path_expr, update_expr } => Expr::Update {
+                path_expr: Box::new(self.inline_func_calls(path_expr)),
+                update_expr: Box::new(self.inline_func_calls(update_expr)),
+            },
+            Expr::TryCatch { try_expr, catch_expr } => Expr::TryCatch {
+                try_expr: Box::new(self.inline_func_calls(try_expr)),
+                catch_expr: Box::new(self.inline_func_calls(catch_expr)),
+            },
+            Expr::Alternative { primary, fallback } => Expr::Alternative {
+                primary: Box::new(self.inline_func_calls(primary)),
+                fallback: Box::new(self.inline_func_calls(fallback)),
+            },
+            // For other node types, return as-is (no FuncCall inside)
+            _ => expr.clone(),
+        }
+    }
+
     fn alloc_slot(&mut self) -> SlotId { let s = self.next_slot; self.next_slot += 1; s }
     fn alloc_label(&mut self) -> LabelId { let l = self.next_label; self.next_label += 1; l }
     fn alloc_var(&mut self) -> u32 { let v = self.next_var; self.next_var += 1; v }
@@ -1296,6 +1374,11 @@ impl Flattener {
             }
 
             Expr::Assign { path_expr, value_expr } => {
+                // Inline FuncCalls to make expressions suitable for runtime delegation
+                let inlined_path = self.inline_func_calls(path_expr);
+                let inlined_value = self.inline_func_calls(value_expr);
+                let path_expr = &inlined_path;
+                let value_expr = &inlined_value;
                 if let Some(path_components) = extract_simple_path(path_expr) {
                     if is_scalar(value_expr) {
                         // Simple static path with scalar value
@@ -1331,9 +1414,9 @@ impl Flattener {
                     return false;
                 }
                 let idx = self.closure_ops.len();
-                self.closure_ops.push((**path_expr).clone());
+                self.closure_ops.push(path_expr.clone());
                 let idx2 = self.closure_ops.len();
-                self.closure_ops.push((**value_expr).clone());
+                self.closure_ops.push(value_expr.clone());
                 let inp = self.alloc_slot();
                 self.emit(JitOp::Clone { dst: inp, src: input_slot });
                 let arr = self.alloc_slot();
@@ -1352,10 +1435,15 @@ impl Flattener {
             }
 
             Expr::Update { path_expr, update_expr } => {
+                // Inline FuncCalls to make expressions suitable for runtime delegation
+                let inlined_path = self.inline_func_calls(path_expr);
+                let inlined_update = self.inline_func_calls(update_expr);
+                let path_expr = &inlined_path;
+                let update_expr = &inlined_update;
                 // Handle .[] and .[]? paths with scalar update_expr:
                 // iterate all paths from eval_path, apply update to each
-                let is_each = matches!(path_expr.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input));
-                let is_each_opt = matches!(path_expr.as_ref(), Expr::EachOpt { input_expr } if matches!(input_expr.as_ref(), Expr::Input));
+                let is_each = matches!(path_expr, Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input));
+                let is_each_opt = matches!(path_expr, Expr::EachOpt { input_expr } if matches!(input_expr.as_ref(), Expr::Input));
                 if (is_each || is_each_opt) && is_scalar(update_expr) {
                     // Emit: get all keys/indices, iterate them, for each: getpath([k]), apply f, setpath([k])
                     // Use CallBuiltin "keys" to get all keys, then iterate
@@ -1465,9 +1553,9 @@ impl Flattener {
                     return false;
                 }
                 let idx = self.closure_ops.len();
-                self.closure_ops.push((**path_expr).clone());
+                self.closure_ops.push(path_expr.clone());
                 let idx2 = self.closure_ops.len();
-                self.closure_ops.push((**update_expr).clone());
+                self.closure_ops.push(update_expr.clone());
                 let inp = self.alloc_slot();
                 self.emit(JitOp::Clone { dst: inp, src: input_slot });
                 let arr = self.alloc_slot();
