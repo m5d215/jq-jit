@@ -132,6 +132,14 @@ fn is_scalar(expr: &Expr) -> bool {
             // Reduce is scalar if init and update are scalar (source is the generator)
             is_scalar(init) && is_scalar(update)
         }
+        // Assign with simple path and scalar value produces exactly one output
+        Expr::Assign { path_expr, value_expr } => {
+            extract_simple_path(path_expr).is_some() && is_scalar(value_expr)
+        }
+        // Update with simple path and scalar update produces exactly one output
+        Expr::Update { path_expr, update_expr } => {
+            extract_simple_path(path_expr).is_some() && is_scalar(update_expr)
+        }
         _ => false,
     }
 }
@@ -775,6 +783,52 @@ impl Flattener {
             Expr::FuncCall { func_id, .. } if *func_id < self.funcs.len() => {
                 let func = &self.funcs[*func_id].clone();
                 self.flatten_scalar(&func.body, input_slot)
+            }
+            // Assign with simple path: setpath(path, value)
+            Expr::Assign { path_expr, value_expr } => {
+                if let Some(path_components) = extract_simple_path(path_expr) {
+                    let val = self.flatten_scalar(value_expr, input_slot);
+                    let path_arr = self.build_path_array(&path_components, input_slot);
+                    let inp = self.alloc_slot();
+                    self.emit(JitOp::Clone { dst: inp, src: input_slot });
+                    let out = self.alloc_slot();
+                    self.emit_propagating(JitOp::CallBuiltin { dst: out, name: "setpath".to_string(), args: vec![inp, path_arr, val] });
+                    self.emit(JitOp::Drop { slot: inp });
+                    self.emit(JitOp::Drop { slot: path_arr });
+                    self.emit(JitOp::Drop { slot: val });
+                    out
+                } else {
+                    let out = self.alloc_slot();
+                    self.emit(JitOp::Null { dst: out });
+                    out
+                }
+            }
+            // Update with simple path: getpath, apply, setpath
+            Expr::Update { path_expr, update_expr } => {
+                if let Some(path_components) = extract_simple_path(path_expr) {
+                    let path_arr = self.build_path_array(&path_components, input_slot);
+                    let inp = self.alloc_slot();
+                    self.emit(JitOp::Clone { dst: inp, src: input_slot });
+                    let path_clone = self.alloc_slot();
+                    self.emit(JitOp::Clone { dst: path_clone, src: path_arr });
+                    let old_val = self.alloc_slot();
+                    self.emit_propagating(JitOp::CallBuiltin { dst: old_val, name: "getpath".to_string(), args: vec![inp, path_clone] });
+                    self.emit(JitOp::Drop { slot: inp });
+                    self.emit(JitOp::Drop { slot: path_clone });
+                    let new_val = self.flatten_scalar(update_expr, old_val);
+                    self.emit(JitOp::Drop { slot: old_val });
+                    let inp2 = self.alloc_slot();
+                    self.emit(JitOp::Clone { dst: inp2, src: input_slot });
+                    let out = self.alloc_slot();
+                    self.emit_propagating(JitOp::CallBuiltin { dst: out, name: "setpath".to_string(), args: vec![inp2, path_arr, new_val] });
+                    self.emit(JitOp::Drop { slot: inp2 });
+                    self.emit(JitOp::Drop { slot: new_val });
+                    out
+                } else {
+                    let out = self.alloc_slot();
+                    self.emit(JitOp::Null { dst: out });
+                    out
+                }
             }
             _ => {
                 // Should not be called for non-scalar expressions
@@ -2117,15 +2171,28 @@ impl Flattener {
                     self.flatten_gen(right, mid);
                     self.emit(JitOp::Drop { slot: mid });
                 } else {
-                    // try_expr is a generator; for each output, pipe to right outside try
-                    // This is complex: we need try scope for try_expr but not for right.
-                    // Strategy: flatten try_expr as generator, yield results, then pipe to right
-                    // Use a fresh approach: compile try_expr, each output stored, then pipe
-                    // For now, fall back if this case arises
+                    // try_expr is a generator: collect outputs inside try, then pipe outside
+                    self.emit(JitOp::CollectBegin);
+                    self.collect_depth += 1;
+                    let ok = self.flatten_gen(try_expr, input_slot);
+                    self.collect_depth -= 1;
+                    if !ok {
+                        self.emit(JitOp::TryCatchEnd);
+                        self.try_depth -= 1;
+                        self.try_catch_target = old_target;
+                        return false;
+                    }
+                    let collected = self.alloc_slot();
+                    self.emit(JitOp::CollectFinish { dst: collected });
+                    // End try scope
                     self.emit(JitOp::TryCatchEnd);
                     self.try_depth -= 1;
                     self.try_catch_target = old_target;
-                    return false;
+                    // Iterate collected outputs and pipe to right (outside try)
+                    self.flatten_each_with_action(collected, false, &|s, elem| {
+                        s.flatten_gen(right, elem);
+                    });
+                    self.emit(JitOp::Drop { slot: collected });
                 }
 
                 self.emit(JitOp::Jump { label: done_label });
