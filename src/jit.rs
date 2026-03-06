@@ -1299,8 +1299,25 @@ impl Flattener {
                 true
             }
             _ => {
-                // Generic fallback: try to compile as a generator that yields values
-                false
+                // Generic fallback: collect all outputs, then iterate
+                // Pre-check: can we compile gen_expr?
+                {
+                    let mut test = self.test_flattener();
+                    let t_in = test.alloc_slot();
+                    if !test.flatten_gen(gen_expr, t_in) { return false; }
+                }
+                // Collect all outputs from gen_expr into an array, then iterate
+                self.emit(JitOp::CollectBegin);
+                self.collect_depth += 1;
+                let ok = self.flatten_gen(gen_expr, input_slot);
+                self.collect_depth -= 1;
+                if !ok { return false; }
+                let arr = self.alloc_slot();
+                self.emit(JitOp::CollectFinish { dst: arr });
+                // Iterate the collected array
+                self.flatten_each_with_action(arr, false, action);
+                self.emit(JitOp::Drop { slot: arr });
+                true
             }
         }
     }
