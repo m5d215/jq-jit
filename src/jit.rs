@@ -657,8 +657,29 @@ impl Flattener {
                     false
                 }
             }
-            // EachOpt has correctness issues with input representation; fall back to interpreter
-            Expr::EachOpt { .. } => false,
+            Expr::EachOpt { input_expr } => {
+                if is_scalar(input_expr) {
+                    let container = self.flatten_scalar(input_expr, input_slot);
+                    self.flatten_each_yield(container, true);
+                    self.emit(JitOp::Drop { slot: container });
+                    true
+                } else {
+                    false
+                }
+            }
+            // IndexOpt: produces 0 or 1 outputs (suppresses errors)
+            Expr::IndexOpt { expr: base_expr, key: key_expr } => {
+                if !is_scalar(base_expr) || !is_scalar(key_expr) { return false; }
+                // Compile as: try (base[key]) catch empty
+                let try_catch = Expr::TryCatch {
+                    try_expr: Box::new(Expr::Index {
+                        expr: Box::new((**base_expr).clone()),
+                        key: Box::new((**key_expr).clone()),
+                    }),
+                    catch_expr: Box::new(Expr::Empty),
+                };
+                self.flatten_gen(&try_catch, input_slot)
+            }
 
             Expr::IfThenElse { cond, then_branch, else_branch } => {
                 // Pre-check: ensure both branches can be JIT-compiled
