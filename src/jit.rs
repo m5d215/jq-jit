@@ -87,6 +87,17 @@ fn is_scalar(expr: &Expr) -> bool {
         Expr::Loc { .. } | Expr::Env | Expr::Builtins => true,
         Expr::Debug { expr } => is_scalar(expr),
         Expr::Stderr { expr } => is_scalar(expr),
+        // TryCatch is scalar when both try and catch are scalar:
+        // try produces one value or fails, catch produces one value on failure
+        Expr::TryCatch { try_expr, catch_expr } => is_scalar(try_expr) && is_scalar(catch_expr),
+        Expr::StringInterpolation { parts } => parts.iter().all(|p| match p {
+            StringPart::Literal(_) => true,
+            StringPart::Expr(e) => is_scalar(e),
+        }),
+        Expr::Reduce { source, init, update, .. } => {
+            // Reduce is scalar if init and update are scalar (source is the generator)
+            is_scalar(init) && is_scalar(update)
+        }
         _ => false,
     }
 }
@@ -615,6 +626,85 @@ impl Flattener {
                 self.emit(JitOp::Drop { slot: inp });
                 self.emit(JitOp::Drop { slot: val });
                 out
+            }
+            Expr::TryCatch { try_expr, catch_expr } => {
+                // Scalar try-catch: try produces one value, or catch produces one value
+                let catch_label = self.alloc_label();
+                let done_label = self.alloc_label();
+                let error_slot = self.alloc_slot();
+                let out = self.alloc_slot();
+
+                let old_target = self.try_catch_target;
+                self.try_catch_target = Some((catch_label, error_slot));
+                self.try_depth += 1;
+                self.emit(JitOp::TryCatchBegin);
+
+                let try_val = self.flatten_scalar(try_expr, input_slot);
+                self.emit(JitOp::Clone { dst: out, src: try_val });
+                self.emit(JitOp::Drop { slot: try_val });
+                self.emit(JitOp::TryCatchEnd);
+                self.try_depth -= 1;
+                self.try_catch_target = old_target;
+                self.emit(JitOp::Jump { label: done_label });
+
+                // Catch handler
+                self.emit(JitOp::Label { id: catch_label });
+                self.emit(JitOp::TryCatchEnd);
+                let catch_val = self.flatten_scalar(catch_expr, error_slot);
+                self.emit(JitOp::Clone { dst: out, src: catch_val });
+                self.emit(JitOp::Drop { slot: catch_val });
+                self.emit(JitOp::Drop { slot: error_slot });
+                self.emit(JitOp::Label { id: done_label });
+                out
+            }
+            Expr::StringInterpolation { parts } => {
+                self.emit(JitOp::StrBufNew);
+                for part in parts {
+                    match part {
+                        StringPart::Literal(s) => {
+                            self.emit(JitOp::StrBufAppendLit { val: s.clone() });
+                        }
+                        StringPart::Expr(e) => {
+                            let val = self.flatten_scalar(e, input_slot);
+                            self.emit(JitOp::StrBufAppendVal { src: val });
+                            self.emit(JitOp::Drop { slot: val });
+                        }
+                    }
+                }
+                let out = self.alloc_slot();
+                self.emit(JitOp::StrBufFinish { dst: out });
+                out
+            }
+            Expr::Reduce { source, init, var_index, acc_index, update } => {
+                // Scalar reduce: init is scalar, update is scalar, source is a generator
+                let acc_val = self.flatten_scalar(init, input_slot);
+                let old_acc = self.alloc_slot();
+                self.emit(JitOp::GetVar { dst: old_acc, var_index: *acc_index });
+                self.emit(JitOp::SetVar { var_index: *acc_index, src: acc_val });
+                self.emit(JitOp::Drop { slot: acc_val });
+                let old_var = self.alloc_slot();
+                self.emit(JitOp::GetVar { dst: old_var, var_index: *var_index });
+                // For each output of source, set $var and update acc
+                self.flatten_gen_with_each_output(source, input_slot, &|this, elem| {
+                    this.emit(JitOp::SetVar { var_index: *var_index, src: elem });
+                    let acc = this.alloc_slot();
+                    this.emit(JitOp::GetVar { dst: acc, var_index: *acc_index });
+                    let new_acc = this.flatten_scalar(update, acc);
+                    this.emit(JitOp::SetVar { var_index: *acc_index, src: new_acc });
+                    this.emit(JitOp::Drop { slot: new_acc });
+                    this.emit(JitOp::Drop { slot: acc });
+                });
+                let out = self.alloc_slot();
+                self.emit(JitOp::GetVar { dst: out, var_index: *acc_index });
+                self.emit(JitOp::SetVar { var_index: *acc_index, src: old_acc });
+                self.emit(JitOp::Drop { slot: old_acc });
+                self.emit(JitOp::SetVar { var_index: *var_index, src: old_var });
+                self.emit(JitOp::Drop { slot: old_var });
+                out
+            }
+            Expr::FuncCall { func_id, args } if *func_id < self.funcs.len() && args.is_empty() => {
+                let func = &self.funcs[*func_id].clone();
+                self.flatten_scalar(&func.body, input_slot)
             }
             _ => {
                 // Should not be called for non-scalar expressions
@@ -1167,9 +1257,49 @@ impl Flattener {
                 self.emit(JitOp::Label { id: done });
                 true
             }
+            Expr::IfThenElse { cond, then_branch, else_branch } if is_scalar(cond) => {
+                // Pre-check both branches
+                {
+                    let mut test = self.test_flattener();
+                    let t_in = test.alloc_slot();
+                    if !test.flatten_gen_with_each_output(then_branch, t_in, action) { return false; }
+                    if !test.flatten_gen_with_each_output(else_branch, t_in, action) { return false; }
+                }
+                let cond_val = self.flatten_scalar(cond, input_slot);
+                let then_lbl = self.alloc_label();
+                let else_lbl = self.alloc_label();
+                let done_lbl = self.alloc_label();
+                self.emit(JitOp::IfTruthy { src: cond_val, then_label: then_lbl, else_label: else_lbl });
+                self.emit(JitOp::Drop { slot: cond_val });
+
+                self.emit(JitOp::Label { id: then_lbl });
+                self.flatten_gen_with_each_output(then_branch, input_slot, action);
+                self.emit(JitOp::Jump { label: done_lbl });
+
+                self.emit(JitOp::Label { id: else_lbl });
+                self.flatten_gen_with_each_output(else_branch, input_slot, action);
+                self.emit(JitOp::Label { id: done_lbl });
+                true
+            }
+            Expr::LetBinding { var_index, value, body } if is_scalar(value) => {
+                let val = self.flatten_scalar(value, input_slot);
+                let old = self.alloc_slot();
+                self.emit(JitOp::GetVar { dst: old, var_index: *var_index });
+                self.emit(JitOp::SetVar { var_index: *var_index, src: val });
+                self.emit(JitOp::Drop { slot: val });
+                let ok = self.flatten_gen_with_each_output(body, input_slot, action);
+                self.emit(JitOp::SetVar { var_index: *var_index, src: old });
+                self.emit(JitOp::Drop { slot: old });
+                ok
+            }
+            Expr::EachOpt { input_expr } if is_scalar(input_expr) => {
+                let container = self.flatten_scalar(input_expr, input_slot);
+                self.flatten_each_with_action(container, true, action);
+                self.emit(JitOp::Drop { slot: container });
+                true
+            }
             _ => {
-                // Try to compile as a generator that yields values
-                // For unsupported patterns, return false
+                // Generic fallback: try to compile as a generator that yields values
                 false
             }
         }
@@ -1487,7 +1617,20 @@ impl Flattener {
                 ok
             }
 
-            _ => false,
+            // Generic fallback: for any generator left, iterate its outputs and apply right
+            _ => {
+                // Pre-check: can we compile both left and right?
+                {
+                    let mut test = self.test_flattener();
+                    let t_in = test.alloc_slot();
+                    if !test.flatten_gen(left, t_in) { return false; }
+                    if !test.flatten_gen(right, t_in) { return false; }
+                }
+                let right_clone = right.clone();
+                self.flatten_gen_with_each_output(left, input_slot, &|this, elem| {
+                    this.flatten_gen(&right_clone, elem);
+                })
+            }
         }
     }
 
