@@ -280,6 +280,11 @@ impl Lexer {
                         // .123 is a number, back up
                         self.pos -= 1;
                         self.read_number()?;
+                    } else if self.peek().map_or(false, |c| c.is_ascii_alphabetic() || c == '_') {
+                        // .field — immediately followed by identifier, always treat as field name
+                        self.tokens.push(Token::Dot);
+                        let ident = self.read_ident_str();
+                        self.tokens.push(Token::Ident(ident));
                     } else {
                         self.tokens.push(Token::Dot);
                     }
@@ -1072,6 +1077,27 @@ impl Parser {
 
         if self.eat(&Token::Pipe) {
             let right = self.parse_pipe()?;
+            expr = Expr::Pipe {
+                left: Box::new(expr),
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    /// Like parse_pipe but does not consume comma at the top level.
+    /// Used for object values where comma separates key-value pairs.
+    fn parse_pipe_nocomma(&mut self) -> Result<Expr> {
+        let mut expr = self.parse_assign()?;
+
+        // Check for 'as' binding
+        if self.at(&Token::As) {
+            self.advance();
+            return self.parse_as_binding(expr);
+        }
+
+        if self.eat(&Token::Pipe) {
+            let right = self.parse_pipe_nocomma()?;
             expr = Expr::Pipe {
                 left: Box::new(expr),
                 right: Box::new(right),
@@ -2031,22 +2057,43 @@ impl Parser {
             Token::Format(name) => {
                 self.advance();
                 // @base64, @uri, etc.
-                // May be followed by a string for @base64 "str"
-                let inner = if matches!(self.current(), Token::Str(_)) {
+                // May be followed by a string for @base64 "str" or interpolated string
+                if matches!(self.current(), Token::Str(_)) {
                     let s = match self.advance() {
                         Token::Str(s) => s,
                         _ => unreachable!(),
                     };
-                    // Format string with interpolation: @html "<b>\(.)</b>"
-                    // For now treat it as format(input)
-                    Expr::Literal(Literal::Str(s))
+                    Ok(Expr::Format {
+                        name,
+                        expr: Box::new(Expr::Literal(Literal::Str(s))),
+                    })
+                } else if matches!(self.current(), Token::Ident(n) if n == "__string_interp__") {
+                    // Interpolated string after format: @html "<b>\(.)</b>"
+                    // Apply format to each interpolated expr, not literals
+                    self.advance();
+                    let interp = self.parse_string_interpolation()?;
+                    if let Expr::StringInterpolation { parts } = interp {
+                        let new_parts = parts.into_iter().map(|p| match p {
+                            StringPart::Literal(s) => StringPart::Literal(s),
+                            StringPart::Expr(e) => StringPart::Expr(Expr::Format {
+                                name: name.clone(),
+                                expr: Box::new(e),
+                            }),
+                        }).collect();
+                        Ok(Expr::StringInterpolation { parts: new_parts })
+                    } else {
+                        // Shouldn't happen but fallback
+                        Ok(Expr::Format {
+                            name,
+                            expr: Box::new(interp),
+                        })
+                    }
                 } else {
-                    Expr::Input
-                };
-                Ok(Expr::Format {
-                    name,
-                    expr: Box::new(inner),
-                })
+                    Ok(Expr::Format {
+                        name,
+                        expr: Box::new(Expr::Input),
+                    })
+                }
             }
 
             Token::Ident(ref name) if name == "__string_interp__" => {
@@ -2087,7 +2134,7 @@ impl Parser {
             Token::Ident(key) if !matches!(self.peek(), Token::LParen) => {
                 self.advance();
                 if self.eat(&Token::Colon) {
-                    let val = self.parse_or()?;
+                    let val = self.parse_pipe_nocomma()?;
                     Ok((Expr::Literal(Literal::Str(key)), val))
                 } else {
                     // Shorthand: {foo} = {foo: .foo}
@@ -2103,9 +2150,10 @@ impl Parser {
             Token::Variable(name) => {
                 self.advance();
                 if self.eat(&Token::Colon) {
-                    let val = self.parse_or()?;
-                    let _idx = self.scope.lookup_var(&name);
-                    let key_expr = Expr::Literal(Literal::Str(name));
+                    let val = self.parse_pipe_nocomma()?;
+                    // $var: value — key is the variable's value converted to string
+                    let idx = self.scope.lookup_var(&name).unwrap_or(0);
+                    let key_expr = Expr::LoadVar { var_index: idx };
                     Ok((key_expr, val))
                 } else {
                     // Shorthand: {$x} = {($x|tostring): $x}
@@ -2126,7 +2174,7 @@ impl Parser {
             Token::Str(key) => {
                 self.advance();
                 self.expect(&Token::Colon)?;
-                let val = self.parse_or()?;
+                let val = self.parse_pipe_nocomma()?;
                 Ok((Expr::Literal(Literal::Str(key)), val))
             }
             Token::LParen => {
@@ -2135,7 +2183,7 @@ impl Parser {
                 let key_expr = self.parse_pipe()?;
                 self.expect(&Token::RParen)?;
                 self.expect(&Token::Colon)?;
-                let val = self.parse_or()?;
+                let val = self.parse_pipe_nocomma()?;
                 Ok((key_expr, val))
             }
             Token::Format(ref name) => {
@@ -2146,13 +2194,62 @@ impl Parser {
                     expr: Box::new(Expr::Input),
                 };
                 if self.eat(&Token::Colon) {
-                    let val = self.parse_or()?;
+                    let val = self.parse_pipe_nocomma()?;
                     Ok((key_expr, val))
                 } else {
                     Ok((key_expr, Expr::Input))
                 }
             }
+            // Keywords as object keys: {if:0, and:1, ...}
+            ref tok if Self::keyword_as_string(tok).is_some() => {
+                let key = Self::keyword_as_string(tok).unwrap().to_string();
+                self.advance();
+                if self.eat(&Token::Colon) {
+                    let val = self.parse_pipe_nocomma()?;
+                    Ok((Expr::Literal(Literal::Str(key)), val))
+                } else {
+                    // Shorthand: {as} = {as: .as}
+                    Ok((
+                        Expr::Literal(Literal::Str(key.clone())),
+                        Expr::Index {
+                            expr: Box::new(Expr::Input),
+                            key: Box::new(Expr::Literal(Literal::Str(key))),
+                        },
+                    ))
+                }
+            }
             _ => bail!("expected object key, got {:?}", self.current()),
+        }
+    }
+
+    /// Convert a keyword token to its string representation (for use as field names/object keys).
+    fn keyword_as_string(tok: &Token) -> Option<&'static str> {
+        match tok {
+            Token::If => Some("if"),
+            Token::Then => Some("then"),
+            Token::Elif => Some("elif"),
+            Token::Else => Some("else"),
+            Token::End => Some("end"),
+            Token::Try => Some("try"),
+            Token::Catch => Some("catch"),
+            Token::Reduce => Some("reduce"),
+            Token::Foreach => Some("foreach"),
+            Token::As => Some("as"),
+            Token::Def => Some("def"),
+            Token::And => Some("and"),
+            Token::Or => Some("or"),
+            Token::Not => Some("not"),
+            Token::Label => Some("label"),
+            Token::Break => Some("break"),
+            Token::Import => Some("import"),
+            Token::Include => Some("include"),
+            Token::Module => Some("module"),
+            Token::Null => Some("null"),
+            Token::True => Some("true"),
+            Token::False => Some("false"),
+            Token::Empty => Some("empty"),
+            Token::Error => Some("error"),
+            _ => None,
         }
     }
 
