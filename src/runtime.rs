@@ -6,9 +6,7 @@
 use std::rc::Rc;
 
 use anyhow::{Result, bail};
-use indexmap::IndexMap;
-
-use crate::value::{Value, ObjMap, new_objmap};
+use crate::value::{Value, ObjMap, KeyStr, new_objmap};
 
 /// Dispatch a builtin call by name.
 pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
@@ -278,9 +276,9 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             // For now, try to find module in common paths
             return Ok(Value::Obj(Rc::new({
                 let mut m = new_objmap();
-                m.insert("version".to_string(), Value::Num(0.1, None));
-                m.insert("deps".to_string(), Value::Arr(Rc::new(vec![])));
-                m.insert("defs".to_string(), Value::Arr(Rc::new(vec![])));
+                m.insert("version".into(), Value::Num(0.1, None));
+                m.insert("deps".into(), Value::Arr(Rc::new(vec![])));
+                m.insert("defs".into(), Value::Arr(Rc::new(vec![])));
                 m
             })));
         }
@@ -654,8 +652,8 @@ pub fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
         }
         (Value::Obj(x), Value::Obj(y)) => {
             // Compare by sorted keys then values
-            let mut xkeys: Vec<&String> = x.keys().collect();
-            let mut ykeys: Vec<&String> = y.keys().collect();
+            let mut xkeys: Vec<&KeyStr> = x.keys().collect();
+            let mut ykeys: Vec<&KeyStr> = y.keys().collect();
             xkeys.sort();
             ykeys.sort();
             for (xk, yk) in xkeys.iter().zip(ykeys.iter()) {
@@ -1013,8 +1011,8 @@ fn rt_to_entries(v: &Value) -> Result<Value> {
         Value::Obj(o) => {
             let entries: Vec<Value> = o.iter().map(|(k, v)| {
                 let mut entry = new_objmap();
-                entry.insert("key".to_string(), Value::from_str(k));
-                entry.insert("value".to_string(), v.clone());
+                entry.insert("key".into(), Value::from_str(k));
+                entry.insert("value".into(), v.clone());
                 Value::Obj(Rc::new(entry))
             }).collect();
             Ok(Value::Arr(Rc::new(entries)))
@@ -1040,7 +1038,7 @@ fn rt_from_entries(v: &Value) -> Result<Value> {
                             Value::Num(n, _) => crate::value::format_jq_number(*n),
                             _ => crate::value::value_to_json(&key),
                         };
-                        obj.insert(key_str, val);
+                        obj.insert(KeyStr::from(key_str), val);
                     }
                     _ => bail!("from_entries requires array of objects"),
                 }
@@ -1366,7 +1364,7 @@ pub fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
                     let inner = o.get(k.as_str()).cloned().unwrap_or(Value::Null);
                     let new_inner = rt_setpath(&inner, &rest, val)?;
                     let mut new_obj = (**o).clone();
-                    new_obj.insert(k.as_ref().clone(), new_inner);
+                    new_obj.insert(KeyStr::from(k.as_str()), new_inner);
                     Ok(Value::Obj(Rc::new(new_obj)))
                 }
                 (Value::Arr(a), Value::Num(n, _)) => {
@@ -1386,7 +1384,7 @@ pub fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
                 (Value::Null, Value::Str(k)) => {
                     let new_inner = rt_setpath(&Value::Null, &rest, val)?;
                     let mut obj = new_objmap();
-                    obj.insert(k.as_ref().clone(), new_inner);
+                    obj.insert(KeyStr::from(k.as_str()), new_inner);
                     Ok(Value::Obj(Rc::new(obj)))
                 }
                 (Value::Null, Value::Num(n, _)) => {
@@ -1501,7 +1499,7 @@ fn delete_path(v: &Value, path: &Value) -> Result<Value> {
                     if let Some(inner) = o.get(k.as_str()) {
                         let new_inner = delete_path(inner, &rest)?;
                         let mut new_obj = (**o).clone();
-                        new_obj.insert(k.as_ref().clone(), new_inner);
+                        new_obj.insert(KeyStr::from(k.as_str()), new_inner);
                         Ok(Value::Obj(Rc::new(new_obj)))
                     } else {
                         Ok(v.clone())
@@ -1551,31 +1549,31 @@ fn rt_match(v: &Value, re: &Value) -> Result<Value> {
             match regex.find(s) {
                 Some(m) => {
                     let mut result = new_objmap();
-                    result.insert("offset".to_string(), Value::Num(m.start() as f64, None));
-                    result.insert("length".to_string(), Value::Num(m.len() as f64, None));
-                    result.insert("string".to_string(), Value::from_str(m.as_str()));
+                    result.insert("offset".into(), Value::Num(m.start() as f64, None));
+                    result.insert("length".into(), Value::Num(m.len() as f64, None));
+                    result.insert("string".into(), Value::from_str(m.as_str()));
                     // Add captures
                     let mut captures = Vec::new();
                     if let Some(caps) = regex.captures(s) {
                         for i in 1..caps.len() {
                             if let Some(cap) = caps.get(i) {
                                 let mut c = new_objmap();
-                                c.insert("offset".to_string(), Value::Num(cap.start() as f64, None));
-                                c.insert("length".to_string(), Value::Num(cap.len() as f64, None));
-                                c.insert("string".to_string(), Value::from_str(cap.as_str()));
-                                c.insert("name".to_string(), Value::Null);
+                                c.insert("offset".into(), Value::Num(cap.start() as f64, None));
+                                c.insert("length".into(), Value::Num(cap.len() as f64, None));
+                                c.insert("string".into(), Value::from_str(cap.as_str()));
+                                c.insert("name".into(), Value::Null);
                                 captures.push(Value::Obj(Rc::new(c)));
                             } else {
                                 let mut c = new_objmap();
-                                c.insert("offset".to_string(), Value::Num(-1.0, None));
-                                c.insert("length".to_string(), Value::Num(0.0, None));
-                                c.insert("string".to_string(), Value::Null);
-                                c.insert("name".to_string(), Value::Null);
+                                c.insert("offset".into(), Value::Num(-1.0, None));
+                                c.insert("length".into(), Value::Num(0.0, None));
+                                c.insert("string".into(), Value::Null);
+                                c.insert("name".into(), Value::Null);
                                 captures.push(Value::Obj(Rc::new(c)));
                             }
                         }
                     }
-                    result.insert("captures".to_string(), Value::Arr(Rc::new(captures)));
+                    result.insert("captures".into(), Value::Arr(Rc::new(captures)));
                     Ok(Value::Obj(Rc::new(result)))
                 }
                 None => bail!("match failed"),
@@ -1595,9 +1593,9 @@ fn rt_capture(v: &Value, re: &Value) -> Result<Value> {
                     let mut result = new_objmap();
                     for name in regex.capture_names().flatten() {
                         if let Some(m) = caps.name(name) {
-                            result.insert(name.to_string(), Value::from_str(m.as_str()));
+                            result.insert(KeyStr::from(name), Value::from_str(m.as_str()));
                         } else {
-                            result.insert(name.to_string(), Value::Null);
+                            result.insert(KeyStr::from(name), Value::Null);
                         }
                     }
                     Ok(Value::Obj(Rc::new(result)))
@@ -1814,7 +1812,7 @@ fn rt_strflocaltime_impl(input: &Value, fmt: &Value) -> Result<Value> {
 fn rt_env() -> Value {
     let mut env = new_objmap();
     for (k, v) in std::env::vars() {
-        env.insert(k, Value::from_string(v));
+        env.insert(KeyStr::from(k), Value::from_string(v));
     }
     Value::Obj(Rc::new(env))
 }

@@ -2,9 +2,7 @@
 
 use std::rc::Rc;
 use anyhow::{Result, bail};
-use indexmap::IndexMap;
-
-use crate::value::{Value, ObjMap, new_objmap};
+use crate::value::{Value, KeyStr, new_objmap};
 
 /// Resolve a module name to a file path, searching lib_dirs.
 fn resolve_module(name: &str, lib_dirs: &[String]) -> Result<String> {
@@ -113,8 +111,8 @@ fn parse_module_metadata(content: &str) -> Result<Value> {
     }
 
     let mut result = metadata;
-    result.insert("deps".to_string(), Value::Arr(Rc::new(deps)));
-    result.insert("defs".to_string(), Value::Arr(Rc::new(defs)));
+    result.insert("deps".into(), Value::Arr(Rc::new(deps)));
+    result.insert("defs".into(), Value::Arr(Rc::new(defs)));
 
     Ok(Value::Obj(Rc::new(result)))
 }
@@ -134,7 +132,7 @@ fn parse_simple_object(s: &str) -> Result<Value> {
             let key = part[..colon_pos].trim().trim_matches('"');
             let val_str = part[colon_pos+1..].trim();
             let val = parse_simple_value(val_str);
-            map.insert(key.to_string(), val);
+            map.insert(KeyStr::from(key), val);
         }
     }
 
@@ -245,7 +243,7 @@ fn parse_import_dep(chars: &[char], pos: &mut usize) -> Option<Value> {
             if let Some(colon_pos) = part.find(':') {
                 let key = part[..colon_pos].trim().trim_matches('"');
                 let val = part[colon_pos+1..].trim().trim_matches('"');
-                dep_map.insert(key.to_string(), Value::from_str(val));
+                dep_map.insert(KeyStr::from(key), Value::from_str(val));
             }
         }
     }
@@ -254,9 +252,9 @@ fn parse_import_dep(chars: &[char], pos: &mut usize) -> Option<Value> {
     while *pos < chars.len() && chars[*pos] != ';' { *pos += 1; }
     if *pos < chars.len() { *pos += 1; }
 
-    dep_map.insert("as".to_string(), Value::from_str(&alias));
-    dep_map.insert("is_data".to_string(), Value::from_bool(is_data));
-    dep_map.insert("relpath".to_string(), Value::from_str(&path));
+    dep_map.insert("as".into(), Value::from_str(&alias));
+    dep_map.insert("is_data".into(), Value::from_bool(is_data));
+    dep_map.insert("relpath".into(), Value::from_str(&path));
 
     Some(Value::Obj(Rc::new(dep_map)))
 }
@@ -277,8 +275,8 @@ fn parse_include_dep(chars: &[char], pos: &mut usize) -> Option<Value> {
     if *pos < chars.len() { *pos += 1; }
 
     let mut dep_map = new_objmap();
-    dep_map.insert("is_data".to_string(), Value::False);
-    dep_map.insert("relpath".to_string(), Value::from_str(&path));
+    dep_map.insert("is_data".into(), Value::False);
+    dep_map.insert("relpath".into(), Value::from_str(&path));
     Some(Value::Obj(Rc::new(dep_map)))
 }
 

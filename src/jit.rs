@@ -3552,9 +3552,9 @@ extern "C" fn jit_rt_obj_new(dst: *mut Value) {
 extern "C" fn jit_rt_obj_insert(obj: *mut Value, key: *const Value, val: *const Value) {
     unsafe {
         if let Value::Obj(o) = &mut *obj {
-            let k = match &*key {
-                Value::Str(s) => s.as_str().to_string(),
-                _ => crate::value::value_to_json(&*key),
+            let k: crate::value::KeyStr = match &*key {
+                Value::Str(s) => crate::value::KeyStr::from(s.as_str()),
+                _ => crate::value::KeyStr::from(crate::value::value_to_json(&*key)),
             };
             Rc::make_mut(o).insert(k, (*val).clone());
         }
@@ -3621,8 +3621,8 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                 let line_n: i64 = parts[0].parse().unwrap_or(0);
                 let file = parts[1];
                 let mut obj = crate::value::new_objmap();
-                obj.insert("file".to_string(), Value::Str(Rc::new(file.to_string())));
-                obj.insert("line".to_string(), Value::Num(line_n as f64, None));
+                obj.insert(crate::value::KeyStr::from("file"), Value::Str(Rc::new(file.to_string())));
+                obj.insert(crate::value::KeyStr::from("line"), Value::Num(line_n as f64, None));
                 std::ptr::write(dst, Value::Obj(Rc::new(obj)));
                 return 0;
             }
@@ -3630,7 +3630,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
         if name == "__env__" {
             let mut obj = crate::value::new_objmap();
             for (k, v) in std::env::vars() {
-                obj.insert(k, Value::Str(Rc::new(v)));
+                obj.insert(crate::value::KeyStr::from(k), Value::Str(Rc::new(v)));
             }
             std::ptr::write(dst, Value::Obj(Rc::new(obj)));
             return 0;

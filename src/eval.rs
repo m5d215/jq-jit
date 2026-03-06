@@ -11,7 +11,7 @@ use std::rc::Rc;
 use anyhow::{Result, bail};
 
 use crate::ir::*;
-use crate::value::Value;
+use crate::value::{Value, KeyStr};
 
 type GenResult = Result<bool>;
 type EnvRef = Rc<RefCell<Env>>;
@@ -835,14 +835,14 @@ pub fn eval(
 
         Expr::Loc { file, line } => {
             let mut obj = crate::value::new_objmap();
-            obj.insert("file".to_string(), Value::from_str(file));
-            obj.insert("line".to_string(), Value::Num(*line as f64, None));
+            obj.insert("file".into(), Value::from_str(file));
+            obj.insert("line".into(), Value::Num(*line as f64, None));
             cb(Value::Obj(Rc::new(obj)))
         }
 
         Expr::Env => {
             let mut obj = crate::value::new_objmap();
-            for (k, v) in std::env::vars() { obj.insert(k, Value::from_str(&v)); }
+            for (k, v) in std::env::vars() { obj.insert(KeyStr::from(k), Value::from_str(&v)); }
             cb(Value::Obj(Rc::new(obj)))
         }
 
@@ -1029,7 +1029,7 @@ fn eval_obj_pairs(pairs: &[(Expr, Expr)], idx: usize, cur: crate::value::ObjMap,
     if idx >= pairs.len() { return cb(Value::Obj(Rc::new(cur))); }
     let (ke, ve) = &pairs[idx];
     eval(ke, input.clone(), env, &mut |kv| {
-        let ks = match &kv { Value::Str(s) => s.as_ref().clone(), _ => crate::value::value_to_json(&kv) };
+        let ks: KeyStr = match &kv { Value::Str(s) => KeyStr::from(s.as_str()), _ => KeyStr::from(crate::value::value_to_json(&kv)) };
         eval(ve, input.clone(), env, &mut |vv| {
             let mut next = cur.clone();
             next.insert(ks.clone(), vv);
@@ -1402,8 +1402,8 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 let mut p = match &bp { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
                 p.push(Value::Obj(Rc::new({
                     let mut m = crate::value::new_objmap();
-                    m.insert("start".to_string(), Value::Num(fi as f64, None));
-                    m.insert("end".to_string(), Value::Num(ti as f64, None));
+                    m.insert("start".into(), Value::Num(fi as f64, None));
+                    m.insert("end".into(), Value::Num(ti as f64, None));
                     m
                 })));
                 cb(Value::Arr(Rc::new(p)))

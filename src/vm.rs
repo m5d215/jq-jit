@@ -13,7 +13,7 @@ use anyhow::{Result, bail};
 
 use crate::bytecode::BytecodeRef;
 use crate::jq_ffi::{self, JvKind, Opcode};
-use crate::value::Value;
+use crate::value::{Value, KeyStr};
 
 /// Maximum stack depth to prevent stack overflow.
 const MAX_STACK_DEPTH: usize = 10000;
@@ -39,7 +39,7 @@ enum ForkState {
     /// EACH/EACH_OPT: iterator state (current index).
     Each {
         container: Value,
-        keys: Option<Vec<String>>, // for objects
+        keys: Option<Vec<KeyStr>>, // for objects
         index: usize,
         is_opt: bool,
     },
@@ -449,7 +449,7 @@ impl<'a> VM<'a> {
                 match (obj, &key) {
                     (Value::Obj(ref o), Value::Str(k)) => {
                         let mut new_obj = (**o).clone();
-                        new_obj.insert((**k).clone(), value);
+                        new_obj.insert(KeyStr::from(k.as_str()), value);
                         self.data.push(Value::Obj(Rc::new(new_obj)));
                     }
                     _ => bail!("INSERT: expected object and string key"),
@@ -646,7 +646,7 @@ impl<'a> VM<'a> {
                     }
                     return Ok(());
                 }
-                let keys: Vec<String> = o.keys().cloned().collect();
+                let keys: Vec<KeyStr> = o.keys().cloned().collect();
                 let first_val = o.get(&keys[0]).cloned().unwrap_or(Value::Null);
                 self.data.push(first_val);
                 self.forks.push(ForkPoint {

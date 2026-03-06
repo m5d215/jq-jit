@@ -11,8 +11,11 @@ use indexmap::IndexMap;
 
 use crate::jq_ffi::{self, Jv, JvKind};
 
-/// Object map type — IndexMap with ahash for faster lookups.
-pub type ObjMap = IndexMap<String, Value, ahash::RandomState>;
+/// Inline-optimized string for object keys (≤24 bytes stored on stack, no heap alloc).
+pub type KeyStr = compact_str::CompactString;
+
+/// Object map type — IndexMap with ahash for faster lookups and CompactString keys.
+pub type ObjMap = IndexMap<KeyStr, Value, ahash::RandomState>;
 
 /// Create a new ObjMap using a shared hasher state (avoids per-object random key generation).
 #[inline]
@@ -103,7 +106,7 @@ impl Value {
     }
 
     pub fn from_pairs(pairs: impl IntoIterator<Item = (String, Value)>) -> Self {
-        Value::Obj(Rc::new(pairs.into_iter().collect()))
+        Value::Obj(Rc::new(pairs.into_iter().map(|(k, v)| (KeyStr::from(k), v)).collect()))
     }
 
     pub fn is_true(&self) -> bool {
@@ -368,6 +371,26 @@ fn parse_json_string(b: &[u8], pos: usize) -> Result<(Value, usize)> {
     Ok((Value::Str(Rc::new(s)), end))
 }
 
+/// Parse a JSON key, returning KeyStr (inline for short keys ≤ 24 bytes — no heap allocation).
+fn parse_json_key(b: &[u8], pos: usize) -> Result<(KeyStr, usize)> {
+    debug_assert_eq!(b[pos], b'"');
+    let mut i = pos + 1;
+    let start = i;
+    while i < b.len() {
+        match b[i] {
+            b'"' => {
+                let s = KeyStr::from(unsafe { std::str::from_utf8_unchecked(&b[start..i]) });
+                return Ok((s, i + 1));
+            }
+            b'\\' => break,
+            _ => i += 1,
+        }
+    }
+    // Slow path: fall back to full string parser
+    let (s, end) = parse_json_string_raw(b, pos)?;
+    Ok((KeyStr::from(s), end))
+}
+
 fn parse_json_number(b: &[u8], pos: usize) -> Result<(Value, usize)> {
     let mut i = pos;
     let is_neg = i < b.len() && b[i] == b'-';
@@ -423,7 +446,7 @@ fn parse_json_object(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize
     if i < b.len() && b[i] == b'}' { return Ok((Value::Obj(Rc::new(map)), i + 1)); }
     loop {
         if i >= b.len() || b[i] != b'"' { bail!("Expected string key at position {}", i); }
-        let (key, end) = parse_json_string_raw(b, i)?;
+        let (key, end) = parse_json_key(b, i)?;
         i = skip_ws(b, end);
         if i >= b.len() || b[i] != b':' { bail!("Expected ':' at position {}", i); }
         i = skip_ws(b, i + 1);
@@ -524,7 +547,7 @@ pub unsafe fn jv_to_value(jv: Jv) -> Result<Value> {
                     let key_jv = jq_ffi::jv_object_iter_key(jv, iter);
                     let val_jv = jq_ffi::jv_object_iter_value(jv, iter);
                     let key_cstr = jq_ffi::jv_string_value(key_jv);
-                    let key = CStr::from_ptr(key_cstr).to_string_lossy().into_owned();
+                    let key = KeyStr::from(CStr::from_ptr(key_cstr).to_string_lossy().as_ref());
                     jq_ffi::jv_free(key_jv);
                     let val = jv_to_value(val_jv)?;
                     map.insert(key, val);
