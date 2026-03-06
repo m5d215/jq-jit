@@ -809,7 +809,7 @@ fn eval_obj_pairs(pairs: &[(Expr, Expr)], idx: usize, cur: indexmap::IndexMap<St
     })
 }
 
-fn eval_format(name: &str, val: &Value) -> Result<String> {
+pub fn eval_format(name: &str, val: &Value) -> Result<String> {
     // For csv/tsv, the input must be an array
     match name {
         "csv" => {
@@ -907,7 +907,7 @@ fn slice_index_end(n: f64, len: i64) -> usize {
     if i < 0 { (len + i).max(0) as usize } else { i.min(len) as usize }
 }
 
-fn eval_slice(base: &Value, from: &Value, to: &Value) -> Result<Value> {
+pub fn eval_slice(base: &Value, from: &Value, to: &Value) -> Result<Value> {
     match base {
         Value::Arr(a) => {
             let len = a.len() as i64;

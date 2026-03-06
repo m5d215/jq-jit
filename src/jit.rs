@@ -65,6 +65,17 @@ fn is_scalar(expr: &Expr) -> bool {
             is_scalar(cond) && is_scalar(then_branch) && is_scalar(else_branch),
         Expr::LetBinding { value, body, .. } => is_scalar(value) && is_scalar(body),
         Expr::Alternative { primary, fallback } => is_scalar(primary) && is_scalar(fallback),
+        Expr::Until { cond, update } => is_scalar(cond) && is_scalar(update),
+        Expr::CallBuiltin { args, .. } => args.iter().all(|a| is_scalar(a)),
+        Expr::ObjectConstruct { pairs } => pairs.iter().all(|(k, v)| is_scalar(k) && is_scalar(v)),
+        Expr::Slice { expr, from, to } => is_scalar(expr) && from.as_ref().map_or(true, |f| is_scalar(f)) && to.as_ref().map_or(true, |t| is_scalar(t)),
+        Expr::Format { expr, .. } => is_scalar(expr),
+        Expr::SetPath { path, value } => is_scalar(path) && is_scalar(value),
+        Expr::GetPath { path } => is_scalar(path),
+        Expr::DelPaths { paths } => is_scalar(paths),
+        Expr::Loc { .. } | Expr::Env | Expr::Builtins => true,
+        Expr::Debug { expr } => is_scalar(expr),
+        Expr::Stderr { expr } => is_scalar(expr),
         _ => false,
     }
 }
@@ -152,6 +163,10 @@ enum JitOp {
 
     // Error throwing
     ThrowError { msg: SlotId },
+
+    // CallBuiltin: call a runtime builtin function
+    // args[0] is input, args[1..] are the evaluated arguments
+    CallBuiltin { dst: SlotId, name: String, args: Vec<SlotId> },
 
     // Termination
     ReturnContinue,
@@ -387,6 +402,154 @@ impl Flattener {
                 self.emit(JitOp::Label { id: done_lbl });
                 out
             }
+            Expr::Until { cond, update } => {
+                // until(cond; update): loop { if cond then break; update }; yield current
+                let current = self.alloc_slot();
+                self.emit(JitOp::Clone { dst: current, src: input_slot });
+                let head = self.alloc_label();
+                let body = self.alloc_label();
+                let done = self.alloc_label();
+                self.emit(JitOp::Label { id: head });
+                let cond_val = self.flatten_scalar(cond, current);
+                self.emit(JitOp::IfTruthy { src: cond_val, then_label: done, else_label: body });
+                self.emit(JitOp::Drop { slot: cond_val });
+                self.emit(JitOp::Label { id: body });
+                let new_val = self.flatten_scalar(update, current);
+                self.emit(JitOp::Drop { slot: current });
+                self.emit(JitOp::Clone { dst: current, src: new_val });
+                self.emit(JitOp::Drop { slot: new_val });
+                self.emit(JitOp::Jump { label: head });
+                self.emit(JitOp::Label { id: done });
+                self.emit(JitOp::Drop { slot: cond_val });
+                current
+            }
+            Expr::ObjectConstruct { pairs } => {
+                let out = self.alloc_slot();
+                self.emit(JitOp::ObjNew { dst: out });
+                for (k, v) in pairs {
+                    let kv = self.flatten_scalar(k, input_slot);
+                    let vv = self.flatten_scalar(v, input_slot);
+                    self.emit(JitOp::ObjInsert { obj: out, key: kv, val: vv });
+                    self.emit(JitOp::Drop { slot: kv });
+                    self.emit(JitOp::Drop { slot: vv });
+                }
+                out
+            }
+            Expr::CallBuiltin { name, args } => {
+                let mut arg_slots = Vec::new();
+                // First arg is always the input (.)
+                let inp = self.alloc_slot();
+                self.emit(JitOp::Clone { dst: inp, src: input_slot });
+                arg_slots.push(inp);
+                for arg in args {
+                    arg_slots.push(self.flatten_scalar(arg, input_slot));
+                }
+                let out = self.alloc_slot();
+                self.emit(JitOp::CallBuiltin { dst: out, name: name.clone(), args: arg_slots.clone() });
+                for s in &arg_slots {
+                    self.emit(JitOp::Drop { slot: *s });
+                }
+                out
+            }
+            Expr::Slice { expr: base_expr, from, to } => {
+                let base = self.flatten_scalar(base_expr, input_slot);
+                let from_slot = if let Some(f) = from {
+                    self.flatten_scalar(f, input_slot)
+                } else {
+                    let s = self.alloc_slot();
+                    self.emit(JitOp::Null { dst: s });
+                    s
+                };
+                let to_slot = if let Some(t) = to {
+                    self.flatten_scalar(t, input_slot)
+                } else {
+                    let s = self.alloc_slot();
+                    self.emit(JitOp::Null { dst: s });
+                    s
+                };
+                let out = self.alloc_slot();
+                // Use CallBuiltin("_slice", [input, from, to]) - we define this in runtime
+                self.emit(JitOp::CallBuiltin { dst: out, name: "_slice".to_string(), args: vec![base, from_slot, to_slot] });
+                self.emit(JitOp::Drop { slot: base });
+                self.emit(JitOp::Drop { slot: from_slot });
+                self.emit(JitOp::Drop { slot: to_slot });
+                out
+            }
+            Expr::Format { name, expr: format_expr } => {
+                let val = self.flatten_scalar(format_expr, input_slot);
+                let out = self.alloc_slot();
+                self.emit(JitOp::CallBuiltin { dst: out, name: format!("@{}", name), args: vec![val] });
+                self.emit(JitOp::Drop { slot: val });
+                out
+            }
+            Expr::SetPath { path, value } => {
+                let path_val = self.flatten_scalar(path, input_slot);
+                let val = self.flatten_scalar(value, input_slot);
+                let inp = self.alloc_slot();
+                self.emit(JitOp::Clone { dst: inp, src: input_slot });
+                let out = self.alloc_slot();
+                self.emit(JitOp::CallBuiltin { dst: out, name: "setpath".to_string(), args: vec![inp, path_val, val] });
+                self.emit(JitOp::Drop { slot: inp });
+                self.emit(JitOp::Drop { slot: path_val });
+                self.emit(JitOp::Drop { slot: val });
+                out
+            }
+            Expr::GetPath { path } => {
+                let path_val = self.flatten_scalar(path, input_slot);
+                let inp = self.alloc_slot();
+                self.emit(JitOp::Clone { dst: inp, src: input_slot });
+                let out = self.alloc_slot();
+                self.emit(JitOp::CallBuiltin { dst: out, name: "getpath".to_string(), args: vec![inp, path_val] });
+                self.emit(JitOp::Drop { slot: inp });
+                self.emit(JitOp::Drop { slot: path_val });
+                out
+            }
+            Expr::DelPaths { paths } => {
+                let paths_val = self.flatten_scalar(paths, input_slot);
+                let inp = self.alloc_slot();
+                self.emit(JitOp::Clone { dst: inp, src: input_slot });
+                let out = self.alloc_slot();
+                self.emit(JitOp::CallBuiltin { dst: out, name: "delpaths".to_string(), args: vec![inp, paths_val] });
+                self.emit(JitOp::Drop { slot: inp });
+                self.emit(JitOp::Drop { slot: paths_val });
+                out
+            }
+            Expr::Loc { file, line } => {
+                let out = self.alloc_slot();
+                // Build {"file":"...","line":N} as a CallBuiltin
+                self.emit(JitOp::CallBuiltin { dst: out, name: format!("__loc__:{}:{}", file, line), args: vec![] });
+                out
+            }
+            Expr::Env => {
+                let out = self.alloc_slot();
+                self.emit(JitOp::CallBuiltin { dst: out, name: "__env__".to_string(), args: vec![] });
+                out
+            }
+            Expr::Builtins => {
+                let out = self.alloc_slot();
+                self.emit(JitOp::CallBuiltin { dst: out, name: "__builtins__".to_string(), args: vec![] });
+                out
+            }
+            Expr::Debug { expr } => {
+                let val = self.flatten_scalar(expr, input_slot);
+                let inp = self.alloc_slot();
+                self.emit(JitOp::Clone { dst: inp, src: input_slot });
+                let out = self.alloc_slot();
+                self.emit(JitOp::CallBuiltin { dst: out, name: "debug".to_string(), args: vec![inp, val] });
+                self.emit(JitOp::Drop { slot: inp });
+                self.emit(JitOp::Drop { slot: val });
+                out
+            }
+            Expr::Stderr { expr } => {
+                let val = self.flatten_scalar(expr, input_slot);
+                let inp = self.alloc_slot();
+                self.emit(JitOp::Clone { dst: inp, src: input_slot });
+                let out = self.alloc_slot();
+                self.emit(JitOp::CallBuiltin { dst: out, name: "stderr".to_string(), args: vec![inp, val] });
+                self.emit(JitOp::Drop { slot: inp });
+                self.emit(JitOp::Drop { slot: val });
+                out
+            }
             _ => {
                 // Should not be called for non-scalar expressions
                 let out = self.alloc_slot();
@@ -613,6 +776,47 @@ impl Flattener {
                 self.emit(JitOp::F64Add { dst_var: cur_var, a_var: cur_var, b_var: step_var });
                 self.emit(JitOp::Jump { label: head });
                 self.emit(JitOp::Label { id: done });
+                true
+            }
+
+            Expr::While { cond, update } => {
+                if !is_scalar(cond) || !is_scalar(update) { return false; }
+                let current = self.alloc_slot();
+                self.emit(JitOp::Clone { dst: current, src: input_slot });
+                let head = self.alloc_label();
+                let body = self.alloc_label();
+                let done = self.alloc_label();
+                self.emit(JitOp::Label { id: head });
+                let cond_val = self.flatten_scalar(cond, current);
+                self.emit(JitOp::IfTruthy { src: cond_val, then_label: body, else_label: done });
+                self.emit(JitOp::Drop { slot: cond_val });
+                self.emit(JitOp::Label { id: body });
+                self.emit_yield(current);
+                let new_val = self.flatten_scalar(update, current);
+                self.emit(JitOp::Drop { slot: current });
+                self.emit(JitOp::Clone { dst: current, src: new_val });
+                self.emit(JitOp::Drop { slot: new_val });
+                self.emit(JitOp::Jump { label: head });
+                self.emit(JitOp::Label { id: done });
+                self.emit(JitOp::Drop { slot: cond_val });
+                self.emit(JitOp::Drop { slot: current });
+                true
+            }
+
+            Expr::Repeat { update } => {
+                if !is_scalar(update) { return false; }
+                let current = self.alloc_slot();
+                self.emit(JitOp::Clone { dst: current, src: input_slot });
+                let head = self.alloc_label();
+                self.emit(JitOp::Label { id: head });
+                self.emit_yield(current);
+                let new_val = self.flatten_scalar(update, current);
+                self.emit(JitOp::Drop { slot: current });
+                self.emit(JitOp::Clone { dst: current, src: new_val });
+                self.emit(JitOp::Drop { slot: new_val });
+                self.emit(JitOp::Jump { label: head });
+                // Note: no "done" label — this is an infinite loop.
+                // Early termination happens via Yield returning stop.
                 true
             }
 
@@ -1449,6 +1653,99 @@ extern "C" fn jit_rt_strbuf_finish(dst: *mut Value, env: *mut JitEnv) {
     }
 }
 
+// CallBuiltin helper: call runtime::call_builtin with name and args
+extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len: usize,
+                                   args_ptr: *const Value, nargs: usize) -> i64 {
+    unsafe {
+        let name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(name_ptr, name_len));
+        let args = std::slice::from_raw_parts(args_ptr, nargs);
+        let args_vec: Vec<Value> = args.iter().cloned().collect();
+
+        // Handle special names
+        if let Some(rest) = name.strip_prefix("__loc__:") {
+            // Parse file:line
+            let parts: Vec<&str> = rest.rsplitn(2, ':').collect();
+            if parts.len() == 2 {
+                let line_n: i64 = parts[0].parse().unwrap_or(0);
+                let file = parts[1];
+                let mut obj = indexmap::IndexMap::new();
+                obj.insert("file".to_string(), Value::Str(Rc::new(file.to_string())));
+                obj.insert("line".to_string(), Value::Num(line_n as f64, None));
+                std::ptr::write(dst, Value::Obj(Rc::new(obj)));
+                return 0;
+            }
+        }
+        if name == "__env__" {
+            let mut obj = indexmap::IndexMap::new();
+            for (k, v) in std::env::vars() {
+                obj.insert(k, Value::Str(Rc::new(v)));
+            }
+            std::ptr::write(dst, Value::Obj(Rc::new(obj)));
+            return 0;
+        }
+        if name == "__builtins__" {
+            std::ptr::write(dst, crate::runtime::rt_builtins());
+            return 0;
+        }
+        if name == "debug" {
+            // debug: print to stderr, return input
+            if args_vec.len() >= 2 {
+                let input = &args_vec[0];
+                let label = &args_vec[1];
+                match label {
+                    Value::Str(s) if !s.is_empty() => {
+                        eprintln!("[\"DEBUG:\",{}]", crate::value::value_to_json(input));
+                    }
+                    _ => {
+                        eprintln!("[\"DEBUG:\",{}]", crate::value::value_to_json(input));
+                    }
+                }
+                std::ptr::write(dst, input.clone());
+            } else if !args_vec.is_empty() {
+                eprintln!("[\"DEBUG:\",{}]", crate::value::value_to_json(&args_vec[0]));
+                std::ptr::write(dst, args_vec[0].clone());
+            } else {
+                std::ptr::write(dst, Value::Null);
+            }
+            return 0;
+        }
+        if name == "stderr" {
+            if !args_vec.is_empty() {
+                eprint!("{}", crate::value::value_to_json(&args_vec[0]));
+                std::ptr::write(dst, args_vec[0].clone());
+            } else {
+                std::ptr::write(dst, Value::Null);
+            }
+            return 0;
+        }
+        if name == "_slice" {
+            // _slice(base, from, to)
+            if args_vec.len() >= 3 {
+                match crate::eval::eval_slice(&args_vec[0], &args_vec[1], &args_vec[2]) {
+                    Ok(v) => { std::ptr::write(dst, v); return 0; }
+                    Err(_) => { std::ptr::write(dst, Value::Null); return GEN_ERROR; }
+                }
+            }
+        }
+        if let Some(format_name) = name.strip_prefix('@') {
+            // Format: @base64, @uri, etc.
+            if args_vec.is_empty() {
+                std::ptr::write(dst, Value::Null);
+                return GEN_ERROR;
+            }
+            match crate::eval::eval_format(format_name, &args_vec[0]) {
+                Ok(s) => { std::ptr::write(dst, Value::from_str(&s)); return 0; }
+                Err(_) => { std::ptr::write(dst, Value::Null); return GEN_ERROR; }
+            }
+        }
+
+        match crate::runtime::call_builtin(name, &args_vec) {
+            Ok(v) => { std::ptr::write(dst, v); 0 }
+            Err(_) => { std::ptr::write(dst, Value::Null); GEN_ERROR }
+        }
+    }
+}
+
 // TryCatch helpers
 extern "C" fn jit_rt_try_begin(env: *mut JitEnv) {
     unsafe { (*env).try_depth += 1; }
@@ -1581,6 +1878,7 @@ impl JitCompiler {
             ("jit_rt_try_begin", jit_rt_try_begin as *const u8),
             ("jit_rt_try_end", jit_rt_try_end as *const u8),
             ("jit_rt_throw_error", jit_rt_throw_error as *const u8),
+            ("jit_rt_call_builtin", jit_rt_call_builtin as *const u8),
         ];
         for (name, ptr) in symbols {
             jit_builder.symbol(*name, *ptr);
@@ -1996,6 +2294,41 @@ impl JitCompiler {
                         b.ins().return_(&[v]);
                         terminated = true;
                     }
+                    JitOp::CallBuiltin { dst, name, args } => {
+                        let d = slot_addr(&mut b, *dst);
+                        // Leak the name string so it lives as long as the JIT code
+                        let leaked_name = Box::leak(name.clone().into_boxed_str());
+                        self._string_constants.push(leaked_name);
+                        let name_p = b.ins().iconst(ptr_ty, leaked_name.as_ptr() as i64);
+                        let name_l = b.ins().iconst(ptr_ty, leaked_name.len() as i64);
+                        // Build args array on stack
+                        if args.is_empty() {
+                            let null_p = b.ins().iconst(ptr_ty, 0);
+                            let zero = b.ins().iconst(ptr_ty, 0);
+                            b.ins().call(rt["call_builtin"], &[d, name_p, name_l, null_p, zero]);
+                        } else {
+                            // Allocate stack space for args array
+                            let arg_count = args.len() as u32;
+                            let arg_array_slot = b.create_sized_stack_slot(StackSlotData::new(
+                                StackSlotKind::ExplicitSlot, val_size * arg_count, val_align,
+                            ));
+                            // Clone each arg value into the array
+                            for (i, arg_slot) in args.iter().enumerate() {
+                                let arg_dst = b.ins().stack_addr(ptr_ty, arg_array_slot, (i as i32) * (val_size as i32));
+                                let arg_src = slot_addr(&mut b, *arg_slot);
+                                b.ins().call(rt["clone"], &[arg_dst, arg_src]);
+                            }
+                            let arr_ptr = b.ins().stack_addr(ptr_ty, arg_array_slot, 0);
+                            let n = b.ins().iconst(ptr_ty, args.len() as i64);
+                            b.ins().call(rt["call_builtin"], &[d, name_p, name_l, arr_ptr, n]);
+                            // Drop the cloned args
+                            for i in 0..args.len() {
+                                let arg_p = b.ins().stack_addr(ptr_ty, arg_array_slot, (i as i32) * (val_size as i32));
+                                b.ins().call(rt["drop"], &[arg_p]);
+                            }
+                        }
+                        terminated = false;
+                    }
                     JitOp::ThrowError { msg } => {
                         let msg_addr = slot_addr(&mut b, *msg);
                         let call = b.ins().call(rt["throw_error"], &[msg_addr, env_ptr]);
@@ -2077,6 +2410,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("try_begin", [p], []);
     decl!("try_end", [p], []);
     decl!("throw_error", [p, p], [p]);
+    decl!("call_builtin", [p, p, p, p, p], [p]);  // dst, name_ptr, name_len, args_ptr, nargs -> status
     Ok(())
 }
 
