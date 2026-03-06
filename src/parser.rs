@@ -2339,6 +2339,21 @@ impl Parser {
                     Ok((key_expr, Expr::Input))
                 }
             }
+            Token::Ident(ref name) if name == "__string_interp__" => {
+                self.advance();
+                let key_expr = self.parse_string_interpolation()?;
+                if self.eat(&Token::Colon) {
+                    let val = self.parse_pipe_nocomma()?;
+                    Ok((key_expr, val))
+                } else {
+                    // Shorthand: {"foo\(x)"} = {("foo\(x)"): .["foo\(x)"]}
+                    let val_expr = Expr::Index {
+                        expr: Box::new(Expr::Input),
+                        key: Box::new(key_expr.clone()),
+                    };
+                    Ok((key_expr, val_expr))
+                }
+            }
             // Keywords as object keys: {if:0, and:1, ...}
             ref tok if Self::keyword_as_string(tok).is_some() => {
                 let key = Self::keyword_as_string(tok).unwrap().to_string();
