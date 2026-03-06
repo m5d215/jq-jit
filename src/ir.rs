@@ -319,6 +319,12 @@ pub enum Expr {
 
     /// `genlabel` - generate unique label (internal)
     GenLabel,
+
+    /// Runtime builtin call with evaluated args: contains, startswith, etc.
+    CallBuiltin {
+        name: String,
+        args: Vec<Expr>,
+    },
 }
 
 /// String interpolation part.

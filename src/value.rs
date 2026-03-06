@@ -92,6 +92,10 @@ impl Value {
         !matches!(self, Value::Null | Value::False)
     }
 
+    pub fn is_truthy(&self) -> bool {
+        self.is_true()
+    }
+
     pub fn as_f64(&self) -> Option<f64> {
         match self {
             Value::Num(n) => Some(*n),
@@ -295,8 +299,9 @@ pub fn format_jq_number(n: f64) -> String {
         let i = n as i64;
         if i as f64 == n {
             let int_str = format!("{}", i);
-            // %.17g uses scientific notation when exponent >= 17
-            if int_str.len() > 17 {
+            // %.17g uses scientific notation when significant digits > 17
+            let digit_count = int_str.chars().filter(|c| c.is_ascii_digit()).count();
+            if digit_count > 17 {
                 let sci = format!("{:e}", n);
                 let sci = if !sci.contains('+') && !sci.contains('-') {
                     sci.replacen("e", "e+", 1)

@@ -214,14 +214,10 @@ fi
 
 if [[ ${#FAILURES[@]} -gt 0 ]]; then
     echo ""
-    echo "=== Failures (first 30) ==="
+    echo "=== Failures ==="
     for i in "${!FAILURES[@]}"; do
-        [[ $i -ge 30 ]] && break
         echo "  ${FAILURES[$i]}"
     done
-    if [[ ${#FAILURES[@]} -gt 30 ]]; then
-        echo "  ... and $((${#FAILURES[@]} - 30)) more"
-    fi
 fi
 
 exit 0

@@ -34,7 +34,16 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "values" => unary_op(args, rt_values),
         "sort" => unary_op(args, rt_sort),
         "reverse" => unary_op(args, rt_reverse),
-        "flatten" => unary_op(args, |v| rt_flatten(v, None)),
+        "flatten" if args.len() < 2 => unary_op(args, |v| rt_flatten(v, None)),
+        "flatten" => {
+            match &args[1] {
+                Value::Num(n) => {
+                    if *n < 0.0 { bail!("flatten depth must not be negative"); }
+                    rt_flatten(&args[0], Some(*n as usize))
+                }
+                _ => rt_flatten(&args[0], None)
+            }
+        }
         "unique" => unary_op(args, rt_unique),
         "min" => unary_op(args, rt_min),
         "max" => unary_op(args, rt_max),
@@ -167,16 +176,9 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "map" | "select" | "map_values" | "with_entries" | "from_entries" | "to_entries" => {
             Ok(args.first().cloned().unwrap_or(Value::Null))
         }
-        "flatten" if args.len() >= 2 => {
-            // flatten(depth)
-            if let Value::Num(depth) = &args[1] {
-                rt_flatten(&args[0], Some(*depth as usize))
-            } else {
-                rt_flatten(&args[0], None)
-            }
-        }
-        "pow" => binary_arg(args, rt_pow),
-        "atan2" => binary_arg(args, |a, b| match (a, b) {
+        // flatten with depth already handled above
+        "pow" => ternary_arg(args, rt_pow),
+        "atan2" => ternary_arg(args, |a, b| match (a, b) {
             (Value::Num(y), Value::Num(x)) => Ok(Value::Num(y.atan2(*x))),
             _ => bail!("atan2 requires numbers"),
         }),
@@ -258,6 +260,13 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "mktime" => unary_op(args, rt_mktime),
         "strftime" => binary_arg(args, rt_strftime),
         "strptime" => binary_arg(args, rt_strptime),
+        "todate" => unary_op(args, |v| rt_strftime(v, &Value::from_str("%Y-%m-%dT%H:%M:%SZ"))),
+        "fromdate" => unary_op(args, |v| rt_strptime(v, &Value::from_str("%Y-%m-%dT%H:%M:%SZ"))),
+        "date" => unary_op(args, |v| rt_strftime(v, &Value::from_str("%Y-%m-%dT%H:%M:%SZ"))),
+        "trimstr" => binary_arg(args, |a, b| {
+            let v = rt_ltrimstr(a, b)?;
+            rt_rtrimstr(&v, b)
+        }),
         "modulemeta" => {
             bail!("modulemeta is not supported");
         }
@@ -275,8 +284,37 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
 }
 
 // -----------------------------------------------------------------------
-// Helper macros
+// Helpers
 // -----------------------------------------------------------------------
+
+/// Format a value for error messages the way jq does: "type (value_repr)"
+/// Long values are truncated with "..." appended.
+pub fn errdesc_pub(v: &Value) -> String { errdesc(v) }
+
+fn errdesc(v: &Value) -> String {
+    let json = crate::value::value_to_json(v);
+    let tn = v.type_name();
+    let jlen = json.as_bytes().len();
+    if json.starts_with('"') {
+        // String: threshold 28 bytes of JSON (including quotes)
+        if jlen > 28 {
+            let mut end = 25.min(jlen);
+            while end > 0 && !json.is_char_boundary(end) { end -= 1; }
+            format!("{} ({}...\")", tn, &json[..end])
+        } else {
+            format!("{} ({})", tn, json)
+        }
+    } else {
+        // Non-string: threshold 28 bytes
+        if jlen > 28 {
+            let mut end = 26.min(jlen);
+            while end > 0 && !json.is_char_boundary(end) { end -= 1; }
+            format!("{} ({}...)", tn, &json[..end])
+        } else {
+            format!("{} ({})", tn, json)
+        }
+    }
+}
 
 fn unary_op(args: &[Value], f: impl FnOnce(&Value) -> Result<Value>) -> Result<Value> {
     if args.is_empty() {
@@ -302,11 +340,19 @@ fn binary_arg(args: &[Value], f: impl FnOnce(&Value, &Value) -> Result<Value>) -
     f(&args[0], &args[1])
 }
 
+fn ternary_arg(args: &[Value], f: impl FnOnce(&Value, &Value) -> Result<Value>) -> Result<Value> {
+    if args.len() < 3 {
+        bail!("ternary arg: need 2 explicit args, got {}", args.len().saturating_sub(1));
+    }
+    // args[0] = pipeline input (unused), args[1] = first explicit arg, args[2] = second explicit arg
+    f(&args[1], &args[2])
+}
+
 // -----------------------------------------------------------------------
 // Arithmetic
 // -----------------------------------------------------------------------
 
-fn rt_add(a: &Value, b: &Value) -> Result<Value> {
+pub fn rt_add(a: &Value, b: &Value) -> Result<Value> {
     match (a, b) {
         (Value::Num(x), Value::Num(y)) => Ok(Value::Num(x + y)),
         (Value::Str(x), Value::Str(y)) => {
@@ -327,13 +373,13 @@ fn rt_add(a: &Value, b: &Value) -> Result<Value> {
         (Value::Null, x) | (x, Value::Null) => Ok(x.clone()),
         _ => bail!(
             "{} and {} cannot be added",
-            a.type_name(),
-            b.type_name()
+            errdesc(a),
+            errdesc(b)
         ),
     }
 }
 
-fn rt_sub(a: &Value, b: &Value) -> Result<Value> {
+pub fn rt_sub(a: &Value, b: &Value) -> Result<Value> {
     match (a, b) {
         (Value::Num(x), Value::Num(y)) => Ok(Value::Num(x - y)),
         (Value::Arr(x), Value::Arr(y)) => {
@@ -345,20 +391,21 @@ fn rt_sub(a: &Value, b: &Value) -> Result<Value> {
         }
         _ => bail!(
             "{} and {} cannot be subtracted",
-            a.type_name(),
-            b.type_name()
+            errdesc(a),
+            errdesc(b)
         ),
     }
 }
 
-fn rt_mul(a: &Value, b: &Value) -> Result<Value> {
+pub fn rt_mul(a: &Value, b: &Value) -> Result<Value> {
     match (a, b) {
         (Value::Num(x), Value::Num(y)) => Ok(Value::Num(x * y)),
         (Value::Str(s), Value::Num(n)) | (Value::Num(n), Value::Str(s)) => {
-            if *n <= 0.0 {
+            if n.is_nan() || *n < 0.0 {
                 Ok(Value::Null)
             } else {
-                Ok(Value::from_string(s.repeat(*n as usize)))
+                let count = *n as usize;
+                Ok(Value::from_string(s.repeat(count)))
             }
         }
         (Value::Obj(x), Value::Obj(y)) => {
@@ -368,8 +415,8 @@ fn rt_mul(a: &Value, b: &Value) -> Result<Value> {
         (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
         _ => bail!(
             "{} and {} cannot be multiplied",
-            a.type_name(),
-            b.type_name()
+            errdesc(a),
+            errdesc(b)
         ),
     }
 }
@@ -388,11 +435,11 @@ fn merge_objects(a: &IndexMap<String, Value>, b: &IndexMap<String, Value>) -> In
     result
 }
 
-fn rt_div(a: &Value, b: &Value) -> Result<Value> {
+pub fn rt_div(a: &Value, b: &Value) -> Result<Value> {
     match (a, b) {
         (Value::Num(x), Value::Num(y)) => {
             if *y == 0.0 {
-                bail!("{} and {} cannot be divided because the divisor is zero", x, y);
+                bail!("{} and {} cannot be divided because the divisor is zero", errdesc(a), errdesc(b));
             }
             Ok(Value::Num(x / y))
         }
@@ -405,24 +452,39 @@ fn rt_div(a: &Value, b: &Value) -> Result<Value> {
         }
         _ => bail!(
             "{} and {} cannot be divided",
-            a.type_name(),
-            b.type_name()
+            errdesc(a),
+            errdesc(b)
         ),
     }
 }
 
-fn rt_mod(a: &Value, b: &Value) -> Result<Value> {
+pub fn rt_mod(a: &Value, b: &Value) -> Result<Value> {
     match (a, b) {
         (Value::Num(x), Value::Num(y)) => {
-            if *y == 0.0 {
-                bail!("{} and {} cannot be divided (remainder) because the divisor is zero", x, y);
+            // NaN inputs → NaN output
+            if x.is_nan() || y.is_nan() {
+                return Ok(Value::Num(f64::NAN));
             }
-            Ok(Value::Num(x % y))
+            if *y == 0.0 {
+                bail!("{} and {} cannot be divided (remainder) because the divisor is zero", errdesc(a), errdesc(b));
+            }
+            // jq uses integer modulo (casting to long long first)
+            let xi = *x as i64;
+            let yi = *y as i64;
+            if yi == 0 {
+                bail!("{} and {} cannot be divided (remainder) because the divisor is zero", errdesc(a), errdesc(b));
+            }
+            // Avoid overflow for i64::MIN % -1
+            if xi == i64::MIN && yi == -1 {
+                Ok(Value::Num(0.0))
+            } else {
+                Ok(Value::Num((xi % yi) as f64))
+            }
         }
         _ => bail!(
             "{} and {} cannot be divided (remainder)",
-            a.type_name(),
-            b.type_name()
+            errdesc(a),
+            errdesc(b)
         ),
     }
 }
@@ -455,7 +517,7 @@ fn rt_ge(a: &Value, b: &Value) -> Result<Value> {
     Ok(Value::from_bool(compare_values(a, b) != std::cmp::Ordering::Less))
 }
 
-fn values_equal(a: &Value, b: &Value) -> bool {
+pub fn values_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Null, Value::Null) => true,
         (Value::True, Value::True) => true,
@@ -472,7 +534,7 @@ fn values_equal(a: &Value, b: &Value) -> bool {
     }
 }
 
-fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
+pub fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
     let type_order = |v: &Value| -> u8 {
@@ -541,7 +603,7 @@ fn rt_length(v: &Value) -> Result<Value> {
 fn rt_utf8bytelength(v: &Value) -> Result<Value> {
     match v {
         Value::Str(s) => Ok(Value::Num(s.len() as f64)),
-        _ => v.length(),
+        _ => bail!("{} ({}) only strings have UTF-8 byte length", v.type_name(), crate::value::value_to_json(v)),
     }
 }
 
@@ -721,7 +783,10 @@ fn rt_round(v: &Value) -> Result<Value> {
 fn rt_fabs(v: &Value) -> Result<Value> {
     match v {
         Value::Num(n) => Ok(Value::Num(n.abs())),
-        _ => bail!("{} is not a number", v.type_name()),
+        // abs on non-numbers returns the value for strings, errors for others
+        Value::Str(_) => Ok(v.clone()),
+        Value::Null => Ok(Value::Null),
+        _ => v.length(),
     }
 }
 
@@ -743,10 +808,19 @@ fn rt_tonumber(v: &Value) -> Result<Value> {
     match v {
         Value::Num(_) => Ok(v.clone()),
         Value::Str(s) => {
-            let s = s.trim();
-            match s.parse::<f64>() {
+            let s_ref: &str = s.as_ref();
+            if s_ref.is_empty() {
+                bail!("Cannot convert empty string to number");
+            }
+            // jq rejects leading/trailing whitespace
+            if s_ref.as_bytes()[0].is_ascii_whitespace() || s_ref.as_bytes()[s_ref.len()-1].is_ascii_whitespace() {
+                bail!("Invalid numeric literal: {}", crate::value::value_to_json(v));
+            }
+            // Strip leading '+' for compatibility with jq
+            let parse_str = if s_ref.starts_with('+') { &s_ref[1..] } else { s_ref };
+            match parse_str.parse::<f64>() {
                 Ok(n) => Ok(Value::Num(n)),
-                Err(_) => bail!("Cannot convert {:?} to number", s),
+                Err(_) => bail!("Invalid numeric literal: {}", crate::value::value_to_json(v)),
             }
         }
         _ => bail!("{} cannot be converted to number", v.type_name()),
@@ -755,14 +829,14 @@ fn rt_tonumber(v: &Value) -> Result<Value> {
 
 fn rt_ascii_downcase(v: &Value) -> Result<Value> {
     match v {
-        Value::Str(s) => Ok(Value::from_string(s.to_lowercase())),
+        Value::Str(s) => Ok(Value::from_string(s.chars().map(|c| if c.is_ascii() { c.to_ascii_lowercase() } else { c }).collect())),
         _ => bail!("{} cannot be lowercased", v.type_name()),
     }
 }
 
 fn rt_ascii_upcase(v: &Value) -> Result<Value> {
     match v {
-        Value::Str(s) => Ok(Value::from_string(s.to_uppercase())),
+        Value::Str(s) => Ok(Value::from_string(s.chars().map(|c| if c.is_ascii() { c.to_ascii_uppercase() } else { c }).collect())),
         _ => bail!("{} cannot be uppercased", v.type_name()),
     }
 }
@@ -770,21 +844,21 @@ fn rt_ascii_upcase(v: &Value) -> Result<Value> {
 fn rt_ltrim(v: &Value) -> Result<Value> {
     match v {
         Value::Str(s) => Ok(Value::from_string(s.trim_start().to_string())),
-        _ => bail!("{} cannot be trimmed", v.type_name()),
+        _ => bail!("trim input must be a string"),
     }
 }
 
 fn rt_rtrim(v: &Value) -> Result<Value> {
     match v {
         Value::Str(s) => Ok(Value::from_string(s.trim_end().to_string())),
-        _ => bail!("{} cannot be trimmed", v.type_name()),
+        _ => bail!("trim input must be a string"),
     }
 }
 
 fn rt_trim(v: &Value) -> Result<Value> {
     match v {
         Value::Str(s) => Ok(Value::from_string(s.trim().to_string())),
-        _ => bail!("{} cannot be trimmed", v.type_name()),
+        _ => bail!("trim input must be a string"),
     }
 }
 
@@ -807,18 +881,31 @@ fn rt_implode(v: &Value) -> Result<Value> {
             for item in a.iter() {
                 match item {
                     Value::Num(n) => {
-                        let cp = *n as u32;
-                        match char::from_u32(cp) {
-                            Some(c) => s.push(c),
-                            None => bail!("Invalid codepoint: {}", cp),
+                        if n.is_nan() || n.is_infinite() {
+                            bail!("{} can't be imploded, unicode codepoint needs to be numeric", errdesc(item));
+                        }
+                        let n_val = *n as i64;
+                        // Negative, surrogate range (0xD800-0xDFFF), or > 0x10FFFF → replacement char
+                        if n_val < 0 || (0xD800..=0xDFFF).contains(&n_val) || n_val > 0x10FFFF {
+                            s.push('\u{FFFD}');
+                        } else {
+                            match char::from_u32(n_val as u32) {
+                                Some(c) => s.push(c),
+                                None => s.push('\u{FFFD}'),
+                            }
                         }
                     }
-                    _ => bail!("implode requires array of numbers"),
+                    Value::Str(sv) => {
+                        bail!("{} can't be imploded, unicode codepoint needs to be numeric", errdesc(&Value::Str(sv.clone())));
+                    }
+                    _ => {
+                        bail!("{} can't be imploded, unicode codepoint needs to be numeric", errdesc(item));
+                    }
                 }
             }
             Ok(Value::from_string(s))
         }
-        _ => bail!("{} cannot be imploded", v.type_name()),
+        _ => bail!("implode input must be an array"),
     }
 }
 
@@ -855,9 +942,11 @@ fn rt_from_entries(v: &Value) -> Result<Value> {
             for entry in a.iter() {
                 match entry {
                     Value::Obj(o) => {
-                        let key = o.get("key").or_else(|| o.get("name"))
+                        let key = o.get("key").or_else(|| o.get("Key"))
+                            .or_else(|| o.get("name")).or_else(|| o.get("Name"))
                             .cloned().unwrap_or(Value::Null);
-                        let val = o.get("value").cloned().unwrap_or(Value::Null);
+                        let val = o.get("value").or_else(|| o.get("Value"))
+                            .cloned().unwrap_or(Value::Null);
                         let key_str = match &key {
                             Value::Str(s) => s.as_ref().clone(),
                             Value::Num(n) => crate::value::format_jq_number(*n),
@@ -927,10 +1016,13 @@ fn rt_has(v: &Value, key: &Value) -> Result<Value> {
     match (v, key) {
         (Value::Obj(o), Value::Str(k)) => Ok(Value::from_bool(o.contains_key(k.as_str()))),
         (Value::Arr(a), Value::Num(n)) => {
-            let idx = *n as usize;
-            Ok(Value::from_bool(idx < a.len()))
+            if n.is_nan() || n.is_infinite() { return Ok(Value::False); }
+            let idx = *n as i64;
+            if idx < 0 { return Ok(Value::False); }
+            Ok(Value::from_bool((idx as usize) < a.len()))
         }
-        _ => bail!("{} cannot have {} as key", v.type_name(), key.type_name()),
+        (Value::Null, _) => Ok(Value::False),
+        _ => bail!("{} ({}) and {} ({}) cannot be has-tested", v.type_name(), crate::value::value_to_json(v), key.type_name(), crate::value::value_to_json(key)),
     }
 }
 
@@ -987,7 +1079,7 @@ fn rt_ltrimstr(v: &Value, prefix: &Value) -> Result<Value> {
                 Ok(v.clone())
             }
         }
-        _ => bail!("ltrimstr requires strings"),
+        _ => bail!("startswith() requires string inputs"),
     }
 }
 
@@ -1000,17 +1092,23 @@ fn rt_rtrimstr(v: &Value, suffix: &Value) -> Result<Value> {
                 Ok(v.clone())
             }
         }
-        _ => bail!("rtrimstr requires strings"),
+        _ => bail!("endswith() requires string inputs"),
     }
 }
 
 fn rt_split(v: &Value, sep: &Value) -> Result<Value> {
     match (v, sep) {
         (Value::Str(s), Value::Str(p)) => {
-            let parts: Vec<Value> = s.split(p.as_str())
-                .map(|p| Value::from_str(p))
-                .collect();
-            Ok(Value::Arr(Rc::new(parts)))
+            if p.is_empty() {
+                // split("") = each character as a separate element
+                let parts: Vec<Value> = s.chars().map(|c| Value::from_string(c.to_string())).collect();
+                Ok(Value::Arr(Rc::new(parts)))
+            } else {
+                let parts: Vec<Value> = s.split(p.as_str())
+                    .map(|p| Value::from_str(p))
+                    .collect();
+                Ok(Value::Arr(Rc::new(parts)))
+            }
         }
         _ => bail!("split requires strings"),
     }
@@ -1019,12 +1117,23 @@ fn rt_split(v: &Value, sep: &Value) -> Result<Value> {
 fn rt_join(v: &Value, sep: &Value) -> Result<Value> {
     match (v, sep) {
         (Value::Arr(a), Value::Str(s)) => {
-            let parts: Vec<String> = a.iter().map(|v| match v {
-                Value::Str(s) => s.as_ref().clone(),
-                Value::Null => String::new(),
-                _ => crate::value::value_to_json(v),
-            }).collect();
-            Ok(Value::from_string(parts.join(s.as_str())))
+            let mut result = String::new();
+            for (i, item) in a.iter().enumerate() {
+                if i > 0 { result.push_str(s.as_str()); }
+                match item {
+                    Value::Str(sv) => result.push_str(sv.as_str()),
+                    Value::Null => {},
+                    Value::Num(n) => result.push_str(&crate::value::format_jq_number(*n)),
+                    Value::True => result.push_str("true"),
+                    Value::False => result.push_str("false"),
+                    _ => {
+                        // jq errors when trying to add string to object/array
+                        let partial = Value::from_string(result);
+                        bail!("{} and {} cannot be added", errdesc(&partial), errdesc(item));
+                    }
+                }
+            }
+            Ok(Value::from_string(result))
         }
         _ => bail!("join requires array and string"),
     }
@@ -1033,16 +1142,25 @@ fn rt_join(v: &Value, sep: &Value) -> Result<Value> {
 fn rt_str_index(v: &Value, target: &Value, is_rindex: bool) -> Result<Value> {
     match (v, target) {
         (Value::Str(s), Value::Str(t)) => {
+            if t.is_empty() {
+                return Ok(Value::Null);
+            }
+            let chars: Vec<char> = s.chars().collect();
+            let tchars: Vec<char> = t.chars().collect();
             if is_rindex {
-                match s.rfind(t.as_str()) {
-                    Some(pos) => Ok(Value::Num(pos as f64)),
-                    None => Ok(Value::Null),
+                for i in (0..chars.len()).rev() {
+                    if i + tchars.len() <= chars.len() && chars[i..i+tchars.len()] == tchars[..] {
+                        return Ok(Value::Num(i as f64));
+                    }
                 }
+                Ok(Value::Null)
             } else {
-                match s.find(t.as_str()) {
-                    Some(pos) => Ok(Value::Num(pos as f64)),
-                    None => Ok(Value::Null),
+                for i in 0..chars.len() {
+                    if i + tchars.len() <= chars.len() && chars[i..i+tchars.len()] == tchars[..] {
+                        return Ok(Value::Num(i as f64));
+                    }
                 }
+                Ok(Value::Null)
             }
         }
         (Value::Arr(a), _) => {
@@ -1069,15 +1187,41 @@ fn rt_str_index(v: &Value, target: &Value, is_rindex: bool) -> Result<Value> {
 fn rt_indices(v: &Value, target: &Value) -> Result<Value> {
     match (v, target) {
         (Value::Str(s), Value::Str(t)) => {
+            // Use character indices, not byte indices
+            let chars: Vec<char> = s.chars().collect();
+            let tchars: Vec<char> = t.chars().collect();
             let mut indices = Vec::new();
-            let mut start = 0;
-            while let Some(pos) = s[start..].find(t.as_str()) {
-                indices.push(Value::Num((start + pos) as f64));
-                start += pos + 1;
+            if tchars.is_empty() {
+                return Ok(Value::Arr(Rc::new(indices)));
+            }
+            for i in 0..chars.len() {
+                if i + tchars.len() <= chars.len() && chars[i..i+tchars.len()] == tchars[..] {
+                    indices.push(Value::Num(i as f64));
+                }
+            }
+            Ok(Value::Arr(Rc::new(indices)))
+        }
+        (Value::Arr(a), Value::Arr(sub)) => {
+            // Subarray search
+            let mut indices = Vec::new();
+            if sub.is_empty() {
+                return Ok(Value::Arr(Rc::new(indices)));
+            }
+            for i in 0..a.len() {
+                if i + sub.len() <= a.len() {
+                    let mut matches = true;
+                    for j in 0..sub.len() {
+                        if !values_equal(&a[i+j], &sub[j]) { matches = false; break; }
+                    }
+                    if matches {
+                        indices.push(Value::Num(i as f64));
+                    }
+                }
             }
             Ok(Value::Arr(Rc::new(indices)))
         }
         (Value::Arr(a), _) => {
+            // Element search
             let mut indices = Vec::new();
             for (i, item) in a.iter().enumerate() {
                 if values_equal(item, target) {
@@ -1097,7 +1241,7 @@ fn rt_pow(a: &Value, b: &Value) -> Result<Value> {
     }
 }
 
-fn rt_getpath(v: &Value, path: &Value) -> Result<Value> {
+pub fn rt_getpath(v: &Value, path: &Value) -> Result<Value> {
     match path {
         Value::Arr(p) => {
             let mut current = v.clone();
@@ -1123,7 +1267,7 @@ fn rt_getpath(v: &Value, path: &Value) -> Result<Value> {
     }
 }
 
-fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
+pub fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
     match path {
         Value::Arr(p) if p.is_empty() => Ok(val.clone()),
         Value::Arr(p) => {
@@ -1156,11 +1300,28 @@ fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
                     Ok(Value::Obj(Rc::new(obj)))
                 }
                 (Value::Null, Value::Num(n)) => {
+                    if n.is_nan() { bail!("Cannot set array element at NaN index"); }
+                    if *n < 0.0 { bail!("Out of bounds negative array index"); }
                     let idx = *n as usize;
                     let new_inner = rt_setpath(&Value::Null, &rest, val)?;
                     let mut arr = vec![Value::Null; idx + 1];
                     arr[idx] = new_inner;
                     Ok(Value::Arr(Rc::new(arr)))
+                }
+                (Value::Obj(_), Value::Num(n)) => {
+                    bail!("Cannot index object with number ({})", crate::value::format_jq_number(*n));
+                }
+                (Value::Arr(_), Value::Str(k)) => {
+                    bail!("Cannot index array with string (\"{}\")", k);
+                }
+                (_, Value::Arr(_)) => {
+                    bail!("Cannot update field at array index of array");
+                }
+                (Value::Num(_), Value::Num(n)) => {
+                    bail!("Cannot index number with number ({})", crate::value::format_jq_number(*n));
+                }
+                (Value::Num(_), Value::Str(k)) => {
+                    bail!("Cannot index number with string (\"{}\")", k);
                 }
                 _ => bail!("Cannot set path"),
             }
@@ -1169,7 +1330,7 @@ fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
     }
 }
 
-fn rt_delpaths(v: &Value, paths: &Value) -> Result<Value> {
+pub fn rt_delpaths(v: &Value, paths: &Value) -> Result<Value> {
     match paths {
         Value::Arr(ps) => {
             let mut result = v.clone();
@@ -1181,7 +1342,7 @@ fn rt_delpaths(v: &Value, paths: &Value) -> Result<Value> {
             }
             Ok(result)
         }
-        _ => bail!("delpaths requires array of paths"),
+        _ => bail!("Paths must be specified as an array"),
     }
 }
 
@@ -1196,12 +1357,15 @@ fn delete_path(v: &Value, path: &Value) -> Result<Value> {
                     Ok(Value::Obj(Rc::new(new_obj)))
                 }
                 (Value::Arr(a), Value::Num(n)) => {
-                    let idx = *n as usize;
-                    let mut new_arr = (**a).clone();
-                    if idx < new_arr.len() {
-                        new_arr.remove(idx);
+                    let ni = *n as i64;
+                    let idx = if ni < 0 { (a.len() as i64 + ni) } else { ni };
+                    if idx >= 0 && (idx as usize) < a.len() {
+                        let mut new_arr = (**a).clone();
+                        new_arr.remove(idx as usize);
+                        Ok(Value::Arr(Rc::new(new_arr)))
+                    } else {
+                        Ok(v.clone())
                     }
-                    Ok(Value::Arr(Rc::new(new_arr)))
                 }
                 _ => Ok(v.clone()),
             }
@@ -1211,19 +1375,24 @@ fn delete_path(v: &Value, path: &Value) -> Result<Value> {
             let rest = Value::Arr(Rc::new(p[1..].to_vec()));
             match (v, key) {
                 (Value::Obj(o), Value::Str(k)) => {
-                    let inner = o.get(k.as_str()).cloned().unwrap_or(Value::Null);
-                    let new_inner = delete_path(&inner, &rest)?;
-                    let mut new_obj = (**o).clone();
-                    new_obj.insert(k.as_ref().clone(), new_inner);
-                    Ok(Value::Obj(Rc::new(new_obj)))
+                    if let Some(inner) = o.get(k.as_str()) {
+                        let new_inner = delete_path(inner, &rest)?;
+                        let mut new_obj = (**o).clone();
+                        new_obj.insert(k.as_ref().clone(), new_inner);
+                        Ok(Value::Obj(Rc::new(new_obj)))
+                    } else {
+                        Ok(v.clone())
+                    }
                 }
                 (Value::Arr(a), Value::Num(n)) => {
-                    let idx = *n as usize;
-                    if idx < a.len() {
-                        let inner = &a[idx];
+                    let ni = *n as i64;
+                    let idx = if ni < 0 { a.len() as i64 + ni } else { ni };
+                    if idx >= 0 && (idx as usize) < a.len() {
+                        let uidx = idx as usize;
+                        let inner = &a[uidx];
                         let new_inner = delete_path(inner, &rest)?;
                         let mut new_arr = (**a).clone();
-                        new_arr[idx] = new_inner;
+                        new_arr[uidx] = new_inner;
                         Ok(Value::Arr(Rc::new(new_arr)))
                     } else {
                         Ok(v.clone())
@@ -1355,9 +1524,7 @@ fn rt_gmtime(v: &Value) -> Result<Value> {
     match v {
         Value::Num(n) => {
             let secs = *n as i64;
-            // Convert to broken-down time
-            let time = libc_gmtime(secs);
-            Ok(time)
+            Ok(libc_gmtime(secs))
         }
         _ => bail!("gmtime requires number"),
     }
@@ -1368,53 +1535,122 @@ fn libc_gmtime(secs: i64) -> Value {
     let t = secs as time_t;
     let mut result: tm = unsafe { std::mem::zeroed() };
     unsafe { gmtime_r(&t, &mut result) };
+    // jq format: [year+1900, month(0-based), mday, hour, min, sec, wday, yday]
+    // Wait - jq actually uses [tm_year+1900, tm_mon, tm_mday, tm_hour, tm_min, tm_sec, tm_wday, tm_yday]
+    // But test expects [2015,2,5,23,51,47,4,63] for epoch 1425599507
+    // That matches: year=2015, mon=2(march, 0-indexed), mday=5, hour=23, min=51, sec=47, wday=4(thu), yday=63
     Value::Arr(Rc::new(vec![
-        Value::Num(result.tm_sec as f64),
-        Value::Num(result.tm_min as f64),
-        Value::Num(result.tm_hour as f64),
-        Value::Num(result.tm_mday as f64),
+        Value::Num((result.tm_year + 1900) as f64),
         Value::Num(result.tm_mon as f64),
-        Value::Num(result.tm_year as f64),
+        Value::Num(result.tm_mday as f64),
+        Value::Num(result.tm_hour as f64),
+        Value::Num(result.tm_min as f64),
+        Value::Num(result.tm_sec as f64),
         Value::Num(result.tm_wday as f64),
         Value::Num(result.tm_yday as f64),
     ]))
 }
 
+fn time_arr_to_tm(a: &[Value]) -> Result<libc::tm> {
+    let get = |i: usize| -> f64 { a.get(i).and_then(|v| v.as_f64()).unwrap_or(0.0) };
+    // Validate that first element is a number
+    if !a.is_empty() {
+        if let Value::Str(_) = &a[0] {
+            bail!("mktime requires parsed datetime inputs");
+        }
+    }
+    let mut t: libc::tm = unsafe { std::mem::zeroed() };
+    t.tm_year = get(0) as i32 - 1900;
+    t.tm_mon = get(1) as i32;
+    t.tm_mday = if a.len() > 2 { get(2) as i32 } else { 1 };
+    t.tm_hour = get(3) as i32;
+    t.tm_min = get(4) as i32;
+    t.tm_sec = get(5) as i32;
+    t.tm_wday = get(6) as i32;
+    t.tm_yday = get(7) as i32;
+    Ok(t)
+}
+
 fn rt_mktime(v: &Value) -> Result<Value> {
     match v {
-        Value::Arr(a) if a.len() >= 8 => {
-            use libc::{mktime, tm};
-            let mut t: tm = unsafe { std::mem::zeroed() };
-            t.tm_sec = a[0].as_f64().unwrap_or(0.0) as i32;
-            t.tm_min = a[1].as_f64().unwrap_or(0.0) as i32;
-            t.tm_hour = a[2].as_f64().unwrap_or(0.0) as i32;
-            t.tm_mday = a[3].as_f64().unwrap_or(0.0) as i32;
-            t.tm_mon = a[4].as_f64().unwrap_or(0.0) as i32;
-            t.tm_year = a[5].as_f64().unwrap_or(0.0) as i32;
-            t.tm_wday = a[6].as_f64().unwrap_or(0.0) as i32;
-            t.tm_yday = a[7].as_f64().unwrap_or(0.0) as i32;
-            let result = unsafe { mktime(&mut t) };
+        Value::Arr(a) if a.len() >= 2 => {
+            let mut t = time_arr_to_tm(a)?;
+            // Use timegm for UTC
+            let result = unsafe { libc::timegm(&mut t) };
             Ok(Value::Num(result as f64))
         }
-        _ => bail!("mktime requires array of 8 numbers"),
+        Value::Arr(a) if !a.is_empty() => {
+            if let Value::Str(_) = &a[0] {
+                bail!("mktime requires parsed datetime inputs");
+            }
+            bail!("mktime requires array of time components");
+        }
+        _ => bail!("mktime requires parsed datetime inputs"),
     }
 }
 
 fn rt_strftime(v: &Value, fmt: &Value) -> Result<Value> {
-    match (v, fmt) {
-        (Value::Arr(_), Value::Str(f)) => {
-            // TODO: Implement strftime
-            Ok(Value::from_str(""))
+    let fmt_str = match fmt {
+        Value::Str(f) => f.as_ref(),
+        _ => bail!("strftime/1 requires a string format"),
+    };
+    match v {
+        Value::Arr(a) => {
+            if !a.is_empty() {
+                if let Value::Str(_) = &a[0] {
+                    bail!("strftime/1 requires parsed datetime inputs");
+                }
+            }
+            let t = time_arr_to_tm(a)?;
+            Ok(Value::from_str(&format_tm(&t, fmt_str)))
         }
-        _ => bail!("strftime requires time array and format string"),
+        Value::Num(n) => {
+            // Convert epoch to gmtime first, then format
+            let secs = *n as i64;
+            use libc::{gmtime_r, time_t, tm};
+            let t_val = secs as time_t;
+            let mut t: tm = unsafe { std::mem::zeroed() };
+            unsafe { gmtime_r(&t_val, &mut t) };
+            Ok(Value::from_str(&format_tm(&t, fmt_str)))
+        }
+        _ => bail!("strftime/1 requires parsed datetime inputs"),
     }
+}
+
+fn format_tm(t: &libc::tm, fmt: &str) -> String {
+    use std::ffi::CString;
+    let fmt_c = CString::new(fmt).unwrap_or_default();
+    let mut buf = vec![0u8; 256];
+    let len = unsafe {
+        libc::strftime(buf.as_mut_ptr() as *mut libc::c_char, buf.len(), fmt_c.as_ptr(), t)
+    };
+    if len == 0 { String::new() }
+    else { String::from_utf8_lossy(&buf[..len]).into_owned() }
 }
 
 fn rt_strptime(v: &Value, fmt: &Value) -> Result<Value> {
     match (v, fmt) {
-        (Value::Str(_s), Value::Str(_f)) => {
-            // TODO: Implement strptime
-            Ok(Value::Arr(Rc::new(vec![Value::Num(0.0); 8])))
+        (Value::Str(s), Value::Str(f)) => {
+            use std::ffi::CString;
+            let s_c = CString::new(s.as_ref().as_str()).unwrap_or_default();
+            let f_c = CString::new(f.as_ref().as_str()).unwrap_or_default();
+            let mut t: libc::tm = unsafe { std::mem::zeroed() };
+            unsafe { libc::strptime(s_c.as_ptr(), f_c.as_ptr(), &mut t) };
+            // Compute yday and wday using mktime
+            let mut t2 = t;
+            unsafe { libc::timegm(&mut t2) };
+            t.tm_wday = t2.tm_wday;
+            t.tm_yday = t2.tm_yday;
+            Ok(Value::Arr(Rc::new(vec![
+                Value::Num((t.tm_year + 1900) as f64),
+                Value::Num(t.tm_mon as f64),
+                Value::Num(t.tm_mday as f64),
+                Value::Num(t.tm_hour as f64),
+                Value::Num(t.tm_min as f64),
+                Value::Num(t.tm_sec as f64),
+                Value::Num(t.tm_wday as f64),
+                Value::Num(t.tm_yday as f64),
+            ])))
         }
         _ => bail!("strptime requires string and format"),
     }
@@ -1432,7 +1668,7 @@ fn rt_env() -> Value {
     Value::Obj(Rc::new(env))
 }
 
-fn rt_builtins() -> Value {
+pub fn rt_builtins() -> Value {
     let builtins = vec![
         "length", "utf8bytelength", "keys", "values", "has", "in", "contains", "inside",
         "startswith", "endswith", "ltrimstr", "rtrimstr", "split", "join",
