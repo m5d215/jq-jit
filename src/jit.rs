@@ -1219,7 +1219,86 @@ impl Flattener {
                 false
             }
 
+            // Assign: delegate complex path expressions to runtime
+            Expr::Assign { path_expr, value_expr } if extract_simple_path(path_expr).is_none() => {
+                // Fall back: store expressions and delegate to runtime
+                // For now, use a runtime helper for Assign
+                let idx = self.closure_ops.len();
+                self.closure_ops.push((**path_expr).clone());
+                let idx2 = self.closure_ops.len();
+                self.closure_ops.push((**value_expr).clone());
+                let inp = self.alloc_slot();
+                self.emit(JitOp::Clone { dst: inp, src: input_slot });
+                let out = self.alloc_slot();
+                self.emit_propagating(JitOp::CallBuiltin {
+                    dst: out,
+                    name: format!("__assign__:{}:{}", idx, idx2),
+                    args: vec![inp],
+                });
+                self.emit(JitOp::Drop { slot: inp });
+                self.emit_yield(out);
+                self.emit(JitOp::Drop { slot: out });
+                true
+            }
+
             Expr::Update { path_expr, update_expr } => {
+                // Handle .[] and .[]? paths with scalar update_expr:
+                // iterate all paths from eval_path, apply update to each
+                let is_each = matches!(path_expr.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input));
+                let is_each_opt = matches!(path_expr.as_ref(), Expr::EachOpt { input_expr } if matches!(input_expr.as_ref(), Expr::Input));
+                if (is_each || is_each_opt) && is_scalar(update_expr) {
+                    // Emit: get all keys/indices, iterate them, for each: getpath([k]), apply f, setpath([k])
+                    // Use CallBuiltin "keys" to get all keys, then iterate
+                    let inp = self.alloc_slot();
+                    self.emit(JitOp::Clone { dst: inp, src: input_slot });
+                    let keys = self.alloc_slot();
+                    self.emit_propagating(JitOp::CallBuiltin {
+                        dst: keys, name: "keys".to_string(), args: vec![inp],
+                    });
+                    self.emit(JitOp::Drop { slot: inp });
+                    // Accumulate result starting from input
+                    let result = self.alloc_slot();
+                    self.emit(JitOp::Clone { dst: result, src: input_slot });
+                    // Iterate keys
+                    self.flatten_each_with_action(keys, false, &|s, key_elem| {
+                        // Build path array [key]
+                        let path_arr = s.alloc_slot();
+                        s.emit(JitOp::CollectBegin);
+                        s.emit(JitOp::CollectPush { src: key_elem });
+                        s.emit(JitOp::CollectFinish { dst: path_arr });
+                        // getpath
+                        let cur = s.alloc_slot();
+                        s.emit(JitOp::Clone { dst: cur, src: result });
+                        let path_c = s.alloc_slot();
+                        s.emit(JitOp::Clone { dst: path_c, src: path_arr });
+                        let old_val = s.alloc_slot();
+                        s.emit_propagating(JitOp::CallBuiltin {
+                            dst: old_val, name: "getpath".to_string(), args: vec![cur, path_c],
+                        });
+                        s.emit(JitOp::Drop { slot: cur });
+                        s.emit(JitOp::Drop { slot: path_c });
+                        // apply update
+                        let new_val = s.flatten_scalar(update_expr, old_val);
+                        s.emit(JitOp::Drop { slot: old_val });
+                        // setpath
+                        let cur2 = s.alloc_slot();
+                        s.emit(JitOp::Clone { dst: cur2, src: result });
+                        let updated = s.alloc_slot();
+                        s.emit_propagating(JitOp::CallBuiltin {
+                            dst: updated, name: "setpath".to_string(), args: vec![cur2, path_arr, new_val],
+                        });
+                        s.emit(JitOp::Drop { slot: cur2 });
+                        s.emit(JitOp::Drop { slot: new_val });
+                        // Update result in place (drop old, clone new)
+                        s.emit(JitOp::Drop { slot: result });
+                        s.emit(JitOp::Clone { dst: result, src: updated });
+                        s.emit(JitOp::Drop { slot: updated });
+                    });
+                    self.emit(JitOp::Drop { slot: keys });
+                    self.emit_yield(result);
+                    self.emit(JitOp::Drop { slot: result });
+                    return true;
+                }
                 if let Some(path_components) = extract_simple_path(path_expr) {
                     // Simple static path: getpath, apply update, setpath
                     if is_scalar(update_expr) {
@@ -1271,7 +1350,23 @@ impl Flattener {
                     self.emit(JitOp::Drop { slot: path_arr });
                     return ok;
                 }
-                false
+                // Complex path: delegate to runtime
+                let idx = self.closure_ops.len();
+                self.closure_ops.push((**path_expr).clone());
+                let idx2 = self.closure_ops.len();
+                self.closure_ops.push((**update_expr).clone());
+                let inp = self.alloc_slot();
+                self.emit(JitOp::Clone { dst: inp, src: input_slot });
+                let out = self.alloc_slot();
+                self.emit_propagating(JitOp::CallBuiltin {
+                    dst: out,
+                    name: format!("__update__:{}:{}", idx, idx2),
+                    args: vec![inp],
+                });
+                self.emit(JitOp::Drop { slot: inp });
+                self.emit_yield(out);
+                self.emit(JitOp::Drop { slot: out });
+                true
             }
 
             Expr::Label { var_index, body } => {
@@ -1410,10 +1505,7 @@ impl Flattener {
 
             Expr::PathExpr { expr: path_expr } => {
                 // path(expr): compute the paths that expr would access
-                // Delegate to runtime via a CallBuiltin that evaluates path
                 if is_scalar(path_expr) {
-                    // For scalar path expression (e.g. path(.foo.bar)):
-                    // Result is the path array
                     if let Some(path_components) = extract_simple_path(path_expr) {
                         let path_arr = self.build_path_array(&path_components, input_slot);
                         self.emit_yield(path_arr);
@@ -1421,7 +1513,25 @@ impl Flattener {
                         return true;
                     }
                 }
-                false
+                // Delegate complex path expressions to runtime
+                let idx = self.closure_ops.len();
+                self.closure_ops.push((**path_expr).clone());
+                let inp = self.alloc_slot();
+                self.emit(JitOp::Clone { dst: inp, src: input_slot });
+                // path() can produce multiple outputs (generator paths)
+                let arr = self.alloc_slot();
+                self.emit_propagating(JitOp::CallBuiltin {
+                    dst: arr,
+                    name: format!("__path__:{}", idx),
+                    args: vec![inp],
+                });
+                self.emit(JitOp::Drop { slot: inp });
+                // arr is an array of paths; iterate and yield each
+                self.flatten_each_with_action(arr, false, &|s, elem| {
+                    s.emit_yield(elem);
+                });
+                self.emit(JitOp::Drop { slot: arr });
+                true
             }
 
             // `not` as a generator (already handled as scalar but needs generator wrapper)
@@ -3290,6 +3400,64 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             match crate::eval::eval_format(format_name, &args_vec[0]) {
                 Ok(s) => { std::ptr::write(dst, Value::from_str(&s)); return 0; }
                 Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
+            }
+        }
+
+        // __assign__:path_idx:value_idx — runtime path assignment
+        if let Some(rest) = name.strip_prefix("__assign__:") {
+            let parts: Vec<&str> = rest.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                let path_idx: usize = parts[0].parse().unwrap_or(0);
+                let value_idx: usize = parts[1].parse().unwrap_or(0);
+                let (path_expr, value_expr) = JIT_CLOSURE_OPS.with(|c| {
+                    let ops = c.borrow();
+                    (ops.get(path_idx).cloned(), ops.get(value_idx).cloned())
+                });
+                if let (Some(path_expr), Some(value_expr)) = (path_expr, value_expr) {
+                    let input = if !args_vec.is_empty() { args_vec[0].clone() } else { Value::Null };
+                    let env = Rc::new(RefCell::new(crate::eval::Env::new(vec![])));
+                    match crate::eval::eval_assign_standalone(&path_expr, &value_expr, input, &env) {
+                        Ok(v) => { std::ptr::write(dst, v); return 0; }
+                        Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
+                    }
+                }
+            }
+        }
+
+        // __update__:path_idx:update_idx — runtime path update
+        if let Some(rest) = name.strip_prefix("__update__:") {
+            let parts: Vec<&str> = rest.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                let path_idx: usize = parts[0].parse().unwrap_or(0);
+                let update_idx: usize = parts[1].parse().unwrap_or(0);
+                let (path_expr, update_expr) = JIT_CLOSURE_OPS.with(|c| {
+                    let ops = c.borrow();
+                    (ops.get(path_idx).cloned(), ops.get(update_idx).cloned())
+                });
+                if let (Some(path_expr), Some(update_expr)) = (path_expr, update_expr) {
+                    let input = if !args_vec.is_empty() { args_vec[0].clone() } else { Value::Null };
+                    let env = Rc::new(RefCell::new(crate::eval::Env::new(vec![])));
+                    match crate::eval::eval_update_standalone(&path_expr, &update_expr, input, &env) {
+                        Ok(v) => { std::ptr::write(dst, v); return 0; }
+                        Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
+                    }
+                }
+            }
+        }
+
+        // __path__:idx — runtime path expression evaluation
+        if let Some(rest) = name.strip_prefix("__path__:") {
+            let idx: usize = rest.parse().unwrap_or(0);
+            let path_expr = JIT_CLOSURE_OPS.with(|c| {
+                c.borrow().get(idx).cloned()
+            });
+            if let Some(path_expr) = path_expr {
+                let input = if !args_vec.is_empty() { args_vec[0].clone() } else { Value::Null };
+                let env = Rc::new(RefCell::new(crate::eval::Env::new(vec![])));
+                match crate::eval::eval_path_standalone(&path_expr, input, &env) {
+                    Ok(v) => { std::ptr::write(dst, v); return 0; }
+                    Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
+                }
             }
         }
 
