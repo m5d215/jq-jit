@@ -2,3 +2,6 @@ pub mod jq_ffi;
 pub mod bytecode;
 pub mod value;
 pub mod interpreter;
+pub mod ir;
+pub mod vm;
+pub mod runtime;
