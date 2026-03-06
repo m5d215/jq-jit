@@ -49,20 +49,9 @@ const GEN_ERROR: i64 = -1;
 // Expression classification
 // ============================================================================
 
-fn is_jit_supported_unaryop(op: UnaryOp) -> bool {
-    matches!(op,
-        UnaryOp::Length | UnaryOp::Type | UnaryOp::Keys | UnaryOp::Values |
-        UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Round | UnaryOp::Fabs |
-        UnaryOp::Sort | UnaryOp::Reverse | UnaryOp::Unique | UnaryOp::Flatten |
-        UnaryOp::Min | UnaryOp::Max | UnaryOp::Add | UnaryOp::ToString |
-        UnaryOp::ToNumber | UnaryOp::ToJson | UnaryOp::FromJson | UnaryOp::Ascii |
-        UnaryOp::Explode | UnaryOp::Implode | UnaryOp::AsciiDowncase |
-        UnaryOp::AsciiUpcase | UnaryOp::Any | UnaryOp::All | UnaryOp::Transpose |
-        UnaryOp::ToEntries | UnaryOp::FromEntries | UnaryOp::KeysUnsorted |
-        UnaryOp::Sqrt | UnaryOp::Abs | UnaryOp::Not | UnaryOp::TypeOf |
-        UnaryOp::Infinite | UnaryOp::Nan | UnaryOp::IsInfinite | UnaryOp::IsNan |
-        UnaryOp::IsNormal | UnaryOp::IsFinite
-    )
+fn is_jit_supported_unaryop(_op: UnaryOp) -> bool {
+    // All unary ops are supported via runtime dispatch
+    true
 }
 
 /// Returns true if expr always produces exactly one output value AND the JIT can handle it inline.
@@ -2176,6 +2165,17 @@ fn unaryop_from_i32(op: i32) -> Option<UnaryOp> {
         30 => UnaryOp::Sqrt, 31 => UnaryOp::Abs, 32 => UnaryOp::Not, 33 => UnaryOp::TypeOf,
         34 => UnaryOp::Infinite, 35 => UnaryOp::Nan, 36 => UnaryOp::IsInfinite, 37 => UnaryOp::IsNan,
         38 => UnaryOp::IsNormal, 39 => UnaryOp::IsFinite,
+        40 => UnaryOp::Trim, 41 => UnaryOp::Ltrim, 42 => UnaryOp::Rtrim,
+        43 => UnaryOp::Utf8ByteLength,
+        44 => UnaryOp::Sin, 45 => UnaryOp::Cos, 46 => UnaryOp::Tan,
+        47 => UnaryOp::Asin, 48 => UnaryOp::Acos, 49 => UnaryOp::Atan,
+        50 => UnaryOp::Exp, 51 => UnaryOp::Exp2, 52 => UnaryOp::Exp10,
+        53 => UnaryOp::Log, 54 => UnaryOp::Log2, 55 => UnaryOp::Log10,
+        56 => UnaryOp::Cbrt, 57 => UnaryOp::Significand, 58 => UnaryOp::Exponent,
+        59 => UnaryOp::Logb, 60 => UnaryOp::NearbyInt, 61 => UnaryOp::Trunc,
+        62 => UnaryOp::Rint, 63 => UnaryOp::J0, 64 => UnaryOp::J1,
+        65 => UnaryOp::Gmtime, 66 => UnaryOp::Mktime, 67 => UnaryOp::Now,
+        68 => UnaryOp::GetModuleMeta,
         _ => return None,
     })
 }
@@ -2193,7 +2193,17 @@ fn unaryop_to_i32(op: UnaryOp) -> i32 {
         UnaryOp::Sqrt => 30, UnaryOp::Abs => 31, UnaryOp::Not => 32, UnaryOp::TypeOf => 33,
         UnaryOp::Infinite => 34, UnaryOp::Nan => 35, UnaryOp::IsInfinite => 36, UnaryOp::IsNan => 37,
         UnaryOp::IsNormal => 38, UnaryOp::IsFinite => 39,
-        _ => 99, // catch-all for less common ops
+        UnaryOp::Trim => 40, UnaryOp::Ltrim => 41, UnaryOp::Rtrim => 42,
+        UnaryOp::Utf8ByteLength => 43,
+        UnaryOp::Sin => 44, UnaryOp::Cos => 45, UnaryOp::Tan => 46,
+        UnaryOp::Asin => 47, UnaryOp::Acos => 48, UnaryOp::Atan => 49,
+        UnaryOp::Exp => 50, UnaryOp::Exp2 => 51, UnaryOp::Exp10 => 52,
+        UnaryOp::Log => 53, UnaryOp::Log2 => 54, UnaryOp::Log10 => 55,
+        UnaryOp::Cbrt => 56, UnaryOp::Significand => 57, UnaryOp::Exponent => 58,
+        UnaryOp::Logb => 59, UnaryOp::NearbyInt => 60, UnaryOp::Trunc => 61,
+        UnaryOp::Rint => 62, UnaryOp::J0 => 63, UnaryOp::J1 => 64,
+        UnaryOp::Gmtime => 65, UnaryOp::Mktime => 66, UnaryOp::Now => 67,
+        UnaryOp::GetModuleMeta => 68,
     }
 }
 
