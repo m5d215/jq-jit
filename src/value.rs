@@ -257,12 +257,13 @@ fn parse_json_value(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)
 fn parse_json_string_raw(b: &[u8], pos: usize) -> Result<(String, usize)> {
     debug_assert_eq!(b[pos], b'"');
     let mut i = pos + 1;
-    // Fast path: scan for end of simple string (no escapes, all ASCII)
+    // Fast path: scan for end of simple string (no escapes)
+    // Safety: input comes from json_to_value(&str), so bytes are valid UTF-8
     let start = i;
     while i < b.len() {
         match b[i] {
             b'"' => {
-                let s = std::str::from_utf8(&b[start..i]).unwrap_or("").to_string();
+                let s = unsafe { std::str::from_utf8_unchecked(&b[start..i]) }.to_string();
                 return Ok((s, i + 1));
             }
             b'\\' => break,
@@ -347,17 +348,20 @@ fn parse_json_number(b: &[u8], pos: usize) -> Result<(Value, usize)> {
         if i < b.len() && (b[i] == b'+' || b[i] == b'-') { i += 1; }
         while i < b.len() && b[i].is_ascii_digit() { i += 1; }
     }
-    let num_str = std::str::from_utf8(&b[pos..i]).unwrap_or("0");
+    // Fast path for simple integers: parse directly without f64::from_str overhead
+    if !has_dot && !has_exp && (i - digits_start) <= 15 {
+        let mut n: i64 = 0;
+        for &c in &b[digits_start..i] {
+            n = n * 10 + (c - b'0') as i64;
+        }
+        if is_neg { n = -n; }
+        return Ok((Value::Num(n as f64, None), i));
+    }
+    // Safety: number bytes are ASCII digits/signs/dots, always valid UTF-8
+    let num_str = unsafe { std::str::from_utf8_unchecked(&b[pos..i]) };
     let n: f64 = num_str.parse().unwrap_or(0.0);
-    // Fast path: simple integers that round-trip exactly don't need repr
-    let repr = if !has_dot && !has_exp && (i - digits_start) <= 15 {
-        // Simple integer with <= 15 digits always round-trips via format_jq_number
-        None
-    } else {
-        // Check if f64 round-trip matches the original text
-        let f64_repr = format_jq_number(n);
-        if f64_repr == num_str { None } else { Some(Rc::from(num_str)) }
-    };
+    let f64_repr = format_jq_number(n);
+    let repr = if f64_repr == num_str { None } else { Some(Rc::from(num_str)) };
     Ok((Value::Num(n, repr), i))
 }
 
