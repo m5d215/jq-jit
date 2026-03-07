@@ -23,6 +23,9 @@ compact_str = "0.9.0"
 memmap2 = "0.9"
 mimalloc = { version = "0.1", default-features = false }
 
+[profile.release]
+lto = "thin"
+
 [[bin]]
 name = "jq-jit"
 path = "src/bin/jq-jit.rs"
