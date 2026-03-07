@@ -1332,6 +1332,13 @@ pub fn eval(
                                     } else { None }
                                 } else { None }
                             } else { None };
+                            // Pre-check: can we evaluate the predicate as a compound boolean
+                            // with pre-cached vars? (one borrow before the loop, none during)
+                            let pred_compound = if numeric_bind.is_none() && let_bind.is_none() {
+                                // Test if predicate works with eval_bool_compound
+                                let dummy = Value::Num(0.0, None);
+                                eval_bool_compound(predicate, &dummy, &env.borrow().vars).is_some()
+                            } else { false };
                             eval(generator, input, env, &mut |elem| {
                                 if let Some((vi, body)) = numeric_bind {
                                     // Ultra-fast path: pure f64 predicate, no env writes
@@ -1352,6 +1359,10 @@ pub fn eval(
                                     };
                                     env.borrow_mut().vars[vi as usize] = old;
                                     if is_true { Ok(true) } else { all_true = false; Ok(false) }
+                                } else if pred_compound {
+                                    // Compound boolean path: single borrow for entire expression
+                                    let result = eval_bool_compound(predicate, &elem, &env.borrow().vars).unwrap();
+                                    if result { Ok(true) } else { all_true = false; Ok(false) }
                                 } else {
                                     let pred_result = eval_one(predicate, &elem, env);
                                     match pred_result {
