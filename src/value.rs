@@ -712,58 +712,123 @@ pub fn value_to_json_pretty(v: &Value, indent: usize) -> String {
 /// - `use_tab`: use tab characters instead of spaces
 /// - `sort_keys`: sort object keys alphabetically
 pub fn value_to_json_pretty_ext(v: &Value, depth: usize, step: usize, use_tab: bool, sort_keys: bool) -> String {
-    let indent_char = if use_tab { "\t" } else { " " };
-    let make_indent = |n: usize| indent_char.repeat(n);
-    match v {
-        Value::Arr(a) if a.is_empty() => "[]".to_string(),
-        Value::Obj(o) if o.is_empty() => "{}".to_string(),
-        Value::Arr(a) => {
-            let mut out = String::from("[\n");
-            let inner = make_indent(depth + step);
-            for (i, item) in a.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(",\n");
+    let mut out = String::with_capacity(128);
+    write_pretty_to_string(&mut out, v, depth, step, use_tab, sort_keys);
+    out
+}
+
+// Pre-computed indent buffers (avoid per-call allocation from repeat())
+const SPACES_256: &str = "                                                                                                                                                                                                                                                                ";
+const TABS_64: &str = "\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t";
+
+#[inline]
+fn push_indent(out: &mut String, n: usize, use_tab: bool) {
+    if n == 0 { return; }
+    let buf = if use_tab { TABS_64 } else { SPACES_256 };
+    if n <= buf.len() {
+        out.push_str(&buf[..n]);
+    } else {
+        // Unlikely: very deep nesting
+        let ch = if use_tab { '\t' } else { ' ' };
+        for _ in 0..n { out.push(ch); }
+    }
+}
+
+#[inline]
+fn push_json_string(out: &mut String, s: &str) {
+    let bytes = s.as_bytes();
+    let needs_escape = bytes.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20);
+    out.push('"');
+    if !needs_escape {
+        out.push_str(s);
+    } else {
+        for ch in s.chars() {
+            match ch {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                '\u{08}' => out.push_str("\\b"),
+                '\u{0c}' => out.push_str("\\f"),
+                c if (c as u32) < 0x20 => {
+                    use std::fmt::Write;
+                    let _ = write!(out, "\\u{:04x}", c as u32);
                 }
-                out.push_str(&inner);
-                out.push_str(&value_to_json_pretty_ext(item, depth + step, step, use_tab, sort_keys));
+                c => out.push(c),
+            }
+        }
+    }
+    out.push('"');
+}
+
+#[inline]
+fn push_jq_number(out: &mut String, n: f64) {
+    if n == n.trunc() && n.abs() < 1e15 {
+        let i = n as i64;
+        if i as f64 == n {
+            let mut buf = itoa::Buffer::new();
+            out.push_str(buf.format(i));
+            return;
+        }
+    }
+    out.push_str(&format_jq_number(n));
+}
+
+fn write_pretty_to_string(out: &mut String, v: &Value, depth: usize, step: usize, use_tab: bool, sort_keys: bool) {
+    match v {
+        Value::Null => out.push_str("null"),
+        Value::False => out.push_str("false"),
+        Value::True => out.push_str("true"),
+        Value::Num(n, repr) => {
+            if let Some(r) = repr {
+                out.push_str(r);
+            } else {
+                push_jq_number(out, *n);
+            }
+        }
+        Value::Str(s) => push_json_string(out, s),
+        Value::Error(e) => push_json_string(out, e),
+        Value::Arr(a) if a.is_empty() => out.push_str("[]"),
+        Value::Obj(o) if o.is_empty() => out.push_str("{}"),
+        Value::Arr(a) => {
+            let inner_depth = depth + step;
+            out.push_str("[\n");
+            for (i, item) in a.iter().enumerate() {
+                if i > 0 { out.push_str(",\n"); }
+                push_indent(out, inner_depth, use_tab);
+                write_pretty_to_string(out, item, inner_depth, step, use_tab, sort_keys);
             }
             out.push('\n');
-            out.push_str(&make_indent(depth));
+            push_indent(out, depth, use_tab);
             out.push(']');
-            out
         }
         Value::Obj(o) => {
-            let mut out = String::from("{\n");
-            let inner = make_indent(depth + step);
+            let inner_depth = depth + step;
+            out.push_str("{\n");
             if sort_keys {
                 let mut entries: Vec<_> = o.iter().collect();
                 entries.sort_by(|a, b| a.0.cmp(b.0));
-                for (i, (k, v)) in entries.iter().enumerate() {
-                    if i > 0 {
-                        out.push_str(",\n");
-                    }
-                    out.push_str(&inner);
-                    out.push_str(&json_encode_string(k));
+                for (i, (k, val)) in entries.iter().enumerate() {
+                    if i > 0 { out.push_str(",\n"); }
+                    push_indent(out, inner_depth, use_tab);
+                    push_json_string(out, k);
                     out.push_str(": ");
-                    out.push_str(&value_to_json_pretty_ext(v, depth + step, step, use_tab, sort_keys));
+                    write_pretty_to_string(out, val, inner_depth, step, use_tab, sort_keys);
                 }
             } else {
-                for (i, (k, v)) in o.iter().enumerate() {
-                    if i > 0 {
-                        out.push_str(",\n");
-                    }
-                    out.push_str(&inner);
-                    out.push_str(&json_encode_string(k));
+                for (i, (k, val)) in o.iter().enumerate() {
+                    if i > 0 { out.push_str(",\n"); }
+                    push_indent(out, inner_depth, use_tab);
+                    push_json_string(out, k);
                     out.push_str(": ");
-                    out.push_str(&value_to_json_pretty_ext(v, depth + step, step, use_tab, sort_keys));
+                    write_pretty_to_string(out, val, inner_depth, step, use_tab, sort_keys);
                 }
             }
             out.push('\n');
-            out.push_str(&make_indent(depth));
+            push_indent(out, depth, use_tab);
             out.push('}');
-            out
         }
-        _ => value_to_json_precise(v),
     }
 }
 
@@ -873,7 +938,7 @@ pub fn write_value_pretty_line(w: &mut dyn io::Write, v: &Value, indent: usize, 
         Value::Arr(a) if a.is_empty() => w.write_all(b"[]\n"),
         Value::Obj(o) if o.is_empty() => w.write_all(b"{}\n"),
         _ => {
-            // Container: use String-based pretty formatter (handles indent/recursion)
+            // Build pretty output into a reusable String buffer, then write all at once
             let s = value_to_json_pretty_ext(v, 0, indent, use_tab, sort_keys);
             w.write_all(s.as_bytes())?;
             w.write_all(b"\n")
