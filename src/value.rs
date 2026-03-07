@@ -861,7 +861,110 @@ pub fn write_value_compact(w: &mut dyn io::Write, v: &Value) -> io::Result<()> {
 }
 
 /// Write a Value as compact JSON with optional key sorting.
+/// Uses a stack buffer for small values to minimize write_all calls.
 pub fn write_value_compact_ext(w: &mut dyn io::Write, v: &Value, sort_keys: bool) -> io::Result<()> {
+    if !sort_keys {
+        // Try fast path: build in stack buffer, single write
+        let mut buf = [0u8; 512];
+        if let Some(n) = write_compact_to_buf(v, &mut buf) {
+            return w.write_all(&buf[..n]);
+        }
+    }
+    write_value_compact_ext_inner(w, v, sort_keys)
+}
+
+/// Try to write compact JSON to a fixed buffer. Returns Some(len) on success, None if buffer too small.
+fn write_compact_to_buf(v: &Value, buf: &mut [u8]) -> Option<usize> {
+    let mut pos = 0;
+    write_compact_buf_inner(v, buf, &mut pos).then_some(pos)
+}
+
+fn write_compact_buf_inner(v: &Value, buf: &mut [u8], pos: &mut usize) -> bool {
+    macro_rules! push {
+        ($bytes:expr) => {{
+            let b: &[u8] = $bytes;
+            if *pos + b.len() > buf.len() { return false; }
+            buf[*pos..*pos + b.len()].copy_from_slice(b);
+            *pos += b.len();
+        }};
+    }
+    match v {
+        Value::Null => push!(b"null"),
+        Value::False => push!(b"false"),
+        Value::True => push!(b"true"),
+        Value::Num(n, repr) => {
+            if let Some(r) = repr {
+                push!(r.as_bytes());
+            } else if *n == n.trunc() && n.abs() < 1e15 {
+                let i = *n as i64;
+                if i as f64 == *n {
+                    let mut ibuf = itoa::Buffer::new();
+                    push!(ibuf.format(i).as_bytes());
+                } else {
+                    let s = format_jq_number(*n);
+                    push!(s.as_bytes());
+                }
+            } else {
+                let s = format_jq_number(*n);
+                push!(s.as_bytes());
+            }
+        }
+        Value::Str(s) => {
+            let bytes = s.as_bytes();
+            let needs_escape = bytes.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20);
+            if needs_escape { return false; } // fall back to slow path
+            if *pos + bytes.len() + 2 > buf.len() { return false; }
+            buf[*pos] = b'"';
+            *pos += 1;
+            buf[*pos..*pos + bytes.len()].copy_from_slice(bytes);
+            *pos += bytes.len();
+            buf[*pos] = b'"';
+            *pos += 1;
+        }
+        Value::Arr(a) => {
+            push!(b"[");
+            for (i, item) in a.iter().enumerate() {
+                if i > 0 { push!(b","); }
+                if !write_compact_buf_inner(item, buf, pos) { return false; }
+            }
+            push!(b"]");
+        }
+        Value::Obj(o) => {
+            push!(b"{");
+            for (i, (k, val)) in o.iter().enumerate() {
+                if i > 0 { push!(b","); }
+                // Write key
+                let kb = k.as_bytes();
+                let key_escape = kb.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20);
+                if key_escape { return false; }
+                if *pos + kb.len() + 3 > buf.len() { return false; } // "key":
+                buf[*pos] = b'"';
+                *pos += 1;
+                buf[*pos..*pos + kb.len()].copy_from_slice(kb);
+                *pos += kb.len();
+                buf[*pos] = b'"';
+                *pos += 1;
+                buf[*pos] = b':';
+                *pos += 1;
+                if !write_compact_buf_inner(val, buf, pos) { return false; }
+            }
+            push!(b"}");
+        }
+        Value::Error(e) => {
+            let bytes = e.as_bytes();
+            if *pos + bytes.len() + 2 > buf.len() { return false; }
+            buf[*pos] = b'"';
+            *pos += 1;
+            buf[*pos..*pos + bytes.len()].copy_from_slice(bytes);
+            *pos += bytes.len();
+            buf[*pos] = b'"';
+            *pos += 1;
+        }
+    }
+    true
+}
+
+fn write_value_compact_ext_inner(w: &mut dyn io::Write, v: &Value, sort_keys: bool) -> io::Result<()> {
     match v {
         Value::Null => w.write_all(b"null"),
         Value::False => w.write_all(b"false"),
