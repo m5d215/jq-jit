@@ -221,7 +221,8 @@ enum JitOp {
     ObjCopyField { obj: SlotId, src: SlotId, obj_key: String, src_field: String },
     /// Batch field extraction: build an object from multiple fields of src in a single pass.
     /// Replaces ObjNew + N×ObjCopyField when all fields are extracted from the same source.
-    ObjFromFields { dst: SlotId, src: SlotId, fields: Vec<String> },
+    /// Each pair is (output_key, source_field).
+    ObjFromFields { dst: SlotId, src: SlotId, pairs: Vec<(String, String)> },
 
     // Alternative (//)
     IsNullOrFalse { dst_var: u32, src: SlotId },
@@ -3810,33 +3811,18 @@ extern "C" fn jit_rt_obj_copy_field(
 }
 
 /// Batch field extraction: build a new object from multiple fields of src in a single pass.
-/// field_table is an array of (ptr, len) pairs for field names.
+/// pair_table is an array of (out_key_ptr, out_key_len, src_field_ptr, src_field_len) tuples.
 /// Replaces ObjNew + N×ObjCopyField with a single function call, scanning the source once.
-/// Output fields are always in filter order (field_table order), not source order.
+/// Output fields are always in filter order (pair_table order), not source order.
 extern "C" fn jit_rt_obj_from_fields(
     dst: *mut Value,
     src: *const Value,
-    field_table: *const (*const u8, usize),
+    pair_table: *const (*const u8, usize, *const u8, usize),
     count: usize,
 ) {
     unsafe {
-        let fields = std::slice::from_raw_parts(field_table, count);
+        let pairs = std::slice::from_raw_parts(pair_table, count);
         if let Value::Obj(src_obj) = &*src {
-            // Fast path: if source has exactly the same fields in the same order, clone it directly
-            if src_obj.len() == count {
-                let mut exact_match = true;
-                for (i, (k, _)) in src_obj.iter().enumerate() {
-                    let (fp, fl) = fields[i];
-                    if k.as_bytes().len() != fl || k.as_bytes() != std::slice::from_raw_parts(fp, fl) {
-                        exact_match = false;
-                        break;
-                    }
-                }
-                if exact_match {
-                    std::ptr::write(dst, Value::Obj(src_obj.clone()));
-                    return;
-                }
-            }
             // General path: single-pass extraction with field-order output
             let mut vals: [std::mem::MaybeUninit<Value>; 16] = std::mem::MaybeUninit::uninit().assume_init();
             let use_heap = count > 16;
@@ -3851,9 +3837,9 @@ extern "C" fn jit_rt_obj_from_fields(
             for (k, v) in src_obj.iter() {
                 if found == all_found { break; }
                 let k_bytes = k.as_bytes();
-                for (fi, &(fp, fl)) in fields.iter().enumerate() {
+                for (fi, &(_, _, sfp, sfl)) in pairs.iter().enumerate() {
                     if fi < 64 && (found & (1u64 << fi)) != 0 { continue; }
-                    if k_bytes.len() == fl && k_bytes == std::slice::from_raw_parts(fp, fl) {
+                    if k_bytes.len() == sfl && k_bytes == std::slice::from_raw_parts(sfp, sfl) {
                         val_buf[fi].write(v.clone());
                         found |= 1u64 << fi;
                         break;
@@ -3862,8 +3848,8 @@ extern "C" fn jit_rt_obj_from_fields(
             }
             let mut obj = crate::value::rc_objmap_pool_get(count);
             let map = Rc::get_mut(&mut obj).unwrap_unchecked();
-            for (fi, &(fp, fl)) in fields.iter().enumerate() {
-                let name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(fp, fl));
+            for (fi, &(okp, okl, _, _)) in pairs.iter().enumerate() {
+                let name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(okp, okl));
                 let val = if fi < 64 && (found & (1u64 << fi)) != 0 {
                     val_buf[fi].assume_init_read()
                 } else {
@@ -3876,8 +3862,8 @@ extern "C" fn jit_rt_obj_from_fields(
             // Non-object source: all fields null
             let mut obj = crate::value::rc_objmap_pool_get(count);
             let map = Rc::get_mut(&mut obj).unwrap_unchecked();
-            for &(fp, fl) in fields {
-                let name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(fp, fl));
+            for &(okp, okl, _, _) in pairs {
+                let name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(okp, okl));
                 map.push_unique(crate::value::KeyStr::from(name), Value::Null);
             }
             std::ptr::write(dst, Value::Obj(obj));
@@ -4435,21 +4421,21 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
         if !changed { break; }
     }
 
-    // Fuse ObjNew + consecutive ObjCopyField (same obj & src, key==field) → ObjFromFields
+    // Fuse ObjNew + consecutive ObjCopyField (same obj & src) → ObjFromFields
     let mut i = 0;
     while i < ops.len() {
         if let JitOp::ObjNew { dst: obj_slot, cap } = ops[i] {
             let n = cap as usize;
             if n >= 2 && i + n < ops.len() {
-                // Check that the next N ops are all ObjCopyField with same obj/src and key==field
+                // Check that the next N ops are all ObjCopyField with same obj/src
                 let mut all_match = true;
                 let mut src_slot: SlotId = 0;
-                let mut fields = Vec::with_capacity(n);
+                let mut pairs = Vec::with_capacity(n);
                 for j in 0..n {
                     if let JitOp::ObjCopyField { obj, src, ref obj_key, ref src_field } = ops[i + 1 + j] {
-                        if obj != obj_slot || obj_key != src_field { all_match = false; break; }
+                        if obj != obj_slot { all_match = false; break; }
                         if j == 0 { src_slot = src; } else if src != src_slot { all_match = false; break; }
-                        fields.push(obj_key.clone());
+                        pairs.push((obj_key.clone(), src_field.clone()));
                     } else {
                         all_match = false;
                         break;
@@ -4457,7 +4443,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 }
                 if all_match {
                     // Replace ObjNew + N×ObjCopyField with single ObjFromFields
-                    ops[i] = JitOp::ObjFromFields { dst: obj_slot, src: src_slot, fields };
+                    ops[i] = JitOp::ObjFromFields { dst: obj_slot, src: src_slot, pairs };
                     for _ in 0..n {
                         ops.remove(i + 1);
                     }
@@ -4925,21 +4911,21 @@ impl JitCompiler {
                         let sf_l = b.ins().iconst(ptr_ty, sf_leaked.len() as i64);
                         b.ins().call(rt["obj_copy_field"], &[o, s, ok_p, ok_l, sf_p, sf_l]);
                     }
-                    JitOp::ObjFromFields { dst, src, fields } => {
+                    JitOp::ObjFromFields { dst, src, pairs } => {
                         let d = slot_addr(&mut b, *dst);
                         let s = slot_addr(&mut b, *src);
-                        // Build field table as leaked array of (ptr, len) pairs
-                        let table: Vec<(*const u8, usize)> = fields.iter().map(|f| {
-                            let leaked = Box::leak(f.clone().into_boxed_str());
-                            self._string_constants.push(leaked);
-                            (leaked.as_ptr(), leaked.len())
+                        // Build pair table: (out_key_ptr, out_key_len, src_field_ptr, src_field_len)
+                        let table: Vec<(*const u8, usize, *const u8, usize)> = pairs.iter().map(|(ok, sf)| {
+                            let ok_leaked = Box::leak(ok.clone().into_boxed_str());
+                            self._string_constants.push(ok_leaked);
+                            let sf_leaked = Box::leak(sf.clone().into_boxed_str());
+                            self._string_constants.push(sf_leaked);
+                            (ok_leaked.as_ptr(), ok_leaked.len(), sf_leaked.as_ptr(), sf_leaked.len())
                         }).collect();
                         let table_leaked = Box::leak(table.into_boxed_slice());
-                        // Store the raw pointer so it won't be freed
-                        // Safety: we leak it intentionally - lives as long as the JIT code
                         let table_ptr = table_leaked.as_ptr();
                         let tp = b.ins().iconst(ptr_ty, table_ptr as i64);
-                        let cnt = b.ins().iconst(ptr_ty, fields.len() as i64);
+                        let cnt = b.ins().iconst(ptr_ty, pairs.len() as i64);
                         b.ins().call(rt["obj_from_fields"], &[d, s, tp, cnt]);
                     }
 
