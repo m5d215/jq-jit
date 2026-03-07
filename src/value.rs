@@ -489,6 +489,33 @@ where F: FnMut(Value) -> Result<()> {
     Ok(())
 }
 
+/// Like json_stream but also provides the byte range [start, end) for each value.
+pub fn json_stream_offsets<F>(input: &str, mut cb: F) -> Result<()>
+where F: FnMut(Value, usize, usize) -> Result<()> {
+    let bytes = input.as_bytes();
+    let mut pos = 0;
+    if bytes.len() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF { pos = 3; }
+    pos = skip_ws(bytes, pos);
+    while pos < bytes.len() {
+        let (val, end) = parse_json_value(bytes, pos, 0)?;
+        cb(val, pos, end)?;
+        pos = skip_ws(bytes, end);
+    }
+    Ok(())
+}
+
+/// Check if raw JSON bytes are compact (no whitespace outside of strings).
+/// Uses an O(1) heuristic: for objects/arrays, checks if the second byte is whitespace.
+/// All standard JSON formatters add whitespace consistently, so this catches all common cases.
+#[inline]
+pub fn is_json_compact(bytes: &[u8]) -> bool {
+    if bytes.len() < 2 { return true; }
+    let b0 = bytes[0];
+    let b1 = bytes[1];
+    if (b0 == b'{' || b0 == b'[') && b1 <= b' ' { return false; }
+    true
+}
+
 #[inline(always)]
 fn skip_ws(b: &[u8], mut pos: usize) -> usize {
     while pos < b.len() && matches!(b[pos], b' ' | b'\t' | b'\n' | b'\r') { pos += 1; }

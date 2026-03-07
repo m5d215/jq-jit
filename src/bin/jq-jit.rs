@@ -8,7 +8,7 @@ use std::process;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use jq_jit::value::{Value, json_to_value, json_stream, json_stream_project, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
+use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_project, is_json_compact, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
 use jq_jit::interpreter::Filter;
 
 fn main() {
@@ -205,7 +205,7 @@ fn main() {
     let use_compact_buf = compact && !raw_output && !sort_keys && !join_output;
     let use_pretty_buf = !compact && !raw_output && !sort_keys && !join_output && !tab;
     let mut compact_buf: Vec<u8> = if use_compact_buf || use_pretty_buf { Vec::with_capacity(1 << 17) } else { Vec::new() };
-    let process_input = |input: &Value, out: &mut io::BufWriter<io::StdoutLock>, cbuf: &mut Vec<u8>, any_false: &mut bool, had_error: &mut bool| {
+    let process_input = |input: &Value, raw_bytes: Option<&[u8]>, out: &mut io::BufWriter<io::StdoutLock>, cbuf: &mut Vec<u8>, any_false: &mut bool, had_error: &mut bool| {
         let result = filter.execute_cb(input, &mut |result| {
             if let Value::Error(e) = result {
                 eprintln!("jq: error: {}", e.as_str());
@@ -216,6 +216,19 @@ fn main() {
                 *any_false = true;
             }
             if use_compact_buf {
+                // Raw passthrough: if result is the unmodified input and bytes are compact,
+                // copy original bytes directly instead of re-serializing
+                if let Some(raw) = raw_bytes {
+                    if std::ptr::eq(result, input) && is_json_compact(raw) {
+                        cbuf.extend_from_slice(raw);
+                        cbuf.push(b'\n');
+                        if cbuf.len() >= 1 << 17 {
+                            let _ = out.write_all(cbuf);
+                            cbuf.clear();
+                        }
+                        return Ok(true);
+                    }
+                }
                 push_compact_line(cbuf, result);
                 if cbuf.len() >= 1 << 17 {
                     let _ = out.write_all(cbuf);
@@ -256,7 +269,7 @@ fn main() {
     };
 
     if null_input {
-        process_input(&Value::Null, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+        process_input(&Value::Null, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
     } else if files.is_empty() {
         // Read from stdin
         let stdin = io::stdin();
@@ -268,7 +281,7 @@ fn main() {
                         if slurp {
                             lines.push(Value::from_str(&l));
                         } else {
-                            process_input(&Value::from_str(&l), &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            process_input(&Value::from_str(&l), None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                     }
                     Err(e) => {
@@ -279,7 +292,7 @@ fn main() {
             }
             if slurp {
                 let arr = Value::Arr(std::rc::Rc::new(lines));
-                process_input(&arr, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                process_input(&arr, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
             }
         } else {
             let mut input_str = String::new();
@@ -296,18 +309,26 @@ fn main() {
                     process::exit(2);
                 }
                 let arr = Value::Arr(std::rc::Rc::new(values));
-                process_input(&arr, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                process_input(&arr, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
             } else {
+                let input_bytes = input_str.as_bytes();
                 let parse_result = if let Some(ref pf) = projection_fields {
                     let field_refs: Vec<&str> = pf.iter().map(|s| s.as_str()).collect();
                     json_stream_project(&input_str, &field_refs, |v| {
-                        process_input(&v, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        pool_value(v);
+                        Ok(())
+                    })
+                } else if use_compact_buf {
+                    json_stream_offsets(&input_str, |v, start, end| {
+                        let raw = &input_bytes[start..end];
+                        process_input(&v, Some(raw), &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         pool_value(v);
                         Ok(())
                     })
                 } else {
                     json_stream(&input_str, |v| {
-                        process_input(&v, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         pool_value(v);
                         Ok(())
                     })
@@ -348,13 +369,21 @@ fn main() {
             let parse_result = if let Some(ref pf) = projection_fields {
                 let field_refs: Vec<&str> = pf.iter().map(|s| s.as_str()).collect();
                 json_stream_project(content, &field_refs, |v| {
-                    process_input(&v, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    pool_value(v);
+                    Ok(())
+                })
+            } else if use_compact_buf {
+                let content_bytes = content.as_bytes();
+                json_stream_offsets(content, |v, start, end| {
+                    let raw = &content_bytes[start..end];
+                    process_input(&v, Some(raw), &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     pool_value(v);
                     Ok(())
                 })
             } else {
                 json_stream(content, |v| {
-                    process_input(&v, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     pool_value(v);
                     Ok(())
                 })
