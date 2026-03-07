@@ -1364,16 +1364,29 @@ fn write_json_string(w: &mut dyn io::Write, s: &str) -> io::Result<()> {
 }
 
 fn write_jq_number(w: &mut dyn io::Write, n: f64) -> io::Result<()> {
-    // Fast path for common small integers: avoid String allocation
-    if n == n.trunc() && n.abs() < 1e15 {
+    if n.is_nan() { return w.write_all(b"null"); }
+    if n.is_infinite() {
+        return if n.is_sign_positive() { w.write_all(b"1.7976931348623157e+308") }
+        else { w.write_all(b"-1.7976931348623157e+308") };
+    }
+    if n == 0.0 {
+        return if n.is_sign_negative() { w.write_all(b"-0") } else { w.write_all(b"0") };
+    }
+    // Integer fast path
+    if n == n.trunc() && n.abs() < 1e16 {
         let i = n as i64;
         if i as f64 == n {
             let mut buf = itoa::Buffer::new();
             return w.write_all(buf.format(i).as_bytes());
         }
     }
-    // Fallback: use format_jq_number for general case
-    w.write_all(format_jq_number(n).as_bytes())
+    let abs = n.abs();
+    // Very small or very large numbers need special formatting
+    if (abs != 0.0 && abs < 1e-4) || abs >= 1e16 {
+        return w.write_all(format_jq_number(n).as_bytes());
+    }
+    // Common case: write directly without String allocation
+    write!(w, "{}", n)
 }
 
 // Reusable String buffer for pretty-print output.
