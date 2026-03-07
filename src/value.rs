@@ -855,6 +855,32 @@ fn write_jq_number(w: &mut dyn io::Write, n: f64) -> io::Result<()> {
     w.write_all(format_jq_number(n).as_bytes())
 }
 
+/// Write a Value as pretty JSON + newline, directly to writer.
+/// For scalar values and small containers, uses stack buffer to avoid String allocation.
+pub fn write_value_pretty_line(w: &mut dyn io::Write, v: &Value, indent: usize, use_tab: bool, sort_keys: bool) -> io::Result<()> {
+    match v {
+        Value::Null | Value::True | Value::False | Value::Num(..) | Value::Str(_) | Value::Error(_) => {
+            // Scalar values: pretty == compact
+            let mut buf = [0u8; 512];
+            if let Some(n) = write_compact_to_buf(v, &mut buf) {
+                buf[n] = b'\n';
+                return w.write_all(&buf[..n + 1]);
+            }
+            // Fallback for long strings needing escapes
+            write_value_compact_ext_inner(w, v, false)?;
+            w.write_all(b"\n")
+        }
+        Value::Arr(a) if a.is_empty() => w.write_all(b"[]\n"),
+        Value::Obj(o) if o.is_empty() => w.write_all(b"{}\n"),
+        _ => {
+            // Container: use String-based pretty formatter (handles indent/recursion)
+            let s = value_to_json_pretty_ext(v, 0, indent, use_tab, sort_keys);
+            w.write_all(s.as_bytes())?;
+            w.write_all(b"\n")
+        }
+    }
+}
+
 /// Write a Value as compact JSON directly to an io::Write, using precise repr when available.
 pub fn write_value_compact(w: &mut dyn io::Write, v: &Value) -> io::Result<()> {
     write_value_compact_ext(w, v, false)

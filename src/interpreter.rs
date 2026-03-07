@@ -97,6 +97,7 @@ impl Filter {
         }
         Ok(true)
     }
+
 }
 
 /// Execute a jq filter using libjq directly.

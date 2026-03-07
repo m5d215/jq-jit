@@ -8,7 +8,7 @@ use std::process;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use jq_jit::value::{Value, json_to_value, json_stream, value_to_json_precise, value_to_json_pretty_ext, write_value_compact_ext, write_value_compact_line};
+use jq_jit::value::{Value, json_to_value, json_stream, value_to_json_precise, value_to_json_pretty_ext, write_value_compact_ext, write_value_compact_line, write_value_pretty_line};
 use jq_jit::interpreter::Filter;
 
 fn main() {
@@ -206,19 +206,20 @@ fn main() {
             if exit_status && !result.is_true() {
                 *any_false = true;
             }
-            if compact && !raw_output {
-                if join_output {
+            if join_output {
+                if compact && !raw_output {
                     let _ = write_value_compact_ext(out, result, sort_keys);
                 } else {
-                    let _ = write_value_compact_line(out, result, sort_keys);
+                    let formatted = format_value(result);
+                    let _ = write!(out, "{}", formatted);
                 }
+            } else if compact && !raw_output {
+                let _ = write_value_compact_line(out, result, sort_keys);
+            } else if !raw_output {
+                let _ = write_value_pretty_line(out, result, indent_n, tab, sort_keys);
             } else {
                 let formatted = format_value(result);
-                if join_output {
-                    let _ = write!(out, "{}", formatted);
-                } else {
-                    let _ = writeln!(out, "{}", formatted);
-                }
+                let _ = writeln!(out, "{}", formatted);
             }
             Ok(true)
         });
