@@ -90,7 +90,23 @@ impl Filter {
         if let Some(jit_fn) = self.jit_fn {
             return crate::jit::execute_jit_cb(jit_fn, input, cb);
         }
-        // Fallback: collect results and iterate
+
+        if let Some((ref expr, ref funcs)) = self.parsed {
+            // Stream results directly via eval callback
+            return crate::eval::execute_ir_with_libs_cb(
+                expr, input.clone(), funcs.clone(),
+                self.lib_dirs.clone(),
+                &mut |val| {
+                    if let Value::Error(e) = &val {
+                        eprintln!("jq: error: {}", e.as_str());
+                        return Ok(true);
+                    }
+                    cb(&val)
+                },
+            );
+        }
+
+        // Fall back to libjq: collect results and iterate
         let results = self.execute(input)?;
         for result in &results {
             if !cb(result)? { return Ok(false); }

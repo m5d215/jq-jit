@@ -2866,3 +2866,24 @@ pub fn execute_ir_with_libs(expr: &Expr, input: Value, funcs: Vec<CompiledFunc>,
         }
     }
 }
+
+/// Streaming variant: call cb for each result without collecting into Vec.
+pub fn execute_ir_with_libs_cb(
+    expr: &Expr, input: Value, funcs: Vec<CompiledFunc>, lib_dirs: Vec<String>,
+    cb: &mut dyn FnMut(Value) -> Result<bool>,
+) -> Result<bool> {
+    let env = Rc::new(RefCell::new(Env::with_lib_dirs(funcs, lib_dirs)));
+    let result = eval(expr, input, &env, &mut |val| {
+        cb(val)
+    });
+    match result {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            if e.downcast_ref::<BreakError>().is_some() {
+                Ok(true)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
