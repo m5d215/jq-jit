@@ -43,6 +43,10 @@ impl Env {
         if idx >= self.vars.len() { self.vars.resize(idx + 1, Value::Null); }
         self.vars[idx] = val;
     }
+    fn ensure_var(&mut self, idx: u16) {
+        let idx = idx as usize;
+        if idx >= self.vars.len() { self.vars.resize(idx + 1, Value::Null); }
+    }
 }
 
 /// Substitute param var references with arg expressions in a function body.
@@ -719,6 +723,7 @@ pub fn eval(
             eval(init, input.clone(), env, &mut |v| { acc = v; Ok(true) })?;
             let vi = *var_index;
             let ai = *acc_index;
+            { let mut e = env.borrow_mut(); e.ensure_var(vi); e.ensure_var(ai); }
             let acc_used_in_update = expr_uses_var(update, ai);
             eval(source, input.clone(), env, &mut |val| {
                 let acc_val = std::mem::replace(&mut acc, Value::Null);
@@ -748,6 +753,7 @@ pub fn eval(
         Expr::Foreach { source, init, var_index, acc_index, update, extract } => {
             let vi = *var_index;
             let ai = *acc_index;
+            { let mut e = env.borrow_mut(); e.ensure_var(vi); e.ensure_var(ai); }
             let acc_used = expr_uses_var(update, ai)
                 || extract.as_ref().is_some_and(|e| expr_uses_var(e, ai));
             eval(init, input.clone(), env, &mut |init_val| {
