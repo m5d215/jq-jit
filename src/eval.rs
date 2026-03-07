@@ -755,6 +755,43 @@ fn get_num_leaf(expr: &Expr, input: &Value, vars: &[Value]) -> Option<f64> {
     }
 }
 
+/// Evaluate a compound boolean expression with nested And/Or/comparisons
+/// using only numeric leaf values. Handles patterns like:
+///   `a % 2 != 0 and (a == 5 or a % 5 != 0)`
+/// without creating intermediate Value objects or borrowing env per sub-expression.
+#[inline(always)]
+fn eval_bool_compound(expr: &Expr, input: &Value, vars: &[Value]) -> Option<bool> {
+    match expr {
+        Expr::BinOp { op, lhs, rhs } => {
+            match op {
+                BinOp::And => {
+                    if !eval_bool_compound(lhs, input, vars)? { return Some(false); }
+                    eval_bool_compound(rhs, input, vars)
+                }
+                BinOp::Or => {
+                    if eval_bool_compound(lhs, input, vars)? { return Some(true); }
+                    eval_bool_compound(rhs, input, vars)
+                }
+                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
+                    let ln = get_num_leaf(lhs, input, vars)?;
+                    let rn = get_num_leaf(rhs, input, vars)?;
+                    Some(match op {
+                        BinOp::Eq => ln == rn,
+                        BinOp::Ne => ln != rn,
+                        BinOp::Lt => ln < rn,
+                        BinOp::Gt => ln > rn,
+                        BinOp::Le => ln <= rn,
+                        BinOp::Ge => ln >= rn,
+                        _ => unreachable!(),
+                    })
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Evaluate a boolean expression entirely via f64 arithmetic, with one variable
 /// override (avoids env borrow/store). Returns Some(true/false) or None if not applicable.
 #[inline(always)]
@@ -1203,13 +1240,17 @@ pub fn eval(
                         }
                         // Try eval_one_filter on right to handle select/Empty without cloning
                         if let Some((sel_cond, rest)) = select_prefix {
-                            // Evaluate the leading select condition first
-                            let cond_true = match eval_one(sel_cond, &current, env) {
-                                Ok(v) => v.is_truthy(),
-                                Err(()) => {
-                                    let mut t = false;
-                                    eval(sel_cond, current.clone(), env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
-                                    t
+                            // Try compound boolean evaluation first (no env borrow needed for pure Input+Literal)
+                            let cond_true = if let Some(result) = eval_bool_compound(sel_cond, &current, &env.borrow().vars) {
+                                result
+                            } else {
+                                match eval_one(sel_cond, &current, env) {
+                                    Ok(v) => v.is_truthy(),
+                                    Err(()) => {
+                                        let mut t = false;
+                                        eval(sel_cond, current.clone(), env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
+                                        t
+                                    }
                                 }
                             };
                             if cond_true {
