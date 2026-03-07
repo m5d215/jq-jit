@@ -155,7 +155,7 @@ fn main() {
         }
     };
 
-    // Compile filter (skip JIT for null-input: filter runs once, eval is faster)
+    // Skip JIT for null-input: filter runs once, eval is faster than JIT compile + run
     let use_jit = !null_input;
     let filter = match Filter::with_options(&filter_str, &lib_dirs, use_jit) {
         Ok(f) => f,

@@ -2853,40 +2853,67 @@ impl Parser {
             ("max_by", 1) => Ok(Expr::ClosureOp { op: ClosureOpKind::MaxBy, input_expr: Box::new(Expr::Input), key_expr: Box::new(args.into_iter().next().unwrap()) }),
             ("any", 1) => {
                 let f = args.into_iter().next().unwrap();
-                // any(f) = reduce .[] as $x (false; . or ($x | f))
-                let var_idx = self.scope.alloc_var("__any_x__");
-                let acc_idx = self.scope.alloc_var("__any_acc__");
-                Ok(Expr::Reduce {
-                    source: Box::new(Expr::Each { input_expr: Box::new(Expr::Input) }),
-                    init: Box::new(Expr::Literal(Literal::False)),
-                    var_index: var_idx,
-                    acc_index: acc_idx,
-                    update: Box::new(Expr::BinOp {
-                        op: BinOp::Or,
-                        lhs: Box::new(Expr::Input),
-                        rhs: Box::new(Expr::Pipe {
-                            left: Box::new(Expr::LoadVar { var_index: var_idx }),
-                            right: Box::new(f),
+                // any(f) = any(.[]; f) — short-circuit via first/select
+                let generator = Expr::Each { input_expr: Box::new(Expr::Input) };
+                let wrapped_true = Expr::Collect { generator: Box::new(Expr::Literal(Literal::True)) };
+                let wrapped_false = Expr::Collect { generator: Box::new(Expr::Literal(Literal::False)) };
+                Ok(Expr::Pipe {
+                    left: Box::new(Expr::Alternative {
+                        primary: Box::new(Expr::Limit {
+                            count: Box::new(Expr::Literal(Literal::Num(1.0, None))),
+                            generator: Box::new(Expr::Pipe {
+                                left: Box::new(Expr::Pipe {
+                                    left: Box::new(generator),
+                                    right: Box::new(f),
+                                }),
+                                right: Box::new(Expr::Pipe {
+                                    left: Box::new(Expr::IfThenElse {
+                                        cond: Box::new(Expr::Input),
+                                        then_branch: Box::new(Expr::Input),
+                                        else_branch: Box::new(Expr::Empty),
+                                    }),
+                                    right: Box::new(wrapped_true),
+                                }),
+                            }),
                         }),
+                        fallback: Box::new(wrapped_false),
+                    }),
+                    right: Box::new(Expr::Index {
+                        expr: Box::new(Expr::Input),
+                        key: Box::new(Expr::Literal(Literal::Num(0.0, None))),
                     }),
                 })
             }
             ("all", 1) => {
                 let f = args.into_iter().next().unwrap();
-                let var_idx = self.scope.alloc_var("__all_x__");
-                let acc_idx = self.scope.alloc_var("__all_acc__");
-                Ok(Expr::Reduce {
-                    source: Box::new(Expr::Each { input_expr: Box::new(Expr::Input) }),
-                    init: Box::new(Expr::Literal(Literal::True)),
-                    var_index: var_idx,
-                    acc_index: acc_idx,
-                    update: Box::new(Expr::BinOp {
-                        op: BinOp::And,
-                        lhs: Box::new(Expr::Input),
-                        rhs: Box::new(Expr::Pipe {
-                            left: Box::new(Expr::LoadVar { var_index: var_idx }),
-                            right: Box::new(f),
+                // all(f) = all(.[]; f) — short-circuit via first/select
+                let generator = Expr::Each { input_expr: Box::new(Expr::Input) };
+                let wrapped_false = Expr::Collect { generator: Box::new(Expr::Literal(Literal::False)) };
+                let wrapped_true = Expr::Collect { generator: Box::new(Expr::Literal(Literal::True)) };
+                Ok(Expr::Pipe {
+                    left: Box::new(Expr::Alternative {
+                        primary: Box::new(Expr::Limit {
+                            count: Box::new(Expr::Literal(Literal::Num(1.0, None))),
+                            generator: Box::new(Expr::Pipe {
+                                left: Box::new(Expr::Pipe {
+                                    left: Box::new(generator),
+                                    right: Box::new(f),
+                                }),
+                                right: Box::new(Expr::Pipe {
+                                    left: Box::new(Expr::IfThenElse {
+                                        cond: Box::new(Expr::Input),
+                                        then_branch: Box::new(Expr::Empty),
+                                        else_branch: Box::new(Expr::Input),
+                                    }),
+                                    right: Box::new(wrapped_false),
+                                }),
+                            }),
                         }),
+                        fallback: Box::new(wrapped_true),
+                    }),
+                    right: Box::new(Expr::Index {
+                        expr: Box::new(Expr::Input),
+                        key: Box::new(Expr::Literal(Literal::Num(0.0, None))),
                     }),
                 })
             }

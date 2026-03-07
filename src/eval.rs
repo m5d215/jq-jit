@@ -653,7 +653,6 @@ pub fn eval(
             eval(source, input.clone(), env, &mut |val| {
                 let old_var = env.borrow().get_var(vi);
                 env.borrow_mut().set_var(vi, val);
-                // Move acc out to pass as input with minimal refcount
                 let acc_val = std::mem::replace(&mut acc, Value::Null);
                 if acc_used_in_update {
                     let old_acc = env.borrow().get_var(ai);
@@ -661,7 +660,6 @@ pub fn eval(
                     eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
                     env.borrow_mut().set_var(ai, old_acc);
                 } else {
-                    // Fast path: acc not referenced as $var, pass with sole ownership
                     eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
                 }
                 env.borrow_mut().set_var(vi, old_var);
@@ -673,22 +671,36 @@ pub fn eval(
         Expr::Foreach { source, init, var_index, acc_index, update, extract } => {
             let vi = *var_index;
             let ai = *acc_index;
+            let acc_used = expr_uses_var(update, ai)
+                || extract.as_ref().is_some_and(|e| expr_uses_var(e, ai));
             eval(init, input.clone(), env, &mut |init_val| {
                 let mut acc = init_val;
                 eval(source, input.clone(), env, &mut |val| {
                     let old_var = env.borrow().get_var(vi);
-                    let old_acc = env.borrow().get_var(ai);
                     env.borrow_mut().set_var(vi, val);
-                    env.borrow_mut().set_var(ai, acc.clone());
-                    eval(update, acc.clone(), env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
-                    let cont = if let Some(extract_expr) = extract {
-                        eval(extract_expr, acc.clone(), env, cb)?
+                    let acc_val = std::mem::replace(&mut acc, Value::Null);
+                    if acc_used {
+                        let old_acc = env.borrow().get_var(ai);
+                        env.borrow_mut().set_var(ai, acc_val.clone());
+                        eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
+                        let cont = if let Some(extract_expr) = extract {
+                            eval(extract_expr, acc.clone(), env, cb)?
+                        } else {
+                            cb(acc.clone())?
+                        };
+                        env.borrow_mut().set_var(ai, old_acc);
+                        env.borrow_mut().set_var(vi, old_var);
+                        Ok(cont)
                     } else {
-                        cb(acc.clone())?
-                    };
-                    env.borrow_mut().set_var(vi, old_var);
-                    env.borrow_mut().set_var(ai, old_acc);
-                    Ok(cont)
+                        eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
+                        let cont = if let Some(extract_expr) = extract {
+                            eval(extract_expr, acc.clone(), env, cb)?
+                        } else {
+                            cb(acc.clone())?
+                        };
+                        env.borrow_mut().set_var(vi, old_var);
+                        Ok(cont)
+                    }
                 })
             })
         }
