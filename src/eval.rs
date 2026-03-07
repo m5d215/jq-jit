@@ -1486,9 +1486,13 @@ pub fn eval(
         }
 
         Expr::Label { var_index, body } => {
-            let label_id = env.borrow().next_label;
-            env.borrow_mut().next_label = label_id + 1;
-            env.borrow_mut().set_var(*var_index, Value::Num(label_id as f64, None));
+            let label_id = {
+                let mut e = env.borrow_mut();
+                let id = e.next_label;
+                e.next_label = id + 1;
+                e.set_var(*var_index, Value::Num(id as f64, None));
+                id
+            };
             match eval(body, input, env, cb) {
                 Err(e) => {
                     if let Some(be) = e.downcast_ref::<BreakError>() {
