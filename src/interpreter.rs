@@ -24,10 +24,14 @@ pub struct Filter {
 
 impl Filter {
     pub fn new(program: &str) -> Result<Self> {
-        Self::with_lib_dirs(program, &[])
+        Self::with_options(program, &[], true)
     }
 
     pub fn with_lib_dirs(program: &str, lib_dirs: &[String]) -> Result<Self> {
+        Self::with_options(program, lib_dirs, true)
+    }
+
+    pub fn with_options(program: &str, lib_dirs: &[String], use_jit: bool) -> Result<Self> {
         // Try our parser first
         let parsed = match crate::parser::Parser::parse_with_libs(program, lib_dirs) {
             Ok(result) => Some((result.expr, result.funcs)),
@@ -42,12 +46,14 @@ impl Filter {
         // Try JIT compilation for the parsed expression
         let mut jit_fn = None;
         let mut jit_compiler = None;
-        if let Some((ref expr, ref funcs)) = parsed {
-            if crate::jit::is_jit_compilable_with_funcs(expr, funcs) {
-                if let Ok(mut compiler) = crate::jit::JitCompiler::new() {
-                    if let Ok(func) = compiler.compile_with_funcs(expr, funcs) {
-                        jit_fn = Some(func);
-                        jit_compiler = Some(Box::new(compiler));
+        if use_jit {
+            if let Some((ref expr, ref funcs)) = parsed {
+                if crate::jit::is_jit_compilable_with_funcs(expr, funcs) {
+                    if let Ok(mut compiler) = crate::jit::JitCompiler::new() {
+                        if let Ok(func) = compiler.compile_with_funcs(expr, funcs) {
+                            jit_fn = Some(func);
+                            jit_compiler = Some(Box::new(compiler));
+                        }
                     }
                 }
             }

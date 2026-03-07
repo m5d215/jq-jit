@@ -18,17 +18,17 @@ type EnvRef = Rc<RefCell<Env>>;
 
 pub struct Env {
     vars: Vec<Value>,
-    funcs: Vec<CompiledFunc>,
+    funcs: Vec<Rc<CompiledFunc>>,
     next_label: u64,
     pub lib_dirs: Vec<String>,
 }
 
 impl Env {
     pub fn new(funcs: Vec<CompiledFunc>) -> Self {
-        Env { vars: vec![Value::Null; 4096], funcs, next_label: 0, lib_dirs: Vec::new() }
+        Env { vars: vec![Value::Null; 4096], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, lib_dirs: Vec::new() }
     }
     pub fn with_lib_dirs(funcs: Vec<CompiledFunc>, lib_dirs: Vec<String>) -> Self {
-        Env { vars: vec![Value::Null; 4096], funcs, next_label: 0, lib_dirs }
+        Env { vars: vec![Value::Null; 4096], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, lib_dirs }
     }
     fn get_var(&self, idx: u16) -> Value {
         self.vars.get(idx as usize).cloned().unwrap_or(Value::Null)
@@ -262,6 +262,88 @@ pub fn substitute_params(expr: &Expr, param_vars: &[u16], args: &[Expr]) -> Expr
     }
 }
 
+/// Fast path for scalar expressions: evaluate without callback overhead.
+/// Returns Ok(value) for simple expressions, Err for generators/complex expressions.
+#[inline]
+fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Value, ()> {
+    match expr {
+        Expr::Input => Ok(input.clone()),
+        Expr::Literal(lit) => Ok(match lit {
+            Literal::Null => Value::Null,
+            Literal::True => Value::True,
+            Literal::False => Value::False,
+            Literal::Num(n, repr) => Value::Num(*n, repr.clone()),
+            Literal::Str(s) => Value::from_str(s),
+        }),
+        Expr::LoadVar { var_index } => Ok(env.borrow().get_var(*var_index)),
+        Expr::Not => Ok(Value::from_bool(!input.is_truthy())),
+        Expr::BinOp { op, lhs, rhs } => {
+            match *op {
+                BinOp::And => {
+                    let l = eval_one(lhs, input, env)?;
+                    if !l.is_truthy() { return Ok(Value::False); }
+                    let r = eval_one(rhs, input, env)?;
+                    Ok(Value::from_bool(r.is_truthy()))
+                }
+                BinOp::Or => {
+                    let l = eval_one(lhs, input, env)?;
+                    if l.is_truthy() { return Ok(Value::True); }
+                    let r = eval_one(rhs, input, env)?;
+                    Ok(Value::from_bool(r.is_truthy()))
+                }
+                _ => {
+                    let r = eval_one(rhs, input, env)?;
+                    let l = eval_one(lhs, input, env)?;
+                    eval_binop(*op, &l, &r).map_err(|_| ())
+                }
+            }
+        }
+        Expr::UnaryOp { op, operand } => {
+            let val = eval_one(operand, input, env)?;
+            eval_unaryop(*op, &val).map_err(|_| ())
+        }
+        Expr::Index { expr: base_expr, key: key_expr } => {
+            let base = eval_one(base_expr, input, env)?;
+            let key = eval_one(key_expr, input, env)?;
+            eval_index(&base, &key, false).map_err(|_| ())
+        }
+        Expr::IndexOpt { expr: base_expr, key: key_expr } => {
+            let base = eval_one(base_expr, input, env)?;
+            let key = eval_one(key_expr, input, env)?;
+            Ok(eval_index(&base, &key, true).unwrap_or(Value::Null))
+        }
+        Expr::Negate { operand } => {
+            let val = eval_one(operand, input, env)?;
+            match val {
+                Value::Num(n, _) => Ok(Value::Num(-n, None)),
+                _ => Err(()),
+            }
+        }
+        Expr::Pipe { left, right } => {
+            let mid = eval_one(left, input, env)?;
+            eval_one(right, &mid, env)
+        }
+        Expr::IfThenElse { cond, then_branch, else_branch } => {
+            let c = eval_one(cond, input, env)?;
+            if c.is_truthy() {
+                eval_one(then_branch, input, env)
+            } else {
+                eval_one(else_branch, input, env)
+            }
+        }
+        Expr::FuncCall { func_id, args } => {
+            if !args.is_empty() { return Err(()); }
+            let func = env.borrow().funcs.get(*func_id).cloned();
+            if let Some(f) = func {
+                eval_one(&f.body, input, env)
+            } else {
+                Err(())
+            }
+        }
+        _ => Err(()),
+    }
+}
+
 pub fn eval(
     expr: &Expr, input: Value, env: &EnvRef,
     cb: &mut dyn FnMut(Value) -> GenResult,
@@ -277,6 +359,10 @@ pub fn eval(
         }),
 
         Expr::BinOp { op, lhs, rhs } => {
+            // Try scalar fast path first
+            if let Ok(v) = eval_one(expr, &input, env) {
+                return cb(v);
+            }
             let op = *op;
             match op {
                 BinOp::And => {
@@ -317,6 +403,10 @@ pub fn eval(
         }
 
         Expr::Index { expr: base_expr, key: key_expr } => {
+            // Try scalar fast path
+            if let Ok(v) = eval_one(expr, &input, env) {
+                return cb(v);
+            }
             eval(base_expr, input.clone(), env, &mut |base| {
                 eval(key_expr, input.clone(), env, &mut |key| {
                     match eval_index(&base, &key, false) {
@@ -351,6 +441,14 @@ pub fn eval(
         Expr::Empty => Ok(true),
 
         Expr::IfThenElse { cond, then_branch, else_branch } => {
+            // Try scalar fast path for the condition
+            if let Ok(cond_val) = eval_one(cond, &input, env) {
+                return if cond_val.is_truthy() {
+                    eval(then_branch, input, env, cb)
+                } else {
+                    eval(else_branch, input, env, cb)
+                };
+            }
             eval(cond, input.clone(), env, &mut |cond_val| {
                 if cond_val.is_truthy() {
                     eval(then_branch, input.clone(), env, cb)

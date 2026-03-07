@@ -3231,6 +3231,27 @@ extern "C" fn jit_rt_index_field(dst: *mut Value, base: *const Value, key_ptr: *
 }
 extern "C" fn jit_rt_index(dst: *mut Value, base: *const Value, key: *const Value) -> i64 {
     unsafe {
+        // Fast path: Array[Num] — most common in loops
+        if let (Value::Arr(a), Value::Num(n, _)) = (&*base, &*key) {
+            if n.is_nan() {
+                std::ptr::write(dst, Value::Null);
+                return 0;
+            }
+            let idx = *n as i64;
+            let i = if idx < 0 { (a.len() as i64 + idx) as usize } else { idx as usize };
+            std::ptr::write(dst, a.get(i).cloned().unwrap_or(Value::Null));
+            return 0;
+        }
+        // Fast path: Object[String]
+        if let (Value::Obj(o), Value::Str(k)) = (&*base, &*key) {
+            std::ptr::write(dst, o.get(k.as_str()).cloned().unwrap_or(Value::Null));
+            return 0;
+        }
+        // Fast path: null[anything] = null
+        if matches!(&*base, Value::Null) {
+            std::ptr::write(dst, Value::Null);
+            return 0;
+        }
         match crate::eval::eval_index(&*base, &*key, false) {
             Ok(v) => { std::ptr::write(dst, v); 0 }
             Err(e) => {

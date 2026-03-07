@@ -155,8 +155,9 @@ fn main() {
         }
     };
 
-    // Compile filter
-    let filter = match Filter::with_lib_dirs(&filter_str, &lib_dirs) {
+    // Compile filter (skip JIT for null-input: filter runs once, eval is faster)
+    let use_jit = !null_input;
+    let filter = match Filter::with_options(&filter_str, &lib_dirs, use_jit) {
         Ok(f) => f,
         Err(e) => {
             eprintln!("jq: error: {}", e);
