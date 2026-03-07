@@ -1048,7 +1048,8 @@ pub fn format_jq_number(n: f64) -> String {
     if n == n.trunc() && n.abs() < 1e16 {
         let i = n as i64;
         if i as f64 == n {
-            return format!("{}", i);
+            let mut buf = itoa::Buffer::new();
+            return buf.format(i).to_string();
         }
     }
 
