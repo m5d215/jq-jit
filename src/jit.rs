@@ -3704,10 +3704,16 @@ extern "C" fn jit_rt_field_binop_field(
                 return GEN_ERROR;
             }
         };
-        let ka = std::str::from_utf8_unchecked(std::slice::from_raw_parts(ka_ptr, ka_len));
-        let kb = std::str::from_utf8_unchecked(std::slice::from_raw_parts(kb_ptr, kb_len));
-        let va = obj.get(ka);
-        let vb = obj.get(kb);
+        let ka = std::slice::from_raw_parts(ka_ptr, ka_len);
+        let kb = std::slice::from_raw_parts(kb_ptr, kb_len);
+        // Single-pass scan for both fields
+        let mut va: Option<&Value> = None;
+        let mut vb: Option<&Value> = None;
+        for (k, v) in obj.iter() {
+            let kb_entry = k.as_bytes();
+            if va.is_none() && kb_entry == ka { va = Some(v); if vb.is_some() { break; } }
+            else if vb.is_none() && kb_entry == kb { vb = Some(v); if va.is_some() { break; } }
+        }
         // Fast path: both fields are Num (most common case for arithmetic)
         if let (Some(Value::Num(na, _)), Some(Value::Num(nb, _))) = (va, vb) {
             match op {
