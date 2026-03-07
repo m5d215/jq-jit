@@ -796,13 +796,24 @@ fn json_encode_string(s: &str) -> String {
 use std::io;
 
 fn write_json_string(w: &mut dyn io::Write, s: &str) -> io::Result<()> {
-    w.write_all(b"\"")?;
-    // Fast path: check if string needs any escaping
     let bytes = s.as_bytes();
     let needs_escape = bytes.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20);
     if !needs_escape {
-        w.write_all(bytes)?;
+        // Fast path: write "string" in minimal calls
+        if bytes.len() <= 126 {
+            // Single write for short strings: pack into stack buffer
+            let mut buf = [0u8; 128];
+            buf[0] = b'"';
+            buf[1..1 + bytes.len()].copy_from_slice(bytes);
+            buf[1 + bytes.len()] = b'"';
+            w.write_all(&buf[..bytes.len() + 2])
+        } else {
+            w.write_all(b"\"")?;
+            w.write_all(bytes)?;
+            w.write_all(b"\"")
+        }
     } else {
+        w.write_all(b"\"")?;
         // Slow path: write segments between special characters
         let mut start = 0;
         for (i, &b) in bytes.iter().enumerate() {
@@ -815,7 +826,6 @@ fn write_json_string(w: &mut dyn io::Write, s: &str) -> io::Result<()> {
                 0x08 => b"\\b",
                 0x0c => b"\\f",
                 c if c < 0x20 => {
-                    // Flush pending
                     if start < i { w.write_all(&bytes[start..i])?; }
                     write!(w, "\\u{:04x}", c)?;
                     start = i + 1;
@@ -828,9 +838,8 @@ fn write_json_string(w: &mut dyn io::Write, s: &str) -> io::Result<()> {
             start = i + 1;
         }
         if start < bytes.len() { w.write_all(&bytes[start..])?; }
+        w.write_all(b"\"")
     }
-    w.write_all(b"\"")?;
-    Ok(())
 }
 
 fn write_jq_number(w: &mut dyn io::Write, n: f64) -> io::Result<()> {
