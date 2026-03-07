@@ -1153,7 +1153,13 @@ pub fn eval(
                         _ => eval(left, input, env, &mut |mid| eval(right, mid, env, cb)),
                     }
                 }
-                _ => eval(left, input, env, &mut |mid| eval(right, mid, env, cb)),
+                _ => {
+                    // Scalar fast path: avoid closure overhead when left produces one value
+                    if let Ok(mid) = eval_one(left, &input, env) {
+                        return eval(right, mid, env, cb);
+                    }
+                    eval(left, input, env, &mut |mid| eval(right, mid, env, cb))
+                }
             }
         }
 
@@ -1306,6 +1312,13 @@ pub fn eval(
                     env.borrow_mut().set_var(tmp_vi, old);
                     result
                 }
+            } else if let Ok(val) = eval_one(value, &input, env) {
+                // Scalar fast path: avoid closure + input clone
+                let old = env.borrow().get_var(*var_index);
+                env.borrow_mut().set_var(*var_index, val);
+                let result = eval(body, input, env, cb);
+                env.borrow_mut().set_var(*var_index, old);
+                result
             } else {
                 eval(value, input.clone(), env, &mut |val| {
                     let old = env.borrow().get_var(*var_index);
@@ -1972,7 +1985,34 @@ pub fn eval(
 }
 
 // ---------------------------------------------------------------------------
+#[inline]
 pub fn eval_binop(op: BinOp, lhs: &Value, rhs: &Value) -> Result<Value> {
+    // Numeric fast path: avoid runtime function dispatch for common numeric ops
+    if let (Value::Num(ln, _), Value::Num(rn, _)) = (lhs, rhs) {
+        return Ok(match op {
+            BinOp::Add => Value::Num(ln + rn, None),
+            BinOp::Sub => Value::Num(ln - rn, None),
+            BinOp::Mul => Value::Num(ln * rn, None),
+            BinOp::Div => {
+                if *rn == 0.0 { return crate::runtime::rt_div(lhs, rhs); }
+                Value::Num(ln / rn, None)
+            }
+            BinOp::Mod => {
+                if *rn == 0.0 || rn.is_nan() || ln.is_nan() { return crate::runtime::rt_mod(lhs, rhs); }
+                let yi = *rn as i64;
+                if yi == 0 { return crate::runtime::rt_mod(lhs, rhs); }
+                Value::Num((*ln as i64 % yi) as f64, None)
+            }
+            BinOp::Eq => if ln == rn { Value::True } else { Value::False },
+            BinOp::Ne => if ln != rn { Value::True } else { Value::False },
+            BinOp::Lt => if ln < rn { Value::True } else { Value::False },
+            BinOp::Gt => if ln > rn { Value::True } else { Value::False },
+            BinOp::Le => if ln <= rn { Value::True } else { Value::False },
+            BinOp::Ge => if ln >= rn { Value::True } else { Value::False },
+            BinOp::And => if lhs.is_truthy() && rhs.is_truthy() { Value::True } else { Value::False },
+            BinOp::Or => if lhs.is_truthy() || rhs.is_truthy() { Value::True } else { Value::False },
+        });
+    }
     match op {
         BinOp::Add => crate::runtime::rt_add(lhs, rhs),
         BinOp::Sub => crate::runtime::rt_sub(lhs, rhs),
@@ -1993,6 +2033,31 @@ pub fn eval_binop(op: BinOp, lhs: &Value, rhs: &Value) -> Result<Value> {
 /// Like eval_binop but takes ownership of lhs for in-place mutation (array/object append).
 #[inline]
 fn eval_binop_owned(op: BinOp, lhs: Value, rhs: &Value) -> Result<Value> {
+    // Numeric fast path: avoid function dispatch overhead
+    if let (Value::Num(ln, _), Value::Num(rn, _)) = (&lhs, rhs) {
+        return Ok(match op {
+            BinOp::Add => Value::Num(ln + rn, None),
+            BinOp::Sub => Value::Num(ln - rn, None),
+            BinOp::Mul => Value::Num(ln * rn, None),
+            BinOp::Div => {
+                if *rn == 0.0 { return crate::runtime::rt_div(&lhs, rhs); }
+                Value::Num(ln / rn, None)
+            }
+            BinOp::Mod => {
+                if *rn == 0.0 || rn.is_nan() || ln.is_nan() { return crate::runtime::rt_mod(&lhs, rhs); }
+                let yi = *rn as i64;
+                if yi == 0 { return crate::runtime::rt_mod(&lhs, rhs); }
+                Value::Num((*ln as i64 % yi) as f64, None)
+            }
+            BinOp::Eq => if ln == rn { Value::True } else { Value::False },
+            BinOp::Ne => if ln != rn { Value::True } else { Value::False },
+            BinOp::Lt => if ln < rn { Value::True } else { Value::False },
+            BinOp::Gt => if ln > rn { Value::True } else { Value::False },
+            BinOp::Le => if ln <= rn { Value::True } else { Value::False },
+            BinOp::Ge => if ln >= rn { Value::True } else { Value::False },
+            BinOp::And | BinOp::Or => return eval_binop(op, &lhs, rhs),
+        });
+    }
     match op {
         BinOp::Add => crate::runtime::rt_add_owned(lhs, rhs),
         _ => eval_binop(op, &lhs, rhs),
