@@ -1454,8 +1454,6 @@ pub fn eval(
                 // Fast path: `. as $var | body`
                 let tmp_vi = *var_index;
                 if !expr_uses_outer_input(body) {
-                    // Body doesn't use `.` — move input into env (sole owner, lower refcount)
-                    let old = std::mem::replace(&mut env.borrow_mut().vars[tmp_vi as usize], input);
                     // Detect destructuring: body is chain of LetBinding { vi, Index(LoadVar(tmp), i) }
                     let mut bindings: Vec<(u16, usize)> = Vec::new();
                     let mut inner = body.as_ref();
@@ -1473,34 +1471,72 @@ pub fn eval(
                         }
                         break;
                     }
-                    let result = if !bindings.is_empty() && !expr_uses_var(inner, tmp_vi) {
-                        // Destructuring detected. Extract elements, then clear tmp to release tuple.
-                        let arr_val = env.borrow().get_var(tmp_vi);
-                        if let Value::Arr(ref arr_rc) = arr_val {
-                            let mut olds: Vec<(u16, Value)> = Vec::with_capacity(bindings.len());
-                            for &(vi, idx) in &bindings {
-                                let elem_old = env.borrow().get_var(vi);
-                                let elem = arr_rc.get(idx).cloned().unwrap_or(Value::Null);
-                                env.borrow_mut().set_var(vi, elem);
-                                olds.push((vi, elem_old));
+                    if !bindings.is_empty() && !expr_uses_var(inner, tmp_vi) {
+                        // Optimized array destructuring: batch env operations into 2 borrow_muts.
+                        // Setup: store input in tmp, extract elements, null tmp (1 borrow_mut).
+                        // Teardown: restore all vars (1 borrow_mut).
+                        let n_bind = bindings.len();
+                        // Use stack storage for common 2-element case to avoid Vec allocation
+                        let mut olds_buf: [(u16, Value); 3] = [(0, Value::Null), (0, Value::Null), (0, Value::Null)];
+                        let mut olds_vec: Vec<(u16, Value)> = Vec::new();
+                        let use_buf = n_bind <= 2;
+                        let destructured = {
+                            let mut e = env.borrow_mut();
+                            let old_tmp = std::mem::replace(&mut e.vars[tmp_vi as usize], input);
+                            if use_buf { olds_buf[0] = (tmp_vi, old_tmp); }
+                            else { olds_vec.push((tmp_vi, old_tmp)); }
+                            let rc_opt = match &e.vars[tmp_vi as usize] {
+                                Value::Arr(rc) => Some(rc.clone()),
+                                _ => None,
+                            };
+                            if let Some(rc) = rc_opt {
+                                for (i, &(vi, idx)) in bindings.iter().enumerate() {
+                                    let elem = rc.get(idx).cloned().unwrap_or(Value::Null);
+                                    let old = std::mem::replace(&mut e.vars[vi as usize], elem);
+                                    if use_buf { olds_buf[i + 1] = (vi, old); }
+                                    else { olds_vec.push((vi, old)); }
+                                }
+                                drop(rc);
+                                e.vars[tmp_vi as usize] = Value::Null;
+                                true
+                            } else {
+                                false
                             }
-                            // Clear tmp to release tuple references → element refcounts drop by 1
-                            drop(arr_val);
-                            env.borrow_mut().vars[tmp_vi as usize] = Value::Null;
-                            let result = eval(inner, Value::Null, env, cb);
-                            for (vi, elem_old) in olds.into_iter().rev() {
-                                env.borrow_mut().set_var(vi, elem_old);
-                            }
-                            result
+                        };
+                        let result = if destructured {
+                            eval(inner, Value::Null, env, cb)
                         } else {
-                            drop(arr_val);
                             eval(body, Value::Null, env, cb)
+                        };
+                        // Restore all in one borrow_mut
+                        {
+                            let mut e = env.borrow_mut();
+                            if use_buf {
+                                if destructured {
+                                    for i in (1..=n_bind).rev() {
+                                        let (vi, old) = std::mem::replace(&mut olds_buf[i], (0, Value::Null));
+                                        e.vars[vi as usize] = old;
+                                    }
+                                }
+                                e.vars[tmp_vi as usize] = std::mem::replace(&mut olds_buf[0], (0, Value::Null)).1;
+                            } else {
+                                if destructured {
+                                    while olds_vec.len() > 1 {
+                                        let (vi, old) = olds_vec.pop().unwrap();
+                                        e.vars[vi as usize] = old;
+                                    }
+                                }
+                                e.vars[tmp_vi as usize] = olds_vec.pop().unwrap().1;
+                            }
                         }
+                        result
                     } else {
-                        eval(body, Value::Null, env, cb)
-                    };
-                    env.borrow_mut().vars[tmp_vi as usize] = old;
-                    result
+                        // No destructuring, normal path
+                        let old = std::mem::replace(&mut env.borrow_mut().vars[tmp_vi as usize], input);
+                        let result = eval(body, Value::Null, env, cb);
+                        env.borrow_mut().vars[tmp_vi as usize] = old;
+                        result
+                    }
                 } else {
                     let old = std::mem::replace(&mut env.borrow_mut().vars[tmp_vi as usize], input.clone());
                     let result = eval(body, input, env, cb);
@@ -1575,29 +1611,99 @@ pub fn eval(
             let ai = *acc_index;
             { let mut e = env.borrow_mut(); e.ensure_var(vi); e.ensure_var(ai); }
             let acc_used_in_update = expr_uses_var(update, ai);
-            eval(source, input.clone(), env, &mut |val| {
-                let acc_val = std::mem::replace(&mut acc, Value::Null);
-                if acc_used_in_update {
-                    let (old_var, old_acc) = {
+            // Detect fused Reduce+destructure pattern:
+            // update = LetBinding(tmp, Input, LetBinding(a, Index(tmp, 0), LetBinding(b, Index(tmp, 1), inner)))
+            // where inner doesn't use tmp and body doesn't use outer input.
+            let fused = if !acc_used_in_update {
+                if let Expr::LetBinding { var_index: tmp_vi, value, body } = update.as_ref() {
+                    if matches!(value.as_ref(), Expr::Input) && !expr_uses_outer_input(body) {
+                        let mut bindings: Vec<(u16, usize)> = Vec::new();
+                        let mut inner = body.as_ref();
+                        while let Expr::LetBinding { var_index: bvi, value: bval, body: bb } = inner {
+                            if let Expr::Index { expr: base, key } = bval.as_ref() {
+                                if let Expr::LoadVar { var_index: lv } = base.as_ref() {
+                                    if *lv == *tmp_vi {
+                                        if let Expr::Literal(Literal::Num(n, _)) = key.as_ref() {
+                                            bindings.push((*bvi, *n as usize));
+                                            inner = bb;
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        if !bindings.is_empty() && !expr_uses_var(inner, *tmp_vi) {
+                            Some((*tmp_vi, bindings, inner))
+                        } else { None }
+                    } else { None }
+                } else { None }
+            } else { None };
+            if let Some((tmp_vi, ref bindings, inner_body)) = fused {
+                // Fused Reduce+destructure: batch $var store + array destructure into 2 borrow_muts
+                eval(source, input.clone(), env, &mut |val| {
+                    let acc_val = std::mem::replace(&mut acc, Value::Null);
+                    // Setup: store $var, destructure acc, null tmp (1 borrow_mut)
+                    let (old_var, old_tmp, destructured) = {
                         let mut e = env.borrow_mut();
-                        let ov = std::mem::replace(&mut e.vars[vi as usize], val);
-                        let oa = std::mem::replace(&mut e.vars[ai as usize], acc_val.clone());
-                        (ov, oa)
+                        let old_var = std::mem::replace(&mut e.vars[vi as usize], val);
+                        let old_tmp = std::mem::replace(&mut e.vars[tmp_vi as usize], acc_val);
+                        let rc_opt = match &e.vars[tmp_vi as usize] {
+                            Value::Arr(rc) => Some(rc.clone()),
+                            _ => None,
+                        };
+                        if let Some(rc) = rc_opt {
+                            for &(bvi, idx) in bindings {
+                                let elem = rc.get(idx).cloned().unwrap_or(Value::Null);
+                                e.vars[bvi as usize] = elem;
+                            }
+                            drop(rc);
+                            e.vars[tmp_vi as usize] = Value::Null;
+                            (old_var, old_tmp, true)
+                        } else {
+                            (old_var, old_tmp, false)
+                        }
                     };
-                    eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
-                    {
-                        let mut e = env.borrow_mut();
-                        e.vars[ai as usize] = old_acc;
-                        e.vars[vi as usize] = old_var;
+                    if destructured {
+                        eval(inner_body, Value::Null, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
+                    } else {
+                        // Not an array; restore tmp and run update normally
+                        env.borrow_mut().vars[tmp_vi as usize] = old_tmp;
+                        let acc_val_for_update = env.borrow().get_var(tmp_vi);
+                        eval(update, acc_val_for_update, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
                     }
-                } else {
-                    let old_var = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], val);
-                    eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
+                    // Teardown: restore $var (1 borrow_mut)
+                    // Note: destructured bindings' old values were whatever was in env before;
+                    // since we're in a reduce loop and these are scratch vars, we just restore $var.
                     env.borrow_mut().vars[vi as usize] = old_var;
-                }
-                Ok(true)
-            })?;
-            cb(acc)
+                    Ok(true)
+                })?;
+                cb(acc)
+            } else {
+                eval(source, input.clone(), env, &mut |val| {
+                    let acc_val = std::mem::replace(&mut acc, Value::Null);
+                    if acc_used_in_update {
+                        let (old_var, old_acc) = {
+                            let mut e = env.borrow_mut();
+                            let ov = std::mem::replace(&mut e.vars[vi as usize], val);
+                            let oa = std::mem::replace(&mut e.vars[ai as usize], acc_val.clone());
+                            (ov, oa)
+                        };
+                        eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
+                        {
+                            let mut e = env.borrow_mut();
+                            e.vars[ai as usize] = old_acc;
+                            e.vars[vi as usize] = old_var;
+                        }
+                    } else {
+                        let old_var = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], val);
+                        eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
+                        env.borrow_mut().vars[vi as usize] = old_var;
+                    }
+                    Ok(true)
+                })?;
+                cb(acc)
+            }
         }
 
         Expr::Foreach { source, init, var_index, acc_index, update, extract } => {
