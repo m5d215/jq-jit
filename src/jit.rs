@@ -188,6 +188,8 @@ enum JitOp {
     IfTruthy { src: SlotId, then_label: LabelId, else_label: LabelId },
     /// Combined field access + truthiness check: avoids clone+drop of the field value.
     FieldIsTruthy { base: SlotId, field: String, then_label: LabelId, else_label: LabelId },
+    /// Combined field access + numeric comparison + branch: avoids creating intermediate Values.
+    FieldCmpNum { base: SlotId, field: String, value: f64, op: i32, then_label: LabelId, else_label: LabelId },
     Jump { label: LabelId },
     Label { id: LabelId },
 
@@ -1325,8 +1327,44 @@ impl Flattener {
                     let then_lbl = self.alloc_label();
                     let else_lbl = self.alloc_label();
                     let done_lbl = self.alloc_label();
+                    // Optimization: if cond is .field OP num on input, use combined FieldCmpNum
+                    let used_fused = if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                        if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge) {
+                            // .field OP num
+                            let field_num = if let Expr::Index { expr: base, key } | Expr::IndexOpt { expr: base, key } = lhs.as_ref() {
+                                if matches!(base.as_ref(), Expr::Input) {
+                                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                        if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                            Some((field.clone(), *n, binop_to_i32(*op)))
+                                        } else { None }
+                                    } else { None }
+                                } else { None }
+                            } else { None };
+                            // num OP .field → flip the comparison
+                            let field_num = field_num.or_else(|| {
+                                if let Expr::Index { expr: base, key } | Expr::IndexOpt { expr: base, key } = rhs.as_ref() {
+                                    if matches!(base.as_ref(), Expr::Input) {
+                                        if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                            if let Expr::Literal(Literal::Num(n, _)) = lhs.as_ref() {
+                                                let flipped = match op {
+                                                    BinOp::Lt => BinOp::Gt, BinOp::Gt => BinOp::Lt,
+                                                    BinOp::Le => BinOp::Ge, BinOp::Ge => BinOp::Le,
+                                                    _ => *op, // Eq, Ne are symmetric
+                                                };
+                                                Some((field.clone(), *n, binop_to_i32(flipped)))
+                                            } else { None }
+                                        } else { None }
+                                    } else { None }
+                                } else { None }
+                            });
+                            if let Some((field, value, op_code)) = field_num {
+                                self.emit(JitOp::FieldCmpNum { base: input_slot, field, value, op: op_code, then_label: then_lbl, else_label: else_lbl });
+                                true
+                            } else { false }
+                        } else { false }
+                    } else { false };
                     // Optimization: if cond is .field on input, use combined FieldIsTruthy
-                    let used_field_truthy = if let Expr::Index { expr: base, key } | Expr::IndexOpt { expr: base, key } = cond.as_ref() {
+                    let used_fused = used_fused || if let Expr::Index { expr: base, key } | Expr::IndexOpt { expr: base, key } = cond.as_ref() {
                         if matches!(base.as_ref(), Expr::Input) {
                             if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                                 self.emit(JitOp::FieldIsTruthy { base: input_slot, field: field.clone(), then_label: then_lbl, else_label: else_lbl });
@@ -1334,7 +1372,7 @@ impl Flattener {
                             } else { false }
                         } else { false }
                     } else { false };
-                    if !used_field_truthy {
+                    if !used_fused {
                         let cond_val = self.flatten_scalar(cond, input_slot);
                         self.emit(JitOp::IfTruthy { src: cond_val, then_label: then_lbl, else_label: else_lbl });
                         self.emit(JitOp::Drop { slot: cond_val });
@@ -3542,6 +3580,37 @@ extern "C" fn jit_rt_field_is_truthy(base: *const Value, key_ptr: *const u8, key
         }
     }
 }
+/// Combined field access + numeric comparison — avoids creating intermediate Value objects.
+/// Returns 1 if the comparison is true, 0 otherwise.
+/// op encoding: 5=Eq, 6=Ne, 7=Lt, 8=Gt, 9=Le, 10=Ge
+extern "C" fn jit_rt_field_cmp_num(base: *const Value, key_ptr: *const u8, key_len: usize, rhs: f64, op: i32) -> i64 {
+    unsafe {
+        let field_val = match &*base {
+            Value::Obj(o) => {
+                let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key_ptr, key_len));
+                match o.get(key) {
+                    Some(v) => v,
+                    None => return 0,
+                }
+            }
+            _ => return 0,
+        };
+        if let Value::Num(lhs, _) = field_val {
+            let result = match op {
+                5 => lhs == &rhs,
+                6 => lhs != &rhs,
+                7 => lhs < &rhs,
+                8 => lhs > &rhs,
+                9 => lhs <= &rhs,
+                10 => lhs >= &rhs,
+                _ => return 0,
+            };
+            if result { 1 } else { 0 }
+        } else {
+            0
+        }
+    }
+}
 extern "C" fn jit_rt_index_field(dst: *mut Value, base: *const Value, key_ptr: *const u8, key_len: usize) -> i64 {
     unsafe {
         match &*base {
@@ -4324,7 +4393,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 *use_count.entry(*src).or_insert(0) += 1;
             }
             JitOp::IfTruthy { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
-            JitOp::FieldIsTruthy { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
+            JitOp::FieldIsTruthy { base, .. } | JitOp::FieldCmpNum { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
             JitOp::IsNullOrFalse { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
             JitOp::Alternative { primary, .. } => { *use_count.entry(*primary).or_insert(0) += 1; }
             JitOp::SetVar { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
@@ -4383,7 +4452,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                     *use_count.entry(*src).or_insert(0) += 1;
                 }
                 JitOp::IfTruthy { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
-                JitOp::FieldIsTruthy { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
+                JitOp::FieldIsTruthy { base, .. } | JitOp::FieldCmpNum { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
                 JitOp::IsNullOrFalse { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
                 JitOp::Alternative { primary, .. } => { *use_count.entry(*primary).or_insert(0) += 1; }
                 JitOp::SetVar { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
@@ -4490,6 +4559,7 @@ impl JitCompiler {
             ("jit_rt_str_rc", jit_rt_str_rc as *const u8),
             ("jit_rt_is_truthy", jit_rt_is_truthy as *const u8),
             ("jit_rt_field_is_truthy", jit_rt_field_is_truthy as *const u8),
+            ("jit_rt_field_cmp_num", jit_rt_field_cmp_num as *const u8),
             ("jit_rt_index", jit_rt_index as *const u8),
             ("jit_rt_index_field", jit_rt_index_field as *const u8),
             ("jit_rt_binop", jit_rt_binop as *const u8),
@@ -4776,6 +4846,21 @@ impl JitCompiler {
                         let truthy = b.inst_results(call)[0];
                         let zero = b.ins().iconst(ptr_ty, 0);
                         let is_t = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, truthy, zero);
+                        b.ins().brif(is_t, label_blocks[*then_label as usize], &[], label_blocks[*else_label as usize], &[]);
+                        terminated = true;
+                    }
+                    JitOp::FieldCmpNum { base, field, value, op, then_label, else_label } => {
+                        let ba = slot_addr(&mut b, *base);
+                        let leaked = Box::leak(field.clone().into_boxed_str());
+                        self._string_constants.push(leaked);
+                        let kp = b.ins().iconst(ptr_ty, leaked.as_ptr() as i64);
+                        let kl = b.ins().iconst(ptr_ty, leaked.len() as i64);
+                        let rhs_f64 = b.ins().f64const(*value);
+                        let op_i32 = b.ins().iconst(types::I32, *op as i64);
+                        let call = b.ins().call(rt["field_cmp_num"], &[ba, kp, kl, rhs_f64, op_i32]);
+                        let result = b.inst_results(call)[0];
+                        let zero = b.ins().iconst(ptr_ty, 0);
+                        let is_t = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, result, zero);
                         b.ins().brif(is_t, label_blocks[*then_label as usize], &[], label_blocks[*else_label as usize], &[]);
                         terminated = true;
                     }
@@ -5154,6 +5239,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("str_rc", [p, p], []);
     decl!("is_truthy", [p], [p]);
     decl!("field_is_truthy", [p, p, p], [p]);
+    decl!("field_cmp_num", [p, p, p, f, i], [p]);
     decl!("index", [p, p, p], [p]);
     decl!("index_field", [p, p, p, p], [p]);
     decl!("binop", [p, i, p, p], [p]);
