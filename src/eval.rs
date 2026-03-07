@@ -1298,6 +1298,8 @@ pub fn eval(
                                     crate::runtime::rt_add_owned(other, &rhs_val)?
                                 }
                             };
+                        } else if let Ok(next) = eval_one(update, &current, env) {
+                            current = next;
                         } else {
                             let mut next = Value::Null;
                             eval(update, current, env, &mut |v| { next = v; Ok(true) })?;
