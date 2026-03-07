@@ -211,6 +211,7 @@ enum JitOp {
     ObjNew { dst: SlotId, cap: u16 },
     ObjInsert { obj: SlotId, key: SlotId, val: SlotId },
     ObjInsertStrKey { obj: SlotId, key: String, val: SlotId },
+    ObjPushStrKey { obj: SlotId, key: String, val: SlotId },
 
     // Alternative (//)
     IsNullOrFalse { dst_var: u32, src: SlotId },
@@ -667,11 +668,27 @@ impl Flattener {
             Expr::ObjectConstruct { pairs } => {
                 let out = self.alloc_slot();
                 self.emit(JitOp::ObjNew { dst: out, cap: pairs.len() as u16 });
+                // Check if all keys are distinct literal strings — if so, skip dedup
+                let all_unique_str_keys = {
+                    let str_keys: Vec<&str> = pairs.iter().filter_map(|(k, _)| {
+                        if let Expr::Literal(Literal::Str(s)) = k { Some(s.as_str()) } else { None }
+                    }).collect();
+                    str_keys.len() == pairs.len() && {
+                        let mut uniq = str_keys.clone();
+                        uniq.sort_unstable();
+                        uniq.dedup();
+                        uniq.len() == str_keys.len()
+                    }
+                };
                 for (k, v) in pairs {
                     // Fast path: literal string key avoids creating/dropping a Value
                     if let Expr::Literal(Literal::Str(s)) = k {
                         let vv = self.flatten_scalar(v, input_slot);
-                        self.emit(JitOp::ObjInsertStrKey { obj: out, key: s.clone(), val: vv });
+                        if all_unique_str_keys {
+                            self.emit(JitOp::ObjPushStrKey { obj: out, key: s.clone(), val: vv });
+                        } else {
+                            self.emit(JitOp::ObjInsertStrKey { obj: out, key: s.clone(), val: vv });
+                        }
                     } else {
                         let kv = self.flatten_scalar(k, input_slot);
                         let vv = self.flatten_scalar(v, input_slot);
@@ -1124,10 +1141,25 @@ impl Flattener {
                 if pairs.iter().all(|(k, v)| is_scalar(k) && is_scalar(v)) {
                     let out = self.alloc_slot();
                     self.emit(JitOp::ObjNew { dst: out, cap: pairs.len() as u16 });
+                    let all_unique_str_keys = {
+                        let str_keys: Vec<&str> = pairs.iter().filter_map(|(k, _)| {
+                            if let Expr::Literal(Literal::Str(s)) = k { Some(s.as_str()) } else { None }
+                        }).collect();
+                        str_keys.len() == pairs.len() && {
+                            let mut uniq = str_keys.clone();
+                            uniq.sort_unstable();
+                            uniq.dedup();
+                            uniq.len() == str_keys.len()
+                        }
+                    };
                     for (k, v) in pairs {
                         if let Expr::Literal(Literal::Str(s)) = k {
                             let vv = self.flatten_scalar(v, input_slot);
-                            self.emit(JitOp::ObjInsertStrKey { obj: out, key: s.clone(), val: vv });
+                            if all_unique_str_keys {
+                                self.emit(JitOp::ObjPushStrKey { obj: out, key: s.clone(), val: vv });
+                            } else {
+                                self.emit(JitOp::ObjInsertStrKey { obj: out, key: s.clone(), val: vv });
+                            }
                         } else {
                             let kv = self.flatten_scalar(k, input_slot);
                             let vv = self.flatten_scalar(v, input_slot);
@@ -3453,6 +3485,18 @@ extern "C" fn jit_rt_obj_insert_str_key(obj: *mut Value, key_ptr: *const u8, key
     }
 }
 
+/// Push into object with raw string key — skips duplicate check (caller guarantees unique keys).
+extern "C" fn jit_rt_obj_push_str_key(obj: *mut Value, key_ptr: *const u8, key_len: usize, val: *mut Value) {
+    unsafe {
+        let val_val = std::ptr::read(val);
+        if let Value::Obj(o) = &mut *obj {
+            let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key_ptr, key_len));
+            let k = crate::value::KeyStr::from(key);
+            Rc::get_mut(o).unwrap_unchecked().push_unique(k, val_val);
+        }
+    }
+}
+
 // Alternative helper
 extern "C" fn jit_rt_is_null_or_false(v: *const Value) -> i64 {
     unsafe { match &*v { Value::Null | Value::False => 1, _ => 0 } }
@@ -3888,7 +3932,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 *use_count.entry(*key).or_insert(0) += 1;
                 *use_count.entry(*val).or_insert(0) += 1;
             }
-            JitOp::ObjInsertStrKey { obj, val, .. } => {
+            JitOp::ObjInsertStrKey { obj, val, .. } | JitOp::ObjPushStrKey { obj, val, .. } => {
                 *use_count.entry(*obj).or_insert(0) += 1;
                 *use_count.entry(*val).or_insert(0) += 1;
             }
@@ -3939,7 +3983,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                     *use_count.entry(*key).or_insert(0) += 1;
                     *use_count.entry(*val).or_insert(0) += 1;
                 }
-                JitOp::ObjInsertStrKey { obj, val, .. } => {
+                JitOp::ObjInsertStrKey { obj, val, .. } | JitOp::ObjPushStrKey { obj, val, .. } => {
                     *use_count.entry(*obj).or_insert(0) += 1;
                     *use_count.entry(*val).or_insert(0) += 1;
                 }
@@ -4032,6 +4076,7 @@ impl JitCompiler {
             ("jit_rt_obj_new", jit_rt_obj_new as *const u8),
             ("jit_rt_obj_insert", jit_rt_obj_insert as *const u8),
             ("jit_rt_obj_insert_str_key", jit_rt_obj_insert_str_key as *const u8),
+            ("jit_rt_obj_push_str_key", jit_rt_obj_push_str_key as *const u8),
             ("jit_rt_is_null_or_false", jit_rt_is_null_or_false as *const u8),
             ("jit_rt_to_f64", jit_rt_to_f64 as *const u8),
             ("jit_rt_f64_to_num", jit_rt_f64_to_num as *const u8),
@@ -4387,6 +4432,15 @@ impl JitCompiler {
                         let v = slot_addr(&mut b, *val);
                         b.ins().call(rt["obj_insert_str_key"], &[o, kp, kl, v]);
                     }
+                    JitOp::ObjPushStrKey { obj, key, val } => {
+                        let o = slot_addr(&mut b, *obj);
+                        let leaked = Box::leak(key.clone().into_boxed_str());
+                        self._string_constants.push(leaked);
+                        let kp = b.ins().iconst(ptr_ty, leaked.as_ptr() as i64);
+                        let kl = b.ins().iconst(ptr_ty, leaked.len() as i64);
+                        let v = slot_addr(&mut b, *val);
+                        b.ins().call(rt["obj_push_str_key"], &[o, kp, kl, v]);
+                    }
 
                     // Alternative
                     JitOp::IsNullOrFalse { dst_var, src } => {
@@ -4630,6 +4684,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("obj_new", [p, p], []);
     decl!("obj_insert", [p, p, p], []);
     decl!("obj_insert_str_key", [p, p, p, p], []);
+    decl!("obj_push_str_key", [p, p, p, p], []);
     decl!("is_null_or_false", [p], [p]);
     decl!("to_f64", [p], [f]);
     decl!("f64_to_num", [p, f], []);
