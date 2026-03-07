@@ -967,6 +967,17 @@ pub fn eval(
             // Fuse While/Until | scalar_expr to avoid cloning intermediate values
             match left.as_ref() {
                 Expr::While { cond, update } => {
+                    // Detect `. as $V | $V + [gen]` pattern for in-place array append
+                    let append_info = if let Expr::LetBinding { var_index, value, body } = update.as_ref() {
+                        if matches!(value.as_ref(), Expr::Input) {
+                            if let Expr::BinOp { op: BinOp::Add, lhs, rhs } = body.as_ref() {
+                                if let (Expr::LoadVar { var_index: lv }, Expr::Collect { generator: gen }) = (lhs.as_ref(), rhs.as_ref()) {
+                                    if *lv == *var_index { Some((*var_index, gen.as_ref())) } else { None }
+                                } else { None }
+                            } else { None }
+                        } else { None }
+                    } else { None };
+
                     let mut current = input;
                     loop {
                         let is_true = if let Ok(v) = eval_one(cond, &current, env) {
@@ -985,9 +996,39 @@ pub fn eval(
                                 if !eval(right, current.clone(), env, cb)? { return Ok(false); }
                             }
                         }
-                        let mut next = Value::Null;
-                        eval(update, current, env, &mut |v| { next = v; Ok(true) })?;
-                        current = next;
+                        if let Some((v_idx, gen)) = append_info {
+                            // In-place array append: move current into env, eval gen, take back, append
+                            let old = env.borrow().get_var(v_idx);
+                            env.borrow_mut().set_var(v_idx, current);
+                            let mut elems = Vec::new();
+                            let gen_result = eval(gen, Value::Null, env, &mut |elem| { elems.push(elem); Ok(true) });
+                            // Take array back from env (refcount should be 1 after gen drops its refs)
+                            let arr_val = std::mem::replace(&mut env.borrow_mut().vars[v_idx as usize], old);
+                            gen_result?;
+                            current = match arr_val {
+                                Value::Arr(rc) => {
+                                    match Rc::try_unwrap(rc) {
+                                        Ok(mut vec) => {
+                                            vec.extend(elems);
+                                            Value::Arr(Rc::new(vec))
+                                        }
+                                        Err(rc) => {
+                                            let mut vec = (*rc).clone();
+                                            vec.extend(elems);
+                                            Value::Arr(Rc::new(vec))
+                                        }
+                                    }
+                                }
+                                other => {
+                                    let rhs_val = Value::Arr(Rc::new(elems));
+                                    crate::runtime::rt_add_owned(other, &rhs_val)?
+                                }
+                            };
+                        } else {
+                            let mut next = Value::Null;
+                            eval(update, current, env, &mut |v| { next = v; Ok(true) })?;
+                            current = next;
+                        }
                     }
                     Ok(true)
                 }
