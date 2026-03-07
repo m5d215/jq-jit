@@ -1335,8 +1335,10 @@ pub fn eval(
                             // Pre-check: can we evaluate the predicate as a compound boolean
                             // with pre-cached vars? (one borrow before the loop, none during)
                             let pred_compound = if numeric_bind.is_none() && let_bind.is_none() {
-                                // Test if predicate works with eval_bool_compound
-                                let dummy = Value::Num(0.0, None);
+                                // Test if predicate works with eval_bool_compound.
+                                // Use 1.0 as dummy (not 0.0) to avoid false negatives from
+                                // fmod/div-by-zero returning None in get_num_leaf.
+                                let dummy = Value::Num(1.0, None);
                                 eval_bool_compound(predicate, &dummy, &env.borrow().vars).is_some()
                             } else { false };
                             eval(generator, input, env, &mut |elem| {
