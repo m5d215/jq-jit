@@ -41,7 +41,7 @@ fn parse_module_metadata(content: &str) -> Result<Value> {
     let mut deps = Vec::new();
     let mut defs = Vec::new();
 
-    let lines: Vec<&str> = content.lines().collect();
+    let _lines: Vec<&str> = content.lines().collect();
     let mut i = 0;
 
     // Simple line-based parser for module metadata extraction

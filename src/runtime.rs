@@ -171,7 +171,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             // Closure-based operations need special handling
             Ok(args.first().cloned().unwrap_or(Value::Null))
         }
-        "map" | "select" | "map_values" | "with_entries" | "from_entries" | "to_entries" => {
+        "map" | "select" | "map_values" | "with_entries" => {
             Ok(args.first().cloned().unwrap_or(Value::Null))
         }
         // flatten with depth already handled above
@@ -268,7 +268,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "modulemeta" => {
             // modulemeta takes a module name string as input and returns metadata
             let input = &args[0];
-            let name = match input {
+            let _name = match input {
                 Value::Str(s) => s.as_str().to_string(),
                 _ => bail!("modulemeta requires string input"),
             };
@@ -1479,7 +1479,7 @@ fn delete_path(v: &Value, path: &Value) -> Result<Value> {
                 }
                 (Value::Arr(a), Value::Num(n, _)) => {
                     let ni = *n as i64;
-                    let idx = if ni < 0 { (a.len() as i64 + ni) } else { ni };
+                    let idx = if ni < 0 { a.len() as i64 + ni } else { ni };
                     if idx >= 0 && (idx as usize) < a.len() {
                         let mut new_arr = (**a).clone();
                         new_arr.remove(idx as usize);

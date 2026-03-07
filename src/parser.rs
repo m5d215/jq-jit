@@ -670,7 +670,7 @@ impl Parser {
         };
 
         // Pre-register $ENV
-        let env_idx = parser.scope.alloc_var("ENV");
+        let _env_idx = parser.scope.alloc_var("ENV");
 
         let expr = parser.parse_program()?;
         if !parser.at_eof() {
@@ -847,7 +847,7 @@ impl Parser {
         if self.at(&Token::LBrace) {
             // Skip metadata but extract search if present
             // This is simplified - just look for search:"..."
-            let start = self.pos;
+            let _start = self.pos;
             self.advance(); // {
             while !self.at(&Token::RBrace) && !self.at_eof() {
                 if matches!(self.current(), Token::Ident(s) if s == "search") {
@@ -1305,7 +1305,7 @@ impl Parser {
 
     fn build_binding(&mut self, value_expr: Expr, pattern: Pattern, allocs: Vec<u16>, body: Expr) -> Result<Expr> {
         match pattern {
-            Pattern::Var(name) => {
+            Pattern::Var(_name) => {
                 let var_idx = allocs[0];
                 Ok(Expr::LetBinding {
                     var_index: var_idx,
@@ -1896,7 +1896,7 @@ impl Parser {
                                 Some(self.parse_pipe()?)
                             };
                             self.expect(&Token::RBracket)?;
-                            let optional = self.eat(&Token::Question);
+                            let _optional = self.eat(&Token::Question);
                             expr = Expr::Slice {
                                 expr: Box::new(expr),
                                 from: first.map(Box::new),

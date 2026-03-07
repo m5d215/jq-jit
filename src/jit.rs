@@ -35,7 +35,7 @@ fn clear_jit_error() {
 }
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder, StackSlotData, StackSlotKind};
 use cranelift_codegen::settings::{self, Configurable};
-use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module, FuncId};
 
@@ -43,7 +43,6 @@ use crate::ir::*;
 use crate::value::Value;
 
 const GEN_CONTINUE: i64 = 1;
-const GEN_STOP: i64 = 0;
 const GEN_ERROR: i64 = -1;
 
 // ============================================================================
@@ -135,7 +134,7 @@ fn is_scalar(expr: &Expr) -> bool {
             StringPart::Literal(_) => true,
             StringPart::Expr(e) => is_scalar(e),
         }),
-        Expr::Reduce { source, init, update, .. } => {
+        Expr::Reduce { source: _source, init, update, .. } => {
             // Reduce is scalar if init and update are scalar (source is the generator)
             is_scalar(init) && is_scalar(update)
         }
@@ -159,6 +158,7 @@ type SlotId = u32;
 type LabelId = u32;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum JitOp {
     // Value construction
     Clone { dst: SlotId, src: SlotId },
@@ -1258,7 +1258,7 @@ impl Flattener {
                 if is_scalar(rhs) {
                     // lhs is generator, rhs is scalar: for each output of lhs, yield lhs_out op rhs
                     let rhs_val = self.flatten_scalar(rhs, input_slot);
-                    let gen_body = Expr::BinOp {
+                    let _gen_body = Expr::BinOp {
                         op: *op,
                         lhs: Box::new(Expr::Input),
                         rhs: Box::new(Expr::Input), // placeholder
@@ -1886,48 +1886,6 @@ impl Flattener {
                 true
             }
 
-            // StringInterpolation with generator parts
-            Expr::StringInterpolation { parts } if parts.iter().any(|p| matches!(p, StringPart::Expr(e) if !is_scalar(e))) => {
-                // Convert generator interpolation parts to LetBindings
-                let base_var: u16 = 10400;
-                let mut var_parts = Vec::new();
-                let mut all_compilable = true;
-                for (i, part) in parts.iter().enumerate() {
-                    match part {
-                        StringPart::Literal(s) => {
-                            var_parts.push(StringPart::Literal(s.clone()));
-                        }
-                        StringPart::Expr(e) => {
-                            if !is_scalar(e) {
-                                let mut test = self.test_flattener();
-                                let t_in = test.alloc_slot();
-                                if !test.flatten_gen(e, t_in) {
-                                    all_compilable = false;
-                                    break;
-                                }
-                            }
-                            let vi = base_var + i as u16;
-                            var_parts.push(StringPart::Expr(Expr::LoadVar { var_index: vi }));
-                        }
-                    }
-                }
-                if !all_compilable { return false; }
-
-                let inner = Expr::StringInterpolation { parts: var_parts };
-                let mut rewritten = inner;
-                for (i, part) in parts.iter().enumerate().rev() {
-                    if let StringPart::Expr(e) = part {
-                        let vi = base_var + i as u16;
-                        rewritten = Expr::LetBinding {
-                            var_index: vi,
-                            value: Box::new(e.clone()),
-                            body: Box::new(rewritten),
-                        };
-                    }
-                }
-                self.flatten_gen(&rewritten, input_slot)
-            }
-
             // (dead code removed — foreach gen-init moved earlier, Assign/Update handled above)
 
             // ClosureOp: sort_by, group_by, min_by, max_by, unique_by
@@ -2356,37 +2314,6 @@ impl Flattener {
                 self.emit(JitOp::Drop { slot: error_slot });
 
                 self.emit(JitOp::Label { id: done_label });
-                true
-            }
-
-            // IfThenElse | right: handle each branch inline
-            Expr::IfThenElse { cond, then_branch, else_branch } if is_scalar(cond) => {
-                let cond_val = self.flatten_scalar(cond, input_slot);
-                let then_lbl = self.alloc_label();
-                let else_lbl = self.alloc_label();
-                let done_lbl = self.alloc_label();
-                self.emit(JitOp::IfTruthy { src: cond_val, then_label: then_lbl, else_label: else_lbl });
-                self.emit(JitOp::Drop { slot: cond_val });
-
-                self.emit(JitOp::Label { id: then_lbl });
-                if is_scalar(then_branch) {
-                    let mid = self.flatten_scalar(then_branch, input_slot);
-                    self.flatten_gen(right, mid);
-                    self.emit(JitOp::Drop { slot: mid });
-                } else {
-                    if !self.flatten_gen_pipe(then_branch, right, input_slot) { return false; }
-                }
-                self.emit(JitOp::Jump { label: done_lbl });
-
-                self.emit(JitOp::Label { id: else_lbl });
-                if is_scalar(else_branch) {
-                    let mid = self.flatten_scalar(else_branch, input_slot);
-                    self.flatten_gen(right, mid);
-                    self.emit(JitOp::Drop { slot: mid });
-                } else {
-                    if !self.flatten_gen_pipe(else_branch, right, input_slot) { return false; }
-                }
-                self.emit(JitOp::Label { id: done_lbl });
                 true
             }
 
@@ -3084,110 +3011,6 @@ impl Flattener {
                 });
                 self.emit(JitOp::Drop { slot: collected });
                 true
-            }
-        }
-    }
-
-    /// Emit foreach loop: for each output of source, set $var, update acc, yield extract.
-    fn flatten_foreach_loop(&mut self, source: &Expr, var_index: u16, acc_index: u16,
-                            update: &Expr, extract: Option<&Expr>, input_slot: SlotId) {
-        self.flatten_gen_with_action(source, input_slot, &|s, elem_slot| {
-            s.emit(JitOp::SetVar { var_index, src: elem_slot });
-            let new_acc = s.flatten_scalar(update, input_slot);
-            s.emit(JitOp::SetVar { var_index: acc_index, src: new_acc });
-            s.emit(JitOp::Drop { slot: new_acc });
-            if let Some(ext) = extract {
-                s.flatten_gen(ext, input_slot);
-            } else {
-                // Default: yield the accumulator
-                let acc = s.alloc_slot();
-                s.emit(JitOp::GetVar { dst: acc, var_index: acc_index });
-                s.emit_yield(acc);
-                s.emit(JitOp::Drop { slot: acc });
-            }
-        });
-    }
-
-    /// Generic: run a generator, but instead of yielding, execute an action for each output.
-    fn flatten_gen_with_action(&mut self, expr: &Expr, input_slot: SlotId,
-                               action: &dyn Fn(&mut Flattener, SlotId)) {
-        if is_scalar(expr) {
-            let out = self.flatten_scalar(expr, input_slot);
-            action(self, out);
-            self.emit(JitOp::Drop { slot: out });
-            return;
-        }
-        match expr {
-            Expr::Empty => {}
-            Expr::Comma { left, right } => {
-                self.flatten_gen_with_action(left, input_slot, action);
-                self.flatten_gen_with_action(right, input_slot, action);
-            }
-            Expr::Pipe { left, right } => {
-                if is_scalar(left) {
-                    let mid = self.flatten_scalar(left, input_slot);
-                    self.flatten_gen_with_action(right, mid, action);
-                    self.emit(JitOp::Drop { slot: mid });
-                } else {
-                    // For gen | expr, handle each output of left
-                    self.flatten_gen_with_action(left, input_slot, &|s, mid| {
-                        if is_scalar(right) {
-                            let out = s.flatten_scalar(right, mid);
-                            action(s, out);
-                            s.emit(JitOp::Drop { slot: out });
-                        } else {
-                            s.flatten_gen_with_action(right, mid, action);
-                        }
-                    });
-                }
-            }
-            Expr::Each { input_expr } | Expr::EachOpt { input_expr } => {
-                let is_opt = matches!(expr, Expr::EachOpt { .. });
-                if is_scalar(input_expr) {
-                    let container = self.flatten_scalar(input_expr, input_slot);
-                    self.flatten_each_with_action(container, is_opt, action);
-                    self.emit(JitOp::Drop { slot: container });
-                }
-            }
-            Expr::Range { from, to, step } => {
-                if is_scalar(from) && is_scalar(to) && step.as_ref().map_or(true, |s| is_scalar(s)) {
-                    let from_val = self.flatten_scalar(from, input_slot);
-                    let to_val = self.flatten_scalar(to, input_slot);
-                    let step_val = if let Some(s) = step {
-                        self.flatten_scalar(s, input_slot)
-                    } else {
-                        let s = self.alloc_slot();
-                        self.emit(JitOp::Num { dst: s, val: 1.0, repr: None });
-                        s
-                    };
-                    let cur = self.alloc_var();
-                    let to_v = self.alloc_var();
-                    let step_v = self.alloc_var();
-                    let cmp = self.alloc_var();
-                    self.emit(JitOp::ToF64Var { dst_var: cur, src: from_val });
-                    self.emit(JitOp::ToF64Var { dst_var: to_v, src: to_val });
-                    self.emit(JitOp::ToF64Var { dst_var: step_v, src: step_val });
-                    self.emit(JitOp::Drop { slot: from_val });
-                    self.emit(JitOp::Drop { slot: to_val });
-                    self.emit(JitOp::Drop { slot: step_val });
-                    let head = self.alloc_label();
-                    let body = self.alloc_label();
-                    let done = self.alloc_label();
-                    self.emit(JitOp::Label { id: head });
-                    self.emit(JitOp::RangeCheck { dst_var: cmp, cur_var: cur, to_var: to_v, step_var: step_v });
-                    self.emit(JitOp::BranchOnVar { var: cmp, nonzero_label: body, zero_label: done });
-                    self.emit(JitOp::Label { id: body });
-                    let num = self.alloc_slot();
-                    self.emit(JitOp::F64Num { dst: num, src_var: cur });
-                    action(self, num);
-                    self.emit(JitOp::Drop { slot: num });
-                    self.emit(JitOp::F64Add { dst_var: cur, a_var: cur, b_var: step_v });
-                    self.emit(JitOp::Jump { label: head });
-                    self.emit(JitOp::Label { id: done });
-                }
-            }
-            _ => {
-                // Fallback: not supported
             }
         }
     }

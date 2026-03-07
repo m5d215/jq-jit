@@ -1155,7 +1155,7 @@ pub fn eval_slice(base: &Value, from: &Value, to: &Value) -> Result<Value> {
     }
 }
 
-fn eval_closure_op(op: ClosureOpKind, container: &Value, key_expr: &Expr, input: &Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
+fn eval_closure_op(op: ClosureOpKind, container: &Value, key_expr: &Expr, _input: &Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
     let a = match container { Value::Arr(a) => a, _ => bail!("{} is not an array", container.type_name()) };
     let mut keyed: Vec<(Vec<Value>, Value)> = Vec::new();
     for item in a.iter() {

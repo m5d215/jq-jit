@@ -20,6 +20,7 @@ const MAX_STACK_DEPTH: usize = 10000;
 
 /// A backtracking save point on the fork stack.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct ForkPoint {
     /// Saved data stack depth.
     data_depth: usize,
@@ -33,6 +34,7 @@ struct ForkPoint {
 
 /// Instruction-specific state for backtracking.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum ForkState {
     /// FORK instruction: just resumes at the target PC.
     Jump,
@@ -58,6 +60,7 @@ enum ForkState {
 
 /// A function call frame.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct Frame {
     /// Return program counter.
     ret_pc: usize,
@@ -94,6 +97,7 @@ pub struct VM<'a> {
 }
 
 /// Information about a bytecode function.
+#[allow(dead_code)]
 struct BytecodeInfo<'a> {
     bc: &'a BytecodeRef<'a>,
     /// Constants extracted from the bytecode.
@@ -733,8 +737,8 @@ impl<'a> VM<'a> {
     }
 
     fn execute_range(&mut self) -> Result<()> {
-        let level = self.bytecodes[self.current_bc].bc.code()[self.pc + 1] as usize;
-        let var_idx = self.bytecodes[self.current_bc].bc.code()[self.pc + 2] as usize;
+        let _level = self.bytecodes[self.current_bc].bc.code()[self.pc + 1] as usize;
+        let _var_idx = self.bytecodes[self.current_bc].bc.code()[self.pc + 2] as usize;
 
         // Stack: [..., to, from]  (from on top in jq's convention)
         // Actually in jq: range uses STOREV to save the current value
@@ -797,7 +801,7 @@ impl<'a> VM<'a> {
 
     fn execute_call_jq(&mut self, _is_tail: bool) -> Result<()> {
         let code = self.bytecodes[self.current_bc].bc.code();
-        let nargs = code[self.pc + 1] as usize;
+        let _nargs = code[self.pc + 1] as usize;
 
         // The first pair (level, idx) identifies the target subfunction
         let _target_level = code[self.pc + 2] as usize;

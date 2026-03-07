@@ -5,7 +5,7 @@
 use std::io::{self, BufRead, Read, Write};
 use std::process;
 
-use jq_jit::value::{self, Value, json_to_value, json_stream, value_to_json, value_to_json_precise, value_to_json_pretty, write_value_compact};
+use jq_jit::value::{Value, json_to_value, json_stream, value_to_json_precise, value_to_json_pretty, write_value_compact};
 use jq_jit::interpreter::Filter;
 
 fn main() {
@@ -20,8 +20,8 @@ fn main() {
     let mut slurp = false;
     let mut join_output = false;
     let mut tab = false;
-    let mut indent_n = 2usize;
-    let mut sort_keys = false;
+    let mut _indent_n = 2usize;
+    let mut _sort_keys = false;
     let mut exit_status = false;
     let mut arg_vars: Vec<(String, Value)> = Vec::new();
     let mut argjson_vars: Vec<(String, Value)> = Vec::new();
@@ -40,7 +40,7 @@ fn main() {
                 join_output = true;
                 raw_output = true;
             }
-            "-S" | "--sort-keys" => sort_keys = true,
+            "-S" | "--sort-keys" => _sort_keys = true,
             "-e" | "--exit-status" => exit_status = true,
             "--tab" => {
                 tab = true;
@@ -48,7 +48,7 @@ fn main() {
             "--indent" => {
                 i += 1;
                 if i < args.len() {
-                    indent_n = args[i].parse().unwrap_or(2);
+                    _indent_n = args[i].parse().unwrap_or(2);
                 }
             }
             "--arg" => {
