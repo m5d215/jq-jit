@@ -3417,7 +3417,8 @@ extern "C" fn jit_rt_obj_insert(obj: *mut Value, key: *mut Value, val: *mut Valu
                 Value::Str(s) => crate::value::KeyStr::from(s.as_str()),
                 _ => crate::value::KeyStr::from(crate::value::value_to_json(&key_val)),
             };
-            Rc::make_mut(o).insert(k, val_val);
+            // Safety: obj was just created by jit_rt_obj_new, refcount is always 1
+            Rc::get_mut(o).unwrap_unchecked().insert(k, val_val);
         }
         drop(key_val);
         // val_val is moved into the map, no drop needed (unless obj wasn't Obj, but that can't happen)
@@ -4511,19 +4512,18 @@ unsafe extern "C" fn collect_callback(value: *const Value, ctx: *mut u8) -> i64 
 }
 
 thread_local! {
-    static REUSABLE_ENV: RefCell<Option<JitEnv>> = const { RefCell::new(None) };
+    static REUSABLE_ENV: RefCell<JitEnv> = RefCell::new(JitEnv::new());
 }
 
 fn with_jit_env<R>(f: impl FnOnce(&mut JitEnv) -> R) -> R {
-    let mut env = REUSABLE_ENV.with(|cell| cell.borrow_mut().take())
-        .unwrap_or_else(JitEnv::new);
-    env.collect_stacks.clear();
-    env.str_bufs.clear();
-    env.try_depth = 0;
-    env.error_msg = None;
-    let result = f(&mut env);
-    REUSABLE_ENV.with(|cell| { *cell.borrow_mut() = Some(env); });
-    result
+    REUSABLE_ENV.with(|cell| {
+        let mut env = cell.borrow_mut();
+        env.collect_stacks.clear();
+        env.str_bufs.clear();
+        env.try_depth = 0;
+        env.error_msg = None;
+        f(&mut env)
+    })
 }
 
 pub fn execute_jit(func: JitFilterFn, input: &Value) -> Result<Vec<Value>> {
