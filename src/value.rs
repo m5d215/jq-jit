@@ -1456,18 +1456,8 @@ fn push_compact_value(buf: &mut Vec<u8>, v: &Value) {
         Value::Num(n, repr) => {
             if let Some(r) = repr {
                 buf.extend_from_slice(r.as_bytes());
-            } else if *n == n.trunc() && n.abs() < 1e15 {
-                let i = *n as i64;
-                if i as f64 == *n {
-                    let mut ibuf = itoa::Buffer::new();
-                    buf.extend_from_slice(ibuf.format(i).as_bytes());
-                } else {
-                    let s = format_jq_number(*n);
-                    buf.extend_from_slice(s.as_bytes());
-                }
             } else {
-                let s = format_jq_number(*n);
-                buf.extend_from_slice(s.as_bytes());
+                push_jq_number_bytes(buf, *n);
             }
         }
         Value::Str(s) => {
@@ -1495,6 +1485,41 @@ fn push_compact_value(buf: &mut Vec<u8>, v: &Value) {
             push_json_string_to_vec(buf, e.as_str());
         }
     }
+}
+
+/// Write a jq-formatted number directly to a Vec<u8> buffer, avoiding intermediate String allocation.
+#[inline]
+fn push_jq_number_bytes(buf: &mut Vec<u8>, n: f64) {
+    use std::io::Write;
+    if n.is_nan() { buf.extend_from_slice(b"null"); return; }
+    if n.is_infinite() {
+        if n.is_sign_positive() { buf.extend_from_slice(b"1.7976931348623157e+308"); }
+        else { buf.extend_from_slice(b"-1.7976931348623157e+308"); }
+        return;
+    }
+    if n == 0.0 {
+        if n.is_sign_negative() { buf.extend_from_slice(b"-0"); }
+        else { buf.push(b'0'); }
+        return;
+    }
+    // Integer fast path
+    if n == n.trunc() && n.abs() < 1e16 {
+        let i = n as i64;
+        if i as f64 == n {
+            let mut ibuf = itoa::Buffer::new();
+            buf.extend_from_slice(ibuf.format(i).as_bytes());
+            return;
+        }
+    }
+    let abs = n.abs();
+    // Very small or very large numbers need special formatting — fall back to String
+    if (abs != 0.0 && abs < 1e-4) || abs >= 1e16 {
+        let s = format_jq_number(n);
+        buf.extend_from_slice(s.as_bytes());
+        return;
+    }
+    // Common case: write Display format directly to buffer (no String allocation)
+    let _ = write!(buf, "{}", n);
 }
 
 #[inline]
