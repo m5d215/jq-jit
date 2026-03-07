@@ -2012,18 +2012,85 @@ pub fn eval(
         }
 
         Expr::FuncCall { func_id, args } => {
-            let func = env.borrow().funcs.get(*func_id).cloned();
-            if let Some(f) = func {
-                if f.param_vars.is_empty() || args.is_empty() {
-                    eval(&f.body, input, env, cb)
+            // Consolidated function call: single env borrow for func lookup + recursive check + cache hit
+            enum FuncAction {
+                Direct(Rc<CompiledFunc>),
+                Recursive(Rc<CompiledFunc>),
+                CacheHit(Rc<Expr>),
+                CacheMiss(Rc<CompiledFunc>),
+            }
+            let action = {
+                let e = env.borrow();
+                let func = match e.funcs.get(*func_id) {
+                    Some(f) => f.clone(),
+                    None => bail!("undefined function id {}", func_id),
+                };
+                if func.param_vars.is_empty() || args.is_empty() {
+                    FuncAction::Direct(func)
                 } else {
+                    let is_recursive = e.recursive_cache.iter()
+                        .find(|(k, _)| *k == *func_id)
+                        .map(|&(_, r)| r);
+                    if is_recursive == Some(true) {
+                        FuncAction::Recursive(func)
+                    } else if is_recursive == Some(false) {
+                        // Known non-recursive: try cache lookup in same borrow
+                        // Single-arg LoadVar fast path: avoid Vec allocation
+                        let cached = if args.len() == 1 {
+                            if let Expr::LoadVar { var_index: vi0 } = &args[0] {
+                                e.subst_cache.iter()
+                                    .find(|((fid, vis), _)| *fid == *func_id && vis.len() == 1 && vis[0] == *vi0)
+                                    .map(|(_, v)| v.clone())
+                            } else {
+                                let args_ptr = args.as_ptr() as usize;
+                                e.subst_ptr_cache.iter()
+                                    .find(|(fid, ptr, _)| *fid == *func_id && *ptr == args_ptr)
+                                    .map(|(_, _, body)| body.clone())
+                            }
+                        } else {
+                            // Multi-arg: check all LoadVar
+                            let all_loadvar: Option<Vec<u16>> = args.iter().map(|a| {
+                                if let Expr::LoadVar { var_index } = a { Some(*var_index) } else { None }
+                            }).collect();
+                            if let Some(ref vis) = all_loadvar {
+                                e.subst_cache.iter()
+                                    .find(|((fid, v), _)| *fid == *func_id && v == vis)
+                                    .map(|(_, v)| v.clone())
+                            } else {
+                                let args_ptr = args.as_ptr() as usize;
+                                e.subst_ptr_cache.iter()
+                                    .find(|(fid, ptr, _)| *fid == *func_id && *ptr == args_ptr)
+                                    .map(|(_, _, body)| body.clone())
+                            }
+                        };
+                        match cached {
+                            Some(body) => FuncAction::CacheHit(body),
+                            None => FuncAction::CacheMiss(func),
+                        }
+                    } else {
+                        // Unknown recursive status: need to check
+                        FuncAction::CacheMiss(func)
+                    }
+                }
+            };
+            match action {
+                FuncAction::Direct(func) => eval(&func.body, input, env, cb),
+                FuncAction::CacheHit(body) => eval(&body, input, env, cb),
+                FuncAction::Recursive(func) => {
+                    let mut nv = env.borrow().next_var;
+                    let body = substitute_and_rename(&func.body, &func.param_vars, args, &mut nv);
+                    env.borrow_mut().next_var = nv;
+                    eval(&body, input, env, cb)
+                }
+                FuncAction::CacheMiss(func) => {
+                    // Check if recursive (first call or unknown)
                     let is_recursive = {
                         let e = env.borrow();
                         match e.recursive_cache.iter().find(|(k, _)| *k == *func_id) {
                             Some(&(_, r)) => r,
                             None => {
                                 drop(e);
-                                let r = contains_func_call(&f.body, *func_id);
+                                let r = contains_func_call(&func.body, *func_id);
                                 env.borrow_mut().recursive_cache.push((*func_id, r));
                                 r
                             }
@@ -2031,47 +2098,31 @@ pub fn eval(
                     };
                     if is_recursive {
                         let mut nv = env.borrow().next_var;
-                        let body = substitute_and_rename(&f.body, &f.param_vars, args, &mut nv);
+                        let body = substitute_and_rename(&func.body, &func.param_vars, args, &mut nv);
                         env.borrow_mut().next_var = nv;
                         eval(&body, input, env, cb)
                     } else {
-                        // Try to use cached substituted body when all args are LoadVar
+                        let body = substitute_params(&func.body, &func.param_vars, args);
+                        let body_rc = Rc::new(body);
+                        // Single-arg LoadVar fast path for caching
+                        if args.len() == 1 {
+                            if let Expr::LoadVar { var_index: vi0 } = &args[0] {
+                                env.borrow_mut().subst_cache.push(((*func_id, vec![*vi0]), body_rc.clone()));
+                                return eval(&body_rc, input, env, cb);
+                            }
+                        }
                         let all_loadvar: Option<Vec<u16>> = args.iter().map(|a| {
                             if let Expr::LoadVar { var_index } = a { Some(*var_index) } else { None }
                         }).collect();
                         if let Some(var_indices) = all_loadvar {
-                            let cache_key = (*func_id, var_indices);
-                            let cached = env.borrow().subst_cache.iter()
-                                .find(|(k, _)| *k == cache_key)
-                                .map(|(_, v)| v.clone());
-                            if let Some(body) = cached {
-                                eval(&body, input, env, cb)
-                            } else {
-                                let body = substitute_params(&f.body, &f.param_vars, args);
-                                let body_rc = Rc::new(body);
-                                env.borrow_mut().subst_cache.push((cache_key, body_rc.clone()));
-                                eval(&body_rc, input, env, cb)
-                            }
+                            env.borrow_mut().subst_cache.push(((*func_id, var_indices), body_rc.clone()));
                         } else {
-                            // Pointer-based cache: if args come from a stable (cached) body,
-                            // the pointer is the same across calls.
                             let args_ptr = args.as_ptr() as usize;
-                            let cached = env.borrow().subst_ptr_cache.iter()
-                                .find(|(fid, ptr, _)| *fid == *func_id && *ptr == args_ptr)
-                                .map(|(_, _, body)| body.clone());
-                            if let Some(body) = cached {
-                                eval(&body, input, env, cb)
-                            } else {
-                                let body = substitute_params(&f.body, &f.param_vars, args);
-                                let body_rc = Rc::new(body);
-                                env.borrow_mut().subst_ptr_cache.push((*func_id, args_ptr, body_rc.clone()));
-                                eval(&body_rc, input, env, cb)
-                            }
+                            env.borrow_mut().subst_ptr_cache.push((*func_id, args_ptr, body_rc.clone()));
                         }
+                        eval(&body_rc, input, env, cb)
                     }
                 }
-            } else {
-                bail!("undefined function id {}", func_id)
             }
         }
 
