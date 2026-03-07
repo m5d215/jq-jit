@@ -83,6 +83,20 @@ impl Filter {
             execute_via_libjq(&self.program, input)
         }
     }
+
+    /// Execute the filter with a callback for each result (avoids Vec allocation).
+    /// Returns Ok(true) if all values were processed, Ok(false) if stopped early.
+    pub fn execute_cb(&self, input: &Value, cb: &mut dyn FnMut(&Value) -> Result<bool>) -> Result<bool> {
+        if let Some(jit_fn) = self.jit_fn {
+            return crate::jit::execute_jit_cb(jit_fn, input, cb);
+        }
+        // Fallback: collect results and iterate
+        let results = self.execute(input)?;
+        for result in &results {
+            if !cb(result)? { return Ok(false); }
+        }
+        Ok(true)
+    }
 }
 
 /// Execute a jq filter using libjq directly.

@@ -206,7 +206,7 @@ enum JitOp {
     CollectFinish { dst: SlotId },
 
     // Object construction
-    ObjNew { dst: SlotId },
+    ObjNew { dst: SlotId, cap: u16 },
     ObjInsert { obj: SlotId, key: SlotId, val: SlotId },
 
     // Alternative (//)
@@ -663,13 +663,12 @@ impl Flattener {
             }
             Expr::ObjectConstruct { pairs } => {
                 let out = self.alloc_slot();
-                self.emit(JitOp::ObjNew { dst: out });
+                self.emit(JitOp::ObjNew { dst: out, cap: pairs.len() as u16 });
                 for (k, v) in pairs {
                     let kv = self.flatten_scalar(k, input_slot);
                     let vv = self.flatten_scalar(v, input_slot);
                     self.emit(JitOp::ObjInsert { obj: out, key: kv, val: vv });
-                    self.emit(JitOp::Drop { slot: kv });
-                    self.emit(JitOp::Drop { slot: vv });
+                    // ObjInsert takes ownership of key and val slots (ptr::read), no Drop needed
                 }
                 out
             }
@@ -1115,13 +1114,12 @@ impl Flattener {
             Expr::ObjectConstruct { pairs } => {
                 if pairs.iter().all(|(k, v)| is_scalar(k) && is_scalar(v)) {
                     let out = self.alloc_slot();
-                    self.emit(JitOp::ObjNew { dst: out });
+                    self.emit(JitOp::ObjNew { dst: out, cap: pairs.len() as u16 });
                     for (k, v) in pairs {
                         let kv = self.flatten_scalar(k, input_slot);
                         let vv = self.flatten_scalar(v, input_slot);
                         self.emit(JitOp::ObjInsert { obj: out, key: kv, val: vv });
-                        self.emit(JitOp::Drop { slot: kv });
-                        self.emit(JitOp::Drop { slot: vv });
+                        // ObjInsert takes ownership of key and val slots (ptr::read), no Drop needed
                     }
                     self.emit_yield(out);
                     self.emit(JitOp::Drop { slot: out });
@@ -3390,18 +3388,23 @@ extern "C" fn jit_rt_collect_finish(dst: *mut Value, env: *mut JitEnv) {
 }
 
 // Object construction helpers
-extern "C" fn jit_rt_obj_new(dst: *mut Value) {
-    unsafe { std::ptr::write(dst, Value::Obj(Rc::new(crate::value::new_objmap()))); }
+extern "C" fn jit_rt_obj_new(dst: *mut Value, cap: usize) {
+    unsafe { std::ptr::write(dst, Value::Obj(Rc::new(crate::value::new_objmap_with_capacity(cap)))); }
 }
-extern "C" fn jit_rt_obj_insert(obj: *mut Value, key: *const Value, val: *const Value) {
+/// Insert key-value pair into object. Takes ownership of both key and val (ptr::read, no clone).
+extern "C" fn jit_rt_obj_insert(obj: *mut Value, key: *mut Value, val: *mut Value) {
     unsafe {
+        let key_val = std::ptr::read(key);
+        let val_val = std::ptr::read(val);
         if let Value::Obj(o) = &mut *obj {
-            let k: crate::value::KeyStr = match &*key {
+            let k: crate::value::KeyStr = match &key_val {
                 Value::Str(s) => crate::value::KeyStr::from(s.as_str()),
-                _ => crate::value::KeyStr::from(crate::value::value_to_json(&*key)),
+                _ => crate::value::KeyStr::from(crate::value::value_to_json(&key_val)),
             };
-            Rc::make_mut(o).insert(k, (*val).clone());
+            Rc::make_mut(o).insert(k, val_val);
         }
+        drop(key_val);
+        // val_val is moved into the map, no drop needed (unless obj wasn't Obj, but that can't happen)
     }
 }
 
@@ -4193,9 +4196,10 @@ impl JitCompiler {
                     }
 
                     // Object ops
-                    JitOp::ObjNew { dst } => {
+                    JitOp::ObjNew { dst, cap } => {
                         let d = slot_addr(&mut b, *dst);
-                        b.ins().call(rt["obj_new"], &[d]);
+                        let c = b.ins().iconst(ptr_ty, *cap as i64);
+                        b.ins().call(rt["obj_new"], &[d, c]);
                     }
                     JitOp::ObjInsert { obj, key, val } => {
                         let o = slot_addr(&mut b, *obj);
@@ -4442,7 +4446,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("collect_begin", [p], []);
     decl!("collect_push", [p, p], []);
     decl!("collect_finish", [p, p], []);
-    decl!("obj_new", [p], []);
+    decl!("obj_new", [p, p], []);
     decl!("obj_insert", [p, p, p], []);
     decl!("is_null_or_false", [p], [p]);
     decl!("to_f64", [p], [f]);
@@ -4487,34 +4491,86 @@ thread_local! {
     static REUSABLE_ENV: RefCell<Option<JitEnv>> = const { RefCell::new(None) };
 }
 
-pub fn execute_jit(func: JitFilterFn, input: &Value) -> Result<Vec<Value>> {
-    // Reuse JitEnv from thread-local to avoid 100KB alloc per call (critical for NDJSON)
+fn with_jit_env<R>(f: impl FnOnce(&mut JitEnv) -> R) -> R {
     let mut env = REUSABLE_ENV.with(|cell| cell.borrow_mut().take())
         .unwrap_or_else(JitEnv::new);
-
-    // Reset mutable state (vars persist safely — set_var drops old values on overwrite)
     env.collect_stacks.clear();
     env.str_bufs.clear();
     env.try_depth = 0;
     env.error_msg = None;
+    let result = f(&mut env);
+    REUSABLE_ENV.with(|cell| { *cell.borrow_mut() = Some(env); });
+    result
+}
 
-    let mut results: Vec<Value> = Vec::new();
-    let result = unsafe {
-        func(input as *const Value, &mut env, collect_callback,
-             &mut results as *mut Vec<Value> as *mut u8)
-    };
-    if result == GEN_ERROR {
-        let err_msg = env.error_msg.take()
-            .unwrap_or_else(|| "JIT execution error".to_string());
-        results.push(Value::Error(Rc::new(err_msg)));
+pub fn execute_jit(func: JitFilterFn, input: &Value) -> Result<Vec<Value>> {
+    with_jit_env(|env| {
+        let mut results: Vec<Value> = Vec::new();
+        let result = unsafe {
+            func(input as *const Value, env, collect_callback,
+                 &mut results as *mut Vec<Value> as *mut u8)
+        };
+        if result == GEN_ERROR {
+            let err_msg = env.error_msg.take()
+                .unwrap_or_else(|| "JIT execution error".to_string());
+            results.push(Value::Error(Rc::new(err_msg)));
+        }
+        Ok(results)
+    })
+}
+
+/// Streaming callback context for execute_jit_cb.
+/// cb_fat stores the fat pointer (data+vtable) as two usize values.
+struct StreamCtx {
+    cb_fat: [usize; 2],
+    had_error: bool,
+    error_msg: Option<String>,
+}
+
+unsafe extern "C" fn stream_callback(value: *const Value, ctx: *mut u8) -> i64 {
+    let sctx = &mut *(ctx as *mut StreamCtx);
+    let cb: &mut dyn FnMut(&Value) -> Result<bool> =
+        std::mem::transmute::<[usize; 2], &mut dyn FnMut(&Value) -> Result<bool>>(sctx.cb_fat);
+    match cb(&*value) {
+        Ok(true) => GEN_CONTINUE,
+        Ok(false) => 0, // stop
+        Err(e) => {
+            sctx.had_error = true;
+            sctx.error_msg = Some(format!("{}", e));
+            0 // stop
+        }
     }
+}
 
-    // Put env back for reuse
-    REUSABLE_ENV.with(|cell| {
-        *cell.borrow_mut() = Some(env);
-    });
-
-    Ok(results)
+/// Execute JIT filter with streaming callback (avoids Vec allocation).
+pub fn execute_jit_cb(func: JitFilterFn, input: &Value, cb: &mut dyn FnMut(&Value) -> Result<bool>) -> Result<bool> {
+    with_jit_env(|env| {
+        // Store the fat pointer as raw bytes to avoid lifetime issues.
+        // Safety: sctx lives only within this scope, same as cb.
+        let cb_fat: [usize; 2] = unsafe {
+            std::mem::transmute::<&mut dyn FnMut(&Value) -> Result<bool>, [usize; 2]>(cb)
+        };
+        let mut sctx = StreamCtx {
+            cb_fat,
+            had_error: false,
+            error_msg: None,
+        };
+        let result = unsafe {
+            func(input as *const Value, env, stream_callback,
+                 &mut sctx as *mut StreamCtx as *mut u8)
+        };
+        if sctx.had_error {
+            if let Some(msg) = sctx.error_msg {
+                return Err(anyhow::anyhow!("{}", msg));
+            }
+        }
+        if result == GEN_ERROR {
+            let err_msg = env.error_msg.take()
+                .unwrap_or_else(|| "JIT execution error".to_string());
+            return Err(anyhow::anyhow!("{}", err_msg));
+        }
+        Ok(true)
+    })
 }
 
 #[cfg(test)]

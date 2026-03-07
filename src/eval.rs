@@ -1459,7 +1459,21 @@ fn eval_range(from: &Value, to: &Value, step: Option<&Value>, cb: &mut dyn FnMut
 }
 
 fn eval_object_construct(pairs: &[(Expr, Expr)], input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
-    eval_obj_pairs(pairs, 0, crate::value::new_objmap(), input, env, cb)
+    // Fast path: if all keys and values are scalar expressions, build directly without cloning
+    let mut obj = crate::value::new_objmap_with_capacity(pairs.len());
+    for (ke, ve) in pairs {
+        let kv = match eval_one(ke, &input, env) {
+            Ok(v) => v,
+            Err(()) => return eval_obj_pairs(pairs, 0, crate::value::new_objmap_with_capacity(pairs.len()), input, env, cb),
+        };
+        let ks: KeyStr = match &kv { Value::Str(s) => KeyStr::from(s.as_str()), _ => KeyStr::from(crate::value::value_to_json(&kv)) };
+        let vv = match eval_one(ve, &input, env) {
+            Ok(v) => v,
+            Err(()) => return eval_obj_pairs(pairs, 0, crate::value::new_objmap_with_capacity(pairs.len()), input, env, cb),
+        };
+        obj.insert(ks, vv);
+    }
+    cb(Value::Obj(Rc::new(obj)))
 }
 
 fn eval_obj_pairs(pairs: &[(Expr, Expr)], idx: usize, cur: crate::value::ObjMap, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {

@@ -194,42 +194,38 @@ fn main() {
 
     let mut had_error = false;
     let process_input = |input: &Value, out: &mut io::BufWriter<io::StdoutLock>, any_false: &mut bool, had_error: &mut bool| {
-        match filter.execute(input) {
-            Ok(results) => {
-                for result in &results {
-                    if let Value::Error(e) = result {
-                        eprintln!("jq: error: {}", e.as_str());
-                        *had_error = true;
-                        continue;
-                    }
-                    if exit_status && !result.is_true() {
-                        *any_false = true;
-                    }
-                    // Use streaming write for compact mode to avoid intermediate String allocation
-                    if compact && !raw_output {
-                        let _ = write_value_compact_ext(out, result, sort_keys);
-                        if !join_output {
-                            let _ = out.write_all(b"\n");
-                        }
-                    } else {
-                        let formatted = format_value(result);
-                        if join_output {
-                            let _ = write!(out, "{}", formatted);
-                        } else {
-                            let _ = writeln!(out, "{}", formatted);
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                let msg = format!("{}", e);
-                if let Some(jq_msg) = msg.strip_prefix("__jqerror__:") {
-                    eprintln!("jq: error: {}", jq_msg);
-                } else {
-                    eprintln!("jq: error: {}", msg);
-                }
+        let result = filter.execute_cb(input, &mut |result| {
+            if let Value::Error(e) = result {
+                eprintln!("jq: error: {}", e.as_str());
                 *had_error = true;
+                return Ok(true);
             }
+            if exit_status && !result.is_true() {
+                *any_false = true;
+            }
+            if compact && !raw_output {
+                let _ = write_value_compact_ext(out, result, sort_keys);
+                if !join_output {
+                    let _ = out.write_all(b"\n");
+                }
+            } else {
+                let formatted = format_value(result);
+                if join_output {
+                    let _ = write!(out, "{}", formatted);
+                } else {
+                    let _ = writeln!(out, "{}", formatted);
+                }
+            }
+            Ok(true)
+        });
+        if let Err(e) = result {
+            let msg = format!("{}", e);
+            if let Some(jq_msg) = msg.strip_prefix("__jqerror__:") {
+                eprintln!("jq: error: {}", jq_msg);
+            } else {
+                eprintln!("jq: error: {}", msg);
+            }
+            *had_error = true;
         }
     };
 
