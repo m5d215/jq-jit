@@ -1837,14 +1837,19 @@ pub fn eval(
                                             Ok(cont)
                                         } else {
                                             // Fast path: evaluate cond before touching env
-                                            let is_true = match eval_one(cond_body, &val, env) {
-                                                Ok(v) => v.is_truthy(),
-                                                Err(()) => {
-                                                    let mut t = false;
-                                                    eval(cond_body, val.clone(), env, &mut |v| {
-                                                        t = v.is_truthy(); Ok(true)
-                                                    })?;
-                                                    t
+                                            // Try compound boolean first (single borrow for nested And/Or)
+                                            let is_true = if let Some(result) = eval_bool_compound(cond_body, &val, &env.borrow().vars) {
+                                                result
+                                            } else {
+                                                match eval_one(cond_body, &val, env) {
+                                                    Ok(v) => v.is_truthy(),
+                                                    Err(()) => {
+                                                        let mut t = false;
+                                                        eval(cond_body, val.clone(), env, &mut |v| {
+                                                            t = v.is_truthy(); Ok(true)
+                                                        })?;
+                                                        t
+                                                    }
                                                 }
                                             };
                                             if is_true {
