@@ -219,6 +219,9 @@ enum JitOp {
     /// Fused field extraction + push: copies a field from src object directly into dst object.
     /// Eliminates intermediate slot allocation and one function call vs IndexField + ObjPushStrKey.
     ObjCopyField { obj: SlotId, src: SlotId, obj_key: String, src_field: String },
+    /// Batch field extraction: build an object from multiple fields of src in a single pass.
+    /// Replaces ObjNew + N×ObjCopyField when all fields are extracted from the same source.
+    ObjFromFields { dst: SlotId, src: SlotId, fields: Vec<String> },
 
     // Alternative (//)
     IsNullOrFalse { dst_var: u32, src: SlotId },
@@ -3660,6 +3663,61 @@ extern "C" fn jit_rt_obj_copy_field(
     }
 }
 
+/// Batch field extraction: build a new object from multiple fields of src in a single pass.
+/// field_table is an array of (ptr, len) pairs for field names.
+/// Replaces ObjNew + N×ObjCopyField with a single function call, scanning the source once.
+/// Output fields are always in filter order (field_table order), not source order.
+extern "C" fn jit_rt_obj_from_fields(
+    dst: *mut Value,
+    src: *const Value,
+    field_table: *const (*const u8, usize),
+    count: usize,
+) {
+    unsafe {
+        let fields = std::slice::from_raw_parts(field_table, count);
+        // Collect values on stack (using MaybeUninit to avoid unnecessary init)
+        // For typical field counts (< 16), this stays on stack
+        let mut vals: [std::mem::MaybeUninit<Value>; 16] = std::mem::MaybeUninit::uninit().assume_init();
+        let use_heap = count > 16;
+        let mut heap_vals: Vec<std::mem::MaybeUninit<Value>> = if use_heap {
+            let mut v = Vec::with_capacity(count);
+            v.resize_with(count, std::mem::MaybeUninit::uninit);
+            v
+        } else { Vec::new() };
+        let val_buf: &mut [std::mem::MaybeUninit<Value>] = if use_heap { &mut heap_vals } else { &mut vals[..count] };
+
+        let mut found = 0u64;
+        if let Value::Obj(src_obj) = &*src {
+            let all_found: u64 = if count < 64 { (1u64 << count) - 1 } else { u64::MAX };
+            for (k, v) in src_obj.iter() {
+                if found == all_found { break; }
+                let k_bytes = k.as_bytes();
+                for (fi, &(fp, fl)) in fields.iter().enumerate() {
+                    if fi < 64 && (found & (1u64 << fi)) != 0 { continue; }
+                    if k_bytes.len() == fl && k_bytes == std::slice::from_raw_parts(fp, fl) {
+                        val_buf[fi].write(v.clone());
+                        found |= 1u64 << fi;
+                        break;
+                    }
+                }
+            }
+        }
+        // Build object in field order
+        let mut obj = crate::value::rc_objmap_pool_get(count);
+        let map = Rc::get_mut(&mut obj).unwrap_unchecked();
+        for (fi, &(fp, fl)) in fields.iter().enumerate() {
+            let name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(fp, fl));
+            let val = if fi < 64 && (found & (1u64 << fi)) != 0 {
+                val_buf[fi].assume_init_read()
+            } else {
+                Value::Null
+            };
+            map.push_unique(crate::value::KeyStr::from(name), val);
+        }
+        std::ptr::write(dst, Value::Obj(obj));
+    }
+}
+
 // Alternative helper
 extern "C" fn jit_rt_is_null_or_false(v: *const Value) -> i64 {
     unsafe { match &*v { Value::Null | Value::False => 1, _ => 0 } }
@@ -4109,6 +4167,9 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 *use_count.entry(*obj).or_insert(0) += 1;
                 *use_count.entry(*src).or_insert(0) += 1;
             }
+            JitOp::ObjFromFields { src, .. } => {
+                *use_count.entry(*src).or_insert(0) += 1;
+            }
             JitOp::IfTruthy { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
             JitOp::FieldIsTruthy { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
             JitOp::IsNullOrFalse { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
@@ -4165,6 +4226,9 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                     *use_count.entry(*obj).or_insert(0) += 1;
                     *use_count.entry(*src).or_insert(0) += 1;
                 }
+                JitOp::ObjFromFields { src, .. } => {
+                    *use_count.entry(*src).or_insert(0) += 1;
+                }
                 JitOp::IfTruthy { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
                 JitOp::FieldIsTruthy { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
                 JitOp::IsNullOrFalse { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
@@ -4203,6 +4267,39 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
         }
         if !changed { break; }
     }
+
+    // Fuse ObjNew + consecutive ObjCopyField (same obj & src, key==field) → ObjFromFields
+    let mut i = 0;
+    while i < ops.len() {
+        if let JitOp::ObjNew { dst: obj_slot, cap } = ops[i] {
+            let n = cap as usize;
+            if n >= 2 && i + n < ops.len() {
+                // Check that the next N ops are all ObjCopyField with same obj/src and key==field
+                let mut all_match = true;
+                let mut src_slot: SlotId = 0;
+                let mut fields = Vec::with_capacity(n);
+                for j in 0..n {
+                    if let JitOp::ObjCopyField { obj, src, ref obj_key, ref src_field } = ops[i + 1 + j] {
+                        if obj != obj_slot || obj_key != src_field { all_match = false; break; }
+                        if j == 0 { src_slot = src; } else if src != src_slot { all_match = false; break; }
+                        fields.push(obj_key.clone());
+                    } else {
+                        all_match = false;
+                        break;
+                    }
+                }
+                if all_match {
+                    // Replace ObjNew + N×ObjCopyField with single ObjFromFields
+                    ops[i] = JitOp::ObjFromFields { dst: obj_slot, src: src_slot, fields };
+                    for _ in 0..n {
+                        ops.remove(i + 1);
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+
     ops
 }
 
@@ -4260,6 +4357,7 @@ impl JitCompiler {
             ("jit_rt_obj_insert_str_key", jit_rt_obj_insert_str_key as *const u8),
             ("jit_rt_obj_push_str_key", jit_rt_obj_push_str_key as *const u8),
             ("jit_rt_obj_copy_field", jit_rt_obj_copy_field as *const u8),
+            ("jit_rt_obj_from_fields", jit_rt_obj_from_fields as *const u8),
             ("jit_rt_is_null_or_false", jit_rt_is_null_or_false as *const u8),
             ("jit_rt_to_f64", jit_rt_to_f64 as *const u8),
             ("jit_rt_f64_to_num", jit_rt_f64_to_num as *const u8),
@@ -4650,6 +4748,23 @@ impl JitCompiler {
                         let sf_l = b.ins().iconst(ptr_ty, sf_leaked.len() as i64);
                         b.ins().call(rt["obj_copy_field"], &[o, s, ok_p, ok_l, sf_p, sf_l]);
                     }
+                    JitOp::ObjFromFields { dst, src, fields } => {
+                        let d = slot_addr(&mut b, *dst);
+                        let s = slot_addr(&mut b, *src);
+                        // Build field table as leaked array of (ptr, len) pairs
+                        let table: Vec<(*const u8, usize)> = fields.iter().map(|f| {
+                            let leaked = Box::leak(f.clone().into_boxed_str());
+                            self._string_constants.push(leaked);
+                            (leaked.as_ptr(), leaked.len())
+                        }).collect();
+                        let table_leaked = Box::leak(table.into_boxed_slice());
+                        // Store the raw pointer so it won't be freed
+                        // Safety: we leak it intentionally - lives as long as the JIT code
+                        let table_ptr = table_leaked.as_ptr();
+                        let tp = b.ins().iconst(ptr_ty, table_ptr as i64);
+                        let cnt = b.ins().iconst(ptr_ty, fields.len() as i64);
+                        b.ins().call(rt["obj_from_fields"], &[d, s, tp, cnt]);
+                    }
 
                     // Alternative
                     JitOp::IsNullOrFalse { dst_var, src } => {
@@ -4896,6 +5011,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("obj_insert_str_key", [p, p, p, p], []);
     decl!("obj_push_str_key", [p, p, p, p], []);
     decl!("obj_copy_field", [p, p, p, p, p, p], []);
+    decl!("obj_from_fields", [p, p, p, p], []);
     decl!("is_null_or_false", [p], [p]);
     decl!("to_f64", [p], [f]);
     decl!("f64_to_num", [p, f], []);

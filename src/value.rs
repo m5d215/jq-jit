@@ -669,6 +669,22 @@ fn parse_json_number(b: &[u8], pos: usize) -> Result<(Value, usize)> {
     // Safety: number bytes are ASCII digits/signs/dots, always valid UTF-8
     let num_str = unsafe { std::str::from_utf8_unchecked(&b[pos..i]) };
     let n: f64 = num_str.parse().unwrap_or(0.0);
+    // Fast path: for simple decimals (no exponent, no trailing zeros after dot, ≤15 sig digits),
+    // Rust's Display roundtrips identically — skip format_jq_number to avoid String allocation.
+    if !has_exp && has_dot && (i - digits_start) <= 16 {
+        let last = b[i - 1];
+        if last != b'0' && (b[digits_start] != b'0' || digits_start + 1 == i || b[digits_start + 1] == b'.') {
+            return Ok((Value::Num(n, None), i));
+        }
+        // Integer value with decimal notation (e.g., "1.0", "2.00") — format_jq_number would
+        // return just the integer, so repr always differs. Skip format call.
+        if n == n.trunc() && n.abs() < 1e16 {
+            let iv = n as i64;
+            if iv as f64 == n {
+                return Ok((Value::Num(n, Some(Rc::from(num_str))), i));
+            }
+        }
+    }
     let f64_repr = format_jq_number(n);
     let repr = if f64_repr == num_str { None } else { Some(Rc::from(num_str)) };
     Ok((Value::Num(n, repr), i))
