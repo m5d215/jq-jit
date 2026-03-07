@@ -868,7 +868,11 @@ fn value_to_json_depth(v: &Value, depth: usize, precise: bool) -> String {
             }
             format_jq_number(*n)
         }
-        Value::Str(s) => json_encode_string(s),
+        Value::Str(s) => {
+            let mut out = String::with_capacity(s.len() + 2);
+            push_json_string(&mut out, s);
+            out
+        }
         Value::Arr(a) => {
             let mut out = String::from("[");
             for (i, item) in a.iter().enumerate() {
@@ -886,14 +890,18 @@ fn value_to_json_depth(v: &Value, depth: usize, precise: bool) -> String {
                 if i > 0 {
                     out.push(',');
                 }
-                out.push_str(&json_encode_string(k));
+                push_json_string(&mut out, k);
                 out.push(':');
                 out.push_str(&value_to_json_depth(v, depth + 1, precise));
             }
             out.push('}');
             out
         }
-        Value::Error(e) => json_encode_string(e),
+        Value::Error(e) => {
+            let mut out = String::with_capacity(e.len() + 2);
+            push_json_string(&mut out, e);
+            out
+        }
     }
 }
 
@@ -1035,28 +1043,6 @@ fn write_pretty_to_string(out: &mut String, v: &Value, depth: usize, step: usize
             out.push('}');
         }
     }
-}
-
-fn json_encode_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for ch in s.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0c}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
 }
 
 // ============================================================================
