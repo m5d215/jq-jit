@@ -702,38 +702,64 @@ fn value_to_json_depth(v: &Value, depth: usize, precise: bool) -> String {
 
 /// Convert Value to pretty-printed JSON string.
 pub fn value_to_json_pretty(v: &Value, indent: usize) -> String {
+    value_to_json_pretty_ext(v, indent, 2, false, false)
+}
+
+/// Convert Value to pretty-printed JSON string with formatting options.
+///
+/// - `depth`: current indentation depth (in units of indent chars)
+/// - `step`: number of indent chars per level (e.g. 2 for 2-space indent)
+/// - `use_tab`: use tab characters instead of spaces
+/// - `sort_keys`: sort object keys alphabetically
+pub fn value_to_json_pretty_ext(v: &Value, depth: usize, step: usize, use_tab: bool, sort_keys: bool) -> String {
+    let indent_char = if use_tab { "\t" } else { " " };
+    let make_indent = |n: usize| indent_char.repeat(n);
     match v {
         Value::Arr(a) if a.is_empty() => "[]".to_string(),
         Value::Obj(o) if o.is_empty() => "{}".to_string(),
         Value::Arr(a) => {
             let mut out = String::from("[\n");
-            let inner = " ".repeat(indent + 2);
+            let inner = make_indent(depth + step);
             for (i, item) in a.iter().enumerate() {
                 if i > 0 {
                     out.push_str(",\n");
                 }
                 out.push_str(&inner);
-                out.push_str(&value_to_json_pretty(item, indent + 2));
+                out.push_str(&value_to_json_pretty_ext(item, depth + step, step, use_tab, sort_keys));
             }
             out.push('\n');
-            out.push_str(&" ".repeat(indent));
+            out.push_str(&make_indent(depth));
             out.push(']');
             out
         }
         Value::Obj(o) => {
             let mut out = String::from("{\n");
-            let inner = " ".repeat(indent + 2);
-            for (i, (k, v)) in o.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(",\n");
+            let inner = make_indent(depth + step);
+            if sort_keys {
+                let mut entries: Vec<_> = o.iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(b.0));
+                for (i, (k, v)) in entries.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(",\n");
+                    }
+                    out.push_str(&inner);
+                    out.push_str(&json_encode_string(k));
+                    out.push_str(": ");
+                    out.push_str(&value_to_json_pretty_ext(v, depth + step, step, use_tab, sort_keys));
                 }
-                out.push_str(&inner);
-                out.push_str(&json_encode_string(k));
-                out.push_str(": ");
-                out.push_str(&value_to_json_pretty(v, indent + 2));
+            } else {
+                for (i, (k, v)) in o.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(",\n");
+                    }
+                    out.push_str(&inner);
+                    out.push_str(&json_encode_string(k));
+                    out.push_str(": ");
+                    out.push_str(&value_to_json_pretty_ext(v, depth + step, step, use_tab, sort_keys));
+                }
             }
             out.push('\n');
-            out.push_str(&" ".repeat(indent));
+            out.push_str(&make_indent(depth));
             out.push('}');
             out
         }
@@ -822,6 +848,11 @@ fn write_jq_number(w: &mut dyn io::Write, n: f64) -> io::Result<()> {
 
 /// Write a Value as compact JSON directly to an io::Write, using precise repr when available.
 pub fn write_value_compact(w: &mut dyn io::Write, v: &Value) -> io::Result<()> {
+    write_value_compact_ext(w, v, false)
+}
+
+/// Write a Value as compact JSON with optional key sorting.
+pub fn write_value_compact_ext(w: &mut dyn io::Write, v: &Value, sort_keys: bool) -> io::Result<()> {
     match v {
         Value::Null => w.write_all(b"null"),
         Value::False => w.write_all(b"false"),
@@ -838,17 +869,28 @@ pub fn write_value_compact(w: &mut dyn io::Write, v: &Value) -> io::Result<()> {
             w.write_all(b"[")?;
             for (i, item) in a.iter().enumerate() {
                 if i > 0 { w.write_all(b",")?; }
-                write_value_compact(w, item)?;
+                write_value_compact_ext(w, item, sort_keys)?;
             }
             w.write_all(b"]")
         }
         Value::Obj(o) => {
             w.write_all(b"{")?;
-            for (i, (k, val)) in o.iter().enumerate() {
-                if i > 0 { w.write_all(b",")?; }
-                write_json_string(w, k)?;
-                w.write_all(b":")?;
-                write_value_compact(w, val)?;
+            if sort_keys {
+                let mut entries: Vec<_> = o.iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(b.0));
+                for (i, (k, val)) in entries.iter().enumerate() {
+                    if i > 0 { w.write_all(b",")?; }
+                    write_json_string(w, k)?;
+                    w.write_all(b":")?;
+                    write_value_compact_ext(w, val, sort_keys)?;
+                }
+            } else {
+                for (i, (k, val)) in o.iter().enumerate() {
+                    if i > 0 { w.write_all(b",")?; }
+                    write_json_string(w, k)?;
+                    w.write_all(b":")?;
+                    write_value_compact_ext(w, val, sort_keys)?;
+                }
             }
             w.write_all(b"}")
         }

@@ -5,7 +5,7 @@
 use std::io::{self, BufRead, Read, Write};
 use std::process;
 
-use jq_jit::value::{Value, json_to_value, json_stream, value_to_json_precise, value_to_json_pretty, write_value_compact};
+use jq_jit::value::{Value, json_to_value, json_stream, value_to_json_precise, value_to_json_pretty_ext, write_value_compact_ext};
 use jq_jit::interpreter::Filter;
 
 fn main() {
@@ -20,8 +20,8 @@ fn main() {
     let mut slurp = false;
     let mut join_output = false;
     let mut tab = false;
-    let mut _indent_n = 2usize;
-    let mut _sort_keys = false;
+    let mut indent_n = 2usize;
+    let mut sort_keys = false;
     let mut exit_status = false;
     let mut arg_vars: Vec<(String, Value)> = Vec::new();
     let mut argjson_vars: Vec<(String, Value)> = Vec::new();
@@ -40,7 +40,7 @@ fn main() {
                 join_output = true;
                 raw_output = true;
             }
-            "-S" | "--sort-keys" => _sort_keys = true,
+            "-S" | "--sort-keys" => sort_keys = true,
             "-e" | "--exit-status" => exit_status = true,
             "--tab" => {
                 tab = true;
@@ -48,7 +48,7 @@ fn main() {
             "--indent" => {
                 i += 1;
                 if i < args.len() {
-                    _indent_n = args[i].parse().unwrap_or(2);
+                    indent_n = args[i].parse().unwrap_or(2);
                 }
             }
             "--arg" => {
@@ -114,6 +114,29 @@ fn main() {
         }
     };
 
+    // Prepend --arg / --argjson bindings to the filter expression
+    let filter_str = {
+        let mut prefix = String::new();
+        for (name, val) in &arg_vars {
+            prefix.push_str(&value_to_json_precise(val));
+            prefix.push_str(" as $");
+            prefix.push_str(name);
+            prefix.push_str(" | ");
+        }
+        for (name, val) in &argjson_vars {
+            prefix.push_str(&value_to_json_precise(val));
+            prefix.push_str(" as $");
+            prefix.push_str(name);
+            prefix.push_str(" | ");
+        }
+        if prefix.is_empty() {
+            filter_str
+        } else {
+            prefix.push_str(&filter_str);
+            prefix
+        }
+    };
+
     // Compile filter
     let filter = match Filter::with_lib_dirs(&filter_str, &lib_dirs) {
         Ok(f) => f,
@@ -137,9 +160,9 @@ fn main() {
         if compact {
             value_to_json_precise(v)
         } else if tab {
-            value_to_json_pretty(v, 0).replace("  ", "\t")
+            value_to_json_pretty_ext(v, 0, 1, true, sort_keys)
         } else {
-            value_to_json_pretty(v, 0)
+            value_to_json_pretty_ext(v, 0, indent_n, false, sort_keys)
         }
     };
 
@@ -158,7 +181,7 @@ fn main() {
                     }
                     // Use streaming write for compact mode to avoid intermediate String allocation
                     if compact && !raw_output {
-                        let _ = write_value_compact(out, result);
+                        let _ = write_value_compact_ext(out, result, sort_keys);
                         if !join_output {
                             let _ = out.write_all(b"\n");
                         }
