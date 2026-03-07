@@ -219,6 +219,18 @@ pub enum Expr {
         update: Box<Expr>,
     },
 
+    /// Short-circuit all(gen; cond)
+    AllShort {
+        generator: Box<Expr>,
+        predicate: Box<Expr>,
+    },
+
+    /// Short-circuit any(gen; cond)
+    AnyShort {
+        generator: Box<Expr>,
+        predicate: Box<Expr>,
+    },
+
     /// Error: `error` or `error(msg)`
     Error {
         msg: Option<Box<Expr>>,

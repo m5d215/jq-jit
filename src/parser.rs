@@ -2853,137 +2853,34 @@ impl Parser {
             ("max_by", 1) => Ok(Expr::ClosureOp { op: ClosureOpKind::MaxBy, input_expr: Box::new(Expr::Input), key_expr: Box::new(args.into_iter().next().unwrap()) }),
             ("any", 1) => {
                 let f = args.into_iter().next().unwrap();
-                // any(f) = any(.[]; f) — short-circuit via first/select
-                let generator = Expr::Each { input_expr: Box::new(Expr::Input) };
-                let wrapped_true = Expr::Collect { generator: Box::new(Expr::Literal(Literal::True)) };
-                let wrapped_false = Expr::Collect { generator: Box::new(Expr::Literal(Literal::False)) };
-                Ok(Expr::Pipe {
-                    left: Box::new(Expr::Alternative {
-                        primary: Box::new(Expr::Limit {
-                            count: Box::new(Expr::Literal(Literal::Num(1.0, None))),
-                            generator: Box::new(Expr::Pipe {
-                                left: Box::new(Expr::Pipe {
-                                    left: Box::new(generator),
-                                    right: Box::new(f),
-                                }),
-                                right: Box::new(Expr::Pipe {
-                                    left: Box::new(Expr::IfThenElse {
-                                        cond: Box::new(Expr::Input),
-                                        then_branch: Box::new(Expr::Input),
-                                        else_branch: Box::new(Expr::Empty),
-                                    }),
-                                    right: Box::new(wrapped_true),
-                                }),
-                            }),
-                        }),
-                        fallback: Box::new(wrapped_false),
-                    }),
-                    right: Box::new(Expr::Index {
-                        expr: Box::new(Expr::Input),
-                        key: Box::new(Expr::Literal(Literal::Num(0.0, None))),
-                    }),
+                Ok(Expr::AnyShort {
+                    generator: Box::new(Expr::Each { input_expr: Box::new(Expr::Input) }),
+                    predicate: Box::new(f),
                 })
             }
             ("all", 1) => {
                 let f = args.into_iter().next().unwrap();
-                // all(f) = all(.[]; f) — short-circuit via first/select
-                let generator = Expr::Each { input_expr: Box::new(Expr::Input) };
-                let wrapped_false = Expr::Collect { generator: Box::new(Expr::Literal(Literal::False)) };
-                let wrapped_true = Expr::Collect { generator: Box::new(Expr::Literal(Literal::True)) };
-                Ok(Expr::Pipe {
-                    left: Box::new(Expr::Alternative {
-                        primary: Box::new(Expr::Limit {
-                            count: Box::new(Expr::Literal(Literal::Num(1.0, None))),
-                            generator: Box::new(Expr::Pipe {
-                                left: Box::new(Expr::Pipe {
-                                    left: Box::new(generator),
-                                    right: Box::new(f),
-                                }),
-                                right: Box::new(Expr::Pipe {
-                                    left: Box::new(Expr::IfThenElse {
-                                        cond: Box::new(Expr::Input),
-                                        then_branch: Box::new(Expr::Empty),
-                                        else_branch: Box::new(Expr::Input),
-                                    }),
-                                    right: Box::new(wrapped_false),
-                                }),
-                            }),
-                        }),
-                        fallback: Box::new(wrapped_true),
-                    }),
-                    right: Box::new(Expr::Index {
-                        expr: Box::new(Expr::Input),
-                        key: Box::new(Expr::Literal(Literal::Num(0.0, None))),
-                    }),
+                Ok(Expr::AllShort {
+                    generator: Box::new(Expr::Each { input_expr: Box::new(Expr::Input) }),
+                    predicate: Box::new(f),
                 })
             }
             ("any", 2) => {
-                // any(gen; cond) = (first(gen | cond | select(.) | [true]) // [false]) | .[0]
                 let mut args = args.into_iter();
                 let generator = args.next().unwrap();
                 let cond = args.next().unwrap();
-                // Wrap result in array to avoid // skipping false/null
-                let wrapped_true = Expr::Collect { generator: Box::new(Expr::Literal(Literal::True)) };
-                let wrapped_false = Expr::Collect { generator: Box::new(Expr::Literal(Literal::False)) };
-                Ok(Expr::Pipe {
-                    left: Box::new(Expr::Alternative {
-                        primary: Box::new(Expr::Limit {
-                            count: Box::new(Expr::Literal(Literal::Num(1.0, None))),
-                            generator: Box::new(Expr::Pipe {
-                                left: Box::new(Expr::Pipe {
-                                    left: Box::new(generator),
-                                    right: Box::new(cond),
-                                }),
-                                right: Box::new(Expr::Pipe {
-                                    left: Box::new(Expr::IfThenElse {
-                                        cond: Box::new(Expr::Input),
-                                        then_branch: Box::new(Expr::Input),
-                                        else_branch: Box::new(Expr::Empty),
-                                    }),
-                                    right: Box::new(wrapped_true),
-                                }),
-                            }),
-                        }),
-                        fallback: Box::new(wrapped_false),
-                    }),
-                    right: Box::new(Expr::Index {
-                        expr: Box::new(Expr::Input),
-                        key: Box::new(Expr::Literal(Literal::Num(0.0, None))),
-                    }),
+                Ok(Expr::AnyShort {
+                    generator: Box::new(generator),
+                    predicate: Box::new(cond),
                 })
             }
             ("all", 2) => {
-                // all(gen; cond) = (first(gen | cond | select(not) | [false]) // [true]) | .[0]
                 let mut args = args.into_iter();
                 let generator = args.next().unwrap();
                 let cond = args.next().unwrap();
-                let wrapped_false = Expr::Collect { generator: Box::new(Expr::Literal(Literal::False)) };
-                let wrapped_true = Expr::Collect { generator: Box::new(Expr::Literal(Literal::True)) };
-                Ok(Expr::Pipe {
-                    left: Box::new(Expr::Alternative {
-                        primary: Box::new(Expr::Limit {
-                            count: Box::new(Expr::Literal(Literal::Num(1.0, None))),
-                            generator: Box::new(Expr::Pipe {
-                                left: Box::new(Expr::Pipe {
-                                    left: Box::new(generator),
-                                    right: Box::new(cond),
-                                }),
-                                right: Box::new(Expr::Pipe {
-                                    left: Box::new(Expr::IfThenElse {
-                                        cond: Box::new(Expr::Input),
-                                        then_branch: Box::new(Expr::Empty),
-                                        else_branch: Box::new(Expr::Input),
-                                    }),
-                                    right: Box::new(wrapped_false),
-                                }),
-                            }),
-                        }),
-                        fallback: Box::new(wrapped_true),
-                    }),
-                    right: Box::new(Expr::Index {
-                        expr: Box::new(Expr::Input),
-                        key: Box::new(Expr::Literal(Literal::Num(0.0, None))),
-                    }),
+                Ok(Expr::AllShort {
+                    generator: Box::new(generator),
+                    predicate: Box::new(cond),
                 })
             }
             ("range", 1) => {

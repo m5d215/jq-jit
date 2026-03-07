@@ -188,6 +188,14 @@ pub fn substitute_params(expr: &Expr, param_vars: &[u16], args: &[Expr]) -> Expr
         Expr::Repeat { update } => Expr::Repeat {
             update: Box::new(substitute_params(update, param_vars, args)),
         },
+        Expr::AllShort { generator, predicate } => Expr::AllShort {
+            generator: Box::new(substitute_params(generator, param_vars, args)),
+            predicate: Box::new(substitute_params(predicate, param_vars, args)),
+        },
+        Expr::AnyShort { generator, predicate } => Expr::AnyShort {
+            generator: Box::new(substitute_params(generator, param_vars, args)),
+            predicate: Box::new(substitute_params(predicate, param_vars, args)),
+        },
         Expr::Label { var_index, body } => Expr::Label {
             var_index: *var_index,
             body: Box::new(substitute_params(body, param_vars, args)),
@@ -265,6 +273,70 @@ pub fn substitute_params(expr: &Expr, param_vars: &[u16], args: &[Expr]) -> Expr
     }
 }
 
+/// Check if an expression uses the input (`.`) passed to it.
+/// This tracks input flow: Pipe's right side gets new input from left's output.
+fn expr_uses_outer_input(expr: &Expr) -> bool {
+    match expr {
+        Expr::Input => true,
+        Expr::LoadVar { .. } | Expr::Literal(_) | Expr::Empty | Expr::Not
+        | Expr::Env | Expr::Builtins | Expr::ReadInput | Expr::ReadInputs
+        | Expr::ModuleMeta | Expr::GenLabel | Expr::Loc { .. } => false,
+        // Pipe: only left receives our input; right gets left's output
+        Expr::Pipe { left, .. } => expr_uses_outer_input(left),
+        Expr::Comma { left, right }
+        | Expr::BinOp { lhs: left, rhs: right, .. }
+        | Expr::Alternative { primary: left, fallback: right }
+        | Expr::Index { expr: left, key: right }
+        | Expr::IndexOpt { expr: left, key: right }
+        | Expr::SetPath { path: left, value: right }
+        | Expr::TryCatch { try_expr: left, catch_expr: right } => {
+            expr_uses_outer_input(left) || expr_uses_outer_input(right)
+        }
+        // Update/Assign: path_expr gets our input, update_expr gets path value
+        Expr::Update { path_expr, .. } | Expr::Assign { path_expr, .. } => {
+            expr_uses_outer_input(path_expr)
+        }
+        Expr::IfThenElse { cond, then_branch, else_branch } => {
+            expr_uses_outer_input(cond) || expr_uses_outer_input(then_branch) || expr_uses_outer_input(else_branch)
+        }
+        Expr::LetBinding { value, body, .. } => {
+            expr_uses_outer_input(value) || expr_uses_outer_input(body)
+        }
+        Expr::Each { input_expr } | Expr::EachOpt { input_expr }
+        | Expr::Recurse { input_expr }
+        | Expr::Negate { operand: input_expr } | Expr::UnaryOp { operand: input_expr, .. }
+        | Expr::Collect { generator: input_expr }
+        | Expr::PathExpr { expr: input_expr } | Expr::GetPath { path: input_expr }
+        | Expr::DelPaths { paths: input_expr } | Expr::Debug { expr: input_expr }
+        | Expr::Stderr { expr: input_expr } | Expr::Format { expr: input_expr, .. } => {
+            expr_uses_outer_input(input_expr)
+        }
+        // While/Until/Repeat: cond/update get the loop value, not our input
+        Expr::While { .. } | Expr::Until { .. } | Expr::Repeat { .. } => false,
+        // Reduce/Foreach: source and init get our input, update gets accumulator
+        Expr::Reduce { source, init, .. } | Expr::Foreach { source, init, .. } => {
+            expr_uses_outer_input(source) || expr_uses_outer_input(init)
+        }
+        Expr::Limit { count, generator } => {
+            expr_uses_outer_input(count) || expr_uses_outer_input(generator)
+        }
+        Expr::Range { from, to, step } => {
+            expr_uses_outer_input(from) || expr_uses_outer_input(to)
+                || step.as_ref().is_some_and(|s| expr_uses_outer_input(s))
+        }
+        Expr::AllShort { generator, .. } | Expr::AnyShort { generator, .. } => {
+            expr_uses_outer_input(generator)
+        }
+        // Conservative: assume these use input
+        Expr::FuncCall { .. } | Expr::CallBuiltin { .. } | Expr::ObjectConstruct { .. }
+        | Expr::StringInterpolation { .. } | Expr::Label { .. } | Expr::Break { .. }
+        | Expr::Error { .. } | Expr::ClosureOp { .. } | Expr::Slice { .. }
+        | Expr::RegexTest { .. } | Expr::RegexMatch { .. } | Expr::RegexCapture { .. }
+        | Expr::RegexScan { .. } | Expr::RegexSub { .. } | Expr::RegexGsub { .. }
+        | Expr::AlternativeDestructure { .. } => true,
+    }
+}
+
 /// Check if an expression references a specific variable (for reduce optimization).
 fn expr_uses_var(expr: &Expr, target: u16) -> bool {
     match expr {
@@ -312,6 +384,9 @@ fn expr_uses_var(expr: &Expr, target: u16) -> bool {
         Expr::CallBuiltin { args, .. } => args.iter().any(|a| expr_uses_var(a, target)),
         Expr::ObjectConstruct { pairs } => pairs.iter().any(|(k, v)| expr_uses_var(k, target) || expr_uses_var(v, target)),
         Expr::StringInterpolation { parts } => parts.iter().any(|p| matches!(p, StringPart::Expr(e) if expr_uses_var(e, target))),
+        Expr::AllShort { generator, predicate } | Expr::AnyShort { generator, predicate } => {
+            expr_uses_var(generator, target) || expr_uses_var(predicate, target)
+        }
         Expr::Label { body, .. } | Expr::Break { value: body, .. } => expr_uses_var(body, target),
         Expr::Error { msg } => msg.as_ref().is_some_and(|m| expr_uses_var(m, target)),
         Expr::ClosureOp { input_expr, key_expr, .. } => {
@@ -345,13 +420,21 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
             Literal::Str(s) => Value::from_str(s),
         }),
         Expr::LoadVar { var_index } => {
-            let e = env.borrow();
-            if let Some(c) = e.closures.iter().rev().find(|c| c.0 == *var_index) {
-                let arg = c.1.clone();
-                drop(e);
-                eval_one(&arg, input, env)
-            } else {
-                Ok(e.get_var(*var_index))
+            // Resolve closure chains iteratively for LoadVar→LoadVar→...→env
+            let mut idx = *var_index;
+            loop {
+                let e = env.borrow();
+                if let Some(c) = e.closures.iter().rev().find(|c| c.0 == idx) {
+                    if let Expr::LoadVar { var_index: next_idx } = &c.1 {
+                        idx = *next_idx;
+                        continue;
+                    }
+                    let arg = c.1.clone();
+                    drop(e);
+                    return eval_one(&arg, input, env);
+                } else {
+                    return Ok(e.get_var(idx));
+                }
             }
         }
         Expr::Not => Ok(Value::from_bool(!input.is_truthy())),
@@ -473,6 +556,34 @@ pub fn eval(
                         }
                     })
                 }
+                BinOp::Add if matches!(rhs.as_ref(), Expr::Collect { .. }) => {
+                    // Optimize `arr + [elems]`: push directly instead of creating intermediate array
+                    let gen = match rhs.as_ref() { Expr::Collect { generator } => generator, _ => unreachable!() };
+                    eval(lhs, input.clone(), env, &mut |lval| {
+                        match lval {
+                            Value::Arr(arr_rc) => {
+                                match Rc::try_unwrap(arr_rc) {
+                                    Ok(mut vec) => {
+                                        eval(gen, input.clone(), env, &mut |elem| { vec.push(elem); Ok(true) })?;
+                                        cb(Value::Arr(Rc::new(vec)))
+                                    }
+                                    Err(arr_rc) => {
+                                        let mut vec = (*arr_rc).clone();
+                                        eval(gen, input.clone(), env, &mut |elem| { vec.push(elem); Ok(true) })?;
+                                        cb(Value::Arr(Rc::new(vec)))
+                                    }
+                                }
+                            }
+                            _ => {
+                                // Not an array - fall back to normal add
+                                let mut rhs_arr = Vec::new();
+                                eval(gen, input.clone(), env, &mut |elem| { rhs_arr.push(elem); Ok(true) })?;
+                                let rval = Value::Arr(Rc::new(rhs_arr));
+                                cb(crate::runtime::rt_add_owned(lval, &rval)?)
+                            }
+                        }
+                    })
+                }
                 _ => {
                     // jq evaluates rhs as outer generator, lhs as inner
                     eval(rhs, input.clone(), env, &mut |rval| {
@@ -515,7 +626,33 @@ pub fn eval(
         }
 
         Expr::Pipe { left, right } => {
-            eval(left, input, env, &mut |mid| eval(right, mid, env, cb))
+            // Fuse While/Until | scalar_expr to avoid cloning intermediate values
+            match left.as_ref() {
+                Expr::While { cond, update } => {
+                    let mut current = input;
+                    loop {
+                        let is_true = if let Ok(v) = eval_one(cond, &current, env) {
+                            v.is_truthy()
+                        } else {
+                            let mut t = false;
+                            eval(cond, current.clone(), env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
+                            t
+                        };
+                        if !is_true { break; }
+                        // Try eval_one on right with &current to avoid cloning
+                        if let Ok(result) = eval_one(right, &current, env) {
+                            if !cb(result)? { return Ok(false); }
+                        } else {
+                            if !eval(right, current.clone(), env, cb)? { return Ok(false); }
+                        }
+                        let mut next = Value::Null;
+                        eval(update, current, env, &mut |v| { next = v; Ok(true) })?;
+                        current = next;
+                    }
+                    Ok(true)
+                }
+                _ => eval(left, input, env, &mut |mid| eval(right, mid, env, cb)),
+            }
         }
 
         Expr::Comma { left, right } => {
@@ -609,28 +746,50 @@ pub fn eval(
         }
 
         Expr::LetBinding { var_index, value, body } => {
-            eval(value, input.clone(), env, &mut |val| {
+            if matches!(value.as_ref(), Expr::Input) {
+                // Fast path: `. as $var | body`
                 let old = env.borrow().get_var(*var_index);
-                env.borrow_mut().set_var(*var_index, val);
-                let result = eval(body, input.clone(), env, cb);
-                env.borrow_mut().set_var(*var_index, old);
-                result
-            })
+                if !expr_uses_outer_input(body) {
+                    // Body doesn't use `.` — move input into env (sole owner, lower refcount)
+                    env.borrow_mut().set_var(*var_index, input);
+                    let result = eval(body, Value::Null, env, cb);
+                    env.borrow_mut().set_var(*var_index, old);
+                    result
+                } else {
+                    env.borrow_mut().set_var(*var_index, input.clone());
+                    let result = eval(body, input, env, cb);
+                    env.borrow_mut().set_var(*var_index, old);
+                    result
+                }
+            } else {
+                eval(value, input.clone(), env, &mut |val| {
+                    let old = env.borrow().get_var(*var_index);
+                    env.borrow_mut().set_var(*var_index, val);
+                    let result = eval(body, input.clone(), env, cb);
+                    env.borrow_mut().set_var(*var_index, old);
+                    result
+                })
+            }
         }
 
         Expr::LoadVar { var_index } => {
-            // Check closures first (reverse order for proper shadowing)
-            let closure_arg = {
+            // Resolve closure chains iteratively for LoadVar→LoadVar→...→env
+            let mut idx = *var_index;
+            loop {
                 let e = env.borrow();
-                e.closures.iter().rev()
-                    .find(|c| c.0 == *var_index)
-                    .map(|c| c.1.clone())
-            };
-            if let Some(arg) = closure_arg {
-                eval(&arg, input, env, cb)
-            } else {
-                let val = env.borrow().get_var(*var_index);
-                cb(val)
+                if let Some(c) = e.closures.iter().rev().find(|c| c.0 == idx) {
+                    if let Expr::LoadVar { var_index: next_idx } = &c.1 {
+                        idx = *next_idx;
+                        continue;
+                    }
+                    let arg = c.1.clone();
+                    drop(e);
+                    return eval(&arg, input, env, cb);
+                } else {
+                    let val = e.get_var(idx);
+                    drop(e);
+                    return cb(val);
+                }
             }
         }
 
@@ -925,7 +1084,7 @@ pub fn eval(
                 };
                 if !is_true { break; }
                 if !cb(current.clone())? { return Ok(false); }
-                let mut next = current.clone();
+                let mut next = Value::Null;
                 eval(update, current, env, &mut |v| { next = v; Ok(true) })?;
                 current = next;
             }
@@ -943,7 +1102,7 @@ pub fn eval(
                     t
                 };
                 if is_true { break; }
-                let mut next = current.clone();
+                let mut next = Value::Null;
                 eval(update, current, env, &mut |v| { next = v; Ok(true) })?;
                 current = next;
             }
@@ -954,10 +1113,46 @@ pub fn eval(
             let mut current = input;
             loop {
                 if !cb(current.clone())? { return Ok(false); }
-                let mut next = current.clone();
+                let mut next = Value::Null;
                 eval(update, current, env, &mut |v| { next = v; Ok(true) })?;
                 current = next;
             }
+        }
+
+        Expr::AllShort { generator, predicate } => {
+            let mut all_true = true;
+            eval(generator, input.clone(), env, &mut |elem| {
+                let pred_result = eval_one(predicate, &elem, env);
+                match pred_result {
+                    Ok(v) => {
+                        if v.is_truthy() { Ok(true) } else { all_true = false; Ok(false) }
+                    }
+                    Err(()) => {
+                        let mut truthy = false;
+                        eval(predicate, elem, env, &mut |v| { truthy = v.is_truthy(); Ok(true) })?;
+                        if truthy { Ok(true) } else { all_true = false; Ok(false) }
+                    }
+                }
+            })?;
+            cb(Value::from_bool(all_true))
+        }
+
+        Expr::AnyShort { generator, predicate } => {
+            let mut any_true = false;
+            eval(generator, input.clone(), env, &mut |elem| {
+                let pred_result = eval_one(predicate, &elem, env);
+                match pred_result {
+                    Ok(v) => {
+                        if v.is_truthy() { any_true = true; Ok(false) } else { Ok(true) }
+                    }
+                    Err(()) => {
+                        let mut truthy = false;
+                        eval(predicate, elem, env, &mut |v| { truthy = v.is_truthy(); Ok(true) })?;
+                        if truthy { any_true = true; Ok(false) } else { Ok(true) }
+                    }
+                }
+            })?;
+            cb(Value::from_bool(any_true))
         }
 
         Expr::Error { msg } => {
