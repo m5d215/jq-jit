@@ -386,7 +386,153 @@ impl Flattener {
                 primary: Box::new(self.inline_func_calls(primary)),
                 fallback: Box::new(self.inline_func_calls(fallback)),
             },
-            // For other node types, return as-is (no FuncCall inside)
+            Expr::UnaryOp { op, operand } => Expr::UnaryOp {
+                op: *op,
+                operand: Box::new(self.inline_func_calls(operand)),
+            },
+            Expr::Negate { operand } => Expr::Negate {
+                operand: Box::new(self.inline_func_calls(operand)),
+            },
+            Expr::While { cond, update } => Expr::While {
+                cond: Box::new(self.inline_func_calls(cond)),
+                update: Box::new(self.inline_func_calls(update)),
+            },
+            Expr::Until { cond, update } => Expr::Until {
+                cond: Box::new(self.inline_func_calls(cond)),
+                update: Box::new(self.inline_func_calls(update)),
+            },
+            Expr::Repeat { update } => Expr::Repeat {
+                update: Box::new(self.inline_func_calls(update)),
+            },
+            Expr::Reduce { source, init, var_index, acc_index, update } => Expr::Reduce {
+                source: Box::new(self.inline_func_calls(source)),
+                init: Box::new(self.inline_func_calls(init)),
+                var_index: *var_index,
+                acc_index: *acc_index,
+                update: Box::new(self.inline_func_calls(update)),
+            },
+            Expr::Foreach { source, init, var_index, acc_index, update, extract } => Expr::Foreach {
+                source: Box::new(self.inline_func_calls(source)),
+                init: Box::new(self.inline_func_calls(init)),
+                var_index: *var_index,
+                acc_index: *acc_index,
+                update: Box::new(self.inline_func_calls(update)),
+                extract: extract.as_ref().map(|e| Box::new(self.inline_func_calls(e))),
+            },
+            Expr::Range { from, to, step } => Expr::Range {
+                from: Box::new(self.inline_func_calls(from)),
+                to: Box::new(self.inline_func_calls(to)),
+                step: step.as_ref().map(|s| Box::new(self.inline_func_calls(s))),
+            },
+            Expr::Limit { count, generator } => Expr::Limit {
+                count: Box::new(self.inline_func_calls(count)),
+                generator: Box::new(self.inline_func_calls(generator)),
+            },
+            Expr::AllShort { generator, predicate } => Expr::AllShort {
+                generator: Box::new(self.inline_func_calls(generator)),
+                predicate: Box::new(self.inline_func_calls(predicate)),
+            },
+            Expr::AnyShort { generator, predicate } => Expr::AnyShort {
+                generator: Box::new(self.inline_func_calls(generator)),
+                predicate: Box::new(self.inline_func_calls(predicate)),
+            },
+            Expr::Label { var_index, body } => Expr::Label {
+                var_index: *var_index,
+                body: Box::new(self.inline_func_calls(body)),
+            },
+            Expr::Break { var_index, value } => Expr::Break {
+                var_index: *var_index,
+                value: Box::new(self.inline_func_calls(value)),
+            },
+            Expr::CallBuiltin { name, args } => Expr::CallBuiltin {
+                name: name.clone(),
+                args: args.iter().map(|a| self.inline_func_calls(a)).collect(),
+            },
+            Expr::ObjectConstruct { pairs } => Expr::ObjectConstruct {
+                pairs: pairs.iter().map(|(k, v)| (self.inline_func_calls(k), self.inline_func_calls(v))).collect(),
+            },
+            Expr::Slice { expr, from, to } => Expr::Slice {
+                expr: Box::new(self.inline_func_calls(expr)),
+                from: from.as_ref().map(|f| Box::new(self.inline_func_calls(f))),
+                to: to.as_ref().map(|t| Box::new(self.inline_func_calls(t))),
+            },
+            Expr::StringInterpolation { parts } => Expr::StringInterpolation {
+                parts: parts.iter().map(|p| match p {
+                    StringPart::Literal(s) => StringPart::Literal(s.clone()),
+                    StringPart::Expr(e) => StringPart::Expr(self.inline_func_calls(e)),
+                }).collect(),
+            },
+            Expr::Format { name, expr } => Expr::Format {
+                name: name.clone(),
+                expr: Box::new(self.inline_func_calls(expr)),
+            },
+            Expr::SetPath { path, value } => Expr::SetPath {
+                path: Box::new(self.inline_func_calls(path)),
+                value: Box::new(self.inline_func_calls(value)),
+            },
+            Expr::GetPath { path } => Expr::GetPath {
+                path: Box::new(self.inline_func_calls(path)),
+            },
+            Expr::DelPaths { paths } => Expr::DelPaths {
+                paths: Box::new(self.inline_func_calls(paths)),
+            },
+            Expr::Debug { expr } => Expr::Debug {
+                expr: Box::new(self.inline_func_calls(expr)),
+            },
+            Expr::Stderr { expr } => Expr::Stderr {
+                expr: Box::new(self.inline_func_calls(expr)),
+            },
+            Expr::Error { msg } => Expr::Error {
+                msg: msg.as_ref().map(|m| Box::new(self.inline_func_calls(m))),
+            },
+            Expr::Recurse { input_expr } => Expr::Recurse {
+                input_expr: Box::new(self.inline_func_calls(input_expr)),
+            },
+            Expr::PathExpr { expr } => Expr::PathExpr {
+                expr: Box::new(self.inline_func_calls(expr)),
+            },
+            Expr::ClosureOp { op, input_expr, key_expr } => Expr::ClosureOp {
+                op: *op,
+                input_expr: Box::new(self.inline_func_calls(input_expr)),
+                key_expr: Box::new(self.inline_func_calls(key_expr)),
+            },
+            Expr::RegexTest { input_expr, re, flags } => Expr::RegexTest {
+                input_expr: Box::new(self.inline_func_calls(input_expr)),
+                re: Box::new(self.inline_func_calls(re)),
+                flags: Box::new(self.inline_func_calls(flags)),
+            },
+            Expr::RegexMatch { input_expr, re, flags } => Expr::RegexMatch {
+                input_expr: Box::new(self.inline_func_calls(input_expr)),
+                re: Box::new(self.inline_func_calls(re)),
+                flags: Box::new(self.inline_func_calls(flags)),
+            },
+            Expr::RegexCapture { input_expr, re, flags } => Expr::RegexCapture {
+                input_expr: Box::new(self.inline_func_calls(input_expr)),
+                re: Box::new(self.inline_func_calls(re)),
+                flags: Box::new(self.inline_func_calls(flags)),
+            },
+            Expr::RegexScan { input_expr, re, flags } => Expr::RegexScan {
+                input_expr: Box::new(self.inline_func_calls(input_expr)),
+                re: Box::new(self.inline_func_calls(re)),
+                flags: Box::new(self.inline_func_calls(flags)),
+            },
+            Expr::RegexSub { input_expr, re, tostr, flags } => Expr::RegexSub {
+                input_expr: Box::new(self.inline_func_calls(input_expr)),
+                re: Box::new(self.inline_func_calls(re)),
+                tostr: Box::new(self.inline_func_calls(tostr)),
+                flags: Box::new(self.inline_func_calls(flags)),
+            },
+            Expr::RegexGsub { input_expr, re, tostr, flags } => Expr::RegexGsub {
+                input_expr: Box::new(self.inline_func_calls(input_expr)),
+                re: Box::new(self.inline_func_calls(re)),
+                tostr: Box::new(self.inline_func_calls(tostr)),
+                flags: Box::new(self.inline_func_calls(flags)),
+            },
+            Expr::AlternativeDestructure { alternatives } => Expr::AlternativeDestructure {
+                alternatives: alternatives.iter().map(|a| self.inline_func_calls(a)).collect(),
+            },
+            // Leaf nodes: Input, Literal, LoadVar, Empty, Not, Loc, Env, Builtins,
+            // ReadInput, ReadInputs, ModuleMeta, GenLabel
             _ => expr.clone(),
         }
     }
@@ -4419,10 +4565,13 @@ impl JitCompiler {
         // Phase 1: Flatten
         let mut fl = Flattener::new();
         fl.funcs = funcs.to_vec();
+        // Pre-inline function calls so is_scalar sees no FuncCall nodes,
+        // enabling JIT for expressions that use user-defined functions.
+        let inlined = fl.inline_func_calls(expr);
         let input_slot = fl.alloc_slot(); // slot 0 = input ptr (read-only, owned by caller)
         // Use input_slot directly — flatten_gen only reads it, never writes/drops it.
         // The codegen handles Drop{slot:0} as a no-op.
-        if !fl.flatten_gen(expr, input_slot) {
+        if !fl.flatten_gen(&inlined, input_slot) {
             bail!("Expression not JIT-compilable");
         }
         fl.emit(JitOp::ReturnContinue);
