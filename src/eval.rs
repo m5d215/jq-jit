@@ -1180,6 +1180,15 @@ pub fn eval(
                     } else { None };
 
                     let always_true = matches!(cond.as_ref(), Expr::Literal(Literal::True));
+                    // Detect leading select in right side: `select(cond) | rest`
+                    // Avoids redundant re-evaluation of the select condition on fallback.
+                    let select_prefix = if let Expr::Pipe { left: sel, right: rest } = right.as_ref() {
+                        if let Expr::IfThenElse { cond: sc, then_branch, else_branch } = sel.as_ref() {
+                            if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                                Some((sc.as_ref(), rest.as_ref()))
+                            } else { None }
+                        } else { None }
+                    } else { None };
                     let mut current = input;
                     loop {
                         if !always_true {
@@ -1193,11 +1202,31 @@ pub fn eval(
                             if !is_true { break; }
                         }
                         // Try eval_one_filter on right to handle select/Empty without cloning
-                        match eval_one_filter(right, &current, env) {
-                            Ok(Some(result)) => { if !cb(result)? { return Ok(false); } }
-                            Ok(None) => { /* filtered out (select/empty), skip */ }
-                            Err(()) => {
-                                if !eval(right, current.clone(), env, cb)? { return Ok(false); }
+                        if let Some((sel_cond, rest)) = select_prefix {
+                            // Evaluate the leading select condition first
+                            let cond_true = match eval_one(sel_cond, &current, env) {
+                                Ok(v) => v.is_truthy(),
+                                Err(()) => {
+                                    let mut t = false;
+                                    eval(sel_cond, current.clone(), env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
+                                    t
+                                }
+                            };
+                            if cond_true {
+                                // Select passed: evaluate rest directly (skip redundant cond re-check)
+                                match eval_one_filter(rest, &current, env) {
+                                    Ok(Some(v)) => { if !cb(v)? { return Ok(false); } }
+                                    Ok(None) => {}
+                                    Err(()) => { if !eval(rest, current.clone(), env, cb)? { return Ok(false); } }
+                                }
+                            }
+                        } else {
+                            match eval_one_filter(right, &current, env) {
+                                Ok(Some(result)) => { if !cb(result)? { return Ok(false); } }
+                                Ok(None) => { /* filtered out (select/empty), skip */ }
+                                Err(()) => {
+                                    if !eval(right, current.clone(), env, cb)? { return Ok(false); }
+                                }
                             }
                         }
                         if let Some((v_idx, gen)) = append_info {
