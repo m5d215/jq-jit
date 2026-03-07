@@ -680,8 +680,23 @@ fn parse_json_value(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)
         b'[' => parse_json_array(b, pos, depth),
         b'{' => parse_json_object(b, pos, depth),
         b'-' => {
-            // Could be -Infinity, -NaN, or negative number
-            if b.get(pos..pos+9) == Some(b"-Infinity") { Ok((Value::Num(f64::NEG_INFINITY, None), pos + 9)) }
+            // Fast path for negative integers (most common case for '-')
+            let j = pos + 1;
+            if j < b.len() && b[j] >= b'1' && b[j] <= b'9' {
+                let mut n: i64 = -((b[j] - b'0') as i64);
+                let mut k = j + 1;
+                while k < b.len() && b[k].is_ascii_digit() {
+                    n = n * 10 - (b[k] - b'0') as i64;
+                    k += 1;
+                }
+                if (k >= b.len() || (b[k] != b'.' && b[k] != b'e' && b[k] != b'E')) && (k - j) <= 15 {
+                    return Ok((Value::Num(n as f64, None), k));
+                }
+                // Has decimal/exponent — fall through to full parser
+                parse_json_number(b, pos)
+            }
+            // -Infinity, -NaN, or other
+            else if b.get(pos..pos+9) == Some(b"-Infinity") { Ok((Value::Num(f64::NEG_INFINITY, None), pos + 9)) }
             else if b.get(pos..pos+4) == Some(b"-NaN") { Ok((Value::Num(f64::NAN, None), pos + 4)) }
             else { parse_json_number(b, pos) }
         }
@@ -788,6 +803,7 @@ fn parse_json_string_raw(b: &[u8], pos: usize) -> Result<(String, usize)> {
     bail!("Unterminated string")
 }
 
+#[inline]
 fn parse_json_string(b: &[u8], pos: usize) -> Result<(Value, usize)> {
     // Fast path: no escapes — create CompactString directly from byte slice (no intermediate String)
     debug_assert_eq!(b[pos], b'"');
@@ -809,6 +825,7 @@ fn parse_json_string(b: &[u8], pos: usize) -> Result<(Value, usize)> {
 }
 
 /// Parse a JSON key, returning KeyStr (inline for short keys ≤ 24 bytes — no heap allocation).
+#[inline]
 fn parse_json_key(b: &[u8], pos: usize) -> Result<(KeyStr, usize)> {
     debug_assert_eq!(b[pos], b'"');
     let mut i = pos + 1;
@@ -1522,34 +1539,32 @@ fn push_compact_value(buf: &mut Vec<u8>, v: &Value) {
 #[inline]
 fn push_jq_number_bytes(buf: &mut Vec<u8>, n: f64) {
     use std::io::Write;
+    // Fast path: exact integer in displayable range (covers vast majority of JSON numbers).
+    // The i64 roundtrip check (i as f64 == n) naturally rejects NaN, infinity, and non-integers.
+    let i = n as i64;
+    if i as f64 == n && i.unsigned_abs() < 10_000_000_000_000_000 {
+        if i == 0 && n.is_sign_negative() {
+            buf.extend_from_slice(b"-0");
+        } else {
+            let mut ibuf = itoa::Buffer::new();
+            buf.extend_from_slice(ibuf.format(i).as_bytes());
+        }
+        return;
+    }
+    // Slow path: NaN, infinity, decimals, very large numbers
     if n.is_nan() { buf.extend_from_slice(b"null"); return; }
     if n.is_infinite() {
         if n.is_sign_positive() { buf.extend_from_slice(b"1.7976931348623157e+308"); }
         else { buf.extend_from_slice(b"-1.7976931348623157e+308"); }
         return;
     }
-    if n == 0.0 {
-        if n.is_sign_negative() { buf.extend_from_slice(b"-0"); }
-        else { buf.push(b'0'); }
-        return;
-    }
-    // Integer fast path
-    if n == n.trunc() && n.abs() < 1e16 {
-        let i = n as i64;
-        if i as f64 == n {
-            let mut ibuf = itoa::Buffer::new();
-            buf.extend_from_slice(ibuf.format(i).as_bytes());
-            return;
-        }
-    }
     let abs = n.abs();
-    // Very small or very large numbers need special formatting — fall back to String
     if (abs != 0.0 && abs < 1e-4) || abs >= 1e16 {
         let s = format_jq_number(n);
         buf.extend_from_slice(s.as_bytes());
         return;
     }
-    // Common case: write Display format directly to buffer (no String allocation)
+    // Common decimal case: write Display format directly to buffer
     let _ = write!(buf, "{}", n);
 }
 
