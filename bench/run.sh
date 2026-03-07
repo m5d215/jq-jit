@@ -17,13 +17,13 @@ echo "=== jq-jit Benchmark ($COUNT NDJSON objects) ==="
 echo ""
 
 # Detect available tools
-JQ_JIT2="${JQ_JIT2:-target/release/jq-jit}"
-if [ ! -x "$JQ_JIT2" ]; then
-    echo "Error: $JQ_JIT2 not found. Run: cargo build --release"
+JQ_JIT="${JQ_JIT:-target/release/jq-jit}"
+if [ ! -x "$JQ_JIT" ]; then
+    echo "Error: $JQ_JIT not found. Run: cargo build --release"
     exit 1
 fi
 
-TOOLS=("$JQ_JIT2")
+TOOLS=("$JQ_JIT")
 NAMES=("jq-jit")
 
 for cmd in jq gojq jaq; do
