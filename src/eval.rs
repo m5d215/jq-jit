@@ -1346,7 +1346,11 @@ pub fn eval(
                         };
                         eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
                         let cont = if let Some(extract_expr) = extract {
-                            eval(extract_expr, acc.clone(), env, cb)?
+                            match eval_one_filter(extract_expr, &acc, env) {
+                                Ok(Some(v)) => cb(v)?,
+                                Ok(None) => true,
+                                Err(()) => eval(extract_expr, acc.clone(), env, cb)?,
+                            }
                         } else {
                             cb(acc.clone())?
                         };
@@ -1360,7 +1364,11 @@ pub fn eval(
                         let old_var = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], val);
                         eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
                         let cont = if let Some(extract_expr) = extract {
-                            eval(extract_expr, acc.clone(), env, cb)?
+                            match eval_one_filter(extract_expr, &acc, env) {
+                                Ok(Some(v)) => cb(v)?,
+                                Ok(None) => true,
+                                Err(()) => eval(extract_expr, acc.clone(), env, cb)?,
+                            }
                         } else {
                             cb(acc.clone())?
                         };
@@ -1629,9 +1637,13 @@ pub fn eval(
                 };
                 if !is_true { break; }
                 if !cb(current.clone())? { return Ok(false); }
-                let mut next = Value::Null;
-                eval(update, current, env, &mut |v| { next = v; Ok(true) })?;
-                current = next;
+                if let Ok(next) = eval_one(update, &current, env) {
+                    current = next;
+                } else {
+                    let mut next = Value::Null;
+                    eval(update, current, env, &mut |v| { next = v; Ok(true) })?;
+                    current = next;
+                }
             }
             Ok(true)
         }
@@ -1647,9 +1659,13 @@ pub fn eval(
                     t
                 };
                 if is_true { break; }
-                let mut next = Value::Null;
-                eval(update, current, env, &mut |v| { next = v; Ok(true) })?;
-                current = next;
+                if let Ok(next) = eval_one(update, &current, env) {
+                    current = next;
+                } else {
+                    let mut next = Value::Null;
+                    eval(update, current, env, &mut |v| { next = v; Ok(true) })?;
+                    current = next;
+                }
             }
             cb(current)
         }
@@ -1658,9 +1674,13 @@ pub fn eval(
             let mut current = input;
             loop {
                 if !cb(current.clone())? { return Ok(false); }
-                let mut next = Value::Null;
-                eval(update, current, env, &mut |v| { next = v; Ok(true) })?;
-                current = next;
+                if let Ok(next) = eval_one(update, &current, env) {
+                    current = next;
+                } else {
+                    let mut next = Value::Null;
+                    eval(update, current, env, &mut |v| { next = v; Ok(true) })?;
+                    current = next;
+                }
             }
         }
 
