@@ -17,21 +17,23 @@ use anyhow::{Result, bail};
 // Thread-local error storage for JIT runtime functions.
 // When a fallible runtime function encounters an error, it stores the error
 // message here. The CheckError JitOp checks this and branches to catch handlers.
-thread_local! {
-    static JIT_LAST_ERROR: RefCell<Option<String>> = RefCell::new(None);
-    static JIT_CLOSURE_OPS: RefCell<Vec<Expr>> = RefCell::new(Vec::new());
-}
+// Global statics — safe because jq-jit is single-threaded (uses Rc, not Arc).
+struct GlobalCell<T>(std::cell::UnsafeCell<T>);
+unsafe impl<T> Sync for GlobalCell<T> {}
+
+static JIT_LAST_ERROR: GlobalCell<Option<String>> = GlobalCell(std::cell::UnsafeCell::new(None));
+static JIT_CLOSURE_OPS: GlobalCell<Vec<Expr>> = GlobalCell(std::cell::UnsafeCell::new(Vec::new()));
 
 fn set_jit_error(msg: String) {
-    JIT_LAST_ERROR.with(|e| *e.borrow_mut() = Some(msg));
+    unsafe { *JIT_LAST_ERROR.0.get() = Some(msg); }
 }
 
 fn take_jit_error() -> Option<String> {
-    JIT_LAST_ERROR.with(|e| e.borrow_mut().take())
+    unsafe { (*JIT_LAST_ERROR.0.get()).take() }
 }
 
 fn clear_jit_error() {
-    JIT_LAST_ERROR.with(|e| *e.borrow_mut() = None);
+    unsafe { *JIT_LAST_ERROR.0.get() = None; }
 }
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder, StackSlotData, StackSlotKind};
 use cranelift_codegen::settings::{self, Configurable};
@@ -3424,15 +3426,18 @@ extern "C" fn jit_rt_obj_insert(obj: *mut Value, key: *mut Value, val: *mut Valu
         let key_val = std::ptr::read(key);
         let val_val = std::ptr::read(val);
         if let Value::Obj(o) = &mut *obj {
-            let k: crate::value::KeyStr = match &key_val {
-                Value::Str(s) => crate::value::KeyStr::from(s.as_str()),
-                _ => crate::value::KeyStr::from(crate::value::value_to_json(&key_val)),
+            // Move KeyStr out of Value::Str to avoid clone+drop
+            let k: crate::value::KeyStr = match key_val {
+                Value::Str(s) => s,
+                other => {
+                    let k = crate::value::KeyStr::from(crate::value::value_to_json(&other));
+                    drop(other);
+                    k
+                }
             };
             // Safety: obj was just created by jit_rt_obj_new, refcount is always 1
             Rc::get_mut(o).unwrap_unchecked().insert(k, val_val);
         }
-        drop(key_val);
-        // val_val is moved into the map, no drop needed (unless obj wasn't Obj, but that can't happen)
     }
 }
 
@@ -3623,10 +3628,10 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             if parts.len() == 2 {
                 let path_idx: usize = parts[0].parse().unwrap_or(0);
                 let value_idx: usize = parts[1].parse().unwrap_or(0);
-                let (path_expr, value_expr) = JIT_CLOSURE_OPS.with(|c| {
-                    let ops = c.borrow();
+                let (path_expr, value_expr) = {
+                    let ops = &*JIT_CLOSURE_OPS.0.get();
                     (ops.get(path_idx).cloned(), ops.get(value_idx).cloned())
-                });
+                };
                 if let (Some(path_expr), Some(value_expr)) = (path_expr, value_expr) {
                     let input = if !args_vec.is_empty() { args_vec[0].clone() } else { Value::Null };
                     let env = Rc::new(RefCell::new(crate::eval::Env::new(vec![])));
@@ -3644,10 +3649,10 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             if parts.len() == 2 {
                 let path_idx: usize = parts[0].parse().unwrap_or(0);
                 let update_idx: usize = parts[1].parse().unwrap_or(0);
-                let (path_expr, update_expr) = JIT_CLOSURE_OPS.with(|c| {
-                    let ops = c.borrow();
+                let (path_expr, update_expr) = {
+                    let ops = &*JIT_CLOSURE_OPS.0.get();
                     (ops.get(path_idx).cloned(), ops.get(update_idx).cloned())
-                });
+                };
                 if let (Some(path_expr), Some(update_expr)) = (path_expr, update_expr) {
                     let input = if !args_vec.is_empty() { args_vec[0].clone() } else { Value::Null };
                     let env = Rc::new(RefCell::new(crate::eval::Env::new(vec![])));
@@ -3662,9 +3667,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
         // __path__:idx — runtime path expression evaluation
         if let Some(rest) = name.strip_prefix("__path__:") {
             let idx: usize = rest.parse().unwrap_or(0);
-            let path_expr = JIT_CLOSURE_OPS.with(|c| {
-                c.borrow().get(idx).cloned()
-            });
+            let path_expr = (&*JIT_CLOSURE_OPS.0.get()).get(idx).cloned();
             if let Some(path_expr) = path_expr {
                 let input = if !args_vec.is_empty() { args_vec[0].clone() } else { Value::Null };
                 let env = Rc::new(RefCell::new(crate::eval::Env::new(vec![])));
@@ -3683,9 +3686,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                 let idx: usize = parts[1].parse().unwrap_or(0);
                 if !args_vec.is_empty() {
                     let container = &args_vec[0];
-                    let key_expr = JIT_CLOSURE_OPS.with(|c| {
-                        c.borrow().get(idx).cloned()
-                    });
+                    let key_expr = (&*JIT_CLOSURE_OPS.0.get()).get(idx).cloned();
                     if let Some(key_expr) = key_expr {
                         let op_kind = match op_name {
                             "sort_by" => Some(ClosureOpKind::SortBy),
@@ -3744,7 +3745,7 @@ extern "C" fn jit_rt_propagate_error(env: *mut JitEnv) {
 /// Check if the last operation produced an error.
 /// Returns 1 if error, 0 if ok.
 extern "C" fn jit_rt_has_error() -> i64 {
-    JIT_LAST_ERROR.with(|e| if e.borrow().is_some() { 1 } else { 0 })
+    unsafe { if (*JIT_LAST_ERROR.0.get()).is_some() { 1 } else { 0 } }
 }
 
 /// Get the last error as a Value and write it to dst. Clears the error.
@@ -4081,7 +4082,7 @@ impl JitCompiler {
 
         // Store closure ops for runtime access
         if !fl.closure_ops.is_empty() {
-            JIT_CLOSURE_OPS.with(|c| *c.borrow_mut() = fl.closure_ops.clone());
+            unsafe { *JIT_CLOSURE_OPS.0.get() = fl.closure_ops.clone(); }
         }
 
         let ops = optimize_clone_yield(fl.ops);
@@ -4668,19 +4669,19 @@ unsafe extern "C" fn collect_callback(value: *const Value, ctx: *mut u8) -> i64 
     GEN_CONTINUE
 }
 
-thread_local! {
-    static REUSABLE_ENV: RefCell<JitEnv> = RefCell::new(JitEnv::new());
-}
+// Global reusable JIT env — safe because jq-jit is single-threaded (uses Rc, not Arc).
+struct GlobalJitEnv(std::cell::UnsafeCell<Option<JitEnv>>);
+unsafe impl Sync for GlobalJitEnv {}
+static REUSABLE_ENV: GlobalJitEnv = GlobalJitEnv(std::cell::UnsafeCell::new(None));
 
 fn with_jit_env<R>(f: impl FnOnce(&mut JitEnv) -> R) -> R {
-    REUSABLE_ENV.with(|cell| {
-        let mut env = cell.borrow_mut();
-        env.collect_stacks.clear();
-        env.str_bufs.clear();
-        env.try_depth = 0;
-        env.error_msg = None;
-        f(&mut env)
-    })
+    let env_opt = unsafe { &mut *REUSABLE_ENV.0.get() };
+    let env = env_opt.get_or_insert_with(JitEnv::new);
+    env.collect_stacks.clear();
+    env.str_bufs.clear();
+    env.try_depth = 0;
+    env.error_msg = None;
+    f(env)
 }
 
 
