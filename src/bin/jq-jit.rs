@@ -5,6 +5,9 @@
 use std::io::{self, BufRead, Read, Write};
 use std::process;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use jq_jit::value::{Value, json_to_value, json_stream, value_to_json_precise, value_to_json_pretty_ext, write_value_compact_ext};
 use jq_jit::interpreter::Filter;
 
