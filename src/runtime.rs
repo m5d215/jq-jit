@@ -434,7 +434,10 @@ pub fn rt_add(a: &Value, b: &Value) -> Result<Value> {
     match (a, b) {
         (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::Num(x + y, None)),
         (Value::Str(x), Value::Str(y)) => {
-            Ok(Value::from_string(format!("{}{}", x, y)))
+            let mut s = String::with_capacity(x.len() + y.len());
+            s.push_str(x);
+            s.push_str(y);
+            Ok(Value::Str(Rc::new(s)))
         }
         (Value::Arr(x), Value::Arr(y)) => {
             let mut result = (**x).clone();
@@ -462,7 +465,15 @@ pub fn rt_add_owned(a: Value, b: &Value) -> Result<Value> {
     match (a, b) {
         (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::Num(x + y, None)),
         (Value::Str(x), Value::Str(y)) => {
-            Ok(Value::from_string(format!("{}{}", x, y)))
+            match Rc::try_unwrap(x) {
+                Ok(mut s) => { s.push_str(y); Ok(Value::Str(Rc::new(s))) }
+                Err(x) => {
+                    let mut s = String::with_capacity(x.len() + y.len());
+                    s.push_str(&x);
+                    s.push_str(y);
+                    Ok(Value::Str(Rc::new(s)))
+                }
+            }
         }
         (Value::Arr(x), Value::Arr(y)) => {
             match Rc::try_unwrap(x) {
