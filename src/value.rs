@@ -1487,9 +1487,27 @@ fn push_compact_value(buf: &mut Vec<u8>, v: &Value) {
         Value::Obj(o) => {
             buf.push(b'{');
             for (i, (k, val)) in o.iter().enumerate() {
-                if i > 0 { buf.push(b','); }
-                push_json_string_to_vec(buf, k.as_str());
-                buf.push(b':');
+                let kb = k.as_bytes();
+                let klen = kb.len();
+                let key_needs_escape = kb.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20);
+                if !key_needs_escape {
+                    // Write ,"key": (or "key": for first) in a single memcpy
+                    let prefix = if i > 0 { 1 } else { 0 }; // comma
+                    buf.reserve(prefix + klen + 3); // [,]"key":
+                    unsafe {
+                        let dst = buf.as_mut_ptr().add(buf.len());
+                        if i > 0 { *dst = b','; }
+                        *dst.add(prefix) = b'"';
+                        std::ptr::copy_nonoverlapping(kb.as_ptr(), dst.add(prefix + 1), klen);
+                        *dst.add(prefix + 1 + klen) = b'"';
+                        *dst.add(prefix + 2 + klen) = b':';
+                        buf.set_len(buf.len() + prefix + klen + 3);
+                    }
+                } else {
+                    if i > 0 { buf.push(b','); }
+                    push_json_string_to_vec(buf, k.as_str());
+                    buf.push(b':');
+                }
                 push_compact_value(buf, val);
             }
             buf.push(b'}');
@@ -1538,17 +1556,33 @@ fn push_jq_number_bytes(buf: &mut Vec<u8>, n: f64) {
 #[inline]
 fn push_json_string_to_vec(buf: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
+    let len = bytes.len();
+    // Ultra-fast path for single-byte strings (common object keys like "x", "y")
+    if len == 1 {
+        let c = bytes[0];
+        if c >= 0x20 && c != b'"' && c != b'\\' {
+            buf.reserve(3);
+            unsafe {
+                let dst = buf.as_mut_ptr().add(buf.len());
+                *dst = b'"';
+                *dst.add(1) = c;
+                *dst.add(2) = b'"';
+                buf.set_len(buf.len() + 3);
+            }
+            return;
+        }
+    }
     // Fast path: no escapes needed — write "str" in one contiguous block
     let needs_escape = bytes.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20);
     if !needs_escape {
-        buf.reserve(bytes.len() + 2);
+        buf.reserve(len + 2);
         // Safety: we just reserved enough space
         unsafe {
             let dst = buf.as_mut_ptr().add(buf.len());
             *dst = b'"';
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.add(1), bytes.len());
-            *dst.add(1 + bytes.len()) = b'"';
-            buf.set_len(buf.len() + bytes.len() + 2);
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.add(1), len);
+            *dst.add(1 + len) = b'"';
+            buf.set_len(buf.len() + len + 2);
         }
         return;
     }
