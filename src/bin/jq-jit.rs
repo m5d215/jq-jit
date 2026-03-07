@@ -176,7 +176,7 @@ fn main() {
     };
 
     let stdout = io::stdout();
-    let mut out = io::BufWriter::new(stdout.lock());
+    let mut out = io::BufWriter::with_capacity(65536, stdout.lock());
 
     let mut any_output_false = false;
 
