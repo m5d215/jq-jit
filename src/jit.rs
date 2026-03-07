@@ -177,6 +177,8 @@ enum JitOp {
     Index { dst: SlotId, base: SlotId, key: SlotId },
     IndexField { dst: SlotId, base: SlotId, field: String },
     BinOp { dst: SlotId, op: BinOp, lhs: SlotId, rhs: SlotId },
+    /// Combined two-field lookup + binop: .field_a OP .field_b without intermediate Values.
+    FieldBinopField { dst: SlotId, base: SlotId, field_a: String, field_b: String, op: i32 },
     UnaryOp { dst: SlotId, op: UnaryOp, src: SlotId },
     Negate { dst: SlotId, src: SlotId },
     Not { dst: SlotId, src: SlotId },
@@ -540,6 +542,18 @@ impl Flattener {
         }
     }
 
+    /// Extract field name if expr is `.field` on Input (for fused op detection).
+    fn extract_input_field(expr: &Expr) -> Option<String> {
+        if let Expr::Index { expr: base, key } | Expr::IndexOpt { expr: base, key } = expr {
+            if matches!(base.as_ref(), Expr::Input) {
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    return Some(field.clone());
+                }
+            }
+        }
+        None
+    }
+
     fn alloc_slot(&mut self) -> SlotId { let s = self.next_slot; self.next_slot += 1; s }
     fn alloc_label(&mut self) -> LabelId { let l = self.next_label; self.next_label += 1; l }
     fn alloc_var(&mut self) -> u32 { let v = self.next_var; self.next_var += 1; v }
@@ -697,13 +711,23 @@ impl Flattener {
                         out
                     }
                     _ => {
-                        let l = self.flatten_scalar(lhs, input_slot);
-                        let r = self.flatten_scalar(rhs, input_slot);
-                        let out = self.alloc_slot();
-                        self.emit(JitOp::BinOp { dst: out, op: *op, lhs: l, rhs: r });
-                        self.emit(JitOp::Drop { slot: l });
-                        self.emit(JitOp::Drop { slot: r });
-                        out
+                        // Optimization: .field_a OP .field_b on same input → FieldBinopField
+                        let fused = Self::extract_input_field(lhs).and_then(|fa| {
+                            Self::extract_input_field(rhs).map(|fb| (fa, fb))
+                        });
+                        if let Some((field_a, field_b)) = fused {
+                            let out = self.alloc_slot();
+                            self.emit(JitOp::FieldBinopField { dst: out, base: input_slot, field_a, field_b, op: binop_to_i32(*op) });
+                            out
+                        } else {
+                            let l = self.flatten_scalar(lhs, input_slot);
+                            let r = self.flatten_scalar(rhs, input_slot);
+                            let out = self.alloc_slot();
+                            self.emit(JitOp::BinOp { dst: out, op: *op, lhs: l, rhs: r });
+                            self.emit(JitOp::Drop { slot: l });
+                            self.emit(JitOp::Drop { slot: r });
+                            out
+                        }
                     }
                 }
             }
@@ -3611,6 +3635,58 @@ extern "C" fn jit_rt_field_cmp_num(base: *const Value, key_ptr: *const u8, key_l
         }
     }
 }
+/// Combined two-field lookup + binop: base.field_a OP base.field_b
+/// Avoids creating/dropping intermediate Value objects for the field lookups.
+extern "C" fn jit_rt_field_binop_field(
+    dst: *mut Value, base: *const Value,
+    ka_ptr: *const u8, ka_len: usize,
+    kb_ptr: *const u8, kb_len: usize,
+    op: i32,
+) -> i64 {
+    unsafe {
+        let obj = match &*base {
+            Value::Obj(o) => o,
+            Value::Null => {
+                // null.field = null, so this is null OP null
+                match crate::eval::eval_binop(binop_from_i32(op), &Value::Null, &Value::Null) {
+                    Ok(v) => { std::ptr::write(dst, v); return 0; }
+                    Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
+                }
+            }
+            _ => {
+                set_jit_error(format!("Cannot index {} with string", (*base).type_name()));
+                std::ptr::write(dst, Value::Null);
+                return GEN_ERROR;
+            }
+        };
+        let ka = std::str::from_utf8_unchecked(std::slice::from_raw_parts(ka_ptr, ka_len));
+        let kb = std::str::from_utf8_unchecked(std::slice::from_raw_parts(kb_ptr, kb_len));
+        let va = obj.get(ka);
+        let vb = obj.get(kb);
+        // Fast path: both fields are Num (most common case for arithmetic)
+        if let (Some(Value::Num(na, _)), Some(Value::Num(nb, _))) = (va, vb) {
+            match op {
+                0 => { std::ptr::write(dst, Value::Num(na + nb, None)); return 0; }
+                1 => { std::ptr::write(dst, Value::Num(na - nb, None)); return 0; }
+                2 => { std::ptr::write(dst, Value::Num(na * nb, None)); return 0; }
+                5 => { std::ptr::write(dst, Value::from_bool(na == nb)); return 0; }
+                6 => { std::ptr::write(dst, Value::from_bool(na != nb)); return 0; }
+                7 => { std::ptr::write(dst, Value::from_bool(na < nb)); return 0; }
+                8 => { std::ptr::write(dst, Value::from_bool(na > nb)); return 0; }
+                9 => { std::ptr::write(dst, Value::from_bool(na <= nb)); return 0; }
+                10 => { std::ptr::write(dst, Value::from_bool(na >= nb)); return 0; }
+                _ => {} // div, mod: fall through to general path
+            }
+        }
+        // General path: clone field values and use eval_binop
+        let a = va.cloned().unwrap_or(Value::Null);
+        let b = vb.cloned().unwrap_or(Value::Null);
+        match crate::eval::eval_binop(binop_from_i32(op), &a, &b) {
+            Ok(v) => { std::ptr::write(dst, v); 0 }
+            Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); GEN_ERROR }
+        }
+    }
+}
 extern "C" fn jit_rt_index_field(dst: *mut Value, base: *const Value, key_ptr: *const u8, key_len: usize) -> i64 {
     unsafe {
         match &*base {
@@ -4264,6 +4340,15 @@ fn binop_to_i32(op: BinOp) -> i32 {
     }
 }
 
+fn binop_from_i32(op: i32) -> BinOp {
+    match op {
+        0 => BinOp::Add, 1 => BinOp::Sub, 2 => BinOp::Mul, 3 => BinOp::Div,
+        4 => BinOp::Mod, 5 => BinOp::Eq, 6 => BinOp::Ne, 7 => BinOp::Lt,
+        8 => BinOp::Gt, 9 => BinOp::Le, 10 => BinOp::Ge, 11 => BinOp::And, 12 => BinOp::Or,
+        _ => BinOp::Add,
+    }
+}
+
 fn unaryop_from_i32(op: i32) -> Option<UnaryOp> {
     Some(match op {
         0 => UnaryOp::Length, 1 => UnaryOp::Type, 2 => UnaryOp::Keys, 3 => UnaryOp::Values,
@@ -4367,7 +4452,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 *use_count.entry(*base).or_insert(0) += 1;
                 *use_count.entry(*key).or_insert(0) += 1;
             }
-            JitOp::IndexField { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
+            JitOp::IndexField { base, .. } | JitOp::FieldBinopField { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
             JitOp::BinOp { lhs, rhs, .. } => {
                 *use_count.entry(*lhs).or_insert(0) += 1;
                 *use_count.entry(*rhs).or_insert(0) += 1;
@@ -4426,7 +4511,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                     *use_count.entry(*base).or_insert(0) += 1;
                     *use_count.entry(*key).or_insert(0) += 1;
                 }
-                JitOp::IndexField { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
+                JitOp::IndexField { base, .. } | JitOp::FieldBinopField { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
                 JitOp::BinOp { lhs, rhs, .. } => {
                     *use_count.entry(*lhs).or_insert(0) += 1;
                     *use_count.entry(*rhs).or_insert(0) += 1;
@@ -4560,6 +4645,7 @@ impl JitCompiler {
             ("jit_rt_is_truthy", jit_rt_is_truthy as *const u8),
             ("jit_rt_field_is_truthy", jit_rt_field_is_truthy as *const u8),
             ("jit_rt_field_cmp_num", jit_rt_field_cmp_num as *const u8),
+            ("jit_rt_field_binop_field", jit_rt_field_binop_field as *const u8),
             ("jit_rt_index", jit_rt_index as *const u8),
             ("jit_rt_index_field", jit_rt_index_field as *const u8),
             ("jit_rt_binop", jit_rt_binop as *const u8),
@@ -4795,6 +4881,20 @@ impl JitCompiler {
                         let r = slot_addr(&mut b, *rhs);
                         let o = b.ins().iconst(types::I32, binop_to_i32(*op) as i64);
                         b.ins().call(rt["binop"], &[d, o, l, r]);
+                    }
+                    JitOp::FieldBinopField { dst, base, field_a, field_b, op } => {
+                        let d = slot_addr(&mut b, *dst);
+                        let ba = slot_addr(&mut b, *base);
+                        let la = Box::leak(field_a.clone().into_boxed_str());
+                        self._string_constants.push(la);
+                        let lb = Box::leak(field_b.clone().into_boxed_str());
+                        self._string_constants.push(lb);
+                        let kap = b.ins().iconst(ptr_ty, la.as_ptr() as i64);
+                        let kal = b.ins().iconst(ptr_ty, la.len() as i64);
+                        let kbp = b.ins().iconst(ptr_ty, lb.as_ptr() as i64);
+                        let kbl = b.ins().iconst(ptr_ty, lb.len() as i64);
+                        let op_i32 = b.ins().iconst(types::I32, *op as i64);
+                        b.ins().call(rt["field_binop_field"], &[d, ba, kap, kal, kbp, kbl, op_i32]);
                     }
                     JitOp::UnaryOp { dst, op, src } => {
                         let d = slot_addr(&mut b, *dst);
@@ -5240,6 +5340,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("is_truthy", [p], [p]);
     decl!("field_is_truthy", [p, p, p], [p]);
     decl!("field_cmp_num", [p, p, p, f, i], [p]);
+    decl!("field_binop_field", [p, p, p, p, p, p, i], [p]);
     decl!("index", [p, p, p], [p]);
     decl!("index_field", [p, p, p, p], [p]);
     decl!("binop", [p, i, p, p], [p]);
