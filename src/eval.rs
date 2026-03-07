@@ -780,6 +780,10 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
                             BinOp::Add => Value::Num(ln + rn, None),
                             BinOp::Sub => Value::Num(ln - rn, None),
                             BinOp::Mul => Value::Num(ln * rn, None),
+                            BinOp::Div => {
+                                if *rn == 0.0 { return eval_binop(*op, &l, &r).map_err(|_| ()); }
+                                Value::Num(ln / rn, None)
+                            }
                             BinOp::Mod => {
                                 let yi = *rn as i64;
                                 if yi == 0 { return eval_binop(*op, &l, &r).map_err(|_| ()); }
@@ -800,6 +804,18 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
         }
         Expr::UnaryOp { op, operand } => {
             let val = eval_one(operand, input, env)?;
+            // Fast path for numeric unary ops
+            if let Value::Num(n, _) = &val {
+                return Ok(match *op {
+                    UnaryOp::Floor => Value::Num(n.floor(), None),
+                    UnaryOp::Ceil => Value::Num(n.ceil(), None),
+                    UnaryOp::Round => Value::Num(n.round(), None),
+                    UnaryOp::Fabs | UnaryOp::Abs => Value::Num(n.abs(), None),
+                    UnaryOp::Length => Value::Num(n.abs(), None),
+                    UnaryOp::Sqrt => Value::Num(n.sqrt(), None),
+                    _ => return eval_unaryop(*op, &val).map_err(|_| ()),
+                });
+            }
             eval_unaryop(*op, &val).map_err(|_| ())
         }
         Expr::Index { expr: base_expr, key: key_expr } => {
