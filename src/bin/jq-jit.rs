@@ -284,14 +284,31 @@ fn main() {
     } else {
         // Process files
         for file in &files {
-            let content = match std::fs::read_to_string(file) {
-                Ok(c) => c,
+            let f = match std::fs::File::open(file) {
+                Ok(f) => f,
                 Err(e) => {
                     eprintln!("jq: error: Could not open file {}: {}", file, e);
                     process::exit(2);
                 }
             };
-            if let Err(e) = json_stream(&content, |v| {
+            let meta = f.metadata().unwrap();
+            // Memory-map files to avoid heap allocation for file content
+            let (mmap, content);
+            if meta.len() > 0 {
+                mmap = Some(unsafe { memmap2::Mmap::map(&f) }.unwrap_or_else(|e| {
+                    eprintln!("jq: error: Could not mmap file {}: {}", file, e);
+                    process::exit(2);
+                }));
+                content = std::str::from_utf8(mmap.as_ref().unwrap()).unwrap_or_else(|e| {
+                    eprintln!("jq: error: File {} is not valid UTF-8: {}", file, e);
+                    process::exit(2);
+                });
+            } else {
+                mmap = None;
+                content = "";
+            }
+            let _ = &mmap; // keep mmap alive
+            if let Err(e) = json_stream(content, |v| {
                 process_input(&v, &mut out, &mut any_output_false, &mut had_error);
                 Ok(())
             }) {

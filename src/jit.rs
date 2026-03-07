@@ -3277,6 +3277,16 @@ extern "C" fn jit_rt_binop(dst: *mut Value, op: i32, lhs: *const Value, rhs: *co
                 _ => {} // fall through to eval_binop for div(3), mod(4)
             }
         }
+        // Fast path for Str + Str (string concatenation)
+        if op == 0 {
+            if let (Value::Str(a), Value::Str(b)) = (&*lhs, &*rhs) {
+                let mut s = String::with_capacity(a.len() + b.len());
+                s.push_str(a);
+                s.push_str(b);
+                std::ptr::write(dst, Value::Str(Rc::new(s)));
+                return 0;
+            }
+        }
         let binop = match op {
             0 => BinOp::Add, 1 => BinOp::Sub, 2 => BinOp::Mul, 3 => BinOp::Div,
             4 => BinOp::Mod, 5 => BinOp::Eq, 6 => BinOp::Ne, 7 => BinOp::Lt,
