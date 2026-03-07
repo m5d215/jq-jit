@@ -1,8 +1,11 @@
 [package]
 name = "jq-jit2"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 license = "MIT OR Apache-2.0"
+description = "A JIT-compiling implementation of jq using Cranelift"
+repository = "https://github.com/m5d215/jq-jit"
+authors = ["m5d215"]
 
 [dependencies]
 cranelift-codegen = "0.129"
