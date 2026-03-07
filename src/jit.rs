@@ -140,6 +140,8 @@ fn is_scalar(expr: &Expr) -> bool {
             // Reduce is scalar if init and update are scalar (source is the generator)
             is_scalar(init) && is_scalar(update)
         }
+        // AllShort/AnyShort produce exactly one bool
+        Expr::AllShort { predicate, .. } | Expr::AnyShort { predicate, .. } => is_scalar(predicate),
         // Assign with simple path and scalar value produces exactly one output
         Expr::Assign { path_expr, value_expr } => {
             extract_simple_path(path_expr).is_some() && is_scalar(value_expr)
@@ -919,6 +921,70 @@ impl Flattener {
                 self.collect_depth -= 1;
                 let out = self.alloc_slot();
                 self.emit(JitOp::CollectFinish { dst: out });
+                out
+            }
+            Expr::AllShort { generator, predicate } => {
+                // all(pred): iterate generator, short-circuit to false on first falsey predicate
+                let result_var = self.alloc_var();
+                // result = 1 (true)
+                self.emit(JitOp::InitVar { var: result_var });
+                self.emit(JitOp::IncVar { var: result_var });
+                let done_label = self.alloc_label();
+                self.flatten_gen_with_each_output(generator, input_slot, &|this, elem| {
+                    let pred_result = this.flatten_scalar(predicate, elem);
+                    let cont = this.alloc_label();
+                    let fail = this.alloc_label();
+                    this.emit(JitOp::IfTruthy { src: pred_result, then_label: cont, else_label: fail });
+                    this.emit(JitOp::Label { id: fail });
+                    this.emit(JitOp::Drop { slot: pred_result });
+                    this.emit(JitOp::InitVar { var: result_var }); // result = 0 (false)
+                    this.emit(JitOp::Jump { label: done_label });
+                    this.emit(JitOp::Label { id: cont });
+                    this.emit(JitOp::Drop { slot: pred_result });
+                });
+                self.emit(JitOp::Label { id: done_label });
+                let out = self.alloc_slot();
+                let true_lbl = self.alloc_label();
+                let false_lbl = self.alloc_label();
+                let end_lbl = self.alloc_label();
+                self.emit(JitOp::BranchOnVar { var: result_var, nonzero_label: true_lbl, zero_label: false_lbl });
+                self.emit(JitOp::Label { id: true_lbl });
+                self.emit(JitOp::True { dst: out });
+                self.emit(JitOp::Jump { label: end_lbl });
+                self.emit(JitOp::Label { id: false_lbl });
+                self.emit(JitOp::False { dst: out });
+                self.emit(JitOp::Label { id: end_lbl });
+                out
+            }
+            Expr::AnyShort { generator, predicate } => {
+                // any(pred): iterate generator, short-circuit to true on first truthy predicate
+                let result_var = self.alloc_var();
+                self.emit(JitOp::InitVar { var: result_var }); // result = 0 (false)
+                let done_label = self.alloc_label();
+                self.flatten_gen_with_each_output(generator, input_slot, &|this, elem| {
+                    let pred_result = this.flatten_scalar(predicate, elem);
+                    let cont = this.alloc_label();
+                    let success = this.alloc_label();
+                    this.emit(JitOp::IfTruthy { src: pred_result, then_label: success, else_label: cont });
+                    this.emit(JitOp::Label { id: success });
+                    this.emit(JitOp::Drop { slot: pred_result });
+                    this.emit(JitOp::IncVar { var: result_var }); // result = 1 (true)
+                    this.emit(JitOp::Jump { label: done_label });
+                    this.emit(JitOp::Label { id: cont });
+                    this.emit(JitOp::Drop { slot: pred_result });
+                });
+                self.emit(JitOp::Label { id: done_label });
+                let out = self.alloc_slot();
+                let true_lbl = self.alloc_label();
+                let false_lbl = self.alloc_label();
+                let end_lbl = self.alloc_label();
+                self.emit(JitOp::BranchOnVar { var: result_var, nonzero_label: true_lbl, zero_label: false_lbl });
+                self.emit(JitOp::Label { id: true_lbl });
+                self.emit(JitOp::True { dst: out });
+                self.emit(JitOp::Jump { label: end_lbl });
+                self.emit(JitOp::Label { id: false_lbl });
+                self.emit(JitOp::False { dst: out });
+                self.emit(JitOp::Label { id: end_lbl });
                 out
             }
             Expr::FuncCall { func_id, args } if *func_id < self.funcs.len() && !self.expanding_funcs.contains(func_id) => {
