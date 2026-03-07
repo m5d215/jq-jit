@@ -934,27 +934,35 @@ fn push_indent(out: &mut String, n: usize, use_tab: bool) {
 #[inline]
 fn push_json_string(out: &mut String, s: &str) {
     let bytes = s.as_bytes();
-    let needs_escape = bytes.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20);
     out.push('"');
-    if !needs_escape {
-        out.push_str(s);
-    } else {
-        for ch in s.chars() {
-            match ch {
-                '"' => out.push_str("\\\""),
-                '\\' => out.push_str("\\\\"),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                '\u{08}' => out.push_str("\\b"),
-                '\u{0c}' => out.push_str("\\f"),
-                c if (c as u32) < 0x20 => {
-                    use std::fmt::Write;
-                    let _ = write!(out, "\\u{:04x}", c as u32);
-                }
-                c => out.push(c),
-            }
+    // Single-pass: copy safe chunks between escape chars
+    let mut start = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        let esc = match b {
+            b'"' => b'\"' as u16 | 0x100,
+            b'\\' => b'\\' as u16 | 0x100,
+            b'\n' => b'n' as u16 | 0x100,
+            b'\r' => b'r' as u16 | 0x100,
+            b'\t' => b't' as u16 | 0x100,
+            0x08 => b'b' as u16 | 0x100,
+            0x0c => b'f' as u16 | 0x100,
+            c if c < 0x20 => c as u16,
+            _ => continue,
+        };
+        if start < i {
+            out.push_str(unsafe { std::str::from_utf8_unchecked(&bytes[start..i]) });
         }
+        if esc & 0x100 != 0 {
+            let pair = [b'\\', esc as u8];
+            out.push_str(unsafe { std::str::from_utf8_unchecked(&pair) });
+        } else {
+            use std::fmt::Write;
+            let _ = write!(out, "\\u{:04x}", esc);
+        }
+        start = i + 1;
+    }
+    if start < bytes.len() {
+        out.push_str(unsafe { std::str::from_utf8_unchecked(&bytes[start..]) });
     }
     out.push('"');
 }
@@ -1059,49 +1067,51 @@ use std::io;
 
 fn write_json_string(w: &mut dyn io::Write, s: &str) -> io::Result<()> {
     let bytes = s.as_bytes();
-    let needs_escape = bytes.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20);
-    if !needs_escape {
-        // Fast path: write "string" in minimal calls
+    // Find first byte needing escape
+    let first_esc = bytes.iter().position(|&b| b == b'"' || b == b'\\' || b < 0x20);
+    if first_esc.is_none() {
+        // No escapes: write "string" in minimal calls
         if bytes.len() <= 126 {
-            // Single write for short strings: pack into stack buffer
             let mut buf = [0u8; 128];
             buf[0] = b'"';
             buf[1..1 + bytes.len()].copy_from_slice(bytes);
             buf[1 + bytes.len()] = b'"';
-            w.write_all(&buf[..bytes.len() + 2])
+            return w.write_all(&buf[..bytes.len() + 2]);
         } else {
             w.write_all(b"\"")?;
             w.write_all(bytes)?;
-            w.write_all(b"\"")
+            return w.write_all(b"\"");
         }
-    } else {
-        w.write_all(b"\"")?;
-        // Slow path: write segments between special characters
-        let mut start = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            let escape = match b {
-                b'"' => b"\\\"",
-                b'\\' => b"\\\\",
-                b'\n' => b"\\n",
-                b'\r' => b"\\r",
-                b'\t' => b"\\t",
-                0x08 => b"\\b",
-                0x0c => b"\\f",
-                c if c < 0x20 => {
-                    if start < i { w.write_all(&bytes[start..i])?; }
-                    write!(w, "\\u{:04x}", c)?;
-                    start = i + 1;
-                    continue;
-                }
-                _ => { continue; }
-            };
-            if start < i { w.write_all(&bytes[start..i])?; }
-            w.write_all(escape)?;
-            start = i + 1;
-        }
-        if start < bytes.len() { w.write_all(&bytes[start..])?; }
-        w.write_all(b"\"")
     }
+    // Has escapes: write prefix then scan remainder
+    let first = first_esc.unwrap();
+    w.write_all(b"\"")?;
+    if first > 0 { w.write_all(&bytes[..first])?; }
+    let mut start = first;
+    for (i, &b) in bytes[first..].iter().enumerate() {
+        let i = i + first;
+        let escape = match b {
+            b'"' => b"\\\"",
+            b'\\' => b"\\\\",
+            b'\n' => b"\\n",
+            b'\r' => b"\\r",
+            b'\t' => b"\\t",
+            0x08 => b"\\b",
+            0x0c => b"\\f",
+            c if c < 0x20 => {
+                if start < i { w.write_all(&bytes[start..i])?; }
+                write!(w, "\\u{:04x}", c)?;
+                start = i + 1;
+                continue;
+            }
+            _ => { continue; }
+        };
+        if start < i { w.write_all(&bytes[start..i])?; }
+        w.write_all(escape)?;
+        start = i + 1;
+    }
+    if start < bytes.len() { w.write_all(&bytes[start..])?; }
+    w.write_all(b"\"")
 }
 
 fn write_jq_number(w: &mut dyn io::Write, n: f64) -> io::Result<()> {
@@ -1116,6 +1126,11 @@ fn write_jq_number(w: &mut dyn io::Write, n: f64) -> io::Result<()> {
     // Fallback: use format_jq_number for general case
     w.write_all(format_jq_number(n).as_bytes())
 }
+
+// Reusable String buffer for pretty-print output.
+struct PrettyBuf(std::cell::UnsafeCell<String>);
+unsafe impl Sync for PrettyBuf {}
+static PRETTY_BUF: PrettyBuf = PrettyBuf(std::cell::UnsafeCell::new(String::new()));
 
 /// Write a Value as pretty JSON + newline, directly to writer.
 /// For scalar values and small containers, uses stack buffer to avoid String allocation.
@@ -1135,9 +1150,11 @@ pub fn write_value_pretty_line(w: &mut dyn io::Write, v: &Value, indent: usize, 
         Value::Arr(a) if a.is_empty() => w.write_all(b"[]\n"),
         Value::Obj(o) if o.is_empty() => w.write_all(b"{}\n"),
         _ => {
-            // Build pretty output into a reusable String buffer, then write all at once
-            let s = value_to_json_pretty_ext(v, 0, indent, use_tab, sort_keys);
-            w.write_all(s.as_bytes())?;
+            // Reuse a global String buffer to avoid per-value allocation
+            let out = unsafe { &mut *PRETTY_BUF.0.get() };
+            out.clear();
+            write_pretty_to_string(out, v, 0, indent, use_tab, sort_keys);
+            w.write_all(out.as_bytes())?;
             w.write_all(b"\n")
         }
     }
