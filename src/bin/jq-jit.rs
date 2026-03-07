@@ -62,7 +62,8 @@ fn main() {
             "-f" | "--from-file" => {
                 i += 1;
                 if i < expanded_args.len() {
-                    let content = match std::fs::read_to_string(&expanded_args[i]) {
+                    let path = std::path::Path::new(&expanded_args[i]);
+                    let content = match std::fs::read_to_string(path) {
                         Ok(c) => c,
                         Err(e) => {
                             eprintln!("jq: Could not open file {}: {}", expanded_args[i], e);
@@ -70,6 +71,12 @@ fn main() {
                         }
                     };
                     filter_str = Some(content.trim_end().to_string());
+                    // Add the filter file's directory to lib search path for import resolution
+                    if let Some(parent) = path.canonicalize().ok().and_then(|p| p.parent().map(|d| d.to_string_lossy().into_owned())) {
+                        if !lib_dirs.contains(&parent) {
+                            lib_dirs.push(parent);
+                        }
+                    }
                 }
             }
             "--arg" => {
