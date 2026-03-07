@@ -3859,19 +3859,31 @@ extern "C" fn jit_rt_index(dst: *mut Value, base: *const Value, key: *const Valu
 extern "C" fn jit_rt_binop(dst: *mut Value, op: i32, lhs: *const Value, rhs: *const Value) -> i64 {
     unsafe {
         // Fast path for Num op Num (most common case in filters)
-        // Div/Mod excluded: they need special error messages and infinity handling from eval_binop
         if let (Value::Num(a, _), Value::Num(b, _)) = (&*lhs, &*rhs) {
             match op {
                 0 => { std::ptr::write(dst, Value::Num(a + b, None)); return 0; }
                 1 => { std::ptr::write(dst, Value::Num(a - b, None)); return 0; }
                 2 => { std::ptr::write(dst, Value::Num(a * b, None)); return 0; }
+                3 => { // Div: fast path for non-zero, non-NaN
+                    if *b != 0.0 && !b.is_nan() && !a.is_nan() {
+                        std::ptr::write(dst, Value::Num(a / b, None)); return 0;
+                    }
+                }
+                4 => { // Mod: fast path for non-zero integer modulo
+                    if !b.is_nan() && !a.is_nan() {
+                        let yi = *b as i64;
+                        if yi != 0 {
+                            std::ptr::write(dst, Value::Num((*a as i64 % yi) as f64, None)); return 0;
+                        }
+                    }
+                }
                 5 => { std::ptr::write(dst, Value::from_bool(a == b)); return 0; }
                 6 => { std::ptr::write(dst, Value::from_bool(a != b)); return 0; }
                 7 => { std::ptr::write(dst, Value::from_bool(a < b)); return 0; }
                 8 => { std::ptr::write(dst, Value::from_bool(a > b)); return 0; }
                 9 => { std::ptr::write(dst, Value::from_bool(a <= b)); return 0; }
                 10 => { std::ptr::write(dst, Value::from_bool(a >= b)); return 0; }
-                _ => {} // fall through to eval_binop for div(3), mod(4)
+                _ => {}
             }
         }
         // Fast path for Str + Str (string concatenation)
