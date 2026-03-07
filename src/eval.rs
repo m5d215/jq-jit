@@ -1043,16 +1043,19 @@ pub fn eval(
                         } else { None }
                     } else { None };
 
+                    let always_true = matches!(cond.as_ref(), Expr::Literal(Literal::True));
                     let mut current = input;
                     loop {
-                        let is_true = if let Ok(v) = eval_one(cond, &current, env) {
-                            v.is_truthy()
-                        } else {
-                            let mut t = false;
-                            eval(cond, current.clone(), env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
-                            t
-                        };
-                        if !is_true { break; }
+                        if !always_true {
+                            let is_true = if let Ok(v) = eval_one(cond, &current, env) {
+                                v.is_truthy()
+                            } else {
+                                let mut t = false;
+                                eval(cond, current.clone(), env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
+                                t
+                            };
+                            if !is_true { break; }
+                        }
                         // Try eval_one_filter on right to handle select/Empty without cloning
                         match eval_one_filter(right, &current, env) {
                             Ok(Some(result)) => { if !cb(result)? { return Ok(false); } }
@@ -1695,16 +1698,19 @@ pub fn eval(
         }
 
         Expr::While { cond, update } => {
+            let always_true = matches!(cond.as_ref(), Expr::Literal(Literal::True));
             let mut current = input;
             loop {
-                let is_true = if let Ok(v) = eval_one(cond, &current, env) {
-                    v.is_truthy()
-                } else {
-                    let mut t = false;
-                    eval(cond, current.clone(), env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
-                    t
-                };
-                if !is_true { break; }
+                if !always_true {
+                    let is_true = if let Ok(v) = eval_one(cond, &current, env) {
+                        v.is_truthy()
+                    } else {
+                        let mut t = false;
+                        eval(cond, current.clone(), env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
+                        t
+                    };
+                    if !is_true { break; }
+                }
                 if !cb(current.clone())? { return Ok(false); }
                 if let Ok(next) = eval_one(update, &current, env) {
                     current = next;
