@@ -181,7 +181,7 @@ pub enum Value {
     True,
     /// Numeric value. Optional Rc<str> preserves original representation for precision.
     Num(f64, Option<Rc<str>>),
-    Str(Rc<String>),
+    Str(KeyStr),
     Arr(Rc<Vec<Value>>),
     Obj(Rc<ObjMap>),
     Error(Rc<String>),
@@ -194,7 +194,7 @@ impl Clone for Value {
             Value::False => Value::False,
             Value::True => Value::True,
             Value::Num(n, repr) => Value::Num(*n, repr.clone()),
-            Value::Str(s) => Value::Str(Rc::clone(s)),
+            Value::Str(s) => Value::Str(s.clone()),
             Value::Arr(a) => Value::Arr(Rc::clone(a)),
             Value::Obj(o) => Value::Obj(Rc::clone(o)),
             Value::Error(e) => Value::Error(Rc::clone(e)),
@@ -227,11 +227,11 @@ impl Value {
     }
 
     pub fn from_str(s: &str) -> Self {
-        Value::Str(Rc::new(s.to_string()))
+        Value::Str(KeyStr::from(s))
     }
 
     pub fn from_string(s: String) -> Self {
-        Value::Str(Rc::new(s))
+        Value::Str(KeyStr::from(s))
     }
 
     pub fn from_pairs(pairs: impl IntoIterator<Item = (String, Value)>) -> Self {
@@ -496,8 +496,23 @@ fn parse_json_string_raw(b: &[u8], pos: usize) -> Result<(String, usize)> {
 }
 
 fn parse_json_string(b: &[u8], pos: usize) -> Result<(Value, usize)> {
+    // Fast path: no escapes — create CompactString directly from byte slice (no intermediate String)
+    debug_assert_eq!(b[pos], b'"');
+    let mut i = pos + 1;
+    let start = i;
+    while i < b.len() {
+        match b[i] {
+            b'"' => {
+                let s = KeyStr::from(unsafe { std::str::from_utf8_unchecked(&b[start..i]) });
+                return Ok((Value::Str(s), i + 1));
+            }
+            b'\\' => break,
+            _ => i += 1,
+        }
+    }
+    // Slow path: has escapes — go through parse_json_string_raw
     let (s, end) = parse_json_string_raw(b, pos)?;
-    Ok((Value::Str(Rc::new(s)), end))
+    Ok((Value::Str(KeyStr::from(s)), end))
 }
 
 /// Parse a JSON key, returning KeyStr (inline for short keys ≤ 24 bytes — no heap allocation).
@@ -657,7 +672,7 @@ pub unsafe fn jv_to_value(jv: Jv) -> Result<Value> {
                 let bytes = std::slice::from_raw_parts(cstr as *const u8, len);
                 let s = String::from_utf8_lossy(bytes).into_owned();
                 jq_ffi::jv_free(jv);
-                Ok(Value::Str(Rc::new(s)))
+                Ok(Value::Str(KeyStr::from(s)))
             }
             JvKind::Array => {
                 let len = jq_ffi::jv_array_length(jq_ffi::jv_copy(jv));

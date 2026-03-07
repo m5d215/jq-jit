@@ -1528,7 +1528,7 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
     }
 
     // For other formats, stringify the value first
-    let s = match val { Value::Str(s) => s.as_ref().clone(), _ => crate::value::value_to_json(val) };
+    let s = match val { Value::Str(s) => s.to_string(), _ => crate::value::value_to_json(val) };
     match name {
         "text" => Ok(s),
         "json" => Ok(serde_json::to_string(&s).unwrap_or_else(|_| format!("{:?}", s))),
@@ -1708,7 +1708,7 @@ fn eval_interp_parts(parts: &[StringPart], idx: usize, cur: String, input: Value
         StringPart::Literal(s) => { let mut n = cur; n.push_str(s); eval_interp_parts(parts, idx+1, n, input, env, cb) }
         StringPart::Expr(e) => {
             eval(e, input.clone(), env, &mut |val| {
-                let s = match &val { Value::Str(s) => s.as_ref().clone(), _ => crate::value::value_to_json(&val) };
+                let s = match &val { Value::Str(s) => s.to_string(), _ => crate::value::value_to_json(&val) };
                 let mut n = cur.clone(); n.push_str(&s);
                 eval_interp_parts(parts, idx+1, n, input.clone(), env, cb)
             })

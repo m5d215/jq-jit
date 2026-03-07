@@ -531,7 +531,7 @@ impl<'a> VM<'a> {
                     self.data.pop();
                 }
                 let msg = match &err_val {
-                    Value::Str(s) => s.as_ref().clone(),
+                    Value::Str(s) => s.to_string(),
                     Value::Null => {
                         // error with null = use top of stack as error message
                         "null".to_string()

@@ -183,7 +183,7 @@ fn main() {
     let format_value = |v: &Value| -> String {
         if raw_output {
             if let Value::Str(s) = v {
-                return s.as_ref().clone();
+                return s.to_string();
             }
         }
         if compact {

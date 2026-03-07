@@ -3207,13 +3207,13 @@ extern "C" fn jit_rt_num_repr(dst: *mut Value, n: f64, repr_ptr: *const Rc<str>)
 extern "C" fn jit_rt_str(dst: *mut Value, ptr: *const u8, len: usize) {
     unsafe {
         let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len));
-        std::ptr::write(dst, Value::Str(Rc::new(s.to_string())));
+        std::ptr::write(dst, Value::Str(crate::value::KeyStr::from(s)));
     }
 }
-/// Clone a pre-allocated Rc<String> constant (just Rc increment, no allocation).
-extern "C" fn jit_rt_str_rc(dst: *mut Value, rc_ptr: *const Rc<String>) {
+/// Copy a pre-allocated CompactString constant (24-byte inline copy).
+extern "C" fn jit_rt_str_rc(dst: *mut Value, cs_ptr: *const crate::value::KeyStr) {
     unsafe {
-        std::ptr::write(dst, Value::Str(Rc::clone(&*rc_ptr)));
+        std::ptr::write(dst, Value::Str((*cs_ptr).clone()));
     }
 }
 extern "C" fn jit_rt_is_truthy(v: *const Value) -> i64 {
@@ -3298,9 +3298,9 @@ extern "C" fn jit_rt_binop(dst: *mut Value, op: i32, lhs: *const Value, rhs: *co
         if op == 0 {
             if let (Value::Str(a), Value::Str(b)) = (&*lhs, &*rhs) {
                 let mut s = String::with_capacity(a.len() + b.len());
-                s.push_str(a);
-                s.push_str(b);
-                std::ptr::write(dst, Value::Str(Rc::new(s)));
+                s.push_str(a.as_str());
+                s.push_str(b.as_str());
+                std::ptr::write(dst, Value::from_string(s));
                 return 0;
             }
         }
@@ -3488,7 +3488,7 @@ extern "C" fn jit_rt_strbuf_append_val(env: *mut JitEnv, val: *const Value) {
 extern "C" fn jit_rt_strbuf_finish(dst: *mut Value, env: *mut JitEnv) {
     unsafe {
         let s = (*env).str_bufs.pop().unwrap();
-        std::ptr::write(dst, Value::Str(Rc::new(s)));
+        std::ptr::write(dst, Value::from_string(s));
     }
 }
 
@@ -3508,7 +3508,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                 let line_n: i64 = parts[0].parse().unwrap_or(0);
                 let file = parts[1];
                 let mut obj = crate::value::new_objmap();
-                obj.insert(crate::value::KeyStr::from("file"), Value::Str(Rc::new(file.to_string())));
+                obj.insert(crate::value::KeyStr::from("file"), Value::from_str(file));
                 obj.insert(crate::value::KeyStr::from("line"), Value::Num(line_n as f64, None));
                 std::ptr::write(dst, Value::Obj(Rc::new(obj)));
                 return 0;
@@ -3517,7 +3517,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
         if name == "__env__" {
             let mut obj = crate::value::new_objmap();
             for (k, v) in std::env::vars() {
-                obj.insert(crate::value::KeyStr::from(k), Value::Str(Rc::new(v)));
+                obj.insert(crate::value::KeyStr::from(k), Value::from_string(v));
             }
             std::ptr::write(dst, Value::Obj(Rc::new(obj)));
             return 0;
@@ -3989,8 +3989,8 @@ pub struct JitCompiler {
     rt_funcs: HashMap<&'static str, FuncId>,
     _string_constants: Vec<&'static str>,
     _repr_constants: Vec<Box<Rc<str>>>,
-    /// Pre-allocated Rc<String> constants for string literals in JIT code.
-    _rc_str_constants: Vec<Box<Rc<String>>>,
+    /// Pre-allocated CompactString constants for string literals in JIT code.
+    _rc_str_constants: Vec<Box<crate::value::KeyStr>>,
 }
 
 impl JitCompiler {
@@ -4206,12 +4206,12 @@ impl JitCompiler {
                     }
                     JitOp::Str { dst, val } => {
                         let a = slot_addr(&mut b, *dst);
-                        // Pre-allocate Rc<String> and just clone the Rc (refcount bump)
-                        let rc = Rc::new(val.clone());
-                        let boxed = Box::new(rc);
-                        let rc_ptr = &*boxed as *const Rc<String>;
+                        // Pre-allocate CompactString constant — copy 24 bytes at runtime
+                        let cs = crate::value::KeyStr::from(val.as_str());
+                        let boxed = Box::new(cs);
+                        let cs_ptr = &*boxed as *const crate::value::KeyStr;
                         self._rc_str_constants.push(boxed);
-                        let rp = b.ins().iconst(ptr_ty, rc_ptr as i64);
+                        let rp = b.ins().iconst(ptr_ty, cs_ptr as i64);
                         b.ins().call(rt["str_rc"], &[a, rp]);
                     }
                     JitOp::Index { dst, base, key } => {

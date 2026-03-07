@@ -435,9 +435,9 @@ pub fn rt_add(a: &Value, b: &Value) -> Result<Value> {
         (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::Num(x + y, None)),
         (Value::Str(x), Value::Str(y)) => {
             let mut s = String::with_capacity(x.len() + y.len());
-            s.push_str(x);
-            s.push_str(y);
-            Ok(Value::Str(Rc::new(s)))
+            s.push_str(x.as_str());
+            s.push_str(y.as_str());
+            Ok(Value::from_string(s))
         }
         (Value::Arr(x), Value::Arr(y)) => {
             let mut result = (**x).clone();
@@ -464,16 +464,9 @@ pub fn rt_add(a: &Value, b: &Value) -> Result<Value> {
 pub fn rt_add_owned(a: Value, b: &Value) -> Result<Value> {
     match (a, b) {
         (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::Num(x + y, None)),
-        (Value::Str(x), Value::Str(y)) => {
-            match Rc::try_unwrap(x) {
-                Ok(mut s) => { s.push_str(y); Ok(Value::Str(Rc::new(s))) }
-                Err(x) => {
-                    let mut s = String::with_capacity(x.len() + y.len());
-                    s.push_str(&x);
-                    s.push_str(y);
-                    Ok(Value::Str(Rc::new(s)))
-                }
-            }
+        (Value::Str(mut x), Value::Str(y)) => {
+            x.push_str(y.as_str());
+            Ok(Value::Str(x))
         }
         (Value::Arr(x), Value::Arr(y)) => {
             match Rc::try_unwrap(x) {
@@ -545,7 +538,7 @@ pub fn rt_mul(a: &Value, b: &Value) -> Result<Value> {
                 if result_len > 536870911 {
                     bail!("Repeat string result too long");
                 }
-                Ok(Value::from_string(s.repeat(count)))
+                Ok(Value::from_string(s.as_str().repeat(count)))
             }
         }
         (Value::Obj(x), Value::Obj(y)) => {
@@ -1092,7 +1085,7 @@ fn rt_from_entries(v: &Value) -> Result<Value> {
                         let val = o.get("value").or_else(|| o.get("Value"))
                             .cloned().unwrap_or(Value::Null);
                         let key_str = match &key {
-                            Value::Str(s) => s.as_ref().clone(),
+                            Value::Str(s) => s.to_string(),
                             Value::Num(n, _) => crate::value::format_jq_number(*n),
                             _ => crate::value::value_to_json(&key),
                         };
@@ -1811,8 +1804,8 @@ fn rt_strptime(v: &Value, fmt: &Value) -> Result<Value> {
     match (v, fmt) {
         (Value::Str(s), Value::Str(f)) => {
             use std::ffi::CString;
-            let s_c = CString::new(s.as_ref().as_str()).unwrap_or_default();
-            let f_c = CString::new(f.as_ref().as_str()).unwrap_or_default();
+            let s_c = CString::new(s.as_str()).unwrap_or_default();
+            let f_c = CString::new(f.as_str()).unwrap_or_default();
             let mut t: libc::tm = unsafe { std::mem::zeroed() };
             unsafe { libc::strptime(s_c.as_ptr(), f_c.as_ptr(), &mut t) };
             // Compute yday and wday using mktime
