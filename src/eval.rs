@@ -17,6 +17,16 @@ use crate::value::{Value, KeyStr};
 type GenResult = Result<bool>;
 type EnvRef = Rc<RefCell<Env>>;
 
+/// Typed error for label/break to avoid string formatting/parsing overhead.
+#[derive(Debug)]
+struct BreakError(u64);
+impl std::fmt::Display for BreakError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "__break__:{}:", self.0)
+    }
+}
+impl std::error::Error for BreakError {}
+
 pub struct Env {
     vars: Vec<Value>,
     funcs: Vec<Rc<CompiledFunc>>,
@@ -1046,8 +1056,8 @@ pub fn eval(
                 Ok(cont) => Ok(cont),
                 Err(e) if cb_error.get() => Err(e),
                 Err(e) => {
+                    if e.downcast_ref::<BreakError>().is_some() { return Err(e); }
                     let msg = format!("{}", e);
-                    if msg.starts_with("__break__:") { return Err(e); }
                     let catch_val = if let Some(json) = msg.strip_prefix("__jqerror__:") {
                         crate::value::json_to_value(json).unwrap_or(Value::from_str(&msg))
                     } else {
@@ -1271,11 +1281,8 @@ pub fn eval(
             env.borrow_mut().set_var(*var_index, Value::Num(label_id as f64, None));
             match eval(body, input, env, cb) {
                 Err(e) => {
-                    let msg = format!("{}", e);
-                    if let Some(rest) = msg.strip_prefix("__break__:") {
-                        if let Ok(bid) = rest.trim_end_matches(':').parse::<u64>() {
-                            if bid == label_id { return Ok(true); }
-                        }
+                    if let Some(be) = e.downcast_ref::<BreakError>() {
+                        if be.0 == label_id { return Ok(true); }
                     }
                     Err(e)
                 }
@@ -1285,8 +1292,10 @@ pub fn eval(
 
         Expr::Break { var_index, .. } => {
             let label = env.borrow().get_var(*var_index);
-            if let Value::Num(n, None) = &label { bail!("__break__:{}:", *n as u64) }
-            else { bail!("break: invalid label") }
+            if let Value::Num(n, None) = &label {
+                return Err(BreakError(*n as u64).into());
+            }
+            bail!("break: invalid label")
         }
 
         Expr::Update { path_expr, update_expr } => {
@@ -2277,8 +2286,8 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             match result {
                 Ok(cont) => Ok(cont),
                 Err(e) => {
+                    if e.downcast_ref::<BreakError>().is_some() { return Err(e); }
                     let msg = format!("{}", e);
-                    if msg.starts_with("__break__:") { return Err(e); }
                     let catch_val = if let Some(json) = msg.strip_prefix("__jqerror__:") {
                         crate::value::json_to_value(json).unwrap_or(Value::from_str(&msg))
                     } else {
@@ -2760,10 +2769,10 @@ pub fn execute_ir_with_libs(expr: &Expr, input: Value, funcs: Vec<CompiledFunc>,
     match result {
         Ok(_) => Ok(outputs),
         Err(e) => {
-            let msg = format!("{}", e);
-            if msg.starts_with("__break__:") {
+            if e.downcast_ref::<BreakError>().is_some() {
                 Ok(outputs)
             } else {
+                let msg = format!("{}", e);
                 // Report error to stderr but still return collected outputs
                 if let Some(json) = msg.strip_prefix("__jqerror__:") {
                     eprintln!("jq: error: {}", json);
