@@ -4567,11 +4567,18 @@ impl JitCompiler {
         fl.funcs = funcs.to_vec();
         // Pre-inline function calls so is_scalar sees no FuncCall nodes,
         // enabling JIT for expressions that use user-defined functions.
-        let inlined = fl.inline_func_calls(expr);
+        // Skip if no functions defined (avoids unnecessary tree clone for simple filters).
+        let inlined;
+        let compile_expr = if !funcs.is_empty() {
+            inlined = fl.inline_func_calls(expr);
+            &inlined
+        } else {
+            expr
+        };
         let input_slot = fl.alloc_slot(); // slot 0 = input ptr (read-only, owned by caller)
         // Use input_slot directly — flatten_gen only reads it, never writes/drops it.
         // The codegen handles Drop{slot:0} as a no-op.
-        if !fl.flatten_gen(&inlined, input_slot) {
+        if !fl.flatten_gen(compile_expr, input_slot) {
             bail!("Expression not JIT-compilable");
         }
         fl.emit(JitOp::ReturnContinue);
