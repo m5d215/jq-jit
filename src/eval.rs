@@ -1452,11 +1452,10 @@ pub fn eval(
         Expr::LetBinding { var_index, value, body } => {
             if matches!(value.as_ref(), Expr::Input) {
                 // Fast path: `. as $var | body`
-                let old = env.borrow().get_var(*var_index);
                 let tmp_vi = *var_index;
                 if !expr_uses_outer_input(body) {
                     // Body doesn't use `.` — move input into env (sole owner, lower refcount)
-                    env.borrow_mut().set_var(tmp_vi, input);
+                    let old = std::mem::replace(&mut env.borrow_mut().vars[tmp_vi as usize], input);
                     // Detect destructuring: body is chain of LetBinding { vi, Index(LoadVar(tmp), i) }
                     let mut bindings: Vec<(u16, usize)> = Vec::new();
                     let mut inner = body.as_ref();
@@ -1500,27 +1499,27 @@ pub fn eval(
                     } else {
                         eval(body, Value::Null, env, cb)
                     };
-                    env.borrow_mut().set_var(tmp_vi, old);
+                    env.borrow_mut().vars[tmp_vi as usize] = old;
                     result
                 } else {
-                    env.borrow_mut().set_var(tmp_vi, input.clone());
+                    let old = std::mem::replace(&mut env.borrow_mut().vars[tmp_vi as usize], input.clone());
                     let result = eval(body, input, env, cb);
-                    env.borrow_mut().set_var(tmp_vi, old);
+                    env.borrow_mut().vars[tmp_vi as usize] = old;
                     result
                 }
             } else if let Ok(val) = eval_one(value, &input, env) {
                 // Scalar fast path: avoid closure + input clone
-                let old = env.borrow().get_var(*var_index);
-                env.borrow_mut().set_var(*var_index, val);
+                let vi = *var_index as usize;
+                let old = std::mem::replace(&mut env.borrow_mut().vars[vi], val);
                 let result = eval(body, input, env, cb);
-                env.borrow_mut().set_var(*var_index, old);
+                env.borrow_mut().vars[vi] = old;
                 result
             } else {
                 eval(value, input.clone(), env, &mut |val| {
-                    let old = env.borrow().get_var(*var_index);
-                    env.borrow_mut().set_var(*var_index, val);
+                    let vi = *var_index as usize;
+                    let old = std::mem::replace(&mut env.borrow_mut().vars[vi], val);
                     let result = eval(body, input.clone(), env, cb);
-                    env.borrow_mut().set_var(*var_index, old);
+                    env.borrow_mut().vars[vi] = old;
                     result
                 })
             }
