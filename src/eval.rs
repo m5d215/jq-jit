@@ -1465,6 +1465,47 @@ pub fn eval(
                 && matches!(update.as_ref(), Expr::Literal(Literal::Null));
             if trivial_acc {
                 if let Some(extract_expr) = extract {
+                    // Detect takeWhile pattern: if $item | cond then $item else break/empty
+                    // Avoids redundant LoadVar reads by reusing val directly.
+                    if let Expr::IfThenElse { cond, then_branch, else_branch } = extract_expr.as_ref() {
+                        if let Expr::Pipe { left, right: cond_body } = cond.as_ref() {
+                            if matches!(left.as_ref(), Expr::LoadVar { var_index: lvi } if *lvi == vi)
+                                && matches!(then_branch.as_ref(), Expr::LoadVar { var_index: tvi } if *tvi == vi)
+                            {
+                                let else_is_break = matches!(else_branch.as_ref(), Expr::Break { .. });
+                                let else_is_empty = matches!(else_branch.as_ref(), Expr::Empty);
+                                if else_is_break || else_is_empty {
+                                    return eval(source, input, env, &mut |val| {
+                                        // Store val in env for any nested $item access in cond_body
+                                        let old_var = std::mem::replace(
+                                            &mut env.borrow_mut().vars[vi as usize], val.clone());
+                                        // Evaluate cond with val as input (replaces Pipe(LoadVar($item), cond_body))
+                                        let is_true = match eval_one(cond_body, &val, env) {
+                                            Ok(v) => v.is_truthy(),
+                                            Err(()) => {
+                                                let mut t = false;
+                                                eval(cond_body, val.clone(), env, &mut |v| {
+                                                    t = v.is_truthy(); Ok(true)
+                                                })?;
+                                                t
+                                            }
+                                        };
+                                        let cont = if is_true {
+                                            cb(val)?  // Output val directly, skip LoadVar re-read
+                                        } else if else_is_break {
+                                            env.borrow_mut().vars[vi as usize] = old_var;
+                                            // Evaluate break to trigger label unwinding
+                                            return eval(else_branch, Value::Null, env, cb);
+                                        } else {
+                                            true // Empty: no output
+                                        };
+                                        env.borrow_mut().vars[vi as usize] = old_var;
+                                        Ok(cont)
+                                    });
+                                }
+                            }
+                        }
+                    }
                     return eval(source, input, env, &mut |val| {
                         let old_var = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], val);
                         let cont = match eval_one_filter(extract_expr, &Value::Null, env) {
