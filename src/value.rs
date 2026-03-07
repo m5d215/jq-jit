@@ -1,40 +1,168 @@
 //! Value type for JIT-compiled jq filters.
 //!
-//! Key improvement over jq-jit: uses IndexMap for objects (preserves insertion order).
+//! Uses Vec-backed ordered map for objects (optimal for typical small JSON objects).
 
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::rc::Rc;
 
 use anyhow::{Context, Result, bail};
-use indexmap::IndexMap;
 
 use crate::jq_ffi::{self, Jv, JvKind};
 
 /// Inline-optimized string for object keys (≤24 bytes stored on stack, no heap alloc).
 pub type KeyStr = compact_str::CompactString;
 
-/// Object map type — IndexMap with ahash for faster lookups and CompactString keys.
-pub type ObjMap = IndexMap<KeyStr, Value, ahash::RandomState>;
-
-/// Process-wide shared hasher (cheaper than thread_local per access).
-static SHARED_HASHER: std::sync::OnceLock<ahash::RandomState> = std::sync::OnceLock::new();
-
-fn get_shared_hasher() -> ahash::RandomState {
-    SHARED_HASHER.get_or_init(|| ahash::RandomState::default()).clone()
+/// Vec-backed ordered map for JSON objects.
+/// Preserves insertion order, last-key-wins on duplicate insert.
+/// Optimized for small objects (typical JSON ≤10 keys): no hashing overhead.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObjMap {
+    entries: Vec<(KeyStr, Value)>,
 }
 
-/// Create a new ObjMap using a shared hasher state (avoids per-object random key generation).
+impl ObjMap {
+    #[inline]
+    pub fn new() -> Self {
+        ObjMap { entries: Vec::new() }
+    }
+
+    #[inline]
+    pub fn with_capacity(cap: usize) -> Self {
+        ObjMap { entries: Vec::with_capacity(cap) }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Insert a key-value pair. If the key exists, updates the value and returns the old one.
+    #[inline]
+    pub fn insert(&mut self, key: KeyStr, value: Value) -> Option<Value> {
+        for entry in &mut self.entries {
+            if entry.0 == key {
+                let old = std::mem::replace(&mut entry.1, value);
+                return Some(old);
+            }
+        }
+        self.entries.push((key, value));
+        None
+    }
+
+    /// Get a value by key (linear scan).
+    #[inline]
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        for (k, v) in &self.entries {
+            if k.as_str() == key {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    /// Get a key-value pair by index.
+    #[inline]
+    pub fn get_index(&self, index: usize) -> Option<(&KeyStr, &Value)> {
+        self.entries.get(index).map(|(k, v)| (k, v))
+    }
+
+    /// Remove a key, shifting subsequent entries to preserve order.
+    pub fn shift_remove(&mut self, key: &str) -> Option<Value> {
+        if let Some(pos) = self.entries.iter().position(|(k, _)| k.as_str() == key) {
+            Some(self.entries.remove(pos).1)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn iter(&self) -> std::slice::Iter<'_, (KeyStr, Value)> {
+        self.entries.iter()
+    }
+
+    #[inline]
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, (KeyStr, Value)> {
+        self.entries.iter_mut()
+    }
+
+    #[inline]
+    pub fn keys(&self) -> ObjMapKeys<'_> {
+        ObjMapKeys(self.entries.iter())
+    }
+
+    #[inline]
+    pub fn values(&self) -> ObjMapValues<'_> {
+        ObjMapValues(self.entries.iter())
+    }
+
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.entries.iter().any(|(k, _)| k.as_str() == key)
+    }
+}
+
+impl std::iter::FromIterator<(KeyStr, Value)> for ObjMap {
+    fn from_iter<I: IntoIterator<Item = (KeyStr, Value)>>(iter: I) -> Self {
+        ObjMap { entries: iter.into_iter().collect() }
+    }
+}
+
+impl IntoIterator for ObjMap {
+    type Item = (KeyStr, Value);
+    type IntoIter = std::vec::IntoIter<(KeyStr, Value)>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a ObjMap {
+    type Item = &'a (KeyStr, Value);
+    type IntoIter = std::slice::Iter<'a, (KeyStr, Value)>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.iter()
+    }
+}
+
+/// Create a new empty ObjMap.
 #[inline]
 pub fn new_objmap() -> ObjMap {
-    IndexMap::with_hasher(get_shared_hasher())
+    ObjMap::new()
 }
 
 /// Create a new ObjMap with pre-allocated capacity.
 #[inline]
 pub fn new_objmap_with_capacity(cap: usize) -> ObjMap {
-    IndexMap::with_capacity_and_hasher(cap, get_shared_hasher())
+    ObjMap::with_capacity(cap)
 }
+
+pub struct ObjMapKeys<'a>(std::slice::Iter<'a, (KeyStr, Value)>);
+impl<'a> Iterator for ObjMapKeys<'a> {
+    type Item = &'a KeyStr;
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> { self.0.next().map(|(k, _)| k) }
+    fn size_hint(&self) -> (usize, Option<usize>) { self.0.size_hint() }
+}
+impl<'a> DoubleEndedIterator for ObjMapKeys<'a> {
+    fn next_back(&mut self) -> Option<Self::Item> { self.0.next_back().map(|(k, _)| k) }
+}
+impl<'a> ExactSizeIterator for ObjMapKeys<'a> {}
+
+pub struct ObjMapValues<'a>(std::slice::Iter<'a, (KeyStr, Value)>);
+impl<'a> Iterator for ObjMapValues<'a> {
+    type Item = &'a Value;
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> { self.0.next().map(|(_, v)| v) }
+    fn size_hint(&self) -> (usize, Option<usize>) { self.0.size_hint() }
+}
+impl<'a> DoubleEndedIterator for ObjMapValues<'a> {
+    fn next_back(&mut self) -> Option<Self::Item> { self.0.next_back().map(|(_, v)| v) }
+}
+impl<'a> ExactSizeIterator for ObjMapValues<'a> {}
 
 /// Tag discriminant constants, matching `#[repr(C, u64)]` layout.
 pub const TAG_NULL: u64 = 0;
@@ -808,7 +936,7 @@ fn write_pretty_to_string(out: &mut String, v: &Value, depth: usize, step: usize
             out.push_str("{\n");
             if sort_keys {
                 let mut entries: Vec<_> = o.iter().collect();
-                entries.sort_by(|a, b| a.0.cmp(b.0));
+                entries.sort_by(|a, b| a.0.cmp(&b.0));
                 for (i, (k, val)) in entries.iter().enumerate() {
                     if i > 0 { out.push_str(",\n"); }
                     push_indent(out, inner_depth, use_tab);
@@ -1094,7 +1222,7 @@ fn write_value_compact_ext_inner(w: &mut dyn io::Write, v: &Value, sort_keys: bo
             w.write_all(b"{")?;
             if sort_keys {
                 let mut entries: Vec<_> = o.iter().collect();
-                entries.sort_by(|a, b| a.0.cmp(b.0));
+                entries.sort_by(|a, b| a.0.cmp(&b.0));
                 for (i, (k, val)) in entries.iter().enumerate() {
                     if i > 0 { w.write_all(b",")?; }
                     write_json_string(w, k)?;
