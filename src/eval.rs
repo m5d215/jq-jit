@@ -184,6 +184,55 @@ fn subst_inner(
     }
 }
 
+/// Check if an expression contains a FuncCall to the given func_id (direct recursion check).
+fn contains_func_call(expr: &Expr, target: usize) -> bool {
+    macro_rules! c { ($e:expr) => { contains_func_call($e, target) } }
+    match expr {
+        Expr::FuncCall { func_id, args } => *func_id == target || args.iter().any(|a| c!(a)),
+        Expr::Pipe { left, right } | Expr::Comma { left, right } => c!(left) || c!(right),
+        Expr::BinOp { lhs, rhs, .. } => c!(lhs) || c!(rhs),
+        Expr::UnaryOp { operand, .. } | Expr::Negate { operand } => c!(operand),
+        Expr::Index { expr: e, key } | Expr::IndexOpt { expr: e, key } => c!(e) || c!(key),
+        Expr::Each { input_expr } | Expr::EachOpt { input_expr } | Expr::Recurse { input_expr } => c!(input_expr),
+        Expr::IfThenElse { cond, then_branch, else_branch } => c!(cond) || c!(then_branch) || c!(else_branch),
+        Expr::LetBinding { value, body, .. } => c!(value) || c!(body),
+        Expr::TryCatch { try_expr, catch_expr } => c!(try_expr) || c!(catch_expr),
+        Expr::Collect { generator } => c!(generator),
+        Expr::Alternative { primary, fallback } => c!(primary) || c!(fallback),
+        Expr::Reduce { source, init, update, .. } => c!(source) || c!(init) || c!(update),
+        Expr::Foreach { source, init, update, extract, .. } => {
+            c!(source) || c!(init) || c!(update) || extract.as_ref().is_some_and(|e| c!(e))
+        }
+        Expr::ObjectConstruct { pairs } => pairs.iter().any(|(k, v)| c!(k) || c!(v)),
+        Expr::Range { from, to, step } => c!(from) || c!(to) || step.as_ref().is_some_and(|s| c!(s)),
+        Expr::Update { path_expr, update_expr } | Expr::Assign { path_expr, value_expr: update_expr } => c!(path_expr) || c!(update_expr),
+        Expr::PathExpr { expr: e } | Expr::GetPath { path: e } | Expr::DelPaths { paths: e }
+        | Expr::Debug { expr: e } | Expr::Stderr { expr: e } | Expr::Format { expr: e, .. } => c!(e),
+        Expr::SetPath { path, value } => c!(path) || c!(value),
+        Expr::Label { body, .. } => c!(body),
+        Expr::Break { value, .. } | Expr::Error { msg: Some(value) } => c!(value),
+        Expr::StringInterpolation { parts } => parts.iter().any(|p| matches!(p, StringPart::Expr(e) if c!(e))),
+        Expr::Limit { count, generator } => c!(count) || c!(generator),
+        Expr::While { cond, update } | Expr::Until { cond, update } => c!(cond) || c!(update),
+        Expr::Repeat { update } => c!(update),
+        Expr::AllShort { generator, predicate } | Expr::AnyShort { generator, predicate } => c!(generator) || c!(predicate),
+        Expr::ClosureOp { input_expr, key_expr, .. } => c!(input_expr) || c!(key_expr),
+        Expr::CallBuiltin { args, .. } => args.iter().any(|a| c!(a)),
+        Expr::Slice { expr: e, from, to } => c!(e) || from.as_ref().is_some_and(|f| c!(f)) || to.as_ref().is_some_and(|t| c!(t)),
+        Expr::RegexTest { input_expr, re, flags } | Expr::RegexMatch { input_expr, re, flags }
+        | Expr::RegexCapture { input_expr, re, flags } | Expr::RegexScan { input_expr, re, flags } => {
+            c!(input_expr) || c!(re) || c!(flags)
+        }
+        Expr::RegexSub { input_expr, re, tostr, flags } | Expr::RegexGsub { input_expr, re, tostr, flags } => {
+            c!(input_expr) || c!(re) || c!(tostr) || c!(flags)
+        }
+        Expr::AlternativeDestructure { alternatives } => alternatives.iter().any(|a| c!(a)),
+        Expr::Input | Expr::Empty | Expr::Not | Expr::Env | Expr::Builtins
+        | Expr::ReadInput | Expr::ReadInputs | Expr::ModuleMeta | Expr::GenLabel
+        | Expr::Literal(_) | Expr::Loc { .. } | Expr::LoadVar { .. } | Expr::Error { msg: None } => false,
+    }
+}
+
 /// Check if an expression uses the input (`.`) passed to it.
 /// This tracks input flow: Pipe's right side gets new input from left's output.
 fn expr_uses_outer_input(expr: &Expr) -> bool {
@@ -948,12 +997,15 @@ pub fn eval(
             if let Some(f) = func {
                 if f.param_vars.is_empty() || args.is_empty() {
                     eval(&f.body, input, env, cb)
-                } else {
-                    // Substitute params and rename local vars to fresh indices,
+                } else if contains_func_call(&f.body, *func_id) {
+                    // Recursive function: rename local vars to fresh indices,
                     // preventing recursive calls from clobbering each other's bindings.
                     let mut nv = env.borrow().next_var;
                     let body = substitute_and_rename(&f.body, &f.param_vars, args, &mut nv);
                     env.borrow_mut().next_var = nv;
+                    eval(&body, input, env, cb)
+                } else {
+                    let body = substitute_params(&f.body, &f.param_vars, args);
                     eval(&body, input, env, cb)
                 }
             } else {
