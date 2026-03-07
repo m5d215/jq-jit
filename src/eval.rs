@@ -897,18 +897,42 @@ pub fn eval(
                 BinOp::Add if matches!(rhs.as_ref(), Expr::Collect { .. }) => {
                     // Optimize `arr + [elems]`: push directly instead of creating intermediate array
                     let gen = match rhs.as_ref() { Expr::Collect { generator } => generator, _ => unreachable!() };
+                    // When lhs is LoadVar and gen doesn't use that var, temporarily clear env
+                    // to reduce refcount and enable Rc::try_unwrap for in-place push.
+                    let loadvar_idx = if let Expr::LoadVar { var_index } = lhs.as_ref() {
+                        if !expr_uses_var(gen, *var_index) { Some(*var_index) } else { None }
+                    } else { None };
                     eval(lhs, input.clone(), env, &mut |lval| {
                         match lval {
                             Value::Arr(arr_rc) => {
+                                // First try direct try_unwrap
                                 match Rc::try_unwrap(arr_rc) {
                                     Ok(mut vec) => {
                                         eval(gen, input.clone(), env, &mut |elem| { vec.push(elem); Ok(true) })?;
                                         cb(Value::Arr(Rc::new(vec)))
                                     }
                                     Err(arr_rc) => {
-                                        let mut vec = (*arr_rc).clone();
-                                        eval(gen, input.clone(), env, &mut |elem| { vec.push(elem); Ok(true) })?;
-                                        cb(Value::Arr(Rc::new(vec)))
+                                        // If lhs was LoadVar, DROP env's copy to reduce refcount.
+                                        // Safe: the surrounding LetBinding will restore env[vi] anyway.
+                                        if let Some(vi) = loadvar_idx {
+                                            drop(std::mem::replace(&mut env.borrow_mut().vars[vi as usize], Value::Null));
+                                            match Rc::try_unwrap(arr_rc) {
+                                                Ok(mut vec) => {
+                                                    eval(gen, input.clone(), env, &mut |elem| { vec.push(elem); Ok(true) })?;
+                                                    cb(Value::Arr(Rc::new(vec)))
+                                                }
+                                                Err(arr_rc) => {
+                                                    // Other references exist, fall back to clone
+                                                    let mut vec = (*arr_rc).clone();
+                                                    eval(gen, input.clone(), env, &mut |elem| { vec.push(elem); Ok(true) })?;
+                                                    cb(Value::Arr(Rc::new(vec)))
+                                                }
+                                            }
+                                        } else {
+                                            let mut vec = (*arr_rc).clone();
+                                            eval(gen, input.clone(), env, &mut |elem| { vec.push(elem); Ok(true) })?;
+                                            cb(Value::Arr(Rc::new(vec)))
+                                        }
                                     }
                                 }
                             }
@@ -1174,16 +1198,59 @@ pub fn eval(
             if matches!(value.as_ref(), Expr::Input) {
                 // Fast path: `. as $var | body`
                 let old = env.borrow().get_var(*var_index);
+                let tmp_vi = *var_index;
                 if !expr_uses_outer_input(body) {
                     // Body doesn't use `.` — move input into env (sole owner, lower refcount)
-                    env.borrow_mut().set_var(*var_index, input);
-                    let result = eval(body, Value::Null, env, cb);
-                    env.borrow_mut().set_var(*var_index, old);
+                    env.borrow_mut().set_var(tmp_vi, input);
+                    // Detect destructuring: body is chain of LetBinding { vi, Index(LoadVar(tmp), i) }
+                    let mut bindings: Vec<(u16, usize)> = Vec::new();
+                    let mut inner = body.as_ref();
+                    while let Expr::LetBinding { var_index: vi, value: val, body: b } = inner {
+                        if let Expr::Index { expr: base, key } = val.as_ref() {
+                            if let Expr::LoadVar { var_index: lv } = base.as_ref() {
+                                if *lv == tmp_vi {
+                                    if let Expr::Literal(Literal::Num(n, _)) = key.as_ref() {
+                                        bindings.push((*vi, *n as usize));
+                                        inner = b;
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    let result = if !bindings.is_empty() && !expr_uses_var(inner, tmp_vi) {
+                        // Destructuring detected. Extract elements, then clear tmp to release tuple.
+                        let arr_val = env.borrow().get_var(tmp_vi);
+                        if let Value::Arr(ref arr_rc) = arr_val {
+                            let mut olds: Vec<(u16, Value)> = Vec::with_capacity(bindings.len());
+                            for &(vi, idx) in &bindings {
+                                let elem_old = env.borrow().get_var(vi);
+                                let elem = arr_rc.get(idx).cloned().unwrap_or(Value::Null);
+                                env.borrow_mut().set_var(vi, elem);
+                                olds.push((vi, elem_old));
+                            }
+                            // Clear tmp to release tuple references → element refcounts drop by 1
+                            drop(arr_val);
+                            env.borrow_mut().vars[tmp_vi as usize] = Value::Null;
+                            let result = eval(inner, Value::Null, env, cb);
+                            for (vi, elem_old) in olds.into_iter().rev() {
+                                env.borrow_mut().set_var(vi, elem_old);
+                            }
+                            result
+                        } else {
+                            drop(arr_val);
+                            eval(body, Value::Null, env, cb)
+                        }
+                    } else {
+                        eval(body, Value::Null, env, cb)
+                    };
+                    env.borrow_mut().set_var(tmp_vi, old);
                     result
                 } else {
-                    env.borrow_mut().set_var(*var_index, input.clone());
+                    env.borrow_mut().set_var(tmp_vi, input.clone());
                     let result = eval(body, input, env, cb);
-                    env.borrow_mut().set_var(*var_index, old);
+                    env.borrow_mut().set_var(tmp_vi, old);
                     result
                 }
             } else {
