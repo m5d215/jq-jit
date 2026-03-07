@@ -827,6 +827,30 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
     }
 }
 
+/// Like eval_one but returns Ok(None) for Empty/select(false) instead of Err.
+/// This lets callers distinguish "no output" from "can't handle".
+#[inline]
+fn eval_one_filter(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Option<Value>, ()> {
+    match expr {
+        Expr::Empty => Ok(None),
+        Expr::IfThenElse { cond, then_branch, else_branch } => {
+            let c = eval_one(cond, input, env)?;
+            if c.is_truthy() {
+                eval_one_filter(then_branch, input, env)
+            } else {
+                eval_one_filter(else_branch, input, env)
+            }
+        }
+        Expr::Pipe { left, right } => {
+            match eval_one_filter(left, input, env)? {
+                Some(mid) => eval_one_filter(right, &mid, env),
+                None => Ok(None),
+            }
+        }
+        _ => eval_one(expr, input, env).map(Some),
+    }
+}
+
 pub fn eval(
     expr: &Expr, input: Value, env: &EnvRef,
     cb: &mut dyn FnMut(Value) -> GenResult,
@@ -953,11 +977,13 @@ pub fn eval(
                             t
                         };
                         if !is_true { break; }
-                        // Try eval_one on right with &current to avoid cloning
-                        if let Ok(result) = eval_one(right, &current, env) {
-                            if !cb(result)? { return Ok(false); }
-                        } else {
-                            if !eval(right, current.clone(), env, cb)? { return Ok(false); }
+                        // Try eval_one_filter on right to handle select/Empty without cloning
+                        match eval_one_filter(right, &current, env) {
+                            Ok(Some(result)) => { if !cb(result)? { return Ok(false); } }
+                            Ok(None) => { /* filtered out (select/empty), skip */ }
+                            Err(()) => {
+                                if !eval(right, current.clone(), env, cb)? { return Ok(false); }
+                            }
                         }
                         let mut next = Value::Null;
                         eval(update, current, env, &mut |v| { next = v; Ok(true) })?;
