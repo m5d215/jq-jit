@@ -27,42 +27,63 @@ fn main() {
     let mut argjson_vars: Vec<(String, Value)> = Vec::new();
     let mut lib_dirs: Vec<String> = Vec::new();
 
-    let mut i = 1;
-    while i < args.len() {
-        let arg = &args[i];
+    // Expand args: split combined short flags like -ncr into ["-n", "-c", "-r"]
+    let mut expanded_args: Vec<String> = Vec::new();
+    for arg in &args[1..] {
+        if arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 2
+            && arg[1..].chars().all(|c| c.is_ascii_alphabetic()) {
+            for ch in arg[1..].chars() {
+                expanded_args.push(format!("-{}", ch));
+            }
+        } else {
+            expanded_args.push(arg.clone());
+        }
+    }
+
+    let mut i = 0;
+    while i < expanded_args.len() {
+        let arg = &expanded_args[i];
         match arg.as_str() {
             "-c" | "--compact-output" => compact = true,
             "-r" | "--raw-output" => raw_output = true,
             "-R" | "--raw-input" => raw_input = true,
             "-n" | "--null-input" => null_input = true,
             "-s" | "--slurp" => slurp = true,
-            "-j" | "--join-output" => {
-                join_output = true;
-                raw_output = true;
-            }
+            "-j" | "--join-output" => { join_output = true; raw_output = true; }
             "-S" | "--sort-keys" => sort_keys = true,
             "-e" | "--exit-status" => exit_status = true,
-            "--tab" => {
-                tab = true;
-            }
+            "--tab" => tab = true,
             "--indent" => {
                 i += 1;
-                if i < args.len() {
-                    indent_n = args[i].parse().unwrap_or(2);
+                if i < expanded_args.len() {
+                    indent_n = expanded_args[i].parse().unwrap_or(2);
+                }
+            }
+            "-f" | "--from-file" => {
+                i += 1;
+                if i < expanded_args.len() {
+                    let content = match std::fs::read_to_string(&expanded_args[i]) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            eprintln!("jq: Could not open file {}: {}", expanded_args[i], e);
+                            process::exit(2);
+                        }
+                    };
+                    filter_str = Some(content.trim_end().to_string());
                 }
             }
             "--arg" => {
-                if i + 2 < args.len() {
-                    let name = args[i + 1].clone();
-                    let val = Value::from_str(&args[i + 2]);
+                if i + 2 < expanded_args.len() {
+                    let name = expanded_args[i + 1].clone();
+                    let val = Value::from_str(&expanded_args[i + 2]);
                     arg_vars.push((name, val));
                     i += 2;
                 }
             }
             "--argjson" => {
-                if i + 2 < args.len() {
-                    let name = args[i + 1].clone();
-                    match json_to_value(&args[i + 2]) {
+                if i + 2 < expanded_args.len() {
+                    let name = expanded_args[i + 1].clone();
+                    match json_to_value(&expanded_args[i + 2]) {
                         Ok(val) => argjson_vars.push((name, val)),
                         Err(e) => {
                             eprintln!("jq: Invalid JSON text passed to --argjson: {}", e);
@@ -74,14 +95,11 @@ fn main() {
             }
             "-L" => {
                 i += 1;
-                if i < args.len() {
-                    lib_dirs.push(args[i].clone());
+                if i < expanded_args.len() {
+                    lib_dirs.push(expanded_args[i].clone());
                 }
             }
-            "--args" => {
-                // Remaining args are positional args
-                break;
-            }
+            "--args" => break,
             "--version" => {
                 println!("jq-jit-0.1.0");
                 process::exit(0);
@@ -300,6 +318,7 @@ fn print_usage() {
     eprintln!("  -s, --slurp            Slurp all inputs into array");
     eprintln!("  -S, --sort-keys        Sort object keys");
     eprintln!("  -e, --exit-status      Exit with non-zero if last output is false/null");
+    eprintln!("  -f, --from-file FILE   Read filter from file");
     eprintln!("  --tab                  Use tabs for indentation");
     eprintln!("  --indent N             Use N spaces for indentation");
     eprintln!("  --arg NAME VALUE       Set variable $NAME to VALUE (string)");
