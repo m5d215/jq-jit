@@ -855,7 +855,7 @@ fn parse_json_number(b: &[u8], pos: usize) -> Result<(Value, usize)> {
     }
     // Safety: number bytes are ASCII digits/signs/dots, always valid UTF-8
     let num_str = unsafe { std::str::from_utf8_unchecked(&b[pos..i]) };
-    let n: f64 = num_str.parse().unwrap_or(0.0);
+    let n: f64 = fast_float::parse(num_str).unwrap_or(0.0);
     // Fast path: for simple decimals (no exponent, no trailing zeros after dot, ≤15 sig digits),
     // Rust's Display roundtrips identically — skip format_jq_number to avoid String allocation.
     if !has_exp && has_dot && (i - digits_start) <= 16 {
