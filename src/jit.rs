@@ -4639,22 +4639,37 @@ unsafe extern "C" fn collect_callback(value: *const Value, ctx: *mut u8) -> i64 
     GEN_CONTINUE
 }
 
+thread_local! {
+    static REUSABLE_ENV: RefCell<Option<JitEnv>> = const { RefCell::new(None) };
+}
+
 pub fn execute_jit(func: JitFilterFn, input: &Value) -> Result<Vec<Value>> {
+    // Reuse JitEnv from thread-local to avoid 100KB alloc per call (critical for NDJSON)
+    let mut env = REUSABLE_ENV.with(|cell| cell.borrow_mut().take())
+        .unwrap_or_else(JitEnv::new);
+
+    // Reset mutable state (vars persist safely — set_var drops old values on overwrite)
+    env.collect_stacks.clear();
+    env.str_bufs.clear();
+    env.try_depth = 0;
+    env.error_msg = None;
+
     let mut results: Vec<Value> = Vec::new();
-    let mut env = JitEnv::new();
     let result = unsafe {
         func(input as *const Value, &mut env, collect_callback,
              &mut results as *mut Vec<Value> as *mut u8)
     };
     if result == GEN_ERROR {
-        // Append error as a Value::Error result (like the interpreter does)
-        let err_msg = if let Some(msg) = env.error_msg {
-            msg
-        } else {
-            "JIT execution error".to_string()
-        };
+        let err_msg = env.error_msg.take()
+            .unwrap_or_else(|| "JIT execution error".to_string());
         results.push(Value::Error(Rc::new(err_msg)));
     }
+
+    // Put env back for reuse
+    REUSABLE_ENV.with(|cell| {
+        *cell.borrow_mut() = Some(env);
+    });
+
     Ok(results)
 }
 
