@@ -22,6 +22,52 @@ static OBJMAP_POOL: ObjMapPool = ObjMapPool(std::cell::UnsafeCell::new(Vec::new(
 
 const OBJMAP_POOL_MAX: usize = 64;
 
+// Global pool of Rc<ObjMap> to avoid repeated Rc alloc/dealloc.
+// When an Rc<ObjMap> with refcount=1 is dropped, we clear entries and pool the Rc.
+// On next alloc, we reuse the Rc memory instead of calling malloc.
+struct RcObjMapPool(std::cell::UnsafeCell<Vec<*const ObjMap>>);
+unsafe impl Sync for RcObjMapPool {}
+
+static RC_OBJMAP_POOL: RcObjMapPool = RcObjMapPool(std::cell::UnsafeCell::new(Vec::new()));
+
+const RC_OBJMAP_POOL_MAX: usize = 32;
+
+/// Try to recycle an Rc<ObjMap> instead of allocating a new one.
+#[inline]
+pub fn rc_objmap_pool_get(cap: usize) -> Rc<ObjMap> {
+    let pool = unsafe { &mut *RC_OBJMAP_POOL.0.get() };
+    if let Some(raw) = pool.pop() {
+        // Safety: raw was produced by Rc::into_raw and has refcount=1
+        let mut rc = unsafe { Rc::from_raw(raw) };
+        let map = Rc::get_mut(&mut rc).unwrap();
+        map.entries = pool_get(cap);
+        rc
+    } else {
+        Rc::new(ObjMap::with_capacity(cap))
+    }
+}
+
+/// Try to pool an Rc<ObjMap> with refcount=1 instead of dropping it.
+/// Returns true if pooled, false if dropped normally.
+#[inline]
+pub fn rc_objmap_pool_return(mut rc: Rc<ObjMap>) -> bool {
+    if Rc::strong_count(&rc) != 1 {
+        return false;
+    }
+    let pool = unsafe { &mut *RC_OBJMAP_POOL.0.get() };
+    if pool.len() >= RC_OBJMAP_POOL_MAX {
+        return false;
+    }
+    // Clear entries and pool the Vec buffer
+    let map = Rc::get_mut(&mut rc).unwrap();
+    let old_entries = std::mem::take(&mut map.entries);
+    pool_return(old_entries);
+    // Pool the Rc itself (prevents deallocation)
+    let raw = Rc::into_raw(rc);
+    pool.push(raw);
+    true
+}
+
 #[inline]
 fn pool_get(cap: usize) -> Vec<(KeyStr, Value)> {
     let pool = unsafe { &mut *OBJMAP_POOL.0.get() };

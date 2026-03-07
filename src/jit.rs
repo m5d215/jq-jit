@@ -3269,7 +3269,17 @@ extern "C" fn jit_rt_clone(dst: *mut Value, src: *const Value) {
     unsafe { std::ptr::write(dst, (*src).clone()); }
 }
 extern "C" fn jit_rt_drop(v: *mut Value) {
-    unsafe { std::ptr::drop_in_place(v); }
+    unsafe {
+        // Fast path: try to pool Rc<ObjMap> instead of deallocating
+        let val = std::ptr::read(v);
+        if let Value::Obj(rc) = val {
+            if !crate::value::rc_objmap_pool_return(rc) {
+                // Pool full or refcount > 1, drop normally (rc is consumed above)
+            }
+        } else {
+            drop(val);
+        }
+    }
 }
 extern "C" fn jit_rt_null(dst: *mut Value) {
     unsafe { std::ptr::write(dst, Value::Null); }
@@ -3513,7 +3523,7 @@ extern "C" fn jit_rt_collect_finish(dst: *mut Value, env: *mut JitEnv) {
 
 // Object construction helpers
 extern "C" fn jit_rt_obj_new(dst: *mut Value, cap: usize) {
-    unsafe { std::ptr::write(dst, Value::Obj(Rc::new(crate::value::new_objmap_with_capacity(cap)))); }
+    unsafe { std::ptr::write(dst, Value::Obj(crate::value::rc_objmap_pool_get(cap))); }
 }
 /// Insert key-value pair into object. Takes ownership of both key and val (ptr::read, no clone).
 extern "C" fn jit_rt_obj_insert(obj: *mut Value, key: *mut Value, val: *mut Value) {
