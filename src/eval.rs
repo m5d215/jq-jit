@@ -1379,6 +1379,23 @@ pub fn eval(
             let vi = *var_index;
             let ai = *acc_index;
             { let mut e = env.borrow_mut(); e.ensure_var(vi); e.ensure_var(ai); }
+            // Fast path: foreach with null init and null update (pure transform/filter pattern, e.g. takeWhile)
+            let trivial_acc = matches!(init.as_ref(), Expr::Literal(Literal::Null))
+                && matches!(update.as_ref(), Expr::Literal(Literal::Null));
+            if trivial_acc {
+                if let Some(extract_expr) = extract {
+                    return eval(source, input, env, &mut |val| {
+                        let old_var = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], val);
+                        let cont = match eval_one_filter(extract_expr, &Value::Null, env) {
+                            Ok(Some(v)) => cb(v)?,
+                            Ok(None) => true,
+                            Err(()) => eval(extract_expr, Value::Null, env, cb)?,
+                        };
+                        env.borrow_mut().vars[vi as usize] = old_var;
+                        Ok(cont)
+                    });
+                }
+            }
             let acc_used = expr_uses_var(update, ai)
                 || extract.as_ref().is_some_and(|e| expr_uses_var(e, ai));
             eval(init, input.clone(), env, &mut |init_val| {
