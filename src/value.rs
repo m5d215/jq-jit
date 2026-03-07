@@ -81,7 +81,21 @@ fn pool_get(cap: usize) -> Vec<(KeyStr, Value)> {
 
 #[inline]
 fn pool_return(mut v: Vec<(KeyStr, Value)>) {
-    v.clear();
+    // Fast path: if all entries are trivially droppable (inline strings, simple numbers),
+    // skip the per-entry destructor calls and just zero the length.
+    let trivial = v.iter().all(|(k, val)| {
+        !k.is_heap_allocated() && match val {
+            Value::Null | Value::True | Value::False => true,
+            Value::Num(_, repr) => repr.is_none(),
+            Value::Str(s) => !s.is_heap_allocated(),
+            _ => false,
+        }
+    });
+    if trivial {
+        unsafe { v.set_len(0); }
+    } else {
+        v.clear();
+    }
     let pool = unsafe { &mut *OBJMAP_POOL.0.get() };
     if pool.len() < OBJMAP_POOL_MAX {
         pool.push(v);
