@@ -1,4 +1,4 @@
-//! Module system support for jq-jit2.
+//! Module system support for jq-jit.
 
 use std::rc::Rc;
 use anyhow::{Result, bail};

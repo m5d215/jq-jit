@@ -1,10 +1,10 @@
 #!/bin/bash
-# jq official test suite runner for jq-jit2
-# Usage: bash tests/official/run.sh [target/release/jq-jit2] [tests/official/jq.test]
+# jq official test suite runner for jq-jit
+# Usage: bash tests/official/run.sh [target/release/jq-jit] [tests/official/jq.test]
 
 set -euo pipefail
 
-JQ_JIT="${1:-target/release/jq-jit2}"
+JQ_JIT="${1:-target/release/jq-jit}"
 TEST_FILE="${2:-tests/official/jq.test}"
 TIMEOUT=5
 LIB_DIR="tests/modules"

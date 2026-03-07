@@ -1,12 +1,12 @@
-//! jq-jit2: A JIT-compiled jq implementation.
+//! jq-jit: A JIT-compiled jq implementation.
 //!
-//! Usage: jq-jit2 [OPTIONS] <FILTER> [FILE...]
+//! Usage: jq-jit [OPTIONS] <FILTER> [FILE...]
 
 use std::io::{self, BufRead, Read, Write};
 use std::process;
 
-use jq_jit2::value::{self, Value, json_to_value, json_stream, value_to_json, value_to_json_precise, value_to_json_pretty, write_value_compact};
-use jq_jit2::interpreter::Filter;
+use jq_jit::value::{self, Value, json_to_value, json_stream, value_to_json, value_to_json_precise, value_to_json_pretty, write_value_compact};
+use jq_jit::interpreter::Filter;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -83,7 +83,7 @@ fn main() {
                 break;
             }
             "--version" => {
-                println!("jq-jit2-0.1.0");
+                println!("jq-jit-0.1.0");
                 process::exit(0);
             }
             "-h" | "--help" => {
@@ -109,7 +109,7 @@ fn main() {
         Some(f) => f,
         None => {
             eprintln!("jq - commandline JSON processor");
-            eprintln!("Usage: jq-jit2 [OPTIONS] <FILTER> [FILE...]");
+            eprintln!("Usage: jq-jit [OPTIONS] <FILTER> [FILE...]");
             process::exit(2);
         }
     };
@@ -267,7 +267,7 @@ fn main() {
 }
 
 fn print_usage() {
-    eprintln!("Usage: jq-jit2 [OPTIONS] <FILTER> [FILE...]");
+    eprintln!("Usage: jq-jit [OPTIONS] <FILTER> [FILE...]");
     eprintln!();
     eprintln!("Options:");
     eprintln!("  -c, --compact-output   Compact output");

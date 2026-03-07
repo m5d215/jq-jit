@@ -1,5 +1,5 @@
 #!/bin/bash
-# Benchmark jq-jit2 against jq, gojq, jaq
+# Benchmark jq-jit against jq, gojq, jaq
 # Usage: bench/run.sh [data_file]
 set -e
 
@@ -13,18 +13,18 @@ if [ ! -f "$DATAFILE" ]; then
 fi
 
 COUNT=$(awk 'END{print NR}' "$DATAFILE")
-echo "=== jq-jit2 Benchmark ($COUNT NDJSON objects) ==="
+echo "=== jq-jit Benchmark ($COUNT NDJSON objects) ==="
 echo ""
 
 # Detect available tools
-JQ_JIT2="${JQ_JIT2:-target/release/jq-jit2}"
+JQ_JIT2="${JQ_JIT2:-target/release/jq-jit}"
 if [ ! -x "$JQ_JIT2" ]; then
     echo "Error: $JQ_JIT2 not found. Run: cargo build --release"
     exit 1
 fi
 
 TOOLS=("$JQ_JIT2")
-NAMES=("jq-jit2")
+NAMES=("jq-jit")
 
 for cmd in jq gojq jaq; do
     if command -v "$cmd" > /dev/null 2>&1; then
@@ -99,4 +99,4 @@ done
 
 echo ""
 echo "Times are user CPU seconds (best of $RUNS). Lower is better."
-echo "Ratio is relative to jq-jit2 (higher = slower)."
+echo "Ratio is relative to jq-jit (higher = slower)."
