@@ -725,6 +725,24 @@ fn expr_uses_var(expr: &Expr, target: u16) -> bool {
     }
 }
 
+/// Extract f64 from a leaf expression (LoadVar, Input, Literal) without cloning.
+/// Used by the zero-clone BinOp fast path.
+#[inline(always)]
+fn get_num_leaf(expr: &Expr, input: &Value, vars: &[Value]) -> Option<f64> {
+    match expr {
+        Expr::LoadVar { var_index } => {
+            if let Some(Value::Num(n, _)) = vars.get(*var_index as usize) {
+                Some(*n)
+            } else { None }
+        }
+        Expr::Input => {
+            if let Value::Num(n, _) = input { Some(*n) } else { None }
+        }
+        Expr::Literal(Literal::Num(n, _)) => Some(*n),
+        _ => None,
+    }
+}
+
 /// Fast path for scalar expressions: evaluate without callback overhead.
 /// Returns Ok(value) for simple expressions, Err for generators/complex expressions.
 #[inline]
@@ -781,6 +799,39 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
                     Ok(Value::from_bool(r.is_truthy()))
                 }
                 _ => {
+                    // Zero-clone numeric path: extract f64 directly from env/input
+                    // without creating intermediate Value objects.
+                    {
+                        let e = env.borrow();
+                        if e.closures.is_empty() {
+                            if let (Some(ln), Some(rn)) = (
+                                get_num_leaf(lhs, input, &e.vars),
+                                get_num_leaf(rhs, input, &e.vars),
+                            ) {
+                                return Ok(match *op {
+                                    BinOp::Add => Value::Num(ln + rn, None),
+                                    BinOp::Sub => Value::Num(ln - rn, None),
+                                    BinOp::Mul => Value::Num(ln * rn, None),
+                                    BinOp::Div => {
+                                        if rn == 0.0 { drop(e); return Err(()); }
+                                        Value::Num(ln / rn, None)
+                                    }
+                                    BinOp::Mod => {
+                                        let yi = rn as i64;
+                                        if yi == 0 { drop(e); return Err(()); }
+                                        Value::Num((ln as i64 % yi) as f64, None)
+                                    }
+                                    BinOp::Eq => if ln == rn { Value::True } else { Value::False },
+                                    BinOp::Ne => if ln != rn { Value::True } else { Value::False },
+                                    BinOp::Lt => if ln < rn { Value::True } else { Value::False },
+                                    BinOp::Gt => if ln > rn { Value::True } else { Value::False },
+                                    BinOp::Le => if ln <= rn { Value::True } else { Value::False },
+                                    BinOp::Ge => if ln >= rn { Value::True } else { Value::False },
+                                    _ => { drop(e); return Err(()); }
+                                });
+                            }
+                        }
+                    }
                     let r = eval_one(rhs, input, env)?;
                     let l = eval_one(lhs, input, env)?;
                     // Fast path: both numeric, avoid function call dispatch
@@ -1502,6 +1553,16 @@ pub fn eval(
         Expr::Recurse { input_expr } => eval_recurse_expr(input_expr, &input, env, cb),
 
         Expr::Range { from, to, step } => {
+            // Fast path: from/to/step are almost always scalar
+            if let (Ok(from_val), Ok(to_val)) = (eval_one(from, &input, env), eval_one(to, &input, env)) {
+                if let Some(step_expr) = step.as_ref() {
+                    if let Ok(step_val) = eval_one(step_expr, &input, env) {
+                        return eval_range(&from_val, &to_val, Some(&step_val), cb);
+                    }
+                } else {
+                    return eval_range(&from_val, &to_val, None, cb);
+                }
+            }
             eval(from, input.clone(), env, &mut |from_val| {
                 eval(to, input.clone(), env, &mut |to_val| {
                     if let Some(step_expr) = step.as_ref() {
