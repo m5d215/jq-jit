@@ -4071,13 +4071,12 @@ impl JitCompiler {
         // Phase 1: Flatten
         let mut fl = Flattener::new();
         fl.funcs = funcs.to_vec();
-        let input_slot = fl.alloc_slot(); // slot 0 = input ptr (special)
-        let clone_slot = fl.alloc_slot(); // slot 1 = cloned input
-        fl.emit(JitOp::Clone { dst: clone_slot, src: input_slot });
-        if !fl.flatten_gen(expr, clone_slot) {
+        let input_slot = fl.alloc_slot(); // slot 0 = input ptr (read-only, owned by caller)
+        // Use input_slot directly — flatten_gen only reads it, never writes/drops it.
+        // The codegen handles Drop{slot:0} as a no-op.
+        if !fl.flatten_gen(expr, input_slot) {
             bail!("Expression not JIT-compilable");
         }
-        fl.emit(JitOp::Drop { slot: clone_slot });
         fl.emit(JitOp::ReturnContinue);
 
         // Store closure ops for runtime access
