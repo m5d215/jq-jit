@@ -13,12 +13,58 @@ use crate::jq_ffi::{self, Jv, JvKind};
 /// Inline-optimized string for object keys (≤24 bytes stored on stack, no heap alloc).
 pub type KeyStr = compact_str::CompactString;
 
+// Global pool of Vec buffers for ObjMap reuse.
+// Safe because jq-jit is single-threaded (uses Rc, not Arc).
+struct ObjMapPool(std::cell::UnsafeCell<Vec<Vec<(KeyStr, Value)>>>);
+unsafe impl Sync for ObjMapPool {}
+
+static OBJMAP_POOL: ObjMapPool = ObjMapPool(std::cell::UnsafeCell::new(Vec::new()));
+
+const OBJMAP_POOL_MAX: usize = 64;
+
+#[inline]
+fn pool_get(cap: usize) -> Vec<(KeyStr, Value)> {
+    let pool = unsafe { &mut *OBJMAP_POOL.0.get() };
+    if let Some(v) = pool.pop() {
+        if v.capacity() >= cap {
+            return v;
+        }
+    }
+    Vec::with_capacity(cap)
+}
+
+#[inline]
+fn pool_return(mut v: Vec<(KeyStr, Value)>) {
+    v.clear();
+    let pool = unsafe { &mut *OBJMAP_POOL.0.get() };
+    if pool.len() < OBJMAP_POOL_MAX {
+        pool.push(v);
+    }
+}
+
 /// Vec-backed ordered map for JSON objects.
 /// Preserves insertion order, last-key-wins on duplicate insert.
 /// Optimized for small objects (typical JSON ≤10 keys): no hashing overhead.
-#[derive(Clone, Debug, PartialEq)]
+/// Vec buffers are pooled thread-locally to avoid repeated allocation.
+#[derive(Debug, PartialEq)]
 pub struct ObjMap {
     entries: Vec<(KeyStr, Value)>,
+}
+
+impl Clone for ObjMap {
+    fn clone(&self) -> Self {
+        let mut entries = pool_get(self.entries.len());
+        entries.extend(self.entries.iter().cloned());
+        ObjMap { entries }
+    }
+}
+
+impl Drop for ObjMap {
+    fn drop(&mut self) {
+        if self.entries.capacity() > 0 {
+            pool_return(std::mem::take(&mut self.entries));
+        }
+    }
 }
 
 impl ObjMap {
@@ -29,7 +75,7 @@ impl ObjMap {
 
     #[inline]
     pub fn with_capacity(cap: usize) -> Self {
-        ObjMap { entries: Vec::with_capacity(cap) }
+        ObjMap { entries: pool_get(cap) }
     }
 
     #[inline]
@@ -53,6 +99,13 @@ impl ObjMap {
         }
         self.entries.push((key, value));
         None
+    }
+
+    /// Push a key-value pair without checking for duplicates.
+    /// Caller must ensure the key does not already exist (e.g. during JSON parsing).
+    #[inline]
+    pub fn push_unique(&mut self, key: KeyStr, value: Value) {
+        self.entries.push((key, value));
     }
 
     /// Get a value by key (linear scan).
@@ -115,8 +168,9 @@ impl std::iter::FromIterator<(KeyStr, Value)> for ObjMap {
 impl IntoIterator for ObjMap {
     type Item = (KeyStr, Value);
     type IntoIter = std::vec::IntoIter<(KeyStr, Value)>;
-    fn into_iter(self) -> Self::IntoIter {
-        self.entries.into_iter()
+    fn into_iter(mut self) -> Self::IntoIter {
+        // Take entries out before Drop runs (which would return the Vec to pool)
+        std::mem::take(&mut self.entries).into_iter()
     }
 }
 
