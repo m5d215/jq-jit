@@ -41,14 +41,17 @@ pub struct Env {
     /// Cache for substituted function bodies: (func_id, arg_var_indices) → substituted body.
     /// Only used when all args are LoadVar (the common case).
     subst_cache: HashMap<(usize, Vec<u16>), Rc<Expr>>,
+    /// Pointer-based substitution cache: func_id → (args_ptr, substituted_body).
+    /// For non-LoadVar args from stable (cached) call sites.
+    subst_ptr_cache: HashMap<usize, (usize, Rc<Expr>)>,
 }
 
 impl Env {
     pub fn new(funcs: Vec<CompiledFunc>) -> Self {
-        Env { vars: vec![Value::Null; 4096], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs: Vec::new(), closures: Vec::new(), recursive_cache: HashMap::new(), subst_cache: HashMap::new() }
+        Env { vars: vec![Value::Null; 4096], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs: Vec::new(), closures: Vec::new(), recursive_cache: HashMap::new(), subst_cache: HashMap::new(), subst_ptr_cache: HashMap::new() }
     }
     pub fn with_lib_dirs(funcs: Vec<CompiledFunc>, lib_dirs: Vec<String>) -> Self {
-        Env { vars: vec![Value::Null; 4096], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs, closures: Vec::new(), recursive_cache: HashMap::new(), subst_cache: HashMap::new() }
+        Env { vars: vec![Value::Null; 4096], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs, closures: Vec::new(), recursive_cache: HashMap::new(), subst_cache: HashMap::new(), subst_ptr_cache: HashMap::new() }
     }
     fn get_var(&self, idx: u16) -> Value {
         self.vars.get(idx as usize).cloned().unwrap_or(Value::Null)
@@ -1422,8 +1425,20 @@ pub fn eval(
                                 eval(&body_rc, input, env, cb)
                             }
                         } else {
-                            let body = substitute_params(&f.body, &f.param_vars, args);
-                            eval(&body, input, env, cb)
+                            // Pointer-based cache: if args come from a stable (cached) body,
+                            // the pointer is the same across calls.
+                            let args_ptr = args.as_ptr() as usize;
+                            let cached = env.borrow().subst_ptr_cache.get(func_id)
+                                .filter(|(ptr, _)| *ptr == args_ptr)
+                                .map(|(_, body)| body.clone());
+                            if let Some(body) = cached {
+                                eval(&body, input, env, cb)
+                            } else {
+                                let body = substitute_params(&f.body, &f.param_vars, args);
+                                let body_rc = Rc::new(body);
+                                env.borrow_mut().subst_ptr_cache.insert(*func_id, (args_ptr, body_rc.clone()));
+                                eval(&body_rc, input, env, cb)
+                            }
                         }
                     }
                 }
