@@ -8,7 +8,7 @@ use std::process;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use jq_jit::value::{Value, json_to_value, json_stream, json_stream_project, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
+use jq_jit::value::{Value, json_to_value, json_stream, json_stream_project, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
 use jq_jit::interpreter::Filter;
 
 fn main() {
@@ -203,7 +203,8 @@ fn main() {
     let mut had_error = false;
     // Use Vec-based buffering for compact output to avoid per-value write_all overhead
     let use_compact_buf = compact && !raw_output && !sort_keys && !join_output;
-    let mut compact_buf: Vec<u8> = if use_compact_buf { Vec::with_capacity(1 << 17) } else { Vec::new() };
+    let use_pretty_buf = !compact && !raw_output && !sort_keys && !join_output && !tab;
+    let mut compact_buf: Vec<u8> = if use_compact_buf || use_pretty_buf { Vec::with_capacity(1 << 17) } else { Vec::new() };
     let process_input = |input: &Value, out: &mut io::BufWriter<io::StdoutLock>, cbuf: &mut Vec<u8>, any_false: &mut bool, had_error: &mut bool| {
         let result = filter.execute_cb(input, &mut |result| {
             if let Value::Error(e) = result {
@@ -216,6 +217,12 @@ fn main() {
             }
             if use_compact_buf {
                 push_compact_line(cbuf, result);
+                if cbuf.len() >= 1 << 17 {
+                    let _ = out.write_all(cbuf);
+                    cbuf.clear();
+                }
+            } else if use_pretty_buf {
+                push_pretty_line(cbuf, result, indent_n, tab);
                 if cbuf.len() >= 1 << 17 {
                     let _ = out.write_all(cbuf);
                     cbuf.clear();

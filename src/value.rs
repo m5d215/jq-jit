@@ -1478,6 +1478,70 @@ pub fn push_compact_line(buf: &mut Vec<u8>, v: &Value) {
     buf.push(b'\n');
 }
 
+/// Push pretty-printed JSON + newline directly into a Vec<u8> buffer.
+/// Mirrors push_compact_line but with indentation. Avoids per-value write_all overhead.
+pub fn push_pretty_line(buf: &mut Vec<u8>, v: &Value, indent: usize, use_tab: bool) {
+    push_pretty_value(buf, v, 0, indent, use_tab);
+    buf.push(b'\n');
+}
+
+fn push_pretty_value(buf: &mut Vec<u8>, v: &Value, depth: usize, step: usize, use_tab: bool) {
+    match v {
+        Value::Null => buf.extend_from_slice(b"null"),
+        Value::False => buf.extend_from_slice(b"false"),
+        Value::True => buf.extend_from_slice(b"true"),
+        Value::Num(n, repr) => {
+            if let Some(r) = repr {
+                buf.extend_from_slice(r.as_bytes());
+            } else {
+                push_jq_number_bytes(buf, *n);
+            }
+        }
+        Value::Str(s) => push_json_string_to_vec(buf, s.as_str()),
+        Value::Error(e) => push_json_string_to_vec(buf, e.as_str()),
+        Value::Arr(a) if a.is_empty() => buf.extend_from_slice(b"[]"),
+        Value::Obj(o) if o.is_empty() => buf.extend_from_slice(b"{}"),
+        Value::Arr(a) => {
+            let inner = depth + step;
+            buf.extend_from_slice(b"[\n");
+            for (i, item) in a.iter().enumerate() {
+                if i > 0 { buf.extend_from_slice(b",\n"); }
+                push_indent_bytes(buf, inner, use_tab);
+                push_pretty_value(buf, item, inner, step, use_tab);
+            }
+            buf.push(b'\n');
+            push_indent_bytes(buf, depth, use_tab);
+            buf.push(b']');
+        }
+        Value::Obj(o) => {
+            let inner = depth + step;
+            buf.extend_from_slice(b"{\n");
+            for (i, (k, val)) in o.iter().enumerate() {
+                if i > 0 { buf.extend_from_slice(b",\n"); }
+                push_indent_bytes(buf, inner, use_tab);
+                push_json_string_to_vec(buf, k.as_str());
+                buf.extend_from_slice(b": ");
+                push_pretty_value(buf, val, inner, step, use_tab);
+            }
+            buf.push(b'\n');
+            push_indent_bytes(buf, depth, use_tab);
+            buf.push(b'}');
+        }
+    }
+}
+
+#[inline]
+fn push_indent_bytes(buf: &mut Vec<u8>, n: usize, use_tab: bool) {
+    if n == 0 { return; }
+    let src = if use_tab { TABS_64.as_bytes() } else { SPACES_256.as_bytes() };
+    if n <= src.len() {
+        buf.extend_from_slice(&src[..n]);
+    } else {
+        let ch = if use_tab { b'\t' } else { b' ' };
+        for _ in 0..n { buf.push(ch); }
+    }
+}
+
 fn push_compact_value(buf: &mut Vec<u8>, v: &Value) {
     match v {
         Value::Null => buf.extend_from_slice(b"null"),
