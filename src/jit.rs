@@ -214,6 +214,9 @@ enum JitOp {
     ObjInsert { obj: SlotId, key: SlotId, val: SlotId },
     ObjInsertStrKey { obj: SlotId, key: String, val: SlotId },
     ObjPushStrKey { obj: SlotId, key: String, val: SlotId },
+    /// Fused field extraction + push: copies a field from src object directly into dst object.
+    /// Eliminates intermediate slot allocation and one function call vs IndexField + ObjPushStrKey.
+    ObjCopyField { obj: SlotId, src: SlotId, obj_key: String, src_field: String },
 
     // Alternative (//)
     IsNullOrFalse { dst_var: u32, src: SlotId },
@@ -685,18 +688,35 @@ impl Flattener {
                 for (k, v) in pairs {
                     // Fast path: literal string key avoids creating/dropping a Value
                     if let Expr::Literal(Literal::Str(s)) = k {
-                        let vv = self.flatten_scalar(v, input_slot);
-                        if all_unique_str_keys {
-                            self.emit(JitOp::ObjPushStrKey { obj: out, key: s.clone(), val: vv });
-                        } else {
-                            self.emit(JitOp::ObjInsertStrKey { obj: out, key: s.clone(), val: vv });
+                        // Fused path: if value is .field from input, use ObjCopyField
+                        // to combine field extraction + push into a single runtime call
+                        let used_copy_field = if all_unique_str_keys {
+                            if let Expr::Index { expr: base, key } | Expr::IndexOpt { expr: base, key } = v {
+                                if matches!(base.as_ref(), Expr::Input) {
+                                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                        self.emit(JitOp::ObjCopyField {
+                                            obj: out, src: input_slot,
+                                            obj_key: s.clone(), src_field: field.clone(),
+                                        });
+                                        true
+                                    } else { false }
+                                } else { false }
+                            } else { false }
+                        } else { false };
+                        if !used_copy_field {
+                            let vv = self.flatten_scalar(v, input_slot);
+                            if all_unique_str_keys {
+                                self.emit(JitOp::ObjPushStrKey { obj: out, key: s.clone(), val: vv });
+                            } else {
+                                self.emit(JitOp::ObjInsertStrKey { obj: out, key: s.clone(), val: vv });
+                            }
                         }
                     } else {
                         let kv = self.flatten_scalar(k, input_slot);
                         let vv = self.flatten_scalar(v, input_slot);
                         self.emit(JitOp::ObjInsert { obj: out, key: kv, val: vv });
                     }
-                    // ObjInsert/ObjInsertStrKey takes ownership of val slot (ptr::read), no Drop needed
+                    // ObjInsert/ObjInsertStrKey/ObjCopyField takes ownership of val slot (ptr::read), no Drop needed
                 }
                 out
             }
@@ -1167,11 +1187,26 @@ impl Flattener {
                     };
                     for (k, v) in pairs {
                         if let Expr::Literal(Literal::Str(s)) = k {
-                            let vv = self.flatten_scalar(v, input_slot);
-                            if all_unique_str_keys {
-                                self.emit(JitOp::ObjPushStrKey { obj: out, key: s.clone(), val: vv });
-                            } else {
-                                self.emit(JitOp::ObjInsertStrKey { obj: out, key: s.clone(), val: vv });
+                            let used_copy_field = if all_unique_str_keys {
+                                if let Expr::Index { expr: base, key } | Expr::IndexOpt { expr: base, key } = v {
+                                    if matches!(base.as_ref(), Expr::Input) {
+                                        if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                            self.emit(JitOp::ObjCopyField {
+                                                obj: out, src: input_slot,
+                                                obj_key: s.clone(), src_field: field.clone(),
+                                            });
+                                            true
+                                        } else { false }
+                                    } else { false }
+                                } else { false }
+                            } else { false };
+                            if !used_copy_field {
+                                let vv = self.flatten_scalar(v, input_slot);
+                                if all_unique_str_keys {
+                                    self.emit(JitOp::ObjPushStrKey { obj: out, key: s.clone(), val: vv });
+                                } else {
+                                    self.emit(JitOp::ObjInsertStrKey { obj: out, key: s.clone(), val: vv });
+                                }
                             }
                         } else {
                             let kv = self.flatten_scalar(k, input_slot);
@@ -3525,6 +3560,30 @@ extern "C" fn jit_rt_obj_push_str_key(obj: *mut Value, key_ptr: *const u8, key_l
     }
 }
 
+/// Fused field extraction + push: look up src_field in src object, push clone into dst object with obj_key.
+/// Combines jit_rt_index_field + jit_rt_obj_push_str_key into one call, saving function call
+/// overhead and intermediate slot read/write.
+extern "C" fn jit_rt_obj_copy_field(
+    obj: *mut Value,
+    src: *const Value,
+    obj_key_ptr: *const u8, obj_key_len: usize,
+    src_field_ptr: *const u8, src_field_len: usize,
+) {
+    unsafe {
+        let src_field = std::str::from_utf8_unchecked(std::slice::from_raw_parts(src_field_ptr, src_field_len));
+        let val = match &*src {
+            Value::Obj(o) => o.get(src_field).cloned().unwrap_or(Value::Null),
+            Value::Null => Value::Null,
+            _ => Value::Null,
+        };
+        if let Value::Obj(o) = &mut *obj {
+            let obj_key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(obj_key_ptr, obj_key_len));
+            let k = crate::value::KeyStr::from(obj_key);
+            Rc::get_mut(o).unwrap_unchecked().push_unique(k, val);
+        }
+    }
+}
+
 // Alternative helper
 extern "C" fn jit_rt_is_null_or_false(v: *const Value) -> i64 {
     unsafe { match &*v { Value::Null | Value::False => 1, _ => 0 } }
@@ -3970,6 +4029,10 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 *use_count.entry(*obj).or_insert(0) += 1;
                 *use_count.entry(*val).or_insert(0) += 1;
             }
+            JitOp::ObjCopyField { obj, src, .. } => {
+                *use_count.entry(*obj).or_insert(0) += 1;
+                *use_count.entry(*src).or_insert(0) += 1;
+            }
             JitOp::IfTruthy { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
             JitOp::FieldIsTruthy { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
             JitOp::IsNullOrFalse { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
@@ -4021,6 +4084,10 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 JitOp::ObjInsertStrKey { obj, val, .. } | JitOp::ObjPushStrKey { obj, val, .. } => {
                     *use_count.entry(*obj).or_insert(0) += 1;
                     *use_count.entry(*val).or_insert(0) += 1;
+                }
+                JitOp::ObjCopyField { obj, src, .. } => {
+                    *use_count.entry(*obj).or_insert(0) += 1;
+                    *use_count.entry(*src).or_insert(0) += 1;
                 }
                 JitOp::IfTruthy { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
                 JitOp::FieldIsTruthy { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
@@ -4116,6 +4183,7 @@ impl JitCompiler {
             ("jit_rt_obj_insert", jit_rt_obj_insert as *const u8),
             ("jit_rt_obj_insert_str_key", jit_rt_obj_insert_str_key as *const u8),
             ("jit_rt_obj_push_str_key", jit_rt_obj_push_str_key as *const u8),
+            ("jit_rt_obj_copy_field", jit_rt_obj_copy_field as *const u8),
             ("jit_rt_is_null_or_false", jit_rt_is_null_or_false as *const u8),
             ("jit_rt_to_f64", jit_rt_to_f64 as *const u8),
             ("jit_rt_f64_to_num", jit_rt_f64_to_num as *const u8),
@@ -4493,6 +4561,19 @@ impl JitCompiler {
                         let v = slot_addr(&mut b, *val);
                         b.ins().call(rt["obj_push_str_key"], &[o, kp, kl, v]);
                     }
+                    JitOp::ObjCopyField { obj, src, obj_key, src_field } => {
+                        let o = slot_addr(&mut b, *obj);
+                        let s = slot_addr(&mut b, *src);
+                        let ok_leaked = Box::leak(obj_key.clone().into_boxed_str());
+                        self._string_constants.push(ok_leaked);
+                        let ok_p = b.ins().iconst(ptr_ty, ok_leaked.as_ptr() as i64);
+                        let ok_l = b.ins().iconst(ptr_ty, ok_leaked.len() as i64);
+                        let sf_leaked = Box::leak(src_field.clone().into_boxed_str());
+                        self._string_constants.push(sf_leaked);
+                        let sf_p = b.ins().iconst(ptr_ty, sf_leaked.as_ptr() as i64);
+                        let sf_l = b.ins().iconst(ptr_ty, sf_leaked.len() as i64);
+                        b.ins().call(rt["obj_copy_field"], &[o, s, ok_p, ok_l, sf_p, sf_l]);
+                    }
 
                     // Alternative
                     JitOp::IsNullOrFalse { dst_var, src } => {
@@ -4738,6 +4819,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("obj_insert", [p, p, p], []);
     decl!("obj_insert_str_key", [p, p, p, p], []);
     decl!("obj_push_str_key", [p, p, p, p], []);
+    decl!("obj_copy_field", [p, p, p, p, p, p], []);
     decl!("is_null_or_false", [p], [p]);
     decl!("to_f64", [p], [f]);
     decl!("f64_to_num", [p, f], []);
