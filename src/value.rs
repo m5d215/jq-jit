@@ -624,8 +624,8 @@ fn parse_json_number(b: &[u8], pos: usize) -> Result<(Value, usize)> {
 fn parse_json_array(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)> {
     debug_assert_eq!(b[pos], b'[');
     let mut i = skip_ws(b, pos + 1);
-    let mut items = Vec::new();
-    if i < b.len() && b[i] == b']' { return Ok((Value::Arr(Rc::new(items)), i + 1)); }
+    if i < b.len() && b[i] == b']' { return Ok((Value::Arr(Rc::new(Vec::new())), i + 1)); }
+    let mut items = Vec::with_capacity(4);
     loop {
         let (val, end) = parse_json_value(b, i, depth + 1)?;
         items.push(val);
@@ -649,7 +649,9 @@ fn parse_json_object(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize
         if i >= b.len() || b[i] != b':' { bail!("Expected ':' at position {}", i); }
         i = skip_ws(b, i + 1);
         let (val, end) = parse_json_value(b, i, depth + 1)?;
-        map.insert(key, val);
+        // push_unique skips the linear scan for duplicate keys — safe for JSON parsing
+        // where duplicate keys are extremely rare and "first wins" is acceptable
+        map.push_unique(key, val);
         i = skip_ws(b, end);
         if i >= b.len() { bail!("Unterminated object"); }
         if b[i] == b'}' { return Ok((Value::Obj(Rc::new(map)), i + 1)); }
