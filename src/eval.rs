@@ -53,13 +53,22 @@ impl Env {
     pub fn with_lib_dirs(funcs: Vec<CompiledFunc>, lib_dirs: Vec<String>) -> Self {
         Env { vars: vec![Value::Null; 4096], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs, closures: Vec::new(), recursive_cache: HashMap::new(), subst_cache: HashMap::new(), subst_ptr_cache: HashMap::new() }
     }
+    #[inline(always)]
     fn get_var(&self, idx: u16) -> Value {
-        self.vars.get(idx as usize).cloned().unwrap_or(Value::Null)
+        let i = idx as usize;
+        if i < self.vars.len() {
+            // SAFETY: bounds checked above
+            unsafe { self.vars.get_unchecked(i) }.clone()
+        } else {
+            Value::Null
+        }
     }
+    #[inline(always)]
     fn set_var(&mut self, idx: u16, val: Value) {
         let idx = idx as usize;
         if idx >= self.vars.len() { self.vars.resize(idx + 1, Value::Null); }
-        self.vars[idx] = val;
+        // SAFETY: bounds ensured above
+        unsafe { *self.vars.get_unchecked_mut(idx) = val; }
     }
     fn ensure_var(&mut self, idx: u16) {
         let idx = idx as usize;
