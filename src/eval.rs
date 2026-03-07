@@ -725,8 +725,8 @@ fn expr_uses_var(expr: &Expr, target: u16) -> bool {
     }
 }
 
-/// Extract f64 from a leaf expression (LoadVar, Input, Literal) without cloning.
-/// Used by the zero-clone BinOp fast path.
+/// Extract f64 from a leaf expression (LoadVar, Input, Literal) or simple
+/// numeric BinOp without cloning. Used by the zero-clone BinOp fast path.
 #[inline(always)]
 fn get_num_leaf(expr: &Expr, input: &Value, vars: &[Value]) -> Option<f64> {
     match expr {
@@ -739,6 +739,18 @@ fn get_num_leaf(expr: &Expr, input: &Value, vars: &[Value]) -> Option<f64> {
             if let Value::Num(n, _) = input { Some(*n) } else { None }
         }
         Expr::Literal(Literal::Num(n, _)) => Some(*n),
+        Expr::BinOp { op, lhs, rhs } => {
+            let ln = get_num_leaf(lhs, input, vars)?;
+            let rn = get_num_leaf(rhs, input, vars)?;
+            Some(match op {
+                BinOp::Add => ln + rn,
+                BinOp::Sub => ln - rn,
+                BinOp::Mul => ln * rn,
+                BinOp::Div => { if rn == 0.0 { return None; } ln / rn }
+                BinOp::Mod => { let yi = rn as i64; if yi == 0 { return None; } (ln as i64 % yi) as f64 }
+                _ => return None,
+            })
+        }
         _ => None,
     }
 }
@@ -917,11 +929,16 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
             }
         }
         Expr::LetBinding { var_index, value, body } => {
-            let val = eval_one(value, input, env)?;
-            let old = env.borrow().get_var(*var_index);
-            env.borrow_mut().set_var(*var_index, val);
+            let vi = *var_index as usize;
+            // Fast path: `. as $var` avoids eval_one dispatch for Input
+            let val = if matches!(value.as_ref(), Expr::Input) {
+                input.clone()
+            } else {
+                eval_one(value, input, env)?
+            };
+            let old = std::mem::replace(&mut env.borrow_mut().vars[vi], val);
             let result = eval_one(body, input, env);
-            env.borrow_mut().set_var(*var_index, old);
+            env.borrow_mut().vars[vi] = old;
             result
         }
         _ => Err(()),
@@ -1475,32 +1492,60 @@ pub fn eval(
                                 let else_is_break = matches!(else_branch.as_ref(), Expr::Break { .. });
                                 let else_is_empty = matches!(else_branch.as_ref(), Expr::Empty);
                                 if else_is_break || else_is_empty {
+                                    // If cond_body doesn't reference $item, we can evaluate it
+                                    // before storing val in env, avoiding clone + borrow_mut on
+                                    // the common (true) path.
+                                    let cond_needs_var = expr_uses_var(cond_body, vi);
                                     return eval(source, input, env, &mut |val| {
-                                        // Store val in env for any nested $item access in cond_body
-                                        let old_var = std::mem::replace(
-                                            &mut env.borrow_mut().vars[vi as usize], val.clone());
-                                        // Evaluate cond with val as input (replaces Pipe(LoadVar($item), cond_body))
-                                        let is_true = match eval_one(cond_body, &val, env) {
-                                            Ok(v) => v.is_truthy(),
-                                            Err(()) => {
-                                                let mut t = false;
-                                                eval(cond_body, val.clone(), env, &mut |v| {
-                                                    t = v.is_truthy(); Ok(true)
-                                                })?;
-                                                t
-                                            }
-                                        };
-                                        let cont = if is_true {
-                                            cb(val)?  // Output val directly, skip LoadVar re-read
-                                        } else if else_is_break {
+                                        if cond_needs_var {
+                                            // Slow path: cond_body references $item
+                                            let old_var = std::mem::replace(
+                                                &mut env.borrow_mut().vars[vi as usize], val.clone());
+                                            let is_true = match eval_one(cond_body, &val, env) {
+                                                Ok(v) => v.is_truthy(),
+                                                Err(()) => {
+                                                    let mut t = false;
+                                                    eval(cond_body, val.clone(), env, &mut |v| {
+                                                        t = v.is_truthy(); Ok(true)
+                                                    })?;
+                                                    t
+                                                }
+                                            };
+                                            let cont = if is_true {
+                                                cb(val)?
+                                            } else if else_is_break {
+                                                env.borrow_mut().vars[vi as usize] = old_var;
+                                                return eval(else_branch, Value::Null, env, cb);
+                                            } else {
+                                                true
+                                            };
                                             env.borrow_mut().vars[vi as usize] = old_var;
-                                            // Evaluate break to trigger label unwinding
-                                            return eval(else_branch, Value::Null, env, cb);
+                                            Ok(cont)
                                         } else {
-                                            true // Empty: no output
-                                        };
-                                        env.borrow_mut().vars[vi as usize] = old_var;
-                                        Ok(cont)
+                                            // Fast path: evaluate cond before touching env
+                                            let is_true = match eval_one(cond_body, &val, env) {
+                                                Ok(v) => v.is_truthy(),
+                                                Err(()) => {
+                                                    let mut t = false;
+                                                    eval(cond_body, val.clone(), env, &mut |v| {
+                                                        t = v.is_truthy(); Ok(true)
+                                                    })?;
+                                                    t
+                                                }
+                                            };
+                                            if is_true {
+                                                Ok(cb(val)?)
+                                            } else if else_is_break {
+                                                // Store val in env only for break path
+                                                let old_var = std::mem::replace(
+                                                    &mut env.borrow_mut().vars[vi as usize], val);
+                                                let r = eval(else_branch, Value::Null, env, cb);
+                                                env.borrow_mut().vars[vi as usize] = old_var;
+                                                r
+                                            } else {
+                                                Ok(true)
+                                            }
+                                        }
                                     });
                                 }
                             }
