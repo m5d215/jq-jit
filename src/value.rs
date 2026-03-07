@@ -88,6 +88,15 @@ fn pool_return(mut v: Vec<(KeyStr, Value)>) {
     }
 }
 
+/// Recycle Rc<ObjMap> from a consumed Value to avoid repeated alloc/dealloc.
+/// Call this instead of letting a Value drop when you know it won't be used again.
+#[inline]
+pub fn pool_value(v: Value) {
+    if let Value::Obj(rc) = v {
+        rc_objmap_pool_return(rc);
+    }
+}
+
 /// Vec-backed ordered map for JSON objects.
 /// Preserves insertion order, last-key-wins on duplicate insert.
 /// Optimized for small objects (typical JSON ≤10 keys): no hashing overhead.
@@ -865,8 +874,10 @@ fn parse_json_array(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)
 fn parse_json_object(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)> {
     debug_assert_eq!(b[pos], b'{');
     let mut i = skip_ws(b, pos + 1);
-    let mut map = new_objmap_with_capacity(4);
-    if i < b.len() && b[i] == b'}' { return Ok((Value::Obj(Rc::new(map)), i + 1)); }
+    if i < b.len() && b[i] == b'}' { return Ok((Value::Obj(Rc::new(ObjMap::new())), i + 1)); }
+    // Use Rc pool to recycle both the Rc allocation and the Vec buffer
+    let mut rc = rc_objmap_pool_get(4);
+    let map = Rc::get_mut(&mut rc).unwrap();
     loop {
         if i >= b.len() || b[i] != b'"' { bail!("Expected string key at position {}", i); }
         let (key, end) = parse_json_key(b, i)?;
@@ -879,7 +890,7 @@ fn parse_json_object(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize
         map.push_unique(key, val);
         i = skip_ws(b, end);
         if i >= b.len() { bail!("Unterminated object"); }
-        if b[i] == b'}' { return Ok((Value::Obj(Rc::new(map)), i + 1)); }
+        if b[i] == b'}' { return Ok((Value::Obj(rc), i + 1)); }
         if b[i] != b',' { bail!("Expected ',' or '}}' at position {}", i); }
         i = skip_ws(b, i + 1);
     }
