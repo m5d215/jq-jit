@@ -184,6 +184,8 @@ enum JitOp {
 
     // Control flow
     IfTruthy { src: SlotId, then_label: LabelId, else_label: LabelId },
+    /// Combined field access + truthiness check: avoids clone+drop of the field value.
+    FieldIsTruthy { base: SlotId, field: String, then_label: LabelId, else_label: LabelId },
     Jump { label: LabelId },
     Label { id: LabelId },
 
@@ -1084,12 +1086,23 @@ impl Flattener {
                     if !test.flatten_gen(else_branch, t_in) { return false; }
                 }
                 if is_scalar(cond) {
-                    let cond_val = self.flatten_scalar(cond, input_slot);
                     let then_lbl = self.alloc_label();
                     let else_lbl = self.alloc_label();
                     let done_lbl = self.alloc_label();
-                    self.emit(JitOp::IfTruthy { src: cond_val, then_label: then_lbl, else_label: else_lbl });
-                    self.emit(JitOp::Drop { slot: cond_val });
+                    // Optimization: if cond is .field on input, use combined FieldIsTruthy
+                    let used_field_truthy = if let Expr::Index { expr: base, key } | Expr::IndexOpt { expr: base, key } = cond.as_ref() {
+                        if matches!(base.as_ref(), Expr::Input) {
+                            if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                self.emit(JitOp::FieldIsTruthy { base: input_slot, field: field.clone(), then_label: then_lbl, else_label: else_lbl });
+                                true
+                            } else { false }
+                        } else { false }
+                    } else { false };
+                    if !used_field_truthy {
+                        let cond_val = self.flatten_scalar(cond, input_slot);
+                        self.emit(JitOp::IfTruthy { src: cond_val, then_label: then_lbl, else_label: else_lbl });
+                        self.emit(JitOp::Drop { slot: cond_val });
+                    }
 
                     self.emit(JitOp::Label { id: then_lbl });
                     self.flatten_gen(then_branch, input_slot);
@@ -3253,6 +3266,21 @@ extern "C" fn jit_rt_str_rc(dst: *mut Value, cs_ptr: *const crate::value::KeyStr
 extern "C" fn jit_rt_is_truthy(v: *const Value) -> i64 {
     unsafe { if (*v).is_truthy() { 1 } else { 0 } }
 }
+/// Combined field access + truthiness check — avoids cloning and dropping the field value.
+extern "C" fn jit_rt_field_is_truthy(base: *const Value, key_ptr: *const u8, key_len: usize) -> i64 {
+    unsafe {
+        match &*base {
+            Value::Obj(o) => {
+                let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key_ptr, key_len));
+                match o.get(key) {
+                    Some(v) => if v.is_truthy() { 1 } else { 0 },
+                    None => 0,
+                }
+            }
+            _ => 0,
+        }
+    }
+}
 extern "C" fn jit_rt_index_field(dst: *mut Value, base: *const Value, key_ptr: *const u8, key_len: usize) -> i64 {
     unsafe {
         match &*base {
@@ -3937,6 +3965,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 *use_count.entry(*val).or_insert(0) += 1;
             }
             JitOp::IfTruthy { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
+            JitOp::FieldIsTruthy { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
             JitOp::IsNullOrFalse { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
             JitOp::Alternative { primary, .. } => { *use_count.entry(*primary).or_insert(0) += 1; }
             JitOp::SetVar { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
@@ -3988,6 +4017,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                     *use_count.entry(*val).or_insert(0) += 1;
                 }
                 JitOp::IfTruthy { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
+                JitOp::FieldIsTruthy { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
                 JitOp::IsNullOrFalse { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
                 JitOp::Alternative { primary, .. } => { *use_count.entry(*primary).or_insert(0) += 1; }
                 JitOp::SetVar { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
@@ -4058,6 +4088,7 @@ impl JitCompiler {
             ("jit_rt_str", jit_rt_str as *const u8),
             ("jit_rt_str_rc", jit_rt_str_rc as *const u8),
             ("jit_rt_is_truthy", jit_rt_is_truthy as *const u8),
+            ("jit_rt_field_is_truthy", jit_rt_field_is_truthy as *const u8),
             ("jit_rt_index", jit_rt_index as *const u8),
             ("jit_rt_index_field", jit_rt_index_field as *const u8),
             ("jit_rt_binop", jit_rt_binop as *const u8),
@@ -4316,6 +4347,19 @@ impl JitCompiler {
                     JitOp::IfTruthy { src, then_label, else_label } => {
                         let sa = slot_addr(&mut b, *src);
                         let call = b.ins().call(rt["is_truthy"], &[sa]);
+                        let truthy = b.inst_results(call)[0];
+                        let zero = b.ins().iconst(ptr_ty, 0);
+                        let is_t = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, truthy, zero);
+                        b.ins().brif(is_t, label_blocks[*then_label as usize], &[], label_blocks[*else_label as usize], &[]);
+                        terminated = true;
+                    }
+                    JitOp::FieldIsTruthy { base, field, then_label, else_label } => {
+                        let ba = slot_addr(&mut b, *base);
+                        let leaked = Box::leak(field.clone().into_boxed_str());
+                        self._string_constants.push(leaked);
+                        let kp = b.ins().iconst(ptr_ty, leaked.as_ptr() as i64);
+                        let kl = b.ins().iconst(ptr_ty, leaked.len() as i64);
+                        let call = b.ins().call(rt["field_is_truthy"], &[ba, kp, kl]);
                         let truthy = b.inst_results(call)[0];
                         let zero = b.ins().iconst(ptr_ty, 0);
                         let is_t = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, truthy, zero);
@@ -4666,6 +4710,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("str", [p, p, p], []);
     decl!("str_rc", [p, p], []);
     decl!("is_truthy", [p], [p]);
+    decl!("field_is_truthy", [p, p, p], [p]);
     decl!("index", [p, p, p], [p]);
     decl!("index_field", [p, p, p, p], [p]);
     decl!("binop", [p, i, p, p], [p]);
