@@ -755,6 +755,65 @@ fn get_num_leaf(expr: &Expr, input: &Value, vars: &[Value]) -> Option<f64> {
     }
 }
 
+/// Evaluate a boolean expression entirely via f64 arithmetic, with one variable
+/// override (avoids env borrow/store). Returns Some(true/false) or None if not applicable.
+#[inline(always)]
+fn eval_bool_numeric(expr: &Expr, vars: &[Value], override_vi: u16, override_val: f64) -> Option<bool> {
+    match expr {
+        Expr::BinOp { op, lhs, rhs } => {
+            let ln = get_num_leaf_override(lhs, vars, override_vi, override_val)?;
+            let rn = get_num_leaf_override(rhs, vars, override_vi, override_val)?;
+            match op {
+                BinOp::Eq => Some(ln == rn),
+                BinOp::Ne => Some(ln != rn),
+                BinOp::Lt => Some(ln < rn),
+                BinOp::Gt => Some(ln > rn),
+                BinOp::Le => Some(ln <= rn),
+                BinOp::Ge => Some(ln >= rn),
+                BinOp::And => {
+                    if ln == 0.0 { return Some(false); }
+                    Some(rn != 0.0)
+                }
+                BinOp::Or => {
+                    if ln != 0.0 { return Some(true); }
+                    Some(rn != 0.0)
+                }
+                _ => None,
+            }
+        }
+        Expr::Not => None, // Not operates on input, complex
+        _ => None,
+    }
+}
+
+/// Like get_num_leaf but with a variable override for one var_index.
+#[inline(always)]
+fn get_num_leaf_override(expr: &Expr, vars: &[Value], override_vi: u16, override_val: f64) -> Option<f64> {
+    match expr {
+        Expr::LoadVar { var_index } => {
+            if *var_index == override_vi {
+                Some(override_val)
+            } else if let Some(Value::Num(n, _)) = vars.get(*var_index as usize) {
+                Some(*n)
+            } else { None }
+        }
+        Expr::Literal(Literal::Num(n, _)) => Some(*n),
+        Expr::BinOp { op, lhs, rhs } => {
+            let ln = get_num_leaf_override(lhs, vars, override_vi, override_val)?;
+            let rn = get_num_leaf_override(rhs, vars, override_vi, override_val)?;
+            Some(match op {
+                BinOp::Add => ln + rn,
+                BinOp::Sub => ln - rn,
+                BinOp::Mul => ln * rn,
+                BinOp::Div => { if rn == 0.0 { return None; } ln / rn }
+                BinOp::Mod => { let yi = rn as i64; if yi == 0 { return None; } (ln as i64 % yi) as f64 }
+                _ => return None,
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Fast path for scalar expressions: evaluate without callback overhead.
 /// Returns Ok(value) for simple expressions, Err for generators/complex expressions.
 #[inline]
@@ -1184,16 +1243,56 @@ pub fn eval(
                             if matches!(all_gen.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)) =>
                         {
                             let mut all_true = true;
+                            // Detect `. as $var | numeric_body` to bypass env entirely
+                            let no_closures = env.borrow().closures.is_empty();
+                            let numeric_bind = if no_closures {
+                                if let Expr::LetBinding { var_index, value, body } = predicate.as_ref() {
+                                    if matches!(value.as_ref(), Expr::Input) && !expr_uses_outer_input(body) {
+                                        // Test if body is a pure numeric boolean expr
+                                        if eval_bool_numeric(body, &env.borrow().vars, *var_index, 0.0).is_some() {
+                                            Some((*var_index, body.as_ref()))
+                                        } else { None }
+                                    } else { None }
+                                } else { None }
+                            } else { None };
+                            let let_bind = if numeric_bind.is_none() {
+                                if let Expr::LetBinding { var_index, value, body } = predicate.as_ref() {
+                                    if matches!(value.as_ref(), Expr::Input) && !expr_uses_outer_input(body) {
+                                        Some((*var_index, body.as_ref()))
+                                    } else { None }
+                                } else { None }
+                            } else { None };
                             eval(generator, input, env, &mut |elem| {
-                                let pred_result = eval_one(predicate, &elem, env);
-                                match pred_result {
-                                    Ok(v) => {
-                                        if v.is_truthy() { Ok(true) } else { all_true = false; Ok(false) }
+                                if let Some((vi, body)) = numeric_bind {
+                                    // Ultra-fast path: pure f64 predicate, no env writes
+                                    if let Value::Num(n, _) = &elem {
+                                        let result = eval_bool_numeric(body, &env.borrow().vars, vi, *n).unwrap();
+                                        return if result { Ok(true) } else { all_true = false; Ok(false) };
                                     }
-                                    Err(()) => {
-                                        let mut truthy = false;
-                                        eval(predicate, elem, env, &mut |v| { truthy = v.is_truthy(); Ok(true) })?;
-                                        if truthy { Ok(true) } else { all_true = false; Ok(false) }
+                                }
+                                if let Some((vi, body)) = let_bind {
+                                    let old = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], elem);
+                                    let is_true = match eval_one(body, &Value::Null, env) {
+                                        Ok(v) => v.is_truthy(),
+                                        Err(()) => {
+                                            let mut t = false;
+                                            eval(body, Value::Null, env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
+                                            t
+                                        }
+                                    };
+                                    env.borrow_mut().vars[vi as usize] = old;
+                                    if is_true { Ok(true) } else { all_true = false; Ok(false) }
+                                } else {
+                                    let pred_result = eval_one(predicate, &elem, env);
+                                    match pred_result {
+                                        Ok(v) => {
+                                            if v.is_truthy() { Ok(true) } else { all_true = false; Ok(false) }
+                                        }
+                                        Err(()) => {
+                                            let mut truthy = false;
+                                            eval(predicate, elem, env, &mut |v| { truthy = v.is_truthy(); Ok(true) })?;
+                                            if truthy { Ok(true) } else { all_true = false; Ok(false) }
+                                        }
                                     }
                                 }
                             })?;
@@ -1203,16 +1302,45 @@ pub fn eval(
                             if matches!(any_gen.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)) =>
                         {
                             let mut any_true = false;
+                            let let_bind = if let Expr::LetBinding { var_index, value, body } = predicate.as_ref() {
+                                if matches!(value.as_ref(), Expr::Input) && !expr_uses_outer_input(body) {
+                                    Some((*var_index, body.as_ref()))
+                                } else { None }
+                            } else { None };
                             eval(generator, input, env, &mut |elem| {
-                                let pred_result = eval_one(predicate, &elem, env);
-                                match pred_result {
-                                    Ok(v) => {
-                                        if v.is_truthy() { any_true = true; Ok(false) } else { Ok(true) }
+                                if let Some((vi, body)) = let_bind {
+                                    if let Value::Num(n, _) = &elem {
+                                        let e = env.borrow();
+                                        if e.closures.is_empty() {
+                                            if let Some(result) = eval_bool_numeric(body, &e.vars, vi, *n) {
+                                                drop(e);
+                                                return if result { any_true = true; Ok(false) } else { Ok(true) };
+                                            }
+                                        }
+                                        drop(e);
                                     }
-                                    Err(()) => {
-                                        let mut truthy = false;
-                                        eval(predicate, elem, env, &mut |v| { truthy = v.is_truthy(); Ok(true) })?;
-                                        if truthy { any_true = true; Ok(false) } else { Ok(true) }
+                                    let old = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], elem);
+                                    let is_true = match eval_one(body, &Value::Null, env) {
+                                        Ok(v) => v.is_truthy(),
+                                        Err(()) => {
+                                            let mut t = false;
+                                            eval(body, Value::Null, env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
+                                            t
+                                        }
+                                    };
+                                    env.borrow_mut().vars[vi as usize] = old;
+                                    if is_true { any_true = true; Ok(false) } else { Ok(true) }
+                                } else {
+                                    let pred_result = eval_one(predicate, &elem, env);
+                                    match pred_result {
+                                        Ok(v) => {
+                                            if v.is_truthy() { any_true = true; Ok(false) } else { Ok(true) }
+                                        }
+                                        Err(()) => {
+                                            let mut truthy = false;
+                                            eval(predicate, elem, env, &mut |v| { truthy = v.is_truthy(); Ok(true) })?;
+                                            if truthy { any_true = true; Ok(false) } else { Ok(true) }
+                                        }
                                     }
                                 }
                             })?;
@@ -1937,16 +2065,45 @@ pub fn eval(
 
         Expr::AllShort { generator, predicate } => {
             let mut all_true = true;
+            let let_bind = if let Expr::LetBinding { var_index, value, body } = predicate.as_ref() {
+                if matches!(value.as_ref(), Expr::Input) && !expr_uses_outer_input(body) {
+                    Some((*var_index, body.as_ref()))
+                } else { None }
+            } else { None };
             eval(generator, input.clone(), env, &mut |elem| {
-                let pred_result = eval_one(predicate, &elem, env);
-                match pred_result {
-                    Ok(v) => {
-                        if v.is_truthy() { Ok(true) } else { all_true = false; Ok(false) }
+                if let Some((vi, body)) = let_bind {
+                    if let Value::Num(n, _) = &elem {
+                        let e = env.borrow();
+                        if e.closures.is_empty() {
+                            if let Some(result) = eval_bool_numeric(body, &e.vars, vi, *n) {
+                                drop(e);
+                                return if result { Ok(true) } else { all_true = false; Ok(false) };
+                            }
+                        }
+                        drop(e);
                     }
-                    Err(()) => {
-                        let mut truthy = false;
-                        eval(predicate, elem, env, &mut |v| { truthy = v.is_truthy(); Ok(true) })?;
-                        if truthy { Ok(true) } else { all_true = false; Ok(false) }
+                    let old = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], elem);
+                    let is_true = match eval_one(body, &Value::Null, env) {
+                        Ok(v) => v.is_truthy(),
+                        Err(()) => {
+                            let mut t = false;
+                            eval(body, Value::Null, env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
+                            t
+                        }
+                    };
+                    env.borrow_mut().vars[vi as usize] = old;
+                    if is_true { Ok(true) } else { all_true = false; Ok(false) }
+                } else {
+                    let pred_result = eval_one(predicate, &elem, env);
+                    match pred_result {
+                        Ok(v) => {
+                            if v.is_truthy() { Ok(true) } else { all_true = false; Ok(false) }
+                        }
+                        Err(()) => {
+                            let mut truthy = false;
+                            eval(predicate, elem, env, &mut |v| { truthy = v.is_truthy(); Ok(true) })?;
+                            if truthy { Ok(true) } else { all_true = false; Ok(false) }
+                        }
                     }
                 }
             })?;
@@ -1955,16 +2112,45 @@ pub fn eval(
 
         Expr::AnyShort { generator, predicate } => {
             let mut any_true = false;
+            let let_bind = if let Expr::LetBinding { var_index, value, body } = predicate.as_ref() {
+                if matches!(value.as_ref(), Expr::Input) && !expr_uses_outer_input(body) {
+                    Some((*var_index, body.as_ref()))
+                } else { None }
+            } else { None };
             eval(generator, input.clone(), env, &mut |elem| {
-                let pred_result = eval_one(predicate, &elem, env);
-                match pred_result {
-                    Ok(v) => {
-                        if v.is_truthy() { any_true = true; Ok(false) } else { Ok(true) }
+                if let Some((vi, body)) = let_bind {
+                    if let Value::Num(n, _) = &elem {
+                        let e = env.borrow();
+                        if e.closures.is_empty() {
+                            if let Some(result) = eval_bool_numeric(body, &e.vars, vi, *n) {
+                                drop(e);
+                                return if result { any_true = true; Ok(false) } else { Ok(true) };
+                            }
+                        }
+                        drop(e);
                     }
-                    Err(()) => {
-                        let mut truthy = false;
-                        eval(predicate, elem, env, &mut |v| { truthy = v.is_truthy(); Ok(true) })?;
-                        if truthy { any_true = true; Ok(false) } else { Ok(true) }
+                    let old = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], elem);
+                    let is_true = match eval_one(body, &Value::Null, env) {
+                        Ok(v) => v.is_truthy(),
+                        Err(()) => {
+                            let mut t = false;
+                            eval(body, Value::Null, env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
+                            t
+                        }
+                    };
+                    env.borrow_mut().vars[vi as usize] = old;
+                    if is_true { any_true = true; Ok(false) } else { Ok(true) }
+                } else {
+                    let pred_result = eval_one(predicate, &elem, env);
+                    match pred_result {
+                        Ok(v) => {
+                            if v.is_truthy() { any_true = true; Ok(false) } else { Ok(true) }
+                        }
+                        Err(()) => {
+                            let mut truthy = false;
+                            eval(predicate, elem, env, &mut |v| { truthy = v.is_truthy(); Ok(true) })?;
+                            if truthy { any_true = true; Ok(false) } else { Ok(true) }
+                        }
                     }
                 }
             })?;
