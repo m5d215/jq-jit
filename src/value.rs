@@ -685,7 +685,29 @@ fn parse_json_value(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)
             else if b.get(pos..pos+4) == Some(b"-NaN") { Ok((Value::Num(f64::NAN, None), pos + 4)) }
             else { parse_json_number(b, pos) }
         }
-        b'0'..=b'9' => parse_json_number(b, pos),
+        b'0' => {
+            // Fast path for zero or numbers starting with 0 (must be just "0" unless "0." etc)
+            let j = pos + 1;
+            if j >= b.len() || (b[j] != b'.' && b[j] != b'e' && b[j] != b'E' && !b[j].is_ascii_digit()) {
+                Ok((Value::Num(0.0, None), j))
+            } else {
+                parse_json_number(b, pos)
+            }
+        }
+        b'1'..=b'9' => {
+            // Fast inline path: accumulate digits in single pass for non-negative integers
+            let mut n: i64 = (b[pos] - b'0') as i64;
+            let mut j = pos + 1;
+            while j < b.len() && b[j].is_ascii_digit() {
+                n = n * 10 + (b[j] - b'0') as i64;
+                j += 1;
+            }
+            if (j >= b.len() || (b[j] != b'.' && b[j] != b'e' && b[j] != b'E')) && (j - pos) <= 15 {
+                Ok((Value::Num(n as f64, None), j))
+            } else {
+                parse_json_number(b, pos)
+            }
+        }
         c => bail!("Unexpected character '{}' at position {}", c as char, pos),
     }
 }
