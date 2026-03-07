@@ -434,10 +434,9 @@ pub fn rt_add(a: &Value, b: &Value) -> Result<Value> {
     match (a, b) {
         (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::Num(x + y, None)),
         (Value::Str(x), Value::Str(y)) => {
-            let mut s = String::with_capacity(x.len() + y.len());
-            s.push_str(x.as_str());
-            s.push_str(y.as_str());
-            Ok(Value::from_string(s))
+            let mut cs = x.clone();
+            cs.push_str(y.as_str());
+            Ok(Value::Str(cs))
         }
         (Value::Arr(x), Value::Arr(y)) => {
             let mut result = (**x).clone();

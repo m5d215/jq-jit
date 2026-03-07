@@ -3617,12 +3617,12 @@ extern "C" fn jit_rt_binop(dst: *mut Value, op: i32, lhs: *const Value, rhs: *co
             }
         }
         // Fast path for Str + Str (string concatenation)
+        // Use CompactString directly to avoid intermediate String heap allocation for short results.
         if op == 0 {
             if let (Value::Str(a), Value::Str(b)) = (&*lhs, &*rhs) {
-                let mut s = String::with_capacity(a.len() + b.len());
-                s.push_str(a.as_str());
-                s.push_str(b.as_str());
-                std::ptr::write(dst, Value::from_string(s));
+                let mut cs = crate::value::KeyStr::new(a.as_str());
+                cs.push_str(b.as_str());
+                std::ptr::write(dst, Value::Str(cs));
                 return 0;
             }
         }
