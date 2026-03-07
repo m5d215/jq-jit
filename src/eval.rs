@@ -730,8 +730,13 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
             Literal::Str(s) => Value::from_str(s),
         }),
         Expr::LoadVar { var_index } => {
+            let e = env.borrow();
+            if e.closures.is_empty() {
+                return Ok(e.get_var(*var_index));
+            }
             // Resolve closure chains iteratively for LoadVar→LoadVar→...→env
             let mut idx = *var_index;
+            drop(e);
             loop {
                 let e = env.borrow();
                 if let Some(c) = e.closures.iter().rev().find(|c| c.0 == idx) {
@@ -769,6 +774,26 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
                 _ => {
                     let r = eval_one(rhs, input, env)?;
                     let l = eval_one(lhs, input, env)?;
+                    // Fast path: both numeric, avoid function call dispatch
+                    if let (Value::Num(ln, _), Value::Num(rn, _)) = (&l, &r) {
+                        return Ok(match *op {
+                            BinOp::Add => Value::Num(ln + rn, None),
+                            BinOp::Sub => Value::Num(ln - rn, None),
+                            BinOp::Mul => Value::Num(ln * rn, None),
+                            BinOp::Mod => {
+                                let yi = *rn as i64;
+                                if yi == 0 { return eval_binop(*op, &l, &r).map_err(|_| ()); }
+                                Value::Num((*ln as i64 % yi) as f64, None)
+                            }
+                            BinOp::Eq => if ln == rn { Value::True } else { Value::False },
+                            BinOp::Ne => if ln != rn { Value::True } else { Value::False },
+                            BinOp::Lt => if ln < rn { Value::True } else { Value::False },
+                            BinOp::Gt => if ln > rn { Value::True } else { Value::False },
+                            BinOp::Le => if ln <= rn { Value::True } else { Value::False },
+                            BinOp::Ge => if ln >= rn { Value::True } else { Value::False },
+                            _ => return eval_binop(*op, &l, &r).map_err(|_| ()),
+                        });
+                    }
                     eval_binop(*op, &l, &r).map_err(|_| ())
                 }
             }
@@ -1265,8 +1290,15 @@ pub fn eval(
         }
 
         Expr::LoadVar { var_index } => {
+            let e = env.borrow();
+            if e.closures.is_empty() {
+                let val = e.get_var(*var_index);
+                drop(e);
+                return cb(val);
+            }
             // Resolve closure chains iteratively for LoadVar→LoadVar→...→env
             let mut idx = *var_index;
+            drop(e);
             loop {
                 let e = env.borrow();
                 if let Some(c) = e.closures.iter().rev().find(|c| c.0 == idx) {
