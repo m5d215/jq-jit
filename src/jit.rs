@@ -3199,6 +3199,12 @@ extern "C" fn jit_rt_str(dst: *mut Value, ptr: *const u8, len: usize) {
         std::ptr::write(dst, Value::Str(Rc::new(s.to_string())));
     }
 }
+/// Clone a pre-allocated Rc<String> constant (just Rc increment, no allocation).
+extern "C" fn jit_rt_str_rc(dst: *mut Value, rc_ptr: *const Rc<String>) {
+    unsafe {
+        std::ptr::write(dst, Value::Str(Rc::clone(&*rc_ptr)));
+    }
+}
 extern "C" fn jit_rt_is_truthy(v: *const Value) -> i64 {
     unsafe { if (*v).is_truthy() { 1 } else { 0 } }
 }
@@ -3835,6 +3841,8 @@ pub struct JitCompiler {
     rt_funcs: HashMap<&'static str, FuncId>,
     _string_constants: Vec<&'static str>,
     _repr_constants: Vec<Box<Rc<str>>>,
+    /// Pre-allocated Rc<String> constants for string literals in JIT code.
+    _rc_str_constants: Vec<Box<Rc<String>>>,
 }
 
 impl JitCompiler {
@@ -3855,6 +3863,7 @@ impl JitCompiler {
             ("jit_rt_num", jit_rt_num as *const u8),
             ("jit_rt_num_repr", jit_rt_num_repr as *const u8),
             ("jit_rt_str", jit_rt_str as *const u8),
+            ("jit_rt_str_rc", jit_rt_str_rc as *const u8),
             ("jit_rt_is_truthy", jit_rt_is_truthy as *const u8),
             ("jit_rt_index", jit_rt_index as *const u8),
             ("jit_rt_index_field", jit_rt_index_field as *const u8),
@@ -3901,6 +3910,7 @@ impl JitCompiler {
             module, ctx: cranelift_codegen::Context::new(),
             func_ctx: FunctionBuilderContext::new(), rt_funcs,
             _string_constants: Vec::new(), _repr_constants: Vec::new(),
+            _rc_str_constants: Vec::new(),
         })
     }
 
@@ -4048,11 +4058,13 @@ impl JitCompiler {
                     }
                     JitOp::Str { dst, val } => {
                         let a = slot_addr(&mut b, *dst);
-                        let leaked = Box::leak(val.clone().into_boxed_str());
-                        self._string_constants.push(leaked);
-                        let sp = b.ins().iconst(ptr_ty, leaked.as_ptr() as i64);
-                        let sl = b.ins().iconst(ptr_ty, leaked.len() as i64);
-                        b.ins().call(rt["str"], &[a, sp, sl]);
+                        // Pre-allocate Rc<String> and just clone the Rc (refcount bump)
+                        let rc = Rc::new(val.clone());
+                        let boxed = Box::new(rc);
+                        let rc_ptr = &*boxed as *const Rc<String>;
+                        self._rc_str_constants.push(boxed);
+                        let rp = b.ins().iconst(ptr_ty, rc_ptr as i64);
+                        b.ins().call(rt["str_rc"], &[a, rp]);
                     }
                     JitOp::Index { dst, base, key } => {
                         let d = slot_addr(&mut b, *dst);
@@ -4440,6 +4452,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("num", [p, f], []);
     decl!("num_repr", [p, f, p], []);
     decl!("str", [p, p, p], []);
+    decl!("str_rc", [p, p], []);
     decl!("is_truthy", [p], [p]);
     decl!("index", [p, p, p], [p]);
     decl!("index_field", [p, p, p, p], [p]);
