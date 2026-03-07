@@ -457,6 +457,53 @@ pub fn rt_add(a: &Value, b: &Value) -> Result<Value> {
     }
 }
 
+/// Like rt_add but takes ownership of the left operand for in-place mutation.
+pub fn rt_add_owned(a: Value, b: &Value) -> Result<Value> {
+    match (a, b) {
+        (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::Num(x + y, None)),
+        (Value::Str(x), Value::Str(y)) => {
+            Ok(Value::from_string(format!("{}{}", x, y)))
+        }
+        (Value::Arr(x), Value::Arr(y)) => {
+            match Rc::try_unwrap(x) {
+                Ok(mut vec) => {
+                    vec.extend(y.iter().cloned());
+                    Ok(Value::Arr(Rc::new(vec)))
+                }
+                Err(x) => {
+                    let mut result = (*x).clone();
+                    result.extend(y.iter().cloned());
+                    Ok(Value::Arr(Rc::new(result)))
+                }
+            }
+        }
+        (Value::Obj(x), Value::Obj(y)) => {
+            match Rc::try_unwrap(x) {
+                Ok(mut map) => {
+                    for (k, v) in y.iter() {
+                        map.insert(k.clone(), v.clone());
+                    }
+                    Ok(Value::Obj(Rc::new(map)))
+                }
+                Err(x) => {
+                    let mut result = (*x).clone();
+                    for (k, v) in y.iter() {
+                        result.insert(k.clone(), v.clone());
+                    }
+                    Ok(Value::Obj(Rc::new(result)))
+                }
+            }
+        }
+        (Value::Null, x) => Ok(x.clone()),
+        (a, Value::Null) => Ok(a),
+        (a, b) => bail!(
+            "{} and {} cannot be added",
+            errdesc(&a),
+            errdesc(b)
+        ),
+    }
+}
+
 pub fn rt_sub(a: &Value, b: &Value) -> Result<Value> {
     match (a, b) {
         (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::Num(x - y, None)),
