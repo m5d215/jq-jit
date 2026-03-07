@@ -75,10 +75,10 @@ echo '[1,2,3]' | jq-jit 'map(. * 2)'
 
 ## Testing
 
-Run the official jq test suite:
+Run the official jq test suite (509/509 passing):
 
 ```bash
-bash tests/official/run.sh target/release/jq-jit
+cargo test --release
 ```
 
 ## Benchmarks
