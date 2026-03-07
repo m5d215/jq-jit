@@ -208,6 +208,7 @@ enum JitOp {
     // Object construction
     ObjNew { dst: SlotId, cap: u16 },
     ObjInsert { obj: SlotId, key: SlotId, val: SlotId },
+    ObjInsertStrKey { obj: SlotId, key: String, val: SlotId },
 
     // Alternative (//)
     IsNullOrFalse { dst_var: u32, src: SlotId },
@@ -665,10 +666,16 @@ impl Flattener {
                 let out = self.alloc_slot();
                 self.emit(JitOp::ObjNew { dst: out, cap: pairs.len() as u16 });
                 for (k, v) in pairs {
-                    let kv = self.flatten_scalar(k, input_slot);
-                    let vv = self.flatten_scalar(v, input_slot);
-                    self.emit(JitOp::ObjInsert { obj: out, key: kv, val: vv });
-                    // ObjInsert takes ownership of key and val slots (ptr::read), no Drop needed
+                    // Fast path: literal string key avoids creating/dropping a Value
+                    if let Expr::Literal(Literal::Str(s)) = k {
+                        let vv = self.flatten_scalar(v, input_slot);
+                        self.emit(JitOp::ObjInsertStrKey { obj: out, key: s.clone(), val: vv });
+                    } else {
+                        let kv = self.flatten_scalar(k, input_slot);
+                        let vv = self.flatten_scalar(v, input_slot);
+                        self.emit(JitOp::ObjInsert { obj: out, key: kv, val: vv });
+                    }
+                    // ObjInsert/ObjInsertStrKey takes ownership of val slot (ptr::read), no Drop needed
                 }
                 out
             }
@@ -1116,10 +1123,14 @@ impl Flattener {
                     let out = self.alloc_slot();
                     self.emit(JitOp::ObjNew { dst: out, cap: pairs.len() as u16 });
                     for (k, v) in pairs {
-                        let kv = self.flatten_scalar(k, input_slot);
-                        let vv = self.flatten_scalar(v, input_slot);
-                        self.emit(JitOp::ObjInsert { obj: out, key: kv, val: vv });
-                        // ObjInsert takes ownership of key and val slots (ptr::read), no Drop needed
+                        if let Expr::Literal(Literal::Str(s)) = k {
+                            let vv = self.flatten_scalar(v, input_slot);
+                            self.emit(JitOp::ObjInsertStrKey { obj: out, key: s.clone(), val: vv });
+                        } else {
+                            let kv = self.flatten_scalar(k, input_slot);
+                            let vv = self.flatten_scalar(v, input_slot);
+                            self.emit(JitOp::ObjInsert { obj: out, key: kv, val: vv });
+                        }
                     }
                     self.emit_yield(out);
                     self.emit(JitOp::Drop { slot: out });
@@ -3425,6 +3436,18 @@ extern "C" fn jit_rt_obj_insert(obj: *mut Value, key: *mut Value, val: *mut Valu
     }
 }
 
+/// Insert into object with raw string key — avoids creating/dropping a Value for the key.
+extern "C" fn jit_rt_obj_insert_str_key(obj: *mut Value, key_ptr: *const u8, key_len: usize, val: *mut Value) {
+    unsafe {
+        let val_val = std::ptr::read(val);
+        if let Value::Obj(o) = &mut *obj {
+            let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key_ptr, key_len));
+            let k = crate::value::KeyStr::from(key);
+            Rc::get_mut(o).unwrap_unchecked().insert(k, val_val);
+        }
+    }
+}
+
 // Alternative helper
 extern "C" fn jit_rt_is_null_or_false(v: *const Value) -> i64 {
     unsafe { match &*v { Value::Null | Value::False => 1, _ => 0 } }
@@ -3883,6 +3906,7 @@ impl JitCompiler {
             ("jit_rt_collect_finish", jit_rt_collect_finish as *const u8),
             ("jit_rt_obj_new", jit_rt_obj_new as *const u8),
             ("jit_rt_obj_insert", jit_rt_obj_insert as *const u8),
+            ("jit_rt_obj_insert_str_key", jit_rt_obj_insert_str_key as *const u8),
             ("jit_rt_is_null_or_false", jit_rt_is_null_or_false as *const u8),
             ("jit_rt_to_f64", jit_rt_to_f64 as *const u8),
             ("jit_rt_f64_to_num", jit_rt_f64_to_num as *const u8),
@@ -4230,6 +4254,15 @@ impl JitCompiler {
                         let v = slot_addr(&mut b, *val);
                         b.ins().call(rt["obj_insert"], &[o, k, v]);
                     }
+                    JitOp::ObjInsertStrKey { obj, key, val } => {
+                        let o = slot_addr(&mut b, *obj);
+                        let leaked = Box::leak(key.clone().into_boxed_str());
+                        self._string_constants.push(leaked);
+                        let kp = b.ins().iconst(ptr_ty, leaked.as_ptr() as i64);
+                        let kl = b.ins().iconst(ptr_ty, leaked.len() as i64);
+                        let v = slot_addr(&mut b, *val);
+                        b.ins().call(rt["obj_insert_str_key"], &[o, kp, kl, v]);
+                    }
 
                     // Alternative
                     JitOp::IsNullOrFalse { dst_var, src } => {
@@ -4472,6 +4505,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("collect_finish", [p, p], []);
     decl!("obj_new", [p, p], []);
     decl!("obj_insert", [p, p, p], []);
+    decl!("obj_insert_str_key", [p, p, p, p], []);
     decl!("is_null_or_false", [p], [p]);
     decl!("to_f64", [p], [f]);
     decl!("f64_to_num", [p, f], []);
