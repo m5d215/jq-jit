@@ -165,7 +165,8 @@ fn main() {
         }
     };
 
-    // Skip JIT for null-input: filter runs once, eval is faster than JIT compile + run
+    // Skip JIT for null-input: these filters typically use complex features (label/break,
+    // foreach, import) that fall back to eval anyway, wasting compilation time.
     let use_jit = !null_input;
     let filter = match Filter::with_options(&filter_str, &lib_dirs, use_jit) {
         Ok(f) => f,

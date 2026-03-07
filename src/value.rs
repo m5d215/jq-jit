@@ -1294,31 +1294,40 @@ fn push_compact_value(buf: &mut Vec<u8>, v: &Value) {
 #[inline]
 fn push_json_string_to_vec(buf: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
-    buf.push(b'"');
-    // Fast path: no escapes needed
+    // Fast path: no escapes needed — write "str" in one contiguous block
     let needs_escape = bytes.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20);
     if !needs_escape {
-        buf.extend_from_slice(bytes);
-    } else {
-        for &b in bytes {
-            match b {
-                b'"' => buf.extend_from_slice(b"\\\""),
-                b'\\' => buf.extend_from_slice(b"\\\\"),
-                b'\n' => buf.extend_from_slice(b"\\n"),
-                b'\r' => buf.extend_from_slice(b"\\r"),
-                b'\t' => buf.extend_from_slice(b"\\t"),
-                0x08 => buf.extend_from_slice(b"\\b"),
-                0x0c => buf.extend_from_slice(b"\\f"),
-                c if c < 0x20 => {
-                    let hex = [
-                        b'\\', b'u', b'0', b'0',
-                        b"0123456789abcdef"[(c >> 4) as usize],
-                        b"0123456789abcdef"[(c & 0xf) as usize],
-                    ];
-                    buf.extend_from_slice(&hex);
-                }
-                _ => buf.push(b),
+        buf.reserve(bytes.len() + 2);
+        // Safety: we just reserved enough space
+        unsafe {
+            let dst = buf.as_mut_ptr().add(buf.len());
+            *dst = b'"';
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.add(1), bytes.len());
+            *dst.add(1 + bytes.len()) = b'"';
+            buf.set_len(buf.len() + bytes.len() + 2);
+        }
+        return;
+    }
+    // Slow path: has escapes
+    buf.push(b'"');
+    for &b in bytes {
+        match b {
+            b'"' => buf.extend_from_slice(b"\\\""),
+            b'\\' => buf.extend_from_slice(b"\\\\"),
+            b'\n' => buf.extend_from_slice(b"\\n"),
+            b'\r' => buf.extend_from_slice(b"\\r"),
+            b'\t' => buf.extend_from_slice(b"\\t"),
+            0x08 => buf.extend_from_slice(b"\\b"),
+            0x0c => buf.extend_from_slice(b"\\f"),
+            c if c < 0x20 => {
+                let hex = [
+                    b'\\', b'u', b'0', b'0',
+                    b"0123456789abcdef"[(c >> 4) as usize],
+                    b"0123456789abcdef"[(c & 0xf) as usize],
+                ];
+                buf.extend_from_slice(&hex);
             }
+            _ => buf.push(b),
         }
     }
     buf.push(b'"');
