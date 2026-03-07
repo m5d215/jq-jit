@@ -1827,7 +1827,12 @@ pub fn eval(
                         Ok(cont)
                     } else {
                         let old_var = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], val);
-                        eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
+                        // Try scalar fast path for update to avoid callback dispatch
+                        if let Ok(new_acc) = eval_one(update, &acc_val, env) {
+                            acc = new_acc;
+                        } else {
+                            eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
+                        }
                         let cont = if let Some(extract_expr) = extract {
                             match eval_one_filter(extract_expr, &acc, env) {
                                 Ok(Some(v)) => cb(v)?,
