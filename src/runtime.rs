@@ -955,7 +955,7 @@ fn rt_tonumber(v: &Value) -> Result<Value> {
             }
             // Strip leading '+' for compatibility with jq
             let parse_str = s_ref.strip_prefix('+').unwrap_or(s_ref);
-            match parse_str.parse::<f64>() {
+            match fast_float::parse(parse_str) {
                 Ok(n) => Ok(Value::Num(n, None)),
                 Err(_) => bail!("Invalid numeric literal: {}", crate::value::value_to_json(v)),
             }
