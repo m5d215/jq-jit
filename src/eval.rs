@@ -814,18 +814,25 @@ pub fn eval(
             let ai = *acc_index;
             let acc_used_in_update = expr_uses_var(update, ai);
             eval(source, input.clone(), env, &mut |val| {
-                let old_var = env.borrow().get_var(vi);
-                env.borrow_mut().set_var(vi, val);
                 let acc_val = std::mem::replace(&mut acc, Value::Null);
                 if acc_used_in_update {
-                    let old_acc = env.borrow().get_var(ai);
-                    env.borrow_mut().set_var(ai, acc_val.clone());
+                    let (old_var, old_acc) = {
+                        let mut e = env.borrow_mut();
+                        let ov = std::mem::replace(&mut e.vars[vi as usize], val);
+                        let oa = std::mem::replace(&mut e.vars[ai as usize], acc_val.clone());
+                        (ov, oa)
+                    };
                     eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
-                    env.borrow_mut().set_var(ai, old_acc);
+                    {
+                        let mut e = env.borrow_mut();
+                        e.vars[ai as usize] = old_acc;
+                        e.vars[vi as usize] = old_var;
+                    }
                 } else {
+                    let old_var = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], val);
                     eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
+                    env.borrow_mut().vars[vi as usize] = old_var;
                 }
-                env.borrow_mut().set_var(vi, old_var);
                 Ok(true)
             })?;
             cb(acc)
@@ -839,29 +846,35 @@ pub fn eval(
             eval(init, input.clone(), env, &mut |init_val| {
                 let mut acc = init_val;
                 eval(source, input.clone(), env, &mut |val| {
-                    let old_var = env.borrow().get_var(vi);
-                    env.borrow_mut().set_var(vi, val);
                     let acc_val = std::mem::replace(&mut acc, Value::Null);
                     if acc_used {
-                        let old_acc = env.borrow().get_var(ai);
-                        env.borrow_mut().set_var(ai, acc_val.clone());
+                        let (old_var, old_acc) = {
+                            let mut e = env.borrow_mut();
+                            let ov = std::mem::replace(&mut e.vars[vi as usize], val);
+                            let oa = std::mem::replace(&mut e.vars[ai as usize], acc_val.clone());
+                            (ov, oa)
+                        };
                         eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
                         let cont = if let Some(extract_expr) = extract {
                             eval(extract_expr, acc.clone(), env, cb)?
                         } else {
                             cb(acc.clone())?
                         };
-                        env.borrow_mut().set_var(ai, old_acc);
-                        env.borrow_mut().set_var(vi, old_var);
+                        {
+                            let mut e = env.borrow_mut();
+                            e.vars[ai as usize] = old_acc;
+                            e.vars[vi as usize] = old_var;
+                        }
                         Ok(cont)
                     } else {
+                        let old_var = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], val);
                         eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
                         let cont = if let Some(extract_expr) = extract {
                             eval(extract_expr, acc.clone(), env, cb)?
                         } else {
                             cb(acc.clone())?
                         };
-                        env.borrow_mut().set_var(vi, old_var);
+                        env.borrow_mut().vars[vi as usize] = old_var;
                         Ok(cont)
                     }
                 })
@@ -1023,17 +1036,10 @@ pub fn eval(
                 if f.param_vars.is_empty() || args.is_empty() {
                     eval(&f.body, input, env, cb)
                 } else {
-                    // Push closure bindings (clone small arg exprs, not the whole body)
-                    let old_len = env.borrow().closures.len();
-                    {
-                        let mut e = env.borrow_mut();
-                        for (pv, arg) in f.param_vars.iter().zip(args.iter()) {
-                            e.closures.push((*pv, arg.clone()));
-                        }
-                    }
-                    let result = eval(&f.body, input, env, cb);
-                    env.borrow_mut().closures.truncate(old_len);
-                    result
+                    // Substitute param references with arg expressions in the body.
+                    // This correctly captures the calling scope for recursive calls.
+                    let body = substitute_params(&f.body, &f.param_vars, args);
+                    eval(&body, input, env, cb)
                 }
             } else {
                 bail!("undefined function id {}", func_id)
@@ -1937,6 +1943,26 @@ fn eval_call_builtin(name: &str, args: &[Expr], input: Value, env: &EnvRef, cb: 
     match (name, args.len()) {
         ("toboolean", 0) => {
             return cb(rt_toboolean(&input)?);
+        }
+        ("halt", 0) => {
+            // halt: exit with code 0, print input to stderr if not null
+            if !matches!(input, Value::Null) {
+                let json = crate::value::value_to_json_precise(&input);
+                eprintln!("{}", json);
+            }
+            std::process::exit(0);
+        }
+        ("halt_error", 0) => {
+            // halt_error: exit with code from input (default 5)
+            let code = match &input {
+                Value::Num(n, _) => *n as i32,
+                _ => {
+                    let json = crate::value::value_to_json_precise(&input);
+                    eprintln!("{}", json);
+                    5
+                }
+            };
+            std::process::exit(code);
         }
         ("add", 1) => {
             // add(f) = reduce .[] as $x (null; . + ($x | f))

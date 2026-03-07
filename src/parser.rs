@@ -1017,11 +1017,15 @@ impl Parser {
             }
         }
 
-        // Parse the module tokens to extract function definitions
+        // Parse the module tokens to extract function definitions.
+        // Start module var indices after the main scope's to prevent collisions
+        // when closure expressions reference main-scope variables.
+        let mut mod_scope = Scope::new();
+        mod_scope.next_var = self.scope.next_var;
         let mut mod_parser = Parser {
             tokens,
             pos: 0,
-            scope: Scope::new(),
+            scope: mod_scope,
             lib_dirs: mod_lib_dirs,
         };
 
@@ -1051,11 +1055,27 @@ impl Parser {
             }
         }
 
-        // Register module's functions into our scope with namespace prefix
-        // If there are data imports, wrap each function body with LetBindings
-        for (name, _func_id, nargs) in &mod_parser.scope.funcs {
-            let func = mod_parser.scope.compiled_funcs[*_func_id].clone();
-            let mut body = func.body;
+        // Register module's functions into our scope with namespace prefix.
+        // Build a func_id mapping (module-internal → main scope) so that
+        // intra-module FuncCall references get remapped correctly.
+        let mut func_id_map: Vec<(usize, usize)> = Vec::new(); // (old, new)
+
+        // First pass: register all functions with placeholder bodies to get new func_ids
+        for (name, mod_func_id, nargs) in &mod_parser.scope.funcs {
+            let func = &mod_parser.scope.compiled_funcs[*mod_func_id];
+            let new_name = if namespace.is_empty() {
+                name.clone()
+            } else {
+                format!("{}::{}", namespace, name)
+            };
+            let new_id = self.scope.define_func(&new_name, *nargs, Expr::Empty, func.param_vars.clone());
+            func_id_map.push((*mod_func_id, new_id));
+        }
+
+        // Second pass: remap func_ids in bodies and install them
+        for (mod_func_id, new_func_id) in &func_id_map {
+            let func = mod_parser.scope.compiled_funcs[*mod_func_id].clone();
+            let mut body = remap_func_ids(func.body, &func_id_map);
             // Wrap function body with data import bindings (in reverse order)
             for (var_idx, value_expr) in data_bindings.iter().rev() {
                 body = Expr::LetBinding {
@@ -1064,12 +1084,12 @@ impl Parser {
                     body: Box::new(body),
                 };
             }
-            if namespace.is_empty() {
-                self.scope.define_func(name, *nargs, body, func.param_vars.clone());
-            } else {
-                let qualified = format!("{}::{}", namespace, name);
-                self.scope.define_func(&qualified, *nargs, body, func.param_vars.clone());
-            }
+            self.scope.update_func_body(*new_func_id, body, func.param_vars.clone());
+        }
+
+        // Advance main scope's var counter past module's allocations
+        if mod_parser.scope.next_var > self.scope.next_var {
+            self.scope.next_var = mod_parser.scope.next_var;
         }
 
         Ok(())
@@ -2776,6 +2796,12 @@ impl Parser {
             "toboolean" => {
                 Ok(Expr::CallBuiltin { name: "toboolean".to_string(), args: vec![] })
             }
+            "halt" => {
+                Ok(Expr::CallBuiltin { name: "halt".to_string(), args: vec![] })
+            }
+            "halt_error" => {
+                Ok(Expr::CallBuiltin { name: "halt_error".to_string(), args: vec![] })
+            }
             _ => {
                 // Check user-defined functions
                 if let Some(func_id) = self.scope.lookup_func(name, 0) {
@@ -3509,6 +3535,180 @@ enum Pattern {
     Object(Vec<(String, Pattern)>),
     /// $var: sub_pattern — binds $var to whole value AND destructures via sub_pattern
     VarAndSub(String, Box<Pattern>),
+}
+
+/// Remap FuncCall func_ids in an expression tree using a mapping table.
+fn remap_func_ids(expr: Expr, map: &[(usize, usize)]) -> Expr {
+    match expr {
+        Expr::FuncCall { func_id, args } => {
+            let new_id = map.iter().find(|(old, _)| *old == func_id).map(|(_, new)| *new).unwrap_or(func_id);
+            Expr::FuncCall { func_id: new_id, args: args.into_iter().map(|a| remap_func_ids(a, map)).collect() }
+        }
+        Expr::Pipe { left, right } => Expr::Pipe {
+            left: Box::new(remap_func_ids(*left, map)),
+            right: Box::new(remap_func_ids(*right, map)),
+        },
+        Expr::Comma { left, right } => Expr::Comma {
+            left: Box::new(remap_func_ids(*left, map)),
+            right: Box::new(remap_func_ids(*right, map)),
+        },
+        Expr::BinOp { op, lhs, rhs } => Expr::BinOp {
+            op, lhs: Box::new(remap_func_ids(*lhs, map)), rhs: Box::new(remap_func_ids(*rhs, map)),
+        },
+        Expr::UnaryOp { op, operand } => Expr::UnaryOp {
+            op, operand: Box::new(remap_func_ids(*operand, map)),
+        },
+        Expr::Index { expr, key } => Expr::Index {
+            expr: Box::new(remap_func_ids(*expr, map)), key: Box::new(remap_func_ids(*key, map)),
+        },
+        Expr::IndexOpt { expr, key } => Expr::IndexOpt {
+            expr: Box::new(remap_func_ids(*expr, map)), key: Box::new(remap_func_ids(*key, map)),
+        },
+        Expr::IfThenElse { cond, then_branch, else_branch } => Expr::IfThenElse {
+            cond: Box::new(remap_func_ids(*cond, map)),
+            then_branch: Box::new(remap_func_ids(*then_branch, map)),
+            else_branch: Box::new(remap_func_ids(*else_branch, map)),
+        },
+        Expr::TryCatch { try_expr, catch_expr } => Expr::TryCatch {
+            try_expr: Box::new(remap_func_ids(*try_expr, map)),
+            catch_expr: Box::new(remap_func_ids(*catch_expr, map)),
+        },
+        Expr::Each { input_expr } => Expr::Each { input_expr: Box::new(remap_func_ids(*input_expr, map)) },
+        Expr::EachOpt { input_expr } => Expr::EachOpt { input_expr: Box::new(remap_func_ids(*input_expr, map)) },
+        Expr::LetBinding { var_index, value, body } => Expr::LetBinding {
+            var_index, value: Box::new(remap_func_ids(*value, map)), body: Box::new(remap_func_ids(*body, map)),
+        },
+        Expr::Collect { generator } => Expr::Collect { generator: Box::new(remap_func_ids(*generator, map)) },
+        Expr::ObjectConstruct { pairs } => Expr::ObjectConstruct {
+            pairs: pairs.into_iter().map(|(k, v)| (remap_func_ids(k, map), remap_func_ids(v, map))).collect(),
+        },
+        Expr::Alternative { primary, fallback } => Expr::Alternative {
+            primary: Box::new(remap_func_ids(*primary, map)),
+            fallback: Box::new(remap_func_ids(*fallback, map)),
+        },
+        Expr::Negate { operand } => Expr::Negate { operand: Box::new(remap_func_ids(*operand, map)) },
+        Expr::Recurse { input_expr } => Expr::Recurse { input_expr: Box::new(remap_func_ids(*input_expr, map)) },
+        Expr::Reduce { source, init, var_index, acc_index, update } => Expr::Reduce {
+            source: Box::new(remap_func_ids(*source, map)),
+            init: Box::new(remap_func_ids(*init, map)),
+            var_index, acc_index,
+            update: Box::new(remap_func_ids(*update, map)),
+        },
+        Expr::Foreach { source, init, var_index, acc_index, update, extract } => Expr::Foreach {
+            source: Box::new(remap_func_ids(*source, map)),
+            init: Box::new(remap_func_ids(*init, map)),
+            var_index, acc_index,
+            update: Box::new(remap_func_ids(*update, map)),
+            extract: extract.map(|e| Box::new(remap_func_ids(*e, map))),
+        },
+        Expr::Range { from, to, step } => Expr::Range {
+            from: Box::new(remap_func_ids(*from, map)),
+            to: Box::new(remap_func_ids(*to, map)),
+            step: step.map(|s| Box::new(remap_func_ids(*s, map))),
+        },
+        Expr::Label { var_index, body } => Expr::Label {
+            var_index, body: Box::new(remap_func_ids(*body, map)),
+        },
+        Expr::Break { var_index, value } => Expr::Break {
+            var_index, value: Box::new(remap_func_ids(*value, map)),
+        },
+        Expr::Update { path_expr, update_expr } => Expr::Update {
+            path_expr: Box::new(remap_func_ids(*path_expr, map)),
+            update_expr: Box::new(remap_func_ids(*update_expr, map)),
+        },
+        Expr::Assign { path_expr, value_expr } => Expr::Assign {
+            path_expr: Box::new(remap_func_ids(*path_expr, map)),
+            value_expr: Box::new(remap_func_ids(*value_expr, map)),
+        },
+        Expr::PathExpr { expr } => Expr::PathExpr { expr: Box::new(remap_func_ids(*expr, map)) },
+        Expr::SetPath { path, value } => Expr::SetPath {
+            path: Box::new(remap_func_ids(*path, map)), value: Box::new(remap_func_ids(*value, map)),
+        },
+        Expr::GetPath { path } => Expr::GetPath { path: Box::new(remap_func_ids(*path, map)) },
+        Expr::DelPaths { paths } => Expr::DelPaths { paths: Box::new(remap_func_ids(*paths, map)) },
+        Expr::Limit { count, generator } => Expr::Limit {
+            count: Box::new(remap_func_ids(*count, map)),
+            generator: Box::new(remap_func_ids(*generator, map)),
+        },
+        Expr::While { cond, update } => Expr::While {
+            cond: Box::new(remap_func_ids(*cond, map)),
+            update: Box::new(remap_func_ids(*update, map)),
+        },
+        Expr::Until { cond, update } => Expr::Until {
+            cond: Box::new(remap_func_ids(*cond, map)),
+            update: Box::new(remap_func_ids(*update, map)),
+        },
+        Expr::Repeat { update } => Expr::Repeat { update: Box::new(remap_func_ids(*update, map)) },
+        Expr::AllShort { generator, predicate } => Expr::AllShort {
+            generator: Box::new(remap_func_ids(*generator, map)),
+            predicate: Box::new(remap_func_ids(*predicate, map)),
+        },
+        Expr::AnyShort { generator, predicate } => Expr::AnyShort {
+            generator: Box::new(remap_func_ids(*generator, map)),
+            predicate: Box::new(remap_func_ids(*predicate, map)),
+        },
+        Expr::Error { msg } => Expr::Error { msg: msg.map(|m| Box::new(remap_func_ids(*m, map))) },
+        Expr::Format { name, expr } => Expr::Format { name, expr: Box::new(remap_func_ids(*expr, map)) },
+        Expr::ClosureOp { op, input_expr, key_expr } => Expr::ClosureOp {
+            op, input_expr: Box::new(remap_func_ids(*input_expr, map)),
+            key_expr: Box::new(remap_func_ids(*key_expr, map)),
+        },
+        Expr::StringInterpolation { parts } => Expr::StringInterpolation {
+            parts: parts.into_iter().map(|p| match p {
+                StringPart::Expr(e) => StringPart::Expr(remap_func_ids(e, map)),
+                lit => lit,
+            }).collect(),
+        },
+        Expr::Slice { expr, from, to } => Expr::Slice {
+            expr: Box::new(remap_func_ids(*expr, map)),
+            from: from.map(|f| Box::new(remap_func_ids(*f, map))),
+            to: to.map(|t| Box::new(remap_func_ids(*t, map))),
+        },
+        Expr::Debug { expr } => Expr::Debug { expr: Box::new(remap_func_ids(*expr, map)) },
+        Expr::Stderr { expr } => Expr::Stderr { expr: Box::new(remap_func_ids(*expr, map)) },
+        Expr::RegexTest { input_expr, re, flags } => Expr::RegexTest {
+            input_expr: Box::new(remap_func_ids(*input_expr, map)),
+            re: Box::new(remap_func_ids(*re, map)),
+            flags: Box::new(remap_func_ids(*flags, map)),
+        },
+        Expr::RegexMatch { input_expr, re, flags } => Expr::RegexMatch {
+            input_expr: Box::new(remap_func_ids(*input_expr, map)),
+            re: Box::new(remap_func_ids(*re, map)),
+            flags: Box::new(remap_func_ids(*flags, map)),
+        },
+        Expr::RegexCapture { input_expr, re, flags } => Expr::RegexCapture {
+            input_expr: Box::new(remap_func_ids(*input_expr, map)),
+            re: Box::new(remap_func_ids(*re, map)),
+            flags: Box::new(remap_func_ids(*flags, map)),
+        },
+        Expr::RegexScan { input_expr, re, flags } => Expr::RegexScan {
+            input_expr: Box::new(remap_func_ids(*input_expr, map)),
+            re: Box::new(remap_func_ids(*re, map)),
+            flags: Box::new(remap_func_ids(*flags, map)),
+        },
+        Expr::RegexSub { input_expr, re, tostr, flags } => Expr::RegexSub {
+            input_expr: Box::new(remap_func_ids(*input_expr, map)),
+            re: Box::new(remap_func_ids(*re, map)),
+            tostr: Box::new(remap_func_ids(*tostr, map)),
+            flags: Box::new(remap_func_ids(*flags, map)),
+        },
+        Expr::RegexGsub { input_expr, re, tostr, flags } => Expr::RegexGsub {
+            input_expr: Box::new(remap_func_ids(*input_expr, map)),
+            re: Box::new(remap_func_ids(*re, map)),
+            tostr: Box::new(remap_func_ids(*tostr, map)),
+            flags: Box::new(remap_func_ids(*flags, map)),
+        },
+        Expr::AlternativeDestructure { alternatives } => Expr::AlternativeDestructure {
+            alternatives: alternatives.into_iter().map(|a| remap_func_ids(a, map)).collect(),
+        },
+        Expr::CallBuiltin { name, args } => Expr::CallBuiltin {
+            name, args: args.into_iter().map(|a| remap_func_ids(a, map)).collect(),
+        },
+        // Leaf nodes: no remapping needed
+        Expr::Input | Expr::Literal(_) | Expr::LoadVar { .. } | Expr::Empty
+        | Expr::Not | Expr::Loc { .. } | Expr::Env | Expr::Builtins
+        | Expr::ReadInput | Expr::ReadInputs | Expr::ModuleMeta | Expr::GenLabel => expr,
+    }
 }
 
 fn make_type_select(type_name: &str) -> Expr {
