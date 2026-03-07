@@ -1189,6 +1189,95 @@ pub fn write_value_compact_line(w: &mut dyn io::Write, v: &Value, sort_keys: boo
     w.write_all(b"\n")
 }
 
+/// Push compact JSON + newline directly into a Vec<u8> buffer.
+/// Avoids per-value write_all calls — caller flushes the buffer periodically.
+pub fn push_compact_line(buf: &mut Vec<u8>, v: &Value) {
+    push_compact_value(buf, v);
+    buf.push(b'\n');
+}
+
+fn push_compact_value(buf: &mut Vec<u8>, v: &Value) {
+    match v {
+        Value::Null => buf.extend_from_slice(b"null"),
+        Value::False => buf.extend_from_slice(b"false"),
+        Value::True => buf.extend_from_slice(b"true"),
+        Value::Num(n, repr) => {
+            if let Some(r) = repr {
+                buf.extend_from_slice(r.as_bytes());
+            } else if *n == n.trunc() && n.abs() < 1e15 {
+                let i = *n as i64;
+                if i as f64 == *n {
+                    let mut ibuf = itoa::Buffer::new();
+                    buf.extend_from_slice(ibuf.format(i).as_bytes());
+                } else {
+                    let s = format_jq_number(*n);
+                    buf.extend_from_slice(s.as_bytes());
+                }
+            } else {
+                let s = format_jq_number(*n);
+                buf.extend_from_slice(s.as_bytes());
+            }
+        }
+        Value::Str(s) => {
+            push_json_string_to_vec(buf, s.as_str());
+        }
+        Value::Arr(a) => {
+            buf.push(b'[');
+            for (i, item) in a.iter().enumerate() {
+                if i > 0 { buf.push(b','); }
+                push_compact_value(buf, item);
+            }
+            buf.push(b']');
+        }
+        Value::Obj(o) => {
+            buf.push(b'{');
+            for (i, (k, val)) in o.iter().enumerate() {
+                if i > 0 { buf.push(b','); }
+                push_json_string_to_vec(buf, k.as_str());
+                buf.push(b':');
+                push_compact_value(buf, val);
+            }
+            buf.push(b'}');
+        }
+        Value::Error(e) => {
+            push_json_string_to_vec(buf, e.as_str());
+        }
+    }
+}
+
+#[inline]
+fn push_json_string_to_vec(buf: &mut Vec<u8>, s: &str) {
+    let bytes = s.as_bytes();
+    buf.push(b'"');
+    // Fast path: no escapes needed
+    let needs_escape = bytes.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20);
+    if !needs_escape {
+        buf.extend_from_slice(bytes);
+    } else {
+        for &b in bytes {
+            match b {
+                b'"' => buf.extend_from_slice(b"\\\""),
+                b'\\' => buf.extend_from_slice(b"\\\\"),
+                b'\n' => buf.extend_from_slice(b"\\n"),
+                b'\r' => buf.extend_from_slice(b"\\r"),
+                b'\t' => buf.extend_from_slice(b"\\t"),
+                0x08 => buf.extend_from_slice(b"\\b"),
+                0x0c => buf.extend_from_slice(b"\\f"),
+                c if c < 0x20 => {
+                    let hex = [
+                        b'\\', b'u', b'0', b'0',
+                        b"0123456789abcdef"[(c >> 4) as usize],
+                        b"0123456789abcdef"[(c & 0xf) as usize],
+                    ];
+                    buf.extend_from_slice(&hex);
+                }
+                _ => buf.push(b),
+            }
+        }
+    }
+    buf.push(b'"');
+}
+
 /// Try to write compact JSON to a fixed buffer. Returns Some(len) on success, None if buffer too small.
 fn write_compact_to_buf(v: &Value, buf: &mut [u8]) -> Option<usize> {
     let mut pos = 0;
