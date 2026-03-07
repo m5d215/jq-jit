@@ -439,6 +439,10 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
         }
         Expr::Not => Ok(Value::from_bool(!input.is_truthy())),
         Expr::BinOp { op, lhs, rhs } => {
+            // Skip eval_one for Add+Collect to use array-push fusion in full eval
+            if matches!(op, BinOp::Add) && matches!(rhs.as_ref(), Expr::Collect { .. }) {
+                return Err(());
+            }
             match *op {
                 BinOp::And => {
                     let l = eval_one(lhs, input, env)?;
