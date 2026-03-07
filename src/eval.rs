@@ -1369,8 +1369,13 @@ pub fn eval(
         }
 
         Expr::Reduce { source, init, var_index, acc_index, update } => {
-            let mut acc = Value::Null;
-            eval(init, input.clone(), env, &mut |v| { acc = v; Ok(true) })?;
+            let mut acc = if let Ok(v) = eval_one(init, &input, env) {
+                v
+            } else {
+                let mut a = Value::Null;
+                eval(init, input.clone(), env, &mut |v| { a = v; Ok(true) })?;
+                a
+            };
             let vi = *var_index;
             let ai = *acc_index;
             { let mut e = env.borrow_mut(); e.ensure_var(vi); e.ensure_var(ai); }
