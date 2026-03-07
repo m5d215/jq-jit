@@ -26,14 +26,16 @@ pub struct Env {
     /// Closure bindings: (param_var_index, arg_expression).
     /// Used to avoid deep-cloning function bodies via substitute_params.
     closures: Vec<(u16, Expr)>,
+    /// Cache for is_recursive check per func_id.
+    recursive_cache: HashMap<usize, bool>,
 }
 
 impl Env {
     pub fn new(funcs: Vec<CompiledFunc>) -> Self {
-        Env { vars: vec![Value::Null; 4096], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs: Vec::new(), closures: Vec::new() }
+        Env { vars: vec![Value::Null; 4096], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs: Vec::new(), closures: Vec::new(), recursive_cache: HashMap::new() }
     }
     pub fn with_lib_dirs(funcs: Vec<CompiledFunc>, lib_dirs: Vec<String>) -> Self {
-        Env { vars: vec![Value::Null; 4096], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs, closures: Vec::new() }
+        Env { vars: vec![Value::Null; 4096], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs, closures: Vec::new(), recursive_cache: HashMap::new() }
     }
     fn get_var(&self, idx: u16) -> Value {
         self.vars.get(idx as usize).cloned().unwrap_or(Value::Null)
@@ -997,16 +999,28 @@ pub fn eval(
             if let Some(f) = func {
                 if f.param_vars.is_empty() || args.is_empty() {
                     eval(&f.body, input, env, cb)
-                } else if contains_func_call(&f.body, *func_id) {
-                    // Recursive function: rename local vars to fresh indices,
-                    // preventing recursive calls from clobbering each other's bindings.
-                    let mut nv = env.borrow().next_var;
-                    let body = substitute_and_rename(&f.body, &f.param_vars, args, &mut nv);
-                    env.borrow_mut().next_var = nv;
-                    eval(&body, input, env, cb)
                 } else {
-                    let body = substitute_params(&f.body, &f.param_vars, args);
-                    eval(&body, input, env, cb)
+                    let is_recursive = {
+                        let e = env.borrow();
+                        match e.recursive_cache.get(func_id) {
+                            Some(&r) => r,
+                            None => {
+                                drop(e);
+                                let r = contains_func_call(&f.body, *func_id);
+                                env.borrow_mut().recursive_cache.insert(*func_id, r);
+                                r
+                            }
+                        }
+                    };
+                    if is_recursive {
+                        let mut nv = env.borrow().next_var;
+                        let body = substitute_and_rename(&f.body, &f.param_vars, args, &mut nv);
+                        env.borrow_mut().next_var = nv;
+                        eval(&body, input, env, cb)
+                    } else {
+                        let body = substitute_params(&f.body, &f.param_vars, args);
+                        eval(&body, input, env, cb)
+                    }
                 }
             } else {
                 bail!("undefined function id {}", func_id)
