@@ -8,7 +8,7 @@ use std::process;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use jq_jit::value::{Value, json_to_value, json_stream, value_to_json_precise, value_to_json_pretty_ext, write_value_compact_ext};
+use jq_jit::value::{Value, json_to_value, json_stream, value_to_json_precise, value_to_json_pretty_ext, write_value_compact_ext, write_value_compact_line};
 use jq_jit::interpreter::Filter;
 
 fn main() {
@@ -207,9 +207,10 @@ fn main() {
                 *any_false = true;
             }
             if compact && !raw_output {
-                let _ = write_value_compact_ext(out, result, sort_keys);
-                if !join_output {
-                    let _ = out.write_all(b"\n");
+                if join_output {
+                    let _ = write_value_compact_ext(out, result, sort_keys);
+                } else {
+                    let _ = write_value_compact_line(out, result, sort_keys);
                 }
             } else {
                 let formatted = format_value(result);

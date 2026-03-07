@@ -873,6 +873,20 @@ pub fn write_value_compact_ext(w: &mut dyn io::Write, v: &Value, sort_keys: bool
     write_value_compact_ext_inner(w, v, sort_keys)
 }
 
+/// Write compact JSON + newline in a single operation.
+/// Fuses the JSON serialization and newline into one write_all call when possible.
+pub fn write_value_compact_line(w: &mut dyn io::Write, v: &Value, sort_keys: bool) -> io::Result<()> {
+    if !sort_keys {
+        let mut buf = [0u8; 512];
+        if let Some(n) = write_compact_to_buf(v, &mut buf) {
+            buf[n] = b'\n';
+            return w.write_all(&buf[..n + 1]);
+        }
+    }
+    write_value_compact_ext_inner(w, v, sort_keys)?;
+    w.write_all(b"\n")
+}
+
 /// Try to write compact JSON to a fixed buffer. Returns Some(len) on success, None if buffer too small.
 fn write_compact_to_buf(v: &Value, buf: &mut [u8]) -> Option<usize> {
     let mut pos = 0;

@@ -3858,6 +3858,130 @@ impl JitEnv {
 pub type JitFilterFn = unsafe extern "C" fn(*const Value, *mut JitEnv,
     unsafe extern "C" fn(*const Value, *mut u8) -> i64, *mut u8) -> i64;
 
+/// Peephole: eliminate redundant Clone+Yield+Drop sequences.
+/// Pattern: Clone{dst=A, src=B}, Yield{A}, Drop{A} where A is used nowhere else.
+/// Replaced with: Yield{B} (skipping clone and drop entirely).
+fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
+    // Build use counts for each slot (how many times each slot appears as a source/operand)
+    let mut use_count: HashMap<SlotId, u32> = HashMap::new();
+    for op in &ops {
+        match op {
+            JitOp::Clone { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
+            JitOp::Yield { output } => { *use_count.entry(*output).or_insert(0) += 1; }
+            JitOp::Drop { slot } => { *use_count.entry(*slot).or_insert(0) += 1; }
+            JitOp::Index { base, key, .. } => {
+                *use_count.entry(*base).or_insert(0) += 1;
+                *use_count.entry(*key).or_insert(0) += 1;
+            }
+            JitOp::IndexField { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
+            JitOp::BinOp { lhs, rhs, .. } => {
+                *use_count.entry(*lhs).or_insert(0) += 1;
+                *use_count.entry(*rhs).or_insert(0) += 1;
+            }
+            JitOp::UnaryOp { src, .. } | JitOp::Negate { src, .. } | JitOp::Not { src, .. } => {
+                *use_count.entry(*src).or_insert(0) += 1;
+            }
+            JitOp::CollectPush { src } => { *use_count.entry(*src).or_insert(0) += 1; }
+            JitOp::ObjInsert { obj, key, val } => {
+                *use_count.entry(*obj).or_insert(0) += 1;
+                *use_count.entry(*key).or_insert(0) += 1;
+                *use_count.entry(*val).or_insert(0) += 1;
+            }
+            JitOp::ObjInsertStrKey { obj, val, .. } => {
+                *use_count.entry(*obj).or_insert(0) += 1;
+                *use_count.entry(*val).or_insert(0) += 1;
+            }
+            JitOp::IfTruthy { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
+            JitOp::IsNullOrFalse { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
+            JitOp::Alternative { primary, .. } => { *use_count.entry(*primary).or_insert(0) += 1; }
+            JitOp::SetVar { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
+            JitOp::StrBufAppendVal { src } => { *use_count.entry(*src).or_insert(0) += 1; }
+            JitOp::ThrowError { msg } => { *use_count.entry(*msg).or_insert(0) += 1; }
+            JitOp::CallBuiltin { args, .. } => {
+                for a in args { *use_count.entry(*a).or_insert(0) += 1; }
+            }
+            JitOp::ArrayGet { arr, .. } => { *use_count.entry(*arr).or_insert(0) += 1; }
+            JitOp::ObjGetByIdx { obj, .. } => { *use_count.entry(*obj).or_insert(0) += 1; }
+            JitOp::GetKind { src, .. } | JitOp::GetLen { src, .. } => {
+                *use_count.entry(*src).or_insert(0) += 1;
+            }
+            JitOp::ToF64Var { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
+            _ => {}
+        }
+    }
+
+    // Iteratively find Clone{A,B} + Yield{A} + Drop{A} where A is used exactly twice
+    loop {
+        let mut changed = false;
+        // Rebuild use counts after each pass
+        use_count.clear();
+        for op in &ops {
+            match op {
+                JitOp::Clone { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
+                JitOp::Yield { output } => { *use_count.entry(*output).or_insert(0) += 1; }
+                JitOp::Drop { slot } => { *use_count.entry(*slot).or_insert(0) += 1; }
+                JitOp::Index { base, key, .. } => {
+                    *use_count.entry(*base).or_insert(0) += 1;
+                    *use_count.entry(*key).or_insert(0) += 1;
+                }
+                JitOp::IndexField { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
+                JitOp::BinOp { lhs, rhs, .. } => {
+                    *use_count.entry(*lhs).or_insert(0) += 1;
+                    *use_count.entry(*rhs).or_insert(0) += 1;
+                }
+                JitOp::UnaryOp { src, .. } | JitOp::Negate { src, .. } | JitOp::Not { src, .. } => {
+                    *use_count.entry(*src).or_insert(0) += 1;
+                }
+                JitOp::CollectPush { src } => { *use_count.entry(*src).or_insert(0) += 1; }
+                JitOp::ObjInsert { obj, key, val } => {
+                    *use_count.entry(*obj).or_insert(0) += 1;
+                    *use_count.entry(*key).or_insert(0) += 1;
+                    *use_count.entry(*val).or_insert(0) += 1;
+                }
+                JitOp::ObjInsertStrKey { obj, val, .. } => {
+                    *use_count.entry(*obj).or_insert(0) += 1;
+                    *use_count.entry(*val).or_insert(0) += 1;
+                }
+                JitOp::IfTruthy { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
+                JitOp::IsNullOrFalse { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
+                JitOp::Alternative { primary, .. } => { *use_count.entry(*primary).or_insert(0) += 1; }
+                JitOp::SetVar { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
+                JitOp::StrBufAppendVal { src } => { *use_count.entry(*src).or_insert(0) += 1; }
+                JitOp::ThrowError { msg } => { *use_count.entry(*msg).or_insert(0) += 1; }
+                JitOp::CallBuiltin { args, .. } => {
+                    for a in args { *use_count.entry(*a).or_insert(0) += 1; }
+                }
+                JitOp::ArrayGet { arr, .. } => { *use_count.entry(*arr).or_insert(0) += 1; }
+                JitOp::ObjGetByIdx { obj, .. } => { *use_count.entry(*obj).or_insert(0) += 1; }
+                JitOp::GetKind { src, .. } | JitOp::GetLen { src, .. } => {
+                    *use_count.entry(*src).or_insert(0) += 1;
+                }
+                JitOp::ToF64Var { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
+                _ => {}
+            }
+        }
+        let mut i = 0;
+        while i + 2 < ops.len() {
+            if let JitOp::Clone { dst, src } = ops[i] {
+                if let JitOp::Yield { output } = ops[i + 1] {
+                    if let JitOp::Drop { slot } = ops[i + 2] {
+                        if output == dst && slot == dst && use_count.get(&dst) == Some(&2) {
+                            ops[i] = JitOp::Yield { output: src };
+                            ops.remove(i + 2);
+                            ops.remove(i + 1);
+                            changed = true;
+                            continue;
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+        if !changed { break; }
+    }
+    ops
+}
+
 pub struct JitCompiler {
     module: JITModule,
     ctx: cranelift_codegen::Context,
@@ -3961,7 +4085,7 @@ impl JitCompiler {
             JIT_CLOSURE_OPS.with(|c| *c.borrow_mut() = fl.closure_ops.clone());
         }
 
-        let ops = fl.ops;
+        let ops = optimize_clone_yield(fl.ops);
         let num_slots = fl.next_slot;
         let num_vars = fl.next_var;
         let num_labels = fl.next_label;
