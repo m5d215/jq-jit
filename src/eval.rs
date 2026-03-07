@@ -28,14 +28,17 @@ pub struct Env {
     closures: Vec<(u16, Expr)>,
     /// Cache for is_recursive check per func_id.
     recursive_cache: HashMap<usize, bool>,
+    /// Cache for substituted function bodies: (func_id, arg_var_indices) → substituted body.
+    /// Only used when all args are LoadVar (the common case).
+    subst_cache: HashMap<(usize, Vec<u16>), Rc<Expr>>,
 }
 
 impl Env {
     pub fn new(funcs: Vec<CompiledFunc>) -> Self {
-        Env { vars: vec![Value::Null; 4096], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs: Vec::new(), closures: Vec::new(), recursive_cache: HashMap::new() }
+        Env { vars: vec![Value::Null; 4096], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs: Vec::new(), closures: Vec::new(), recursive_cache: HashMap::new(), subst_cache: HashMap::new() }
     }
     pub fn with_lib_dirs(funcs: Vec<CompiledFunc>, lib_dirs: Vec<String>) -> Self {
-        Env { vars: vec![Value::Null; 4096], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs, closures: Vec::new(), recursive_cache: HashMap::new() }
+        Env { vars: vec![Value::Null; 4096], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs, closures: Vec::new(), recursive_cache: HashMap::new(), subst_cache: HashMap::new() }
     }
     fn get_var(&self, idx: u16) -> Value {
         self.vars.get(idx as usize).cloned().unwrap_or(Value::Null)
@@ -54,9 +57,9 @@ impl Env {
 /// Substitute param var references with arg expressions in a function body.
 /// This implements jq's closure semantics: each time a param is referenced,
 /// the arg filter is re-evaluated with the current input.
+/// Uses COW: unchanged subtrees are not cloned.
 pub fn substitute_params(expr: &Expr, param_vars: &[u16], args: &[Expr]) -> Expr {
-    let mut dummy = 0u16;
-    subst_inner(expr, param_vars, args, false, &mut dummy, &mut HashMap::new())
+    subst_cow(expr, param_vars, args).unwrap_or_else(|| expr.clone())
 }
 
 /// Substitute params AND rename all local variable bindings (LetBinding, Reduce,
@@ -183,6 +186,338 @@ fn subst_inner(
         Expr::Input | Expr::Empty | Expr::Not | Expr::Env | Expr::Builtins
         | Expr::ReadInput | Expr::ReadInputs | Expr::ModuleMeta | Expr::GenLabel
         | Expr::Literal(_) | Expr::Loc { .. } => expr.clone(),
+    }
+}
+
+/// COW substitution: returns None if no param vars were found (no changes needed).
+/// Avoids deep-cloning unchanged subtrees.
+fn subst_cow(expr: &Expr, pv: &[u16], args: &[Expr]) -> Option<Expr> {
+    // Helpers: s returns Option, sb returns Option<Box>
+    macro_rules! s { ($e:expr) => { subst_cow($e, pv, args) } }
+    match expr {
+        Expr::LoadVar { var_index } => {
+            for (i, p) in pv.iter().enumerate() {
+                if *var_index == *p {
+                    if let Some(arg) = args.get(i) { return Some(arg.clone()); }
+                }
+            }
+            None
+        }
+        // Two-child nodes
+        Expr::Pipe { left, right } => {
+            let l = s!(left); let r = s!(right);
+            if l.is_none() && r.is_none() { return None; }
+            Some(Expr::Pipe {
+                left: Box::new(l.unwrap_or_else(|| left.as_ref().clone())),
+                right: Box::new(r.unwrap_or_else(|| right.as_ref().clone())),
+            })
+        }
+        Expr::Comma { left, right } => {
+            let l = s!(left); let r = s!(right);
+            if l.is_none() && r.is_none() { return None; }
+            Some(Expr::Comma {
+                left: Box::new(l.unwrap_or_else(|| left.as_ref().clone())),
+                right: Box::new(r.unwrap_or_else(|| right.as_ref().clone())),
+            })
+        }
+        Expr::BinOp { op, lhs, rhs } => {
+            let l = s!(lhs); let r = s!(rhs);
+            if l.is_none() && r.is_none() { return None; }
+            Some(Expr::BinOp {
+                op: *op,
+                lhs: Box::new(l.unwrap_or_else(|| lhs.as_ref().clone())),
+                rhs: Box::new(r.unwrap_or_else(|| rhs.as_ref().clone())),
+            })
+        }
+        Expr::UnaryOp { op, operand } => s!(operand).map(|o| Expr::UnaryOp { op: *op, operand: Box::new(o) }),
+        Expr::Index { expr: e, key } => {
+            let ev = s!(e); let kv = s!(key);
+            if ev.is_none() && kv.is_none() { return None; }
+            Some(Expr::Index {
+                expr: Box::new(ev.unwrap_or_else(|| e.as_ref().clone())),
+                key: Box::new(kv.unwrap_or_else(|| key.as_ref().clone())),
+            })
+        }
+        Expr::IndexOpt { expr: e, key } => {
+            let ev = s!(e); let kv = s!(key);
+            if ev.is_none() && kv.is_none() { return None; }
+            Some(Expr::IndexOpt {
+                expr: Box::new(ev.unwrap_or_else(|| e.as_ref().clone())),
+                key: Box::new(kv.unwrap_or_else(|| key.as_ref().clone())),
+            })
+        }
+        Expr::Each { input_expr } => s!(input_expr).map(|e| Expr::Each { input_expr: Box::new(e) }),
+        Expr::EachOpt { input_expr } => s!(input_expr).map(|e| Expr::EachOpt { input_expr: Box::new(e) }),
+        Expr::IfThenElse { cond, then_branch, else_branch } => {
+            let c = s!(cond); let t = s!(then_branch); let e = s!(else_branch);
+            if c.is_none() && t.is_none() && e.is_none() { return None; }
+            Some(Expr::IfThenElse {
+                cond: Box::new(c.unwrap_or_else(|| cond.as_ref().clone())),
+                then_branch: Box::new(t.unwrap_or_else(|| then_branch.as_ref().clone())),
+                else_branch: Box::new(e.unwrap_or_else(|| else_branch.as_ref().clone())),
+            })
+        }
+        Expr::LetBinding { var_index, value, body } => {
+            let v = s!(value); let b = s!(body);
+            if v.is_none() && b.is_none() { return None; }
+            Some(Expr::LetBinding {
+                var_index: *var_index,
+                value: Box::new(v.unwrap_or_else(|| value.as_ref().clone())),
+                body: Box::new(b.unwrap_or_else(|| body.as_ref().clone())),
+            })
+        }
+        Expr::TryCatch { try_expr, catch_expr } => {
+            let t = s!(try_expr); let c = s!(catch_expr);
+            if t.is_none() && c.is_none() { return None; }
+            Some(Expr::TryCatch {
+                try_expr: Box::new(t.unwrap_or_else(|| try_expr.as_ref().clone())),
+                catch_expr: Box::new(c.unwrap_or_else(|| catch_expr.as_ref().clone())),
+            })
+        }
+        Expr::Collect { generator } => s!(generator).map(|g| Expr::Collect { generator: Box::new(g) }),
+        Expr::Negate { operand } => s!(operand).map(|o| Expr::Negate { operand: Box::new(o) }),
+        Expr::Alternative { primary, fallback } => {
+            let p = s!(primary); let f = s!(fallback);
+            if p.is_none() && f.is_none() { return None; }
+            Some(Expr::Alternative {
+                primary: Box::new(p.unwrap_or_else(|| primary.as_ref().clone())),
+                fallback: Box::new(f.unwrap_or_else(|| fallback.as_ref().clone())),
+            })
+        }
+        Expr::Reduce { source, init, var_index, acc_index, update } => {
+            let sv = s!(source); let iv = s!(init); let uv = s!(update);
+            if sv.is_none() && iv.is_none() && uv.is_none() { return None; }
+            Some(Expr::Reduce {
+                source: Box::new(sv.unwrap_or_else(|| source.as_ref().clone())),
+                init: Box::new(iv.unwrap_or_else(|| init.as_ref().clone())),
+                var_index: *var_index, acc_index: *acc_index,
+                update: Box::new(uv.unwrap_or_else(|| update.as_ref().clone())),
+            })
+        }
+        Expr::Foreach { source, init, var_index, acc_index, update, extract } => {
+            let sv = s!(source); let iv = s!(init); let uv = s!(update);
+            let ev = extract.as_ref().and_then(|e| s!(e));
+            if sv.is_none() && iv.is_none() && uv.is_none() && ev.is_none() { return None; }
+            Some(Expr::Foreach {
+                source: Box::new(sv.unwrap_or_else(|| source.as_ref().clone())),
+                init: Box::new(iv.unwrap_or_else(|| init.as_ref().clone())),
+                var_index: *var_index, acc_index: *acc_index,
+                update: Box::new(uv.unwrap_or_else(|| update.as_ref().clone())),
+                extract: if ev.is_some() { ev.map(Box::new) } else { extract.clone() },
+            })
+        }
+        Expr::ObjectConstruct { pairs } => {
+            let results: Vec<_> = pairs.iter().map(|(k, v)| (s!(k), s!(v))).collect();
+            if results.iter().all(|(k, v)| k.is_none() && v.is_none()) { return None; }
+            Some(Expr::ObjectConstruct {
+                pairs: pairs.iter().zip(results).map(|((k, v), (kn, vn))| {
+                    (kn.unwrap_or_else(|| k.clone()), vn.unwrap_or_else(|| v.clone()))
+                }).collect(),
+            })
+        }
+        Expr::Recurse { input_expr } => s!(input_expr).map(|e| Expr::Recurse { input_expr: Box::new(e) }),
+        Expr::Range { from, to, step } => {
+            let fv = s!(from); let tv = s!(to); let sv = step.as_ref().and_then(|s2| s!(s2));
+            if fv.is_none() && tv.is_none() && sv.is_none() { return None; }
+            Some(Expr::Range {
+                from: Box::new(fv.unwrap_or_else(|| from.as_ref().clone())),
+                to: Box::new(tv.unwrap_or_else(|| to.as_ref().clone())),
+                step: if sv.is_some() { sv.map(Box::new) } else { step.clone() },
+            })
+        }
+        Expr::Update { path_expr, update_expr } => {
+            let p = s!(path_expr); let u = s!(update_expr);
+            if p.is_none() && u.is_none() { return None; }
+            Some(Expr::Update {
+                path_expr: Box::new(p.unwrap_or_else(|| path_expr.as_ref().clone())),
+                update_expr: Box::new(u.unwrap_or_else(|| update_expr.as_ref().clone())),
+            })
+        }
+        Expr::Assign { path_expr, value_expr } => {
+            let p = s!(path_expr); let v = s!(value_expr);
+            if p.is_none() && v.is_none() { return None; }
+            Some(Expr::Assign {
+                path_expr: Box::new(p.unwrap_or_else(|| path_expr.as_ref().clone())),
+                value_expr: Box::new(v.unwrap_or_else(|| value_expr.as_ref().clone())),
+            })
+        }
+        Expr::PathExpr { expr: e } => s!(e).map(|v| Expr::PathExpr { expr: Box::new(v) }),
+        Expr::SetPath { path, value } => {
+            let p = s!(path); let v = s!(value);
+            if p.is_none() && v.is_none() { return None; }
+            Some(Expr::SetPath {
+                path: Box::new(p.unwrap_or_else(|| path.as_ref().clone())),
+                value: Box::new(v.unwrap_or_else(|| value.as_ref().clone())),
+            })
+        }
+        Expr::GetPath { path } => s!(path).map(|p| Expr::GetPath { path: Box::new(p) }),
+        Expr::DelPaths { paths } => s!(paths).map(|p| Expr::DelPaths { paths: Box::new(p) }),
+        Expr::FuncCall { func_id, args: fargs } => {
+            let results: Vec<_> = fargs.iter().map(|a| s!(a)).collect();
+            if results.iter().all(|r| r.is_none()) { return None; }
+            Some(Expr::FuncCall {
+                func_id: *func_id,
+                args: fargs.iter().zip(results).map(|(a, r)| r.unwrap_or_else(|| a.clone())).collect(),
+            })
+        }
+        Expr::StringInterpolation { parts } => {
+            let results: Vec<_> = parts.iter().map(|p| match p {
+                StringPart::Literal(_) => None,
+                StringPart::Expr(e) => s!(e),
+            }).collect();
+            if results.iter().all(|r| r.is_none()) { return None; }
+            Some(Expr::StringInterpolation {
+                parts: parts.iter().zip(results).map(|(p, r)| match (p, r) {
+                    (_, Some(new_e)) => StringPart::Expr(new_e),
+                    (orig, None) => orig.clone(),
+                }).collect(),
+            })
+        }
+        Expr::Limit { count, generator } => {
+            let c = s!(count); let g = s!(generator);
+            if c.is_none() && g.is_none() { return None; }
+            Some(Expr::Limit {
+                count: Box::new(c.unwrap_or_else(|| count.as_ref().clone())),
+                generator: Box::new(g.unwrap_or_else(|| generator.as_ref().clone())),
+            })
+        }
+        Expr::While { cond, update } => {
+            let c = s!(cond); let u = s!(update);
+            if c.is_none() && u.is_none() { return None; }
+            Some(Expr::While {
+                cond: Box::new(c.unwrap_or_else(|| cond.as_ref().clone())),
+                update: Box::new(u.unwrap_or_else(|| update.as_ref().clone())),
+            })
+        }
+        Expr::Until { cond, update } => {
+            let c = s!(cond); let u = s!(update);
+            if c.is_none() && u.is_none() { return None; }
+            Some(Expr::Until {
+                cond: Box::new(c.unwrap_or_else(|| cond.as_ref().clone())),
+                update: Box::new(u.unwrap_or_else(|| update.as_ref().clone())),
+            })
+        }
+        Expr::Repeat { update } => s!(update).map(|u| Expr::Repeat { update: Box::new(u) }),
+        Expr::AllShort { generator, predicate } => {
+            let g = s!(generator); let p = s!(predicate);
+            if g.is_none() && p.is_none() { return None; }
+            Some(Expr::AllShort {
+                generator: Box::new(g.unwrap_or_else(|| generator.as_ref().clone())),
+                predicate: Box::new(p.unwrap_or_else(|| predicate.as_ref().clone())),
+            })
+        }
+        Expr::AnyShort { generator, predicate } => {
+            let g = s!(generator); let p = s!(predicate);
+            if g.is_none() && p.is_none() { return None; }
+            Some(Expr::AnyShort {
+                generator: Box::new(g.unwrap_or_else(|| generator.as_ref().clone())),
+                predicate: Box::new(p.unwrap_or_else(|| predicate.as_ref().clone())),
+            })
+        }
+        Expr::Label { var_index, body } => s!(body).map(|b| Expr::Label { var_index: *var_index, body: Box::new(b) }),
+        Expr::Break { var_index, value } => s!(value).map(|v| Expr::Break { var_index: *var_index, value: Box::new(v) }),
+        Expr::Error { msg } => {
+            let m = msg.as_ref().and_then(|m2| s!(m2));
+            m.map(|v| Expr::Error { msg: Some(Box::new(v)) })
+        }
+        Expr::Format { name, expr: e } => s!(e).map(|v| Expr::Format { name: name.clone(), expr: Box::new(v) }),
+        Expr::ClosureOp { op, input_expr, key_expr } => {
+            let i = s!(input_expr); let k = s!(key_expr);
+            if i.is_none() && k.is_none() { return None; }
+            Some(Expr::ClosureOp {
+                op: *op,
+                input_expr: Box::new(i.unwrap_or_else(|| input_expr.as_ref().clone())),
+                key_expr: Box::new(k.unwrap_or_else(|| key_expr.as_ref().clone())),
+            })
+        }
+        Expr::CallBuiltin { name, args: bargs } => {
+            let results: Vec<_> = bargs.iter().map(|a| s!(a)).collect();
+            if results.iter().all(|r| r.is_none()) { return None; }
+            Some(Expr::CallBuiltin {
+                name: name.clone(),
+                args: bargs.iter().zip(results).map(|(a, r)| r.unwrap_or_else(|| a.clone())).collect(),
+            })
+        }
+        Expr::Slice { expr: e, from, to } => {
+            let ev = s!(e);
+            let fv = from.as_ref().and_then(|f2| s!(f2));
+            let tv = to.as_ref().and_then(|t2| s!(t2));
+            if ev.is_none() && fv.is_none() && tv.is_none() { return None; }
+            Some(Expr::Slice {
+                expr: Box::new(ev.unwrap_or_else(|| e.as_ref().clone())),
+                from: if fv.is_some() { fv.map(Box::new) } else { from.clone() },
+                to: if tv.is_some() { tv.map(Box::new) } else { to.clone() },
+            })
+        }
+        Expr::Debug { expr: e } => s!(e).map(|v| Expr::Debug { expr: Box::new(v) }),
+        Expr::Stderr { expr: e } => s!(e).map(|v| Expr::Stderr { expr: Box::new(v) }),
+        Expr::RegexTest { input_expr, re, flags } => {
+            let i = s!(input_expr); let r = s!(re); let f = s!(flags);
+            if i.is_none() && r.is_none() && f.is_none() { return None; }
+            Some(Expr::RegexTest {
+                input_expr: Box::new(i.unwrap_or_else(|| input_expr.as_ref().clone())),
+                re: Box::new(r.unwrap_or_else(|| re.as_ref().clone())),
+                flags: Box::new(f.unwrap_or_else(|| flags.as_ref().clone())),
+            })
+        }
+        Expr::RegexMatch { input_expr, re, flags } => {
+            let i = s!(input_expr); let r = s!(re); let f = s!(flags);
+            if i.is_none() && r.is_none() && f.is_none() { return None; }
+            Some(Expr::RegexMatch {
+                input_expr: Box::new(i.unwrap_or_else(|| input_expr.as_ref().clone())),
+                re: Box::new(r.unwrap_or_else(|| re.as_ref().clone())),
+                flags: Box::new(f.unwrap_or_else(|| flags.as_ref().clone())),
+            })
+        }
+        Expr::RegexCapture { input_expr, re, flags } => {
+            let i = s!(input_expr); let r = s!(re); let f = s!(flags);
+            if i.is_none() && r.is_none() && f.is_none() { return None; }
+            Some(Expr::RegexCapture {
+                input_expr: Box::new(i.unwrap_or_else(|| input_expr.as_ref().clone())),
+                re: Box::new(r.unwrap_or_else(|| re.as_ref().clone())),
+                flags: Box::new(f.unwrap_or_else(|| flags.as_ref().clone())),
+            })
+        }
+        Expr::RegexScan { input_expr, re, flags } => {
+            let i = s!(input_expr); let r = s!(re); let f = s!(flags);
+            if i.is_none() && r.is_none() && f.is_none() { return None; }
+            Some(Expr::RegexScan {
+                input_expr: Box::new(i.unwrap_or_else(|| input_expr.as_ref().clone())),
+                re: Box::new(r.unwrap_or_else(|| re.as_ref().clone())),
+                flags: Box::new(f.unwrap_or_else(|| flags.as_ref().clone())),
+            })
+        }
+        Expr::RegexSub { input_expr, re, tostr, flags } => {
+            let i = s!(input_expr); let r = s!(re); let t = s!(tostr); let f = s!(flags);
+            if i.is_none() && r.is_none() && t.is_none() && f.is_none() { return None; }
+            Some(Expr::RegexSub {
+                input_expr: Box::new(i.unwrap_or_else(|| input_expr.as_ref().clone())),
+                re: Box::new(r.unwrap_or_else(|| re.as_ref().clone())),
+                tostr: Box::new(t.unwrap_or_else(|| tostr.as_ref().clone())),
+                flags: Box::new(f.unwrap_or_else(|| flags.as_ref().clone())),
+            })
+        }
+        Expr::RegexGsub { input_expr, re, tostr, flags } => {
+            let i = s!(input_expr); let r = s!(re); let t = s!(tostr); let f = s!(flags);
+            if i.is_none() && r.is_none() && t.is_none() && f.is_none() { return None; }
+            Some(Expr::RegexGsub {
+                input_expr: Box::new(i.unwrap_or_else(|| input_expr.as_ref().clone())),
+                re: Box::new(r.unwrap_or_else(|| re.as_ref().clone())),
+                tostr: Box::new(t.unwrap_or_else(|| tostr.as_ref().clone())),
+                flags: Box::new(f.unwrap_or_else(|| flags.as_ref().clone())),
+            })
+        }
+        Expr::AlternativeDestructure { alternatives } => {
+            let results: Vec<_> = alternatives.iter().map(|a| s!(a)).collect();
+            if results.iter().all(|r| r.is_none()) { return None; }
+            Some(Expr::AlternativeDestructure {
+                alternatives: alternatives.iter().zip(results).map(|(a, r)| r.unwrap_or_else(|| a.clone())).collect(),
+            })
+        }
+        // Leaf nodes never contain param var references
+        Expr::Input | Expr::Empty | Expr::Not | Expr::Env | Expr::Builtins
+        | Expr::ReadInput | Expr::ReadInputs | Expr::ModuleMeta | Expr::GenLabel
+        | Expr::Literal(_) | Expr::Loc { .. } => None,
     }
 }
 
@@ -617,6 +952,50 @@ pub fn eval(
                     }
                     Ok(true)
                 }
+                // Fuse [generator] | all(predicate) → single-pass short-circuit
+                Expr::Collect { generator } => {
+                    match right.as_ref() {
+                        Expr::AllShort { generator: all_gen, predicate }
+                            if matches!(all_gen.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)) =>
+                        {
+                            let mut all_true = true;
+                            eval(generator, input, env, &mut |elem| {
+                                let pred_result = eval_one(predicate, &elem, env);
+                                match pred_result {
+                                    Ok(v) => {
+                                        if v.is_truthy() { Ok(true) } else { all_true = false; Ok(false) }
+                                    }
+                                    Err(()) => {
+                                        let mut truthy = false;
+                                        eval(predicate, elem, env, &mut |v| { truthy = v.is_truthy(); Ok(true) })?;
+                                        if truthy { Ok(true) } else { all_true = false; Ok(false) }
+                                    }
+                                }
+                            })?;
+                            cb(Value::from_bool(all_true))
+                        }
+                        Expr::AnyShort { generator: any_gen, predicate }
+                            if matches!(any_gen.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)) =>
+                        {
+                            let mut any_true = false;
+                            eval(generator, input, env, &mut |elem| {
+                                let pred_result = eval_one(predicate, &elem, env);
+                                match pred_result {
+                                    Ok(v) => {
+                                        if v.is_truthy() { any_true = true; Ok(false) } else { Ok(true) }
+                                    }
+                                    Err(()) => {
+                                        let mut truthy = false;
+                                        eval(predicate, elem, env, &mut |v| { truthy = v.is_truthy(); Ok(true) })?;
+                                        if truthy { any_true = true; Ok(false) } else { Ok(true) }
+                                    }
+                                }
+                            })?;
+                            cb(Value::from_bool(any_true))
+                        }
+                        _ => eval(left, input, env, &mut |mid| eval(right, mid, env, cb)),
+                    }
+                }
                 _ => eval(left, input, env, &mut |mid| eval(right, mid, env, cb)),
             }
         }
@@ -1018,8 +1397,25 @@ pub fn eval(
                         env.borrow_mut().next_var = nv;
                         eval(&body, input, env, cb)
                     } else {
-                        let body = substitute_params(&f.body, &f.param_vars, args);
-                        eval(&body, input, env, cb)
+                        // Try to use cached substituted body when all args are LoadVar
+                        let all_loadvar: Option<Vec<u16>> = args.iter().map(|a| {
+                            if let Expr::LoadVar { var_index } = a { Some(*var_index) } else { None }
+                        }).collect();
+                        if let Some(var_indices) = all_loadvar {
+                            let cache_key = (*func_id, var_indices);
+                            let cached = env.borrow().subst_cache.get(&cache_key).cloned();
+                            if let Some(body) = cached {
+                                eval(&body, input, env, cb)
+                            } else {
+                                let body = substitute_params(&f.body, &f.param_vars, args);
+                                let body_rc = Rc::new(body);
+                                env.borrow_mut().subst_cache.insert(cache_key, body_rc.clone());
+                                eval(&body_rc, input, env, cb)
+                            }
+                        } else {
+                            let body = substitute_params(&f.body, &f.param_vars, args);
+                            eval(&body, input, env, cb)
+                        }
                     }
                 }
             } else {
