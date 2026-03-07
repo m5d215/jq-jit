@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x86_64
+            install: sudo apt-get update && sudo apt-get install -y libjq-dev libonig-dev
+          - os: macos-latest
+            target: macos-arm64
+            install: brew install jq oniguruma
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: ${{ matrix.install }}
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Run tests
+        run: cargo test --release
+
+      - name: Package
+        run: |
+          cd target/release
+          tar czf ../../jq-jit-${{ matrix.target }}.tar.gz jq-jit
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jq-jit-${{ matrix.target }}
+          path: jq-jit-${{ matrix.target }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create ${{ github.ref_name }} --generate-notes jq-jit-*.tar.gz
