@@ -274,13 +274,13 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             };
             // Need lib_dirs from env - they're passed through args[1] if available
             // For now, try to find module in common paths
-            return Ok(Value::Obj(Rc::new({
+            Ok(Value::Obj(Rc::new({
                 let mut m = new_objmap();
                 m.insert("version".into(), Value::Num(0.1, None));
                 m.insert("deps".into(), Value::Arr(Rc::new(vec![])));
                 m.insert("defs".into(), Value::Arr(Rc::new(vec![])));
                 m
-            })));
+            })))
         }
         "have_decnum" => {
             // We don't have arbitrary precision, return false
@@ -372,7 +372,7 @@ fn errdesc(v: &Value) -> String {
         _ => crate::value::value_to_json(v),
     };
     let tn = v.type_name();
-    let jlen = json.as_bytes().len();
+    let jlen = json.len();
     if json.starts_with('"') {
         // String: threshold 28 bytes of JSON (including quotes)
         if jlen > 28 {
@@ -579,7 +579,7 @@ pub fn rt_div(a: &Value, b: &Value) -> Result<Value> {
         (Value::Str(s), Value::Str(sep)) => {
             // String division = split
             let parts: Vec<Value> = s.split(sep.as_str())
-                .map(|p| Value::from_str(p))
+                .map(Value::from_str)
                 .collect();
             Ok(Value::Arr(Rc::new(parts)))
         }
@@ -749,7 +749,7 @@ fn rt_keys(v: &Value, sorted: bool) -> Result<Value> {
         Value::Obj(o) => {
             let mut keys: Vec<Value> = o.keys().map(|k| Value::from_str(k)).collect();
             if sorted {
-                keys.sort_by(|a, b| compare_values(a, b));
+                keys.sort_by(compare_values);
             }
             Ok(Value::Arr(Rc::new(keys)))
         }
@@ -954,7 +954,7 @@ fn rt_tonumber(v: &Value) -> Result<Value> {
                 bail!("Invalid numeric literal: {}", crate::value::value_to_json(v));
             }
             // Strip leading '+' for compatibility with jq
-            let parse_str = if s_ref.starts_with('+') { &s_ref[1..] } else { s_ref };
+            let parse_str = s_ref.strip_prefix('+').unwrap_or(s_ref);
             match parse_str.parse::<f64>() {
                 Ok(n) => Ok(Value::Num(n, None)),
                 Err(_) => bail!("Invalid numeric literal: {}", crate::value::value_to_json(v)),
@@ -1242,7 +1242,7 @@ fn rt_split(v: &Value, sep: &Value) -> Result<Value> {
                 Ok(Value::Arr(Rc::new(parts)))
             } else {
                 let parts: Vec<Value> = s.split(p.as_str())
-                    .map(|p| Value::from_str(p))
+                    .map(Value::from_str)
                     .collect();
                 Ok(Value::Arr(Rc::new(parts)))
             }

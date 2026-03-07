@@ -1378,7 +1378,7 @@ pub fn eval_unaryop(op: UnaryOp, val: &Value) -> Result<Value> {
         UnaryOp::Abs => "abs", UnaryOp::GetModuleMeta => "modulemeta",
         _ => unreachable!(),
     };
-    crate::runtime::call_builtin(name, &[val.clone()])
+    crate::runtime::call_builtin(name, std::slice::from_ref(val))
 }
 
 pub fn eval_index(base: &Value, key: &Value, optional: bool) -> std::result::Result<Value, String> {
@@ -2122,9 +2122,7 @@ fn walk_value(f: &Expr, input: Value, env: &EnvRef) -> Result<Vec<Value>> {
             let mut new_obj = crate::value::new_objmap();
             for (k, v) in o.iter() {
                 let walked = walk_value(f, v.clone(), env)?;
-                if walked.len() == 1 {
-                    new_obj.insert(k.clone(), walked.into_iter().next().unwrap());
-                } else if !walked.is_empty() {
+                if !walked.is_empty() {
                     new_obj.insert(k.clone(), walked.into_iter().next().unwrap());
                 }
             }

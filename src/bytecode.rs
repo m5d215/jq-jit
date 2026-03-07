@@ -184,7 +184,7 @@ impl<'a> BytecodeRef<'a> {
                 jq_ffi::jv_free(debuginfo);
                 return None;
             }
-            let name_key = jq_ffi::jv_string(b"name\0".as_ptr() as *const std::ffi::c_char);
+            let name_key = jq_ffi::jv_string(c"name".as_ptr());
             let name_val = jq_ffi::jv_object_get(jq_ffi::jv_copy(debuginfo), name_key);
             jq_ffi::jv_free(debuginfo);
             let name_kind = jq_ffi::jv_get_kind(name_val);

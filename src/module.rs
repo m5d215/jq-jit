@@ -52,11 +52,9 @@ fn parse_module_metadata(content: &str) -> Result<Value> {
         if let Some(semi_pos) = full.find(';') {
             let module_stmt = &full[7..semi_pos].trim();
             // Parse the metadata object
-            if let Ok(meta_val) = parse_simple_object(module_stmt) {
-                if let Value::Obj(obj) = meta_val {
-                    for (k, v) in obj.iter() {
-                        metadata.insert(k.clone(), v.clone());
-                    }
+            if let Ok(Value::Obj(obj)) = parse_simple_object(module_stmt) {
+                for (k, v) in obj.iter() {
+                    metadata.insert(k.clone(), v.clone());
                 }
             }
             i = semi_pos + 1;

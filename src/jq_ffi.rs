@@ -100,7 +100,7 @@ pub enum Opcode {
 impl Opcode {
     pub fn from_u16(v: u16) -> Option<Self> {
         if v <= 42 {
-            Some(unsafe { std::mem::transmute(v) })
+            Some(unsafe { std::mem::transmute::<u16, Opcode>(v) })
         } else {
             None
         }
@@ -218,6 +218,8 @@ pub struct JqState {
 
 const JQ_STATE_BC_OFFSET: usize = 16;
 
+/// # Safety
+/// `state` must be a valid pointer to a `JqState` obtained from libjq.
 pub unsafe fn jq_state_get_bytecode(state: *mut JqState) -> *mut Bytecode {
     unsafe {
         let base = state as *const u8;

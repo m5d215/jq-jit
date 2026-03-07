@@ -67,6 +67,12 @@ impl Drop for ObjMap {
     }
 }
 
+impl Default for ObjMap {
+    fn default() -> Self {
+        ObjMap::new()
+    }
+}
+
 impl ObjMap {
     #[inline]
     pub fn new() -> Self {
@@ -280,6 +286,7 @@ impl Value {
         if b { Value::True } else { Value::False }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         Value::Str(KeyStr::from(s))
     }
@@ -685,6 +692,8 @@ pub fn json_to_value_libjq(json: &str) -> Result<Value> {
     }
 }
 
+/// # Safety
+/// `jv` must be a valid `Jv` value obtained from libjq.
 pub unsafe fn jv_to_value(jv: Jv) -> Result<Value> {
     unsafe {
         let kind = jq_ffi::jv_get_kind(jv);
@@ -825,10 +834,10 @@ fn normalize_scientific(s: &str) -> String {
     if let Some(idx) = s.find('e') {
         let mantissa = &s[..idx];
         let exp_str = &s[idx+1..]; // includes sign
-        let (sign, digits) = if exp_str.starts_with('-') {
-            ("-", &exp_str[1..])
-        } else if exp_str.starts_with('+') {
-            ("+", &exp_str[1..])
+        let (sign, digits) = if let Some(rest) = exp_str.strip_prefix('-') {
+            ("-", rest)
+        } else if let Some(rest) = exp_str.strip_prefix('+') {
+            ("+", rest)
         } else {
             ("+", exp_str)
         };

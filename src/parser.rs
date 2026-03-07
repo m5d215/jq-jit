@@ -283,11 +283,11 @@ impl Lexer {
                     if self.peek() == Some('.') {
                         self.pos += 1;
                         self.tokens.push(Token::Recurse);
-                    } else if self.peek().map_or(false, |c| c.is_ascii_digit()) {
+                    } else if self.peek().is_some_and(|c| c.is_ascii_digit()) {
                         // .123 is a number, back up
                         self.pos -= 1;
                         self.read_number()?;
-                    } else if self.peek().map_or(false, |c| c.is_ascii_alphabetic() || c == '_') {
+                    } else if self.peek().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') {
                         // .field — immediately followed by identifier, always treat as field name
                         self.tokens.push(Token::Dot);
                         let ident = self.read_ident_str();
@@ -441,13 +441,13 @@ impl Lexer {
 /// Normalize a number literal to match jq's output format.
 fn normalize_num_repr(s: &str) -> String {
     let s = s.trim();
-    if let Some(e_pos) = s.find(|c: char| c == 'e' || c == 'E') {
+    if let Some(e_pos) = s.find(['e', 'E']) {
         let mantissa = &s[..e_pos];
         let exp_str = &s[e_pos + 1..];
         let exp: i64 = exp_str.parse().unwrap_or(0);
 
-        let (sign, mantissa_abs) = if mantissa.starts_with('-') {
-            ("-", &mantissa[1..])
+        let (sign, mantissa_abs) = if let Some(rest) = mantissa.strip_prefix('-') {
+            ("-", rest)
         } else {
             ("", mantissa)
         };

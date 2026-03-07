@@ -76,7 +76,7 @@ fn can_scalar_collect(expr: &Expr) -> bool {
         }
         Expr::Empty => true,
         Expr::Range { from, to, step } => {
-            is_scalar(from) && is_scalar(to) && step.as_ref().map_or(true, |s| is_scalar(s))
+            is_scalar(from) && is_scalar(to) && step.as_ref().is_none_or(|s| is_scalar(s))
         }
         Expr::Collect { generator } => can_scalar_collect(generator),
         Expr::LetBinding { value, body, .. } => {
@@ -85,7 +85,7 @@ fn can_scalar_collect(expr: &Expr) -> bool {
         Expr::TryCatch { try_expr, catch_expr } => {
             can_scalar_collect(try_expr) && can_scalar_collect(catch_expr)
         }
-        Expr::Error { msg } => msg.as_ref().map_or(true, |m| is_scalar(m)),
+        Expr::Error { msg } => msg.as_ref().is_none_or(|m| is_scalar(m)),
         _ => false,
     }
 }
@@ -114,11 +114,11 @@ fn is_scalar(expr: &Expr) -> bool {
             match (name.as_str(), args.len()) {
                 ("walk", _) | ("pick", _) | ("skip", _) | ("del", _) => false,
                 ("add", 1) => false,
-                _ => args.iter().all(|a| is_scalar(a)),
+                _ => args.iter().all(is_scalar),
             }
         }
         Expr::ObjectConstruct { pairs } => pairs.iter().all(|(k, v)| is_scalar(k) && is_scalar(v)),
-        Expr::Slice { expr, from, to } => is_scalar(expr) && from.as_ref().map_or(true, |f| is_scalar(f)) && to.as_ref().map_or(true, |t| is_scalar(t)),
+        Expr::Slice { expr, from, to } => is_scalar(expr) && from.as_ref().is_none_or(|f| is_scalar(f)) && to.as_ref().is_none_or(|t| is_scalar(t)),
         Expr::Format { expr, .. } => is_scalar(expr),
         Expr::SetPath { path, value } => is_scalar(path) && is_scalar(value),
         Expr::GetPath { path } => is_scalar(path),
@@ -1237,7 +1237,7 @@ impl Flattener {
             }
 
             Expr::Range { from, to, step } => {
-                let step_scalar = step.as_ref().map_or(true, |s| is_scalar(s));
+                let step_scalar = step.as_ref().is_none_or(|s| is_scalar(s));
                 if !is_scalar(from) || !is_scalar(to) || !step_scalar {
                     // Convert to nested evaluation:
                     // range(A; B; C) where some are generators =
@@ -1408,7 +1408,7 @@ impl Flattener {
                         extract: extract.clone(),
                     }),
                 };
-                return self.flatten_gen(&rewritten, input_slot);
+                self.flatten_gen(&rewritten, input_slot)
             }
 
             Expr::Foreach { source, init, var_index, acc_index, update, extract } => {
@@ -1670,7 +1670,7 @@ impl Flattener {
                         generator: generator.clone(),
                     }),
                 };
-                return self.flatten_gen(&rewritten, input_slot);
+                self.flatten_gen(&rewritten, input_slot)
             }
 
             Expr::Limit { count, generator } => {
@@ -1699,7 +1699,7 @@ impl Flattener {
                 // Check if limit > 0
                 let cmp = self.alloc_var();
                 self.emit(JitOp::F64Less { dst_var: cmp, a_var: zero_var, b_var: limit_var });
-                self.emit(JitOp::BranchOnVar { var: cmp, nonzero_label: start_label, zero_label: zero_label });
+                self.emit(JitOp::BranchOnVar { var: cmp, nonzero_label: start_label, zero_label });
                 self.emit(JitOp::Label { id: zero_label });
                 // limit <= 0: check if negative (error) or zero (skip)
                 let neg_cmp = self.alloc_var();
@@ -1841,7 +1841,7 @@ impl Flattener {
                 (name.as_str(), args.len()),
                 ("walk", _) | ("pick", _) | ("skip", _) | ("add", 1) | ("del", _)
             ) => {
-                return false;
+                false
             }
 
             // CallBuiltin with generator args: rewrite as nested LetBinding
@@ -1973,8 +1973,8 @@ impl Flattener {
 
             // Slice with generator args
             Expr::Slice { expr: base_expr, from, to } if is_scalar(base_expr) => {
-                let from_scalar = from.as_ref().map_or(true, |f| is_scalar(f));
-                let to_scalar = to.as_ref().map_or(true, |t| is_scalar(t));
+                let from_scalar = from.as_ref().is_none_or(|f| is_scalar(f));
+                let to_scalar = to.as_ref().is_none_or(|t| is_scalar(t));
                 if from_scalar && to_scalar {
                     // Already scalar, should be handled by is_scalar. Yield once.
                     let out = self.flatten_scalar(expr, input_slot);
@@ -2018,7 +2018,7 @@ impl Flattener {
                 self.emit(JitOp::Drop { slot: mid });
                 ok
             }
-            Expr::Range { from, to, step } if is_scalar(from) && is_scalar(to) && step.as_ref().map_or(true, |s| is_scalar(s)) => {
+            Expr::Range { from, to, step } if is_scalar(from) && is_scalar(to) && step.as_ref().is_none_or(|s| is_scalar(s)) => {
                 let from_val = self.flatten_scalar(from, input_slot);
                 let to_val = self.flatten_scalar(to, input_slot);
                 let step_val = if let Some(s) = step {
@@ -2504,7 +2504,7 @@ impl Flattener {
     fn flatten_range_gen(&mut self, from: &Expr, to: &Expr, step: Option<&Expr>, input_slot: SlotId) -> bool {
         // Build a fully scalar range call wrapped in appropriate generator nesting
         // For each combination of (from_val, to_val, step_val), emit range loop
-        if is_scalar(from) && is_scalar(to) && step.map_or(true, |s| is_scalar(s)) {
+        if is_scalar(from) && is_scalar(to) && step.is_none_or(is_scalar) {
             // All scalar - just emit directly
             let fv = self.flatten_scalar(from, input_slot);
             let tv = self.flatten_scalar(to, input_slot);
@@ -2527,7 +2527,7 @@ impl Flattener {
         if !is_scalar(from) {
             // from is generator
             let to_clone = to.clone();
-            let step_clone = step.map(|s| s.clone());
+            let step_clone = step.cloned();
             return self.flatten_gen_with_each_output(from, input_slot, &|this, fv| {
                 let step_ref = step_clone.as_ref();
                 this.flatten_range_gen_inner(fv, &to_clone, step_ref, input_slot);
@@ -2537,7 +2537,7 @@ impl Flattener {
         // from is scalar, to is generator
         let fv = self.flatten_scalar(from, input_slot);
         if !is_scalar(to) {
-            let step_clone = step.map(|s| s.clone());
+            let step_clone = step.cloned();
             let ok = self.flatten_gen_with_each_output(to, input_slot, &|this, tv| {
                 let step_ref = step_clone.as_ref();
                 if let Some(s) = step_ref {
@@ -2598,7 +2598,7 @@ impl Flattener {
             }
             self.emit(JitOp::Drop { slot: tv });
         } else {
-            let step_clone = step.map(|s| s.clone());
+            let step_clone = step.cloned();
             self.flatten_gen_with_each_output(to, input_slot, &|this, tv| {
                 let step_ref = step_clone.as_ref();
                 if let Some(s) = step_ref {
@@ -3217,11 +3217,11 @@ fn contains_func_call(expr: &Expr) -> bool {
         Expr::Collect { generator } => contains_func_call(generator),
         Expr::BinOp { lhs, rhs, .. } => contains_func_call(lhs) || contains_func_call(rhs),
         Expr::UnaryOp { operand, .. } | Expr::Negate { operand } => contains_func_call(operand),
-        Expr::CallBuiltin { args, .. } => args.iter().any(|a| contains_func_call(a)),
+        Expr::CallBuiltin { args, .. } => args.iter().any(contains_func_call),
         Expr::Update { path_expr, update_expr } => contains_func_call(path_expr) || contains_func_call(update_expr),
         Expr::Assign { path_expr, value_expr } => contains_func_call(path_expr) || contains_func_call(value_expr),
         Expr::Alternative { primary, fallback } => contains_func_call(primary) || contains_func_call(fallback),
-        Expr::Slice { expr, from, to } => contains_func_call(expr) || from.as_ref().map_or(false, |f| contains_func_call(f)) || to.as_ref().map_or(false, |t| contains_func_call(t)),
+        Expr::Slice { expr, from, to } => contains_func_call(expr) || from.as_ref().is_some_and(|f| contains_func_call(f)) || to.as_ref().is_some_and(|t| contains_func_call(t)),
         _ => false, // Literals, Input, LoadVar, etc. are safe
     }
 }
@@ -3298,7 +3298,7 @@ extern "C" fn jit_rt_index_field(dst: *mut Value, base: *const Value, key_ptr: *
                 match crate::eval::eval_index(&*base, &key_val, false) {
                     Ok(v) => { std::ptr::write(dst, v); 0 }
                     Err(e) => {
-                        set_jit_error(format!("{}", e));
+                        set_jit_error(e.to_string());
                         std::ptr::write(dst, Value::Null); GEN_ERROR
                     }
                 }
@@ -3332,7 +3332,7 @@ extern "C" fn jit_rt_index(dst: *mut Value, base: *const Value, key: *const Valu
         match crate::eval::eval_index(&*base, &*key, false) {
             Ok(v) => { std::ptr::write(dst, v); 0 }
             Err(e) => {
-                set_jit_error(format!("{}", e));
+                set_jit_error(e.to_string());
                 std::ptr::write(dst, Value::Null); GEN_ERROR
             }
         }
@@ -3575,7 +3575,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
     unsafe {
         let name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(name_ptr, name_len));
         let args = std::slice::from_raw_parts(args_ptr, nargs);
-        let args_vec: Vec<Value> = args.iter().cloned().collect();
+        let args_vec: Vec<Value> = args.to_vec();
 
         // Handle special names
         if let Some(rest) = name.strip_prefix("__loc__:") {
@@ -3916,6 +3916,12 @@ pub struct JitEnv {
     pub error_msg: Option<String>,
 }
 
+impl Default for JitEnv {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl JitEnv {
     pub fn new() -> Self {
         JitEnv {
@@ -4063,8 +4069,10 @@ pub struct JitCompiler {
     func_ctx: FunctionBuilderContext,
     rt_funcs: HashMap<&'static str, FuncId>,
     _string_constants: Vec<&'static str>,
+    #[allow(clippy::vec_box)]
     _repr_constants: Vec<Box<Rc<str>>>,
     /// Pre-allocated CompactString constants for string literals in JIT code.
+    #[allow(clippy::vec_box)]
     _rc_str_constants: Vec<Box<crate::value::KeyStr>>,
 }
 
@@ -4683,7 +4691,7 @@ impl JitCompiler {
         self.module.finalize_definitions()?;
 
         let code_ptr = self.module.get_finalized_function(func_id);
-        Ok(unsafe { std::mem::transmute(code_ptr) })
+        Ok(unsafe { std::mem::transmute::<*const u8, JitFilterFn>(code_ptr) })
     }
 }
 
