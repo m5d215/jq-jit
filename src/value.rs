@@ -480,12 +480,167 @@ where F: FnMut(Value) -> Result<()> {
     Ok(())
 }
 
+#[inline(always)]
 fn skip_ws(b: &[u8], mut pos: usize) -> usize {
     while pos < b.len() && matches!(b[pos], b' ' | b'\t' | b'\n' | b'\r') { pos += 1; }
     pos
 }
 
 const MAX_JSON_DEPTH: usize = 10000;
+
+/// Skip past a JSON value without constructing it. Returns the position after the value.
+fn skip_json_value(b: &[u8], pos: usize) -> Result<usize> {
+    if pos >= b.len() { bail!("Unexpected end of JSON"); }
+    match b[pos] {
+        b'n' => { if b.get(pos..pos+4) == Some(b"null") { Ok(pos + 4) } else { bail!("Invalid JSON at position {}", pos) } }
+        b't' => { if b.get(pos..pos+4) == Some(b"true") { Ok(pos + 4) } else { bail!("Invalid JSON at position {}", pos) } }
+        b'f' => { if b.get(pos..pos+5) == Some(b"false") { Ok(pos + 5) } else { bail!("Invalid JSON at position {}", pos) } }
+        b'"' => {
+            let mut i = pos + 1;
+            while i < b.len() {
+                match b[i] {
+                    b'"' => return Ok(i + 1),
+                    b'\\' => i += 2,
+                    _ => i += 1,
+                }
+            }
+            bail!("Unterminated string")
+        }
+        b'[' => {
+            let mut i = skip_ws(b, pos + 1);
+            if i < b.len() && b[i] == b']' { return Ok(i + 1); }
+            loop {
+                i = skip_json_value(b, i)?;
+                i = skip_ws(b, i);
+                if i >= b.len() { bail!("Unterminated array"); }
+                if b[i] == b']' { return Ok(i + 1); }
+                if b[i] != b',' { bail!("Expected ',' or ']' at position {}", i); }
+                i = skip_ws(b, i + 1);
+            }
+        }
+        b'{' => {
+            let mut i = skip_ws(b, pos + 1);
+            if i < b.len() && b[i] == b'}' { return Ok(i + 1); }
+            loop {
+                if i >= b.len() || b[i] != b'"' { bail!("Expected string key at position {}", i); }
+                // Skip key
+                let mut j = i + 1;
+                while j < b.len() {
+                    match b[j] { b'"' => break, b'\\' => j += 2, _ => j += 1 }
+                }
+                i = skip_ws(b, j + 1);
+                if i >= b.len() || b[i] != b':' { bail!("Expected ':' at position {}", i); }
+                i = skip_ws(b, i + 1);
+                i = skip_json_value(b, i)?;
+                i = skip_ws(b, i);
+                if i >= b.len() { bail!("Unterminated object"); }
+                if b[i] == b'}' { return Ok(i + 1); }
+                if b[i] != b',' { bail!("Expected ',' or '}}' at position {}", i); }
+                i = skip_ws(b, i + 1);
+            }
+        }
+        b'-' | b'0'..=b'9' => {
+            let mut i = pos;
+            if b[i] == b'-' { i += 1; }
+            while i < b.len() && b[i].is_ascii_digit() { i += 1; }
+            if i < b.len() && b[i] == b'.' { i += 1; while i < b.len() && b[i].is_ascii_digit() { i += 1; } }
+            if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+                i += 1;
+                if i < b.len() && (b[i] == b'+' || b[i] == b'-') { i += 1; }
+                while i < b.len() && b[i].is_ascii_digit() { i += 1; }
+            }
+            Ok(i)
+        }
+        c => bail!("Unexpected character '{}' at position {}", c as char, pos),
+    }
+}
+
+/// Parse a JSON object, only parsing values for keys in `fields`. Other values are skipped.
+/// Uses the same key parsing as parse_json_object but skips value parsing for non-matching keys.
+fn parse_json_object_project(b: &[u8], pos: usize, depth: usize, fields: &[&str]) -> Result<(Value, usize)> {
+    debug_assert_eq!(b[pos], b'{');
+    let mut i = skip_ws(b, pos + 1);
+    let n = fields.len();
+    let mut map = new_objmap_with_capacity(n);
+    if i < b.len() && b[i] == b'}' {
+        // Empty object: fill with nulls
+        for &f in fields { map.push_unique(KeyStr::from(f), Value::Null); }
+        return Ok((Value::Obj(Rc::new(map)), i + 1));
+    }
+    let mut found = 0u64;
+    let all_found: u64 = if n < 64 { (1u64 << n) - 1 } else { u64::MAX };
+    loop {
+        if i >= b.len() || b[i] != b'"' { bail!("Expected string key at position {}", i); }
+        let (key, end) = parse_json_key(b, i)?;
+        i = skip_ws(b, end);
+        if i >= b.len() || b[i] != b':' { bail!("Expected ':' at position {}", i); }
+        i = skip_ws(b, i + 1);
+        // Check if key is in projection set
+        let mut matched = false;
+        if found != all_found {
+            let key_str = key.as_str();
+            for (fi, &f) in fields.iter().enumerate() {
+                if fi < 64 && (found & (1u64 << fi)) != 0 { continue; }
+                if key_str == f {
+                    let (val, end) = parse_json_value(b, i, depth + 1)?;
+                    map.push_unique(key, val);
+                    found |= 1u64 << fi;
+                    i = end;
+                    matched = true;
+                    break;
+                }
+            }
+        }
+        if !matched {
+            i = skip_json_value(b, i)?;
+        }
+        i = skip_ws(b, i);
+        if i >= b.len() { bail!("Unterminated object"); }
+        if b[i] == b'}' { break; }
+        if b[i] != b',' { bail!("Expected ',' or '}}' at position {}", i); }
+        i = skip_ws(b, i + 1);
+        // Early exit: all needed fields found — skip rest of object
+        if found == all_found {
+            // Find closing brace, handling nesting
+            let mut nest = 1u32;
+            while i < b.len() && nest > 0 {
+                match b[i] {
+                    b'{' => { nest += 1; i += 1; }
+                    b'}' => { nest -= 1; if nest == 0 { break; } i += 1; }
+                    b'"' => { i += 1; while i < b.len() { match b[i] { b'"' => { i += 1; break; } b'\\' => i += 2, _ => i += 1 } } }
+                    _ => i += 1,
+                }
+            }
+            break;
+        }
+    }
+    // Add null for missing fields (in field order)
+    for (fi, &f) in fields.iter().enumerate() {
+        if fi < 64 && (found & (1u64 << fi)) != 0 { continue; }
+        map.push_unique(KeyStr::from(f), Value::Null);
+    }
+    Ok((Value::Obj(Rc::new(map)), i + 1))
+}
+
+/// Stream JSON values from input, only parsing specified fields from top-level objects.
+/// Other fields are skipped without constructing values.
+pub fn json_stream_project<F>(input: &str, fields: &[&str], mut cb: F) -> Result<()>
+where F: FnMut(Value) -> Result<()> {
+    let bytes = input.as_bytes();
+    let mut pos = 0;
+    if bytes.len() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF { pos = 3; }
+    pos = skip_ws(bytes, pos);
+    while pos < bytes.len() {
+        let (val, end) = if bytes[pos] == b'{' {
+            parse_json_object_project(bytes, pos, 0, fields)?
+        } else {
+            parse_json_value(bytes, pos, 0)?
+        };
+        cb(val)?;
+        pos = skip_ws(bytes, end);
+    }
+    Ok(())
+}
 
 fn parse_json_value(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)> {
     if pos >= b.len() { bail!("Unexpected end of JSON input"); }
@@ -642,6 +797,7 @@ fn parse_json_key(b: &[u8], pos: usize) -> Result<(KeyStr, usize)> {
     Ok((KeyStr::from(s), end))
 }
 
+#[inline]
 fn parse_json_number(b: &[u8], pos: usize) -> Result<(Value, usize)> {
     let mut i = pos;
     let is_neg = i < b.len() && b[i] == b'-';

@@ -8,7 +8,7 @@ use std::process;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use jq_jit::value::{Value, json_to_value, json_stream, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, write_value_compact_ext, write_value_compact_line, write_value_pretty_line};
+use jq_jit::value::{Value, json_to_value, json_stream, json_stream_project, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, write_value_compact_ext, write_value_compact_line, write_value_pretty_line};
 use jq_jit::interpreter::Filter;
 
 fn main() {
@@ -176,6 +176,11 @@ fn main() {
         }
     };
 
+    // Projection pushdown: skip parsing values for unneeded fields.
+    // Only worthwhile when extracting very few fields from wide objects.
+    // Disabled for now — overhead exceeds savings for typical narrow objects.
+    let projection_fields: Option<Vec<String>> = None;
+
     let stdout = io::stdout();
     let mut out = io::BufWriter::with_capacity(65536, stdout.lock());
 
@@ -287,10 +292,19 @@ fn main() {
                 let arr = Value::Arr(std::rc::Rc::new(values));
                 process_input(&arr, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
             } else {
-                if let Err(e) = json_stream(&input_str, |v| {
-                    process_input(&v, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                    Ok(())
-                }) {
+                let parse_result = if let Some(ref pf) = projection_fields {
+                    let field_refs: Vec<&str> = pf.iter().map(|s| s.as_str()).collect();
+                    json_stream_project(&input_str, &field_refs, |v| {
+                        process_input(&v, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        Ok(())
+                    })
+                } else {
+                    json_stream(&input_str, |v| {
+                        process_input(&v, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        Ok(())
+                    })
+                };
+                if let Err(e) = parse_result {
                     eprintln!("jq: error (at <stdin>:0): {}", e);
                     process::exit(2);
                 }
@@ -323,10 +337,19 @@ fn main() {
                 content = "";
             }
             let _ = &mmap; // keep mmap alive
-            if let Err(e) = json_stream(content, |v| {
-                process_input(&v, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                Ok(())
-            }) {
+            let parse_result = if let Some(ref pf) = projection_fields {
+                let field_refs: Vec<&str> = pf.iter().map(|s| s.as_str()).collect();
+                json_stream_project(content, &field_refs, |v| {
+                    process_input(&v, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    Ok(())
+                })
+            } else {
+                json_stream(content, |v| {
+                    process_input(&v, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    Ok(())
+                })
+            };
+            if let Err(e) = parse_result {
                 eprintln!("jq: error: {}", e);
                 process::exit(2);
             }

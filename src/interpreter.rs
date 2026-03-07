@@ -98,6 +98,75 @@ impl Filter {
         Ok(true)
     }
 
+    /// Returns the set of input fields accessed by the filter, if it can be statically determined.
+    /// Returns None if the filter might access any/all fields (e.g., identity, iteration).
+    pub fn needed_input_fields(&self) -> Option<Vec<String>> {
+        if let Some((ref expr, _)) = self.parsed {
+            let mut fields = Vec::new();
+            if collect_input_fields(expr, &mut fields) {
+                // Deduplicate
+                fields.sort();
+                fields.dedup();
+                if !fields.is_empty() {
+                    return Some(fields);
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Recursively collect field names accessed from the input. Returns false if the filter
+/// accesses the input in a way that requires the full object (e.g., bare `.`, `.[]`, `keys`).
+fn collect_input_fields(expr: &crate::ir::Expr, fields: &mut Vec<String>) -> bool {
+    use crate::ir::{Expr, Literal};
+    match expr {
+        // Accessing a specific field of input: .foo
+        Expr::Index { expr: base, key } => {
+            if matches!(base.as_ref(), Expr::Input) {
+                if let Expr::Literal(Literal::Str(s)) = key.as_ref() {
+                    fields.push(s.clone());
+                    return true;
+                }
+            }
+            // General index: recurse
+            collect_input_fields(base, fields) && collect_input_fields(key, fields)
+        }
+        Expr::IndexOpt { expr: base, key } => {
+            if matches!(base.as_ref(), Expr::Input) {
+                if let Expr::Literal(Literal::Str(s)) = key.as_ref() {
+                    fields.push(s.clone());
+                    return true;
+                }
+            }
+            collect_input_fields(base, fields) && collect_input_fields(key, fields)
+        }
+        // Bare input access — needs full object
+        Expr::Input => false,
+        // Literals and variables don't access input
+        Expr::Literal(_) | Expr::LoadVar { .. } => true,
+        // Pipe: both sides
+        Expr::Pipe { left, right } => collect_input_fields(left, fields) && collect_input_fields(right, fields),
+        // Object construct: check keys and values
+        Expr::ObjectConstruct { pairs } => {
+            pairs.iter().all(|(k, v)| collect_input_fields(k, fields) && collect_input_fields(v, fields))
+        }
+        // Conditionals
+        Expr::IfThenElse { cond, then_branch, else_branch } => {
+            collect_input_fields(cond, fields) && collect_input_fields(then_branch, fields) && collect_input_fields(else_branch, fields)
+        }
+        // Binary/unary ops
+        Expr::BinOp { lhs, rhs, .. } => collect_input_fields(lhs, fields) && collect_input_fields(rhs, fields),
+        Expr::UnaryOp { operand, .. } => collect_input_fields(operand, fields),
+        Expr::Negate { operand } => collect_input_fields(operand, fields),
+        Expr::Not => true,
+        // Let binding
+        Expr::LetBinding { value, body, .. } => collect_input_fields(value, fields) && collect_input_fields(body, fields),
+        // Select, alternative
+        Expr::Alternative { primary, fallback } => collect_input_fields(primary, fields) && collect_input_fields(fallback, fields),
+        // Anything else: assume full input needed
+        _ => false,
+    }
 }
 
 /// Execute a jq filter using libjq directly.

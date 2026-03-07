@@ -3675,19 +3675,32 @@ extern "C" fn jit_rt_obj_from_fields(
 ) {
     unsafe {
         let fields = std::slice::from_raw_parts(field_table, count);
-        // Collect values on stack (using MaybeUninit to avoid unnecessary init)
-        // For typical field counts (< 16), this stays on stack
-        let mut vals: [std::mem::MaybeUninit<Value>; 16] = std::mem::MaybeUninit::uninit().assume_init();
-        let use_heap = count > 16;
-        let mut heap_vals: Vec<std::mem::MaybeUninit<Value>> = if use_heap {
-            let mut v = Vec::with_capacity(count);
-            v.resize_with(count, std::mem::MaybeUninit::uninit);
-            v
-        } else { Vec::new() };
-        let val_buf: &mut [std::mem::MaybeUninit<Value>] = if use_heap { &mut heap_vals } else { &mut vals[..count] };
-
-        let mut found = 0u64;
         if let Value::Obj(src_obj) = &*src {
+            // Fast path: if source has exactly the same fields in the same order, clone it directly
+            if src_obj.len() == count {
+                let mut exact_match = true;
+                for (i, (k, _)) in src_obj.iter().enumerate() {
+                    let (fp, fl) = fields[i];
+                    if k.as_bytes().len() != fl || k.as_bytes() != std::slice::from_raw_parts(fp, fl) {
+                        exact_match = false;
+                        break;
+                    }
+                }
+                if exact_match {
+                    std::ptr::write(dst, Value::Obj(src_obj.clone()));
+                    return;
+                }
+            }
+            // General path: single-pass extraction with field-order output
+            let mut vals: [std::mem::MaybeUninit<Value>; 16] = std::mem::MaybeUninit::uninit().assume_init();
+            let use_heap = count > 16;
+            let mut heap_vals: Vec<std::mem::MaybeUninit<Value>> = if use_heap {
+                let mut v = Vec::with_capacity(count);
+                v.resize_with(count, std::mem::MaybeUninit::uninit);
+                v
+            } else { Vec::new() };
+            let val_buf: &mut [std::mem::MaybeUninit<Value>] = if use_heap { &mut heap_vals } else { &mut vals[..count] };
+            let mut found = 0u64;
             let all_found: u64 = if count < 64 { (1u64 << count) - 1 } else { u64::MAX };
             for (k, v) in src_obj.iter() {
                 if found == all_found { break; }
@@ -3701,20 +3714,28 @@ extern "C" fn jit_rt_obj_from_fields(
                     }
                 }
             }
+            let mut obj = crate::value::rc_objmap_pool_get(count);
+            let map = Rc::get_mut(&mut obj).unwrap_unchecked();
+            for (fi, &(fp, fl)) in fields.iter().enumerate() {
+                let name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(fp, fl));
+                let val = if fi < 64 && (found & (1u64 << fi)) != 0 {
+                    val_buf[fi].assume_init_read()
+                } else {
+                    Value::Null
+                };
+                map.push_unique(crate::value::KeyStr::from(name), val);
+            }
+            std::ptr::write(dst, Value::Obj(obj));
+        } else {
+            // Non-object source: all fields null
+            let mut obj = crate::value::rc_objmap_pool_get(count);
+            let map = Rc::get_mut(&mut obj).unwrap_unchecked();
+            for &(fp, fl) in fields {
+                let name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(fp, fl));
+                map.push_unique(crate::value::KeyStr::from(name), Value::Null);
+            }
+            std::ptr::write(dst, Value::Obj(obj));
         }
-        // Build object in field order
-        let mut obj = crate::value::rc_objmap_pool_get(count);
-        let map = Rc::get_mut(&mut obj).unwrap_unchecked();
-        for (fi, &(fp, fl)) in fields.iter().enumerate() {
-            let name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(fp, fl));
-            let val = if fi < 64 && (found & (1u64 << fi)) != 0 {
-                val_buf[fi].assume_init_read()
-            } else {
-                Value::Null
-            };
-            map.push_unique(crate::value::KeyStr::from(name), val);
-        }
-        std::ptr::write(dst, Value::Obj(obj));
     }
 }
 
