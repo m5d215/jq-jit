@@ -680,6 +680,19 @@ pub fn json_object_get_field_raw(b: &[u8], pos: usize, field: &str) -> Option<(u
     }
 }
 
+/// Extract a nested field from a JSON object: `.a.b.c` traversal on raw bytes.
+/// Returns (start, end) byte offsets of the final value within `b`.
+pub fn json_object_get_nested_field_raw(b: &[u8], pos: usize, fields: &[&str]) -> Option<(usize, usize)> {
+    if fields.is_empty() { return None; }
+    let (mut vs, mut ve) = json_object_get_field_raw(b, pos, fields[0])?;
+    for field in &fields[1..] {
+        let (s, e) = json_object_get_field_raw(b, vs, field)?;
+        vs = s;
+        ve = e;
+    }
+    Some((vs, ve))
+}
+
 /// Count the number of key-value pairs in a JSON object without full parsing.
 /// Returns None if the input isn't a JSON object.
 pub fn json_object_length(b: &[u8], pos: usize) -> Option<usize> {

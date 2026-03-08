@@ -369,6 +369,35 @@ impl Filter {
         None
     }
 
+    /// Detect nested field access `.a.b` or `.a.b.c` pattern.
+    /// Returns the chain of field names if this is chained field access on input.
+    pub fn detect_nested_field_access(&self) -> Option<Vec<String>> {
+        use crate::ir::{Expr, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        let mut fields = Vec::new();
+        let mut current = expr;
+        loop {
+            if let Expr::Index { expr: base, key } = current {
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    fields.push(field.clone());
+                    current = base.as_ref();
+                } else {
+                    return None;
+                }
+            } else if matches!(current, Expr::Input) {
+                break;
+            } else {
+                return None;
+            }
+        }
+        if fields.len() >= 2 {
+            fields.reverse(); // .a.b parses as Index(Index(Input, "a"), "b"), so reverse
+            Some(fields)
+        } else {
+            None
+        }
+    }
+
     /// Execute the filter against an input value, collecting all results.
     pub fn execute(&self, input: &Value) -> Result<Vec<Value>> {
         // Try JIT execution first
