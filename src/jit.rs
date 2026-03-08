@@ -300,6 +300,9 @@ enum JitOp {
     /// Consumes input_slot and mutates the clone in-place.
     MutateInplace { slot: SlotId, func: MutateFn },
 
+    /// Fused [range(n)]: pre-allocate and fill array in one call.
+    CollectRange { dst: SlotId, n: SlotId },
+
     // Termination
     ReturnContinue,
     ReturnError,
@@ -1266,6 +1269,18 @@ impl Flattener {
                 out
             }
             Expr::Collect { generator } => {
+                // Fused [range(n)]: single call creates the array directly
+                if let Expr::Range { from, to, step } = generator.as_ref() {
+                    let is_from_zero = matches!(from.as_ref(),
+                        Expr::Literal(Literal::Num(n, _)) if *n == 0.0);
+                    if is_from_zero && step.is_none() {
+                        let n_slot = self.flatten_scalar(to, input_slot);
+                        let out = self.alloc_slot();
+                        self.emit(JitOp::CollectRange { dst: out, n: n_slot });
+                        self.emit(JitOp::Drop { slot: n_slot });
+                        return out;
+                    }
+                }
                 // Collect is scalar: produce one array value.
                 // Use CollectBegin/flatten_gen/CollectFinish.
                 self.emit(JitOp::CollectBegin);
@@ -4510,6 +4525,20 @@ extern "C" fn jit_rt_path_insert(container: *mut Value, key: *const Value, val: 
 }
 
 // Collect (array construction) helpers
+/// Fused [range(n)]: pre-allocate and fill array in a single call.
+extern "C" fn jit_rt_collect_range(dst: *mut Value, n: f64) {
+    let count = n as i64;
+    if count <= 0 {
+        unsafe { std::ptr::write(dst, Value::Arr(Rc::new(Vec::new()))); }
+        return;
+    }
+    let count = count as usize;
+    let mut arr = Vec::with_capacity(count);
+    for i in 0..count {
+        arr.push(Value::Num(i as f64, None));
+    }
+    unsafe { std::ptr::write(dst, Value::Arr(Rc::new(arr))); }
+}
 extern "C" fn jit_rt_collect_begin(env: *mut JitEnv) {
     unsafe { (*env).collect_stacks.push(Vec::with_capacity(16)); }
 }
@@ -5153,6 +5182,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
             JitOp::StrBufAppendVal { src } => { *use_count.entry(*src).or_insert(0) += 1; }
             JitOp::ThrowError { msg } => { *use_count.entry(*msg).or_insert(0) += 1; }
             JitOp::MutateInplace { slot, .. } => { *use_count.entry(*slot).or_insert(0) += 1; }
+            JitOp::CollectRange { n, .. } => { *use_count.entry(*n).or_insert(0) += 1; }
             JitOp::CallBuiltin { args, .. } => {
                 for a in args { *use_count.entry(*a).or_insert(0) += 1; }
             }
@@ -5225,6 +5255,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 JitOp::StrBufAppendVal { src } => { *use_count.entry(*src).or_insert(0) += 1; }
                 JitOp::ThrowError { msg } => { *use_count.entry(*msg).or_insert(0) += 1; }
                 JitOp::MutateInplace { slot, .. } => { *use_count.entry(*slot).or_insert(0) += 1; }
+                JitOp::CollectRange { n, .. } => { *use_count.entry(*n).or_insert(0) += 1; }
                 JitOp::CallBuiltin { args, .. } => {
                     for a in args { *use_count.entry(*a).or_insert(0) += 1; }
                 }
@@ -5395,6 +5426,7 @@ impl JitCompiler {
             ("jit_rt_call_builtin", jit_rt_call_builtin as *const u8),
             ("jit_rt_reverse_inplace", jit_rt_reverse_inplace as *const u8),
             ("jit_rt_sort_inplace", jit_rt_sort_inplace as *const u8),
+            ("jit_rt_collect_range", jit_rt_collect_range as *const u8),
         ];
         for (name, ptr) in symbols {
             jit_builder.symbol(*name, *ptr);
@@ -6068,6 +6100,13 @@ impl JitCompiler {
                         };
                         b.ins().call(rt[rt_name], &[s]);
                     }
+                    JitOp::CollectRange { dst, n } => {
+                        let d = slot_addr(&mut b, *dst);
+                        let n_addr = slot_addr(&mut b, *n);
+                        let n_f64 = b.ins().call(rt["to_f64"], &[n_addr]);
+                        let n_val = b.inst_results(n_f64)[0];
+                        b.ins().call(rt["collect_range"], &[d, n_val]);
+                    }
                 }
             }
 
@@ -6163,6 +6202,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("call_builtin", [p, p, p, p, p], [p]);  // dst, name_ptr, name_len, args_ptr, nargs -> status
     decl!("reverse_inplace", [p], [p]);  // v: *mut Value -> status
     decl!("sort_inplace", [p], [p]);     // v: *mut Value -> status
+    decl!("collect_range", [p, f], []);  // dst, n (f64)
     Ok(())
 }
 
