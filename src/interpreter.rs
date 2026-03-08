@@ -241,6 +241,14 @@ impl Filter {
         None
     }
 
+    /// Detect `.[]` — each/iteration on input.
+    pub fn is_each(&self) -> bool {
+        use crate::ir::Expr;
+        if let Some((ref expr, _)) = self.parsed {
+            matches!(expr, Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input))
+        } else { false }
+    }
+
     /// Detect array-of-field-access `[.f1,.f2,...]` pattern.
     /// Returns the list of field names if this is Collect over comma field accesses.
     pub fn detect_array_field_access(&self) -> Option<Vec<String>> {

@@ -905,6 +905,61 @@ pub fn json_object_del_field(b: &[u8], pos: usize, field: &str, buf: &mut Vec<u8
     true
 }
 
+/// Iterate over values of a JSON object or elements of a JSON array,
+/// calling `cb` with (value_start, value_end) for each. Returns true on success.
+pub fn json_each_value_raw(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {
+    if pos >= b.len() { return false; }
+    match b[pos] {
+        b'{' => {
+            let mut i = pos + 1;
+            while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+            if i < b.len() && b[i] == b'}' { return true; }
+            loop {
+                // Skip key
+                if i >= b.len() || b[i] != b'"' { return false; }
+                i += 1;
+                while i < b.len() { match b[i] { b'"' => break, b'\\' => { i += 2; continue }, _ => i += 1 } }
+                if i >= b.len() { return false; }
+                i += 1; // closing quote
+                while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+                if i >= b.len() || b[i] != b':' { return false; }
+                i += 1;
+                while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+                let vs = i;
+                i = match skip_json_value(b, i) { Ok(e) => e, Err(_) => return false };
+                buf.extend_from_slice(&b[vs..i]);
+                buf.push(b'\n');
+                while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+                if i >= b.len() { return false; }
+                if b[i] == b'}' { break; }
+                if b[i] != b',' { return false; }
+                i += 1;
+                while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+            }
+            true
+        }
+        b'[' => {
+            let mut i = pos + 1;
+            while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+            if i < b.len() && b[i] == b']' { return true; }
+            loop {
+                let vs = i;
+                i = match skip_json_value(b, i) { Ok(e) => e, Err(_) => return false };
+                buf.extend_from_slice(&b[vs..i]);
+                buf.push(b'\n');
+                while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+                if i >= b.len() { return false; }
+                if b[i] == b']' { break; }
+                if b[i] != b',' { return false; }
+                i += 1;
+                while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Extract two numeric field values from a JSON object without full parsing.
 /// More efficient than calling json_object_get_num twice (single scan).
 pub fn json_object_get_two_nums(b: &[u8], pos: usize, field1: &str, field2: &str) -> Option<(f64, f64)> {
