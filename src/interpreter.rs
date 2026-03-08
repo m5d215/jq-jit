@@ -180,6 +180,24 @@ impl Filter {
         None
     }
 
+    /// Detect `length` applied directly to input.
+    pub fn is_length(&self) -> bool {
+        if let Some((ref expr, _)) = self.parsed {
+            matches!(expr, crate::ir::Expr::UnaryOp { op: crate::ir::UnaryOp::Length, operand } if matches!(operand.as_ref(), crate::ir::Expr::Input))
+        } else {
+            false
+        }
+    }
+
+    /// Detect `keys` applied directly to input.
+    pub fn is_keys(&self) -> bool {
+        if let Some((ref expr, _)) = self.parsed {
+            matches!(expr, crate::ir::Expr::UnaryOp { op: crate::ir::UnaryOp::Keys, operand } if matches!(operand.as_ref(), crate::ir::Expr::Input))
+        } else {
+            false
+        }
+    }
+
     /// Detect simple field access `.field` pattern.
     /// Returns the field name if this is a direct field access on input.
     pub fn detect_field_access(&self) -> Option<String> {

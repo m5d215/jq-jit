@@ -642,6 +642,116 @@ pub fn json_object_get_field_raw(b: &[u8], pos: usize, field: &str) -> Option<(u
     }
 }
 
+/// Count the number of key-value pairs in a JSON object without full parsing.
+/// Returns None if the input isn't a JSON object.
+pub fn json_object_length(b: &[u8], pos: usize) -> Option<usize> {
+    if pos >= b.len() || b[pos] != b'{' { return None; }
+    let mut i = pos + 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < b.len() && b[i] == b'}' { return Some(0); }
+    let mut count = 0usize;
+    loop {
+        if i >= b.len() || b[i] != b'"' { return None; }
+        // Skip key string
+        i += 1;
+        while i < b.len() {
+            match b[i] { b'"' => break, b'\\' => i += 2, _ => i += 1 }
+        }
+        if i >= b.len() { return None; }
+        i += 1; // past closing quote
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { return None; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        // Skip value
+        i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return None };
+        count += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { return None; }
+        if b[i] == b'}' { return Some(count); }
+        if b[i] != b',' { return None; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
+}
+
+/// Count the length of a JSON value without full parsing.
+/// - object: number of keys
+/// - array: number of elements
+/// - string: character count (requires scanning for multi-byte chars)
+/// - null: returns 0
+/// Returns None if we can't determine the length quickly.
+pub fn json_value_length(b: &[u8], pos: usize) -> Option<usize> {
+    if pos >= b.len() { return None; }
+    match b[pos] {
+        b'{' => json_object_length(b, pos),
+        b'[' => {
+            let mut i = pos + 1;
+            while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+            if i < b.len() && b[i] == b']' { return Some(0); }
+            let mut count = 0usize;
+            loop {
+                i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return None };
+                count += 1;
+                while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+                if i >= b.len() { return None; }
+                if b[i] == b']' { return Some(count); }
+                if b[i] != b',' { return None; }
+                i += 1;
+                while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+            }
+        }
+        b'n' => Some(0), // null → 0
+        _ => None, // numbers return their value (not a usize), strings need unicode counting
+    }
+}
+
+/// Extract all keys from a JSON object and write them as a sorted JSON array into buf.
+/// Returns true if successful, false if the input isn't a JSON object.
+pub fn json_object_keys_to_buf(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    let mut i = pos + 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < b.len() && b[i] == b'}' {
+        buf.extend_from_slice(b"[]\n");
+        return true;
+    }
+    // Collect raw key byte ranges
+    let mut keys: Vec<(usize, usize)> = Vec::new();
+    loop {
+        if i >= b.len() || b[i] != b'"' { return false; }
+        let key_start = i; // include the opening quote
+        i += 1;
+        while i < b.len() {
+            match b[i] { b'"' => break, b'\\' => i += 2, _ => i += 1 }
+        }
+        if i >= b.len() { return false; }
+        let key_end = i + 1; // include the closing quote
+        keys.push((key_start, key_end));
+        i = key_end;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return false };
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { return false; }
+        if b[i] == b'}' { break; }
+        if b[i] != b',' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
+    // Sort keys by their string content (between quotes)
+    keys.sort_by(|a, c| b[a.0+1..a.1-1].cmp(&b[c.0+1..c.1-1]));
+    buf.push(b'[');
+    for (idx, (ks, ke)) in keys.iter().enumerate() {
+        if idx > 0 { buf.push(b','); }
+        buf.extend_from_slice(&b[*ks..*ke]);
+    }
+    buf.extend_from_slice(b"]\n");
+    true
+}
+
 /// Extract two numeric field values from a JSON object without full parsing.
 /// More efficient than calling json_object_get_num twice (single scan).
 pub fn json_object_get_two_nums(b: &[u8], pos: usize, field1: &str, field2: &str) -> Option<(f64, f64)> {
