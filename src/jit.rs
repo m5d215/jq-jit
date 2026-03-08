@@ -5981,9 +5981,72 @@ impl JitCompiler {
 
                 match op {
                     JitOp::Clone { dst, src } => {
-                        let d = slot_addr(&mut b, *dst);
+                        // Inline trivial clone: check tag to avoid function call
                         let s = slot_addr(&mut b, *src);
-                        b.ins().call(rt["clone"], &[d, s]);
+                        let tag = b.ins().load(types::I8, cranelift_codegen::ir::MemFlags::new(), s, 0);
+                        let tag_i32 = b.ins().uextend(types::I32, tag);
+                        let three = b.ins().iconst(types::I32, 3);
+                        let is_trivial = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::UnsignedLessThan, tag_i32, three);
+
+                        let copy_tag_blk = b.create_block();
+                        let check_num_blk = b.create_block();
+                        let call_clone_blk = b.create_block();
+                        let done_blk = b.create_block();
+
+                        // tag < 3 (Null/False/True): copy tag byte only
+                        b.ins().brif(is_trivial, copy_tag_blk, &[], check_num_blk, &[]);
+
+                        // copy_tag_blk: copy tag word (i64 at offset 0) for Null/False/True
+                        b.switch_to_block(copy_tag_blk);
+                        b.seal_block(copy_tag_blk);
+                        let d1 = slot_addr(&mut b, *dst);
+                        let s1 = slot_addr(&mut b, *src);
+                        let tag_word = b.ins().load(ptr_ty, cranelift_codegen::ir::MemFlags::new(), s1, 0);
+                        b.ins().store(cranelift_codegen::ir::MemFlags::new(), tag_word, d1, 0);
+                        b.ins().jump(done_blk, &[]);
+
+                        // check tag == 3 (Num)
+                        b.switch_to_block(check_num_blk);
+                        b.seal_block(check_num_blk);
+                        let is_num = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, tag_i32, three);
+                        let check_repr_blk = b.create_block();
+                        b.ins().brif(is_num, check_repr_blk, &[], call_clone_blk, &[]);
+
+                        // Num: check repr at offset 16
+                        b.switch_to_block(check_repr_blk);
+                        b.seal_block(check_repr_blk);
+                        let s_r = slot_addr(&mut b, *src);
+                        let repr = b.ins().load(ptr_ty, cranelift_codegen::ir::MemFlags::new(), s_r, 16);
+                        let zero = b.ins().iconst(ptr_ty, 0);
+                        let repr_null = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, repr, zero);
+                        let copy_num_blk = b.create_block();
+                        b.ins().brif(repr_null, copy_num_blk, &[], call_clone_blk, &[]);
+
+                        // copy_num_blk: inline Num(f64, None) clone — copy all 32 bytes
+                        b.switch_to_block(copy_num_blk);
+                        b.seal_block(copy_num_blk);
+                        let d2 = slot_addr(&mut b, *dst);
+                        let s2 = slot_addr(&mut b, *src);
+                        let w0 = b.ins().load(ptr_ty, cranelift_codegen::ir::MemFlags::new(), s2, 0);
+                        b.ins().store(cranelift_codegen::ir::MemFlags::new(), w0, d2, 0);
+                        let w1 = b.ins().load(ptr_ty, cranelift_codegen::ir::MemFlags::new(), s2, 8);
+                        b.ins().store(cranelift_codegen::ir::MemFlags::new(), w1, d2, 8);
+                        let z = b.ins().iconst(ptr_ty, 0);
+                        b.ins().store(cranelift_codegen::ir::MemFlags::new(), z, d2, 16);
+                        b.ins().store(cranelift_codegen::ir::MemFlags::new(), z, d2, 24);
+                        b.ins().jump(done_blk, &[]);
+
+                        // call_clone_blk: non-trivial, call runtime
+                        b.switch_to_block(call_clone_blk);
+                        b.seal_block(call_clone_blk);
+                        let d3 = slot_addr(&mut b, *dst);
+                        let s3 = slot_addr(&mut b, *src);
+                        b.ins().call(rt["clone"], &[d3, s3]);
+                        b.ins().jump(done_blk, &[]);
+
+                        // done_blk: continue
+                        b.switch_to_block(done_blk);
+                        b.seal_block(done_blk);
                         terminated = false;
                     }
                     JitOp::Drop { slot } if *slot == 0 => { /* don't drop input */ }
@@ -6032,27 +6095,40 @@ impl JitCompiler {
                         terminated = false;
                     }
                     JitOp::Null { dst } => {
+                        // Inline: store tag word 0 (Null) — full i64 includes padding
                         let a = slot_addr(&mut b, *dst);
-                        b.ins().call(rt["null"], &[a]);
+                        let tag_word = b.ins().iconst(ptr_ty, 0);
+                        b.ins().store(cranelift_codegen::ir::MemFlags::new(), tag_word, a, 0);
                     }
                     JitOp::True { dst } => {
+                        // Inline: store tag word 2 (True)
                         let a = slot_addr(&mut b, *dst);
-                        b.ins().call(rt["true"], &[a]);
+                        let tag_word = b.ins().iconst(ptr_ty, 2);
+                        b.ins().store(cranelift_codegen::ir::MemFlags::new(), tag_word, a, 0);
                     }
                     JitOp::False { dst } => {
+                        // Inline: store tag word 1 (False)
                         let a = slot_addr(&mut b, *dst);
-                        b.ins().call(rt["false"], &[a]);
+                        let tag_word = b.ins().iconst(ptr_ty, 1);
+                        b.ins().store(cranelift_codegen::ir::MemFlags::new(), tag_word, a, 0);
                     }
                     JitOp::Num { dst, val, repr } => {
                         let a = slot_addr(&mut b, *dst);
-                        let n = b.ins().f64const(*val);
                         if let Some(r) = repr {
+                            let n = b.ins().f64const(*val);
                             let boxed = Box::new(r.clone());
                             let rp = b.ins().iconst(ptr_ty, &*boxed as *const Rc<str> as i64);
                             self._repr_constants.push(boxed);
                             b.ins().call(rt["num_repr"], &[a, n, rp]);
                         } else {
-                            b.ins().call(rt["num"], &[a, n]);
+                            // Inline: tag_word=3, f64 at +8, repr=0 at +16, len=0 at +24
+                            let tag_word = b.ins().iconst(ptr_ty, 3);
+                            b.ins().store(cranelift_codegen::ir::MemFlags::new(), tag_word, a, 0);
+                            let n = b.ins().f64const(*val);
+                            b.ins().store(cranelift_codegen::ir::MemFlags::new(), n, a, 8);
+                            let zero = b.ins().iconst(ptr_ty, 0);
+                            b.ins().store(cranelift_codegen::ir::MemFlags::new(), zero, a, 16);
+                            b.ins().store(cranelift_codegen::ir::MemFlags::new(), zero, a, 24);
                         }
                     }
                     JitOp::Str { dst, val } => {
