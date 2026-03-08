@@ -6157,11 +6157,90 @@ impl JitCompiler {
                         b.ins().call(rt["index_field"], &[d, ba, fp, fl]);
                     }
                     JitOp::BinOp { dst, op, lhs, rhs } => {
-                        let d = slot_addr(&mut b, *dst);
-                        let l = slot_addr(&mut b, *lhs);
-                        let r = slot_addr(&mut b, *rhs);
-                        let o = b.ins().iconst(types::I32, binop_to_i32(*op) as i64);
-                        b.ins().call(rt["binop"], &[d, o, l, r]);
+                        // Inline fast path for Num+Num arithmetic (add/sub/mul/div)
+                        // Check if we can inline: arithmetic (add/sub/mul) or comparison (eq/ne/lt/gt/le/ge)
+                        let inline_kind: Option<u8> = match op {
+                            BinOp::Add => Some(0), BinOp::Sub => Some(1), BinOp::Mul => Some(2),
+                            BinOp::Eq => Some(10), BinOp::Ne => Some(11),
+                            BinOp::Lt => Some(12), BinOp::Gt => Some(13),
+                            BinOp::Le => Some(14), BinOp::Ge => Some(15),
+                            // Div/Mod excluded: jq requires division-by-zero error
+                            _ => None,
+                        };
+                        if let Some(kind) = inline_kind {
+                            let l = slot_addr(&mut b, *lhs);
+                            let r = slot_addr(&mut b, *rhs);
+                            let lt = b.ins().load(types::I8, cranelift_codegen::ir::MemFlags::new(), l, 0);
+                            let rt_tag = b.ins().load(types::I8, cranelift_codegen::ir::MemFlags::new(), r, 0);
+                            let lt32 = b.ins().uextend(types::I32, lt);
+                            let rt32 = b.ins().uextend(types::I32, rt_tag);
+                            let three = b.ins().iconst(types::I32, 3);
+                            let l_is_num = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lt32, three);
+                            let r_is_num = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, rt32, three);
+                            let both_num = b.ins().band(l_is_num, r_is_num);
+
+                            let fast_blk = b.create_block();
+                            let slow_blk = b.create_block();
+                            let done_blk = b.create_block();
+                            b.ins().brif(both_num, fast_blk, &[], slow_blk, &[]);
+
+                            b.switch_to_block(fast_blk);
+                            b.seal_block(fast_blk);
+                            let l2 = slot_addr(&mut b, *lhs);
+                            let r2 = slot_addr(&mut b, *rhs);
+                            let lf = b.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), l2, 8);
+                            let rf = b.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), r2, 8);
+                            let d2 = slot_addr(&mut b, *dst);
+                            if kind < 10 {
+                                // Arithmetic: result is f64
+                                let result = match kind {
+                                    0 => b.ins().fadd(lf, rf),
+                                    1 => b.ins().fsub(lf, rf),
+                                    2 => b.ins().fmul(lf, rf),
+                                    _ => unreachable!(),
+                                };
+                                let tag_word = b.ins().iconst(ptr_ty, 3);
+                                b.ins().store(cranelift_codegen::ir::MemFlags::new(), tag_word, d2, 0);
+                                b.ins().store(cranelift_codegen::ir::MemFlags::new(), result, d2, 8);
+                                let zero = b.ins().iconst(ptr_ty, 0);
+                                b.ins().store(cranelift_codegen::ir::MemFlags::new(), zero, d2, 16);
+                                b.ins().store(cranelift_codegen::ir::MemFlags::new(), zero, d2, 24);
+                            } else {
+                                // Comparison: result is True/False
+                                use cranelift_codegen::ir::condcodes::FloatCC;
+                                let cc = match kind {
+                                    10 => FloatCC::Equal, 11 => FloatCC::NotEqual,
+                                    12 => FloatCC::LessThan, 13 => FloatCC::GreaterThan,
+                                    14 => FloatCC::LessThanOrEqual, 15 => FloatCC::GreaterThanOrEqual,
+                                    _ => unreachable!(),
+                                };
+                                let cmp = b.ins().fcmp(cc, lf, rf);
+                                // True=2, False=1
+                                let one = b.ins().iconst(ptr_ty, 1);
+                                let two = b.ins().iconst(ptr_ty, 2);
+                                let tag_word = b.ins().select(cmp, two, one);
+                                b.ins().store(cranelift_codegen::ir::MemFlags::new(), tag_word, d2, 0);
+                            }
+                            b.ins().jump(done_blk, &[]);
+
+                            b.switch_to_block(slow_blk);
+                            b.seal_block(slow_blk);
+                            let d3 = slot_addr(&mut b, *dst);
+                            let l3 = slot_addr(&mut b, *lhs);
+                            let r3 = slot_addr(&mut b, *rhs);
+                            let o = b.ins().iconst(types::I32, binop_to_i32(*op) as i64);
+                            b.ins().call(rt["binop"], &[d3, o, l3, r3]);
+                            b.ins().jump(done_blk, &[]);
+
+                            b.switch_to_block(done_blk);
+                            b.seal_block(done_blk);
+                        } else {
+                            let d = slot_addr(&mut b, *dst);
+                            let l = slot_addr(&mut b, *lhs);
+                            let r = slot_addr(&mut b, *rhs);
+                            let o = b.ins().iconst(types::I32, binop_to_i32(*op) as i64);
+                            b.ins().call(rt["binop"], &[d, o, l, r]);
+                        }
                     }
                     JitOp::AddMove { dst, lhs, rhs } => {
                         let d = slot_addr(&mut b, *dst);
