@@ -239,6 +239,12 @@ enum JitOp {
     /// In-place path insert: set container[key] = val, consuming val (slot becomes Null).
     /// Container is modified in-place via Rc::make_mut (no clone if refcount == 1).
     PathInsert { container: SlotId, key: SlotId, val: SlotId },
+    /// Take value at integer index from container (arr[i] or obj.entries[i].value).
+    /// O(1) direct index access, no hash lookup. Container must have refcount == 1.
+    TakeByIdx { dst: SlotId, container: SlotId, idx_var: u32 },
+    /// Put value at integer index into container (arr[i] or obj.entries[i].value).
+    /// O(1) direct index access, no hash lookup. Container must have refcount == 1.
+    PutByIdx { container: SlotId, idx_var: u32, val: SlotId },
 
     // Collect (array construction)
     CollectBegin,
@@ -2033,54 +2039,35 @@ impl Flattener {
                 let is_each = matches!(path_expr, Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input));
                 let is_each_opt = matches!(path_expr, Expr::EachOpt { input_expr } if matches!(input_expr.as_ref(), Expr::Input));
                 if (is_each || is_each_opt) && is_scalar(update_expr) {
-                    // Emit: get all keys/indices, iterate them, for each: getpath([k]), apply f, setpath([k])
-                    // Use CallBuiltin "keys" to get all keys, then iterate
-                    let inp = self.alloc_slot();
-                    self.emit(JitOp::Clone { dst: inp, src: input_slot });
-                    let keys = self.alloc_slot();
-                    self.emit_propagating(JitOp::CallBuiltin {
-                        dst: keys, name: "keys".to_string(), args: vec![inp],
-                    });
-                    self.emit(JitOp::Drop { slot: inp });
-                    // Accumulate result starting from input
+                    // O(n) in-place update: iterate by integer index, TakeByIdx/PutByIdx
+                    // No hash lookups — direct Vec index access for O(1) per element
                     let result = self.alloc_slot();
                     self.emit(JitOp::Clone { dst: result, src: input_slot });
-                    // Iterate keys
-                    self.flatten_each_with_action(keys, false, &|s, key_elem| {
-                        // Build path array [key]
-                        let path_arr = s.alloc_slot();
-                        s.emit(JitOp::CollectBegin);
-                        s.emit(JitOp::CollectPush { src: key_elem });
-                        s.emit(JitOp::CollectFinish { dst: path_arr });
-                        // getpath
-                        let cur = s.alloc_slot();
-                        s.emit(JitOp::Clone { dst: cur, src: result });
-                        let path_c = s.alloc_slot();
-                        s.emit(JitOp::Clone { dst: path_c, src: path_arr });
-                        let old_val = s.alloc_slot();
-                        s.emit_propagating(JitOp::CallBuiltin {
-                            dst: old_val, name: "getpath".to_string(), args: vec![cur, path_c],
-                        });
-                        s.emit(JitOp::Drop { slot: cur });
-                        s.emit(JitOp::Drop { slot: path_c });
-                        // apply update
-                        let new_val = s.flatten_scalar(update_expr, old_val);
-                        s.emit(JitOp::Drop { slot: old_val });
-                        // setpath
-                        let cur2 = s.alloc_slot();
-                        s.emit(JitOp::Clone { dst: cur2, src: result });
-                        let updated = s.alloc_slot();
-                        s.emit_propagating(JitOp::CallBuiltin {
-                            dst: updated, name: "setpath".to_string(), args: vec![cur2, path_arr, new_val],
-                        });
-                        s.emit(JitOp::Drop { slot: cur2 });
-                        s.emit(JitOp::Drop { slot: new_val });
-                        // Update result in place (drop old, clone new)
-                        s.emit(JitOp::Drop { slot: result });
-                        s.emit(JitOp::Clone { dst: result, src: updated });
-                        s.emit(JitOp::Drop { slot: updated });
-                    });
-                    self.emit(JitOp::Drop { slot: keys });
+
+                    let idx = self.alloc_var();
+                    let len = self.alloc_var();
+                    let head = self.alloc_label();
+                    let body = self.alloc_label();
+                    let done = self.alloc_label();
+
+                    self.emit(JitOp::GetLen { dst_var: len, src: result });
+                    self.emit(JitOp::InitVar { var: idx });
+                    self.emit(JitOp::Label { id: head });
+                    self.emit(JitOp::LoopCheck { idx_var: idx, len_var: len, body_label: body, done_label: done });
+                    self.emit(JitOp::Label { id: body });
+                    // Take value at index (O(1), replaces with Null)
+                    let old_val = self.alloc_slot();
+                    self.emit(JitOp::TakeByIdx { dst: old_val, container: result, idx_var: idx });
+                    // Apply update function
+                    let new_val = self.flatten_scalar(update_expr, old_val);
+                    self.emit(JitOp::Drop { slot: old_val });
+                    // Put value back at index (O(1))
+                    self.emit(JitOp::PutByIdx { container: result, idx_var: idx, val: new_val });
+                    self.emit(JitOp::Drop { slot: new_val });
+                    self.emit(JitOp::IncVar { var: idx });
+                    self.emit(JitOp::Jump { label: head });
+                    self.emit(JitOp::Label { id: done });
+
                     self.emit_yield(result);
                     self.emit(JitOp::Drop { slot: result });
                     return true;
@@ -4514,6 +4501,56 @@ extern "C" fn jit_rt_array_get(dst: *mut Value, arr: *const Value, idx: i64) {
         }
     }
 }
+/// Take value at index from container (O(1) direct Vec access, no hash).
+extern "C" fn jit_rt_take_by_idx(dst: *mut Value, container: *mut Value, idx: i64) {
+    unsafe {
+        let i = idx as usize;
+        match &mut *container {
+            Value::Arr(rc) => {
+                let arr = Rc::make_mut(rc);
+                if i < arr.len() {
+                    std::ptr::write(dst, std::mem::replace(&mut arr[i], Value::Null));
+                } else {
+                    std::ptr::write(dst, Value::Null);
+                }
+            }
+            Value::Obj(rc) => {
+                let obj = Rc::make_mut(rc);
+                if let Some(v) = obj.get_value_mut_by_index(i) {
+                    std::ptr::write(dst, std::mem::replace(v, Value::Null));
+                } else {
+                    std::ptr::write(dst, Value::Null);
+                }
+            }
+            _ => std::ptr::write(dst, Value::Null),
+        }
+    }
+}
+
+/// Put value at index into container (O(1) direct Vec access, no hash).
+extern "C" fn jit_rt_put_by_idx(container: *mut Value, idx: i64, val: *mut Value) {
+    unsafe {
+        let new_val = std::ptr::read(val);
+        std::ptr::write(val, Value::Null);
+        let i = idx as usize;
+        match &mut *container {
+            Value::Arr(rc) => {
+                let arr = Rc::make_mut(rc);
+                if i < arr.len() {
+                    arr[i] = new_val;
+                }
+            }
+            Value::Obj(rc) => {
+                let obj = Rc::make_mut(rc);
+                if let Some(v) = obj.get_value_mut_by_index(i) {
+                    *v = new_val;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 extern "C" fn jit_rt_obj_get_idx(dst: *mut Value, obj: *const Value, idx: i64) {
     unsafe {
         match &*obj {
@@ -5298,6 +5335,11 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 *use_count.entry(*key).or_insert(0) += 1;
                 *use_count.entry(*val).or_insert(0) += 1;
             }
+            JitOp::TakeByIdx { container, .. } => { *use_count.entry(*container).or_insert(0) += 1; }
+            JitOp::PutByIdx { container, val, .. } => {
+                *use_count.entry(*container).or_insert(0) += 1;
+                *use_count.entry(*val).or_insert(0) += 1;
+            }
             JitOp::StrBufAppendVal { src } => { *use_count.entry(*src).or_insert(0) += 1; }
             JitOp::ThrowError { msg } => { *use_count.entry(*msg).or_insert(0) += 1; }
             JitOp::MutateInplace { slot, .. } => { *use_count.entry(*slot).or_insert(0) += 1; }
@@ -5369,6 +5411,11 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 JitOp::PathInsert { container, key, val } => {
                     *use_count.entry(*container).or_insert(0) += 1;
                     *use_count.entry(*key).or_insert(0) += 1;
+                    *use_count.entry(*val).or_insert(0) += 1;
+                }
+                JitOp::TakeByIdx { container, .. } => { *use_count.entry(*container).or_insert(0) += 1; }
+                JitOp::PutByIdx { container, val, .. } => {
+                    *use_count.entry(*container).or_insert(0) += 1;
                     *use_count.entry(*val).or_insert(0) += 1;
                 }
                 JitOp::StrBufAppendVal { src } => { *use_count.entry(*src).or_insert(0) += 1; }
@@ -5519,6 +5566,8 @@ impl JitCompiler {
             ("jit_rt_take_var", jit_rt_take_var as *const u8),
             ("jit_rt_path_extract", jit_rt_path_extract as *const u8),
             ("jit_rt_path_insert", jit_rt_path_insert as *const u8),
+            ("jit_rt_take_by_idx", jit_rt_take_by_idx as *const u8),
+            ("jit_rt_put_by_idx", jit_rt_put_by_idx as *const u8),
             ("jit_rt_collect_begin", jit_rt_collect_begin as *const u8),
             ("jit_rt_collect_push", jit_rt_collect_push as *const u8),
             ("jit_rt_collect_finish", jit_rt_collect_finish as *const u8),
@@ -5961,6 +6010,18 @@ impl JitCompiler {
                         let v = slot_addr(&mut b, *val);
                         b.ins().call(rt["path_insert"], &[c, k, v]);
                     }
+                    JitOp::TakeByIdx { dst, container, idx_var } => {
+                        let d = slot_addr(&mut b, *dst);
+                        let c = slot_addr(&mut b, *container);
+                        let i = b.use_var(vars[*idx_var as usize]);
+                        b.ins().call(rt["take_by_idx"], &[d, c, i]);
+                    }
+                    JitOp::PutByIdx { container, idx_var, val } => {
+                        let c = slot_addr(&mut b, *container);
+                        let i = b.use_var(vars[*idx_var as usize]);
+                        let v = slot_addr(&mut b, *val);
+                        b.ins().call(rt["put_by_idx"], &[c, i, v]);
+                    }
                     // Collect ops
                     JitOp::CollectBegin => {
                         b.ins().call(rt["collect_begin"], &[env_ptr]);
@@ -6295,6 +6356,8 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("take_var", [p, p, i], []);
     decl!("path_extract", [p, p, p], [p]);
     decl!("path_insert", [p, p, p], [p]);
+    decl!("take_by_idx", [p, p, p], []);
+    decl!("put_by_idx", [p, p, p], []);
     decl!("collect_begin", [p], []);
     decl!("collect_push", [p, p], []);
     decl!("collect_finish", [p, p], []);

@@ -130,7 +130,7 @@ impl Clone for ObjMap {
     fn clone(&self) -> Self {
         let mut entries = pool_get(self.entries.len());
         entries.extend(self.entries.iter().cloned());
-        ObjMap { entries, index: None }
+        ObjMap { entries, index: self.index.clone() }
     }
 }
 
@@ -241,6 +241,12 @@ impl ObjMap {
     #[inline]
     pub fn get_index(&self, index: usize) -> Option<(&KeyStr, &Value)> {
         self.entries.get(index).map(|(k, v)| (k, v))
+    }
+
+    /// Get a mutable reference to value at index (O(1) direct Vec access).
+    #[inline]
+    pub fn get_value_mut_by_index(&mut self, index: usize) -> Option<&mut Value> {
+        self.entries.get_mut(index).map(|(_, v)| v)
     }
 
     /// Remove a key, shifting subsequent entries to preserve order.
