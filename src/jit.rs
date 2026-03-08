@@ -189,6 +189,9 @@ enum JitOp {
 
     // Generator output
     Yield { output: SlotId },
+    /// Fused field lookup + yield: borrows the field value from base without cloning.
+    /// Replaces IndexField(dst) + Yield(dst) + Drop(dst).
+    YieldFieldRef { base: SlotId, field: String },
 
     // Control flow
     IfTruthy { src: SlotId, then_label: LabelId, else_label: LabelId },
@@ -3837,6 +3840,47 @@ extern "C" fn jit_rt_index_field(dst: *mut Value, base: *const Value, key_ptr: *
         }
     }
 }
+/// Fused field lookup + yield: borrows field from base, calls callback, no clone/drop.
+/// For non-object bases or missing fields, creates a temporary Null value.
+/// Returns the callback result (GEN_CONTINUE or 0).
+extern "C" fn jit_rt_yield_field_ref(
+    base: *const Value, key_ptr: *const u8, key_len: usize,
+    cb: unsafe extern "C" fn(*const Value, *mut u8) -> i64, ctx: *mut u8,
+) -> i64 {
+    unsafe {
+        match &*base {
+            Value::Obj(o) => {
+                let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key_ptr, key_len));
+                match o.get(key) {
+                    Some(v) => cb(v as *const Value, ctx),
+                    None => {
+                        let null = Value::Null;
+                        cb(&null as *const Value, ctx)
+                    }
+                }
+            }
+            Value::Null => {
+                let null = Value::Null;
+                cb(&null as *const Value, ctx)
+            }
+            _ => {
+                // Non-object: clone + yield + drop (rare fallback)
+                let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key_ptr, key_len));
+                let key_val = Value::from_str(key);
+                match crate::eval::eval_index(&*base, &key_val, false) {
+                    Ok(v) => {
+                        let result = cb(&v as *const Value, ctx);
+                        result
+                    }
+                    Err(e) => {
+                        set_jit_error(e.to_string());
+                        GEN_ERROR
+                    }
+                }
+            }
+        }
+    }
+}
 extern "C" fn jit_rt_index(dst: *mut Value, base: *const Value, key: *const Value) -> i64 {
     unsafe {
         // Fast path: Array[Num] — most common in loops
@@ -4589,7 +4633,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 *use_count.entry(*base).or_insert(0) += 1;
                 *use_count.entry(*key).or_insert(0) += 1;
             }
-            JitOp::IndexField { base, .. } | JitOp::FieldBinopField { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
+            JitOp::IndexField { base, .. } | JitOp::FieldBinopField { base, .. } | JitOp::YieldFieldRef { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
             JitOp::FieldBinopConst { base, .. } => {
                 *use_count.entry(*base).or_insert(0) += 1;
             }
@@ -4651,7 +4695,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                     *use_count.entry(*base).or_insert(0) += 1;
                     *use_count.entry(*key).or_insert(0) += 1;
                 }
-                JitOp::IndexField { base, .. } | JitOp::FieldBinopField { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
+                JitOp::IndexField { base, .. } | JitOp::FieldBinopField { base, .. } | JitOp::YieldFieldRef { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
             JitOp::FieldBinopConst { base, .. } => {
                 *use_count.entry(*base).or_insert(0) += 1;
             }
@@ -4716,6 +4760,26 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
             i += 1;
         }
         if !changed { break; }
+    }
+
+    // Fuse IndexField(dst) + Yield(dst) + Drop(dst) → YieldFieldRef(base, field)
+    // Avoids cloning the field value — yields a borrowed reference directly.
+    let mut i = 0;
+    while i + 2 < ops.len() {
+        if let JitOp::IndexField { dst, base, ref field } = ops[i] {
+            if let JitOp::Yield { output } = ops[i + 1] {
+                if let JitOp::Drop { slot } = ops[i + 2] {
+                    if output == dst && slot == dst {
+                        let field = field.clone();
+                        ops[i] = JitOp::YieldFieldRef { base, field };
+                        ops.remove(i + 2);
+                        ops.remove(i + 1);
+                        continue;
+                    }
+                }
+            }
+        }
+        i += 1;
     }
 
     // Fuse ObjNew + consecutive ObjCopyField (same obj & src) → ObjFromFields
@@ -4795,6 +4859,7 @@ impl JitCompiler {
             ("jit_rt_field_binop_const", jit_rt_field_binop_const as *const u8),
             ("jit_rt_index", jit_rt_index as *const u8),
             ("jit_rt_index_field", jit_rt_index_field as *const u8),
+            ("jit_rt_yield_field_ref", jit_rt_yield_field_ref as *const u8),
             ("jit_rt_binop", jit_rt_binop as *const u8),
             ("jit_rt_unaryop", jit_rt_unaryop as *const u8),
             ("jit_rt_negate", jit_rt_negate as *const u8),
@@ -5077,6 +5142,25 @@ impl JitCompiler {
                     JitOp::Yield { output } => {
                         let oa = slot_addr(&mut b, *output);
                         let call = b.ins().call_indirect(cb_sig, cb_fn, &[oa, cb_ctx]);
+                        let result = b.inst_results(call)[0];
+                        let zero = b.ins().iconst(ptr_ty, 0);
+                        let stop = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual, result, zero);
+                        let stop_blk = b.create_block();
+                        let cont_blk = b.create_block();
+                        b.ins().brif(stop, stop_blk, &[], cont_blk, &[]);
+                        b.switch_to_block(stop_blk);
+                        b.seal_block(stop_blk);
+                        b.ins().return_(&[result]);
+                        b.switch_to_block(cont_blk);
+                        b.seal_block(cont_blk);
+                    }
+                    JitOp::YieldFieldRef { base, field } => {
+                        let ba = slot_addr(&mut b, *base);
+                        let leaked = Box::leak(field.clone().into_boxed_str());
+                        self._string_constants.push(leaked);
+                        let kp = b.ins().iconst(ptr_ty, leaked.as_ptr() as i64);
+                        let kl = b.ins().iconst(ptr_ty, leaked.len() as i64);
+                        let call = b.ins().call(rt["yield_field_ref"], &[ba, kp, kl, cb_fn, cb_ctx]);
                         let result = b.inst_results(call)[0];
                         let zero = b.ins().iconst(ptr_ty, 0);
                         let stop = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual, result, zero);
@@ -5506,6 +5590,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("field_binop_const", [p, p, p, p, p, i, i], [p]);
     decl!("index", [p, p, p], [p]);
     decl!("index_field", [p, p, p, p], [p]);
+    decl!("yield_field_ref", [p, p, p, p, p], [p]);
     decl!("binop", [p, i, p, p], [p]);
     decl!("unaryop", [p, i, p], [p]);
     decl!("negate", [p, p], [p]);
