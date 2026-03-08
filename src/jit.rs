@@ -6281,9 +6281,40 @@ impl JitCompiler {
                         b.ins().call(rt["unaryop"], &[d, o, s]);
                     }
                     JitOp::Negate { dst, src } => {
-                        let d = slot_addr(&mut b, *dst);
+                        // Inline for Num: fneg
                         let s = slot_addr(&mut b, *src);
-                        b.ins().call(rt["negate"], &[d, s]);
+                        let tag = b.ins().load(types::I8, cranelift_codegen::ir::MemFlags::new(), s, 0);
+                        let tag_i32 = b.ins().uextend(types::I32, tag);
+                        let three = b.ins().iconst(types::I32, 3);
+                        let is_num = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, tag_i32, three);
+                        let fast_blk = b.create_block();
+                        let slow_blk = b.create_block();
+                        let done_blk = b.create_block();
+                        b.ins().brif(is_num, fast_blk, &[], slow_blk, &[]);
+
+                        b.switch_to_block(fast_blk);
+                        b.seal_block(fast_blk);
+                        let s2 = slot_addr(&mut b, *src);
+                        let d2 = slot_addr(&mut b, *dst);
+                        let f_val = b.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), s2, 8);
+                        let neg = b.ins().fneg(f_val);
+                        let tag_word = b.ins().iconst(ptr_ty, 3);
+                        b.ins().store(cranelift_codegen::ir::MemFlags::new(), tag_word, d2, 0);
+                        b.ins().store(cranelift_codegen::ir::MemFlags::new(), neg, d2, 8);
+                        let zero = b.ins().iconst(ptr_ty, 0);
+                        b.ins().store(cranelift_codegen::ir::MemFlags::new(), zero, d2, 16);
+                        b.ins().store(cranelift_codegen::ir::MemFlags::new(), zero, d2, 24);
+                        b.ins().jump(done_blk, &[]);
+
+                        b.switch_to_block(slow_blk);
+                        b.seal_block(slow_blk);
+                        let d3 = slot_addr(&mut b, *dst);
+                        let s3 = slot_addr(&mut b, *src);
+                        b.ins().call(rt["negate"], &[d3, s3]);
+                        b.ins().jump(done_blk, &[]);
+
+                        b.switch_to_block(done_blk);
+                        b.seal_block(done_blk);
                     }
                     JitOp::Not { dst, src } => {
                         // Inline: null(0)/false(1) → True(2), else → False(1)
