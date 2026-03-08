@@ -251,6 +251,9 @@ enum JitOp {
     /// Put value at integer index into container (arr[i] or obj.entries[i].value).
     /// O(1) direct index access, no hash lookup. Container must have refcount == 1.
     PutByIdx { container: SlotId, idx_var: u32, val: SlotId },
+    /// In-place setpath: container[path...] = val. Container must have refcount == 1.
+    /// Both path and val slots become Null after the call.
+    SetPathMut { container: SlotId, path: SlotId, val: SlotId },
 
     // Collect (array construction)
     CollectBegin,
@@ -1326,6 +1329,33 @@ impl Flattener {
                         this.emit(JitOp::SetVar { var_index: *var_index, src: elem });
                         this.emit_reduce_assign(*acc_index, &info);
                     });
+                } else if let Expr::SetPath { path, value } = update.as_ref() {
+                    // Optimized: TakeVar + SetPathMut for setpath(path; val) in reduce
+                    if is_scalar(path) && is_scalar(value) {
+                        self.flatten_gen_with_each_output(source, input_slot, &|this, elem| {
+                            this.emit(JitOp::SetVar { var_index: *var_index, src: elem });
+                            let acc = this.alloc_slot();
+                            this.emit(JitOp::TakeVar { dst: acc, var_index: *acc_index });
+                            let path_val = this.flatten_scalar(path, acc);
+                            let val = this.flatten_scalar(value, acc);
+                            this.emit(JitOp::SetPathMut { container: acc, path: path_val, val });
+                            this.emit(JitOp::Drop { slot: val });
+                            this.emit(JitOp::Drop { slot: path_val });
+                            this.emit(JitOp::SetVar { var_index: *acc_index, src: acc });
+                            this.emit(JitOp::Drop { slot: acc });
+                        });
+                    } else {
+                        // Fall through to generic reduce
+                        self.flatten_gen_with_each_output(source, input_slot, &|this, elem| {
+                            this.emit(JitOp::SetVar { var_index: *var_index, src: elem });
+                            let acc = this.alloc_slot();
+                            this.emit(JitOp::GetVar { dst: acc, var_index: *acc_index });
+                            let new_acc = this.flatten_scalar(update, acc);
+                            this.emit(JitOp::SetVar { var_index: *acc_index, src: new_acc });
+                            this.emit(JitOp::Drop { slot: new_acc });
+                            this.emit(JitOp::Drop { slot: acc });
+                        });
+                    }
                 } else {
                     // For each output of source, set $var and update acc
                     self.flatten_gen_with_each_output(source, input_slot, &|this, elem| {
@@ -4594,6 +4624,20 @@ extern "C" fn jit_rt_take_by_idx(dst: *mut Value, container: *mut Value, idx: i6
 }
 
 /// Put value at index into container (O(1) direct Vec access, no hash).
+/// In-place setpath for reduce contexts. Takes ownership of the container (via TakeVar).
+/// Void return — errors are silently swallowed (setpath in reduce rarely errors).
+extern "C" fn jit_rt_setpath_mut(container: *mut Value, path: *const Value, val: *mut Value) {
+    unsafe {
+        let path_val = &*path;
+        let new_val = std::ptr::read(val);
+        std::ptr::write(val, Value::Null);
+
+        if let Value::Arr(p) = path_val {
+            let _ = crate::runtime::rt_setpath_mut(&mut *container, p.as_slice(), new_val);
+        }
+    }
+}
+
 extern "C" fn jit_rt_put_by_idx(container: *mut Value, idx: i64, val: *mut Value) {
     unsafe {
         let new_val = std::ptr::read(val);
@@ -5406,6 +5450,11 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 *use_count.entry(*container).or_insert(0) += 1;
                 *use_count.entry(*val).or_insert(0) += 1;
             }
+            JitOp::SetPathMut { container, path, val } => {
+                *use_count.entry(*container).or_insert(0) += 1;
+                *use_count.entry(*path).or_insert(0) += 1;
+                *use_count.entry(*val).or_insert(0) += 1;
+            }
             JitOp::StrBufAppendVal { src } => { *use_count.entry(*src).or_insert(0) += 1; }
             JitOp::ThrowError { msg } => { *use_count.entry(*msg).or_insert(0) += 1; }
             JitOp::MutateInplace { slot, .. } => { *use_count.entry(*slot).or_insert(0) += 1; }
@@ -5482,6 +5531,11 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 JitOp::TakeByIdx { container, .. } => { *use_count.entry(*container).or_insert(0) += 1; }
                 JitOp::PutByIdx { container, val, .. } => {
                     *use_count.entry(*container).or_insert(0) += 1;
+                    *use_count.entry(*val).or_insert(0) += 1;
+                }
+                JitOp::SetPathMut { container, path, val } => {
+                    *use_count.entry(*container).or_insert(0) += 1;
+                    *use_count.entry(*path).or_insert(0) += 1;
                     *use_count.entry(*val).or_insert(0) += 1;
                 }
                 JitOp::StrBufAppendVal { src } => { *use_count.entry(*src).or_insert(0) += 1; }
@@ -5634,6 +5688,7 @@ impl JitCompiler {
             ("jit_rt_path_insert", jit_rt_path_insert as *const u8),
             ("jit_rt_take_by_idx", jit_rt_take_by_idx as *const u8),
             ("jit_rt_put_by_idx", jit_rt_put_by_idx as *const u8),
+            ("jit_rt_setpath_mut", jit_rt_setpath_mut as *const u8),
             ("jit_rt_collect_begin", jit_rt_collect_begin as *const u8),
             ("jit_rt_collect_push", jit_rt_collect_push as *const u8),
             ("jit_rt_collect_finish", jit_rt_collect_finish as *const u8),
@@ -6088,6 +6143,12 @@ impl JitCompiler {
                         let v = slot_addr(&mut b, *val);
                         b.ins().call(rt["put_by_idx"], &[c, i, v]);
                     }
+                    JitOp::SetPathMut { container, path, val } => {
+                        let c = slot_addr(&mut b, *container);
+                        let p = slot_addr(&mut b, *path);
+                        let v = slot_addr(&mut b, *val);
+                        b.ins().call(rt["setpath_mut"], &[c, p, v]);
+                    }
                     // Collect ops
                     JitOp::CollectBegin => {
                         b.ins().call(rt["collect_begin"], &[env_ptr]);
@@ -6424,6 +6485,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("path_insert", [p, p, p], [p]);
     decl!("take_by_idx", [p, p, p], []);
     decl!("put_by_idx", [p, p, p], []);
+    decl!("setpath_mut", [p, p, p], []);
     decl!("collect_begin", [p], []);
     decl!("collect_push", [p, p], []);
     decl!("collect_finish", [p, p], []);

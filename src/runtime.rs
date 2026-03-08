@@ -1583,6 +1583,71 @@ pub fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
     }
 }
 
+/// In-place setpath: modifies `v` directly when Rc refcount allows.
+/// For use in reduce contexts where TakeVar ensures exclusive ownership.
+pub fn rt_setpath_mut(v: &mut Value, path: &[Value], val: Value) -> Result<()> {
+    if path.is_empty() {
+        *v = val;
+        return Ok(());
+    }
+    let key = &path[0];
+    let rest = &path[1..];
+    match key {
+        Value::Str(k) => {
+            // Ensure v is an Obj (or convert Null to Obj)
+            if matches!(v, Value::Null) {
+                *v = Value::Obj(Rc::new(new_objmap()));
+            }
+            if let Value::Obj(o) = v {
+                let obj = Rc::make_mut(o);
+                if rest.is_empty() {
+                    obj.insert(KeyStr::from(k.as_str()), val);
+                } else {
+                    let inner = obj.get_mut(k.as_str());
+                    if let Some(inner_val) = inner {
+                        rt_setpath_mut(inner_val, rest, val)?;
+                    } else {
+                        let mut inner_val = Value::Null;
+                        rt_setpath_mut(&mut inner_val, rest, val)?;
+                        obj.insert(KeyStr::from(k.as_str()), inner_val);
+                    }
+                }
+                Ok(())
+            } else {
+                bail!("Cannot index {} with string", v.type_name());
+            }
+        }
+        Value::Num(n, _) => {
+            if n.is_nan() { bail!("Cannot set array element at NaN index"); }
+            let idx = *n as i64;
+            // Ensure v is an Arr (or convert Null to Arr)
+            if matches!(v, Value::Null) {
+                if idx < 0 { bail!("Out of bounds negative array index"); }
+                let uidx = idx as usize;
+                if uidx > 536870911 { bail!("Array index too large"); }
+                *v = Value::Arr(Rc::new(vec![Value::Null; uidx + 1]));
+            }
+            if let Value::Arr(a) = v {
+                let arr = Rc::make_mut(a);
+                let actual = if idx < 0 { (arr.len() as i64 + idx).max(0) as usize } else { idx as usize };
+                if actual > 536870911 { bail!("Array index too large"); }
+                while arr.len() <= actual {
+                    arr.push(Value::Null);
+                }
+                if rest.is_empty() {
+                    arr[actual] = val;
+                } else {
+                    rt_setpath_mut(&mut arr[actual], rest, val)?;
+                }
+                Ok(())
+            } else {
+                bail!("Cannot index {} with number", v.type_name());
+            }
+        }
+        _ => bail!("Cannot set path with {} key", key.type_name()),
+    }
+}
+
 pub fn rt_delpaths(v: &Value, paths: &Value) -> Result<Value> {
     match paths {
         Value::Arr(ps) => {
