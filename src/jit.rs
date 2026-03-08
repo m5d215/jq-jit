@@ -1164,6 +1164,13 @@ impl Flattener {
                     )
                 );
 
+                // Detect accumulator-add pattern: reduce ... (init; . + rhs) — in-place via TakeVar + AddMove
+                let acc_add_rhs = if let Expr::BinOp { op, lhs, rhs } = update.as_ref() {
+                    if matches!(op, BinOp::Add) && matches!(lhs.as_ref(), Expr::Input) && is_scalar(rhs) {
+                        Some(rhs.as_ref())
+                    } else { None }
+                } else { None };
+
                 if is_last_pattern {
                     // Optimized: reuse array buffer via TakeVar + PathInsert
                     self.flatten_gen_with_each_output(source, input_slot, &|this, elem| {
@@ -1179,6 +1186,20 @@ impl Flattener {
                         this.emit(JitOp::Drop { slot: key });
                         this.emit(JitOp::SetVar { var_index: *acc_index, src: acc });
                         this.emit(JitOp::Drop { slot: acc });
+                    });
+                } else if let Some(rhs_expr) = acc_add_rhs {
+                    // Optimized: TakeVar + AddMove for `. + rhs` — in-place accumulator append
+                    self.flatten_gen_with_each_output(source, input_slot, &|this, elem| {
+                        this.emit(JitOp::SetVar { var_index: *var_index, src: elem });
+                        let acc = this.alloc_slot();
+                        this.emit(JitOp::TakeVar { dst: acc, var_index: *acc_index });
+                        let rhs_val = this.flatten_scalar(rhs_expr, acc);
+                        let result = this.alloc_slot();
+                        this.emit(JitOp::AddMove { dst: result, lhs: acc, rhs: rhs_val });
+                        this.emit(JitOp::Drop { slot: rhs_val });
+                        this.emit(JitOp::Drop { slot: acc });
+                        this.emit(JitOp::SetVar { var_index: *acc_index, src: result });
+                        this.emit(JitOp::Drop { slot: result });
                     });
                 } else if let Some(info) = inplace_info {
                     // Optimized: TakeVar + PathExtract/PathInsert avoids container cloning
@@ -3221,6 +3242,13 @@ impl Flattener {
             )
         );
 
+        // Detect accumulator-add pattern: reduce ... (init; . + rhs)
+        let acc_add_rhs = if let Expr::BinOp { op, lhs, rhs } = update {
+            if matches!(op, BinOp::Add) && matches!(lhs.as_ref(), Expr::Input) && is_scalar(rhs) {
+                Some(rhs.as_ref())
+            } else { None }
+        } else { None };
+
         // Helper: emit the update step (set $var, load acc as ., evaluate update, store back)
         let emit_update = |s: &mut Flattener, elem: SlotId| {
             s.emit(JitOp::SetVar { var_index, src: elem });
@@ -3237,6 +3265,17 @@ impl Flattener {
                 s.emit(JitOp::Drop { slot: key });
                 s.emit(JitOp::SetVar { var_index: acc_index, src: acc });
                 s.emit(JitOp::Drop { slot: acc });
+            } else if let Some(rhs_expr) = acc_add_rhs {
+                // Optimized: TakeVar + AddMove for `. + rhs`
+                let acc = s.alloc_slot();
+                s.emit(JitOp::TakeVar { dst: acc, var_index: acc_index });
+                let rhs_val = s.flatten_scalar(rhs_expr, acc);
+                let result = s.alloc_slot();
+                s.emit(JitOp::AddMove { dst: result, lhs: acc, rhs: rhs_val });
+                s.emit(JitOp::Drop { slot: rhs_val });
+                s.emit(JitOp::Drop { slot: acc });
+                s.emit(JitOp::SetVar { var_index: acc_index, src: result });
+                s.emit(JitOp::Drop { slot: result });
             } else if let Some(ref info) = inplace_info {
                 s.emit_reduce_update_with_lets(acc_index, info);
             } else {

@@ -868,6 +868,53 @@ fn rt_add_all(v: &Value) -> Result<Value> {
     match v {
         Value::Arr(a) if a.is_empty() => Ok(Value::Null),
         Value::Arr(a) => {
+            // Fast path: detect homogeneous types for O(n) pre-allocated merge
+            match &a[0] {
+                Value::Arr(_) => {
+                    // Check if all elements are arrays (or null)
+                    let mut total = 0usize;
+                    let mut all_arr = true;
+                    for item in a.iter() {
+                        match item {
+                            Value::Arr(sub) => total += sub.len(),
+                            Value::Null => {}
+                            _ => { all_arr = false; break; }
+                        }
+                    }
+                    if all_arr {
+                        let mut result = Vec::with_capacity(total);
+                        for item in a.iter() {
+                            if let Value::Arr(sub) = item {
+                                result.extend(sub.iter().cloned());
+                            }
+                        }
+                        return Ok(Value::Arr(Rc::new(result)));
+                    }
+                }
+                Value::Str(_) => {
+                    // Check if all elements are strings (or null)
+                    let mut total = 0usize;
+                    let mut all_str = true;
+                    for item in a.iter() {
+                        match item {
+                            Value::Str(s) => total += s.len(),
+                            Value::Null => {}
+                            _ => { all_str = false; break; }
+                        }
+                    }
+                    if all_str {
+                        let mut result = String::with_capacity(total);
+                        for item in a.iter() {
+                            if let Value::Str(s) = item {
+                                result.push_str(s.as_str());
+                            }
+                        }
+                        return Ok(Value::from_string(result));
+                    }
+                }
+                _ => {}
+            }
+            // General fallback: sequential add
             let mut result = a[0].clone();
             for item in &a[1..] {
                 result = rt_add(&result, item)?;
