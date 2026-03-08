@@ -68,6 +68,15 @@ impl Filter {
         })
     }
 
+    /// Returns true if this filter is a simple identity (`.`) that passes through input unchanged.
+    pub fn is_identity(&self) -> bool {
+        if let Some((ref expr, _)) = self.parsed {
+            matches!(expr, crate::ir::Expr::Input)
+        } else {
+            false
+        }
+    }
+
     /// Execute the filter against an input value, collecting all results.
     pub fn execute(&self, input: &Value) -> Result<Vec<Value>> {
         // Try JIT execution first

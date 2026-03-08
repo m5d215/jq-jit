@@ -518,6 +518,22 @@ where F: FnMut(Value, usize, usize) -> Result<()> {
     Ok(())
 }
 
+/// Stream raw JSON byte ranges without parsing values.
+/// For identity filters in compact mode — skips parsing entirely, just validates structure.
+pub fn json_stream_raw<F>(input: &str, mut cb: F) -> Result<()>
+where F: FnMut(usize, usize) -> Result<()> {
+    let bytes = input.as_bytes();
+    let mut pos = 0;
+    if bytes.len() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF { pos = 3; }
+    pos = skip_ws(bytes, pos);
+    while pos < bytes.len() {
+        let end = skip_json_value(bytes, pos)?;
+        cb(pos, end)?;
+        pos = skip_ws(bytes, end);
+    }
+    Ok(())
+}
+
 /// Check if raw JSON bytes are compact (no whitespace outside of strings).
 /// Uses an O(1) heuristic: for objects/arrays, checks if the second byte is whitespace.
 /// All standard JSON formatters add whitespace consistently, so this catches all common cases.
