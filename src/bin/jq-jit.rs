@@ -567,15 +567,23 @@ fn main() {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         if let Some(n) = json_object_get_num(raw, 0, field) {
-                            let result = match uop {
-                                UnaryOp::Floor => n.floor(),
-                                UnaryOp::Ceil => n.ceil(),
-                                UnaryOp::Sqrt => n.sqrt(),
-                                UnaryOp::Fabs | UnaryOp::Abs => n.abs(),
-                                _ => unreachable!(),
-                            };
-                            push_jq_number_bytes(&mut compact_buf, result);
-                            compact_buf.push(b'\n');
+                            if matches!(uop, UnaryOp::ToString) {
+                                // tostring: output as JSON string "number"
+                                compact_buf.push(b'"');
+                                push_jq_number_bytes(&mut compact_buf, n);
+                                compact_buf.push(b'"');
+                                compact_buf.push(b'\n');
+                            } else {
+                                let result = match uop {
+                                    UnaryOp::Floor => n.floor(),
+                                    UnaryOp::Ceil => n.ceil(),
+                                    UnaryOp::Sqrt => n.sqrt(),
+                                    UnaryOp::Fabs | UnaryOp::Abs => n.abs(),
+                                    _ => unreachable!(),
+                                };
+                                push_jq_number_bytes(&mut compact_buf, result);
+                                compact_buf.push(b'\n');
+                            }
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -1155,15 +1163,22 @@ fn main() {
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
                     if let Some(n) = json_object_get_num(raw, 0, field) {
-                        let result = match uop {
-                            UnaryOp::Floor => n.floor(),
-                            UnaryOp::Ceil => n.ceil(),
-                            UnaryOp::Sqrt => n.sqrt(),
-                            UnaryOp::Fabs | UnaryOp::Abs => n.abs(),
-                            _ => unreachable!(),
-                        };
-                        push_jq_number_bytes(&mut compact_buf, result);
-                        compact_buf.push(b'\n');
+                        if matches!(uop, UnaryOp::ToString) {
+                            compact_buf.push(b'"');
+                            push_jq_number_bytes(&mut compact_buf, n);
+                            compact_buf.push(b'"');
+                            compact_buf.push(b'\n');
+                        } else {
+                            let result = match uop {
+                                UnaryOp::Floor => n.floor(),
+                                UnaryOp::Ceil => n.ceil(),
+                                UnaryOp::Sqrt => n.sqrt(),
+                                UnaryOp::Fabs | UnaryOp::Abs => n.abs(),
+                                _ => unreachable!(),
+                            };
+                            push_jq_number_bytes(&mut compact_buf, result);
+                            compact_buf.push(b'\n');
+                        }
                     } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);

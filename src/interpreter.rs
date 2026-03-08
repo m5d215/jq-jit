@@ -257,7 +257,7 @@ impl Filter {
                     // right = floor/ceil/sqrt/fabs applied to pipe input
                     if let Expr::UnaryOp { op, operand } = right.as_ref() {
                         if !matches!(operand.as_ref(), Expr::Input) { return None; }
-                        if matches!(op, UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Sqrt | UnaryOp::Fabs | UnaryOp::Abs) {
+                        if matches!(op, UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Sqrt | UnaryOp::Fabs | UnaryOp::Abs | UnaryOp::ToString) {
                             return Some((field.clone(), *op));
                         }
                     }
