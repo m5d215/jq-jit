@@ -3613,6 +3613,15 @@ impl Flattener {
             Expr::Range { from, to, step } => {
                 if !is_scalar(from) || !is_scalar(to) { return false; }
                 if let Some(s) = step { if !is_scalar(s) { return false; } }
+
+                // Detect fused foreach-range-add: foreach range(...) as $x (init; . + $x) [no extract]
+                // Keep accumulator in f64, only create Value::Num at yield time
+                let is_fused_foreach_add = extract.is_none()
+                    && if let Expr::BinOp { op, lhs, rhs } = update {
+                        matches!(op, BinOp::Add) && matches!(lhs.as_ref(), Expr::Input)
+                            && matches!(rhs.as_ref(), Expr::LoadVar { var_index: vi } if *vi == var_index)
+                    } else { false };
+
                 let from_val = self.flatten_scalar(from, input_slot);
                 let to_val = self.flatten_scalar(to, input_slot);
                 let step_val = if let Some(s) = step {
@@ -3632,20 +3641,50 @@ impl Flattener {
                 self.emit(JitOp::Drop { slot: from_val });
                 self.emit(JitOp::Drop { slot: to_val });
                 self.emit(JitOp::Drop { slot: step_val });
-                let head = self.alloc_label();
-                let body = self.alloc_label();
-                let done = self.alloc_label();
-                self.emit(JitOp::Label { id: head });
-                self.emit(JitOp::RangeCheck { dst_var: cmp, cur_var: cur, to_var: to_v, step_var: step_v });
-                self.emit(JitOp::BranchOnVar { var: cmp, nonzero_label: body, zero_label: done });
-                self.emit(JitOp::Label { id: body });
-                let num = self.alloc_slot();
-                self.emit(JitOp::F64Num { dst: num, src_var: cur });
-                emit_step(self, num);
-                self.emit(JitOp::Drop { slot: num });
-                self.emit(JitOp::F64Add { dst_var: cur, a_var: cur, b_var: step_v });
-                self.emit(JitOp::Jump { label: head });
-                self.emit(JitOp::Label { id: done });
+
+                if is_fused_foreach_add {
+                    // Fused path: acc_f64 += cur each iteration, yield Value::Num(acc_f64)
+                    let acc_f64 = self.alloc_var();
+                    let init_slot = self.alloc_slot();
+                    self.emit(JitOp::GetVar { dst: init_slot, var_index: acc_index });
+                    self.emit(JitOp::ToF64Var { dst_var: acc_f64, src: init_slot });
+                    self.emit(JitOp::Drop { slot: init_slot });
+                    let head = self.alloc_label();
+                    let body = self.alloc_label();
+                    let done = self.alloc_label();
+                    self.emit(JitOp::Label { id: head });
+                    self.emit(JitOp::RangeCheck { dst_var: cmp, cur_var: cur, to_var: to_v, step_var: step_v });
+                    self.emit(JitOp::BranchOnVar { var: cmp, nonzero_label: body, zero_label: done });
+                    self.emit(JitOp::Label { id: body });
+                    self.emit(JitOp::F64Add { dst_var: acc_f64, a_var: acc_f64, b_var: cur });
+                    let acc_val = self.alloc_slot();
+                    self.emit(JitOp::F64Num { dst: acc_val, src_var: acc_f64 });
+                    self.emit_yield(acc_val);
+                    self.emit(JitOp::Drop { slot: acc_val });
+                    self.emit(JitOp::F64Add { dst_var: cur, a_var: cur, b_var: step_v });
+                    self.emit(JitOp::Jump { label: head });
+                    self.emit(JitOp::Label { id: done });
+                    // Store final acc back to var store
+                    let final_val = self.alloc_slot();
+                    self.emit(JitOp::F64Num { dst: final_val, src_var: acc_f64 });
+                    self.emit(JitOp::SetVar { var_index: acc_index, src: final_val });
+                    self.emit(JitOp::Drop { slot: final_val });
+                } else {
+                    let head = self.alloc_label();
+                    let body = self.alloc_label();
+                    let done = self.alloc_label();
+                    self.emit(JitOp::Label { id: head });
+                    self.emit(JitOp::RangeCheck { dst_var: cmp, cur_var: cur, to_var: to_v, step_var: step_v });
+                    self.emit(JitOp::BranchOnVar { var: cmp, nonzero_label: body, zero_label: done });
+                    self.emit(JitOp::Label { id: body });
+                    let num = self.alloc_slot();
+                    self.emit(JitOp::F64Num { dst: num, src_var: cur });
+                    emit_step(self, num);
+                    self.emit(JitOp::Drop { slot: num });
+                    self.emit(JitOp::F64Add { dst_var: cur, a_var: cur, b_var: step_v });
+                    self.emit(JitOp::Jump { label: head });
+                    self.emit(JitOp::Label { id: done });
+                }
                 true
             }
             _ => {
