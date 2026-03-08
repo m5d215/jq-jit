@@ -979,19 +979,16 @@ pub fn push_json_compact_raw(buf: &mut Vec<u8>, b: &[u8]) {
             b' ' | b'\t' | b'\n' | b'\r' => { i += 1; }
             b'"' => {
                 // Copy entire string including quotes
-                buf.push(b'"');
+                let str_start = i;
                 i += 1;
                 while i < len {
                     match b[i] {
-                        b'"' => { buf.push(b'"'); i += 1; break; }
-                        b'\\' => {
-                            buf.push(b'\\');
-                            i += 1;
-                            if i < len { buf.push(b[i]); i += 1; }
-                        }
-                        c => { buf.push(c); i += 1; }
+                        b'"' => { i += 1; break; }
+                        b'\\' => { i += 2; }
+                        _ => { i += 1; }
                     }
                 }
+                buf.extend_from_slice(&b[str_start..i]);
             }
             c => { buf.push(c); i += 1; }
         }
