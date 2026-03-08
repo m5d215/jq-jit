@@ -790,6 +790,45 @@ pub fn json_object_keys_to_buf(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool 
     true
 }
 
+/// Extract unsorted keys from a JSON object without full parsing.
+/// Writes `["key1","key2",...]\n` to buf. Returns false on non-object.
+pub fn json_object_keys_unsorted_to_buf(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    let mut i = pos + 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < b.len() && b[i] == b'}' {
+        buf.extend_from_slice(b"[]\n");
+        return true;
+    }
+    buf.push(b'[');
+    let mut first = true;
+    loop {
+        if i >= b.len() || b[i] != b'"' { return false; }
+        let key_start = i;
+        i += 1;
+        while i < b.len() { match b[i] { b'"' => break, b'\\' => i += 2, _ => i += 1 } }
+        if i >= b.len() { return false; }
+        let key_end = i + 1;
+        if !first { buf.push(b','); }
+        first = false;
+        buf.extend_from_slice(&b[key_start..key_end]);
+        i = key_end;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return false };
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { return false; }
+        if b[i] == b'}' { break; }
+        if b[i] != b',' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
+    buf.extend_from_slice(b"]\n");
+    true
+}
+
 /// Check if a JSON object contains a given key without full parsing.
 pub fn json_object_has_key(b: &[u8], pos: usize, field: &str) -> Option<bool> {
     if pos >= b.len() || b[pos] != b'{' { return None; }

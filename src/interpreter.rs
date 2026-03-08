@@ -241,6 +241,14 @@ impl Filter {
         None
     }
 
+    /// Detect `keys_unsorted` on input.
+    pub fn is_keys_unsorted(&self) -> bool {
+        use crate::ir::{Expr, UnaryOp};
+        if let Some((ref expr, _)) = self.parsed {
+            matches!(expr, Expr::UnaryOp { op: UnaryOp::KeysUnsorted, operand } if matches!(operand.as_ref(), Expr::Input))
+        } else { false }
+    }
+
     /// Detect `to_entries` on input.
     pub fn is_to_entries(&self) -> bool {
         use crate::ir::{Expr, UnaryOp};
