@@ -213,6 +213,12 @@ fn main() {
     let field_binop = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() {
         filter.detect_field_binop()
     } else { None };
+    let field_unary_num = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_binop.is_none() {
+        filter.detect_field_unary_num()
+    } else { None };
+    let field_binop_const_unary = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_binop.is_none() && field_unary_num.is_none() {
+        filter.detect_field_binop_const_unary()
+    } else { None };
     let field_str_concat = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() {
         filter.detect_field_str_concat()
     } else { None };
@@ -544,6 +550,65 @@ fn main() {
                                 BinOp::Mul => a * b,
                                 _ => unreachable!(),
                             };
+                            push_jq_number_bytes(&mut compact_buf, result);
+                            compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref field, ref uop)) = field_unary_num {
+                    use jq_jit::ir::UnaryOp;
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some(n) = json_object_get_num(raw, 0, field) {
+                            let result = match uop {
+                                UnaryOp::Floor => n.floor(),
+                                UnaryOp::Ceil => n.ceil(),
+                                UnaryOp::Sqrt => n.sqrt(),
+                                UnaryOp::Fabs | UnaryOp::Abs => n.abs(),
+                                _ => unreachable!(),
+                            };
+                            push_jq_number_bytes(&mut compact_buf, result);
+                            compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref field, ref bop, cval, ref uop_opt)) = field_binop_const_unary {
+                    use jq_jit::ir::BinOp;
+                    use jq_jit::ir::UnaryOp;
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some(n) = json_object_get_num(raw, 0, field) {
+                            let mid = match bop {
+                                BinOp::Add => n + cval,
+                                BinOp::Sub => n - cval,
+                                BinOp::Mul => n * cval,
+                                BinOp::Div => n / cval,
+                                BinOp::Mod => n % cval,
+                                _ => unreachable!(),
+                            };
+                            let result = if let Some(uop) = uop_opt {
+                                match uop {
+                                    UnaryOp::Floor => mid.floor(),
+                                    UnaryOp::Ceil => mid.ceil(),
+                                    UnaryOp::Sqrt => mid.sqrt(),
+                                    UnaryOp::Fabs | UnaryOp::Abs => mid.abs(),
+                                    _ => unreachable!(),
+                                }
+                            } else { mid };
                             push_jq_number_bytes(&mut compact_buf, result);
                             compact_buf.push(b'\n');
                         } else {
@@ -1075,6 +1140,67 @@ fn main() {
                         compact_buf.push(b'\n');
                     } else {
                         // Field missing or non-numeric: fall back to parse + JIT
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref field, ref uop)) = field_unary_num {
+                use jq_jit::ir::UnaryOp;
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some(n) = json_object_get_num(raw, 0, field) {
+                        let result = match uop {
+                            UnaryOp::Floor => n.floor(),
+                            UnaryOp::Ceil => n.ceil(),
+                            UnaryOp::Sqrt => n.sqrt(),
+                            UnaryOp::Fabs | UnaryOp::Abs => n.abs(),
+                            _ => unreachable!(),
+                        };
+                        push_jq_number_bytes(&mut compact_buf, result);
+                        compact_buf.push(b'\n');
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref field, ref bop, cval, ref uop_opt)) = field_binop_const_unary {
+                use jq_jit::ir::BinOp;
+                use jq_jit::ir::UnaryOp;
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some(n) = json_object_get_num(raw, 0, field) {
+                        let mid = match bop {
+                            BinOp::Add => n + cval,
+                            BinOp::Sub => n - cval,
+                            BinOp::Mul => n * cval,
+                            BinOp::Div => n / cval,
+                            BinOp::Mod => n % cval,
+                            _ => unreachable!(),
+                        };
+                        let result = if let Some(uop) = uop_opt {
+                            match uop {
+                                UnaryOp::Floor => mid.floor(),
+                                UnaryOp::Ceil => mid.ceil(),
+                                UnaryOp::Sqrt => mid.sqrt(),
+                                UnaryOp::Fabs | UnaryOp::Abs => mid.abs(),
+                                _ => unreachable!(),
+                            }
+                        } else { mid };
+                        push_jq_number_bytes(&mut compact_buf, result);
+                        compact_buf.push(b'\n');
+                    } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }

@@ -244,6 +244,70 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | floor/ceil/sqrt/fabs` pattern (field access + numeric unary op).
+    /// Returns (field_name, op) if detected.
+    pub fn detect_field_unary_num(&self) -> Option<(String, crate::ir::UnaryOp)> {
+        use crate::ir::{Expr, UnaryOp, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::Pipe { left, right } = expr {
+            // left = .field
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    // right = floor/ceil/sqrt/fabs applied to pipe input
+                    if let Expr::UnaryOp { op, operand } = right.as_ref() {
+                        if !matches!(operand.as_ref(), Expr::Input) { return None; }
+                        if matches!(op, UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Sqrt | UnaryOp::Fabs | UnaryOp::Abs) {
+                            return Some((field.clone(), *op));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `.field / N | floor` or `.field % N` pattern (field + binop + optional unary).
+    /// Returns (field_name, binop, constant, optional unary op) if detected.
+    pub fn detect_field_binop_const_unary(&self) -> Option<(String, crate::ir::BinOp, f64, Option<crate::ir::UnaryOp>)> {
+        use crate::ir::{Expr, BinOp, UnaryOp, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        // Case 1: `.field / N | floor` — Pipe { left: BinOp(.field, N), right: UnaryOp }
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::BinOp { op, lhs, rhs } = left.as_ref() {
+                if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) { return None; }
+                if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                            if let Expr::UnaryOp { op: uop, operand } = right.as_ref() {
+                                if !matches!(operand.as_ref(), Expr::Input) { return None; }
+                                if matches!(uop, UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Sqrt | UnaryOp::Fabs | UnaryOp::Abs) {
+                                    return Some((field.clone(), *op, *n, Some(*uop)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Case 2: `.field % N` — top-level BinOp
+        if let Expr::BinOp { op, lhs, rhs } = expr {
+            if !matches!(op, BinOp::Div | BinOp::Mod) { return None; }
+            if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                        if *n != 0.0 {
+                            return Some((field.clone(), *op, *n, None));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `length` applied directly to input.
     pub fn is_length(&self) -> bool {
         if let Some((ref expr, _)) = self.parsed {
