@@ -219,6 +219,9 @@ fn main() {
     let select_cmp = if use_compact_buf && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() && field_str_concat.is_none() {
         filter.detect_select_field_cmp()
     } else { None };
+    let select_str = if use_compact_buf && !exit_status && select_cmp.is_none() && field_access.is_none() {
+        filter.detect_select_field_str()
+    } else { None };
     let array_field = if use_compact_buf && !exit_status && field_access.is_none() {
         filter.detect_array_field_access()
     } else { None };
@@ -600,6 +603,35 @@ fn main() {
                         }
                         Ok(())
                     })
+                } else if let Some((ref field, ref op, ref val)) = select_str {
+                    use jq_jit::ir::BinOp;
+                    // Build expected JSON string: "value" (with quotes)
+                    let mut expected = Vec::with_capacity(val.len() + 2);
+                    expected.push(b'"');
+                    expected.extend_from_slice(val.as_bytes());
+                    expected.push(b'"');
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
+                            let val_bytes = &raw[vs..ve];
+                            let matches = val_bytes == expected.as_slice();
+                            let pass = match op { BinOp::Eq => matches, BinOp::Ne => !matches, _ => false };
+                            if pass {
+                                if is_json_compact(raw) {
+                                    compact_buf.extend_from_slice(raw);
+                                    compact_buf.push(b'\n');
+                                } else {
+                                    push_json_compact_raw(&mut compact_buf, raw);
+                                    compact_buf.push(b'\n');
+                                }
+                                if compact_buf.len() >= 1 << 17 {
+                                    let _ = out.write_all(&compact_buf);
+                                    compact_buf.clear();
+                                }
+                            }
+                        }
+                        Ok(())
+                    })
                 } else if is_length {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
@@ -885,6 +917,35 @@ fn main() {
                             BinOp::Ne => val != threshold,
                             _ => false,
                         };
+                        if pass {
+                            if is_json_compact(raw) {
+                                compact_buf.extend_from_slice(raw);
+                                compact_buf.push(b'\n');
+                            } else {
+                                push_json_compact_raw(&mut compact_buf, raw);
+                                compact_buf.push(b'\n');
+                            }
+                            if compact_buf.len() >= 1 << 17 {
+                                let _ = out.write_all(&compact_buf);
+                                compact_buf.clear();
+                            }
+                        }
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref field, ref op, ref val)) = select_str {
+                use jq_jit::ir::BinOp;
+                let content_bytes = content.as_bytes();
+                let mut expected = Vec::with_capacity(val.len() + 2);
+                expected.push(b'"');
+                expected.extend_from_slice(val.as_bytes());
+                expected.push(b'"');
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
+                        let val_bytes = &raw[vs..ve];
+                        let matches = val_bytes == expected.as_slice();
+                        let pass = match op { BinOp::Eq => matches, BinOp::Ne => !matches, _ => false };
                         if pass {
                             if is_json_compact(raw) {
                                 compact_buf.extend_from_slice(raw);

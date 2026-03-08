@@ -155,6 +155,29 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.field == "str")` pattern for string comparison select.
+    /// Returns (field_name, op, string_value) if detected.
+    pub fn detect_select_field_str(&self) -> Option<(String, crate::ir::BinOp, String)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
+            if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+            if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                if !matches!(op, BinOp::Eq | BinOp::Ne) { return None; }
+                if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        if let Expr::Literal(Literal::Str(val)) = rhs.as_ref() {
+                            return Some((field.clone(), *op, val.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `{a: .x, b: .y}` pattern (object construction from field access).
     /// Returns Vec of (output_key, input_field) pairs if detected.
     pub fn detect_field_remap(&self) -> Option<Vec<(String, String)>> {
