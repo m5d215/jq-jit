@@ -6275,10 +6275,63 @@ impl JitCompiler {
                         b.ins().call(rt["field_binop_const"], &[d, ba, kp, kl, cv, op_i32, lhs_flag]);
                     }
                     JitOp::UnaryOp { dst, op, src } => {
-                        let d = slot_addr(&mut b, *dst);
-                        let s = slot_addr(&mut b, *src);
-                        let o = b.ins().iconst(types::I32, unaryop_to_i32(*op) as i64);
-                        b.ins().call(rt["unaryop"], &[d, o, s]);
+                        // Inline for Num inputs: floor, ceil, sqrt, fabs, abs, trunc
+                        let inlineable = matches!(op,
+                            UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Sqrt |
+                            UnaryOp::Fabs | UnaryOp::Abs | UnaryOp::Trunc);
+                        if inlineable {
+                            let s = slot_addr(&mut b, *src);
+                            let tag = b.ins().load(types::I8, cranelift_codegen::ir::MemFlags::new(), s, 0);
+                            let tag_i32 = b.ins().uextend(types::I32, tag);
+                            let three = b.ins().iconst(types::I32, 3);
+                            let is_num = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, tag_i32, three);
+                            // Also check repr ptr at offset 16 is null (no string repr to preserve)
+                            let repr_ptr = b.ins().load(ptr_ty, cranelift_codegen::ir::MemFlags::new(), s, 16);
+                            let zero_ptr = b.ins().iconst(ptr_ty, 0);
+                            let no_repr = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, repr_ptr, zero_ptr);
+                            let can_inline = b.ins().band(is_num, no_repr);
+                            let fast_blk = b.create_block();
+                            let slow_blk = b.create_block();
+                            let done_blk = b.create_block();
+                            b.ins().brif(can_inline, fast_blk, &[], slow_blk, &[]);
+
+                            b.switch_to_block(fast_blk);
+                            b.seal_block(fast_blk);
+                            let s2 = slot_addr(&mut b, *src);
+                            let d2 = slot_addr(&mut b, *dst);
+                            let f_val = b.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), s2, 8);
+                            let result = match op {
+                                UnaryOp::Floor => b.ins().floor(f_val),
+                                UnaryOp::Ceil => b.ins().ceil(f_val),
+                                UnaryOp::Sqrt => b.ins().sqrt(f_val),
+                                UnaryOp::Fabs | UnaryOp::Abs => b.ins().fabs(f_val),
+                                UnaryOp::Trunc => b.ins().trunc(f_val),
+                                _ => unreachable!(),
+                            };
+                            let tag_word = b.ins().iconst(ptr_ty, 3);
+                            b.ins().store(cranelift_codegen::ir::MemFlags::new(), tag_word, d2, 0);
+                            b.ins().store(cranelift_codegen::ir::MemFlags::new(), result, d2, 8);
+                            let zero = b.ins().iconst(ptr_ty, 0);
+                            b.ins().store(cranelift_codegen::ir::MemFlags::new(), zero, d2, 16);
+                            b.ins().store(cranelift_codegen::ir::MemFlags::new(), zero, d2, 24);
+                            b.ins().jump(done_blk, &[]);
+
+                            b.switch_to_block(slow_blk);
+                            b.seal_block(slow_blk);
+                            let d3 = slot_addr(&mut b, *dst);
+                            let s3 = slot_addr(&mut b, *src);
+                            let o = b.ins().iconst(types::I32, unaryop_to_i32(*op) as i64);
+                            b.ins().call(rt["unaryop"], &[d3, o, s3]);
+                            b.ins().jump(done_blk, &[]);
+
+                            b.switch_to_block(done_blk);
+                            b.seal_block(done_blk);
+                        } else {
+                            let d = slot_addr(&mut b, *dst);
+                            let s = slot_addr(&mut b, *src);
+                            let o = b.ins().iconst(types::I32, unaryop_to_i32(*op) as i64);
+                            b.ins().call(rt["unaryop"], &[d, o, s]);
+                        }
                     }
                     JitOp::Negate { dst, src } => {
                         // Inline for Num: fneg
