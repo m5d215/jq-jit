@@ -181,7 +181,8 @@ enum JitOp {
     FieldBinopField { dst: SlotId, base: SlotId, field_a: String, field_b: String, op: i32 },
     /// Combined field lookup + binop with pre-allocated constant: .field OP const (or const OP .field).
     /// field_is_lhs: true → field OP const, false → const OP field.
-    FieldBinopConst { dst: SlotId, base: SlotId, field: String, const_slot: SlotId, op: i32, field_is_lhs: bool },
+    /// const_ptr points to a Value that lives as long as JitCompiler (no per-call create/drop).
+    FieldBinopConst { dst: SlotId, base: SlotId, field: String, const_ptr: *const Value, op: i32, field_is_lhs: bool },
     UnaryOp { dst: SlotId, op: UnaryOp, src: SlotId },
     Negate { dst: SlotId, src: SlotId },
     Not { dst: SlotId, src: SlotId },
@@ -296,6 +297,9 @@ struct Flattener {
     closure_ops: Vec<Expr>,
     /// Track which functions are currently being expanded (cycle detection)
     expanding_funcs: HashSet<usize>,
+    /// Pre-allocated Value constants for fused ops (hoisted out of per-call code).
+    #[allow(clippy::vec_box)]
+    value_constants: Vec<Box<Value>>,
 }
 
 impl Flattener {
@@ -304,7 +308,23 @@ impl Flattener {
                      collect_depth: 0, try_depth: 0, try_catch_target: None,
                      label_targets: HashMap::new(), funcs: Vec::new(),
                      limit_state: None, closure_ops: Vec::new(),
-                     expanding_funcs: HashSet::new() }
+                     expanding_funcs: HashSet::new(), value_constants: Vec::new() }
+    }
+
+    /// Materialize a Literal into a heap-allocated Value and return a stable pointer.
+    /// The Value is stored in value_constants and lives as long as JitCompiler.
+    fn hoist_literal(&mut self, lit: &Literal) -> *const Value {
+        let val = match lit {
+            Literal::Null => Value::Null,
+            Literal::True => Value::True,
+            Literal::False => Value::False,
+            Literal::Num(n, repr) => Value::Num(*n, repr.clone()),
+            Literal::Str(s) => Value::Str(crate::value::KeyStr::from(s.as_str())),
+        };
+        let boxed = Box::new(val);
+        let ptr = &*boxed as *const Value;
+        self.value_constants.push(boxed);
+        ptr
     }
 
     /// Create a test Flattener inheriting compile-time context from self.
@@ -545,11 +565,6 @@ impl Flattener {
         }
     }
 
-    /// Check if expr is a simple literal (Null, True, False, Num, Str).
-    fn is_literal(expr: &Expr) -> bool {
-        matches!(expr, Expr::Literal(_))
-    }
-
     /// Extract field name if expr is `.field` on Input (for fused op detection).
     fn extract_input_field(expr: &Expr) -> Option<String> {
         if let Expr::Index { expr: base, key } | Expr::IndexOpt { expr: base, key } = expr {
@@ -730,11 +745,10 @@ impl Flattener {
                         }
                         // Optimization: .field OP literal → FieldBinopConst
                         else if let Some(field) = Self::extract_input_field(lhs) {
-                            if Self::is_literal(rhs) {
-                                let const_slot = self.flatten_scalar(rhs, input_slot);
+                            if let Expr::Literal(lit) = rhs.as_ref() {
+                                let const_ptr = self.hoist_literal(lit);
                                 let out = self.alloc_slot();
-                                self.emit(JitOp::FieldBinopConst { dst: out, base: input_slot, field, const_slot, op: binop_to_i32(*op), field_is_lhs: true });
-                                self.emit(JitOp::Drop { slot: const_slot });
+                                self.emit(JitOp::FieldBinopConst { dst: out, base: input_slot, field, const_ptr, op: binop_to_i32(*op), field_is_lhs: true });
                                 out
                             } else {
                                 let l = self.flatten_scalar(lhs, input_slot);
@@ -748,11 +762,10 @@ impl Flattener {
                         }
                         // Optimization: literal OP .field → FieldBinopConst (reversed)
                         else if let Some(field) = Self::extract_input_field(rhs) {
-                            if Self::is_literal(lhs) {
-                                let const_slot = self.flatten_scalar(lhs, input_slot);
+                            if let Expr::Literal(lit) = lhs.as_ref() {
+                                let const_ptr = self.hoist_literal(lit);
                                 let out = self.alloc_slot();
-                                self.emit(JitOp::FieldBinopConst { dst: out, base: input_slot, field, const_slot, op: binop_to_i32(*op), field_is_lhs: false });
-                                self.emit(JitOp::Drop { slot: const_slot });
+                                self.emit(JitOp::FieldBinopConst { dst: out, base: input_slot, field, const_ptr, op: binop_to_i32(*op), field_is_lhs: false });
                                 out
                             } else {
                                 let l = self.flatten_scalar(lhs, input_slot);
@@ -4577,9 +4590,8 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 *use_count.entry(*key).or_insert(0) += 1;
             }
             JitOp::IndexField { base, .. } | JitOp::FieldBinopField { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
-            JitOp::FieldBinopConst { base, const_slot, .. } => {
+            JitOp::FieldBinopConst { base, .. } => {
                 *use_count.entry(*base).or_insert(0) += 1;
-                *use_count.entry(*const_slot).or_insert(0) += 1;
             }
             JitOp::BinOp { lhs, rhs, .. } => {
                 *use_count.entry(*lhs).or_insert(0) += 1;
@@ -4640,9 +4652,8 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                     *use_count.entry(*key).or_insert(0) += 1;
                 }
                 JitOp::IndexField { base, .. } | JitOp::FieldBinopField { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
-            JitOp::FieldBinopConst { base, const_slot, .. } => {
+            JitOp::FieldBinopConst { base, .. } => {
                 *use_count.entry(*base).or_insert(0) += 1;
-                *use_count.entry(*const_slot).or_insert(0) += 1;
             }
                 JitOp::BinOp { lhs, rhs, .. } => {
                     *use_count.entry(*lhs).or_insert(0) += 1;
@@ -4753,6 +4764,9 @@ pub struct JitCompiler {
     /// Pre-allocated CompactString constants for string literals in JIT code.
     #[allow(clippy::vec_box)]
     _rc_str_constants: Vec<Box<crate::value::KeyStr>>,
+    /// Pre-allocated Value constants for fused ops (hoisted out of per-call code).
+    #[allow(clippy::vec_box)]
+    _value_constants: Vec<Box<Value>>,
 }
 
 impl JitCompiler {
@@ -4829,6 +4843,7 @@ impl JitCompiler {
             func_ctx: FunctionBuilderContext::new(), rt_funcs,
             _string_constants: Vec::new(), _repr_constants: Vec::new(),
             _rc_str_constants: Vec::new(),
+            _value_constants: Vec::new(),
         })
     }
 
@@ -4867,6 +4882,8 @@ impl JitCompiler {
         let num_slots = fl.next_slot;
         let num_vars = fl.next_var;
         let num_labels = fl.next_label;
+        // Transfer hoisted value constants to compiler lifetime
+        self._value_constants.extend(fl.value_constants);
 
         // Phase 2: Cranelift codegen
         let ptr_ty = types::I64;
@@ -5029,14 +5046,14 @@ impl JitCompiler {
                         let op_i32 = b.ins().iconst(types::I32, *op as i64);
                         b.ins().call(rt["field_binop_field"], &[d, ba, kap, kal, kbp, kbl, op_i32]);
                     }
-                    JitOp::FieldBinopConst { dst, base, field, const_slot, op, field_is_lhs } => {
+                    JitOp::FieldBinopConst { dst, base, field, const_ptr, op, field_is_lhs } => {
                         let d = slot_addr(&mut b, *dst);
                         let ba = slot_addr(&mut b, *base);
                         let leaked = Box::leak(field.clone().into_boxed_str());
                         self._string_constants.push(leaked);
                         let kp = b.ins().iconst(ptr_ty, leaked.as_ptr() as i64);
                         let kl = b.ins().iconst(ptr_ty, leaked.len() as i64);
-                        let cv = slot_addr(&mut b, *const_slot);
+                        let cv = b.ins().iconst(ptr_ty, *const_ptr as i64);
                         let op_i32 = b.ins().iconst(types::I32, *op as i64);
                         let lhs_flag = b.ins().iconst(types::I32, if *field_is_lhs { 1 } else { 0 });
                         b.ins().call(rt["field_binop_const"], &[d, ba, kp, kl, cv, op_i32, lhs_flag]);
