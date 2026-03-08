@@ -591,8 +591,8 @@ fn main() {
                                 compact_buf.extend_from_slice(raw);
                                 compact_buf.push(b'\n');
                             } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                push_compact_line(&mut compact_buf, &v);
+                                push_json_compact_raw(&mut compact_buf, raw);
+                                compact_buf.push(b'\n');
                             }
                             if compact_buf.len() >= 1 << 17 {
                                 let _ = out.write_all(&compact_buf);
