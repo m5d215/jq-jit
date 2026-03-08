@@ -22,6 +22,8 @@ struct GlobalCell<T>(std::cell::UnsafeCell<T>);
 unsafe impl<T> Sync for GlobalCell<T> {}
 
 static JIT_LAST_ERROR: GlobalCell<Option<String>> = GlobalCell(std::cell::UnsafeCell::new(None));
+/// Direct Value storage for `error` builtin — avoids Value→JSON→Value round-trip in try-catch.
+static JIT_ERROR_VALUE: GlobalCell<Option<Value>> = GlobalCell(std::cell::UnsafeCell::new(None));
 static JIT_CLOSURE_OPS: GlobalCell<Vec<Expr>> = GlobalCell(std::cell::UnsafeCell::new(Vec::new()));
 
 fn set_jit_error(msg: String) {
@@ -32,8 +34,15 @@ fn take_jit_error() -> Option<String> {
     unsafe { (*JIT_LAST_ERROR.0.get()).take() }
 }
 
+fn take_jit_error_value() -> Option<Value> {
+    unsafe { (*JIT_ERROR_VALUE.0.get()).take() }
+}
+
 fn clear_jit_error() {
-    unsafe { *JIT_LAST_ERROR.0.get() = None; }
+    unsafe {
+        *JIT_LAST_ERROR.0.get() = None;
+        *JIT_ERROR_VALUE.0.get() = None;
+    }
 }
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder, StackSlotData, StackSlotKind};
 use cranelift_codegen::settings::{self, Configurable};
@@ -161,6 +170,9 @@ fn is_scalar(expr: &Expr) -> bool {
 type SlotId = u32;
 type LabelId = u32;
 
+#[derive(Debug, Clone, Copy)]
+enum MutateFn { Reverse, Sort }
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 enum JitOp {
@@ -283,6 +295,10 @@ enum JitOp {
     // CallBuiltin: call a runtime builtin function
     // args[0] is input, args[1..] are the evaluated arguments
     CallBuiltin { dst: SlotId, name: String, args: Vec<SlotId> },
+
+    /// In-place unary mutate: call runtime fn(v: *mut Value) -> i64
+    /// Consumes input_slot and mutates the clone in-place.
+    MutateInplace { slot: SlotId, func: MutateFn },
 
     // Termination
     ReturnContinue,
@@ -601,7 +617,7 @@ impl Flattener {
             JitOp::Index { .. } | JitOp::IndexField { .. } |
             JitOp::BinOp { .. } | JitOp::AddMove { .. } | JitOp::UnaryOp { .. } |
             JitOp::Negate { .. } | JitOp::CallBuiltin { .. } |
-            JitOp::ThrowError { .. }
+            JitOp::MutateInplace { .. } | JitOp::ThrowError { .. }
         );
         self.ops.push(op);
         if is_fallible {
@@ -983,6 +999,28 @@ impl Flattener {
                 out
             }
             Expr::CallBuiltin { name, args } => {
+                // In-place mutation for unary builtins: reverse, sort
+                // Clone input → out, drop input_slot (so Rc refcount → 1), mutate in-place
+                let mutate_fn = if args.is_empty() {
+                    match name.as_str() {
+                        "reverse" => Some(MutateFn::Reverse),
+                        "sort" => Some(MutateFn::Sort),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some(func) = mutate_fn {
+                    let out = self.alloc_slot();
+                    self.emit(JitOp::Clone { dst: out, src: input_slot });
+                    // Drop input_slot so the clone becomes sole owner (refcount 1)
+                    // → Rc::make_mut can mutate in-place without cloning inner data
+                    self.emit(JitOp::Drop { slot: input_slot });
+                    self.emit(JitOp::Null { dst: input_slot });
+                    self.emit_propagating(JitOp::MutateInplace { slot: out, func });
+                    return out;
+                }
+
                 let mut arg_slots = Vec::new();
                 // First arg is always the input (.)
                 let inp = self.alloc_slot();
@@ -4264,11 +4302,39 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
 }
 extern "C" fn jit_rt_throw_error(msg: *const Value, env: *mut JitEnv) -> i64 {
     unsafe {
-        let env = &mut *env;
-        let msg_json = crate::value::value_to_json(&*msg);
-        env.error_msg = Some(msg_json.clone());
-        set_jit_error(format!("__jqerror__:{}", msg_json));
+        let val = (*msg).clone();
+        // Store value directly — defer serialization until propagation (if not caught)
+        *JIT_ERROR_VALUE.0.get() = Some(val);
+        let _ = env;
         GEN_ERROR
+    }
+}
+/// In-place reverse: Rc::make_mut avoids inner Vec clone when refcount == 1.
+extern "C" fn jit_rt_reverse_inplace(v: *mut Value) -> i64 {
+    unsafe {
+        match &mut *v {
+            Value::Arr(a) => { Rc::make_mut(a).reverse(); 0 }
+            Value::Str(s) => {
+                *v = Value::from_string(s.chars().rev().collect());
+                0
+            }
+            Value::Null => { *v = Value::Arr(Rc::new(vec![])); 0 }
+            _ => { set_jit_error(format!("{} cannot be reversed", (*v).type_name())); GEN_ERROR }
+        }
+    }
+}
+/// In-place sort.
+extern "C" fn jit_rt_sort_inplace(v: *mut Value) -> i64 {
+    unsafe {
+        match &mut *v {
+            Value::Arr(a) => {
+                let arr = Rc::make_mut(a);
+                arr.sort_by(crate::runtime::compare_values);
+                0
+            }
+            Value::Null => { *v = Value::Arr(Rc::new(vec![])); 0 }
+            _ => { set_jit_error(format!("{} is not an array", (*v).type_name())); GEN_ERROR }
+        }
     }
 }
 extern "C" fn jit_rt_negate(dst: *mut Value, input: *const Value) -> i64 {
@@ -4875,6 +4941,13 @@ extern "C" fn jit_rt_try_end(env: *mut JitEnv) {
 
 /// Transfer error from JIT_LAST_ERROR to env.error_msg for propagation.
 extern "C" fn jit_rt_propagate_error(env: *mut JitEnv) {
+    // Check for direct Value from `error` builtin (deferred serialization)
+    if let Some(val) = take_jit_error_value() {
+        let _ = take_jit_error(); // clear the marker
+        let msg_json = crate::value::value_to_json(&val);
+        unsafe { (*env).error_msg = Some(format!("__jqerror__:{}", msg_json)); }
+        return;
+    }
     if let Some(msg) = take_jit_error() {
         unsafe { (*env).error_msg = Some(msg); }
     }
@@ -4883,11 +4956,19 @@ extern "C" fn jit_rt_propagate_error(env: *mut JitEnv) {
 /// Check if the last operation produced an error.
 /// Returns 1 if error, 0 if ok.
 extern "C" fn jit_rt_has_error() -> i64 {
-    unsafe { if (*JIT_LAST_ERROR.0.get()).is_some() { 1 } else { 0 } }
+    unsafe {
+        if (*JIT_ERROR_VALUE.0.get()).is_some() || (*JIT_LAST_ERROR.0.get()).is_some() { 1 } else { 0 }
+    }
 }
 
 /// Get the last error as a Value and write it to dst. Clears the error.
 extern "C" fn jit_rt_get_error(dst: *mut Value) {
+    // Fast path: use directly stored Value from `error` builtin
+    if let Some(v) = take_jit_error_value() {
+        let _ = take_jit_error(); // clear the string too
+        unsafe { std::ptr::write(dst, v); }
+        return;
+    }
     let err = take_jit_error();
     unsafe {
         if let Some(msg) = err {
@@ -5071,6 +5152,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
             }
             JitOp::StrBufAppendVal { src } => { *use_count.entry(*src).or_insert(0) += 1; }
             JitOp::ThrowError { msg } => { *use_count.entry(*msg).or_insert(0) += 1; }
+            JitOp::MutateInplace { slot, .. } => { *use_count.entry(*slot).or_insert(0) += 1; }
             JitOp::CallBuiltin { args, .. } => {
                 for a in args { *use_count.entry(*a).or_insert(0) += 1; }
             }
@@ -5142,6 +5224,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 }
                 JitOp::StrBufAppendVal { src } => { *use_count.entry(*src).or_insert(0) += 1; }
                 JitOp::ThrowError { msg } => { *use_count.entry(*msg).or_insert(0) += 1; }
+                JitOp::MutateInplace { slot, .. } => { *use_count.entry(*slot).or_insert(0) += 1; }
                 JitOp::CallBuiltin { args, .. } => {
                     for a in args { *use_count.entry(*a).or_insert(0) += 1; }
                 }
@@ -5310,6 +5393,8 @@ impl JitCompiler {
             ("jit_rt_get_error", jit_rt_get_error as *const u8),
             ("jit_rt_throw_error", jit_rt_throw_error as *const u8),
             ("jit_rt_call_builtin", jit_rt_call_builtin as *const u8),
+            ("jit_rt_reverse_inplace", jit_rt_reverse_inplace as *const u8),
+            ("jit_rt_sort_inplace", jit_rt_sort_inplace as *const u8),
         ];
         for (name, ptr) in symbols {
             jit_builder.symbol(*name, *ptr);
@@ -5975,6 +6060,14 @@ impl JitCompiler {
                         b.ins().call(rt["throw_error"], &[msg_addr, env_ptr]);
                         // Don't return here — CheckError or ReturnError will handle it
                     }
+                    JitOp::MutateInplace { slot, func } => {
+                        let s = slot_addr(&mut b, *slot);
+                        let rt_name = match func {
+                            MutateFn::Reverse => "reverse_inplace",
+                            MutateFn::Sort => "sort_inplace",
+                        };
+                        b.ins().call(rt[rt_name], &[s]);
+                    }
                 }
             }
 
@@ -6068,6 +6161,8 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("get_error", [p], []);  // dst
     decl!("throw_error", [p, p], [p]);
     decl!("call_builtin", [p, p, p, p, p], [p]);  // dst, name_ptr, name_len, args_ptr, nargs -> status
+    decl!("reverse_inplace", [p], [p]);  // v: *mut Value -> status
+    decl!("sort_inplace", [p], [p]);     // v: *mut Value -> status
     Ok(())
 }
 
