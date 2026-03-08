@@ -8,7 +8,7 @@ use std::process;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, is_json_compact, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
+use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_field_raw, is_json_compact, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
 use jq_jit::interpreter::Filter;
 
 fn main() {
@@ -204,6 +204,9 @@ fn main() {
     // Use Vec-based buffering for compact output to avoid per-value write_all overhead
     let use_compact_buf = compact && !raw_output && !sort_keys && !join_output;
     let use_pretty_buf = !compact && !raw_output && !sort_keys && !join_output && !tab;
+    let field_access = if (use_compact_buf || use_pretty_buf) && !exit_status {
+        filter.detect_field_access()
+    } else { None };
     let mut compact_buf: Vec<u8> = if use_compact_buf || use_pretty_buf { Vec::with_capacity(1 << 17) } else { Vec::new() };
     let process_input = |input: &Value, raw_bytes: Option<&[u8]>, out: &mut io::BufWriter<io::StdoutLock>, cbuf: &mut Vec<u8>, any_false: &mut bool, had_error: &mut bool| {
         let result = filter.execute_cb(input, &mut |result| {
@@ -330,6 +333,39 @@ fn main() {
                         }
                         Ok(())
                     })
+                } else if let Some(ref fa_field) = field_access {
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if raw[0] == b'{' {
+                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, fa_field) {
+                                let val_bytes = &raw[vs..ve];
+                                let first = val_bytes[0];
+                                if first != b'{' && first != b'[' {
+                                    compact_buf.extend_from_slice(val_bytes);
+                                    compact_buf.push(b'\n');
+                                } else if use_compact_buf && is_json_compact(val_bytes) {
+                                    compact_buf.extend_from_slice(val_bytes);
+                                    compact_buf.push(b'\n');
+                                } else {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(val_bytes) })?;
+                                    if use_compact_buf {
+                                        push_compact_line(&mut compact_buf, &v);
+                                    } else {
+                                        push_pretty_line(&mut compact_buf, &v, indent_n, tab);
+                                    }
+                                }
+                            } else {
+                                compact_buf.extend_from_slice(b"null\n");
+                            }
+                        } else {
+                            compact_buf.extend_from_slice(b"null\n");
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
                 } else if let Some(ref pf) = projection_fields {
                     let field_refs: Vec<&str> = pf.iter().map(|s| s.as_str()).collect();
                     json_stream_project(&input_str, &field_refs, |v| {
@@ -390,6 +426,42 @@ fn main() {
             let parse_result = if filter.is_empty() {
                 // Empty fast path: just validate JSON structure, produce no output.
                 json_stream_raw(content, |_, _| Ok(()))
+            } else if let Some(ref fa_field) = field_access {
+                // Field access fast path: extract a single field's raw bytes, no full parse.
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if raw[0] == b'{' {
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, fa_field) {
+                            let val_bytes = &raw[vs..ve];
+                            let first = val_bytes[0];
+                            if first != b'{' && first != b'[' {
+                                // Scalar: same in compact and pretty
+                                compact_buf.extend_from_slice(val_bytes);
+                                compact_buf.push(b'\n');
+                            } else if use_compact_buf && is_json_compact(val_bytes) {
+                                compact_buf.extend_from_slice(val_bytes);
+                                compact_buf.push(b'\n');
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(val_bytes) })?;
+                                if use_compact_buf {
+                                    push_compact_line(&mut compact_buf, &v);
+                                } else {
+                                    push_pretty_line(&mut compact_buf, &v, indent_n, tab);
+                                }
+                            }
+                        } else {
+                            compact_buf.extend_from_slice(b"null\n");
+                        }
+                    } else {
+                        compact_buf.extend_from_slice(b"null\n");
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
             } else if let Some((ref field, ref op, threshold)) = select_cmp {
                 // Select fast path: extract field without full parsing, copy raw bytes on match.
                 use jq_jit::ir::BinOp;

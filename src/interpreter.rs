@@ -114,6 +114,20 @@ impl Filter {
         None
     }
 
+    /// Detect simple field access `.field` pattern.
+    /// Returns the field name if this is a direct field access on input.
+    pub fn detect_field_access(&self) -> Option<String> {
+        use crate::ir::{Expr, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::Index { expr: base, key } = expr {
+            if !matches!(base.as_ref(), Expr::Input) { return None; }
+            if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                return Some(field.clone());
+            }
+        }
+        None
+    }
+
     /// Execute the filter against an input value, collecting all results.
     pub fn execute(&self, input: &Value) -> Result<Vec<Value>> {
         // Try JIT execution first

@@ -604,6 +604,44 @@ pub fn json_object_get_num(b: &[u8], pos: usize, field: &str) -> Option<f64> {
     }
 }
 
+/// Extract the raw byte range of a field value from a JSON object without full parsing.
+/// Returns Some((start, end)) byte offsets of the field's value, or None if not found
+/// or the input isn't a JSON object. Used for field access fast paths.
+pub fn json_object_get_field_raw(b: &[u8], pos: usize, field: &str) -> Option<(usize, usize)> {
+    if pos >= b.len() || b[pos] != b'{' { return None; }
+    let field_bytes = field.as_bytes();
+    let mut i = pos + 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < b.len() && b[i] == b'}' { return None; }
+    loop {
+        if i >= b.len() || b[i] != b'"' { return None; }
+        let key_start = i + 1;
+        let mut j = key_start;
+        while j < b.len() {
+            match b[j] { b'"' => break, b'\\' => { j += 2; continue }, _ => j += 1 }
+        }
+        let key_matches = (j - key_start) == field_bytes.len()
+            && b[key_start..j] == *field_bytes;
+        i = j + 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { return None; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if key_matches {
+            let val_start = i;
+            let val_end = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return None };
+            return Some((val_start, val_end));
+        }
+        i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return None };
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { return None; }
+        if b[i] == b'}' { return None; }
+        if b[i] != b',' { return None; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
+}
+
 /// Check if raw JSON bytes are compact (no whitespace outside of strings).
 /// For objects, checks after `{` and after the first `:` for whitespace.
 /// For arrays, checks after `[` for whitespace. Scalars are always compact.
