@@ -1287,7 +1287,62 @@ impl Flattener {
                     } else { None }
                 } else { None };
 
-                if is_last_pattern {
+                // Detect fused numeric reduce: reduce range(from;to) as $x (num_init; . + $x)
+                // Keeps everything in f64 variables — zero Value boxing in the loop body.
+                let is_fused_range_add = if let Some(rhs_expr) = acc_add_rhs {
+                    if let Expr::LoadVar { var_index: vi } = rhs_expr {
+                        if *vi == *var_index {
+                            if let Expr::Range { from, to, step } = source.as_ref() {
+                                is_scalar(from) && is_scalar(to) && step.as_ref().is_none_or(|s| is_scalar(s))
+                                    && matches!(init.as_ref(), Expr::Literal(Literal::Num(..)) | Expr::Input)
+                            } else { false }
+                        } else { false }
+                    } else { false }
+                } else { false };
+
+                if is_fused_range_add {
+                    if let Expr::Range { from, to, step } = source.as_ref() {
+                        // Set up range variables
+                        let from_val = self.flatten_scalar(from, input_slot);
+                        let to_val = self.flatten_scalar(to, input_slot);
+                        let step_val = if let Some(s) = step {
+                            self.flatten_scalar(s, input_slot)
+                        } else {
+                            let one = self.alloc_slot();
+                            self.emit(JitOp::Num { dst: one, val: 1.0, repr: None });
+                            one
+                        };
+                        let cur = self.alloc_var();
+                        let to_v = self.alloc_var();
+                        let step_v = self.alloc_var();
+                        let cmp = self.alloc_var();
+                        let acc_f64 = self.alloc_var();
+                        self.emit(JitOp::ToF64Var { dst_var: cur, src: from_val });
+                        self.emit(JitOp::ToF64Var { dst_var: to_v, src: to_val });
+                        self.emit(JitOp::ToF64Var { dst_var: step_v, src: step_val });
+                        self.emit(JitOp::ToF64Var { dst_var: acc_f64, src: acc_val });
+                        self.emit(JitOp::Drop { slot: from_val });
+                        self.emit(JitOp::Drop { slot: to_val });
+                        self.emit(JitOp::Drop { slot: step_val });
+                        let head = self.alloc_label();
+                        let body = self.alloc_label();
+                        let done = self.alloc_label();
+                        self.emit(JitOp::Label { id: head });
+                        self.emit(JitOp::RangeCheck { dst_var: cmp, cur_var: cur, to_var: to_v, step_var: step_v });
+                        self.emit(JitOp::BranchOnVar { var: cmp, nonzero_label: body, zero_label: done });
+                        self.emit(JitOp::Label { id: body });
+                        // Pure f64 accumulation: acc += cur
+                        self.emit(JitOp::F64Add { dst_var: acc_f64, a_var: acc_f64, b_var: cur });
+                        self.emit(JitOp::F64Add { dst_var: cur, a_var: cur, b_var: step_v });
+                        self.emit(JitOp::Jump { label: head });
+                        self.emit(JitOp::Label { id: done });
+                        // Convert f64 accumulator back to Value::Num
+                        let result = self.alloc_slot();
+                        self.emit(JitOp::F64Num { dst: result, src_var: acc_f64 });
+                        self.emit(JitOp::SetVar { var_index: *acc_index, src: result });
+                        self.emit(JitOp::Drop { slot: result });
+                    }
+                } else if is_last_pattern {
                     // Optimized: reuse array buffer via TakeVar + PathInsert
                     self.flatten_gen_with_each_output(source, input_slot, &|this, elem| {
                         this.emit(JitOp::SetVar { var_index: *var_index, src: elem });
@@ -4514,6 +4569,42 @@ extern "C" fn jit_rt_add_move(dst: *mut Value, lhs: *mut Value, rhs: *const Valu
 }
 extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i64 {
     unsafe {
+        // Fast path: inline math ops on numbers — avoids eval_unaryop → call_builtin chain
+        if let Value::Num(n, repr) = &*input {
+            let n = *n;
+            // abs/fabs: preserve repr for non-negative numbers
+            if (op == 7 || op == 31) && n >= 0.0 {
+                std::ptr::write(dst, (*input).clone());
+                return 0;
+            }
+            let result = match op {
+                4 => Some(n.floor()),   // Floor
+                5 => Some(n.ceil()),    // Ceil
+                6 => Some(n.round()),   // Round
+                7 | 31 => Some(n.abs()), // Fabs / Abs (negative case)
+                30 => Some(n.sqrt()),   // Sqrt
+                44 => Some(n.sin()),    // Sin
+                45 => Some(n.cos()),    // Cos
+                46 => Some(n.tan()),    // Tan
+                47 => Some(n.asin()),   // Asin
+                48 => Some(n.acos()),   // Acos
+                49 => Some(n.atan()),   // Atan
+                50 => Some(n.exp()),    // Exp
+                51 => Some(n.exp2()),   // Exp2
+                53 => Some(n.ln()),     // Log
+                54 => Some(n.log2()),   // Log2
+                55 => Some(n.log10()),  // Log10
+                56 => Some(n.cbrt()),   // Cbrt
+                61 => Some(n.trunc()),  // Trunc
+                _ => None,
+            };
+            if let Some(r) = result {
+                // Preserve repr if result equals the original value
+                let keep_repr = repr.is_some() && r == n;
+                std::ptr::write(dst, Value::Num(r, if keep_repr { repr.clone() } else { None }));
+                return 0;
+            }
+        }
         match unaryop_from_i32(op) {
             Some(u) => match crate::eval::eval_unaryop(u, &*input) {
                 Ok(v) => { std::ptr::write(dst, v); 0 }

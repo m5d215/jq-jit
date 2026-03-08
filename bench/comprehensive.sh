@@ -49,8 +49,8 @@ bench_ndjson() {
         local best=999 failed=0
         for ((i=0; i<RUNS; i++)); do
             local t
-            t=$( { TIMEFORMAT='%U'; time timeout "$TIMEOUT" "$tool" $flags "$filter" "$datafile" > /dev/null 2>&1; } 2>&1 )
-            if [ $? -ne 0 ]; then failed=1; break; fi
+            t=$( { TIMEFORMAT='%U'; time timeout "$TIMEOUT" "$tool" $flags "$filter" "$datafile" > /dev/null 2>&1; } 2>&1 ) && rc=0 || rc=$?
+            if [ $rc -ne 0 ]; then failed=1; break; fi
             if (( $(echo "$t < $best" | bc -l) )); then best=$t; fi
         done
         if [ $failed -eq 1 ]; then
@@ -71,8 +71,8 @@ bench_gen() {
         local best=999 failed=0
         for ((i=0; i<RUNS; i++)); do
             local t
-            t=$( { TIMEFORMAT='%U'; time echo "$n" | timeout "$TIMEOUT" "$tool" "$filter" > /dev/null 2>&1; } 2>&1 )
-            if [ $? -ne 0 ]; then failed=1; break; fi
+            t=$( { TIMEFORMAT='%U'; time echo "$n" | timeout "$TIMEOUT" "$tool" "$filter" > /dev/null 2>&1; } 2>&1 ) && rc=0 || rc=$?
+            if [ $rc -ne 0 ]; then failed=1; break; fi
             if (( $(echo "$t < $best" | bc -l) )); then best=$t; fi
         done
         if [ $failed -eq 1 ]; then
