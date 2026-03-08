@@ -752,6 +752,52 @@ pub fn json_object_keys_to_buf(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool 
     true
 }
 
+/// Check if a JSON object contains a given key without full parsing.
+pub fn json_object_has_key(b: &[u8], pos: usize, field: &str) -> Option<bool> {
+    if pos >= b.len() || b[pos] != b'{' { return None; }
+    let field_bytes = field.as_bytes();
+    let mut i = pos + 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < b.len() && b[i] == b'}' { return Some(false); }
+    loop {
+        if i >= b.len() || b[i] != b'"' { return None; }
+        let key_start = i + 1;
+        let mut j = key_start;
+        while j < b.len() {
+            match b[j] { b'"' => break, b'\\' => { j += 2; continue }, _ => j += 1 }
+        }
+        if (j - key_start) == field_bytes.len() && b[key_start..j] == *field_bytes {
+            return Some(true);
+        }
+        i = j + 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { return None; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return None };
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { return None; }
+        if b[i] == b'}' { return Some(false); }
+        if b[i] != b',' { return None; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
+}
+
+/// Get the jq type name for a JSON value by its first byte, without parsing.
+/// Returns the type string literal (e.g., "object", "array", "string", "number", "boolean", "null").
+pub fn json_type_byte(first: u8) -> &'static [u8] {
+    match first {
+        b'{' => b"\"object\"",
+        b'[' => b"\"array\"",
+        b'"' => b"\"string\"",
+        b't' | b'f' => b"\"boolean\"",
+        b'n' => b"\"null\"",
+        b'-' | b'0'..=b'9' => b"\"number\"",
+        _ => b"\"null\"",
+    }
+}
+
 /// Extract two numeric field values from a JSON object without full parsing.
 /// More efficient than calling json_object_get_num twice (single scan).
 pub fn json_object_get_two_nums(b: &[u8], pos: usize, field1: &str, field2: &str) -> Option<(f64, f64)> {

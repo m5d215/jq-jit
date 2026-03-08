@@ -198,6 +198,30 @@ impl Filter {
         }
     }
 
+    /// Detect `type` applied directly to input.
+    pub fn is_type(&self) -> bool {
+        if let Some((ref expr, _)) = self.parsed {
+            matches!(expr, crate::ir::Expr::UnaryOp { op: crate::ir::UnaryOp::Type, operand } if matches!(operand.as_ref(), crate::ir::Expr::Input))
+        } else {
+            false
+        }
+    }
+
+    /// Detect `has("field")` applied directly to input.
+    /// Returns the field name if this is `has("literal_string")`.
+    pub fn detect_has_field(&self) -> Option<String> {
+        use crate::ir::{Expr, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::CallBuiltin { name, args } = expr {
+            if name == "has" && args.len() == 1 {
+                if let Expr::Literal(Literal::Str(field)) = &args[0] {
+                    return Some(field.clone());
+                }
+            }
+        }
+        None
+    }
+
     /// Detect simple field access `.field` pattern.
     /// Returns the field name if this is a direct field access on input.
     pub fn detect_field_access(&self) -> Option<String> {
