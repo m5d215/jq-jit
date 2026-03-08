@@ -343,6 +343,7 @@ dependencies = [
  "itoa",
  "libc",
  "libm",
+ "memchr",
  "memmap2",
  "mimalloc",
  "regex",

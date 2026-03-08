@@ -525,11 +525,49 @@ where F: FnMut(usize, usize) -> Result<()> {
     let bytes = input.as_bytes();
     let mut pos = 0;
     if bytes.len() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF { pos = 3; }
+    // Try NDJSON fast path: if first value ends at a newline, use line-based scanning.
     pos = skip_ws(bytes, pos);
+    if pos < bytes.len() {
+        let end = skip_json_value(bytes, pos)?;
+        let ws_after = skip_ws(bytes, end);
+        if end < bytes.len() && bytes[end] == b'\n' && ws_after == end + 1 {
+            // First value ends exactly at a newline — use NDJSON line scanning for rest
+            cb(pos, end)?;
+            return json_stream_ndjson(bytes, end + 1, cb);
+        }
+        cb(pos, end)?;
+        pos = ws_after;
+    }
     while pos < bytes.len() {
         let end = skip_json_value(bytes, pos)?;
         cb(pos, end)?;
         pos = skip_ws(bytes, end);
+    }
+    Ok(())
+}
+
+/// NDJSON fast path: use memchr to find newlines, trimming trailing whitespace.
+/// Each line is assumed to be a single JSON value. Falls back to skip_json_value
+/// if a line looks suspicious (starts with whitespace within the line).
+fn json_stream_ndjson<F>(bytes: &[u8], start: usize, mut cb: F) -> Result<()>
+where F: FnMut(usize, usize) -> Result<()> {
+    use memchr::memchr;
+    let mut pos = start;
+    while pos < bytes.len() {
+        // Skip leading whitespace/newlines
+        while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r') { pos += 1; }
+        if pos >= bytes.len() { break; }
+        let line_end = match memchr(b'\n', &bytes[pos..]) {
+            Some(offset) => pos + offset,
+            None => bytes.len(),
+        };
+        // Trim trailing whitespace
+        let mut end = line_end;
+        while end > pos && matches!(bytes[end - 1], b' ' | b'\t' | b'\r') { end -= 1; }
+        if end > pos {
+            cb(pos, end)?;
+        }
+        pos = line_end + 1;
     }
     Ok(())
 }
