@@ -162,6 +162,24 @@ impl Filter {
         None
     }
 
+    /// Detect `.field + "literal"` pattern (field access + string concatenation).
+    /// Returns (field_name, suffix) if detected.
+    pub fn detect_field_str_concat(&self) -> Option<(String, String)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::BinOp { op: BinOp::Add, lhs, rhs } = expr {
+            if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::Literal(Literal::Str(suffix)) = rhs.as_ref() {
+                        return Some((field.clone(), suffix.clone()));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect simple field access `.field` pattern.
     /// Returns the field name if this is a direct field access on input.
     pub fn detect_field_access(&self) -> Option<String> {

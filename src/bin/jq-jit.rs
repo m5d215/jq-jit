@@ -213,6 +213,9 @@ fn main() {
     let field_binop = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() {
         filter.detect_field_binop()
     } else { None };
+    let field_str_concat = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() {
+        filter.detect_field_str_concat()
+    } else { None };
     let mut compact_buf: Vec<u8> = if use_compact_buf || use_pretty_buf { Vec::with_capacity(1 << 17) } else { Vec::new() };
     let process_input = |input: &Value, raw_bytes: Option<&[u8]>, out: &mut io::BufWriter<io::StdoutLock>, cbuf: &mut Vec<u8>, any_false: &mut bool, had_error: &mut bool| {
         let result = filter.execute_cb(input, &mut |result| {
@@ -424,6 +427,53 @@ fn main() {
                         }
                         Ok(())
                     })
+                } else if let Some((ref sc_field, ref suffix)) = field_str_concat {
+                    let suffix_needs_escape = suffix.bytes().any(|b| b == b'"' || b == b'\\' || b < 0x20);
+                    let suffix_escaped: Vec<u8> = if suffix_needs_escape {
+                        let mut buf = Vec::new();
+                        for &b in suffix.as_bytes() {
+                            match b {
+                                b'"' => buf.extend_from_slice(b"\\\""),
+                                b'\\' => buf.extend_from_slice(b"\\\\"),
+                                b'\n' => buf.extend_from_slice(b"\\n"),
+                                b'\r' => buf.extend_from_slice(b"\\r"),
+                                b'\t' => buf.extend_from_slice(b"\\t"),
+                                c if c < 0x20 => {}
+                                _ => buf.push(b),
+                            }
+                        }
+                        buf
+                    } else {
+                        suffix.as_bytes().to_vec()
+                    };
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if raw[0] == b'{' {
+                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sc_field) {
+                                let val = &raw[vs..ve];
+                                if val[0] == b'"' && !val[1..ve-vs-1].contains(&b'\\') {
+                                    compact_buf.extend_from_slice(&val[..val.len()-1]);
+                                    compact_buf.extend_from_slice(&suffix_escaped);
+                                    compact_buf.extend_from_slice(b"\"\n");
+                                } else {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                            } else {
+                                compact_buf.push(b'"');
+                                compact_buf.extend_from_slice(&suffix_escaped);
+                                compact_buf.extend_from_slice(b"\"\n");
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
                 } else if let Some(ref pf) = projection_fields {
                     let field_refs: Vec<&str> = pf.iter().map(|s| s.as_str()).collect();
                     json_stream_project(&input_str, &field_refs, |v| {
@@ -604,6 +654,61 @@ fn main() {
                         compact_buf.push(b'\n');
                     } else {
                         // Field missing or non-numeric: fall back to parse + JIT
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref sc_field, ref suffix)) = field_str_concat {
+                // String concat fast path: extract field's raw string bytes and append suffix.
+                // Only works when the field value is a non-escaped string.
+                let content_bytes = content.as_bytes();
+                // Pre-escape suffix for JSON output
+                let suffix_needs_escape = suffix.bytes().any(|b| b == b'"' || b == b'\\' || b < 0x20);
+                let suffix_escaped: Vec<u8> = if suffix_needs_escape {
+                    let mut buf = Vec::new();
+                    for &b in suffix.as_bytes() {
+                        match b {
+                            b'"' => buf.extend_from_slice(b"\\\""),
+                            b'\\' => buf.extend_from_slice(b"\\\\"),
+                            b'\n' => buf.extend_from_slice(b"\\n"),
+                            b'\r' => buf.extend_from_slice(b"\\r"),
+                            b'\t' => buf.extend_from_slice(b"\\t"),
+                            c if c < 0x20 => { let _ = std::fmt::Write::write_fmt(&mut String::new(), format_args!("\\u{:04x}", c)); }
+                            _ => buf.push(b),
+                        }
+                    }
+                    buf
+                } else {
+                    suffix.as_bytes().to_vec()
+                };
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if raw[0] == b'{' {
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sc_field) {
+                            let val = &raw[vs..ve];
+                            // Only use fast path for simple strings (quoted, no backslash)
+                            if val[0] == b'"' && !val[1..ve-vs-1].contains(&b'\\') {
+                                // Copy everything except trailing quote, append suffix + quote + newline
+                                compact_buf.extend_from_slice(&val[..val.len()-1]);
+                                compact_buf.extend_from_slice(&suffix_escaped);
+                                compact_buf.extend_from_slice(b"\"\n");
+                            } else {
+                                // Fall back for non-string or escaped string values
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else {
+                            // Field not found → null + "str" = "str"
+                            compact_buf.push(b'"');
+                            compact_buf.extend_from_slice(&suffix_escaped);
+                            compact_buf.extend_from_slice(b"\"\n");
+                        }
+                    } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
