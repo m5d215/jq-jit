@@ -140,6 +140,28 @@ impl Filter {
         None
     }
 
+    /// Detect `.field1 op .field2` pattern (binary arithmetic on two input fields).
+    /// Returns (field1, op, field2) if detected.
+    pub fn detect_field_binop(&self) -> Option<(String, crate::ir::BinOp, String)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::BinOp { op, lhs, rhs } = expr {
+            if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) { return None; }
+            if let Expr::Index { expr: base1, key: key1 } = lhs.as_ref() {
+                if !matches!(base1.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(f1)) = key1.as_ref() {
+                    if let Expr::Index { expr: base2, key: key2 } = rhs.as_ref() {
+                        if !matches!(base2.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f2)) = key2.as_ref() {
+                            return Some((f1.clone(), *op, f2.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect simple field access `.field` pattern.
     /// Returns the field name if this is a direct field access on input.
     pub fn detect_field_access(&self) -> Option<String> {

@@ -642,6 +642,79 @@ pub fn json_object_get_field_raw(b: &[u8], pos: usize, field: &str) -> Option<(u
     }
 }
 
+/// Extract two numeric field values from a JSON object without full parsing.
+/// More efficient than calling json_object_get_num twice (single scan).
+pub fn json_object_get_two_nums(b: &[u8], pos: usize, field1: &str, field2: &str) -> Option<(f64, f64)> {
+    if pos >= b.len() || b[pos] != b'{' { return None; }
+    let f1 = field1.as_bytes();
+    let f2 = field2.as_bytes();
+    let mut val1: Option<f64> = None;
+    let mut val2: Option<f64> = None;
+    let mut i = pos + 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < b.len() && b[i] == b'}' { return None; }
+    loop {
+        if i >= b.len() || b[i] != b'"' { return None; }
+        let key_start = i + 1;
+        let mut j = key_start;
+        while j < b.len() {
+            match b[j] { b'"' => break, b'\\' => { j += 2; continue }, _ => j += 1 }
+        }
+        let key_len = j - key_start;
+        let match1 = val1.is_none() && key_len == f1.len() && b[key_start..j] == *f1;
+        let match2 = !match1 && val2.is_none() && key_len == f2.len() && b[key_start..j] == *f2;
+        i = j + 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { return None; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if match1 || match2 {
+            // Parse numeric value inline
+            if i >= b.len() { return None; }
+            let neg = b[i] == b'-';
+            let start = if neg { i + 1 } else { i };
+            if start >= b.len() || !b[start].is_ascii_digit() { return None; }
+            let mut n: i64 = (b[start] - b'0') as i64;
+            let mut k = start + 1;
+            while k < b.len() && b[k].is_ascii_digit() {
+                n = n * 10 + (b[k] - b'0') as i64;
+                k += 1;
+            }
+            let val = if k < b.len() && (b[k] == b'.' || b[k] == b'e' || b[k] == b'E') {
+                let end = {
+                    let mut e = k;
+                    if b[e] == b'.' { e += 1; while e < b.len() && b[e].is_ascii_digit() { e += 1; } }
+                    if e < b.len() && (b[e] == b'e' || b[e] == b'E') {
+                        e += 1;
+                        if e < b.len() && (b[e] == b'+' || b[e] == b'-') { e += 1; }
+                        while e < b.len() && b[e].is_ascii_digit() { e += 1; }
+                    }
+                    e
+                };
+                let num_str = unsafe { std::str::from_utf8_unchecked(&b[i..end]) };
+                i = end;
+                fast_float::parse::<f64, _>(num_str).ok()?
+            } else {
+                if (k - start) > 15 { return None; }
+                i = k;
+                if neg { -(n as f64) } else { n as f64 }
+            };
+            if match1 { val1 = Some(val); } else { val2 = Some(val); }
+            if val1.is_some() && val2.is_some() {
+                return Some((val1.unwrap(), val2.unwrap()));
+            }
+        } else {
+            i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return None };
+        }
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { return None; }
+        if b[i] == b'}' { return None; }
+        if b[i] != b',' { return None; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
+}
+
 /// Extract raw byte ranges for multiple fields from a JSON object.
 /// `fields` is a list of (output_key, input_field) pairs.
 /// Returns a Vec of (start, end) pairs for each field value, in the same order as `fields`.
@@ -1844,7 +1917,7 @@ fn push_compact_value(buf: &mut Vec<u8>, v: &Value) {
 
 /// Write a jq-formatted number directly to a Vec<u8> buffer, avoiding intermediate String allocation.
 #[inline]
-fn push_jq_number_bytes(buf: &mut Vec<u8>, n: f64) {
+pub fn push_jq_number_bytes(buf: &mut Vec<u8>, n: f64) {
     use std::io::Write;
     // Fast path: exact integer in displayable range (covers vast majority of JSON numbers).
     // The i64 roundtrip check (i as f64 == n) naturally rejects NaN, infinity, and non-integers.
