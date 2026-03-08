@@ -642,6 +642,66 @@ pub fn json_object_get_field_raw(b: &[u8], pos: usize, field: &str) -> Option<(u
     }
 }
 
+/// Extract raw byte ranges for multiple fields from a JSON object.
+/// `fields` is a list of (output_key, input_field) pairs.
+/// Returns a Vec of (start, end) pairs for each field value, in the same order as `fields`.
+/// Returns None if any field is missing or input isn't an object.
+pub fn json_object_get_fields_raw(b: &[u8], pos: usize, input_fields: &[&str]) -> Option<Vec<(usize, usize)>> {
+    if pos >= b.len() || b[pos] != b'{' { return None; }
+    let n = input_fields.len();
+    let mut results: Vec<Option<(usize, usize)>> = vec![None; n];
+    let mut found = 0;
+    let mut i = pos + 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < b.len() && b[i] == b'}' {
+        return None; // empty object, fields can't be found
+    }
+    loop {
+        if i >= b.len() || b[i] != b'"' { return None; }
+        let key_start = i + 1;
+        let mut j = key_start;
+        while j < b.len() {
+            match b[j] { b'"' => break, b'\\' => { j += 2; continue }, _ => j += 1 }
+        }
+        let key_len = j - key_start;
+        // Check which field this key matches
+        let mut matched_idx = None;
+        for (idx, field) in input_fields.iter().enumerate() {
+            if results[idx].is_none() && key_len == field.len() && b[key_start..j] == *field.as_bytes() {
+                matched_idx = Some(idx);
+                break;
+            }
+        }
+        i = j + 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { return None; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if let Some(idx) = matched_idx {
+            let val_start = i;
+            let val_end = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return None };
+            results[idx] = Some((val_start, val_end));
+            found += 1;
+            if found == n { break; }
+            i = val_end;
+        } else {
+            i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return None };
+        }
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { return None; }
+        if b[i] == b'}' { break; }
+        if b[i] != b',' { return None; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
+    // Convert Options to values, using None → missing field → return None
+    let mut out = Vec::with_capacity(n);
+    for r in results {
+        out.push(r?);
+    }
+    Some(out)
+}
+
 /// Check if raw JSON bytes are compact (no whitespace outside of strings).
 /// For objects, checks after `{` and after the first `:` for whitespace.
 /// For arrays, checks after `[` for whitespace. Scalars are always compact.

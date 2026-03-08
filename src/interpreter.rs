@@ -114,6 +114,32 @@ impl Filter {
         None
     }
 
+    /// Detect `{a: .x, b: .y}` pattern (object construction from field access).
+    /// Returns Vec of (output_key, input_field) pairs if detected.
+    pub fn detect_field_remap(&self) -> Option<Vec<(String, String)>> {
+        use crate::ir::{Expr, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::ObjectConstruct { pairs } = expr {
+            if pairs.is_empty() { return None; }
+            let mut result = Vec::with_capacity(pairs.len());
+            for (k, v) in pairs {
+                // Key must be a literal string
+                let key = if let Expr::Literal(Literal::Str(s)) = k {
+                    s.clone()
+                } else { return None; };
+                // Value must be .field (Index on Input with literal string key)
+                if let Expr::Index { expr: base, key: field_key } = v {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(f)) = field_key.as_ref() {
+                        result.push((key, f.clone()));
+                    } else { return None; }
+                } else { return None; }
+            }
+            return Some(result);
+        }
+        None
+    }
+
     /// Detect simple field access `.field` pattern.
     /// Returns the field name if this is a direct field access on input.
     pub fn detect_field_access(&self) -> Option<String> {

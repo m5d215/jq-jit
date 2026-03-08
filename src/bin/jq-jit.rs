@@ -8,7 +8,7 @@ use std::process;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_field_raw, is_json_compact, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
+use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_field_raw, json_object_get_fields_raw, is_json_compact, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
 use jq_jit::interpreter::Filter;
 
 fn main() {
@@ -207,6 +207,9 @@ fn main() {
     let field_access = if (use_compact_buf || use_pretty_buf) && !exit_status {
         filter.detect_field_access()
     } else { None };
+    let field_remap = if use_compact_buf && !exit_status && field_access.is_none() {
+        filter.detect_field_remap()
+    } else { None };
     let mut compact_buf: Vec<u8> = if use_compact_buf || use_pretty_buf { Vec::with_capacity(1 << 17) } else { Vec::new() };
     let process_input = |input: &Value, raw_bytes: Option<&[u8]>, out: &mut io::BufWriter<io::StdoutLock>, cbuf: &mut Vec<u8>, any_false: &mut bool, had_error: &mut bool| {
         let result = filter.execute_cb(input, &mut |result| {
@@ -366,6 +369,35 @@ fn main() {
                         }
                         Ok(())
                     })
+                } else if let Some(ref remap) = field_remap {
+                    let input_fields: Vec<&str> = remap.iter().map(|(_, f)| f.as_str()).collect();
+                    let mut key_prefixes: Vec<Vec<u8>> = Vec::with_capacity(remap.len());
+                    for (i, (out_key, _)) in remap.iter().enumerate() {
+                        let mut prefix = Vec::new();
+                        if i == 0 { prefix.push(b'{'); } else { prefix.push(b','); }
+                        prefix.push(b'"');
+                        prefix.extend_from_slice(out_key.as_bytes());
+                        prefix.extend_from_slice(b"\":");
+                        key_prefixes.push(prefix);
+                    }
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some(ranges) = json_object_get_fields_raw(raw, 0, &input_fields) {
+                            for (i, (vs, ve)) in ranges.iter().enumerate() {
+                                compact_buf.extend_from_slice(&key_prefixes[i]);
+                                compact_buf.extend_from_slice(&raw[*vs..*ve]);
+                            }
+                            compact_buf.extend_from_slice(b"}\n");
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
                 } else if let Some(ref pf) = projection_fields {
                     let field_refs: Vec<&str> = pf.iter().map(|s| s.as_str()).collect();
                     json_stream_project(&input_str, &field_refs, |v| {
@@ -491,6 +523,40 @@ fn main() {
                                 compact_buf.clear();
                             }
                         }
+                    }
+                    Ok(())
+                })
+            } else if let Some(ref remap) = field_remap {
+                // Object projection fast path: extract multiple fields' raw bytes and
+                // construct output object directly, no Value construction needed.
+                let content_bytes = content.as_bytes();
+                let input_fields: Vec<&str> = remap.iter().map(|(_, f)| f.as_str()).collect();
+                // Pre-build output key prefixes: {"key1":, ,"key2":, etc.
+                let mut key_prefixes: Vec<Vec<u8>> = Vec::with_capacity(remap.len());
+                for (i, (out_key, _)) in remap.iter().enumerate() {
+                    let mut prefix = Vec::new();
+                    if i == 0 { prefix.push(b'{'); } else { prefix.push(b','); }
+                    prefix.push(b'"');
+                    prefix.extend_from_slice(out_key.as_bytes());
+                    prefix.extend_from_slice(b"\":");
+                    key_prefixes.push(prefix);
+                }
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some(ranges) = json_object_get_fields_raw(raw, 0, &input_fields) {
+                        for (i, (vs, ve)) in ranges.iter().enumerate() {
+                            compact_buf.extend_from_slice(&key_prefixes[i]);
+                            compact_buf.extend_from_slice(&raw[*vs..*ve]);
+                        }
+                        compact_buf.extend_from_slice(b"}\n");
+                    } else {
+                        // Missing field → fall back to parse + JIT
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
                     }
                     Ok(())
                 })
