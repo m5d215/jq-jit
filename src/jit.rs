@@ -218,6 +218,15 @@ enum JitOp {
     // jq variables
     GetVar { dst: SlotId, var_index: u16 },
     SetVar { var_index: u16, src: SlotId },
+    /// Take var value (move out, leave Null) — avoids clone, gives refcount = 1.
+    TakeVar { dst: SlotId, var_index: u16 },
+
+    /// In-place path extract: swap container[key] with Null, return old element.
+    /// Container is modified in-place via Rc::make_mut (no clone if refcount == 1).
+    PathExtract { element: SlotId, container: SlotId, key: SlotId },
+    /// In-place path insert: set container[key] = val, consuming val (slot becomes Null).
+    /// Container is modified in-place via Rc::make_mut (no clone if refcount == 1).
+    PathInsert { container: SlotId, key: SlotId, val: SlotId },
 
     // Collect (array construction)
     CollectBegin,
@@ -1145,16 +1154,27 @@ impl Flattener {
                 self.emit(JitOp::Drop { slot: acc_val });
                 let old_var = self.alloc_slot();
                 self.emit(JitOp::GetVar { dst: old_var, var_index: *var_index });
-                // For each output of source, set $var and update acc
-                self.flatten_gen_with_each_output(source, input_slot, &|this, elem| {
-                    this.emit(JitOp::SetVar { var_index: *var_index, src: elem });
-                    let acc = this.alloc_slot();
-                    this.emit(JitOp::GetVar { dst: acc, var_index: *acc_index });
-                    let new_acc = this.flatten_scalar(update, acc);
-                    this.emit(JitOp::SetVar { var_index: *acc_index, src: new_acc });
-                    this.emit(JitOp::Drop { slot: new_acc });
-                    this.emit(JitOp::Drop { slot: acc });
-                });
+                // Detect in-place update pattern: reduce ... (init; path |= f) or path += f
+                let inplace_info = detect_inplace_update(update);
+
+                if let Some(info) = inplace_info {
+                    // Optimized: TakeVar + PathExtract/PathInsert avoids container cloning
+                    self.flatten_gen_with_each_output(source, input_slot, &|this, elem| {
+                        this.emit(JitOp::SetVar { var_index: *var_index, src: elem });
+                        this.emit_reduce_update_with_lets(*acc_index, &info);
+                    });
+                } else {
+                    // For each output of source, set $var and update acc
+                    self.flatten_gen_with_each_output(source, input_slot, &|this, elem| {
+                        this.emit(JitOp::SetVar { var_index: *var_index, src: elem });
+                        let acc = this.alloc_slot();
+                        this.emit(JitOp::GetVar { dst: acc, var_index: *acc_index });
+                        let new_acc = this.flatten_scalar(update, acc);
+                        this.emit(JitOp::SetVar { var_index: *acc_index, src: new_acc });
+                        this.emit(JitOp::Drop { slot: new_acc });
+                        this.emit(JitOp::Drop { slot: acc });
+                    });
+                }
                 let out = self.alloc_slot();
                 self.emit(JitOp::GetVar { dst: out, var_index: *acc_index });
                 self.emit(JitOp::SetVar { var_index: *acc_index, src: old_acc });
@@ -3168,16 +3188,23 @@ impl Flattener {
 
     /// Emit reduce loop inline. Returns false if the source generator can't be compiled.
     fn flatten_gen_with_reduce(&mut self, source: &Expr, var_index: u16, acc_index: u16, update: &Expr, input_slot: SlotId) -> bool {
+        // Detect in-place update pattern: path |= f or path += f (wrapped in LetBinding)
+        let inplace_info = detect_inplace_update(update);
+
         // Helper: emit the update step (set $var, load acc as ., evaluate update, store back)
         let emit_update = |s: &mut Flattener, elem: SlotId| {
             s.emit(JitOp::SetVar { var_index, src: elem });
-            // Load current accumulator as the input to update (. refers to acc in reduce)
-            let acc = s.alloc_slot();
-            s.emit(JitOp::GetVar { dst: acc, var_index: acc_index });
-            let new_acc = s.flatten_scalar(update, acc);
-            s.emit(JitOp::Drop { slot: acc });
-            s.emit(JitOp::SetVar { var_index: acc_index, src: new_acc });
-            s.emit(JitOp::Drop { slot: new_acc });
+            if let Some(ref info) = inplace_info {
+                s.emit_reduce_update_with_lets(acc_index, info);
+            } else {
+                // Load current accumulator as the input to update (. refers to acc in reduce)
+                let acc = s.alloc_slot();
+                s.emit(JitOp::GetVar { dst: acc, var_index: acc_index });
+                let new_acc = s.flatten_scalar(update, acc);
+                s.emit(JitOp::Drop { slot: acc });
+                s.emit(JitOp::SetVar { var_index: acc_index, src: new_acc });
+                s.emit(JitOp::Drop { slot: new_acc });
+            }
         };
 
         if is_scalar(source) {
@@ -3556,6 +3583,87 @@ impl Flattener {
         self.emit(JitOp::CollectFinish { dst: arr });
         arr
     }
+
+    /// Emit optimized in-place reduce update with LetBinding wrapping.
+    /// Handles `path |= f` and `path += f` (which is LetBinding { body: Update }).
+    fn emit_reduce_update_with_lets(&mut self, acc_index: u16, info: &InplaceUpdateInfo) {
+        // Save and set let-binding vars (for += desugaring: rhs evaluated first)
+        let mut saved_vars = Vec::new();
+        let acc_for_lets = self.alloc_slot();
+        self.emit(JitOp::GetVar { dst: acc_for_lets, var_index: acc_index });
+        for &(var_idx, ref value_expr) in &info.let_bindings {
+            let old = self.alloc_slot();
+            self.emit(JitOp::GetVar { dst: old, var_index: var_idx });
+            let val = self.flatten_scalar(value_expr, acc_for_lets);
+            self.emit(JitOp::SetVar { var_index: var_idx, src: val });
+            self.emit(JitOp::Drop { slot: val });
+            saved_vars.push((var_idx, old));
+        }
+        self.emit(JitOp::Drop { slot: acc_for_lets });
+
+        // TakeVar: move acc out (refcount = 1)
+        let acc = self.alloc_slot();
+        self.emit(JitOp::TakeVar { dst: acc, var_index: acc_index });
+
+        // PathExtract chain (multi-level)
+        let mut containers = Vec::new();
+        let mut keys = Vec::new();
+        let mut current = acc;
+
+        for component in &info.path_components {
+            let key = match component {
+                PathComponent::Field(name) => {
+                    let s = self.alloc_slot();
+                    self.emit(JitOp::Str { dst: s, val: name.clone() });
+                    s
+                }
+                PathComponent::Expr(e) => {
+                    self.flatten_scalar(e, current)
+                }
+            };
+            let element = self.alloc_slot();
+            self.emit(JitOp::PathExtract { element, container: current, key });
+            containers.push(current);
+            keys.push(key);
+            current = element;
+        }
+
+        let old_val = current;
+
+        // Detect fused += pattern: update_expr is `. + rhs` where rhs doesn't use Input
+        let new_val = if let Expr::BinOp { op, lhs, rhs } = info.update_expr {
+            if matches!(op, BinOp::Add) && matches!(lhs.as_ref(), Expr::Input) && !uses_input(rhs) {
+                let rhs_val = self.flatten_scalar(rhs, acc);
+                let out = self.alloc_slot();
+                self.emit(JitOp::AddMove { dst: out, lhs: old_val, rhs: rhs_val });
+                self.emit(JitOp::Drop { slot: rhs_val });
+                out
+            } else {
+                self.flatten_scalar(info.update_expr, old_val)
+            }
+        } else {
+            self.flatten_scalar(info.update_expr, old_val)
+        };
+        self.emit(JitOp::Drop { slot: old_val });
+
+        // PathInsert chain (reverse)
+        let mut current_val = new_val;
+        for (container, key) in containers.iter().rev().zip(keys.iter().rev()) {
+            self.emit(JitOp::PathInsert { container: *container, key: *key, val: current_val });
+            self.emit(JitOp::Drop { slot: current_val });
+            self.emit(JitOp::Drop { slot: *key });
+            current_val = *container;
+        }
+
+        self.emit(JitOp::SetVar { var_index: acc_index, src: current_val });
+        self.emit(JitOp::Drop { slot: current_val });
+
+        // Restore let-binding vars
+        for (var_idx, old) in saved_vars.into_iter().rev() {
+            self.emit(JitOp::SetVar { var_index: var_idx, src: old });
+            self.emit(JitOp::Drop { slot: old });
+        }
+    }
 }
 
 /// Path component for simple path extraction.
@@ -3598,6 +3706,43 @@ fn extract_simple_path(expr: &Expr) -> Option<Vec<PathComponent>> {
     }
 }
 
+/// Info for in-place reduce update optimization.
+struct InplaceUpdateInfo<'a> {
+    /// LetBindings wrapping the Update (from += desugaring).
+    /// Each entry is (var_index, value_expr).
+    let_bindings: Vec<(u16, &'a Expr)>,
+    /// Path components for the update target.
+    path_components: Vec<PathComponent>,
+    /// The update expression (applied to the old value at the path).
+    update_expr: &'a Expr,
+}
+
+/// Detect an in-place update pattern in a reduce update expression.
+/// Handles direct `path |= f` and `path += f` (which is `LetBinding { body: Update }`).
+fn detect_inplace_update(expr: &Expr) -> Option<InplaceUpdateInfo<'_>> {
+    match expr {
+        Expr::Update { path_expr, update_expr } => {
+            let pc = extract_simple_path(path_expr)?;
+            if !pc.is_empty() && is_scalar(update_expr) {
+                Some(InplaceUpdateInfo {
+                    let_bindings: vec![],
+                    path_components: pc,
+                    update_expr,
+                })
+            } else {
+                None
+            }
+        }
+        Expr::LetBinding { var_index, value, body } if is_scalar(value) => {
+            let mut info = detect_inplace_update(body)?;
+            // Prepend this let-binding (outermost first)
+            info.let_bindings.insert(0, (*var_index, value.as_ref()));
+            Some(info)
+        }
+        _ => None,
+    }
+}
+
 /// Check if an expression tree contains any FuncCall references.
 /// Used to guard runtime delegation (which loses function context).
 fn contains_func_call(expr: &Expr) -> bool {
@@ -3619,6 +3764,24 @@ fn contains_func_call(expr: &Expr) -> bool {
         Expr::Alternative { primary, fallback } => contains_func_call(primary) || contains_func_call(fallback),
         Expr::Slice { expr, from, to } => contains_func_call(expr) || from.as_ref().is_some_and(|f| contains_func_call(f)) || to.as_ref().is_some_and(|t| contains_func_call(t)),
         _ => false, // Literals, Input, LoadVar, etc. are safe
+    }
+}
+
+/// Check if an expression uses Input (`.`). Used to determine if the rhs of
+/// a += can be evaluated independently of the path target.
+fn uses_input(expr: &Expr) -> bool {
+    match expr {
+        Expr::Input => true,
+        Expr::Literal(_) | Expr::LoadVar { .. } | Expr::Empty => false,
+        Expr::BinOp { lhs, rhs, .. } => uses_input(lhs) || uses_input(rhs),
+        Expr::UnaryOp { operand, .. } | Expr::Negate { operand } => uses_input(operand),
+        Expr::Pipe { left, right } | Expr::Comma { left, right } => uses_input(left) || uses_input(right),
+        Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => uses_input(expr) || uses_input(key),
+        Expr::Collect { generator } => uses_input(generator),
+        Expr::IfThenElse { cond, then_branch, else_branch } => uses_input(cond) || uses_input(then_branch) || uses_input(else_branch),
+        Expr::LetBinding { value, body, .. } => uses_input(value) || uses_input(body),
+        Expr::CallBuiltin { args, .. } => args.iter().any(|a| uses_input(a)),
+        _ => true, // Conservative: assume uses input
     }
 }
 
@@ -4087,6 +4250,114 @@ extern "C" fn jit_rt_set_var(env: *mut JitEnv, idx: u32, val: *const Value) {
         let env = &mut *env;
         if i >= env.vars.len() { env.vars.resize(i + 1, Value::Null); }
         env.vars[i] = (*val).clone();
+    }
+}
+
+/// Take var value (move out, leave Null). Gives the caller sole ownership (refcount unincremented).
+extern "C" fn jit_rt_take_var(dst: *mut Value, env: *mut JitEnv, idx: u32) {
+    unsafe {
+        let env = &mut *env;
+        let i = idx as usize;
+        let v = if i < env.vars.len() {
+            std::mem::replace(&mut env.vars[i], Value::Null)
+        } else {
+            Value::Null
+        };
+        std::ptr::write(dst, v);
+    }
+}
+
+/// In-place path extract: swap container[key] with Null, writing old element to `element`.
+/// Uses Rc::make_mut so no clone occurs when refcount == 1.
+extern "C" fn jit_rt_path_extract(element: *mut Value, container: *mut Value, key: *const Value) -> i64 {
+    unsafe {
+        let cont = &mut *container;
+        let key_ref = &*key;
+        match (cont, key_ref) {
+            (Value::Arr(rc_arr), Value::Num(n, _)) => {
+                let idx = if *n < 0.0 {
+                    let len = rc_arr.len() as i64;
+                    (len + *n as i64).max(0) as usize
+                } else {
+                    *n as usize
+                };
+                let arr = Rc::make_mut(rc_arr);
+                if idx < arr.len() {
+                    std::ptr::write(element, std::mem::replace(&mut arr[idx], Value::Null));
+                } else {
+                    std::ptr::write(element, Value::Null);
+                }
+                0
+            }
+            (Value::Obj(rc_obj), Value::Str(k)) => {
+                let obj = Rc::make_mut(rc_obj);
+                let found = obj.iter_mut().find(|(ek, _)| ek.as_str() == k.as_str());
+                if let Some((_, v)) = found {
+                    std::ptr::write(element, std::mem::replace(v, Value::Null));
+                } else {
+                    std::ptr::write(element, Value::Null);
+                }
+                0
+            }
+            _ => {
+                std::ptr::write(element, Value::Null);
+                0
+            }
+        }
+    }
+}
+
+/// In-place path insert: set container[key] = val, consuming val (slot becomes Null).
+/// Uses Rc::make_mut so no clone occurs when refcount == 1.
+extern "C" fn jit_rt_path_insert(container: *mut Value, key: *const Value, val: *mut Value) -> i64 {
+    unsafe {
+        let new_val = std::ptr::read(val);
+        std::ptr::write(val, Value::Null);
+        let cont = &mut *container;
+        let key_ref = &*key;
+        match (cont, key_ref) {
+            (Value::Arr(rc_arr), Value::Num(n, _)) => {
+                let idx = if *n < 0.0 {
+                    let len = rc_arr.len() as i64;
+                    (len + *n as i64).max(0) as usize
+                } else {
+                    *n as usize
+                };
+                let arr = Rc::make_mut(rc_arr);
+                while arr.len() <= idx {
+                    arr.push(Value::Null);
+                }
+                arr[idx] = new_val;
+                0
+            }
+            (Value::Obj(rc_obj), Value::Str(k)) => {
+                let obj = Rc::make_mut(rc_obj);
+                let found = obj.iter_mut().find(|(ek, _)| ek.as_str() == k.as_str());
+                if let Some((_, v)) = found {
+                    *v = new_val;
+                } else {
+                    obj.insert(crate::value::KeyStr::from(k.as_str()), new_val);
+                }
+                0
+            }
+            (Value::Null, Value::Num(n, _)) => {
+                let idx = (*n).max(0.0) as usize;
+                let mut arr = vec![Value::Null; idx + 1];
+                arr[idx] = new_val;
+                *container = Value::Arr(Rc::new(arr));
+                0
+            }
+            (Value::Null, Value::Str(k)) => {
+                let mut obj = crate::value::new_objmap();
+                obj.insert(crate::value::KeyStr::from(k.as_str()), new_val);
+                *container = Value::Obj(Rc::new(obj));
+                0
+            }
+            _ => {
+                drop(new_val);
+                0
+            }
+        }
     }
 }
 
@@ -4707,6 +4978,15 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
             JitOp::IsNullOrFalse { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
             JitOp::Alternative { primary, .. } => { *use_count.entry(*primary).or_insert(0) += 1; }
             JitOp::SetVar { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
+            JitOp::PathExtract { container, key, .. } => {
+                *use_count.entry(*container).or_insert(0) += 1;
+                *use_count.entry(*key).or_insert(0) += 1;
+            }
+            JitOp::PathInsert { container, key, val } => {
+                *use_count.entry(*container).or_insert(0) += 1;
+                *use_count.entry(*key).or_insert(0) += 1;
+                *use_count.entry(*val).or_insert(0) += 1;
+            }
             JitOp::StrBufAppendVal { src } => { *use_count.entry(*src).or_insert(0) += 1; }
             JitOp::ThrowError { msg } => { *use_count.entry(*msg).or_insert(0) += 1; }
             JitOp::CallBuiltin { args, .. } => {
@@ -4769,6 +5049,15 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 JitOp::IsNullOrFalse { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
                 JitOp::Alternative { primary, .. } => { *use_count.entry(*primary).or_insert(0) += 1; }
                 JitOp::SetVar { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
+                JitOp::PathExtract { container, key, .. } => {
+                    *use_count.entry(*container).or_insert(0) += 1;
+                    *use_count.entry(*key).or_insert(0) += 1;
+                }
+                JitOp::PathInsert { container, key, val } => {
+                    *use_count.entry(*container).or_insert(0) += 1;
+                    *use_count.entry(*key).or_insert(0) += 1;
+                    *use_count.entry(*val).or_insert(0) += 1;
+                }
                 JitOp::StrBufAppendVal { src } => { *use_count.entry(*src).or_insert(0) += 1; }
                 JitOp::ThrowError { msg } => { *use_count.entry(*msg).or_insert(0) += 1; }
                 JitOp::CallBuiltin { args, .. } => {
@@ -4912,6 +5201,9 @@ impl JitCompiler {
             ("jit_rt_obj_get_idx", jit_rt_obj_get_idx as *const u8),
             ("jit_rt_get_var", jit_rt_get_var as *const u8),
             ("jit_rt_set_var", jit_rt_set_var as *const u8),
+            ("jit_rt_take_var", jit_rt_take_var as *const u8),
+            ("jit_rt_path_extract", jit_rt_path_extract as *const u8),
+            ("jit_rt_path_insert", jit_rt_path_insert as *const u8),
             ("jit_rt_collect_begin", jit_rt_collect_begin as *const u8),
             ("jit_rt_collect_push", jit_rt_collect_push as *const u8),
             ("jit_rt_collect_finish", jit_rt_collect_finish as *const u8),
@@ -5334,6 +5626,23 @@ impl JitCompiler {
                         let vi = b.ins().iconst(types::I32, *var_index as i64);
                         b.ins().call(rt["set_var"], &[env_ptr, vi, s]);
                     }
+                    JitOp::TakeVar { dst, var_index } => {
+                        let d = slot_addr(&mut b, *dst);
+                        let vi = b.ins().iconst(types::I32, *var_index as i64);
+                        b.ins().call(rt["take_var"], &[d, env_ptr, vi]);
+                    }
+                    JitOp::PathExtract { element, container, key } => {
+                        let e = slot_addr(&mut b, *element);
+                        let c = slot_addr(&mut b, *container);
+                        let k = slot_addr(&mut b, *key);
+                        b.ins().call(rt["path_extract"], &[e, c, k]);
+                    }
+                    JitOp::PathInsert { container, key, val } => {
+                        let c = slot_addr(&mut b, *container);
+                        let k = slot_addr(&mut b, *key);
+                        let v = slot_addr(&mut b, *val);
+                        b.ins().call(rt["path_insert"], &[c, k, v]);
+                    }
                     // Collect ops
                     JitOp::CollectBegin => {
                         b.ins().call(rt["collect_begin"], &[env_ptr]);
@@ -5650,6 +5959,9 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("obj_get_idx", [p, p, p], []);
     decl!("get_var", [p, p, i], []);
     decl!("set_var", [p, i, p], []);
+    decl!("take_var", [p, p, i], []);
+    decl!("path_extract", [p, p, p], [p]);
+    decl!("path_insert", [p, p, p], [p]);
     decl!("collect_begin", [p], []);
     decl!("collect_push", [p, p], []);
     decl!("collect_finish", [p, p], []);
