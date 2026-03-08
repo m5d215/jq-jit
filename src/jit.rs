@@ -5988,8 +5988,47 @@ impl JitCompiler {
                     }
                     JitOp::Drop { slot } if *slot == 0 => { /* don't drop input */ }
                     JitOp::Drop { slot } => {
+                        // Inline trivial drop: check discriminant tag to skip function call
+                        // Value layout: byte 0 = tag (0=Null,1=False,2=True,3=Num,4+=heap)
+                        // Tags 0-2: no-op drop. Tag 3: no-op if repr (offset 16) is null.
                         let a = slot_addr(&mut b, *slot);
-                        b.ins().call(rt["drop"], &[a]);
+                        let tag = b.ins().load(types::I8, cranelift_codegen::ir::MemFlags::new(), a, 0);
+                        let tag_i32 = b.ins().uextend(types::I32, tag);
+                        let three = b.ins().iconst(types::I32, 3);
+                        let is_le_2 = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::UnsignedLessThan, tag_i32, three);
+
+                        let check_num_blk = b.create_block();
+                        let do_drop_blk = b.create_block();
+                        let skip_blk = b.create_block();
+
+                        // tag < 3 (Null/False/True) → skip
+                        b.ins().brif(is_le_2, skip_blk, &[], check_num_blk, &[]);
+
+                        // check_num_blk: tag >= 3
+                        b.switch_to_block(check_num_blk);
+                        b.seal_block(check_num_blk);
+                        let is_eq_3 = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, tag_i32, three);
+                        let repr_ptr_blk = b.create_block();
+                        b.ins().brif(is_eq_3, repr_ptr_blk, &[], do_drop_blk, &[]);
+
+                        // repr_ptr_blk: tag == 3 (Num), check repr at offset 16
+                        b.switch_to_block(repr_ptr_blk);
+                        b.seal_block(repr_ptr_blk);
+                        let repr = b.ins().load(ptr_ty, cranelift_codegen::ir::MemFlags::new(), a, 16);
+                        let zero = b.ins().iconst(ptr_ty, 0);
+                        let repr_is_null = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, repr, zero);
+                        b.ins().brif(repr_is_null, skip_blk, &[], do_drop_blk, &[]);
+
+                        // do_drop_blk: call jit_rt_drop
+                        b.switch_to_block(do_drop_blk);
+                        b.seal_block(do_drop_blk);
+                        let a2 = slot_addr(&mut b, *slot);
+                        b.ins().call(rt["drop"], &[a2]);
+                        b.ins().jump(skip_blk, &[]);
+
+                        // skip_blk: continue
+                        b.switch_to_block(skip_blk);
+                        b.seal_block(skip_blk);
                         terminated = false;
                     }
                     JitOp::Null { dst } => {
