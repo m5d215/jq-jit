@@ -41,6 +41,7 @@ pub fn rc_objmap_pool_get(cap: usize) -> Rc<ObjMap> {
         let mut rc = unsafe { Rc::from_raw(raw) };
         let map = Rc::get_mut(&mut rc).unwrap();
         map.entries = pool_get(cap);
+        map.index = None;
         rc
     } else {
         Rc::new(ObjMap::with_capacity(cap))
@@ -118,18 +119,24 @@ pub fn pool_value(v: Value) {
 #[derive(Debug, PartialEq)]
 pub struct ObjMap {
     entries: Vec<(KeyStr, Value)>,
+    /// Lazily-built hash index for O(1) key lookup on large objects.
+    index: Option<Box<std::collections::HashMap<KeyStr, usize>>>,
 }
+
+/// Threshold: build hash index when entries exceed this size.
+const OBJMAP_INDEX_THRESHOLD: usize = 32;
 
 impl Clone for ObjMap {
     fn clone(&self) -> Self {
         let mut entries = pool_get(self.entries.len());
         entries.extend(self.entries.iter().cloned());
-        ObjMap { entries }
+        ObjMap { entries, index: None }
     }
 }
 
 impl Drop for ObjMap {
     fn drop(&mut self) {
+        self.index = None;
         if self.entries.capacity() > 0 {
             pool_return(std::mem::take(&mut self.entries));
         }
@@ -145,12 +152,12 @@ impl Default for ObjMap {
 impl ObjMap {
     #[inline]
     pub fn new() -> Self {
-        ObjMap { entries: Vec::new() }
+        ObjMap { entries: Vec::new(), index: None }
     }
 
     #[inline]
     pub fn with_capacity(cap: usize) -> Self {
-        ObjMap { entries: pool_get(cap) }
+        ObjMap { entries: pool_get(cap), index: None }
     }
 
     #[inline]
@@ -166,6 +173,18 @@ impl ObjMap {
     /// Insert a key-value pair. If the key exists, updates the value and returns the old one.
     #[inline]
     pub fn insert(&mut self, key: KeyStr, value: Value) -> Option<Value> {
+        // Use hash index for O(1) lookup on large objects
+        if let Some(ref mut idx) = self.index {
+            if let Some(&pos) = idx.get(&key) {
+                let old = std::mem::replace(&mut self.entries[pos].1, value);
+                return Some(old);
+            }
+            let pos = self.entries.len();
+            idx.insert(key.clone(), pos);
+            self.entries.push((key, value));
+            return None;
+        }
+        // Linear scan for small objects
         for entry in &mut self.entries {
             if entry.0 == key {
                 let old = std::mem::replace(&mut entry.1, value);
@@ -173,6 +192,10 @@ impl ObjMap {
             }
         }
         self.entries.push((key, value));
+        // Build hash index when crossing threshold
+        if self.entries.len() == OBJMAP_INDEX_THRESHOLD {
+            self.build_index();
+        }
         None
     }
 
@@ -180,13 +203,33 @@ impl ObjMap {
     /// Caller must ensure the key does not already exist (e.g. during JSON parsing).
     #[inline]
     pub fn push_unique(&mut self, key: KeyStr, value: Value) {
+        if let Some(ref mut idx) = self.index {
+            idx.insert(key.clone(), self.entries.len());
+        }
         self.entries.push((key, value));
     }
 
-    /// Get a value by key (linear scan).
+    /// Get a value by key. Uses hash index on large objects for O(1) lookup.
     #[inline]
     pub fn get(&self, key: &str) -> Option<&Value> {
+        if let Some(ref idx) = self.index {
+            return idx.get(key).map(|&pos| &self.entries[pos].1);
+        }
         for (k, v) in &self.entries {
+            if k.as_str() == key {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    /// Get a mutable reference to a value by key.
+    #[inline]
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
+        if let Some(ref idx) = self.index {
+            return idx.get(key).map(|&pos| &mut self.entries[pos].1);
+        }
+        for (k, v) in &mut self.entries {
             if k.as_str() == key {
                 return Some(v);
             }
@@ -202,8 +245,19 @@ impl ObjMap {
 
     /// Remove a key, shifting subsequent entries to preserve order.
     pub fn shift_remove(&mut self, key: &str) -> Option<Value> {
-        if let Some(pos) = self.entries.iter().position(|(k, _)| k.as_str() == key) {
-            Some(self.entries.remove(pos).1)
+        let pos = if let Some(ref idx) = self.index {
+            idx.get(key).copied()
+        } else {
+            self.entries.iter().position(|(k, _)| k.as_str() == key)
+        };
+        if let Some(pos) = pos {
+            let val = self.entries.remove(pos).1;
+            // Invalidate index — cheaper to rebuild lazily than update all positions
+            self.index = None;
+            if self.entries.len() >= OBJMAP_INDEX_THRESHOLD {
+                self.build_index();
+            }
+            Some(val)
         } else {
             None
         }
@@ -230,13 +284,25 @@ impl ObjMap {
     }
 
     pub fn contains_key(&self, key: &str) -> bool {
+        if let Some(ref idx) = self.index {
+            return idx.contains_key(key);
+        }
         self.entries.iter().any(|(k, _)| k.as_str() == key)
+    }
+
+    /// Build hash index from current entries.
+    fn build_index(&mut self) {
+        let mut idx = std::collections::HashMap::with_capacity(self.entries.len());
+        for (i, (k, _)) in self.entries.iter().enumerate() {
+            idx.insert(k.clone(), i);
+        }
+        self.index = Some(Box::new(idx));
     }
 }
 
 impl std::iter::FromIterator<(KeyStr, Value)> for ObjMap {
     fn from_iter<I: IntoIterator<Item = (KeyStr, Value)>>(iter: I) -> Self {
-        ObjMap { entries: iter.into_iter().collect() }
+        ObjMap { entries: iter.into_iter().collect(), index: None }
     }
 }
 

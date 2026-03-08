@@ -1248,6 +1248,12 @@ impl Flattener {
                         this.emit(JitOp::SetVar { var_index: *var_index, src: elem });
                         this.emit_reduce_update_with_lets(*acc_index, &info);
                     });
+                } else if let Some(info) = detect_inplace_assign(update) {
+                    // Optimized: TakeVar + PathInsert for .[path] = val
+                    self.flatten_gen_with_each_output(source, input_slot, &|this, elem| {
+                        this.emit(JitOp::SetVar { var_index: *var_index, src: elem });
+                        this.emit_reduce_assign(*acc_index, &info);
+                    });
                 } else {
                     // For each output of source, set $var and update acc
                     self.flatten_gen_with_each_output(source, input_slot, &|this, elem| {
@@ -3288,6 +3294,9 @@ impl Flattener {
         // Detect in-place update pattern: path |= f or path += f (wrapped in LetBinding)
         let inplace_info = detect_inplace_update(update);
 
+        // Detect in-place assign pattern: path = val (e.g. .[$key] = $x in reduce)
+        let assign_info = detect_inplace_assign(update);
+
         // Detect last(g) pattern: reduce g as $x ([]; [$x])
         let is_last_pattern = matches!(update,
             Expr::Collect { generator } if matches!(generator.as_ref(),
@@ -3331,6 +3340,8 @@ impl Flattener {
                 s.emit(JitOp::Drop { slot: result });
             } else if let Some(ref info) = inplace_info {
                 s.emit_reduce_update_with_lets(acc_index, info);
+            } else if let Some(ref info) = assign_info {
+                s.emit_reduce_assign(acc_index, info);
             } else {
                 // Load current accumulator as the input to update (. refers to acc in reduce)
                 let acc = s.alloc_slot();
@@ -3799,6 +3810,86 @@ impl Flattener {
             self.emit(JitOp::Drop { slot: old });
         }
     }
+
+    /// Emit in-place assign for reduce: .[path] = val with TakeVar for zero-copy.
+    fn emit_reduce_assign(&mut self, acc_index: u16, info: &InplaceAssignInfo) {
+        // Save and set let-binding vars
+        let mut saved_vars = Vec::new();
+        let acc_for_lets = self.alloc_slot();
+        self.emit(JitOp::GetVar { dst: acc_for_lets, var_index: acc_index });
+        for &(var_idx, ref value_expr) in &info.let_bindings {
+            let old = self.alloc_slot();
+            self.emit(JitOp::GetVar { dst: old, var_index: var_idx });
+            let val = self.flatten_scalar(value_expr, acc_for_lets);
+            self.emit(JitOp::SetVar { var_index: var_idx, src: val });
+            self.emit(JitOp::Drop { slot: val });
+            saved_vars.push((var_idx, old));
+        }
+
+        // Evaluate value_expr while we still have acc in the var
+        // (value_expr may reference . which is the accumulator)
+        let assign_val = self.flatten_scalar(info.value_expr, acc_for_lets);
+        self.emit(JitOp::Drop { slot: acc_for_lets });
+
+        // TakeVar: move acc out (refcount = 1)
+        let acc = self.alloc_slot();
+        self.emit(JitOp::TakeVar { dst: acc, var_index: acc_index });
+
+        // Build path keys and PathInsert chain
+        let mut containers = Vec::new();
+        let mut keys_vec = Vec::new();
+        let mut current = acc;
+
+        for component in &info.path_components[..info.path_components.len() - 1] {
+            let key = match component {
+                PathComponent::Field(name) => {
+                    let s = self.alloc_slot();
+                    self.emit(JitOp::Str { dst: s, val: name.clone() });
+                    s
+                }
+                PathComponent::Expr(e) => {
+                    self.flatten_scalar(e, current)
+                }
+            };
+            let element = self.alloc_slot();
+            self.emit(JitOp::PathExtract { element, container: current, key });
+            containers.push(current);
+            keys_vec.push(key);
+            current = element;
+        }
+
+        // Last path component: direct PathInsert with the value
+        let last_key = match info.path_components.last().unwrap() {
+            PathComponent::Field(name) => {
+                let s = self.alloc_slot();
+                self.emit(JitOp::Str { dst: s, val: name.clone() });
+                s
+            }
+            PathComponent::Expr(e) => {
+                self.flatten_scalar(e, current)
+            }
+        };
+        self.emit(JitOp::PathInsert { container: current, key: last_key, val: assign_val });
+        self.emit(JitOp::Drop { slot: assign_val });
+        self.emit(JitOp::Drop { slot: last_key });
+
+        // PathInsert chain back up (reverse)
+        for (container, key) in containers.iter().rev().zip(keys_vec.iter().rev()) {
+            self.emit(JitOp::PathInsert { container: *container, key: *key, val: current });
+            self.emit(JitOp::Drop { slot: current });
+            self.emit(JitOp::Drop { slot: *key });
+            current = *container;
+        }
+
+        self.emit(JitOp::SetVar { var_index: acc_index, src: current });
+        self.emit(JitOp::Drop { slot: current });
+
+        // Restore let-binding vars
+        for (var_idx, old) in saved_vars.into_iter().rev() {
+            self.emit(JitOp::SetVar { var_index: var_idx, src: old });
+            self.emit(JitOp::Drop { slot: old });
+        }
+    }
 }
 
 /// Path component for simple path extraction.
@@ -3850,6 +3941,40 @@ struct InplaceUpdateInfo<'a> {
     path_components: Vec<PathComponent>,
     /// The update expression (applied to the old value at the path).
     update_expr: &'a Expr,
+}
+
+/// Info for in-place reduce assign optimization (.[path] = val).
+struct InplaceAssignInfo<'a> {
+    /// LetBindings wrapping the Assign.
+    let_bindings: Vec<(u16, &'a Expr)>,
+    /// Path components for the assign target.
+    path_components: Vec<PathComponent>,
+    /// The value expression to assign.
+    value_expr: &'a Expr,
+}
+
+/// Detect an in-place assign pattern: .[path] = val
+fn detect_inplace_assign(expr: &Expr) -> Option<InplaceAssignInfo<'_>> {
+    match expr {
+        Expr::Assign { path_expr, value_expr } => {
+            let pc = extract_simple_path(path_expr)?;
+            if !pc.is_empty() && is_scalar(value_expr) {
+                Some(InplaceAssignInfo {
+                    let_bindings: vec![],
+                    path_components: pc,
+                    value_expr,
+                })
+            } else {
+                None
+            }
+        }
+        Expr::LetBinding { var_index, value, body } if is_scalar(value) => {
+            let mut info = detect_inplace_assign(body)?;
+            info.let_bindings.insert(0, (*var_index, value.as_ref()));
+            Some(info)
+        }
+        _ => None,
+    }
 }
 
 /// Detect an in-place update pattern in a reduce update expression.
@@ -4454,8 +4579,7 @@ extern "C" fn jit_rt_path_extract(element: *mut Value, container: *mut Value, ke
             }
             (Value::Obj(rc_obj), Value::Str(k)) => {
                 let obj = Rc::make_mut(rc_obj);
-                let found = obj.iter_mut().find(|(ek, _)| ek.as_str() == k.as_str());
-                if let Some((_, v)) = found {
+                if let Some(v) = obj.get_mut(k.as_str()) {
                     std::ptr::write(element, std::mem::replace(v, Value::Null));
                 } else {
                     std::ptr::write(element, Value::Null);
@@ -4495,12 +4619,7 @@ extern "C" fn jit_rt_path_insert(container: *mut Value, key: *const Value, val: 
             }
             (Value::Obj(rc_obj), Value::Str(k)) => {
                 let obj = Rc::make_mut(rc_obj);
-                let found = obj.iter_mut().find(|(ek, _)| ek.as_str() == k.as_str());
-                if let Some((_, v)) = found {
-                    *v = new_val;
-                } else {
-                    obj.insert(crate::value::KeyStr::from(k.as_str()), new_val);
-                }
+                obj.insert(crate::value::KeyStr::from(k.as_str()), new_val);
                 0
             }
             (Value::Null, Value::Num(n, _)) => {

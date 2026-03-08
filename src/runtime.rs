@@ -912,6 +912,41 @@ fn rt_add_all(v: &Value) -> Result<Value> {
                         return Ok(Value::from_string(result));
                     }
                 }
+                Value::Obj(_) => {
+                    // Check if all elements are objects (or null)
+                    let mut total = 0usize;
+                    let mut all_obj = true;
+                    for item in a.iter() {
+                        match item {
+                            Value::Obj(o) => total += o.len(),
+                            Value::Null => {}
+                            _ => { all_obj = false; break; }
+                        }
+                    }
+                    if all_obj {
+                        // O(n) merge using HashMap index for deduplication
+                        use std::collections::HashMap;
+                        let mut key_index: HashMap<crate::value::KeyStr, usize> = HashMap::with_capacity(total);
+                        let mut entries: Vec<(crate::value::KeyStr, Value)> = Vec::with_capacity(total);
+                        for item in a.iter() {
+                            if let Value::Obj(o) = item {
+                                for (k, v) in o.iter() {
+                                    if let Some(&idx) = key_index.get(k) {
+                                        entries[idx].1 = v.clone();
+                                    } else {
+                                        key_index.insert(k.clone(), entries.len());
+                                        entries.push((k.clone(), v.clone()));
+                                    }
+                                }
+                            }
+                        }
+                        let mut result = crate::value::ObjMap::with_capacity(entries.len());
+                        for (k, v) in entries {
+                            result.push_unique(k, v);
+                        }
+                        return Ok(Value::Obj(Rc::new(result)));
+                    }
+                }
                 _ => {}
             }
             // General fallback: sequential add
