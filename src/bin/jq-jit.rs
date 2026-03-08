@@ -8,7 +8,7 @@ use std::process;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw, json_value_length, json_object_keys_to_buf, json_object_keys_unsorted_to_buf, json_object_has_key, json_type_byte, json_object_del_field, json_each_value_raw, json_to_entries_raw, is_json_compact, push_json_compact_raw, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
+use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw, json_value_length, json_object_keys_to_buf, json_object_keys_unsorted_to_buf, json_object_has_key, json_type_byte, json_object_del_field, json_each_value_raw, json_to_entries_raw, is_json_compact, push_json_compact_raw, push_json_pretty_raw, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
 use jq_jit::interpreter::Filter;
 
 fn main() {
@@ -368,6 +368,16 @@ fn main() {
                             push_json_compact_raw(&mut compact_buf, raw);
                             compact_buf.push(b'\n');
                         }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if filter.is_identity() && use_pretty_buf && !exit_status {
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        push_json_pretty_raw(&mut compact_buf, raw, indent_n, tab);
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
                             compact_buf.clear();
@@ -1137,6 +1147,17 @@ fn main() {
                         push_json_compact_raw(&mut compact_buf, raw);
                         compact_buf.push(b'\n');
                     }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if filter.is_identity() && use_pretty_buf && !exit_status {
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    push_json_pretty_raw(&mut compact_buf, raw, indent_n, tab);
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
                         compact_buf.clear();

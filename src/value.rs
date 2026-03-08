@@ -1202,6 +1202,92 @@ pub fn push_json_compact_raw(buf: &mut Vec<u8>, b: &[u8]) {
     }
 }
 
+/// Pretty-print raw JSON bytes without parsing into Value.
+/// Produces jq-compatible indented output with trailing newline.
+pub fn push_json_pretty_raw(buf: &mut Vec<u8>, b: &[u8], indent_n: usize, use_tab: bool) {
+    let mut depth: usize = 0;
+    let mut i = 0;
+    let len = b.len();
+    let indent_char = if use_tab { b'\t' } else { b' ' };
+    while i < len {
+        match b[i] {
+            b' ' | b'\t' | b'\n' | b'\r' => { i += 1; }
+            b'{' => {
+                i += 1;
+                // Skip whitespace to check for empty object
+                while i < len && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+                if i < len && b[i] == b'}' {
+                    buf.extend_from_slice(b"{}");
+                    i += 1;
+                } else {
+                    buf.push(b'{');
+                    depth += 1;
+                    buf.push(b'\n');
+                    for _ in 0..depth * indent_n { buf.push(indent_char); }
+                }
+            }
+            b'[' => {
+                i += 1;
+                while i < len && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+                if i < len && b[i] == b']' {
+                    buf.extend_from_slice(b"[]");
+                    i += 1;
+                } else {
+                    buf.push(b'[');
+                    depth += 1;
+                    buf.push(b'\n');
+                    for _ in 0..depth * indent_n { buf.push(indent_char); }
+                }
+            }
+            b'}' => {
+                if depth > 0 { depth -= 1; }
+                buf.push(b'\n');
+                for _ in 0..depth * indent_n { buf.push(indent_char); }
+                buf.push(b'}');
+                i += 1;
+            }
+            b']' => {
+                if depth > 0 { depth -= 1; }
+                buf.push(b'\n');
+                for _ in 0..depth * indent_n { buf.push(indent_char); }
+                buf.push(b']');
+                i += 1;
+            }
+            b',' => {
+                buf.push(b',');
+                buf.push(b'\n');
+                for _ in 0..depth * indent_n { buf.push(indent_char); }
+                i += 1;
+            }
+            b':' => {
+                buf.extend_from_slice(b": ");
+                i += 1;
+            }
+            b'"' => {
+                let str_start = i;
+                i += 1;
+                while i < len {
+                    match b[i] {
+                        b'"' => { i += 1; break; }
+                        b'\\' => { i += 2; }
+                        _ => { i += 1; }
+                    }
+                }
+                buf.extend_from_slice(&b[str_start..i]);
+            }
+            _ => {
+                // Numbers, true, false, null — copy until structural char or whitespace
+                let start = i;
+                while i < len && !matches!(b[i], b',' | b'}' | b']' | b' ' | b'\t' | b'\n' | b'\r') {
+                    i += 1;
+                }
+                buf.extend_from_slice(&b[start..i]);
+            }
+        }
+    }
+    buf.push(b'\n');
+}
+
 /// Check if raw JSON bytes are compact (no whitespace outside of strings).
 /// For objects, checks after `{` and after the first `:` for whitespace.
 /// For arrays, checks after `[` for whitespace. Scalars are always compact.
