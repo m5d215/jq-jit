@@ -222,6 +222,18 @@ impl Filter {
         None
     }
 
+    /// Detect comma-separated field access `.f1,.f2,...` pattern.
+    /// Returns the list of field names if all branches are direct field accesses on input.
+    pub fn detect_multi_field_access(&self) -> Option<Vec<String>> {
+        let (ref expr, _) = self.parsed.as_ref()?;
+        let mut fields = Vec::new();
+        if collect_comma_fields(expr, &mut fields) && fields.len() >= 2 {
+            Some(fields)
+        } else {
+            None
+        }
+    }
+
     /// Detect simple field access `.field` pattern.
     /// Returns the field name if this is a direct field access on input.
     pub fn detect_field_access(&self) -> Option<String> {
@@ -302,6 +314,26 @@ impl Filter {
 
 /// Recursively collect field names accessed from the input. Returns false if the filter
 /// accesses the input in a way that requires the full object (e.g., bare `.`, `.[]`, `keys`).
+/// Collect field names from a comma expression tree where all leaves are .field on input.
+fn collect_comma_fields(expr: &crate::ir::Expr, fields: &mut Vec<String>) -> bool {
+    use crate::ir::{Expr, Literal};
+    match expr {
+        Expr::Comma { left, right } => {
+            collect_comma_fields(left, fields) && collect_comma_fields(right, fields)
+        }
+        Expr::Index { expr: base, key } => {
+            if matches!(base.as_ref(), Expr::Input) {
+                if let Expr::Literal(Literal::Str(s)) = key.as_ref() {
+                    fields.push(s.clone());
+                    return true;
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
 fn collect_input_fields(expr: &crate::ir::Expr, fields: &mut Vec<String>) -> bool {
     use crate::ir::{Expr, Literal};
     match expr {
