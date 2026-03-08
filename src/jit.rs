@@ -5132,7 +5132,6 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
     unsafe {
         let name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(name_ptr, name_len));
         let args = std::slice::from_raw_parts(args_ptr, nargs);
-        let args_vec: Vec<Value> = args.to_vec();
 
         // Handle special names
         if let Some(rest) = name.strip_prefix("__loc__:") {
@@ -5158,8 +5157,8 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
         }
         if name == "__each_error__" {
             // Generate "Cannot iterate over TYPE (VALUE)" error
-            if !args_vec.is_empty() {
-                let v = &args_vec[0];
+            if !args.is_empty() {
+                let v = &args[0];
                 let ty = v.type_name();
                 let json = crate::value::value_to_json(v);
                 set_jit_error(format!("Cannot iterate over {} ({})", ty, json));
@@ -5173,9 +5172,9 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
         }
         if name == "recurse_collect" {
             // Collect all recursive descendants: ., .[]?, (.[]? | .[]?), ...
-            if !args_vec.is_empty() {
+            if !args.is_empty() {
                 let mut results = Vec::new();
-                let mut stack = vec![args_vec[0].clone()];
+                let mut stack = vec![args[0].clone()];
                 while let Some(v) = stack.pop() {
                     results.push(v.clone());
                     match &v {
@@ -5200,9 +5199,9 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
         }
         if name == "debug" {
             // debug: print to stderr, return input
-            if args_vec.len() >= 2 {
-                let input = &args_vec[0];
-                let label = &args_vec[1];
+            if args.len() >= 2 {
+                let input = &args[0];
+                let label = &args[1];
                 match label {
                     Value::Str(s) if !s.is_empty() => {
                         eprintln!("[\"DEBUG:\",{}]", crate::value::value_to_json(input));
@@ -5212,18 +5211,18 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                     }
                 }
                 std::ptr::write(dst, input.clone());
-            } else if !args_vec.is_empty() {
-                eprintln!("[\"DEBUG:\",{}]", crate::value::value_to_json(&args_vec[0]));
-                std::ptr::write(dst, args_vec[0].clone());
+            } else if !args.is_empty() {
+                eprintln!("[\"DEBUG:\",{}]", crate::value::value_to_json(&args[0]));
+                std::ptr::write(dst, args[0].clone());
             } else {
                 std::ptr::write(dst, Value::Null);
             }
             return 0;
         }
         if name == "stderr" {
-            if !args_vec.is_empty() {
-                eprint!("{}", crate::value::value_to_json(&args_vec[0]));
-                std::ptr::write(dst, args_vec[0].clone());
+            if !args.is_empty() {
+                eprint!("{}", crate::value::value_to_json(&args[0]));
+                std::ptr::write(dst, args[0].clone());
             } else {
                 std::ptr::write(dst, Value::Null);
             }
@@ -5231,8 +5230,8 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
         }
         if name == "_slice" {
             // _slice(base, from, to)
-            if args_vec.len() >= 3 {
-                match crate::eval::eval_slice(&args_vec[0], &args_vec[1], &args_vec[2]) {
+            if args.len() >= 3 {
+                match crate::eval::eval_slice(&args[0], &args[1], &args[2]) {
                     Ok(v) => { std::ptr::write(dst, v); return 0; }
                     Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
                 }
@@ -5240,12 +5239,12 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
         }
         if let Some(format_name) = name.strip_prefix('@') {
             // Format: @base64, @uri, etc.
-            if args_vec.is_empty() {
+            if args.is_empty() {
                 set_jit_error("format: no input".to_string());
                 std::ptr::write(dst, Value::Null);
                 return GEN_ERROR;
             }
-            match crate::eval::eval_format(format_name, &args_vec[0]) {
+            match crate::eval::eval_format(format_name, &args[0]) {
                 Ok(s) => { std::ptr::write(dst, Value::from_str(&s)); return 0; }
                 Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
             }
@@ -5262,7 +5261,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                     (ops.get(path_idx).cloned(), ops.get(value_idx).cloned())
                 };
                 if let (Some(path_expr), Some(value_expr)) = (path_expr, value_expr) {
-                    let input = if !args_vec.is_empty() { args_vec[0].clone() } else { Value::Null };
+                    let input = if !args.is_empty() { args[0].clone() } else { Value::Null };
                     let env = Rc::new(RefCell::new(crate::eval::Env::new(vec![])));
                     match crate::eval::eval_assign_standalone(&path_expr, &value_expr, input, &env) {
                         Ok(v) => { std::ptr::write(dst, v); return 0; }
@@ -5283,7 +5282,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                     (ops.get(path_idx).cloned(), ops.get(update_idx).cloned())
                 };
                 if let (Some(path_expr), Some(update_expr)) = (path_expr, update_expr) {
-                    let input = if !args_vec.is_empty() { args_vec[0].clone() } else { Value::Null };
+                    let input = if !args.is_empty() { args[0].clone() } else { Value::Null };
                     let env = Rc::new(RefCell::new(crate::eval::Env::new(vec![])));
                     match crate::eval::eval_update_standalone(&path_expr, &update_expr, input, &env) {
                         Ok(v) => { std::ptr::write(dst, v); return 0; }
@@ -5298,7 +5297,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             let idx: usize = rest.parse().unwrap_or(0);
             let path_expr = (&*JIT_CLOSURE_OPS.0.get()).get(idx).cloned();
             if let Some(path_expr) = path_expr {
-                let input = if !args_vec.is_empty() { args_vec[0].clone() } else { Value::Null };
+                let input = if !args.is_empty() { args[0].clone() } else { Value::Null };
                 let env = Rc::new(RefCell::new(crate::eval::Env::new(vec![])));
                 match crate::eval::eval_path_standalone(&path_expr, input, &env) {
                     Ok(v) => { std::ptr::write(dst, v); return 0; }
@@ -5313,8 +5312,8 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             if parts.len() == 2 {
                 let op_name = parts[0];
                 let idx: usize = parts[1].parse().unwrap_or(0);
-                if !args_vec.is_empty() {
-                    let container = &args_vec[0];
+                if !args.is_empty() {
+                    let container = &args[0];
                     let key_expr = (&*JIT_CLOSURE_OPS.0.get()).get(idx).cloned();
                     if let Some(key_expr) = key_expr {
                         let op_kind = match op_name {
@@ -5348,7 +5347,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             }
         }
 
-        match crate::runtime::call_builtin(name, &args_vec) {
+        match crate::runtime::call_builtin(name, args) {
             Ok(v) => { std::ptr::write(dst, v); 0 }
             Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); GEN_ERROR }
         }
