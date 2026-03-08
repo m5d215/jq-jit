@@ -1659,15 +1659,62 @@ fn delete_path(v: &Value, path: &Value) -> Result<Value> {
 }
 
 // -----------------------------------------------------------------------
-// Regex
+// Regex (with compile cache — jq-jit is single-threaded)
 // -----------------------------------------------------------------------
+
+/// Cached regex: stores the last compiled pattern to avoid re-compilation.
+/// jq filters typically use a single fixed regex pattern, so a 1-entry cache
+/// hits >99% of the time. For the rare case of multiple patterns, we fall
+/// back to a small LRU of 8 entries.
+struct RegexCache {
+    entries: Vec<(String, regex::Regex)>,
+}
+
+const REGEX_CACHE_SIZE: usize = 8;
+
+impl RegexCache {
+    fn new() -> Self {
+        Self { entries: Vec::with_capacity(REGEX_CACHE_SIZE) }
+    }
+
+    fn get(&mut self, pattern: &str) -> Result<&regex::Regex> {
+        // Check if already cached (most recent first for common case)
+        if let Some(pos) = self.entries.iter().position(|(p, _)| p == pattern) {
+            // Move to front (MRU)
+            if pos > 0 {
+                let entry = self.entries.remove(pos);
+                self.entries.insert(0, entry);
+            }
+            return Ok(&self.entries[0].1);
+        }
+        // Compile and cache
+        let re = regex::Regex::new(pattern)
+            .map_err(|e| anyhow::anyhow!("Invalid regex: {}", e))?;
+        if self.entries.len() >= REGEX_CACHE_SIZE {
+            self.entries.pop();
+        }
+        self.entries.insert(0, (pattern.to_string(), re));
+        Ok(&self.entries[0].1)
+    }
+}
+
+// Global regex cache (safe: single-threaded)
+struct GlobalRegexCache(std::cell::UnsafeCell<Option<RegexCache>>);
+unsafe impl Sync for GlobalRegexCache {}
+static REGEX_CACHE: GlobalRegexCache = GlobalRegexCache(std::cell::UnsafeCell::new(None));
+
+fn with_regex<R>(pattern: &str, f: impl FnOnce(&regex::Regex) -> R) -> Result<R> {
+    let cache = unsafe { &mut *REGEX_CACHE.0.get() };
+    let cache = cache.get_or_insert_with(RegexCache::new);
+    let re = cache.get(pattern)?;
+    Ok(f(re))
+}
 
 fn rt_test(v: &Value, re: &Value) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
-            let regex = regex::Regex::new(r)
-                .map_err(|e| anyhow::anyhow!("Invalid regex: {}", e))?;
-            Ok(Value::from_bool(regex.is_match(s)))
+            let matched = with_regex(r, |regex| regex.is_match(s))?;
+            Ok(Value::from_bool(matched))
         }
         _ => bail!("test requires string and regex"),
     }
@@ -1676,40 +1723,39 @@ fn rt_test(v: &Value, re: &Value) -> Result<Value> {
 fn rt_match(v: &Value, re: &Value) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
-            let regex = regex::Regex::new(r)
-                .map_err(|e| anyhow::anyhow!("Invalid regex: {}", e))?;
-            match regex.find(s) {
-                Some(m) => {
-                    let mut result = new_objmap();
-                    result.insert("offset".into(), Value::Num(m.start() as f64, None));
-                    result.insert("length".into(), Value::Num(m.len() as f64, None));
-                    result.insert("string".into(), Value::from_str(m.as_str()));
-                    // Add captures
-                    let mut captures = Vec::new();
-                    if let Some(caps) = regex.captures(s) {
-                        for i in 1..caps.len() {
-                            if let Some(cap) = caps.get(i) {
-                                let mut c = new_objmap();
-                                c.insert("offset".into(), Value::Num(cap.start() as f64, None));
-                                c.insert("length".into(), Value::Num(cap.len() as f64, None));
-                                c.insert("string".into(), Value::from_str(cap.as_str()));
-                                c.insert("name".into(), Value::Null);
-                                captures.push(Value::Obj(Rc::new(c)));
-                            } else {
-                                let mut c = new_objmap();
-                                c.insert("offset".into(), Value::Num(-1.0, None));
-                                c.insert("length".into(), Value::Num(0.0, None));
-                                c.insert("string".into(), Value::Null);
-                                c.insert("name".into(), Value::Null);
-                                captures.push(Value::Obj(Rc::new(c)));
+            with_regex(r, |regex| {
+                match regex.find(s) {
+                    Some(m) => {
+                        let mut result = new_objmap();
+                        result.insert("offset".into(), Value::Num(m.start() as f64, None));
+                        result.insert("length".into(), Value::Num(m.len() as f64, None));
+                        result.insert("string".into(), Value::from_str(m.as_str()));
+                        let mut captures = Vec::new();
+                        if let Some(caps) = regex.captures(s) {
+                            for i in 1..caps.len() {
+                                if let Some(cap) = caps.get(i) {
+                                    let mut c = new_objmap();
+                                    c.insert("offset".into(), Value::Num(cap.start() as f64, None));
+                                    c.insert("length".into(), Value::Num(cap.len() as f64, None));
+                                    c.insert("string".into(), Value::from_str(cap.as_str()));
+                                    c.insert("name".into(), Value::Null);
+                                    captures.push(Value::Obj(Rc::new(c)));
+                                } else {
+                                    let mut c = new_objmap();
+                                    c.insert("offset".into(), Value::Num(-1.0, None));
+                                    c.insert("length".into(), Value::Num(0.0, None));
+                                    c.insert("string".into(), Value::Null);
+                                    c.insert("name".into(), Value::Null);
+                                    captures.push(Value::Obj(Rc::new(c)));
+                                }
                             }
                         }
+                        result.insert("captures".into(), Value::Arr(Rc::new(captures)));
+                        Ok(Value::Obj(Rc::new(result)))
                     }
-                    result.insert("captures".into(), Value::Arr(Rc::new(captures)));
-                    Ok(Value::Obj(Rc::new(result)))
+                    None => bail!("match failed"),
                 }
-                None => bail!("match failed"),
-            }
+            })?
         }
         _ => bail!("match requires string and regex"),
     }
@@ -1718,22 +1764,22 @@ fn rt_match(v: &Value, re: &Value) -> Result<Value> {
 fn rt_capture(v: &Value, re: &Value) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
-            let regex = regex::Regex::new(r)
-                .map_err(|e| anyhow::anyhow!("Invalid regex: {}", e))?;
-            match regex.captures(s) {
-                Some(caps) => {
-                    let mut result = new_objmap();
-                    for name in regex.capture_names().flatten() {
-                        if let Some(m) = caps.name(name) {
-                            result.insert(KeyStr::from(name), Value::from_str(m.as_str()));
-                        } else {
-                            result.insert(KeyStr::from(name), Value::Null);
+            with_regex(r, |regex| {
+                match regex.captures(s) {
+                    Some(caps) => {
+                        let mut result = new_objmap();
+                        for name in regex.capture_names().flatten() {
+                            if let Some(m) = caps.name(name) {
+                                result.insert(KeyStr::from(name), Value::from_str(m.as_str()));
+                            } else {
+                                result.insert(KeyStr::from(name), Value::Null);
+                            }
                         }
+                        Ok(Value::Obj(Rc::new(result)))
                     }
-                    Ok(Value::Obj(Rc::new(result)))
+                    None => bail!("capture failed"),
                 }
-                None => bail!("capture failed"),
-            }
+            })?
         }
         _ => bail!("capture requires string and regex"),
     }
@@ -1742,12 +1788,12 @@ fn rt_capture(v: &Value, re: &Value) -> Result<Value> {
 fn rt_scan(v: &Value, re: &Value) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
-            let regex = regex::Regex::new(r)
-                .map_err(|e| anyhow::anyhow!("Invalid regex: {}", e))?;
-            let results: Vec<Value> = regex.find_iter(s)
-                .map(|m| Value::Arr(Rc::new(vec![Value::from_str(m.as_str())])))
-                .collect();
-            Ok(Value::Arr(Rc::new(results)))
+            with_regex(r, |regex| {
+                let results: Vec<Value> = regex.find_iter(s)
+                    .map(|m| Value::Arr(Rc::new(vec![Value::from_str(m.as_str())])))
+                    .collect();
+                Value::Arr(Rc::new(results))
+            }).map(Ok)?
         }
         _ => bail!("scan requires string and regex"),
     }
@@ -1756,13 +1802,13 @@ fn rt_scan(v: &Value, re: &Value) -> Result<Value> {
 fn rt_sub_gsub(v: &Value, re: &Value, replacement: &Value, global: bool) -> Result<Value> {
     match (v, re, replacement) {
         (Value::Str(s), Value::Str(r), Value::Str(rep)) => {
-            let regex = regex::Regex::new(r)
-                .map_err(|e| anyhow::anyhow!("Invalid regex: {}", e))?;
-            let result = if global {
-                regex.replace_all(s, rep.as_str()).to_string()
-            } else {
-                regex.replace(s, rep.as_str()).to_string()
-            };
+            let result = with_regex(r, |regex| {
+                if global {
+                    regex.replace_all(s, rep.as_str()).to_string()
+                } else {
+                    regex.replace(s, rep.as_str()).to_string()
+                }
+            })?;
             Ok(Value::from_string(result))
         }
         _ => bail!("sub/gsub requires string, regex, and replacement"),

@@ -159,6 +159,12 @@ fn is_scalar(expr: &Expr) -> bool {
         Expr::Update { path_expr, update_expr } => {
             extract_simple_path(path_expr).is_some() && is_scalar(update_expr)
         }
+        // Regex operations produce exactly one value
+        Expr::RegexTest { input_expr, re, flags } => is_scalar(input_expr) && is_scalar(re) && is_scalar(flags),
+        Expr::RegexMatch { input_expr, re, flags } => is_scalar(input_expr) && is_scalar(re) && is_scalar(flags),
+        Expr::RegexCapture { input_expr, re, flags } => is_scalar(input_expr) && is_scalar(re) && is_scalar(flags),
+        Expr::RegexSub { input_expr, re, tostr, flags } => is_scalar(input_expr) && is_scalar(re) && is_scalar(tostr) && is_scalar(flags),
+        Expr::RegexGsub { input_expr, re, tostr, flags } => is_scalar(input_expr) && is_scalar(re) && is_scalar(tostr) && is_scalar(flags),
         _ => false,
     }
 }
@@ -1106,6 +1112,66 @@ impl Flattener {
                 self.emit(JitOp::CallBuiltin { dst: out, name: "delpaths".to_string(), args: vec![inp, paths_val] });
                 self.emit(JitOp::Drop { slot: inp });
                 self.emit(JitOp::Drop { slot: paths_val });
+                out
+            }
+            // Regex operations — delegate to runtime builtins
+            Expr::RegexTest { input_expr, re, flags } => {
+                let inp = self.flatten_scalar(input_expr, input_slot);
+                let re_val = self.flatten_scalar(re, input_slot);
+                let flags_val = self.flatten_scalar(flags, input_slot);
+                let out = self.alloc_slot();
+                self.emit(JitOp::CallBuiltin { dst: out, name: "test".to_string(), args: vec![inp, re_val, flags_val] });
+                self.emit(JitOp::Drop { slot: inp });
+                self.emit(JitOp::Drop { slot: re_val });
+                self.emit(JitOp::Drop { slot: flags_val });
+                out
+            }
+            Expr::RegexMatch { input_expr, re, flags } => {
+                let inp = self.flatten_scalar(input_expr, input_slot);
+                let re_val = self.flatten_scalar(re, input_slot);
+                let flags_val = self.flatten_scalar(flags, input_slot);
+                let out = self.alloc_slot();
+                self.emit(JitOp::CallBuiltin { dst: out, name: "match".to_string(), args: vec![inp, re_val, flags_val] });
+                self.emit(JitOp::Drop { slot: inp });
+                self.emit(JitOp::Drop { slot: re_val });
+                self.emit(JitOp::Drop { slot: flags_val });
+                out
+            }
+            Expr::RegexCapture { input_expr, re, flags } => {
+                let inp = self.flatten_scalar(input_expr, input_slot);
+                let re_val = self.flatten_scalar(re, input_slot);
+                let flags_val = self.flatten_scalar(flags, input_slot);
+                let out = self.alloc_slot();
+                self.emit(JitOp::CallBuiltin { dst: out, name: "capture".to_string(), args: vec![inp, re_val, flags_val] });
+                self.emit(JitOp::Drop { slot: inp });
+                self.emit(JitOp::Drop { slot: re_val });
+                self.emit(JitOp::Drop { slot: flags_val });
+                out
+            }
+            Expr::RegexSub { input_expr, re, tostr, flags } => {
+                let inp = self.flatten_scalar(input_expr, input_slot);
+                let re_val = self.flatten_scalar(re, input_slot);
+                let tostr_val = self.flatten_scalar(tostr, input_slot);
+                let flags_val = self.flatten_scalar(flags, input_slot);
+                let out = self.alloc_slot();
+                self.emit(JitOp::CallBuiltin { dst: out, name: "sub".to_string(), args: vec![inp, re_val, tostr_val, flags_val] });
+                self.emit(JitOp::Drop { slot: inp });
+                self.emit(JitOp::Drop { slot: re_val });
+                self.emit(JitOp::Drop { slot: tostr_val });
+                self.emit(JitOp::Drop { slot: flags_val });
+                out
+            }
+            Expr::RegexGsub { input_expr, re, tostr, flags } => {
+                let inp = self.flatten_scalar(input_expr, input_slot);
+                let re_val = self.flatten_scalar(re, input_slot);
+                let tostr_val = self.flatten_scalar(tostr, input_slot);
+                let flags_val = self.flatten_scalar(flags, input_slot);
+                let out = self.alloc_slot();
+                self.emit(JitOp::CallBuiltin { dst: out, name: "gsub".to_string(), args: vec![inp, re_val, tostr_val, flags_val] });
+                self.emit(JitOp::Drop { slot: inp });
+                self.emit(JitOp::Drop { slot: re_val });
+                self.emit(JitOp::Drop { slot: tostr_val });
+                self.emit(JitOp::Drop { slot: flags_val });
                 out
             }
             Expr::Loc { file, line } => {
