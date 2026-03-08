@@ -198,6 +198,25 @@ impl Filter {
         }
     }
 
+    /// Detect `del(.field)` applied directly to input.
+    /// Returns the field name to delete.
+    pub fn detect_del_field(&self) -> Option<String> {
+        use crate::ir::{Expr, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::CallBuiltin { name, args } = expr {
+            if name == "del" && args.len() == 1 {
+                if let Expr::Index { expr: base, key } = &args[0] {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                            return Some(field.clone());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `type` applied directly to input.
     pub fn is_type(&self) -> bool {
         if let Some((ref expr, _)) = self.parsed {

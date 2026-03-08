@@ -836,6 +836,75 @@ pub fn json_type_byte(first: u8) -> &'static [u8] {
     }
 }
 
+/// Delete a field from a JSON object by copying raw bytes, skipping the field.
+/// Writes a compact result (without trailing newline) to buf.
+/// Returns true if successful, false if not a JSON object.
+pub fn json_object_del_field(b: &[u8], pos: usize, field: &str, buf: &mut Vec<u8>) -> bool {
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    let field_bytes = field.as_bytes();
+    let mut i = pos + 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < b.len() && b[i] == b'}' {
+        buf.extend_from_slice(b"{}");
+        return true;
+    }
+    // Track kept pairs as (key_start, key_end, val_start, val_end)
+    let mut pairs: Vec<(usize, usize, usize, usize)> = Vec::new();
+    let mut del_found = false;
+    loop {
+        if i >= b.len() || b[i] != b'"' { return false; }
+        let key_start = i; // includes opening quote
+        i += 1;
+        let mut j = i;
+        while j < b.len() {
+            match b[j] { b'"' => break, b'\\' => { j += 2; continue }, _ => j += 1 }
+        }
+        let key_matches = (j - i) == field_bytes.len() && b[i..j] == *field_bytes;
+        let key_end = j + 1; // includes closing quote
+        i = key_end;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        let val_start = i;
+        i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return false };
+        let val_end = i;
+        if key_matches {
+            del_found = true;
+        } else {
+            pairs.push((key_start, key_end, val_start, val_end));
+        }
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { return false; }
+        if b[i] == b'}' { break; }
+        if b[i] != b',' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
+    if !del_found {
+        // Field not present — output compact copy
+        buf.push(b'{');
+        for (idx, (ks, ke, vs, ve)) in pairs.iter().enumerate() {
+            if idx > 0 { buf.push(b','); }
+            buf.extend_from_slice(&b[*ks..*ke]);
+            buf.push(b':');
+            buf.extend_from_slice(&b[*vs..*ve]);
+        }
+        buf.push(b'}');
+        return true;
+    }
+    // Reconstruct without the deleted field (compact)
+    buf.push(b'{');
+    for (idx, (ks, ke, vs, ve)) in pairs.iter().enumerate() {
+        if idx > 0 { buf.push(b','); }
+        buf.extend_from_slice(&b[*ks..*ke]);
+        buf.push(b':');
+        buf.extend_from_slice(&b[*vs..*ve]);
+    }
+    buf.push(b'}');
+    true
+}
+
 /// Extract two numeric field values from a JSON object without full parsing.
 /// More efficient than calling json_object_get_num twice (single scan).
 pub fn json_object_get_two_nums(b: &[u8], pos: usize, field1: &str, field2: &str) -> Option<(f64, f64)> {
