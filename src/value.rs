@@ -960,6 +960,50 @@ pub fn json_each_value_raw(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {
     }
 }
 
+/// Convert a JSON object to `to_entries` format directly from raw bytes.
+/// Produces `[{"key":"k1","value":v1},{"key":"k2","value":v2},...]\n`.
+pub fn json_to_entries_raw(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    let mut i = pos + 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < b.len() && b[i] == b'}' {
+        buf.extend_from_slice(b"[]\n");
+        return true;
+    }
+    buf.push(b'[');
+    let mut first = true;
+    loop {
+        if i >= b.len() || b[i] != b'"' { return false; }
+        let key_start = i; // includes opening quote
+        i += 1;
+        while i < b.len() { match b[i] { b'"' => break, b'\\' => { i += 2; continue }, _ => i += 1 } }
+        if i >= b.len() { return false; }
+        let key_end = i + 1; // includes closing quote
+        i = key_end;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        let vs = i;
+        i = match skip_json_value(b, i) { Ok(e) => e, Err(_) => return false };
+        if !first { buf.push(b','); }
+        first = false;
+        buf.extend_from_slice(b"{\"key\":");
+        buf.extend_from_slice(&b[key_start..key_end]);
+        buf.extend_from_slice(b",\"value\":");
+        buf.extend_from_slice(&b[vs..i]);
+        buf.push(b'}');
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { return false; }
+        if b[i] == b'}' { break; }
+        if b[i] != b',' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
+    buf.extend_from_slice(b"]\n");
+    true
+}
+
 /// Extract two numeric field values from a JSON object without full parsing.
 /// More efficient than calling json_object_get_num twice (single scan).
 pub fn json_object_get_two_nums(b: &[u8], pos: usize, field1: &str, field2: &str) -> Option<(f64, f64)> {
