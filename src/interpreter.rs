@@ -244,8 +244,10 @@ impl Filter {
         None
     }
 
-    /// Detect `.field | floor/ceil/sqrt/fabs` pattern (field access + numeric unary op).
+    /// Detect `.field | unary_op` pattern (field access + unary op).
     /// Returns (field_name, op) if detected.
+    /// Supports numeric ops (floor/ceil/sqrt/fabs/abs), tostring, and
+    /// string ops (ascii_downcase/ascii_upcase).
     pub fn detect_field_unary_num(&self) -> Option<(String, crate::ir::UnaryOp)> {
         use crate::ir::{Expr, UnaryOp, Literal};
         let (ref expr, _) = self.parsed.as_ref()?;
@@ -254,11 +256,36 @@ impl Filter {
             if let Expr::Index { expr: base, key } = left.as_ref() {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
                 if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
-                    // right = floor/ceil/sqrt/fabs applied to pipe input
                     if let Expr::UnaryOp { op, operand } = right.as_ref() {
                         if !matches!(operand.as_ref(), Expr::Input) { return None; }
-                        if matches!(op, UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Sqrt | UnaryOp::Fabs | UnaryOp::Abs | UnaryOp::ToString) {
+                        if matches!(op, UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Sqrt |
+                            UnaryOp::Fabs | UnaryOp::Abs | UnaryOp::ToString |
+                            UnaryOp::AsciiDowncase | UnaryOp::AsciiUpcase) {
                             return Some((field.clone(), *op));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `.field | startswith/endswith/ltrimstr/rtrimstr("str")` pattern.
+    /// Returns (field_name, builtin_name, string_arg) if detected.
+    pub fn detect_field_str_builtin(&self) -> Option<(String, String, String)> {
+        use crate::ir::{Expr, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::CallBuiltin { name, args } = right.as_ref() {
+                        if args.len() == 1 {
+                            if matches!(name.as_str(), "startswith" | "endswith" | "ltrimstr" | "rtrimstr") {
+                                if let Expr::Literal(Literal::Str(arg)) = &args[0] {
+                                    return Some((field.clone(), name.clone(), arg.clone()));
+                                }
+                            }
                         }
                     }
                 }

@@ -219,6 +219,9 @@ fn main() {
     let field_binop_const_unary = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_binop.is_none() && field_unary_num.is_none() {
         filter.detect_field_binop_const_unary()
     } else { None };
+    let field_str_builtin = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_unary_num.is_none() {
+        filter.detect_field_str_builtin()
+    } else { None };
     let field_str_concat = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() {
         filter.detect_field_str_concat()
     } else { None };
@@ -564,11 +567,35 @@ fn main() {
                     })
                 } else if let Some((ref field, ref uop)) = field_unary_num {
                     use jq_jit::ir::UnaryOp;
+                    let is_string_op = matches!(uop, UnaryOp::AsciiDowncase | UnaryOp::AsciiUpcase);
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if let Some(n) = json_object_get_num(raw, 0, field) {
+                        if is_string_op {
+                            // String ops: extract raw field bytes
+                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
+                                let val = &raw[vs..ve];
+                                // Only fast-path for quoted strings without backslash escapes
+                                if val.len() >= 2 && val[0] == b'"' && !val[1..val.len()-1].contains(&b'\\') {
+                                    compact_buf.push(b'"');
+                                    for &byte in &val[1..val.len()-1] {
+                                        compact_buf.push(match uop {
+                                            UnaryOp::AsciiDowncase => if byte >= b'A' && byte <= b'Z' { byte + 32 } else { byte },
+                                            UnaryOp::AsciiUpcase => if byte >= b'a' && byte <= b'z' { byte - 32 } else { byte },
+                                            _ => unreachable!(),
+                                        });
+                                    }
+                                    compact_buf.push(b'"');
+                                    compact_buf.push(b'\n');
+                                } else {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else if let Some(n) = json_object_get_num(raw, 0, field) {
                             if matches!(uop, UnaryOp::ToString) {
-                                // tostring: output as JSON string "number"
                                 compact_buf.push(b'"');
                                 push_jq_number_bytes(&mut compact_buf, n);
                                 compact_buf.push(b'"');
@@ -619,6 +646,71 @@ fn main() {
                             } else { mid };
                             push_jq_number_bytes(&mut compact_buf, result);
                             compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref sb_field, ref sb_name, ref sb_arg)) = field_str_builtin {
+                    let arg_bytes = sb_arg.as_bytes();
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sb_field) {
+                            let val = &raw[vs..ve];
+                            // Only fast-path quoted strings without backslash escapes
+                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                                && !val[1..val.len()-1].contains(&b'\\')
+                            {
+                                let content = &val[1..val.len()-1];
+                                match sb_name.as_str() {
+                                    "startswith" => {
+                                        if content.len() >= arg_bytes.len() && &content[..arg_bytes.len()] == arg_bytes {
+                                            compact_buf.extend_from_slice(b"true\n");
+                                        } else {
+                                            compact_buf.extend_from_slice(b"false\n");
+                                        }
+                                    }
+                                    "endswith" => {
+                                        if content.len() >= arg_bytes.len() && &content[content.len()-arg_bytes.len()..] == arg_bytes {
+                                            compact_buf.extend_from_slice(b"true\n");
+                                        } else {
+                                            compact_buf.extend_from_slice(b"false\n");
+                                        }
+                                    }
+                                    "ltrimstr" => {
+                                        compact_buf.push(b'"');
+                                        if content.len() >= arg_bytes.len() && &content[..arg_bytes.len()] == arg_bytes {
+                                            compact_buf.extend_from_slice(&content[arg_bytes.len()..]);
+                                        } else {
+                                            compact_buf.extend_from_slice(content);
+                                        }
+                                        compact_buf.push(b'"');
+                                        compact_buf.push(b'\n');
+                                    }
+                                    "rtrimstr" => {
+                                        compact_buf.push(b'"');
+                                        if content.len() >= arg_bytes.len() && &content[content.len()-arg_bytes.len()..] == arg_bytes {
+                                            compact_buf.extend_from_slice(&content[..content.len()-arg_bytes.len()]);
+                                        } else {
+                                            compact_buf.extend_from_slice(content);
+                                        }
+                                        compact_buf.push(b'"');
+                                        compact_buf.push(b'\n');
+                                    }
+                                    _ => {
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    }
+                                }
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -1159,10 +1251,33 @@ fn main() {
                 })
             } else if let Some((ref field, ref uop)) = field_unary_num {
                 use jq_jit::ir::UnaryOp;
+                let is_string_op = matches!(uop, UnaryOp::AsciiDowncase | UnaryOp::AsciiUpcase);
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if let Some(n) = json_object_get_num(raw, 0, field) {
+                    if is_string_op {
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
+                            let val = &raw[vs..ve];
+                            if val.len() >= 2 && val[0] == b'"' && !val[1..val.len()-1].contains(&b'\\') {
+                                compact_buf.push(b'"');
+                                for &byte in &val[1..val.len()-1] {
+                                    compact_buf.push(match uop {
+                                        UnaryOp::AsciiDowncase => if byte >= b'A' && byte <= b'Z' { byte + 32 } else { byte },
+                                        UnaryOp::AsciiUpcase => if byte >= b'a' && byte <= b'z' { byte - 32 } else { byte },
+                                        _ => unreachable!(),
+                                    });
+                                }
+                                compact_buf.push(b'"');
+                                compact_buf.push(b'\n');
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                    } else if let Some(n) = json_object_get_num(raw, 0, field) {
                         if matches!(uop, UnaryOp::ToString) {
                             compact_buf.push(b'"');
                             push_jq_number_bytes(&mut compact_buf, n);
@@ -1215,6 +1330,71 @@ fn main() {
                         } else { mid };
                         push_jq_number_bytes(&mut compact_buf, result);
                         compact_buf.push(b'\n');
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref sb_field, ref sb_name, ref sb_arg)) = field_str_builtin {
+                let arg_bytes = sb_arg.as_bytes();
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sb_field) {
+                        let val = &raw[vs..ve];
+                        if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                            && !val[1..val.len()-1].contains(&b'\\')
+                        {
+                            let content = &val[1..val.len()-1];
+                            match sb_name.as_str() {
+                                "startswith" => {
+                                    if content.len() >= arg_bytes.len() && &content[..arg_bytes.len()] == arg_bytes {
+                                        compact_buf.extend_from_slice(b"true\n");
+                                    } else {
+                                        compact_buf.extend_from_slice(b"false\n");
+                                    }
+                                }
+                                "endswith" => {
+                                    if content.len() >= arg_bytes.len() && &content[content.len()-arg_bytes.len()..] == arg_bytes {
+                                        compact_buf.extend_from_slice(b"true\n");
+                                    } else {
+                                        compact_buf.extend_from_slice(b"false\n");
+                                    }
+                                }
+                                "ltrimstr" => {
+                                    compact_buf.push(b'"');
+                                    if content.len() >= arg_bytes.len() && &content[..arg_bytes.len()] == arg_bytes {
+                                        compact_buf.extend_from_slice(&content[arg_bytes.len()..]);
+                                    } else {
+                                        compact_buf.extend_from_slice(content);
+                                    }
+                                    compact_buf.push(b'"');
+                                    compact_buf.push(b'\n');
+                                }
+                                "rtrimstr" => {
+                                    compact_buf.push(b'"');
+                                    if content.len() >= arg_bytes.len() && &content[content.len()-arg_bytes.len()..] == arg_bytes {
+                                        compact_buf.extend_from_slice(&content[..content.len()-arg_bytes.len()]);
+                                    } else {
+                                        compact_buf.extend_from_slice(content);
+                                    }
+                                    compact_buf.push(b'"');
+                                    compact_buf.push(b'\n');
+                                }
+                                _ => {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
                     } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
