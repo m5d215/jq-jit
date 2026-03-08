@@ -216,6 +216,9 @@ fn main() {
     let field_str_concat = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() {
         filter.detect_field_str_concat()
     } else { None };
+    let select_cmp = if use_compact_buf && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() && field_str_concat.is_none() {
+        filter.detect_select_field_cmp()
+    } else { None };
     let mut compact_buf: Vec<u8> = if use_compact_buf || use_pretty_buf { Vec::with_capacity(1 << 17) } else { Vec::new() };
     let process_input = |input: &Value, raw_bytes: Option<&[u8]>, out: &mut io::BufWriter<io::StdoutLock>, cbuf: &mut Vec<u8>, any_false: &mut bool, had_error: &mut bool| {
         let result = filter.execute_cb(input, &mut |result| {
@@ -333,8 +336,8 @@ fn main() {
                             compact_buf.extend_from_slice(raw);
                             compact_buf.push(b'\n');
                         } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            push_compact_line(&mut compact_buf, &v);
+                            push_json_compact_raw(&mut compact_buf, raw);
+                            compact_buf.push(b'\n');
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -474,6 +477,36 @@ fn main() {
                         }
                         Ok(())
                     })
+                } else if let Some((ref field, ref op, threshold)) = select_cmp {
+                    use jq_jit::ir::BinOp;
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some(val) = json_object_get_num(raw, 0, field) {
+                            let pass = match op {
+                                BinOp::Gt => val > threshold,
+                                BinOp::Lt => val < threshold,
+                                BinOp::Ge => val >= threshold,
+                                BinOp::Le => val <= threshold,
+                                BinOp::Eq => val == threshold,
+                                BinOp::Ne => val != threshold,
+                                _ => false,
+                            };
+                            if pass {
+                                if is_json_compact(raw) {
+                                    compact_buf.extend_from_slice(raw);
+                                    compact_buf.push(b'\n');
+                                } else {
+                                    push_json_compact_raw(&mut compact_buf, raw);
+                                    compact_buf.push(b'\n');
+                                }
+                                if compact_buf.len() >= 1 << 17 {
+                                    let _ = out.write_all(&compact_buf);
+                                    compact_buf.clear();
+                                }
+                            }
+                        }
+                        Ok(())
+                    })
                 } else if let Some(ref pf) = projection_fields {
                     let field_refs: Vec<&str> = pf.iter().map(|s| s.as_str()).collect();
                     json_stream_project(&input_str, &field_refs, |v| {
@@ -528,9 +561,6 @@ fn main() {
                 content = "";
             }
             let _ = &mmap; // keep mmap alive
-            let select_cmp = if use_compact_buf && !exit_status {
-                filter.detect_select_field_cmp()
-            } else { None };
             let parse_result = if filter.is_empty() {
                 // Empty fast path: just validate JSON structure, produce no output.
                 json_stream_raw(content, |_, _| Ok(()))
