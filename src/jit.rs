@@ -6207,9 +6207,18 @@ impl JitCompiler {
                         b.ins().call(rt["negate"], &[d, s]);
                     }
                     JitOp::Not { dst, src } => {
-                        let d = slot_addr(&mut b, *dst);
+                        // Inline: null(0)/false(1) → True(2), else → False(1)
                         let s = slot_addr(&mut b, *src);
-                        b.ins().call(rt["not"], &[d, s]);
+                        let d = slot_addr(&mut b, *dst);
+                        let tag = b.ins().load(types::I8, cranelift_codegen::ir::MemFlags::new(), s, 0);
+                        let tag_i32 = b.ins().uextend(types::I32, tag);
+                        let two = b.ins().iconst(types::I32, 2);
+                        let is_truthy = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual, tag_i32, two);
+                        // truthy → write False(1), falsy → write True(2)
+                        let one = b.ins().iconst(ptr_ty, 1);
+                        let two_64 = b.ins().iconst(ptr_ty, 2);
+                        let result = b.ins().select(is_truthy, one, two_64);
+                        b.ins().store(cranelift_codegen::ir::MemFlags::new(), result, d, 0);
                     }
                     JitOp::Yield { output } => {
                         let oa = slot_addr(&mut b, *output);
@@ -6246,12 +6255,13 @@ impl JitCompiler {
                         b.seal_block(cont_blk);
                     }
                     JitOp::IfTruthy { src, then_label, else_label } => {
+                        // Inline: null(0) and false(1) are falsy, everything else truthy
                         let sa = slot_addr(&mut b, *src);
-                        let call = b.ins().call(rt["is_truthy"], &[sa]);
-                        let truthy = b.inst_results(call)[0];
-                        let zero = b.ins().iconst(ptr_ty, 0);
-                        let is_t = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, truthy, zero);
-                        b.ins().brif(is_t, label_blocks[*then_label as usize], &[], label_blocks[*else_label as usize], &[]);
+                        let tag = b.ins().load(types::I8, cranelift_codegen::ir::MemFlags::new(), sa, 0);
+                        let tag_i32 = b.ins().uextend(types::I32, tag);
+                        let two = b.ins().iconst(types::I32, 2);
+                        let is_truthy = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual, tag_i32, two);
+                        b.ins().brif(is_truthy, label_blocks[*then_label as usize], &[], label_blocks[*else_label as usize], &[]);
                         terminated = true;
                     }
                     JitOp::FieldIsTruthy { base, field, then_label, else_label } => {
@@ -6469,9 +6479,13 @@ impl JitCompiler {
 
                     // Alternative
                     JitOp::IsNullOrFalse { dst_var, src } => {
+                        // Inline: null(0) or false(1) → 1, else → 0
                         let s = slot_addr(&mut b, *src);
-                        let call = b.ins().call(rt["is_null_or_false"], &[s]);
-                        let result = b.inst_results(call)[0];
+                        let tag = b.ins().load(types::I8, cranelift_codegen::ir::MemFlags::new(), s, 0);
+                        let tag_i32 = b.ins().uextend(types::I32, tag);
+                        let two = b.ins().iconst(types::I32, 2);
+                        let is_nf = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::UnsignedLessThan, tag_i32, two);
+                        let result = b.ins().uextend(ptr_ty, is_nf);
                         b.def_var(vars[*dst_var as usize], result);
                     }
                     JitOp::BranchOnVar { var, nonzero_label, zero_label } => {
