@@ -177,6 +177,8 @@ enum JitOp {
     Index { dst: SlotId, base: SlotId, key: SlotId },
     IndexField { dst: SlotId, base: SlotId, field: String },
     BinOp { dst: SlotId, op: BinOp, lhs: SlotId, rhs: SlotId },
+    /// Add with move: moves lhs out of slot (writes Null), enabling in-place mutation.
+    AddMove { dst: SlotId, lhs: SlotId, rhs: SlotId },
     /// Combined two-field lookup + binop: .field_a OP .field_b without intermediate Values.
     FieldBinopField { dst: SlotId, base: SlotId, field_a: String, field_b: String, op: i32 },
     /// Combined field lookup + binop with pre-allocated constant: .field OP const (or const OP .field).
@@ -588,7 +590,7 @@ impl Flattener {
         // Check if this op is fallible (can produce errors)
         let is_fallible = matches!(&op,
             JitOp::Index { .. } | JitOp::IndexField { .. } |
-            JitOp::BinOp { .. } | JitOp::UnaryOp { .. } |
+            JitOp::BinOp { .. } | JitOp::AddMove { .. } | JitOp::UnaryOp { .. } |
             JitOp::Negate { .. } | JitOp::CallBuiltin { .. } |
             JitOp::ThrowError { .. }
         );
@@ -757,7 +759,11 @@ impl Flattener {
                                 let l = self.flatten_scalar(lhs, input_slot);
                                 let r = self.flatten_scalar(rhs, input_slot);
                                 let out = self.alloc_slot();
-                                self.emit(JitOp::BinOp { dst: out, op: *op, lhs: l, rhs: r });
+                                if matches!(op, BinOp::Add) {
+                                    self.emit(JitOp::AddMove { dst: out, lhs: l, rhs: r });
+                                } else {
+                                    self.emit(JitOp::BinOp { dst: out, op: *op, lhs: l, rhs: r });
+                                }
                                 self.emit(JitOp::Drop { slot: l });
                                 self.emit(JitOp::Drop { slot: r });
                                 out
@@ -774,7 +780,11 @@ impl Flattener {
                                 let l = self.flatten_scalar(lhs, input_slot);
                                 let r = self.flatten_scalar(rhs, input_slot);
                                 let out = self.alloc_slot();
-                                self.emit(JitOp::BinOp { dst: out, op: *op, lhs: l, rhs: r });
+                                if matches!(op, BinOp::Add) {
+                                    self.emit(JitOp::AddMove { dst: out, lhs: l, rhs: r });
+                                } else {
+                                    self.emit(JitOp::BinOp { dst: out, op: *op, lhs: l, rhs: r });
+                                }
                                 self.emit(JitOp::Drop { slot: l });
                                 self.emit(JitOp::Drop { slot: r });
                                 out
@@ -784,7 +794,11 @@ impl Flattener {
                             let l = self.flatten_scalar(lhs, input_slot);
                             let r = self.flatten_scalar(rhs, input_slot);
                             let out = self.alloc_slot();
-                            self.emit(JitOp::BinOp { dst: out, op: *op, lhs: l, rhs: r });
+                            if matches!(op, BinOp::Add) {
+                                self.emit(JitOp::AddMove { dst: out, lhs: l, rhs: r });
+                            } else {
+                                self.emit(JitOp::BinOp { dst: out, op: *op, lhs: l, rhs: r });
+                            }
                             self.emit(JitOp::Drop { slot: l });
                             self.emit(JitOp::Drop { slot: r });
                             out
@@ -1697,7 +1711,11 @@ impl Flattener {
                     // for each output x of lhs: yield x op rhs
                     let ok = self.flatten_gen_with_each_output(lhs, input_slot, &|s, elem| {
                         let out = s.alloc_slot();
-                        s.emit(JitOp::BinOp { dst: out, op: *op, lhs: elem, rhs: rhs_val });
+                        if matches!(op, BinOp::Add) {
+                            s.emit(JitOp::AddMove { dst: out, lhs: elem, rhs: rhs_val });
+                        } else {
+                            s.emit(JitOp::BinOp { dst: out, op: *op, lhs: elem, rhs: rhs_val });
+                        }
                         s.emit_yield(out);
                         s.emit(JitOp::Drop { slot: out });
                     });
@@ -1708,7 +1726,11 @@ impl Flattener {
                     let lhs_val = self.flatten_scalar(lhs, input_slot);
                     let ok = self.flatten_gen_with_each_output(rhs, input_slot, &|s, elem| {
                         let out = s.alloc_slot();
-                        s.emit(JitOp::BinOp { dst: out, op: *op, lhs: lhs_val, rhs: elem });
+                        if matches!(op, BinOp::Add) {
+                            s.emit(JitOp::AddMove { dst: out, lhs: lhs_val, rhs: elem });
+                        } else {
+                            s.emit(JitOp::BinOp { dst: out, op: *op, lhs: lhs_val, rhs: elem });
+                        }
                         s.emit_yield(out);
                         s.emit(JitOp::Drop { slot: out });
                     });
@@ -3965,6 +3987,25 @@ extern "C" fn jit_rt_binop(dst: *mut Value, op: i32, lhs: *const Value, rhs: *co
         }
     }
 }
+/// Add with move semantics: takes ownership of lhs (writes Null in its place).
+/// This enables in-place string/array/object append when lhs has refcount 1.
+extern "C" fn jit_rt_add_move(dst: *mut Value, lhs: *mut Value, rhs: *const Value) -> i64 {
+    unsafe {
+        // Fast path: Num + Num
+        if let (Value::Num(a, _), Value::Num(b, _)) = (&*lhs, &*rhs) {
+            let result = Value::Num(a + b, None);
+            std::ptr::write(dst, result);
+            return 0;
+        }
+        // Move lhs out, enabling in-place mutation
+        let lhs_val = std::ptr::read(lhs);
+        std::ptr::write(lhs, Value::Null);
+        match crate::runtime::rt_add_owned(lhs_val, &*rhs) {
+            Ok(v) => { std::ptr::write(dst, v); 0 }
+            Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); GEN_ERROR }
+        }
+    }
+}
 extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i64 {
     unsafe {
         match unaryop_from_i32(op) {
@@ -4637,7 +4678,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
             JitOp::FieldBinopConst { base, .. } => {
                 *use_count.entry(*base).or_insert(0) += 1;
             }
-            JitOp::BinOp { lhs, rhs, .. } => {
+            JitOp::BinOp { lhs, rhs, .. } | JitOp::AddMove { lhs, rhs, .. } => {
                 *use_count.entry(*lhs).or_insert(0) += 1;
                 *use_count.entry(*rhs).or_insert(0) += 1;
             }
@@ -4699,7 +4740,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
             JitOp::FieldBinopConst { base, .. } => {
                 *use_count.entry(*base).or_insert(0) += 1;
             }
-                JitOp::BinOp { lhs, rhs, .. } => {
+                JitOp::BinOp { lhs, rhs, .. } | JitOp::AddMove { lhs, rhs, .. } => {
                     *use_count.entry(*lhs).or_insert(0) += 1;
                     *use_count.entry(*rhs).or_insert(0) += 1;
                 }
@@ -4861,6 +4902,7 @@ impl JitCompiler {
             ("jit_rt_index_field", jit_rt_index_field as *const u8),
             ("jit_rt_yield_field_ref", jit_rt_yield_field_ref as *const u8),
             ("jit_rt_binop", jit_rt_binop as *const u8),
+            ("jit_rt_add_move", jit_rt_add_move as *const u8),
             ("jit_rt_unaryop", jit_rt_unaryop as *const u8),
             ("jit_rt_negate", jit_rt_negate as *const u8),
             ("jit_rt_not", jit_rt_not as *const u8),
@@ -5096,6 +5138,12 @@ impl JitCompiler {
                         let r = slot_addr(&mut b, *rhs);
                         let o = b.ins().iconst(types::I32, binop_to_i32(*op) as i64);
                         b.ins().call(rt["binop"], &[d, o, l, r]);
+                    }
+                    JitOp::AddMove { dst, lhs, rhs } => {
+                        let d = slot_addr(&mut b, *dst);
+                        let l = slot_addr(&mut b, *lhs);
+                        let r = slot_addr(&mut b, *rhs);
+                        b.ins().call(rt["add_move"], &[d, l, r]);
                     }
                     JitOp::FieldBinopField { dst, base, field_a, field_b, op } => {
                         let d = slot_addr(&mut b, *dst);
@@ -5592,6 +5640,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("index_field", [p, p, p, p], [p]);
     decl!("yield_field_ref", [p, p, p, p, p], [p]);
     decl!("binop", [p, i, p, p], [p]);
+    decl!("add_move", [p, p, p], [p]);
     decl!("unaryop", [p, i, p], [p]);
     decl!("negate", [p, p], [p]);
     decl!("not", [p, p], [p]);
