@@ -77,6 +77,15 @@ impl Filter {
         }
     }
 
+    /// Returns true if this filter produces no output (e.g. `empty`).
+    pub fn is_empty(&self) -> bool {
+        if let Some((ref expr, _)) = self.parsed {
+            matches!(expr, crate::ir::Expr::Empty)
+        } else {
+            false
+        }
+    }
+
     /// Execute the filter against an input value, collecting all results.
     pub fn execute(&self, input: &Value) -> Result<Vec<Value>> {
         // Try JIT execution first

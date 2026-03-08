@@ -312,7 +312,9 @@ fn main() {
                 process_input(&arr, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
             } else {
                 let input_bytes = input_str.as_bytes();
-                let parse_result = if filter.is_identity() && use_compact_buf && !exit_status {
+                let parse_result = if filter.is_empty() {
+                    json_stream_raw(&input_str, |_, _| Ok(()))
+                } else if filter.is_identity() && use_compact_buf && !exit_status {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         compact_buf.extend_from_slice(raw);
@@ -377,7 +379,10 @@ fn main() {
                 content = "";
             }
             let _ = &mmap; // keep mmap alive
-            let parse_result = if filter.is_identity() && use_compact_buf && !exit_status {
+            let parse_result = if filter.is_empty() {
+                // Empty fast path: just validate JSON structure, produce no output.
+                json_stream_raw(content, |_, _| Ok(()))
+            } else if filter.is_identity() && use_compact_buf && !exit_status {
                 // Identity fast path: skip JSON parsing entirely, just validate structure
                 // and copy raw bytes directly. Eliminates ~76% of identity filter runtime.
                 let content_bytes = content.as_bytes();
