@@ -774,7 +774,6 @@ fn parse_json_string_raw(b: &[u8], pos: usize) -> Result<(String, usize)> {
     debug_assert_eq!(b[pos], b'"');
     let mut i = pos + 1;
     // Fast path: scan for end of simple string (no escapes)
-    // Safety: input comes from json_to_value(&str), so bytes are valid UTF-8
     let start = i;
     while i < b.len() {
         match b[i] {
@@ -1706,28 +1705,36 @@ fn push_json_string_to_vec(buf: &mut Vec<u8>, s: &str) {
         }
         return;
     }
-    // Slow path: has escapes
+    // Slow path: has escapes — single-pass scan+copy
+    buf.reserve(len + 2);
     buf.push(b'"');
-    for &b in bytes {
-        match b {
-            b'"' => buf.extend_from_slice(b"\\\""),
-            b'\\' => buf.extend_from_slice(b"\\\\"),
-            b'\n' => buf.extend_from_slice(b"\\n"),
-            b'\r' => buf.extend_from_slice(b"\\r"),
-            b'\t' => buf.extend_from_slice(b"\\t"),
-            0x08 => buf.extend_from_slice(b"\\b"),
-            0x0c => buf.extend_from_slice(b"\\f"),
+    let mut start = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        let esc = match b {
+            b'"' | b'\\' => b,
+            b'\n' => b'n',
+            b'\r' => b'r',
+            b'\t' => b't',
+            0x08 => b'b',
+            0x0c => b'f',
             c if c < 0x20 => {
+                if start < i { buf.extend_from_slice(&bytes[start..i]); }
                 let hex = [
                     b'\\', b'u', b'0', b'0',
                     b"0123456789abcdef"[(c >> 4) as usize],
                     b"0123456789abcdef"[(c & 0xf) as usize],
                 ];
                 buf.extend_from_slice(&hex);
+                start = i + 1;
+                continue;
             }
-            _ => buf.push(b),
-        }
+            _ => continue,
+        };
+        if start < i { buf.extend_from_slice(&bytes[start..i]); }
+        buf.extend_from_slice(&[b'\\', esc]);
+        start = i + 1;
     }
+    if start < len { buf.extend_from_slice(&bytes[start..]); }
     buf.push(b'"');
 }
 
