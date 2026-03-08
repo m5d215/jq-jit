@@ -77,6 +77,47 @@ impl Filter {
         }
     }
 
+    /// Detect a literal filter that doesn't reference input.
+    /// Returns the compact JSON bytes for the literal, or None.
+    pub fn detect_literal_output(&self) -> Option<Vec<u8>> {
+        use crate::ir::{Expr, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        match expr {
+            Expr::Literal(Literal::Null) => Some(b"null".to_vec()),
+            Expr::Literal(Literal::True) => Some(b"true".to_vec()),
+            Expr::Literal(Literal::False) => Some(b"false".to_vec()),
+            Expr::Literal(Literal::Num(_, Some(raw))) => Some(raw.as_bytes().to_vec()),
+            Expr::Literal(Literal::Num(n, None)) => {
+                let mut buf = Vec::new();
+                crate::value::push_jq_number_bytes(&mut buf, *n);
+                Some(buf)
+            }
+            Expr::Literal(Literal::Str(s)) => {
+                let mut buf = Vec::new();
+                buf.push(b'"');
+                for &b in s.as_bytes() {
+                    match b {
+                        b'"' => buf.extend_from_slice(b"\\\""),
+                        b'\\' => buf.extend_from_slice(b"\\\\"),
+                        b'\n' => buf.extend_from_slice(b"\\n"),
+                        b'\r' => buf.extend_from_slice(b"\\r"),
+                        b'\t' => buf.extend_from_slice(b"\\t"),
+                        0x08 => buf.extend_from_slice(b"\\b"),
+                        0x0c => buf.extend_from_slice(b"\\f"),
+                        c if c < 0x20 => {
+                            let hex = format!("\\u{:04x}", c);
+                            buf.extend_from_slice(hex.as_bytes());
+                        },
+                        _ => buf.push(b),
+                    }
+                }
+                buf.push(b'"');
+                Some(buf)
+            }
+            _ => None,
+        }
+    }
+
     /// Returns true if this filter produces no output (e.g. `empty`).
     pub fn is_empty(&self) -> bool {
         if let Some((ref expr, _)) = self.parsed {

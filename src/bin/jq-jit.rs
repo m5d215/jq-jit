@@ -237,6 +237,7 @@ fn main() {
     } else { None };
     let is_each = use_compact_buf && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() && del_field.is_none() && field_access.is_none() && filter.is_each();
     let is_to_entries = use_compact_buf && !exit_status && !is_each && filter.is_to_entries();
+    let literal_output = if use_compact_buf && !exit_status { filter.detect_literal_output() } else { None };
     let mut compact_buf: Vec<u8> = if use_compact_buf || use_pretty_buf { Vec::with_capacity(1 << 17) } else { Vec::new() };
     let process_input = |input: &Value, raw_bytes: Option<&[u8]>, out: &mut io::BufWriter<io::StdoutLock>, cbuf: &mut Vec<u8>, any_false: &mut bool, had_error: &mut bool| {
         let result = filter.execute_cb(input, &mut |result| {
@@ -347,6 +348,16 @@ fn main() {
                 let input_bytes = input_str.as_bytes();
                 let parse_result = if filter.is_empty() {
                     json_stream_raw(&input_str, |_, _| Ok(()))
+                } else if let Some(ref lit) = literal_output {
+                    json_stream_raw(&input_str, |_, _| {
+                        compact_buf.extend_from_slice(lit);
+                        compact_buf.push(b'\n');
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
                 } else if filter.is_identity() && use_compact_buf && !exit_status {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
@@ -745,6 +756,16 @@ fn main() {
             let parse_result = if filter.is_empty() {
                 // Empty fast path: just validate JSON structure, produce no output.
                 json_stream_raw(content, |_, _| Ok(()))
+            } else if let Some(ref lit) = literal_output {
+                json_stream_raw(content, |_, _| {
+                    compact_buf.extend_from_slice(lit);
+                    compact_buf.push(b'\n');
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
             } else if let Some(ref fa_field) = field_access {
                 // Field access fast path: extract a single field's raw bytes, no full parse.
                 let content_bytes = content.as_bytes();
