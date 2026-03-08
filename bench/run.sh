@@ -1,5 +1,6 @@
 #!/bin/bash
-# Benchmark jq-jit against jq, gojq, jaq
+# Quick daily benchmark — 17 NDJSON workloads, ~30s, colored output with ratios
+# For thorough analysis (80+ patterns), use: bench/comprehensive.sh
 # Usage: bench/run.sh [data_file]
 set -e
 
