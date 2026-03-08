@@ -2960,6 +2960,27 @@ impl Parser {
             ("last", 1) => {
                 // last(g) = reduce g as $x ([]; [$x]) | if length > 0 then .[0] else empty end
                 let generator = args.into_iter().next().unwrap();
+
+                // Optimize last(range(n)) → if n > 0 then n - 1 else empty end
+                if let Expr::Range { ref from, ref to, ref step } = generator {
+                    let is_from_zero = matches!(from.as_ref(),
+                        Expr::Literal(Literal::Num(n, _)) if *n == 0.0);
+                    if is_from_zero && step.is_none() {
+                        return Ok(Expr::IfThenElse {
+                            cond: Box::new(Expr::BinOp {
+                                op: BinOp::Gt,
+                                lhs: to.clone(),
+                                rhs: Box::new(Expr::Literal(Literal::Num(0.0, None))),
+                            }),
+                            then_branch: Box::new(Expr::BinOp {
+                                op: BinOp::Sub,
+                                lhs: to.clone(),
+                                rhs: Box::new(Expr::Literal(Literal::Num(1.0, None))),
+                            }),
+                            else_branch: Box::new(Expr::Empty),
+                        });
+                    }
+                }
                 let var_idx = self.scope.alloc_var("__last__");
                 let acc_idx = self.scope.alloc_var("__last_acc__");
                 Ok(Expr::Pipe {

@@ -1157,7 +1157,30 @@ impl Flattener {
                 // Detect in-place update pattern: reduce ... (init; path |= f) or path += f
                 let inplace_info = detect_inplace_update(update);
 
-                if let Some(info) = inplace_info {
+                // Detect last(g) pattern: reduce g as $x ([]; [$x]) — avoid per-iteration allocation
+                let is_last_pattern = matches!(update.as_ref(),
+                    Expr::Collect { generator } if matches!(generator.as_ref(),
+                        Expr::LoadVar { var_index: vi } if *vi == *var_index
+                    )
+                );
+
+                if is_last_pattern {
+                    // Optimized: reuse array buffer via TakeVar + PathInsert
+                    self.flatten_gen_with_each_output(source, input_slot, &|this, elem| {
+                        this.emit(JitOp::SetVar { var_index: *var_index, src: elem });
+                        let acc = this.alloc_slot();
+                        this.emit(JitOp::TakeVar { dst: acc, var_index: *acc_index });
+                        let key = this.alloc_slot();
+                        this.emit(JitOp::Num { dst: key, val: 0.0, repr: None });
+                        let val = this.alloc_slot();
+                        this.emit(JitOp::GetVar { dst: val, var_index: *var_index });
+                        this.emit(JitOp::PathInsert { container: acc, key, val });
+                        this.emit(JitOp::Drop { slot: val });
+                        this.emit(JitOp::Drop { slot: key });
+                        this.emit(JitOp::SetVar { var_index: *acc_index, src: acc });
+                        this.emit(JitOp::Drop { slot: acc });
+                    });
+                } else if let Some(info) = inplace_info {
                     // Optimized: TakeVar + PathExtract/PathInsert avoids container cloning
                     self.flatten_gen_with_each_output(source, input_slot, &|this, elem| {
                         this.emit(JitOp::SetVar { var_index: *var_index, src: elem });
@@ -3191,10 +3214,30 @@ impl Flattener {
         // Detect in-place update pattern: path |= f or path += f (wrapped in LetBinding)
         let inplace_info = detect_inplace_update(update);
 
+        // Detect last(g) pattern: reduce g as $x ([]; [$x])
+        let is_last_pattern = matches!(update,
+            Expr::Collect { generator } if matches!(generator.as_ref(),
+                Expr::LoadVar { var_index: vi } if *vi == var_index
+            )
+        );
+
         // Helper: emit the update step (set $var, load acc as ., evaluate update, store back)
         let emit_update = |s: &mut Flattener, elem: SlotId| {
             s.emit(JitOp::SetVar { var_index, src: elem });
-            if let Some(ref info) = inplace_info {
+            if is_last_pattern {
+                // Optimized: reuse array buffer via TakeVar + PathInsert
+                let acc = s.alloc_slot();
+                s.emit(JitOp::TakeVar { dst: acc, var_index: acc_index });
+                let key = s.alloc_slot();
+                s.emit(JitOp::Num { dst: key, val: 0.0, repr: None });
+                let val = s.alloc_slot();
+                s.emit(JitOp::GetVar { dst: val, var_index: var_index });
+                s.emit(JitOp::PathInsert { container: acc, key, val });
+                s.emit(JitOp::Drop { slot: val });
+                s.emit(JitOp::Drop { slot: key });
+                s.emit(JitOp::SetVar { var_index: acc_index, src: acc });
+                s.emit(JitOp::Drop { slot: acc });
+            } else if let Some(ref info) = inplace_info {
                 s.emit_reduce_update_with_lets(acc_index, info);
             } else {
                 // Load current accumulator as the input to update (. refers to acc in reduce)
