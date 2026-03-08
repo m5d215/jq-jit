@@ -241,6 +241,20 @@ impl Filter {
         None
     }
 
+    /// Detect array-of-field-access `[.f1,.f2,...]` pattern.
+    /// Returns the list of field names if this is Collect over comma field accesses.
+    pub fn detect_array_field_access(&self) -> Option<Vec<String>> {
+        use crate::ir::Expr;
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::Collect { generator } = expr {
+            let mut fields = Vec::new();
+            if collect_comma_fields(generator, &mut fields) && fields.len() >= 2 {
+                return Some(fields);
+            }
+        }
+        None
+    }
+
     /// Detect comma-separated field access `.f1,.f2,...` pattern.
     /// Returns the list of field names if all branches are direct field accesses on input.
     pub fn detect_multi_field_access(&self) -> Option<Vec<String>> {

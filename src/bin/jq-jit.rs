@@ -219,7 +219,10 @@ fn main() {
     let select_cmp = if use_compact_buf && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() && field_str_concat.is_none() {
         filter.detect_select_field_cmp()
     } else { None };
-    let multi_field = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
+    let array_field = if use_compact_buf && !exit_status && field_access.is_none() {
+        filter.detect_array_field_access()
+    } else { None };
+    let multi_field = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && array_field.is_none() {
         filter.detect_multi_field_access()
     } else { None };
     let is_length = (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && multi_field.is_none() && select_cmp.is_none() && filter.is_length();
@@ -383,6 +386,27 @@ fn main() {
                             }
                         } else {
                             compact_buf.extend_from_slice(b"null\n");
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some(ref af) = array_field {
+                    let af_refs: Vec<&str> = af.iter().map(|s| s.as_str()).collect();
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some(ranges) = json_object_get_fields_raw(raw, 0, &af_refs) {
+                            compact_buf.push(b'[');
+                            for (i, (vs, ve)) in ranges.iter().enumerate() {
+                                if i > 0 { compact_buf.push(b','); }
+                                compact_buf.extend_from_slice(&raw[*vs..*ve]);
+                            }
+                            compact_buf.extend_from_slice(b"]\n");
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -708,6 +732,28 @@ fn main() {
                         }
                     } else {
                         compact_buf.extend_from_slice(b"null\n");
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some(ref af) = array_field {
+                let content_bytes = content.as_bytes();
+                let af_refs: Vec<&str> = af.iter().map(|s| s.as_str()).collect();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some(ranges) = json_object_get_fields_raw(raw, 0, &af_refs) {
+                        compact_buf.push(b'[');
+                        for (i, (vs, ve)) in ranges.iter().enumerate() {
+                            if i > 0 { compact_buf.push(b','); }
+                            compact_buf.extend_from_slice(&raw[*vs..*ve]);
+                        }
+                        compact_buf.extend_from_slice(b"]\n");
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
