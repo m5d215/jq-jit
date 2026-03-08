@@ -775,6 +775,35 @@ pub fn json_object_get_fields_raw(b: &[u8], pos: usize, input_fields: &[&str]) -
     Some(out)
 }
 
+/// Compact a JSON value by stripping whitespace outside strings.
+/// Copies to `buf` directly, avoiding Value construction.
+pub fn push_json_compact_raw(buf: &mut Vec<u8>, b: &[u8]) {
+    let mut i = 0;
+    let len = b.len();
+    while i < len {
+        match b[i] {
+            b' ' | b'\t' | b'\n' | b'\r' => { i += 1; }
+            b'"' => {
+                // Copy entire string including quotes
+                buf.push(b'"');
+                i += 1;
+                while i < len {
+                    match b[i] {
+                        b'"' => { buf.push(b'"'); i += 1; break; }
+                        b'\\' => {
+                            buf.push(b'\\');
+                            i += 1;
+                            if i < len { buf.push(b[i]); i += 1; }
+                        }
+                        c => { buf.push(c); i += 1; }
+                    }
+                }
+            }
+            c => { buf.push(c); i += 1; }
+        }
+    }
+}
+
 /// Check if raw JSON bytes are compact (no whitespace outside of strings).
 /// For objects, checks after `{` and after the first `:` for whitespace.
 /// For arrays, checks after `[` for whitespace. Scalars are always compact.
@@ -783,7 +812,15 @@ pub fn is_json_compact(bytes: &[u8]) -> bool {
     if bytes.len() < 2 { return true; }
     let b0 = bytes[0];
     if b0 == b'[' {
-        return bytes[1] > b' ';
+        if bytes[1] <= b' ' { return false; }
+        // Check after first comma: [1,2] is compact, [1, 2] is not
+        // Skip the first value to find the comma
+        if let Ok(end) = skip_json_value(bytes, 1) {
+            if end < bytes.len() && bytes[end] == b',' {
+                if end + 1 < bytes.len() && bytes[end + 1] <= b' ' { return false; }
+            }
+        }
+        return true;
     }
     if b0 != b'{' { return true; }
     // Object: check after { for whitespace

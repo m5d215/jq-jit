@@ -8,7 +8,7 @@ use std::process;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw, is_json_compact, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
+use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw, is_json_compact, push_json_compact_raw, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
 use jq_jit::interpreter::Filter;
 
 fn main() {
@@ -728,8 +728,8 @@ fn main() {
                         compact_buf.extend_from_slice(raw);
                         compact_buf.push(b'\n');
                     } else {
-                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                        push_compact_line(&mut compact_buf, &v);
+                        push_json_compact_raw(&mut compact_buf, raw);
+                        compact_buf.push(b'\n');
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
