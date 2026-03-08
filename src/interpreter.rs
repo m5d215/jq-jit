@@ -86,6 +86,34 @@ impl Filter {
         }
     }
 
+    /// Detect `select(.field > N)` pattern for fast-path select.
+    /// Returns (field_name, comparison_op, threshold) if detected.
+    pub fn detect_select_field_cmp(&self) -> Option<(String, crate::ir::BinOp, f64)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        // select(cond) compiles to if cond then . else empty end
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
+            if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+            // cond should be BinOp { .field, op, Literal::Num }
+            if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                    return None;
+                }
+                // .field on lhs, literal on rhs
+                if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                            return Some((field.clone(), *op, *n));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Execute the filter against an input value, collecting all results.
     pub fn execute(&self, input: &Value) -> Result<Vec<Value>> {
         // Try JIT execution first

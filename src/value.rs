@@ -534,15 +534,104 @@ where F: FnMut(usize, usize) -> Result<()> {
     Ok(())
 }
 
+/// Extract a numeric field value from a JSON object without full parsing.
+/// Returns Some(f64) if the field exists and is numeric, None otherwise.
+/// Used for select fast paths to avoid parsing discarded objects.
+pub fn json_object_get_num(b: &[u8], pos: usize, field: &str) -> Option<f64> {
+    if pos >= b.len() || b[pos] != b'{' { return None; }
+    let field_bytes = field.as_bytes();
+    let mut i = pos + 1;
+    // Skip whitespace
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < b.len() && b[i] == b'}' { return None; }
+    loop {
+        if i >= b.len() || b[i] != b'"' { return None; }
+        // Scan key
+        let key_start = i + 1;
+        let mut j = key_start;
+        while j < b.len() {
+            match b[j] { b'"' => break, b'\\' => { j += 2; continue }, _ => j += 1 }
+        }
+        let key_matches = (j - key_start) == field_bytes.len()
+            && b[key_start..j] == *field_bytes;
+        i = j + 1;
+        // Skip ws + colon
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { return None; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if key_matches {
+            // Parse the numeric value inline
+            if i >= b.len() { return None; }
+            let neg = b[i] == b'-';
+            let start = if neg { i + 1 } else { i };
+            if start >= b.len() || !b[start].is_ascii_digit() { return None; }
+            // Fast integer path
+            let mut n: i64 = (b[start] - b'0') as i64;
+            let mut k = start + 1;
+            while k < b.len() && b[k].is_ascii_digit() {
+                n = n * 10 + (b[k] - b'0') as i64;
+                k += 1;
+            }
+            if k < b.len() && (b[k] == b'.' || b[k] == b'e' || b[k] == b'E') {
+                // Has decimal/exponent — use fast-float
+                let end = {
+                    let mut e = k;
+                    if b[e] == b'.' { e += 1; while e < b.len() && b[e].is_ascii_digit() { e += 1; } }
+                    if e < b.len() && (b[e] == b'e' || b[e] == b'E') {
+                        e += 1;
+                        if e < b.len() && (b[e] == b'+' || b[e] == b'-') { e += 1; }
+                        while e < b.len() && b[e].is_ascii_digit() { e += 1; }
+                    }
+                    e
+                };
+                let num_str = unsafe { std::str::from_utf8_unchecked(&b[i..end]) };
+                return fast_float::parse::<f64, _>(num_str).ok();
+            }
+            if (k - start) > 15 { return None; }
+            let val = if neg { -(n as f64) } else { n as f64 };
+            return Some(val);
+        }
+        // Skip value
+        i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return None };
+        // Skip ws
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { return None; }
+        if b[i] == b'}' { return None; }
+        if b[i] != b',' { return None; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
+}
+
 /// Check if raw JSON bytes are compact (no whitespace outside of strings).
-/// Uses an O(1) heuristic: for objects/arrays, checks if the second byte is whitespace.
-/// All standard JSON formatters add whitespace consistently, so this catches all common cases.
+/// For objects, checks after `{` and after the first `:` for whitespace.
+/// For arrays, checks after `[` for whitespace. Scalars are always compact.
 #[inline]
 pub fn is_json_compact(bytes: &[u8]) -> bool {
     if bytes.len() < 2 { return true; }
     let b0 = bytes[0];
-    let b1 = bytes[1];
-    if (b0 == b'{' || b0 == b'[') && b1 <= b' ' { return false; }
+    if b0 == b'[' {
+        return bytes[1] > b' ';
+    }
+    if b0 != b'{' { return true; }
+    // Object: check after { for whitespace
+    if bytes[1] <= b' ' { return false; }
+    // Check after first colon: {"key":v is compact, {"key": v is not
+    let mut i = 1;
+    if i < bytes.len() && bytes[i] == b'"' {
+        i += 1;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' { i += 2; continue; }
+            if bytes[i] == b'"' { i += 1; break; }
+            i += 1;
+        }
+    }
+    // i should be at ':'
+    if i < bytes.len() && bytes[i] == b':' {
+        i += 1;
+        if i < bytes.len() && bytes[i] <= b' ' { return false; }
+    }
     true
 }
 

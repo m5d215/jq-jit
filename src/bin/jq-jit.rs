@@ -8,7 +8,7 @@ use std::process;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, is_json_compact, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
+use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, is_json_compact, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
 use jq_jit::interpreter::Filter;
 
 fn main() {
@@ -317,8 +317,13 @@ fn main() {
                 } else if filter.is_identity() && use_compact_buf && !exit_status {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        compact_buf.extend_from_slice(raw);
-                        compact_buf.push(b'\n');
+                        if is_json_compact(raw) {
+                            compact_buf.extend_from_slice(raw);
+                            compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            push_compact_line(&mut compact_buf, &v);
+                        }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
                             compact_buf.clear();
@@ -379,17 +384,57 @@ fn main() {
                 content = "";
             }
             let _ = &mmap; // keep mmap alive
+            let select_cmp = if use_compact_buf && !exit_status {
+                filter.detect_select_field_cmp()
+            } else { None };
             let parse_result = if filter.is_empty() {
                 // Empty fast path: just validate JSON structure, produce no output.
                 json_stream_raw(content, |_, _| Ok(()))
-            } else if filter.is_identity() && use_compact_buf && !exit_status {
-                // Identity fast path: skip JSON parsing entirely, just validate structure
-                // and copy raw bytes directly. Eliminates ~76% of identity filter runtime.
+            } else if let Some((ref field, ref op, threshold)) = select_cmp {
+                // Select fast path: extract field without full parsing, copy raw bytes on match.
+                use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    compact_buf.extend_from_slice(raw);
-                    compact_buf.push(b'\n');
+                    if let Some(val) = json_object_get_num(raw, 0, field) {
+                        let pass = match op {
+                            BinOp::Gt => val > threshold,
+                            BinOp::Lt => val < threshold,
+                            BinOp::Ge => val >= threshold,
+                            BinOp::Le => val <= threshold,
+                            BinOp::Eq => val == threshold,
+                            BinOp::Ne => val != threshold,
+                            _ => false,
+                        };
+                        if pass {
+                            if is_json_compact(raw) {
+                                compact_buf.extend_from_slice(raw);
+                                compact_buf.push(b'\n');
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                push_compact_line(&mut compact_buf, &v);
+                            }
+                            if compact_buf.len() >= 1 << 17 {
+                                let _ = out.write_all(&compact_buf);
+                                compact_buf.clear();
+                            }
+                        }
+                    }
+                    Ok(())
+                })
+            } else if filter.is_identity() && use_compact_buf && !exit_status {
+                // Identity fast path: skip JSON parsing entirely, just validate structure
+                // and copy raw bytes directly. Falls back to parse+serialize for non-compact input.
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if is_json_compact(raw) {
+                        compact_buf.extend_from_slice(raw);
+                        compact_buf.push(b'\n');
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        push_compact_line(&mut compact_buf, &v);
+                    }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
                         compact_buf.clear();
