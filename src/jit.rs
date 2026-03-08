@@ -25,9 +25,15 @@ static JIT_LAST_ERROR: GlobalCell<Option<String>> = GlobalCell(std::cell::Unsafe
 /// Direct Value storage for `error` builtin — avoids Value→JSON→Value round-trip in try-catch.
 static JIT_ERROR_VALUE: GlobalCell<Option<Value>> = GlobalCell(std::cell::UnsafeCell::new(None));
 static JIT_CLOSURE_OPS: GlobalCell<Vec<Expr>> = GlobalCell(std::cell::UnsafeCell::new(Vec::new()));
+/// Fast error flag for inline CheckError: non-zero means an error is pending.
+/// Read directly by JIT codegen to avoid function call overhead.
+static JIT_ERROR_FLAG: GlobalCell<i64> = GlobalCell(std::cell::UnsafeCell::new(0));
 
 fn set_jit_error(msg: String) {
-    unsafe { *JIT_LAST_ERROR.0.get() = Some(msg); }
+    unsafe {
+        *JIT_LAST_ERROR.0.get() = Some(msg);
+        *JIT_ERROR_FLAG.0.get() = 1;
+    }
 }
 
 fn take_jit_error() -> Option<String> {
@@ -42,6 +48,7 @@ fn clear_jit_error() {
     unsafe {
         *JIT_LAST_ERROR.0.get() = None;
         *JIT_ERROR_VALUE.0.get() = None;
+        *JIT_ERROR_FLAG.0.get() = 0;
     }
 }
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder, StackSlotData, StackSlotKind};
@@ -4658,6 +4665,7 @@ extern "C" fn jit_rt_throw_error(msg: *const Value, env: *mut JitEnv) -> i64 {
         let val = (*msg).clone();
         // Store value directly — defer serialization until propagation (if not caught)
         *JIT_ERROR_VALUE.0.get() = Some(val);
+        *JIT_ERROR_FLAG.0.get() = 1;
         let _ = env;
         GEN_ERROR
     }
@@ -5387,6 +5395,7 @@ extern "C" fn jit_rt_has_error() -> i64 {
 
 /// Get the last error as a Value and write it to dst. Clears the error.
 extern "C" fn jit_rt_get_error(dst: *mut Value) {
+    unsafe { *JIT_ERROR_FLAG.0.get() = 0; }
     // Fast path: use directly stored Value from `error` builtin
     if let Some(v) = take_jit_error_value() {
         let _ = take_jit_error(); // clear the string too
@@ -6148,13 +6157,37 @@ impl JitCompiler {
                         b.ins().call(rt["index"], &[d, ba, ka]);
                     }
                     JitOp::IndexField { dst, base, field } => {
-                        let d = slot_addr(&mut b, *dst);
+                        // Inline null fast path: null.field → null
                         let ba = slot_addr(&mut b, *base);
+                        let tag = b.ins().load(types::I8, cranelift_codegen::ir::MemFlags::new(), ba, 0);
+                        let tag_i32 = b.ins().uextend(types::I32, tag);
+                        let zero_i32 = b.ins().iconst(types::I32, 0);
+                        let is_null = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, tag_i32, zero_i32);
+                        let fast_blk = b.create_block();
+                        let slow_blk = b.create_block();
+                        let done_blk = b.create_block();
+                        b.ins().brif(is_null, fast_blk, &[], slow_blk, &[]);
+
+                        b.switch_to_block(fast_blk);
+                        b.seal_block(fast_blk);
+                        let d2 = slot_addr(&mut b, *dst);
+                        let null_word = b.ins().iconst(ptr_ty, 0);
+                        b.ins().store(cranelift_codegen::ir::MemFlags::new(), null_word, d2, 0);
+                        b.ins().jump(done_blk, &[]);
+
+                        b.switch_to_block(slow_blk);
+                        b.seal_block(slow_blk);
+                        let d3 = slot_addr(&mut b, *dst);
+                        let ba3 = slot_addr(&mut b, *base);
                         let leaked = Box::leak(field.clone().into_boxed_str());
                         self._string_constants.push(leaked);
                         let fp = b.ins().iconst(ptr_ty, leaked.as_ptr() as i64);
                         let fl = b.ins().iconst(ptr_ty, leaked.len() as i64);
-                        b.ins().call(rt["index_field"], &[d, ba, fp, fl]);
+                        b.ins().call(rt["index_field"], &[d3, ba3, fp, fl]);
+                        b.ins().jump(done_blk, &[]);
+
+                        b.switch_to_block(done_blk);
+                        b.seal_block(done_blk);
                     }
                     JitOp::BinOp { dst, op, lhs, rhs } => {
                         // Inline fast path for Num+Num arithmetic (add/sub/mul/div)
@@ -6749,11 +6782,11 @@ impl JitCompiler {
                         b.ins().call(rt["try_end"], &[env_ptr]);
                     }
                     JitOp::CheckError { error_dst, catch_label } => {
-                        // Check if the last operation produced an error
-                        let call = b.ins().call(rt["has_error"], &[]);
-                        let has_err = b.inst_results(call)[0];
-                        let zero = b.ins().iconst(ptr_ty, 0);
-                        let is_err = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, has_err, zero);
+                        // Inline error flag check: read JIT_ERROR_FLAG directly
+                        let flag_addr = b.ins().iconst(ptr_ty, JIT_ERROR_FLAG.0.get() as i64);
+                        let flag_val = b.ins().load(types::I64, cranelift_codegen::ir::MemFlags::new(), flag_addr, 0);
+                        let zero = b.ins().iconst(types::I64, 0);
+                        let is_err = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, flag_val, zero);
                         let err_blk = b.create_block();
                         let ok_blk = b.create_block();
                         b.ins().brif(is_err, err_blk, &[], ok_blk, &[]);
