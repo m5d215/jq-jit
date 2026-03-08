@@ -73,11 +73,21 @@ echo ""
 TESTS=(
     'empty::empty'
     'identity (.):-c:.'
+    'identity (pretty)::.'
     'field access::.name'
     'arithmetic::.x + .y'
     'select:-c:select(.x > 1500000)'
     'string concat:-c:.name + "_x"'
     'object construct:-c:{a: .x, b: .y}'
+    'array construct:-c:[.name, .x]'
+    '.[]:-c:.[]'
+    'to_entries:-c:to_entries'
+    'keys:-c:keys'
+    'keys_unsorted:-c:keys_unsorted'
+    'length:-c:length'
+    'has("x"):-c:has("x")'
+    'type:-c:type'
+    'del(.name):-c:del(.name)'
 )
 
 for test in "${TESTS[@]}"; do
