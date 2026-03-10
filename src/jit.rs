@@ -5888,6 +5888,50 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             }
             return 0;
         }
+        // Fast path: split(sep) — avoid call_builtin dispatch
+        if name == "split" && args.len() == 2 {
+            if let (Value::Str(s), Value::Str(p)) = (&args[0], &args[1]) {
+                let parts: Vec<Value> = if p.is_empty() {
+                    if s.is_ascii() {
+                        (0..s.len()).map(|i| Value::from_str(&s.as_str()[i..i+1])).collect()
+                    } else {
+                        let mut buf = [0u8; 4];
+                        s.chars().map(|c| Value::from_str(c.encode_utf8(&mut buf))).collect()
+                    }
+                } else {
+                    s.split(p.as_str()).map(Value::from_str).collect()
+                };
+                std::ptr::write(dst, Value::Arr(Rc::new(parts)));
+                return 0;
+            }
+        }
+        // Fast path: join(sep) — avoid call_builtin dispatch
+        if name == "join" && args.len() == 2 {
+            if let (Value::Arr(a), Value::Str(sep)) = (&args[0], &args[1]) {
+                // Check all elements are scalar (not arr/obj) — otherwise fall through to runtime for error
+                let all_scalar = a.iter().all(|v| !matches!(v, Value::Arr(_) | Value::Obj(_) | Value::Error(_)));
+                if all_scalar {
+                    let cap = a.len() * (8 + sep.len());
+                    let mut buf: Vec<u8> = Vec::with_capacity(cap);
+                    for (i, item) in a.iter().enumerate() {
+                        if i > 0 { buf.extend_from_slice(sep.as_bytes()); }
+                        match item {
+                            Value::Str(sv) => buf.extend_from_slice(sv.as_bytes()),
+                            Value::Null => {},
+                            Value::Num(n, repr) => {
+                                if let Some(r) = repr { buf.extend_from_slice(r.as_bytes()); }
+                                else { crate::value::push_jq_number_bytes(&mut buf, *n); }
+                            }
+                            Value::True => buf.extend_from_slice(b"true"),
+                            Value::False => buf.extend_from_slice(b"false"),
+                            _ => {}
+                        }
+                    }
+                    std::ptr::write(dst, Value::from_string(String::from_utf8_unchecked(buf)));
+                    return 0;
+                }
+            }
+        }
         if name == "_slice" {
             // _slice(base, from, to)
             if args.len() >= 3 {
