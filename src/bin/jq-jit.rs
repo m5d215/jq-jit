@@ -260,6 +260,9 @@ fn real_main() {
     let select_str = if use_compact_buf && !exit_status && select_cmp.is_none() && field_access.is_none() {
         filter.detect_select_field_str()
     } else { None };
+    let select_str_test = if use_compact_buf && !exit_status && select_cmp.is_none() && select_str.is_none() && field_access.is_none() {
+        filter.detect_select_field_str_test()
+    } else { None };
     let array_field = if use_compact_buf && !exit_status && field_access.is_none() {
         filter.detect_array_field_access()
     } else { None };
@@ -291,6 +294,7 @@ fn real_main() {
         || field_binop.is_some() || field_unary_num.is_some() || field_binop_const_unary.is_some()
         || field_str_builtin.is_some() || field_ltrimstr_tonumber.is_some()
         || field_str_concat.is_some() || select_cmp.is_some() || select_str.is_some()
+        || select_str_test.is_some()
         || array_field.is_some() || multi_field.is_some() || is_length || is_keys
         || is_keys_unsorted || has_field.is_some() || is_type || del_field.is_some()
         || is_each || is_to_entries || string_interp_fields.is_some() || array_join.is_some()
@@ -1113,6 +1117,42 @@ fn real_main() {
                         }
                         Ok(())
                     })
+                } else if let Some((ref field, ref builtin, ref arg)) = select_str_test {
+                    // select(.field | startswith/endswith/contains("str")) — raw byte test
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
+                            let val = &raw[vs..ve];
+                            // Only handle simple quoted strings (no backslash escapes)
+                            if val.len() >= 2 && val[0] == b'"' && val[ve-vs-1] == b'"' && !val[1..ve-vs-1].contains(&b'\\') {
+                                let inner = &val[1..ve-vs-1];
+                                let pass = match builtin.as_str() {
+                                    "startswith" => inner.starts_with(arg.as_bytes()),
+                                    "endswith" => inner.ends_with(arg.as_bytes()),
+                                    "contains" => {
+                                        let ab = arg.as_bytes();
+                                        if ab.len() <= inner.len() {
+                                            inner.windows(ab.len()).any(|w| w == ab)
+                                        } else { false }
+                                    }
+                                    _ => false,
+                                };
+                                if pass {
+                                    if is_json_compact(raw) {
+                                        compact_buf.extend_from_slice(raw);
+                                    } else {
+                                        push_json_compact_raw(&mut compact_buf, raw);
+                                    }
+                                    compact_buf.push(b'\n');
+                                }
+                            }
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
                 } else if is_length {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
@@ -1471,6 +1511,41 @@ fn real_main() {
                                 compact_buf.clear();
                             }
                         }
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref field, ref builtin, ref arg)) = select_str_test {
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
+                        let val = &raw[vs..ve];
+                        if val.len() >= 2 && val[0] == b'"' && val[ve-vs-1] == b'"' && !val[1..ve-vs-1].contains(&b'\\') {
+                            let inner = &val[1..ve-vs-1];
+                            let pass = match builtin.as_str() {
+                                "startswith" => inner.starts_with(arg.as_bytes()),
+                                "endswith" => inner.ends_with(arg.as_bytes()),
+                                "contains" => {
+                                    let ab = arg.as_bytes();
+                                    if ab.len() <= inner.len() {
+                                        inner.windows(ab.len()).any(|w| w == ab)
+                                    } else { false }
+                                }
+                                _ => false,
+                            };
+                            if pass {
+                                if is_json_compact(raw) {
+                                    compact_buf.extend_from_slice(raw);
+                                } else {
+                                    push_json_compact_raw(&mut compact_buf, raw);
+                                }
+                                compact_buf.push(b'\n');
+                            }
+                        }
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
                     }
                     Ok(())
                 })

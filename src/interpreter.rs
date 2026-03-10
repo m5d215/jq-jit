@@ -178,6 +178,35 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.field | startswith/endswith/contains("str"))` pattern.
+    /// Returns (field_name, builtin_name, string_arg) if detected.
+    pub fn detect_select_field_str_test(&self) -> Option<(String, String, String)> {
+        use crate::ir::{Expr, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
+            if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+            // cond = .field | builtin("str")
+            if let Expr::Pipe { left, right } = cond.as_ref() {
+                if let Expr::Index { expr: base, key } = left.as_ref() {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        if let Expr::CallBuiltin { name, args } = right.as_ref() {
+                            if args.len() == 1 {
+                                if let Expr::Literal(Literal::Str(arg)) = &args[0] {
+                                    if matches!(name.as_str(), "startswith" | "endswith" | "contains") {
+                                        return Some((field.clone(), name.clone(), arg.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `{a: .x, b: .y}` pattern (object construction from field access).
     /// Returns Vec of (output_key, input_field) pairs if detected.
     pub fn detect_field_remap(&self) -> Option<Vec<(String, String)>> {
