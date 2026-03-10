@@ -845,6 +845,40 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | split("s") | .[0]` or `.field | split("s") | first`.
+    /// Returns (field_name, split_delimiter).
+    pub fn detect_field_split_first(&self) -> Option<(String, String)> {
+        use crate::ir::{Expr, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        // Pipe(.field, Pipe(split("s"), .[0]))
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::Pipe { left: split_expr, right: index_expr } = right.as_ref() {
+                        if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
+                            if name != "split" || args.len() != 1 { return None; }
+                            if let Expr::Literal(Literal::Str(delim)) = &args[0] {
+                                // Check for .[0]
+                                let is_first = match index_expr.as_ref() {
+                                    Expr::Index { expr: base, key } => {
+                                        matches!(base.as_ref(), Expr::Input) &&
+                                        matches!(key.as_ref(), Expr::Literal(Literal::Num(n, _)) if *n == 0.0)
+                                    }
+                                    _ => false,
+                                };
+                                if is_first {
+                                    return Some((field.clone(), delim.clone()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect comma-separated field access `.f1,.f2,...` pattern.
     /// Returns the list of field names if all branches are direct field accesses on input.
     pub fn detect_multi_field_access(&self) -> Option<Vec<String>> {
