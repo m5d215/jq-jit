@@ -5951,7 +5951,46 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                 }
             }
         }
-        // Fast path: startswith/endswith/ltrimstr/rtrimstr/contains — string operations
+        // Fast path: has(key) — avoid dispatch overhead
+        if name == "has" && args.len() == 2 {
+            let result = match (&args[0], &args[1]) {
+                (Value::Obj(o), Value::Str(k)) => Some(Value::from_bool(o.contains_key(k.as_str()))),
+                (Value::Arr(a), Value::Num(n, _)) => {
+                    if n.is_nan() || n.is_infinite() { Some(Value::False) }
+                    else {
+                        let idx = *n as i64;
+                        Some(Value::from_bool(idx >= 0 && (idx as usize) < a.len()))
+                    }
+                }
+                (Value::Null, _) => Some(Value::False),
+                _ => None,
+            };
+            if let Some(v) = result { std::ptr::write(dst, v); return 0; }
+        }
+        // Fast path: in(container) — avoid dispatch overhead
+        if name == "in" && args.len() == 2 {
+            let result = match (&args[0], &args[1]) {
+                (Value::Str(k), Value::Obj(o)) => Some(Value::from_bool(o.contains_key(k.as_str()))),
+                (Value::Num(n, _), Value::Arr(a)) => Some(Value::from_bool((*n as usize) < a.len())),
+                _ => Some(Value::False),
+            };
+            if let Some(v) = result { std::ptr::write(dst, v); return 0; }
+        }
+        // Fast path: contains(str) — direct string containment check
+        if name == "contains" && args.len() == 2 {
+            if let (Value::Str(s), Value::Str(t)) = (&args[0], &args[1]) {
+                std::ptr::write(dst, Value::from_bool(s.contains(t.as_str())));
+                return 0;
+            }
+        }
+        // Fast path: inside(str) — reverse containment
+        if name == "inside" && args.len() == 2 {
+            if let (Value::Str(s), Value::Str(t)) = (&args[0], &args[1]) {
+                std::ptr::write(dst, Value::from_bool(t.contains(s.as_str())));
+                return 0;
+            }
+        }
+        // Fast path: startswith/endswith/ltrimstr/rtrimstr — string operations
         if args.len() == 2 {
             if let (Value::Str(s), Value::Str(t)) = (&args[0], &args[1]) {
                 match name {
@@ -5974,6 +6013,31 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                         return 0;
                     }
                     _ => {}
+                }
+            }
+        }
+        // Fast path: getpath([path]) — inline path traversal
+        if name == "getpath" && args.len() == 2 {
+            if let Value::Arr(path) = &args[1] {
+                let mut current = args[0].clone();
+                let mut ok = true;
+                for key in path.iter() {
+                    match (&current, key) {
+                        (Value::Obj(o), Value::Str(k)) => {
+                            current = o.get(k.as_str()).cloned().unwrap_or(Value::Null);
+                        }
+                        (Value::Arr(a), Value::Num(n, _)) => {
+                            let idx = *n as i64;
+                            let actual = if idx < 0 { (a.len() as i64 + idx) as usize } else { idx as usize };
+                            current = a.get(actual).cloned().unwrap_or(Value::Null);
+                        }
+                        (Value::Null, _) => { current = Value::Null; }
+                        _ => { current = Value::Null; ok = false; break; }
+                    }
+                }
+                if ok || matches!(current, Value::Null) {
+                    std::ptr::write(dst, current);
+                    return 0;
                 }
             }
         }
