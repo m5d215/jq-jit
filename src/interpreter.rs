@@ -455,14 +455,14 @@ impl Filter {
                 }
             }
         }
-        // Case 2: `.field % N` — top-level BinOp
+        // Case 2: `.field op N` — top-level BinOp (all arithmetic ops)
         if let Expr::BinOp { op, lhs, rhs } = expr {
-            if !matches!(op, BinOp::Div | BinOp::Mod) { return None; }
+            if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) { return None; }
             if let Expr::Index { expr: base, key } = lhs.as_ref() {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
                 if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                     if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
-                        if *n != 0.0 {
+                        if !matches!(op, BinOp::Div | BinOp::Mod) || *n != 0.0 {
                             return Some((field.clone(), *op, *n, None));
                         }
                     }
