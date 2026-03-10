@@ -99,6 +99,27 @@ impl Filter {
         })
     }
 
+    /// Try to JIT-compile this filter if not already JIT'd.
+    /// Call this after determining the input is large enough to justify compilation.
+    pub fn compile_jit(&mut self) {
+        if self.jit_fn.is_some() { return; }
+        if let Some((ref expr, ref funcs)) = self.parsed {
+            if crate::jit::is_jit_compilable_with_funcs(expr, funcs) {
+                if let Ok(mut compiler) = crate::jit::JitCompiler::new() {
+                    if let Ok(func) = compiler.compile_with_funcs(expr, funcs) {
+                        self.jit_fn = Some(func);
+                        self._jit_compiler = Some(Box::new(compiler));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Returns true if this filter has a JIT-compiled function.
+    pub fn has_jit(&self) -> bool {
+        self.jit_fn.is_some()
+    }
+
     /// Returns true if this filter is a simple identity (`.`) that passes through input unchanged.
     pub fn is_identity(&self) -> bool {
         if let Some((ref expr, _)) = self.parsed {

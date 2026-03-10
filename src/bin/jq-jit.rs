@@ -264,8 +264,8 @@ fn real_main() {
         }
     };
 
-    let use_jit = true;
-    let filter = match Filter::with_options(&filter_str, &lib_dirs, use_jit) {
+    // Create filter without JIT initially — JIT is compiled lazily when input is large enough.
+    let mut filter = match Filter::with_options(&filter_str, &lib_dirs, false) {
         Ok(f) => f,
         Err(e) => {
             eprintln!("jq: error: {}", e);
@@ -296,6 +296,38 @@ fn real_main() {
     };
 
     let mut had_error = false;
+
+    // Pre-read stdin so we can estimate input size for JIT decision.
+    let stdin_data: Option<String> = if !null_input && files.is_empty() && !raw_input {
+        let mut s = String::new();
+        io::stdin().lock().read_to_string(&mut s).unwrap_or(0);
+        Some(s)
+    } else {
+        None
+    };
+
+    // Lazy JIT: compile only when input is large enough to amortize compilation cost.
+    // Must be done before process_input closure captures &filter.
+    const JIT_THRESHOLD: usize = 4096;
+    if !null_input {
+        if files.is_empty() {
+            if raw_input && !slurp {
+                filter.compile_jit();
+            } else if let Some(ref data) = stdin_data {
+                if data.len() >= JIT_THRESHOLD {
+                    filter.compile_jit();
+                }
+            }
+        } else {
+            // File input: check first file size
+            if let Ok(meta) = std::fs::metadata(&files[0]) {
+                if meta.len() as usize >= JIT_THRESHOLD {
+                    filter.compile_jit();
+                }
+            }
+        }
+    }
+
     // Use Vec-based buffering for compact output to avoid per-value write_all overhead
     let use_compact_buf = compact && !raw_output && !sort_keys && !join_output;
     let use_pretty_buf = !compact && !raw_output && !sort_keys && !join_output && !tab;
@@ -487,6 +519,7 @@ fn real_main() {
     };
 
     if null_input {
+        // Single input — eval is faster than JIT + compile overhead
         process_input(&Value::Null, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
     } else if files.is_empty() {
         // Read from stdin
@@ -513,8 +546,8 @@ fn real_main() {
                 process_input(&arr, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
             }
         } else {
-            let mut input_str = String::new();
-            stdin.lock().read_to_string(&mut input_str).unwrap_or(0);
+            // stdin_data was pre-read above for JIT size estimation
+            let input_str = stdin_data.unwrap_or_default();
 
             if slurp {
                 // Parse all JSON values and collect into array
