@@ -292,7 +292,11 @@ enum JitOp {
     F64Less { dst_var: u32, a_var: u32, b_var: u32 },
     F64Greater { dst_var: u32, a_var: u32, b_var: u32 },
     F64Add { dst_var: u32, a_var: u32, b_var: u32 },
+    F64Sub { dst_var: u32, a_var: u32, b_var: u32 },
     F64Mul { dst_var: u32, a_var: u32, b_var: u32 },
+    F64Rem { dst_var: u32, a_var: u32, b_var: u32 },
+    /// Float comparison: dst = 1 if a `cc` b, else 0. cc: 0=Ge, 1=Gt, 2=Le, 3=Lt, 4=Eq, 5=Ne
+    F64Cmp { dst_var: u32, a_var: u32, b_var: u32, cc: u8 },
     F64Num { dst: SlotId, src_var: u32 },
     /// Range check: (step>0 && cur<to) || (step<=0 && cur>to)
     RangeCheck { dst_var: u32, cur_var: u32, to_var: u32, step_var: u32 },
@@ -958,25 +962,56 @@ impl Flattener {
                 out
             }
             Expr::Until { cond, update } => {
-                // until(cond; update): loop { if cond then break; update }; yield current
-                let current = self.alloc_slot();
-                self.emit(JitOp::Clone { dst: current, src: input_slot });
-                let head = self.alloc_label();
-                let body = self.alloc_label();
-                let done = self.alloc_label();
-                self.emit(JitOp::Label { id: head });
-                let cond_val = self.flatten_scalar(cond, current);
-                self.emit(JitOp::IfTruthy { src: cond_val, then_label: done, else_label: body });
-                self.emit(JitOp::Drop { slot: cond_val });
-                self.emit(JitOp::Label { id: body });
-                let new_val = self.flatten_scalar(update, current);
-                self.emit(JitOp::Drop { slot: current });
-                self.emit(JitOp::Clone { dst: current, src: new_val });
-                self.emit(JitOp::Drop { slot: new_val });
-                self.emit(JitOp::Jump { label: head });
-                self.emit(JitOp::Label { id: done });
-                self.emit(JitOp::Drop { slot: cond_val });
-                current
+                // Try fused f64 until for simple numeric patterns
+                let fused = Self::classify_f64_until(cond, update);
+                if let Some((cond_cc, cond_const, update_op, update_const)) = fused {
+                    // Fused path: pure f64 loop in Cranelift
+                    let acc = self.alloc_var();
+                    self.emit(JitOp::ToF64Var { dst_var: acc, src: input_slot });
+                    let k_var = self.alloc_var();
+                    self.emit(JitOp::F64Const { dst_var: k_var, val: cond_const });
+                    let s_var = self.alloc_var();
+                    self.emit(JitOp::F64Const { dst_var: s_var, val: update_const });
+                    let cmp = self.alloc_var();
+                    let head = self.alloc_label();
+                    let body = self.alloc_label();
+                    let done = self.alloc_label();
+                    self.emit(JitOp::Label { id: head });
+                    self.emit(JitOp::F64Cmp { dst_var: cmp, a_var: acc, b_var: k_var, cc: cond_cc });
+                    self.emit(JitOp::BranchOnVar { var: cmp, nonzero_label: done, zero_label: body });
+                    self.emit(JitOp::Label { id: body });
+                    match update_op {
+                        0 => self.emit(JitOp::F64Add { dst_var: acc, a_var: acc, b_var: s_var }),
+                        1 => self.emit(JitOp::F64Sub { dst_var: acc, a_var: acc, b_var: s_var }),
+                        2 => self.emit(JitOp::F64Mul { dst_var: acc, a_var: acc, b_var: s_var }),
+                        _ => unreachable!(),
+                    }
+                    self.emit(JitOp::Jump { label: head });
+                    self.emit(JitOp::Label { id: done });
+                    let result = self.alloc_slot();
+                    self.emit(JitOp::F64Num { dst: result, src_var: acc });
+                    result
+                } else {
+                    // Generic path: until(cond; update): loop { if cond then break; update }; yield current
+                    let current = self.alloc_slot();
+                    self.emit(JitOp::Clone { dst: current, src: input_slot });
+                    let head = self.alloc_label();
+                    let body = self.alloc_label();
+                    let done = self.alloc_label();
+                    self.emit(JitOp::Label { id: head });
+                    let cond_val = self.flatten_scalar(cond, current);
+                    self.emit(JitOp::IfTruthy { src: cond_val, then_label: done, else_label: body });
+                    self.emit(JitOp::Drop { slot: cond_val });
+                    self.emit(JitOp::Label { id: body });
+                    let new_val = self.flatten_scalar(update, current);
+                    self.emit(JitOp::Drop { slot: current });
+                    self.emit(JitOp::Clone { dst: current, src: new_val });
+                    self.emit(JitOp::Drop { slot: new_val });
+                    self.emit(JitOp::Jump { label: head });
+                    self.emit(JitOp::Label { id: done });
+                    self.emit(JitOp::Drop { slot: cond_val });
+                    current
+                }
             }
             Expr::ObjectConstruct { pairs } => {
                 let out = self.alloc_slot();
@@ -3598,6 +3633,41 @@ impl Flattener {
         }
     }
 
+    /// Classify `until(cond; update)` for fused f64 loop.
+    /// Returns (cond_cc, cond_const, update_op, update_const) if fuseable.
+    /// cond_cc: 0=Ge, 1=Gt, 2=Le, 3=Lt, 4=Eq, 5=Ne
+    /// update_op: 0=Add, 1=Sub, 2=Mul
+    fn classify_f64_until(cond: &Expr, update: &Expr) -> Option<(u8, f64, u8, f64)> {
+        // cond must be: . cmp_op Literal(Num(K))
+        let (cond_cc, cond_const) = match cond {
+            Expr::BinOp { op, lhs, rhs } if matches!(lhs.as_ref(), Expr::Input) => {
+                if let Expr::Literal(Literal::Num(k, _)) = rhs.as_ref() {
+                    let cc = match op {
+                        BinOp::Ge => 0, BinOp::Gt => 1, BinOp::Le => 2, BinOp::Lt => 3,
+                        BinOp::Eq => 4, BinOp::Ne => 5,
+                        _ => return None,
+                    };
+                    (cc, *k)
+                } else { return None; }
+            }
+            _ => return None,
+        };
+        // update must be: . arith_op Literal(Num(S))
+        let (update_op, update_const) = match update {
+            Expr::BinOp { op, lhs, rhs } if matches!(lhs.as_ref(), Expr::Input) => {
+                if let Expr::Literal(Literal::Num(s, _)) = rhs.as_ref() {
+                    let uop = match op {
+                        BinOp::Add => 0, BinOp::Sub => 1, BinOp::Mul => 2,
+                        _ => return None,
+                    };
+                    (uop, *s)
+                } else { return None; }
+            }
+            _ => return None,
+        };
+        Some((cond_cc, cond_const, update_op, update_const))
+    }
+
     /// Iterate source for foreach: update acc and yield extract for each element.
     fn flatten_gen_with_foreach(&mut self, source: &Expr, var_index: u16, acc_index: u16,
                                 update: &Expr, extract: Option<&Expr>, input_slot: SlotId) -> bool {
@@ -5999,6 +6069,7 @@ impl JitCompiler {
             ("jit_rt_sort_inplace", jit_rt_sort_inplace as *const u8),
             ("jit_rt_collect_range", jit_rt_collect_range as *const u8),
             ("jit_rt_arr_push", jit_rt_arr_push as *const u8),
+            ("jit_rt_fmod", libm::fmod as *const u8),
         ];
         for (name, ptr) in symbols {
             jit_builder.symbol(*name, *ptr);
@@ -6941,6 +7012,43 @@ impl JitCompiler {
                         let bits = b.ins().bitcast(ptr_ty, cranelift_codegen::ir::MemFlags::new(), prod);
                         b.def_var(vars[*dst_var as usize], bits);
                     }
+                    JitOp::F64Sub { dst_var, a_var, b_var: bv } => {
+                        let a_bits = b.use_var(vars[*a_var as usize]);
+                        let b_bits = b.use_var(vars[*bv as usize]);
+                        let a_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), a_bits);
+                        let b_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), b_bits);
+                        let diff = b.ins().fsub(a_f, b_f);
+                        let bits = b.ins().bitcast(ptr_ty, cranelift_codegen::ir::MemFlags::new(), diff);
+                        b.def_var(vars[*dst_var as usize], bits);
+                    }
+                    JitOp::F64Rem { dst_var, a_var, b_var: bv } => {
+                        let a_bits = b.use_var(vars[*a_var as usize]);
+                        let b_bits = b.use_var(vars[*bv as usize]);
+                        let a_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), a_bits);
+                        let b_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), b_bits);
+                        let rem = b.ins().call(rt["fmod"], &[a_f, b_f]);
+                        let rem_f = b.inst_results(rem)[0];
+                        let bits = b.ins().bitcast(ptr_ty, cranelift_codegen::ir::MemFlags::new(), rem_f);
+                        b.def_var(vars[*dst_var as usize], bits);
+                    }
+                    JitOp::F64Cmp { dst_var, a_var, b_var: bv, cc } => {
+                        use cranelift_codegen::ir::condcodes::FloatCC;
+                        let a_bits = b.use_var(vars[*a_var as usize]);
+                        let b_bits = b.use_var(vars[*bv as usize]);
+                        let a_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), a_bits);
+                        let b_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), b_bits);
+                        let fcc = match cc {
+                            0 => FloatCC::GreaterThanOrEqual,
+                            1 => FloatCC::GreaterThan,
+                            2 => FloatCC::LessThanOrEqual,
+                            3 => FloatCC::LessThan,
+                            4 => FloatCC::Equal,
+                            _ => FloatCC::NotEqual,
+                        };
+                        let cmp = b.ins().fcmp(fcc, a_f, b_f);
+                        let result = b.ins().uextend(ptr_ty, cmp);
+                        b.def_var(vars[*dst_var as usize], result);
+                    }
                     JitOp::RangeCheck { dst_var, cur_var, to_var, step_var } => {
                         let cur_bits = b.use_var(vars[*cur_var as usize]);
                         let to_bits = b.use_var(vars[*to_var as usize]);
@@ -7183,6 +7291,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("sort_inplace", [p], [p]);     // v: *mut Value -> status
     decl!("collect_range", [p, f], []);  // dst, n (f64)
     decl!("arr_push", [p, p], []);       // arr: *mut Value, val: *const Value
+    decl!("fmod", [f, f], [f]);          // f64 modulo (libm::fmod)
     Ok(())
 }
 
