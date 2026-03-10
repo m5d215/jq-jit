@@ -23,6 +23,24 @@ pub enum RemapExpr {
     ConstOpField(f64, crate::ir::BinOp, String),
 }
 
+/// Output of a conditional branch — either a literal or a field access.
+#[derive(Debug, Clone)]
+pub enum BranchOutput {
+    /// Pre-serialized JSON literal bytes
+    Literal(Vec<u8>),
+    /// `.field` — extract raw bytes from input
+    Field(String),
+}
+
+/// One branch in a conditional chain: if .field cmp N then output.
+#[derive(Debug, Clone)]
+pub struct CondBranch {
+    pub cond_field: String,
+    pub cond_op: crate::ir::BinOp,
+    pub cond_threshold: f64,
+    pub output: BranchOutput,
+}
+
 /// A compiled jq filter, ready to execute.
 pub struct Filter {
     program: String,
@@ -913,6 +931,97 @@ impl Filter {
             }
         }
         None
+    }
+
+    /// Detect chained if-elif-else with field comparisons and field/literal outputs.
+    /// `if .x > N then .x elif .x > M then .y else 0 end`
+    /// Returns (branches, else_output). Only matches if it extends beyond detect_cmp_branch_literals
+    /// (i.e., has >1 branch, or has a field output).
+    pub fn detect_cond_chain(&self) -> Option<(Vec<CondBranch>, BranchOutput)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+
+        let expr_to_output = |e: &Expr| -> Option<BranchOutput> {
+            // .field
+            if let Expr::Index { expr: base, key } = e {
+                if matches!(base.as_ref(), Expr::Input) {
+                    if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                        return Some(BranchOutput::Field(f.clone()));
+                    }
+                }
+                return None;
+            }
+            // Literal
+            match e {
+                Expr::Literal(Literal::Num(n, repr)) => {
+                    let mut buf = Vec::new();
+                    if let Some(r) = repr { buf.extend_from_slice(r.as_bytes()); }
+                    else {
+                        let i = *n as i64;
+                        if i as f64 == *n { buf.extend_from_slice(itoa::Buffer::new().format(i).as_bytes()); }
+                        else { buf.extend_from_slice(ryu::Buffer::new().format(*n).as_bytes()); }
+                    }
+                    Some(BranchOutput::Literal(buf))
+                }
+                Expr::Literal(Literal::Str(s)) => {
+                    let mut v = Vec::with_capacity(s.len() + 2);
+                    v.push(b'"');
+                    for &b in s.as_bytes() {
+                        match b {
+                            b'"' => v.extend_from_slice(b"\\\""),
+                            b'\\' => v.extend_from_slice(b"\\\\"),
+                            b'\n' => v.extend_from_slice(b"\\n"),
+                            b'\r' => v.extend_from_slice(b"\\r"),
+                            b'\t' => v.extend_from_slice(b"\\t"),
+                            c if c < 0x20 => { v.extend_from_slice(format!("\\u{:04x}", c).as_bytes()); }
+                            _ => v.push(b),
+                        }
+                    }
+                    v.push(b'"');
+                    Some(BranchOutput::Literal(v))
+                }
+                Expr::Literal(Literal::Null) => Some(BranchOutput::Literal(b"null".to_vec())),
+                Expr::Literal(Literal::True) => Some(BranchOutput::Literal(b"true".to_vec())),
+                Expr::Literal(Literal::False) => Some(BranchOutput::Literal(b"false".to_vec())),
+                _ => None,
+            }
+        };
+
+        let extract_cond = |cond: &Expr| -> Option<(String, BinOp, f64)> {
+            if let Expr::BinOp { op, lhs, rhs } = cond {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                    return None;
+                }
+                if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                            return Some((field.clone(), *op, *n));
+                        }
+                    }
+                }
+            }
+            None
+        };
+
+        // Recursively collect branches from nested IfThenElse
+        let mut branches = Vec::new();
+        let mut current = expr;
+        loop {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = current {
+                let (field, op, threshold) = extract_cond(cond)?;
+                let output = expr_to_output(then_branch)?;
+                branches.push(CondBranch { cond_field: field, cond_op: op, cond_threshold: threshold, output });
+                current = else_branch;
+            } else {
+                let else_output = expr_to_output(current)?;
+                // Only use this if it adds value over detect_cmp_branch_literals
+                let has_field_output = branches.iter().any(|b| matches!(b.output, BranchOutput::Field(_)))
+                    || matches!(else_output, BranchOutput::Field(_));
+                if branches.len() < 2 && !has_field_output { return None; }
+                return Some((branches, else_output));
+            }
+        }
     }
 
     /// Detect `select(.field > N) | .output_field` or `if .field > N then .output_field else empty end`.

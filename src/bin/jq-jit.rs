@@ -303,10 +303,13 @@ fn real_main() {
     let field_alt = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
         filter.detect_field_alternative()
     } else { None };
-    let cmp_branch_lit = if use_compact_buf && !exit_status && select_cmp.is_none() && field_access.is_none() {
+    let cond_chain = if use_compact_buf && !exit_status && select_cmp.is_none() && field_access.is_none() {
+        filter.detect_cond_chain()
+    } else { None };
+    let cmp_branch_lit = if use_compact_buf && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() {
         filter.detect_cmp_branch_literals()
     } else { None };
-    let select_compound = if use_compact_buf && !exit_status && select_cmp.is_none() && field_access.is_none() && cmp_branch_lit.is_none() {
+    let select_compound = if use_compact_buf && !exit_status && select_cmp.is_none() && field_access.is_none() && cmp_branch_lit.is_none() && cond_chain.is_none() {
         filter.detect_select_compound_cmp()
     } else { None };
     let select_cmp_field = if use_compact_buf && !exit_status && select_cmp.is_none() && field_access.is_none() {
@@ -329,7 +332,7 @@ fn real_main() {
         || field_str_builtin.is_some() || field_ltrimstr_tonumber.is_some()
         || field_str_concat.is_some() || field_alt.is_some()
         || select_cmp.is_some()
-        || cmp_branch_lit.is_some() || select_compound.is_some()
+        || cond_chain.is_some() || cmp_branch_lit.is_some() || select_compound.is_some()
         || select_str.is_some()
         || select_str_test.is_some() || select_nested_cmp.is_some()
         || select_cmp_field.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_str_field.is_some()
@@ -1459,6 +1462,65 @@ fn real_main() {
                         }
                         Ok(())
                     })
+                } else if let Some((ref branches, ref else_output)) = cond_chain {
+                    use jq_jit::interpreter::BranchOutput;
+                    use jq_jit::ir::BinOp;
+                    // Collect all unique fields needed for conditions and field outputs
+                    let mut all_fields: Vec<String> = Vec::new();
+                    let mut field_idx = std::collections::HashMap::new();
+                    for br in branches {
+                        if !field_idx.contains_key(&br.cond_field) {
+                            field_idx.insert(br.cond_field.clone(), all_fields.len());
+                            all_fields.push(br.cond_field.clone());
+                        }
+                        if let BranchOutput::Field(ref f) = br.output {
+                            if !field_idx.contains_key(f) {
+                                field_idx.insert(f.clone(), all_fields.len());
+                                all_fields.push(f.clone());
+                            }
+                        }
+                    }
+                    if let BranchOutput::Field(ref f) = else_output {
+                        if !field_idx.contains_key(f) {
+                            field_idx.insert(f.clone(), all_fields.len());
+                            all_fields.push(f.clone());
+                        }
+                    }
+                    let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some(ranges) = json_object_get_fields_raw(raw, 0, &field_refs) {
+                            let mut output = None;
+                            for br in branches {
+                                let idx = field_idx[&br.cond_field];
+                                let (vs, ve) = ranges[idx];
+                                if let Some(val) = parse_json_num(&raw[vs..ve]) {
+                                    let pass = match br.cond_op {
+                                        BinOp::Gt => val > br.cond_threshold, BinOp::Lt => val < br.cond_threshold,
+                                        BinOp::Ge => val >= br.cond_threshold, BinOp::Le => val <= br.cond_threshold,
+                                        BinOp::Eq => val == br.cond_threshold, BinOp::Ne => val != br.cond_threshold,
+                                        _ => false,
+                                    };
+                                    if pass { output = Some(&br.output); break; }
+                                }
+                            }
+                            let out_branch = output.unwrap_or(else_output);
+                            match out_branch {
+                                BranchOutput::Literal(ref bytes) => compact_buf.extend_from_slice(bytes),
+                                BranchOutput::Field(ref f) => {
+                                    let idx = field_idx[f];
+                                    let (vs, ve) = ranges[idx];
+                                    compact_buf.extend_from_slice(&raw[vs..ve]);
+                                }
+                            }
+                            compact_buf.push(b'\n');
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
                 } else if let Some((ref field, ref op, threshold, ref t_bytes, ref f_bytes)) = cmp_branch_lit {
                     use jq_jit::ir::BinOp;
                     json_stream_raw(&input_str, |start, end| {
@@ -2275,6 +2337,65 @@ fn real_main() {
                         compact_buf.extend_from_slice(fallback_bytes);
                     }
                     compact_buf.push(b'\n');
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref branches, ref else_output)) = cond_chain {
+                use jq_jit::interpreter::BranchOutput;
+                use jq_jit::ir::BinOp;
+                let content_bytes = content.as_bytes();
+                let mut all_fields: Vec<String> = Vec::new();
+                let mut field_idx = std::collections::HashMap::new();
+                for br in branches {
+                    if !field_idx.contains_key(&br.cond_field) {
+                        field_idx.insert(br.cond_field.clone(), all_fields.len());
+                        all_fields.push(br.cond_field.clone());
+                    }
+                    if let BranchOutput::Field(ref f) = br.output {
+                        if !field_idx.contains_key(f) {
+                            field_idx.insert(f.clone(), all_fields.len());
+                            all_fields.push(f.clone());
+                        }
+                    }
+                }
+                if let BranchOutput::Field(ref f) = else_output {
+                    if !field_idx.contains_key(f) {
+                        field_idx.insert(f.clone(), all_fields.len());
+                        all_fields.push(f.clone());
+                    }
+                }
+                let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some(ranges) = json_object_get_fields_raw(raw, 0, &field_refs) {
+                        let mut output = None;
+                        for br in branches {
+                            let idx = field_idx[&br.cond_field];
+                            let (vs, ve) = ranges[idx];
+                            if let Some(val) = parse_json_num(&raw[vs..ve]) {
+                                let pass = match br.cond_op {
+                                    BinOp::Gt => val > br.cond_threshold, BinOp::Lt => val < br.cond_threshold,
+                                    BinOp::Ge => val >= br.cond_threshold, BinOp::Le => val <= br.cond_threshold,
+                                    BinOp::Eq => val == br.cond_threshold, BinOp::Ne => val != br.cond_threshold,
+                                    _ => false,
+                                };
+                                if pass { output = Some(&br.output); break; }
+                            }
+                        }
+                        let out_branch = output.unwrap_or(else_output);
+                        match out_branch {
+                            BranchOutput::Literal(ref bytes) => compact_buf.extend_from_slice(bytes),
+                            BranchOutput::Field(ref f) => {
+                                let idx = field_idx[f];
+                                let (vs, ve) = ranges[idx];
+                                compact_buf.extend_from_slice(&raw[vs..ve]);
+                            }
+                        }
+                        compact_buf.push(b'\n');
+                    }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
                         compact_buf.clear();
