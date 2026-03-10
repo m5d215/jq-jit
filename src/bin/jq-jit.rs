@@ -297,6 +297,9 @@ fn real_main() {
     let field_split_join = if use_compact_buf && !exit_status && field_access.is_none() {
         filter.detect_field_split_join()
     } else { None };
+    let select_compound = if use_compact_buf && !exit_status && select_cmp.is_none() && field_access.is_none() {
+        filter.detect_select_compound_cmp()
+    } else { None };
     let select_cmp_field = if use_compact_buf && !exit_status && select_cmp.is_none() && field_access.is_none() {
         filter.detect_select_cmp_then_field()
     } else { None };
@@ -311,7 +314,8 @@ fn real_main() {
     let has_raw_fast_path = field_access.is_some() || nested_field.is_some() || field_remap.is_some()
         || field_binop.is_some() || field_unary_num.is_some() || field_binop_const_unary.is_some()
         || field_str_builtin.is_some() || field_ltrimstr_tonumber.is_some()
-        || field_str_concat.is_some() || select_cmp.is_some() || select_str.is_some()
+        || field_str_concat.is_some() || select_cmp.is_some() || select_compound.is_some()
+        || select_str.is_some()
         || select_str_test.is_some() || select_nested_cmp.is_some()
         || select_cmp_field.is_some() || select_cmp_remap.is_some() || select_str_field.is_some()
         || array_field.is_some() || multi_field.is_some() || is_length || is_keys
@@ -1311,6 +1315,44 @@ fn real_main() {
                         }
                         Ok(())
                     })
+                } else if let Some((ref conj, ref cmps)) = select_compound {
+                    use jq_jit::ir::BinOp;
+                    let is_and = matches!(conj, BinOp::And);
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        let pass = if is_and {
+                            cmps.iter().all(|(field, op, threshold)| {
+                                json_object_get_num(raw, 0, field).map_or(false, |val| match op {
+                                    BinOp::Gt => val > *threshold, BinOp::Lt => val < *threshold,
+                                    BinOp::Ge => val >= *threshold, BinOp::Le => val <= *threshold,
+                                    BinOp::Eq => val == *threshold, BinOp::Ne => val != *threshold,
+                                    _ => false,
+                                })
+                            })
+                        } else {
+                            cmps.iter().any(|(field, op, threshold)| {
+                                json_object_get_num(raw, 0, field).map_or(false, |val| match op {
+                                    BinOp::Gt => val > *threshold, BinOp::Lt => val < *threshold,
+                                    BinOp::Ge => val >= *threshold, BinOp::Le => val <= *threshold,
+                                    BinOp::Eq => val == *threshold, BinOp::Ne => val != *threshold,
+                                    _ => false,
+                                })
+                            })
+                        };
+                        if pass {
+                            if is_json_compact(raw) {
+                                compact_buf.extend_from_slice(raw);
+                            } else {
+                                push_json_compact_raw(&mut compact_buf, raw);
+                            }
+                            compact_buf.push(b'\n');
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
                 } else if let Some((ref sel_field, ref op, threshold, ref out_field)) = select_cmp_field {
                     use jq_jit::ir::BinOp;
                     json_stream_raw(&input_str, |start, end| {
@@ -1951,6 +1993,45 @@ fn real_main() {
                                 compact_buf.push(b'\n');
                             }
                         }
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref conj, ref cmps)) = select_compound {
+                use jq_jit::ir::BinOp;
+                let content_bytes = content.as_bytes();
+                let is_and = matches!(conj, BinOp::And);
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    let pass = if is_and {
+                        cmps.iter().all(|(field, op, threshold)| {
+                            json_object_get_num(raw, 0, field).map_or(false, |val| match op {
+                                BinOp::Gt => val > *threshold, BinOp::Lt => val < *threshold,
+                                BinOp::Ge => val >= *threshold, BinOp::Le => val <= *threshold,
+                                BinOp::Eq => val == *threshold, BinOp::Ne => val != *threshold,
+                                _ => false,
+                            })
+                        })
+                    } else {
+                        cmps.iter().any(|(field, op, threshold)| {
+                            json_object_get_num(raw, 0, field).map_or(false, |val| match op {
+                                BinOp::Gt => val > *threshold, BinOp::Lt => val < *threshold,
+                                BinOp::Ge => val >= *threshold, BinOp::Le => val <= *threshold,
+                                BinOp::Eq => val == *threshold, BinOp::Ne => val != *threshold,
+                                _ => false,
+                            })
+                        })
+                    };
+                    if pass {
+                        if is_json_compact(raw) {
+                            compact_buf.extend_from_slice(raw);
+                        } else {
+                            push_json_compact_raw(&mut compact_buf, raw);
+                        }
+                        compact_buf.push(b'\n');
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);

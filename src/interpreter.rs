@@ -155,6 +155,58 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.f1 > N and .f2 < M)` or `select(.f1 > N or .f2 < M)` pattern.
+    /// Returns (conjunct, Vec<(field, op, threshold)>) where conjunct is And or Or.
+    pub fn detect_select_compound_cmp(&self) -> Option<(crate::ir::BinOp, Vec<(String, crate::ir::BinOp, f64)>)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
+            if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+            // cond = BinOp(And/Or, cmp1, cmp2)
+            let extract_cmp = |e: &Expr| -> Option<(String, BinOp, f64)> {
+                if let Expr::BinOp { op, lhs, rhs } = e {
+                    if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                        return None;
+                    }
+                    if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                            if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                return Some((field.clone(), *op, *n));
+                            }
+                        }
+                    }
+                }
+                None
+            };
+            // Flatten And/Or chains: (A and B) and C → [A, B, C]
+            fn collect_conds<'a>(e: &'a Expr, conj: BinOp, out: &mut Vec<&'a Expr>) -> bool {
+                if let Expr::BinOp { op, lhs, rhs } = e {
+                    if std::mem::discriminant(op) == std::mem::discriminant(&conj) {
+                        return collect_conds(lhs, conj, out) && collect_conds(rhs, conj, out);
+                    }
+                }
+                out.push(e);
+                true
+            }
+            for conj in [BinOp::And, BinOp::Or] {
+                if let Expr::BinOp { op, .. } = cond.as_ref() {
+                    if std::mem::discriminant(op) == std::mem::discriminant(&conj) {
+                        let mut parts = Vec::new();
+                        if collect_conds(cond, conj, &mut parts) && parts.len() >= 2 {
+                            let cmps: Vec<_> = parts.iter().filter_map(|e| extract_cmp(e)).collect();
+                            if cmps.len() == parts.len() {
+                                return Some((conj, cmps));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.a.b.c > N)` pattern for nested field numeric comparison.
     /// Returns (field_path, comparison_op, threshold) if detected.
     pub fn detect_select_nested_cmp(&self) -> Option<(Vec<String>, crate::ir::BinOp, f64)> {
