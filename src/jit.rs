@@ -325,6 +325,10 @@ enum JitOp {
     /// Fused [range(n)]: pre-allocate and fill array in one call.
     CollectRange { dst: SlotId, n: SlotId },
 
+    /// In-place array push: arr.push(val). Container must have refcount == 1.
+    /// Handles null + push → [val] (jq null identity for addition).
+    ArrPush { arr: SlotId, val: SlotId },
+
     // Termination
     ReturnContinue,
     ReturnError,
@@ -1294,6 +1298,17 @@ impl Flattener {
                     } else { None }
                 } else { None };
 
+                // Detect accumulator-push pattern: reduce ... (init; . + [gen]) — in-place push
+                let acc_push_collect = if acc_add_rhs.is_none() {
+                    if let Expr::BinOp { op, lhs, rhs } = update.as_ref() {
+                        if matches!(op, BinOp::Add) && matches!(lhs.as_ref(), Expr::Input) {
+                            if let Expr::Collect { generator } = rhs.as_ref() {
+                                Some(generator.as_ref())
+                            } else { None }
+                        } else { None }
+                    } else { None }
+                } else { None };
+
                 // Detect fused numeric reduce: reduce range(from;to) as $x (num_init; . + $x)
                 // Keeps everything in f64 variables — zero Value boxing in the loop body.
                 let is_fused_range_add = if let Some(rhs_expr) = acc_add_rhs {
@@ -1378,6 +1393,21 @@ impl Flattener {
                         this.emit(JitOp::Drop { slot: acc });
                         this.emit(JitOp::SetVar { var_index: *acc_index, src: result });
                         this.emit(JitOp::Drop { slot: result });
+                    });
+                } else if let Some(gen) = acc_push_collect {
+                    // Optimized: TakeVar + ArrPush for `. + [gen]` — in-place push, no temp array
+                    let gen = gen.clone();
+                    self.flatten_gen_with_each_output(source, input_slot, &|this, elem| {
+                        this.emit(JitOp::SetVar { var_index: *var_index, src: elem });
+                        let acc = this.alloc_slot();
+                        this.emit(JitOp::TakeVar { dst: acc, var_index: *acc_index });
+                        // Evaluate generator with input = accumulator, push each output
+                        this.flatten_gen_with_each_output(&gen, acc, &|this2, val| {
+                            this2.emit(JitOp::ArrPush { arr: acc, val });
+                            this2.emit(JitOp::Drop { slot: val });
+                        });
+                        this.emit(JitOp::SetVar { var_index: *acc_index, src: acc });
+                        this.emit(JitOp::Drop { slot: acc });
                     });
                 } else if let Some(info) = inplace_info {
                     // Optimized: TakeVar + PathExtract/PathInsert avoids container cloning
@@ -4943,6 +4973,23 @@ extern "C" fn jit_rt_collect_range(dst: *mut Value, n: f64) {
     }
     unsafe { std::ptr::write(dst, Value::Arr(Rc::new(arr))); }
 }
+/// In-place array push: arr.push(val). Handles null → [val] (jq null + array identity).
+extern "C" fn jit_rt_arr_push(arr: *mut Value, val: *const Value) {
+    unsafe {
+        match &mut *arr {
+            Value::Arr(rc) => {
+                Rc::make_mut(rc).push((*val).clone());
+            }
+            Value::Null => {
+                // null + [x] = [x] in jq
+                std::ptr::write(arr, Value::Arr(Rc::new(vec![(*val).clone()])));
+            }
+            _ => {
+                // Type error: silently ignore (should not happen in well-typed reduce)
+            }
+        }
+    }
+}
 extern "C" fn jit_rt_collect_begin(env: *mut JitEnv) {
     unsafe { (*env).collect_stacks.push(Vec::with_capacity(16)); }
 }
@@ -5612,6 +5659,10 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
             JitOp::ThrowError { msg } => { *use_count.entry(*msg).or_insert(0) += 1; }
             JitOp::MutateInplace { slot, .. } => { *use_count.entry(*slot).or_insert(0) += 1; }
             JitOp::CollectRange { n, .. } => { *use_count.entry(*n).or_insert(0) += 1; }
+            JitOp::ArrPush { arr, val } => {
+                *use_count.entry(*arr).or_insert(0) += 1;
+                *use_count.entry(*val).or_insert(0) += 1;
+            }
             JitOp::CallBuiltin { args, .. } => {
                 for a in args { *use_count.entry(*a).or_insert(0) += 1; }
             }
@@ -5695,6 +5746,10 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 JitOp::ThrowError { msg } => { *use_count.entry(*msg).or_insert(0) += 1; }
                 JitOp::MutateInplace { slot, .. } => { *use_count.entry(*slot).or_insert(0) += 1; }
                 JitOp::CollectRange { n, .. } => { *use_count.entry(*n).or_insert(0) += 1; }
+                JitOp::ArrPush { arr, val } => {
+                    *use_count.entry(*arr).or_insert(0) += 1;
+                    *use_count.entry(*val).or_insert(0) += 1;
+                }
                 JitOp::CallBuiltin { args, .. } => {
                     for a in args { *use_count.entry(*a).or_insert(0) += 1; }
                 }
@@ -5869,6 +5924,7 @@ impl JitCompiler {
             ("jit_rt_reverse_inplace", jit_rt_reverse_inplace as *const u8),
             ("jit_rt_sort_inplace", jit_rt_sort_inplace as *const u8),
             ("jit_rt_collect_range", jit_rt_collect_range as *const u8),
+            ("jit_rt_arr_push", jit_rt_arr_push as *const u8),
         ];
         for (name, ptr) in symbols {
             jit_builder.symbol(*name, *ptr);
@@ -6939,6 +6995,11 @@ impl JitCompiler {
                         let n_val = b.inst_results(n_f64)[0];
                         b.ins().call(rt["collect_range"], &[d, n_val]);
                     }
+                    JitOp::ArrPush { arr, val } => {
+                        let a = slot_addr(&mut b, *arr);
+                        let v = slot_addr(&mut b, *val);
+                        b.ins().call(rt["arr_push"], &[a, v]);
+                    }
                 }
             }
 
@@ -7038,6 +7099,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("reverse_inplace", [p], [p]);  // v: *mut Value -> status
     decl!("sort_inplace", [p], [p]);     // v: *mut Value -> status
     decl!("collect_range", [p, f], []);  // dst, n (f64)
+    decl!("arr_push", [p, p], []);       // arr: *mut Value, val: *const Value
     Ok(())
 }
 

@@ -192,8 +192,7 @@ fn real_main() {
         }
     };
 
-    // Skip JIT for null-input: compilation overhead exceeds savings for one-shot filters.
-    let use_jit = !null_input;
+    let use_jit = true;
     let filter = match Filter::with_options(&filter_str, &lib_dirs, use_jit) {
         Ok(f) => f,
         Err(e) => {
