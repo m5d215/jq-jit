@@ -236,7 +236,10 @@ fn real_main() {
     let field_remap = if use_compact_buf && !exit_status && field_access.is_none() && nested_field.is_none() {
         filter.detect_field_remap()
     } else { None };
-    let field_binop = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() {
+    let computed_remap = if use_compact_buf && !exit_status && field_access.is_none() && nested_field.is_none() && field_remap.is_none() {
+        filter.detect_computed_remap()
+    } else { None };
+    let field_binop = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && computed_remap.is_none() {
         filter.detect_field_binop()
     } else { None };
     let field_unary_num = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_binop.is_none() {
@@ -318,6 +321,7 @@ fn real_main() {
     // Field projection: if filter only accesses specific fields, skip parsing the rest.
     // Only activate when no raw byte fast path matched (those handle their own parsing).
     let has_raw_fast_path = field_access.is_some() || nested_field.is_some() || field_remap.is_some()
+        || computed_remap.is_some()
         || field_binop.is_some() || field_unary_num.is_some() || field_binop_const_unary.is_some()
         || field_str_builtin.is_some() || field_ltrimstr_tonumber.is_some()
         || field_str_concat.is_some() || field_alt.is_some()
@@ -720,6 +724,114 @@ fn real_main() {
                             for (i, (vs, ve)) in ranges.iter().enumerate() {
                                 compact_buf.extend_from_slice(&key_prefixes[i]);
                                 compact_buf.extend_from_slice(&raw[*vs..*ve]);
+                            }
+                            compact_buf.extend_from_slice(b"}\n");
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some(ref cremap) = computed_remap {
+                    use jq_jit::interpreter::RemapExpr;
+                    use jq_jit::ir::BinOp;
+                    // Collect all unique input fields needed
+                    let mut all_fields: Vec<String> = Vec::new();
+                    let mut field_idx = std::collections::HashMap::new();
+                    for (_, rexpr) in cremap {
+                        let names: Vec<&str> = match rexpr {
+                            RemapExpr::Field(f) => vec![f.as_str()],
+                            RemapExpr::FieldOpConst(f, _, _) => vec![f.as_str()],
+                            RemapExpr::FieldOpField(f1, _, f2) => vec![f1.as_str(), f2.as_str()],
+                            RemapExpr::ConstOpField(_, _, f) => vec![f.as_str()],
+                        };
+                        for name in names {
+                            if !field_idx.contains_key(name) {
+                                field_idx.insert(name.to_string(), all_fields.len());
+                                all_fields.push(name.to_string());
+                            }
+                        }
+                    }
+                    let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                    // Pre-build key prefixes: {"key1":val1,"key2":val2}
+                    let mut key_prefixes: Vec<Vec<u8>> = Vec::with_capacity(cremap.len());
+                    for (i, (out_key, _)) in cremap.iter().enumerate() {
+                        let mut prefix = Vec::new();
+                        if i == 0 { prefix.push(b'{'); } else { prefix.push(b','); }
+                        prefix.push(b'"');
+                        prefix.extend_from_slice(out_key.as_bytes());
+                        prefix.extend_from_slice(b"\":");
+                        key_prefixes.push(prefix);
+                    }
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some(ranges) = json_object_get_fields_raw(raw, 0, &field_refs) {
+                            for (i, (_out_key, rexpr)) in cremap.iter().enumerate() {
+                                compact_buf.extend_from_slice(&key_prefixes[i]);
+                                match rexpr {
+                                    RemapExpr::Field(f) => {
+                                        let idx = field_idx[f.as_str()];
+                                        let (vs, ve) = ranges[idx];
+                                        compact_buf.extend_from_slice(&raw[vs..ve]);
+                                    }
+                                    RemapExpr::FieldOpConst(f, op, n) => {
+                                        let idx = field_idx[f.as_str()];
+                                        let (vs, ve) = ranges[idx];
+                                        if let Some(a) = parse_json_num(&raw[vs..ve]) {
+                                            let result = match op {
+                                                BinOp::Add => a + n,
+                                                BinOp::Sub => a - n,
+                                                BinOp::Mul => a * n,
+                                                BinOp::Div => a / n,
+                                                BinOp::Mod => a % n,
+                                                _ => unreachable!(),
+                                            };
+                                            push_jq_number_bytes(&mut compact_buf, result);
+                                        } else {
+                                            compact_buf.extend_from_slice(b"null");
+                                        }
+                                    }
+                                    RemapExpr::FieldOpField(f1, op, f2) => {
+                                        let idx1 = field_idx[f1.as_str()];
+                                        let idx2 = field_idx[f2.as_str()];
+                                        let (vs1, ve1) = ranges[idx1];
+                                        let (vs2, ve2) = ranges[idx2];
+                                        if let (Some(a), Some(b)) = (parse_json_num(&raw[vs1..ve1]), parse_json_num(&raw[vs2..ve2])) {
+                                            let result = match op {
+                                                BinOp::Add => a + b,
+                                                BinOp::Sub => a - b,
+                                                BinOp::Mul => a * b,
+                                                BinOp::Div => a / b,
+                                                BinOp::Mod => a % b,
+                                                _ => unreachable!(),
+                                            };
+                                            push_jq_number_bytes(&mut compact_buf, result);
+                                        } else {
+                                            compact_buf.extend_from_slice(b"null");
+                                        }
+                                    }
+                                    RemapExpr::ConstOpField(n, op, f) => {
+                                        let idx = field_idx[f.as_str()];
+                                        let (vs, ve) = ranges[idx];
+                                        if let Some(b) = parse_json_num(&raw[vs..ve]) {
+                                            let result = match op {
+                                                BinOp::Add => n + b,
+                                                BinOp::Sub => n - b,
+                                                BinOp::Mul => n * b,
+                                                BinOp::Div => n / b,
+                                                BinOp::Mod => n % b,
+                                                _ => unreachable!(),
+                                            };
+                                            push_jq_number_bytes(&mut compact_buf, result);
+                                        } else {
+                                            compact_buf.extend_from_slice(b"null");
+                                        }
+                                    }
+                                }
                             }
                             compact_buf.extend_from_slice(b"}\n");
                         } else {
@@ -2274,6 +2386,113 @@ fn real_main() {
                         compact_buf.extend_from_slice(b"}\n");
                     } else {
                         // Missing field → fall back to parse + JIT
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some(ref cremap) = computed_remap {
+                use jq_jit::interpreter::RemapExpr;
+                use jq_jit::ir::BinOp;
+                let content_bytes = content.as_bytes();
+                let mut all_fields: Vec<String> = Vec::new();
+                let mut field_idx = std::collections::HashMap::new();
+                for (_, rexpr) in cremap {
+                    let names: Vec<&str> = match rexpr {
+                        RemapExpr::Field(f) => vec![f.as_str()],
+                        RemapExpr::FieldOpConst(f, _, _) => vec![f.as_str()],
+                        RemapExpr::FieldOpField(f1, _, f2) => vec![f1.as_str(), f2.as_str()],
+                        RemapExpr::ConstOpField(_, _, f) => vec![f.as_str()],
+                    };
+                    for name in names {
+                        if !field_idx.contains_key(name) {
+                            field_idx.insert(name.to_string(), all_fields.len());
+                            all_fields.push(name.to_string());
+                        }
+                    }
+                }
+                let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                let mut key_prefixes: Vec<Vec<u8>> = Vec::with_capacity(cremap.len());
+                for (i, (out_key, _)) in cremap.iter().enumerate() {
+                    let mut prefix = Vec::new();
+                    if i == 0 { prefix.push(b'{'); } else { prefix.push(b','); }
+                    prefix.push(b'"');
+                    prefix.extend_from_slice(out_key.as_bytes());
+                    prefix.extend_from_slice(b"\":");
+                    key_prefixes.push(prefix);
+                }
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some(ranges) = json_object_get_fields_raw(raw, 0, &field_refs) {
+                        for (i, (_out_key, rexpr)) in cremap.iter().enumerate() {
+                            compact_buf.extend_from_slice(&key_prefixes[i]);
+                            match rexpr {
+                                RemapExpr::Field(f) => {
+                                    let idx = field_idx[f.as_str()];
+                                    let (vs, ve) = ranges[idx];
+                                    compact_buf.extend_from_slice(&raw[vs..ve]);
+                                }
+                                RemapExpr::FieldOpConst(f, op, n) => {
+                                    let idx = field_idx[f.as_str()];
+                                    let (vs, ve) = ranges[idx];
+                                    if let Some(a) = parse_json_num(&raw[vs..ve]) {
+                                        let result = match op {
+                                            BinOp::Add => a + n,
+                                            BinOp::Sub => a - n,
+                                            BinOp::Mul => a * n,
+                                            BinOp::Div => a / n,
+                                            BinOp::Mod => a % n,
+                                            _ => unreachable!(),
+                                        };
+                                        push_jq_number_bytes(&mut compact_buf, result);
+                                    } else {
+                                        compact_buf.extend_from_slice(b"null");
+                                    }
+                                }
+                                RemapExpr::FieldOpField(f1, op, f2) => {
+                                    let idx1 = field_idx[f1.as_str()];
+                                    let idx2 = field_idx[f2.as_str()];
+                                    let (vs1, ve1) = ranges[idx1];
+                                    let (vs2, ve2) = ranges[idx2];
+                                    if let (Some(a), Some(b)) = (parse_json_num(&raw[vs1..ve1]), parse_json_num(&raw[vs2..ve2])) {
+                                        let result = match op {
+                                            BinOp::Add => a + b,
+                                            BinOp::Sub => a - b,
+                                            BinOp::Mul => a * b,
+                                            BinOp::Div => a / b,
+                                            BinOp::Mod => a % b,
+                                            _ => unreachable!(),
+                                        };
+                                        push_jq_number_bytes(&mut compact_buf, result);
+                                    } else {
+                                        compact_buf.extend_from_slice(b"null");
+                                    }
+                                }
+                                RemapExpr::ConstOpField(n, op, f) => {
+                                    let idx = field_idx[f.as_str()];
+                                    let (vs, ve) = ranges[idx];
+                                    if let Some(b) = parse_json_num(&raw[vs..ve]) {
+                                        let result = match op {
+                                            BinOp::Add => n + b,
+                                            BinOp::Sub => n - b,
+                                            BinOp::Mul => n * b,
+                                            BinOp::Div => n / b,
+                                            BinOp::Mod => n % b,
+                                            _ => unreachable!(),
+                                        };
+                                        push_jq_number_bytes(&mut compact_buf, result);
+                                    } else {
+                                        compact_buf.extend_from_slice(b"null");
+                                    }
+                                }
+                            }
+                        }
+                        compact_buf.extend_from_slice(b"}\n");
+                    } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }

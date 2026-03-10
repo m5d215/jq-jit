@@ -10,6 +10,19 @@ use anyhow::{Result, bail};
 use crate::ir::CompiledFunc;
 use crate::value::Value;
 
+/// Describes how to compute one value in a computed remap fast path.
+#[derive(Debug, Clone)]
+pub enum RemapExpr {
+    /// `.field` — raw byte copy
+    Field(String),
+    /// `.field op N` — numeric arithmetic with constant
+    FieldOpConst(String, crate::ir::BinOp, f64),
+    /// `.field1 op .field2` — numeric arithmetic with two fields
+    FieldOpField(String, crate::ir::BinOp, String),
+    /// `N op .field` — constant op field (e.g., `100 - .x`)
+    ConstOpField(f64, crate::ir::BinOp, String),
+}
+
 /// A compiled jq filter, ready to execute.
 pub struct Filter {
     program: String,
@@ -317,6 +330,80 @@ impl Filter {
                 } else { return None; }
             }
             return Some(result);
+        }
+        None
+    }
+
+    /// Detect `{a: .x, b: (.y * 2), c: (.x + .y)}` pattern — object construction with computed values.
+    /// Each value can be: field ref, field op const, or field op field.
+    /// Returns Vec of (output_key, RemapExpr) if detected.
+    /// Only matches when detect_field_remap fails (i.e., at least one value is computed).
+    pub fn detect_computed_remap(&self) -> Option<Vec<(String, RemapExpr)>> {
+        use crate::ir::{Expr, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::ObjectConstruct { pairs } = expr {
+            if pairs.is_empty() { return None; }
+            let mut result = Vec::with_capacity(pairs.len());
+            let mut has_computed = false;
+            for (k, v) in pairs {
+                let key = if let Expr::Literal(Literal::Str(s)) = k {
+                    s.clone()
+                } else { return None; };
+                let rexpr = Self::classify_remap_value(v)?;
+                if !matches!(rexpr, RemapExpr::Field(_)) { has_computed = true; }
+                result.push((key, rexpr));
+            }
+            // Only use this if there's at least one computed value;
+            // pure field remap is handled by detect_field_remap (which is faster).
+            if has_computed { return Some(result); }
+        }
+        None
+    }
+
+    /// Classify a single remap value expression.
+    fn classify_remap_value(v: &crate::ir::Expr) -> Option<RemapExpr> {
+        use crate::ir::{Expr, BinOp, Literal};
+        // .field
+        if let Expr::Index { expr: base, key } = v {
+            if matches!(base.as_ref(), Expr::Input) {
+                if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                    return Some(RemapExpr::Field(f.clone()));
+                }
+            }
+            return None;
+        }
+        // .field op N or .field op .field2
+        if let Expr::BinOp { op, lhs, rhs } = v {
+            if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+                return None;
+            }
+            if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(f1)) = key.as_ref() {
+                    // .field op N
+                    if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                        if matches!(op, BinOp::Div | BinOp::Mod) && *n == 0.0 { return None; }
+                        return Some(RemapExpr::FieldOpConst(f1.clone(), *op, *n));
+                    }
+                    // .field1 op .field2
+                    if let Expr::Index { expr: base2, key: key2 } = rhs.as_ref() {
+                        if !matches!(base2.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f2)) = key2.as_ref() {
+                            return Some(RemapExpr::FieldOpField(f1.clone(), *op, f2.clone()));
+                        }
+                    }
+                }
+            }
+            // N op .field (e.g., 100 - .x)
+            if let Expr::Literal(Literal::Num(n, _)) = lhs.as_ref() {
+                if let Expr::Index { expr: base, key } = rhs.as_ref() {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                            return Some(RemapExpr::ConstOpField(*n, *op, f.clone()));
+                        }
+                    }
+                }
+            }
         }
         None
     }

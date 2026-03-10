@@ -94,6 +94,7 @@ TESTS=(
     'split/join:-c:.name | split("a") | join("b")'
     'select|field:-c:select(.x > 1000000) | .name'
     'select|remap:-c:select(.x > 1000000) | {n:.name, v:.y}'
+    'computed remap:-c:{name: .name, double: (.x * 2), sum: (.x + .y)}'
 )
 
 for test in "${TESTS[@]}"; do
