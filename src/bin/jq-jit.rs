@@ -616,6 +616,7 @@ fn real_main() {
                 } else if let Some((ref field, ref uop)) = field_unary_num {
                     use jq_jit::ir::UnaryOp;
                     let is_string_op = matches!(uop, UnaryOp::AsciiDowncase | UnaryOp::AsciiUpcase);
+                    let is_length_op = matches!(uop, UnaryOp::Length | UnaryOp::Utf8ByteLength);
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         if is_string_op {
@@ -641,6 +642,54 @@ fn real_main() {
                             } else {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else if is_length_op {
+                            // Length ops: works on any field type
+                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
+                                let val = &raw[vs..ve];
+                                match val[0] {
+                                    b'"' => {
+                                        // String: count characters or bytes
+                                        let inner = &val[1..ve-vs-1];
+                                        let has_escape = inner.contains(&b'\\');
+                                        if !has_escape {
+                                            let len = if matches!(uop, UnaryOp::Utf8ByteLength) {
+                                                inner.len()
+                                            } else {
+                                                // length: count Unicode chars — ASCII fast path
+                                                if inner.is_ascii() { inner.len() }
+                                                else { unsafe { std::str::from_utf8_unchecked(inner) }.chars().count() }
+                                            };
+                                            push_jq_number_bytes(&mut compact_buf, len as f64);
+                                            compact_buf.push(b'\n');
+                                        } else {
+                                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                        }
+                                    }
+                                    b'[' | b'{' => {
+                                        // Array/object: fall through to full parse for element counting
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    }
+                                    b'n' => {
+                                        // null: length is 0
+                                        compact_buf.push(b'0');
+                                        compact_buf.push(b'\n');
+                                    }
+                                    _ => {
+                                        // Number: length is abs(number)
+                                        if let Some(n) = json_object_get_num(raw, 0, field) {
+                                            push_jq_number_bytes(&mut compact_buf, n.abs());
+                                        } else {
+                                            compact_buf.extend_from_slice(b"null");
+                                        }
+                                        compact_buf.push(b'\n');
+                                    }
+                                }
+                            } else {
+                                // Field not found: .field is null, null | length = 0
+                                compact_buf.extend_from_slice(b"0\n");
                             }
                         } else if let Some(n) = json_object_get_num(raw, 0, field) {
                             if matches!(uop, UnaryOp::ToString) {
@@ -1489,6 +1538,7 @@ fn real_main() {
             } else if let Some((ref field, ref uop)) = field_unary_num {
                 use jq_jit::ir::UnaryOp;
                 let is_string_op = matches!(uop, UnaryOp::AsciiDowncase | UnaryOp::AsciiUpcase);
+                let is_length_op = matches!(uop, UnaryOp::Length | UnaryOp::Utf8ByteLength);
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
@@ -1514,6 +1564,37 @@ fn real_main() {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
+                    } else if is_length_op {
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
+                            let val = &raw[vs..ve];
+                            match val[0] {
+                                b'"' => {
+                                    let inner = &val[1..ve-vs-1];
+                                    if !inner.contains(&b'\\') {
+                                        let len = if matches!(uop, UnaryOp::Utf8ByteLength) {
+                                            inner.len()
+                                        } else if inner.is_ascii() { inner.len() }
+                                        else { unsafe { std::str::from_utf8_unchecked(inner) }.chars().count() };
+                                        push_jq_number_bytes(&mut compact_buf, len as f64);
+                                        compact_buf.push(b'\n');
+                                    } else {
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    }
+                                }
+                                b'n' => { compact_buf.extend_from_slice(b"0\n"); }
+                                b'[' | b'{' => {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                                _ => {
+                                    if let Some(n) = json_object_get_num(raw, 0, field) {
+                                        push_jq_number_bytes(&mut compact_buf, n.abs());
+                                    } else { compact_buf.extend_from_slice(b"null"); }
+                                    compact_buf.push(b'\n');
+                                }
+                            }
+                        } else { compact_buf.extend_from_slice(b"0\n"); }
                     } else if let Some(n) = json_object_get_num(raw, 0, field) {
                         if matches!(uop, UnaryOp::ToString) {
                             compact_buf.push(b'"');

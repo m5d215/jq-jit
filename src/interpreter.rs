@@ -260,7 +260,8 @@ impl Filter {
                         if !matches!(operand.as_ref(), Expr::Input) { return None; }
                         if matches!(op, UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Sqrt |
                             UnaryOp::Fabs | UnaryOp::Abs | UnaryOp::ToString |
-                            UnaryOp::AsciiDowncase | UnaryOp::AsciiUpcase) {
+                            UnaryOp::AsciiDowncase | UnaryOp::AsciiUpcase |
+                            UnaryOp::Length | UnaryOp::Utf8ByteLength) {
                             return Some((field.clone(), *op));
                         }
                     }
