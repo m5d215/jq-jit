@@ -208,6 +208,7 @@ header
 bench_gen "gsub(100K)"                  100000    '[range(.) | "hello_world_\(.)"] | map(gsub("_"; "-")) | length'
 bench_gen "join large(100K)"            100000    '[range(.) | tostring] | join(",") | length'
 bench_gen "explode/implode(100K)"       100000    '[range(.) | "abc\(.)"] | map(explode | map(. + 1) | implode) | length'
+bench_gen "reduce str concat(100K)"    100000    'reduce range(.) as $x (""; . + ($x | tostring)) | length'
 
 echo ""
 echo "--- Try-catch & alternative ---"

@@ -934,11 +934,9 @@ impl Flattener {
                 let val = self.flatten_scalar(value, input_slot);
                 let old = self.alloc_slot();
                 self.emit(JitOp::GetVar { dst: old, var_index: *var_index });
-                self.emit(JitOp::SetVar { var_index: *var_index, src: val });
-                self.emit(JitOp::Drop { slot: val });
+                self.emit(JitOp::MoveToVar { var_index: *var_index, src: val });
                 let result = self.flatten_scalar(body, input_slot);
-                self.emit(JitOp::SetVar { var_index: *var_index, src: old });
-                self.emit(JitOp::Drop { slot: old });
+                self.emit(JitOp::MoveToVar { var_index: *var_index, src: old });
                 result
             }
             Expr::LoadVar { var_index } => {
@@ -1349,8 +1347,7 @@ impl Flattener {
                 let acc_val = self.flatten_scalar(init, input_slot);
                 let old_acc = self.alloc_slot();
                 self.emit(JitOp::GetVar { dst: old_acc, var_index: *acc_index });
-                self.emit(JitOp::SetVar { var_index: *acc_index, src: acc_val });
-                self.emit(JitOp::Drop { slot: acc_val });
+                self.emit(JitOp::MoveToVar { var_index: *acc_index, src: acc_val });
                 let old_var = self.alloc_slot();
                 self.emit(JitOp::GetVar { dst: old_var, var_index: *var_index });
                 // Detect in-place update pattern: reduce ... (init; path |= f) or path += f
@@ -1880,11 +1877,9 @@ impl Flattener {
                     let val = self.flatten_scalar(value, input_slot);
                     let old = self.alloc_slot();
                     self.emit(JitOp::GetVar { dst: old, var_index: *var_index });
-                    self.emit(JitOp::SetVar { var_index: *var_index, src: val });
-                    self.emit(JitOp::Drop { slot: val });
+                    self.emit(JitOp::MoveToVar { var_index: *var_index, src: val });
                     let ok = self.flatten_gen(body, input_slot);
-                    self.emit(JitOp::SetVar { var_index: *var_index, src: old });
-                    self.emit(JitOp::Drop { slot: old });
+                    self.emit(JitOp::MoveToVar { var_index: *var_index, src: old });
                     ok
                 } else {
                     // Generator value: for each output of value, set $var and run body
@@ -1989,8 +1984,7 @@ impl Flattener {
                 let acc_val = self.flatten_scalar(init, input_slot);
                 let old_acc = self.alloc_slot();
                 self.emit(JitOp::GetVar { dst: old_acc, var_index: *acc_index });
-                self.emit(JitOp::SetVar { var_index: *acc_index, src: acc_val });
-                self.emit(JitOp::Drop { slot: acc_val });
+                self.emit(JitOp::MoveToVar { var_index: *acc_index, src: acc_val });
                 let old_var = self.alloc_slot();
                 self.emit(JitOp::GetVar { dst: old_var, var_index: *var_index });
                 if !self.flatten_gen_with_reduce(source, *var_index, *acc_index, update, input_slot) {
@@ -2201,8 +2195,7 @@ impl Flattener {
                 let acc_val = self.flatten_scalar(init, input_slot);
                 let old_acc = self.alloc_slot();
                 self.emit(JitOp::GetVar { dst: old_acc, var_index: *acc_index });
-                self.emit(JitOp::SetVar { var_index: *acc_index, src: acc_val });
-                self.emit(JitOp::Drop { slot: acc_val });
+                self.emit(JitOp::MoveToVar { var_index: *acc_index, src: acc_val });
                 let old_var = self.alloc_slot();
                 self.emit(JitOp::GetVar { dst: old_var, var_index: *var_index });
 
@@ -2838,11 +2831,9 @@ impl Flattener {
                 let val = self.flatten_scalar(value, input_slot);
                 let old = self.alloc_slot();
                 self.emit(JitOp::GetVar { dst: old, var_index: *var_index });
-                self.emit(JitOp::SetVar { var_index: *var_index, src: val });
-                self.emit(JitOp::Drop { slot: val });
+                self.emit(JitOp::MoveToVar { var_index: *var_index, src: val });
                 let ok = self.flatten_gen_with_each_output(body, input_slot, action);
-                self.emit(JitOp::SetVar { var_index: *var_index, src: old });
-                self.emit(JitOp::Drop { slot: old });
+                self.emit(JitOp::MoveToVar { var_index: *var_index, src: old });
                 ok
             }
             Expr::EachOpt { input_expr } if is_scalar(input_expr) => {
@@ -3161,8 +3152,7 @@ impl Flattener {
                 let val = self.flatten_scalar(value, input_slot);
                 let old = self.alloc_slot();
                 self.emit(JitOp::GetVar { dst: old, var_index: *var_index });
-                self.emit(JitOp::SetVar { var_index: *var_index, src: val });
-                self.emit(JitOp::Drop { slot: val });
+                self.emit(JitOp::MoveToVar { var_index: *var_index, src: val });
                 // Now compile body | right
                 let ok = if is_scalar(body) {
                     let mid = self.flatten_scalar(body, input_slot);
@@ -3172,8 +3162,7 @@ impl Flattener {
                 } else {
                     self.flatten_gen_pipe(body, right, input_slot)
                 };
-                self.emit(JitOp::SetVar { var_index: *var_index, src: old });
-                self.emit(JitOp::Drop { slot: old });
+                self.emit(JitOp::MoveToVar { var_index: *var_index, src: old });
                 ok
             }
 
@@ -4114,8 +4103,7 @@ impl Flattener {
                 let ok = self.flatten_gen(value, input_slot);
                 self.collect_depth -= 1;
                 if !ok {
-                    self.emit(JitOp::SetVar { var_index, src: old });
-                    self.emit(JitOp::Drop { slot: old });
+                    self.emit(JitOp::MoveToVar { var_index, src: old });
                     return false;
                 }
                 let collected = self.alloc_slot();
@@ -4128,8 +4116,7 @@ impl Flattener {
             }
         }
 
-        self.emit(JitOp::SetVar { var_index, src: old });
-        self.emit(JitOp::Drop { slot: old });
+        self.emit(JitOp::MoveToVar { var_index, src: old });
         true
     }
 
@@ -4297,8 +4284,7 @@ impl Flattener {
             let old = self.alloc_slot();
             self.emit(JitOp::GetVar { dst: old, var_index: var_idx });
             let val = self.flatten_scalar(value_expr, acc_for_lets);
-            self.emit(JitOp::SetVar { var_index: var_idx, src: val });
-            self.emit(JitOp::Drop { slot: val });
+            self.emit(JitOp::MoveToVar { var_index: var_idx, src: val });
             saved_vars.push((var_idx, old));
         }
         self.emit(JitOp::Drop { slot: acc_for_lets });
@@ -4357,13 +4343,11 @@ impl Flattener {
             current_val = *container;
         }
 
-        self.emit(JitOp::SetVar { var_index: acc_index, src: current_val });
-        self.emit(JitOp::Drop { slot: current_val });
+        self.emit(JitOp::MoveToVar { var_index: acc_index, src: current_val });
 
         // Restore let-binding vars
         for (var_idx, old) in saved_vars.into_iter().rev() {
-            self.emit(JitOp::SetVar { var_index: var_idx, src: old });
-            self.emit(JitOp::Drop { slot: old });
+            self.emit(JitOp::MoveToVar { var_index: var_idx, src: old });
         }
     }
 
@@ -4377,8 +4361,7 @@ impl Flattener {
             let old = self.alloc_slot();
             self.emit(JitOp::GetVar { dst: old, var_index: var_idx });
             let val = self.flatten_scalar(value_expr, acc_for_lets);
-            self.emit(JitOp::SetVar { var_index: var_idx, src: val });
-            self.emit(JitOp::Drop { slot: val });
+            self.emit(JitOp::MoveToVar { var_index: var_idx, src: val });
             saved_vars.push((var_idx, old));
         }
 
@@ -4437,13 +4420,11 @@ impl Flattener {
             current = *container;
         }
 
-        self.emit(JitOp::SetVar { var_index: acc_index, src: current });
-        self.emit(JitOp::Drop { slot: current });
+        self.emit(JitOp::MoveToVar { var_index: acc_index, src: current });
 
         // Restore let-binding vars
         for (var_idx, old) in saved_vars.into_iter().rev() {
-            self.emit(JitOp::SetVar { var_index: var_idx, src: old });
-            self.emit(JitOp::Drop { slot: old });
+            self.emit(JitOp::MoveToVar { var_index: var_idx, src: old });
         }
     }
 }
