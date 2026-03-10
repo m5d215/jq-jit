@@ -294,7 +294,9 @@ enum JitOp {
     F64Add { dst_var: u32, a_var: u32, b_var: u32 },
     F64Sub { dst_var: u32, a_var: u32, b_var: u32 },
     F64Mul { dst_var: u32, a_var: u32, b_var: u32 },
+    F64Div { dst_var: u32, a_var: u32, b_var: u32 },
     F64Rem { dst_var: u32, a_var: u32, b_var: u32 },
+    F64Neg { dst_var: u32, src_var: u32 },
     /// Float comparison: dst = 1 if a `cc` b, else 0. cc: 0=Ge, 1=Gt, 2=Le, 3=Lt, 4=Eq, 5=Ne
     F64Cmp { dst_var: u32, a_var: u32, b_var: u32, cc: u8 },
     F64Num { dst: SlotId, src_var: u32 },
@@ -3670,12 +3672,13 @@ impl Flattener {
             Expr::LoadVar { var_index: vi } if *vi == var_index => true,
             Expr::Literal(Literal::Num(..)) => true,
             Expr::BinOp { op, lhs, rhs } => {
-                matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Mod
+                matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
                     | BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge
                     | BinOp::And | BinOp::Or)
                 && Self::is_pure_f64_expr(lhs, var_index)
                 && Self::is_pure_f64_expr(rhs, var_index)
             }
+            Expr::Negate { operand } => Self::is_pure_f64_expr(operand, var_index),
             Expr::IfThenElse { cond, then_branch, else_branch } => {
                 Self::is_pure_f64_expr(cond, var_index)
                 && Self::is_pure_f64_expr(then_branch, var_index)
@@ -3705,6 +3708,7 @@ impl Flattener {
                     BinOp::Add => self.emit(JitOp::F64Add { dst_var: dst, a_var: a, b_var: b }),
                     BinOp::Sub => self.emit(JitOp::F64Sub { dst_var: dst, a_var: a, b_var: b }),
                     BinOp::Mul => self.emit(JitOp::F64Mul { dst_var: dst, a_var: a, b_var: b }),
+                    BinOp::Div => self.emit(JitOp::F64Div { dst_var: dst, a_var: a, b_var: b }),
                     BinOp::Mod => self.emit(JitOp::F64Rem { dst_var: dst, a_var: a, b_var: b }),
                     BinOp::Eq => self.emit(JitOp::F64Cmp { dst_var: dst, a_var: a, b_var: b, cc: 4 }),
                     BinOp::Ne => self.emit(JitOp::F64Cmp { dst_var: dst, a_var: a, b_var: b, cc: 5 }),
@@ -3762,7 +3766,6 @@ impl Flattener {
                         self.emit(JitOp::F64Add { dst_var: dst, a_var: b_nz, b_var: zero });
                         self.emit(JitOp::Label { id: done_l });
                     }
-                    _ => unreachable!(),
                 };
                 dst
             }
@@ -3785,6 +3788,12 @@ impl Flattener {
                 self.emit(JitOp::F64Const { dst_var: zero2, val: 0.0 });
                 self.emit(JitOp::F64Add { dst_var: dst, a_var: e, b_var: zero2 });
                 self.emit(JitOp::Label { id: done_l });
+                dst
+            }
+            Expr::Negate { operand } => {
+                let src = self.compile_f64_expr(operand, var_index, acc_var, x_var);
+                let dst = self.alloc_var();
+                self.emit(JitOp::F64Neg { dst_var: dst, src_var: src });
                 dst
             }
             _ => unreachable!("is_pure_f64_expr should have rejected this"),
@@ -7150,6 +7159,22 @@ impl JitCompiler {
                         let prod = b.ins().fmul(trunc, b_f);
                         let rem_f = b.ins().fsub(a_f, prod);
                         let bits = b.ins().bitcast(ptr_ty, cranelift_codegen::ir::MemFlags::new(), rem_f);
+                        b.def_var(vars[*dst_var as usize], bits);
+                    }
+                    JitOp::F64Div { dst_var, a_var, b_var: bv } => {
+                        let a_bits = b.use_var(vars[*a_var as usize]);
+                        let b_bits = b.use_var(vars[*bv as usize]);
+                        let a_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), a_bits);
+                        let b_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), b_bits);
+                        let quot = b.ins().fdiv(a_f, b_f);
+                        let bits = b.ins().bitcast(ptr_ty, cranelift_codegen::ir::MemFlags::new(), quot);
+                        b.def_var(vars[*dst_var as usize], bits);
+                    }
+                    JitOp::F64Neg { dst_var, src_var } => {
+                        let src_bits = b.use_var(vars[*src_var as usize]);
+                        let src_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), src_bits);
+                        let neg = b.ins().fneg(src_f);
+                        let bits = b.ins().bitcast(ptr_ty, cranelift_codegen::ir::MemFlags::new(), neg);
                         b.def_var(vars[*dst_var as usize], bits);
                     }
                     JitOp::F64Cmp { dst_var, a_var, b_var: bv, cc } => {
