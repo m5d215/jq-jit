@@ -233,6 +233,9 @@ fn real_main() {
     let field_str_builtin = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_unary_num.is_none() {
         filter.detect_field_str_builtin()
     } else { None };
+    let field_ltrimstr_tonumber = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() {
+        filter.detect_field_ltrimstr_tonumber()
+    } else { None };
     let field_str_concat = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() {
         filter.detect_field_str_concat()
     } else { None };
@@ -758,6 +761,43 @@ fn real_main() {
                                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                     }
+                                }
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref lt_field, ref lt_prefix)) = field_ltrimstr_tonumber {
+                    let prefix_bytes = lt_prefix.as_bytes();
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, lt_field) {
+                            let val = &raw[vs..ve];
+                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                                && !val[1..val.len()-1].contains(&b'\\')
+                            {
+                                let content = &val[1..val.len()-1];
+                                let num_str = if content.len() >= prefix_bytes.len() && &content[..prefix_bytes.len()] == prefix_bytes {
+                                    &content[prefix_bytes.len()..]
+                                } else {
+                                    content
+                                };
+                                // Parse the remaining string as a number
+                                if let Ok(n) = fast_float::parse::<f64, _>(num_str) {
+                                    push_jq_number_bytes(&mut compact_buf, n);
+                                    compact_buf.push(b'\n');
+                                } else {
+                                    // tonumber on non-numeric string → null in jq-jit
+                                    compact_buf.extend_from_slice(b"null\n");
                                 }
                             } else {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
@@ -1541,6 +1581,42 @@ fn real_main() {
                                     let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                     process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                 }
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref lt_field, ref lt_prefix)) = field_ltrimstr_tonumber {
+                let prefix_bytes = lt_prefix.as_bytes();
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, lt_field) {
+                        let val = &raw[vs..ve];
+                        if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                            && !val[1..val.len()-1].contains(&b'\\')
+                        {
+                            let content = &val[1..val.len()-1];
+                            let num_str = if content.len() >= prefix_bytes.len() && &content[..prefix_bytes.len()] == prefix_bytes {
+                                &content[prefix_bytes.len()..]
+                            } else {
+                                content
+                            };
+                            if let Ok(n) = fast_float::parse::<f64, _>(num_str) {
+                                push_jq_number_bytes(&mut compact_buf, n);
+                                compact_buf.push(b'\n');
+                            } else {
+                                compact_buf.extend_from_slice(b"null\n");
                             }
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;

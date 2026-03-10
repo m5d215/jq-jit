@@ -294,6 +294,34 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | ltrimstr("prefix") | tonumber` pattern.
+    /// Returns (field_name, prefix) if detected.
+    pub fn detect_field_ltrimstr_tonumber(&self) -> Option<(String, String)> {
+        use crate::ir::{Expr, Literal, UnaryOp};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::Pipe { left: mid, right: rr } = right.as_ref() {
+                        if let Expr::CallBuiltin { name, args } = mid.as_ref() {
+                            if name == "ltrimstr" && args.len() == 1 {
+                                if let Expr::Literal(Literal::Str(prefix)) = &args[0] {
+                                    if let Expr::UnaryOp { op: UnaryOp::ToNumber, operand } = rr.as_ref() {
+                                        if matches!(operand.as_ref(), Expr::Input) {
+                                            return Some((field.clone(), prefix.clone()));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field / N | floor` or `.field % N` pattern (field + binop + optional unary).
     /// Returns (field_name, binop, constant, optional unary op) if detected.
     pub fn detect_field_binop_const_unary(&self) -> Option<(String, crate::ir::BinOp, f64, Option<crate::ir::UnaryOp>)> {
