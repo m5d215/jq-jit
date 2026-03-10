@@ -3852,43 +3852,20 @@ impl Flattener {
                 if !is_scalar(from) || !is_scalar(to) { return false; }
                 if let Some(s) = step { if !is_scalar(s) { return false; } }
 
-                // Check if update is `. + $var` (accumulator += loop variable)
-                let is_add_update = if let Expr::BinOp { op, lhs, rhs } = update {
-                    matches!(op, BinOp::Add) && matches!(lhs.as_ref(), Expr::Input)
-                        && matches!(rhs.as_ref(), Expr::LoadVar { var_index: vi } if *vi == var_index)
-                } else { false };
+                // Check if update is a pure f64 expression of . (acc) and $x (loop var)
+                let is_f64_update = Self::is_pure_f64_expr(update, var_index);
 
-                // Classify extract for fused f64 path:
-                // 0 = identity (no extract or .), 1 = . * K, 2 = $x then ., 3 = . then $x
-                let (fused_extract_kind, fused_extract_const) = if is_add_update {
-                    match extract {
-                        None => (Some(0u8), 0.0),
-                        Some(ext) => match ext {
-                            Expr::Input => (Some(0), 0.0),
-                            Expr::BinOp { op: BinOp::Mul, lhs, rhs } => {
-                                if matches!(lhs.as_ref(), Expr::Input) {
-                                    if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
-                                        (Some(1), *n)
-                                    } else { (None, 0.0) }
-                                } else if matches!(rhs.as_ref(), Expr::Input) {
-                                    if let Expr::Literal(Literal::Num(n, _)) = lhs.as_ref() {
-                                        (Some(1), *n)
-                                    } else { (None, 0.0) }
-                                } else { (None, 0.0) }
-                            }
-                            Expr::Comma { left, right } => {
-                                let l_is_var = matches!(left.as_ref(), Expr::LoadVar { var_index: vi } if *vi == var_index);
-                                let r_is_var = matches!(right.as_ref(), Expr::LoadVar { var_index: vi } if *vi == var_index);
-                                let l_is_acc = matches!(left.as_ref(), Expr::Input);
-                                let r_is_acc = matches!(right.as_ref(), Expr::Input);
-                                if l_is_var && r_is_acc { (Some(2), 0.0) }
-                                else if l_is_acc && r_is_var { (Some(3), 0.0) }
-                                else { (None, 0.0) }
-                            }
-                            _ => (None, 0.0),
-                        }
+                // Check if extract is fuseable as f64
+                // None = yield acc, scalar f64 = yield result, Comma of f64 = yield both
+                let is_f64_extract = is_f64_update && match extract {
+                    None => true,
+                    Some(ext) => {
+                        Self::is_pure_f64_expr(ext, var_index)
+                        || matches!(ext, Expr::Comma { left, right }
+                            if Self::is_pure_f64_expr(left, var_index)
+                                && Self::is_pure_f64_expr(right, var_index))
                     }
-                } else { (None, 0.0) };
+                };
 
                 let from_val = self.flatten_scalar(from, input_slot);
                 let to_val = self.flatten_scalar(to, input_slot);
@@ -3910,19 +3887,13 @@ impl Flattener {
                 self.emit(JitOp::Drop { slot: to_val });
                 self.emit(JitOp::Drop { slot: step_val });
 
-                if let Some(ekind) = fused_extract_kind {
-                    // Fused path: acc_f64 += cur each iteration, yield based on extract kind
+                if is_f64_extract {
+                    // Fused path: compile update as pure f64, yield extract result
                     let acc_f64 = self.alloc_var();
                     let init_slot = self.alloc_slot();
                     self.emit(JitOp::GetVar { dst: init_slot, var_index: acc_index });
                     self.emit(JitOp::ToF64Var { dst_var: acc_f64, src: init_slot });
                     self.emit(JitOp::Drop { slot: init_slot });
-                    // For `. * K` extract, preload constant into f64 var
-                    let mul_const_var = if ekind == 1 {
-                        let v = self.alloc_var();
-                        self.emit(JitOp::F64Const { dst_var: v, val: fused_extract_const });
-                        v
-                    } else { 0 };
                     let head = self.alloc_label();
                     let body = self.alloc_label();
                     let done = self.alloc_label();
@@ -3930,47 +3901,40 @@ impl Flattener {
                     self.emit(JitOp::RangeCheck { dst_var: cmp, cur_var: cur, to_var: to_v, step_var: step_v });
                     self.emit(JitOp::BranchOnVar { var: cmp, nonzero_label: body, zero_label: done });
                     self.emit(JitOp::Label { id: body });
-                    self.emit(JitOp::F64Add { dst_var: acc_f64, a_var: acc_f64, b_var: cur });
-                    match ekind {
-                        0 => {
-                            // Identity: yield acc
-                            let acc_val = self.alloc_slot();
-                            self.emit(JitOp::F64Num { dst: acc_val, src_var: acc_f64 });
-                            self.emit_yield(acc_val);
-                            self.emit(JitOp::Drop { slot: acc_val });
-                        }
-                        1 => {
-                            // . * K: yield acc * K
-                            let tmp = self.alloc_var();
-                            self.emit(JitOp::F64Mul { dst_var: tmp, a_var: acc_f64, b_var: mul_const_var });
+                    // Compile update as f64
+                    let new_acc = self.compile_f64_expr(update, var_index, acc_f64, cur);
+                    if new_acc != acc_f64 {
+                        let zero_tmp = self.alloc_var();
+                        self.emit(JitOp::F64Const { dst_var: zero_tmp, val: 0.0 });
+                        self.emit(JitOp::F64Add { dst_var: acc_f64, a_var: new_acc, b_var: zero_tmp });
+                    }
+                    // Yield extract result(s)
+                    match extract {
+                        None => {
                             let val = self.alloc_slot();
-                            self.emit(JitOp::F64Num { dst: val, src_var: tmp });
+                            self.emit(JitOp::F64Num { dst: val, src_var: acc_f64 });
                             self.emit_yield(val);
                             self.emit(JitOp::Drop { slot: val });
                         }
-                        2 => {
-                            // $x, .: yield cur then acc
-                            let cur_val = self.alloc_slot();
-                            self.emit(JitOp::F64Num { dst: cur_val, src_var: cur });
-                            self.emit_yield(cur_val);
-                            self.emit(JitOp::Drop { slot: cur_val });
-                            let acc_val = self.alloc_slot();
-                            self.emit(JitOp::F64Num { dst: acc_val, src_var: acc_f64 });
-                            self.emit_yield(acc_val);
-                            self.emit(JitOp::Drop { slot: acc_val });
+                        Some(Expr::Comma { left, right }) => {
+                            let lv = self.compile_f64_expr(left, var_index, acc_f64, cur);
+                            let l_val = self.alloc_slot();
+                            self.emit(JitOp::F64Num { dst: l_val, src_var: lv });
+                            self.emit_yield(l_val);
+                            self.emit(JitOp::Drop { slot: l_val });
+                            let rv = self.compile_f64_expr(right, var_index, acc_f64, cur);
+                            let r_val = self.alloc_slot();
+                            self.emit(JitOp::F64Num { dst: r_val, src_var: rv });
+                            self.emit_yield(r_val);
+                            self.emit(JitOp::Drop { slot: r_val });
                         }
-                        3 => {
-                            // ., $x: yield acc then cur
-                            let acc_val = self.alloc_slot();
-                            self.emit(JitOp::F64Num { dst: acc_val, src_var: acc_f64 });
-                            self.emit_yield(acc_val);
-                            self.emit(JitOp::Drop { slot: acc_val });
-                            let cur_val = self.alloc_slot();
-                            self.emit(JitOp::F64Num { dst: cur_val, src_var: cur });
-                            self.emit_yield(cur_val);
-                            self.emit(JitOp::Drop { slot: cur_val });
+                        Some(ext) => {
+                            let ev = self.compile_f64_expr(ext, var_index, acc_f64, cur);
+                            let val = self.alloc_slot();
+                            self.emit(JitOp::F64Num { dst: val, src_var: ev });
+                            self.emit_yield(val);
+                            self.emit(JitOp::Drop { slot: val });
                         }
-                        _ => unreachable!(),
                     }
                     self.emit(JitOp::F64Add { dst_var: cur, a_var: cur, b_var: step_v });
                     self.emit(JitOp::Jump { label: head });
