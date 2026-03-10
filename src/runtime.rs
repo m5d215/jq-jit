@@ -1077,28 +1077,53 @@ fn rt_tonumber(v: &Value) -> Result<Value> {
 
 fn rt_ascii_downcase(v: &Value) -> Result<Value> {
     match v {
-        Value::Str(s) => Ok(Value::from_string(s.chars().map(|c| if c.is_ascii() { c.to_ascii_lowercase() } else { c }).collect())),
+        Value::Str(s) => {
+            if s.is_ascii() {
+                let mut bytes = s.as_bytes().to_vec();
+                bytes.make_ascii_lowercase();
+                // Safety: input was ASCII, lowercase is still ASCII
+                Ok(Value::from_string(unsafe { String::from_utf8_unchecked(bytes) }))
+            } else {
+                Ok(Value::from_string(s.chars().map(|c| if c.is_ascii() { c.to_ascii_lowercase() } else { c }).collect()))
+            }
+        }
         _ => bail!("{} cannot be lowercased", v.type_name()),
     }
 }
 
 fn rt_ascii_upcase(v: &Value) -> Result<Value> {
     match v {
-        Value::Str(s) => Ok(Value::from_string(s.chars().map(|c| if c.is_ascii() { c.to_ascii_uppercase() } else { c }).collect())),
+        Value::Str(s) => {
+            if s.is_ascii() {
+                let mut bytes = s.as_bytes().to_vec();
+                bytes.make_ascii_uppercase();
+                Ok(Value::from_string(unsafe { String::from_utf8_unchecked(bytes) }))
+            } else {
+                Ok(Value::from_string(s.chars().map(|c| if c.is_ascii() { c.to_ascii_uppercase() } else { c }).collect()))
+            }
+        }
         _ => bail!("{} cannot be uppercased", v.type_name()),
     }
 }
 
 fn rt_ltrim(v: &Value) -> Result<Value> {
     match v {
-        Value::Str(s) => Ok(Value::from_string(s.trim_start().to_string())),
+        Value::Str(s) => {
+            let trimmed = s.trim_start();
+            if trimmed.len() == s.len() { Ok(v.clone()) }
+            else { Ok(Value::from_str(trimmed)) }
+        }
         _ => bail!("trim input must be a string"),
     }
 }
 
 fn rt_rtrim(v: &Value) -> Result<Value> {
     match v {
-        Value::Str(s) => Ok(Value::from_string(s.trim_end().to_string())),
+        Value::Str(s) => {
+            let trimmed = s.trim_end();
+            if trimmed.len() == s.len() { Ok(v.clone()) }
+            else { Ok(Value::from_str(trimmed)) }
+        }
         _ => bail!("trim input must be a string"),
     }
 }

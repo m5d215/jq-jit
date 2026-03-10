@@ -89,6 +89,9 @@ TESTS=(
     'has("x"):-c:has("x")'
     'type:-c:type'
     'del(.name):-c:del(.name)'
+    'tostring:-c:.x | tostring'
+    '@csv:-c:[.name, .x] | @csv'
+    'split/join:-c:.name | split("a") | join("b")'
 )
 
 for test in "${TESTS[@]}"; do
