@@ -716,6 +716,71 @@ impl Filter {
         }
     }
 
+    /// Detect `if .field cmp N then literal_a else literal_b end` pattern.
+    /// Returns (field, op, threshold, true_output_bytes, false_output_bytes).
+    pub fn detect_cmp_branch_literals(&self) -> Option<(String, crate::ir::BinOp, f64, Vec<u8>, Vec<u8>)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        let literal_to_json = |lit: &Expr| -> Option<Vec<u8>> {
+            match lit {
+                Expr::Literal(Literal::Str(s)) => {
+                    let mut v = Vec::with_capacity(s.len() + 2);
+                    v.push(b'"');
+                    // Simple escape for JSON
+                    for &b in s.as_bytes() {
+                        match b {
+                            b'"' => v.extend_from_slice(b"\\\""),
+                            b'\\' => v.extend_from_slice(b"\\\\"),
+                            b'\n' => v.extend_from_slice(b"\\n"),
+                            b'\r' => v.extend_from_slice(b"\\r"),
+                            b'\t' => v.extend_from_slice(b"\\t"),
+                            b if b < 0x20 => { v.extend_from_slice(format!("\\u{:04x}", b).as_bytes()); }
+                            _ => v.push(b),
+                        }
+                    }
+                    v.push(b'"');
+                    Some(v)
+                }
+                Expr::Literal(Literal::Num(n, repr)) => {
+                    if let Some(r) = repr {
+                        Some(r.as_bytes().to_vec())
+                    } else {
+                        let mut buf = Vec::new();
+                        let i = *n as i64;
+                        if i as f64 == *n {
+                            buf.extend_from_slice(itoa::Buffer::new().format(i).as_bytes());
+                        } else {
+                            buf.extend_from_slice(ryu::Buffer::new().format(*n).as_bytes());
+                        }
+                        Some(buf)
+                    }
+                }
+                Expr::Literal(Literal::Null) => Some(b"null".to_vec()),
+                Expr::Literal(Literal::True) => Some(b"true".to_vec()),
+                Expr::Literal(Literal::False) => Some(b"false".to_vec()),
+                _ => None,
+            }
+        };
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                    return None;
+                }
+                if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                            if let (Some(t_bytes), Some(f_bytes)) = (literal_to_json(then_branch), literal_to_json(else_branch)) {
+                                return Some((field.clone(), *op, *n, t_bytes, f_bytes));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.field > N) | .output_field` or `if .field > N then .output_field else empty end`.
     /// Returns (select_field, op, threshold, output_field).
     pub fn detect_select_cmp_then_field(&self) -> Option<(String, crate::ir::BinOp, f64, String)> {
