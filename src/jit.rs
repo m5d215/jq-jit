@@ -245,6 +245,8 @@ enum JitOp {
     SetVar { var_index: u16, src: SlotId },
     /// Take var value (move out, leave Null) — avoids clone, gives refcount = 1.
     TakeVar { dst: SlotId, var_index: u16 },
+    /// Move src into var (drop old, leave src as Null) — avoids clone for accumulator stores.
+    MoveToVar { var_index: u16, src: SlotId },
 
     /// In-place path extract: swap container[key] with Null, return old element.
     /// Container is modified in-place via Rc::make_mut (no clone if refcount == 1).
@@ -1462,8 +1464,7 @@ impl Flattener {
                         this.emit(JitOp::AddMove { dst: result, lhs: acc, rhs: rhs_val });
                         this.emit(JitOp::Drop { slot: rhs_val });
                         this.emit(JitOp::Drop { slot: acc });
-                        this.emit(JitOp::SetVar { var_index: *acc_index, src: result });
-                        this.emit(JitOp::Drop { slot: result });
+                        this.emit(JitOp::MoveToVar { var_index: *acc_index, src: result });
                     });
                 } else if let Some(gen) = acc_push_collect {
                     // Optimized: TakeVar + ArrPush for `. + [gen]` — in-place push, no temp array
@@ -1477,8 +1478,7 @@ impl Flattener {
                             this2.emit(JitOp::ArrPush { arr: acc, val });
                             this2.emit(JitOp::Drop { slot: val });
                         });
-                        this.emit(JitOp::SetVar { var_index: *acc_index, src: acc });
-                        this.emit(JitOp::Drop { slot: acc });
+                        this.emit(JitOp::MoveToVar { var_index: *acc_index, src: acc });
                     });
                 } else if let Some(info) = inplace_info {
                     // Optimized: TakeVar + PathExtract/PathInsert avoids container cloning
@@ -1504,8 +1504,7 @@ impl Flattener {
                             this.emit(JitOp::SetPathMut { container: acc, path: path_val, val });
                             this.emit(JitOp::Drop { slot: val });
                             this.emit(JitOp::Drop { slot: path_val });
-                            this.emit(JitOp::SetVar { var_index: *acc_index, src: acc });
-                            this.emit(JitOp::Drop { slot: acc });
+                            this.emit(JitOp::MoveToVar { var_index: *acc_index, src: acc });
                         });
                     } else {
                         // Fall through to generic reduce
@@ -1514,8 +1513,7 @@ impl Flattener {
                             let acc = this.alloc_slot();
                             this.emit(JitOp::GetVar { dst: acc, var_index: *acc_index });
                             let new_acc = this.flatten_scalar(update, acc);
-                            this.emit(JitOp::SetVar { var_index: *acc_index, src: new_acc });
-                            this.emit(JitOp::Drop { slot: new_acc });
+                            this.emit(JitOp::MoveToVar { var_index: *acc_index, src: new_acc });
                             this.emit(JitOp::Drop { slot: acc });
                         });
                     }
@@ -1526,17 +1524,14 @@ impl Flattener {
                         let acc = this.alloc_slot();
                         this.emit(JitOp::GetVar { dst: acc, var_index: *acc_index });
                         let new_acc = this.flatten_scalar(update, acc);
-                        this.emit(JitOp::SetVar { var_index: *acc_index, src: new_acc });
-                        this.emit(JitOp::Drop { slot: new_acc });
+                        this.emit(JitOp::MoveToVar { var_index: *acc_index, src: new_acc });
                         this.emit(JitOp::Drop { slot: acc });
                     });
                 }
                 let out = self.alloc_slot();
                 self.emit(JitOp::GetVar { dst: out, var_index: *acc_index });
-                self.emit(JitOp::SetVar { var_index: *acc_index, src: old_acc });
-                self.emit(JitOp::Drop { slot: old_acc });
-                self.emit(JitOp::SetVar { var_index: *var_index, src: old_var });
-                self.emit(JitOp::Drop { slot: old_var });
+                self.emit(JitOp::MoveToVar { var_index: *acc_index, src: old_acc });
+                self.emit(JitOp::MoveToVar { var_index: *var_index, src: old_var });
                 out
             }
             Expr::Collect { generator } => {
@@ -2003,10 +1998,8 @@ impl Flattener {
                 }
                 let out = self.alloc_slot();
                 self.emit(JitOp::GetVar { dst: out, var_index: *acc_index });
-                self.emit(JitOp::SetVar { var_index: *acc_index, src: old_acc });
-                self.emit(JitOp::Drop { slot: old_acc });
-                self.emit(JitOp::SetVar { var_index: *var_index, src: old_var });
-                self.emit(JitOp::Drop { slot: old_var });
+                self.emit(JitOp::MoveToVar { var_index: *acc_index, src: old_acc });
+                self.emit(JitOp::MoveToVar { var_index: *var_index, src: old_var });
                 self.emit_yield(out);
                 self.emit(JitOp::Drop { slot: out });
                 true
@@ -2219,10 +2212,8 @@ impl Flattener {
                 let ok = self.flatten_gen_with_foreach(source, vi, ai, update, extract.as_deref(), input_slot);
 
                 // Restore vars
-                self.emit(JitOp::SetVar { var_index: *var_index, src: old_var });
-                self.emit(JitOp::Drop { slot: old_var });
-                self.emit(JitOp::SetVar { var_index: *acc_index, src: old_acc });
-                self.emit(JitOp::Drop { slot: old_acc });
+                self.emit(JitOp::MoveToVar { var_index: *var_index, src: old_var });
+                self.emit(JitOp::MoveToVar { var_index: *acc_index, src: old_acc });
                 ok
             }
 
@@ -3571,8 +3562,7 @@ impl Flattener {
                 s.emit(JitOp::PathInsert { container: acc, key, val });
                 s.emit(JitOp::Drop { slot: val });
                 s.emit(JitOp::Drop { slot: key });
-                s.emit(JitOp::SetVar { var_index: acc_index, src: acc });
-                s.emit(JitOp::Drop { slot: acc });
+                s.emit(JitOp::MoveToVar { var_index: acc_index, src: acc });
             } else if let Some(rhs_expr) = acc_add_rhs {
                 // Optimized: TakeVar + AddMove for `. + rhs`
                 let acc = s.alloc_slot();
@@ -3582,8 +3572,7 @@ impl Flattener {
                 s.emit(JitOp::AddMove { dst: result, lhs: acc, rhs: rhs_val });
                 s.emit(JitOp::Drop { slot: rhs_val });
                 s.emit(JitOp::Drop { slot: acc });
-                s.emit(JitOp::SetVar { var_index: acc_index, src: result });
-                s.emit(JitOp::Drop { slot: result });
+                s.emit(JitOp::MoveToVar { var_index: acc_index, src: result });
             } else if let Some(ref info) = inplace_info {
                 s.emit_reduce_update_with_lets(acc_index, info);
             } else if let Some(ref info) = assign_info {
@@ -3594,8 +3583,7 @@ impl Flattener {
                 s.emit(JitOp::GetVar { dst: acc, var_index: acc_index });
                 let new_acc = s.flatten_scalar(update, acc);
                 s.emit(JitOp::Drop { slot: acc });
-                s.emit(JitOp::SetVar { var_index: acc_index, src: new_acc });
-                s.emit(JitOp::Drop { slot: new_acc });
+                s.emit(JitOp::MoveToVar { var_index: acc_index, src: new_acc });
             }
         };
 
@@ -3926,8 +3914,7 @@ impl Flattener {
             s.emit(JitOp::GetVar { dst: acc, var_index: acc_index });
             let new_acc = s.flatten_scalar(update, acc);
             s.emit(JitOp::Drop { slot: acc });
-            s.emit(JitOp::SetVar { var_index: acc_index, src: new_acc });
-            s.emit(JitOp::Drop { slot: new_acc });
+            s.emit(JitOp::MoveToVar { var_index: acc_index, src: new_acc });
             // Now yield extract (evaluated with new accumulator as input)
             if let Some(ext) = extract {
                 let ext_input = s.alloc_slot();
@@ -5211,6 +5198,18 @@ extern "C" fn jit_rt_set_var(env: *mut JitEnv, idx: u32, val: *const Value) {
     }
 }
 
+/// Move value from slot to var (drop old var, leave slot as Null). Avoids clone.
+extern "C" fn jit_rt_move_to_var(env: *mut JitEnv, idx: u32, val: *mut Value) {
+    unsafe {
+        let env = &mut *env;
+        let i = idx as usize;
+        if i >= env.vars.len() { env.vars.resize(i + 1, Value::Null); }
+        // Drop old value, move new value in, leave source as Null
+        let new_val = std::mem::replace(&mut *val, Value::Null);
+        let _old = std::mem::replace(&mut env.vars[i], new_val);
+    }
+}
+
 /// Take var value (move out, leave Null). Gives the caller sole ownership (refcount unincremented).
 extern "C" fn jit_rt_take_var(dst: *mut Value, env: *mut JitEnv, idx: u32) {
     unsafe {
@@ -6004,7 +6003,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
             JitOp::FieldIsTruthy { base, .. } | JitOp::FieldCmpNum { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
             JitOp::IsNullOrFalse { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
             JitOp::Alternative { primary, .. } => { *use_count.entry(*primary).or_insert(0) += 1; }
-            JitOp::SetVar { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
+            JitOp::SetVar { src, .. } | JitOp::MoveToVar { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
             JitOp::PathExtract { container, key, .. } => {
                 *use_count.entry(*container).or_insert(0) += 1;
                 *use_count.entry(*key).or_insert(0) += 1;
@@ -6091,7 +6090,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 JitOp::FieldIsTruthy { base, .. } | JitOp::FieldCmpNum { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
                 JitOp::IsNullOrFalse { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
                 JitOp::Alternative { primary, .. } => { *use_count.entry(*primary).or_insert(0) += 1; }
-                JitOp::SetVar { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
+                JitOp::SetVar { src, .. } | JitOp::MoveToVar { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
                 JitOp::PathExtract { container, key, .. } => {
                     *use_count.entry(*container).or_insert(0) += 1;
                     *use_count.entry(*key).or_insert(0) += 1;
@@ -6261,6 +6260,7 @@ impl JitCompiler {
             ("jit_rt_get_var", jit_rt_get_var as *const u8),
             ("jit_rt_set_var", jit_rt_set_var as *const u8),
             ("jit_rt_take_var", jit_rt_take_var as *const u8),
+            ("jit_rt_move_to_var", jit_rt_move_to_var as *const u8),
             ("jit_rt_path_extract", jit_rt_path_extract as *const u8),
             ("jit_rt_path_insert", jit_rt_path_insert as *const u8),
             ("jit_rt_take_by_idx", jit_rt_take_by_idx as *const u8),
@@ -7077,6 +7077,11 @@ impl JitCompiler {
                         let vi = b.ins().iconst(types::I32, *var_index as i64);
                         b.ins().call(rt["take_var"], &[d, env_ptr, vi]);
                     }
+                    JitOp::MoveToVar { var_index, src } => {
+                        let s = slot_addr(&mut b, *src);
+                        let vi = b.ins().iconst(types::I32, *var_index as i64);
+                        b.ins().call(rt["move_to_var"], &[env_ptr, vi, s]);
+                    }
                     JitOp::PathExtract { element, container, key } => {
                         let e = slot_addr(&mut b, *element);
                         let c = slot_addr(&mut b, *container);
@@ -7545,6 +7550,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("get_var", [p, p, i], []);
     decl!("set_var", [p, i, p], []);
     decl!("take_var", [p, p, i], []);
+    decl!("move_to_var", [p, i, p], []);
     decl!("path_extract", [p, p, p], [p]);
     decl!("path_insert", [p, p, p], [p]);
     decl!("take_by_idx", [p, p, p], []);
