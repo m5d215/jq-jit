@@ -292,6 +292,7 @@ enum JitOp {
     F64Less { dst_var: u32, a_var: u32, b_var: u32 },
     F64Greater { dst_var: u32, a_var: u32, b_var: u32 },
     F64Add { dst_var: u32, a_var: u32, b_var: u32 },
+    F64Mul { dst_var: u32, a_var: u32, b_var: u32 },
     F64Num { dst: SlotId, src_var: u32 },
     /// Range check: (step>0 && cur<to) || (step<=0 && cur>to)
     RangeCheck { dst_var: u32, cur_var: u32, to_var: u32, step_var: u32 },
@@ -3651,13 +3652,43 @@ impl Flattener {
                 if !is_scalar(from) || !is_scalar(to) { return false; }
                 if let Some(s) = step { if !is_scalar(s) { return false; } }
 
-                // Detect fused foreach-range-add: foreach range(...) as $x (init; . + $x) [no extract]
-                // Keep accumulator in f64, only create Value::Num at yield time
-                let is_fused_foreach_add = extract.is_none()
-                    && if let Expr::BinOp { op, lhs, rhs } = update {
-                        matches!(op, BinOp::Add) && matches!(lhs.as_ref(), Expr::Input)
-                            && matches!(rhs.as_ref(), Expr::LoadVar { var_index: vi } if *vi == var_index)
-                    } else { false };
+                // Check if update is `. + $var` (accumulator += loop variable)
+                let is_add_update = if let Expr::BinOp { op, lhs, rhs } = update {
+                    matches!(op, BinOp::Add) && matches!(lhs.as_ref(), Expr::Input)
+                        && matches!(rhs.as_ref(), Expr::LoadVar { var_index: vi } if *vi == var_index)
+                } else { false };
+
+                // Classify extract for fused f64 path:
+                // 0 = identity (no extract or .), 1 = . * K, 2 = $x then ., 3 = . then $x
+                let (fused_extract_kind, fused_extract_const) = if is_add_update {
+                    match extract {
+                        None => (Some(0u8), 0.0),
+                        Some(ext) => match ext {
+                            Expr::Input => (Some(0), 0.0),
+                            Expr::BinOp { op: BinOp::Mul, lhs, rhs } => {
+                                if matches!(lhs.as_ref(), Expr::Input) {
+                                    if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                        (Some(1), *n)
+                                    } else { (None, 0.0) }
+                                } else if matches!(rhs.as_ref(), Expr::Input) {
+                                    if let Expr::Literal(Literal::Num(n, _)) = lhs.as_ref() {
+                                        (Some(1), *n)
+                                    } else { (None, 0.0) }
+                                } else { (None, 0.0) }
+                            }
+                            Expr::Comma { left, right } => {
+                                let l_is_var = matches!(left.as_ref(), Expr::LoadVar { var_index: vi } if *vi == var_index);
+                                let r_is_var = matches!(right.as_ref(), Expr::LoadVar { var_index: vi } if *vi == var_index);
+                                let l_is_acc = matches!(left.as_ref(), Expr::Input);
+                                let r_is_acc = matches!(right.as_ref(), Expr::Input);
+                                if l_is_var && r_is_acc { (Some(2), 0.0) }
+                                else if l_is_acc && r_is_var { (Some(3), 0.0) }
+                                else { (None, 0.0) }
+                            }
+                            _ => (None, 0.0),
+                        }
+                    }
+                } else { (None, 0.0) };
 
                 let from_val = self.flatten_scalar(from, input_slot);
                 let to_val = self.flatten_scalar(to, input_slot);
@@ -3679,13 +3710,19 @@ impl Flattener {
                 self.emit(JitOp::Drop { slot: to_val });
                 self.emit(JitOp::Drop { slot: step_val });
 
-                if is_fused_foreach_add {
-                    // Fused path: acc_f64 += cur each iteration, yield Value::Num(acc_f64)
+                if let Some(ekind) = fused_extract_kind {
+                    // Fused path: acc_f64 += cur each iteration, yield based on extract kind
                     let acc_f64 = self.alloc_var();
                     let init_slot = self.alloc_slot();
                     self.emit(JitOp::GetVar { dst: init_slot, var_index: acc_index });
                     self.emit(JitOp::ToF64Var { dst_var: acc_f64, src: init_slot });
                     self.emit(JitOp::Drop { slot: init_slot });
+                    // For `. * K` extract, preload constant into f64 var
+                    let mul_const_var = if ekind == 1 {
+                        let v = self.alloc_var();
+                        self.emit(JitOp::F64Const { dst_var: v, val: fused_extract_const });
+                        v
+                    } else { 0 };
                     let head = self.alloc_label();
                     let body = self.alloc_label();
                     let done = self.alloc_label();
@@ -3694,10 +3731,47 @@ impl Flattener {
                     self.emit(JitOp::BranchOnVar { var: cmp, nonzero_label: body, zero_label: done });
                     self.emit(JitOp::Label { id: body });
                     self.emit(JitOp::F64Add { dst_var: acc_f64, a_var: acc_f64, b_var: cur });
-                    let acc_val = self.alloc_slot();
-                    self.emit(JitOp::F64Num { dst: acc_val, src_var: acc_f64 });
-                    self.emit_yield(acc_val);
-                    self.emit(JitOp::Drop { slot: acc_val });
+                    match ekind {
+                        0 => {
+                            // Identity: yield acc
+                            let acc_val = self.alloc_slot();
+                            self.emit(JitOp::F64Num { dst: acc_val, src_var: acc_f64 });
+                            self.emit_yield(acc_val);
+                            self.emit(JitOp::Drop { slot: acc_val });
+                        }
+                        1 => {
+                            // . * K: yield acc * K
+                            let tmp = self.alloc_var();
+                            self.emit(JitOp::F64Mul { dst_var: tmp, a_var: acc_f64, b_var: mul_const_var });
+                            let val = self.alloc_slot();
+                            self.emit(JitOp::F64Num { dst: val, src_var: tmp });
+                            self.emit_yield(val);
+                            self.emit(JitOp::Drop { slot: val });
+                        }
+                        2 => {
+                            // $x, .: yield cur then acc
+                            let cur_val = self.alloc_slot();
+                            self.emit(JitOp::F64Num { dst: cur_val, src_var: cur });
+                            self.emit_yield(cur_val);
+                            self.emit(JitOp::Drop { slot: cur_val });
+                            let acc_val = self.alloc_slot();
+                            self.emit(JitOp::F64Num { dst: acc_val, src_var: acc_f64 });
+                            self.emit_yield(acc_val);
+                            self.emit(JitOp::Drop { slot: acc_val });
+                        }
+                        3 => {
+                            // ., $x: yield acc then cur
+                            let acc_val = self.alloc_slot();
+                            self.emit(JitOp::F64Num { dst: acc_val, src_var: acc_f64 });
+                            self.emit_yield(acc_val);
+                            self.emit(JitOp::Drop { slot: acc_val });
+                            let cur_val = self.alloc_slot();
+                            self.emit(JitOp::F64Num { dst: cur_val, src_var: cur });
+                            self.emit_yield(cur_val);
+                            self.emit(JitOp::Drop { slot: cur_val });
+                        }
+                        _ => unreachable!(),
+                    }
                     self.emit(JitOp::F64Add { dst_var: cur, a_var: cur, b_var: step_v });
                     self.emit(JitOp::Jump { label: head });
                     self.emit(JitOp::Label { id: done });
@@ -6856,6 +6930,15 @@ impl JitCompiler {
                         let b_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), b_bits);
                         let sum = b.ins().fadd(a_f, b_f);
                         let bits = b.ins().bitcast(ptr_ty, cranelift_codegen::ir::MemFlags::new(), sum);
+                        b.def_var(vars[*dst_var as usize], bits);
+                    }
+                    JitOp::F64Mul { dst_var, a_var, b_var: bv } => {
+                        let a_bits = b.use_var(vars[*a_var as usize]);
+                        let b_bits = b.use_var(vars[*bv as usize]);
+                        let a_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), a_bits);
+                        let b_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), b_bits);
+                        let prod = b.ins().fmul(a_f, b_f);
+                        let bits = b.ins().bitcast(ptr_ty, cranelift_codegen::ir::MemFlags::new(), prod);
                         b.def_var(vars[*dst_var as usize], bits);
                     }
                     JitOp::RangeCheck { dst_var, cur_var, to_var, step_var } => {
