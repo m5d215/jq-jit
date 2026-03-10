@@ -120,6 +120,83 @@ impl Filter {
         self.jit_fn.is_some()
     }
 
+    /// Returns true if this filter has O(n²) eval path that benefits from JIT.
+    /// Specifically: Update (.[] |= f), and Reduce/Foreach over input-derived ranges.
+    pub fn has_loop_constructs(&self) -> bool {
+        use crate::ir::Expr;
+        fn references_input(e: &Expr) -> bool {
+            match e {
+                Expr::Input => true,
+                Expr::Pipe { left, right } | Expr::Comma { left, right }
+                | Expr::BinOp { lhs: left, rhs: right, .. } => {
+                    references_input(left) || references_input(right)
+                }
+                Expr::UnaryOp { operand, .. } | Expr::Negate { operand }
+                | Expr::Collect { generator: operand } => references_input(operand),
+                Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => {
+                    references_input(expr) || references_input(key)
+                }
+                Expr::Range { from, to, step } => {
+                    references_input(from) || references_input(to)
+                    || step.as_ref().map_or(false, |s| references_input(s))
+                }
+                Expr::CallBuiltin { args, .. } => args.iter().any(|a| references_input(a)),
+                _ => false,
+            }
+        }
+        fn check(e: &Expr) -> bool {
+            match e {
+                Expr::Update { .. } => true,
+                Expr::While { .. } | Expr::Until { .. } | Expr::Repeat { .. } => true,
+                Expr::Reduce { source, .. } | Expr::Foreach { source, .. } => {
+                    references_input(source)
+                }
+                _ => false,
+            }
+        }
+        fn walk(e: &Expr) -> bool {
+            if check(e) { return true; }
+            match e {
+                Expr::Pipe { left, right } | Expr::Comma { left, right }
+                | Expr::BinOp { lhs: left, rhs: right, .. }
+                | Expr::Alternative { primary: left, fallback: right } => {
+                    walk(left) || walk(right)
+                }
+                Expr::UnaryOp { operand, .. } | Expr::Negate { operand }
+                | Expr::Collect { generator: operand } | Expr::Each { input_expr: operand }
+                | Expr::EachOpt { input_expr: operand } | Expr::Recurse { input_expr: operand } => {
+                    walk(operand)
+                }
+                Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => walk(expr) || walk(key),
+                Expr::IfThenElse { cond, then_branch, else_branch } => {
+                    walk(cond) || walk(then_branch) || walk(else_branch)
+                }
+                Expr::TryCatch { try_expr, catch_expr } => walk(try_expr) || walk(catch_expr),
+                Expr::Reduce { source, init, update, .. } => walk(source) || walk(init) || walk(update),
+                Expr::Foreach { source, init, update, extract, .. } => {
+                    walk(source) || walk(init) || walk(update) || extract.as_ref().map_or(false, |e| walk(e))
+                }
+                Expr::Slice { expr, from, to } => {
+                    walk(expr) || from.as_ref().map_or(false, |e| walk(e))
+                    || to.as_ref().map_or(false, |e| walk(e))
+                }
+                Expr::ObjectConstruct { pairs } => pairs.iter().any(|(k, v)| walk(k) || walk(v)),
+                Expr::LetBinding { value, body, .. } => walk(value) || walk(body),
+                Expr::Label { body, .. } => walk(body),
+                Expr::CallBuiltin { args, .. } => args.iter().any(|a| walk(a)),
+                Expr::Update { path_expr, update_expr } | Expr::Assign { path_expr, value_expr: update_expr } => {
+                    walk(path_expr) || walk(update_expr)
+                }
+                _ => false,
+            }
+        }
+        if let Some((ref expr, _)) = self.parsed {
+            walk(expr)
+        } else {
+            false
+        }
+    }
+
     /// Returns true if this filter is a simple identity (`.`) that passes through input unchanged.
     pub fn is_identity(&self) -> bool {
         if let Some((ref expr, _)) = self.parsed {

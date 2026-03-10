@@ -307,9 +307,13 @@ fn real_main() {
     };
 
     // Lazy JIT: compile only when input is large enough to amortize compilation cost.
+    // Exception: always JIT for loop constructs (reduce/foreach/while/until/recurse)
+    // since their runtime dominates regardless of input size.
     // Must be done before process_input closure captures &filter.
     const JIT_THRESHOLD: usize = 4096;
-    if !null_input {
+    if filter.has_loop_constructs() {
+        filter.compile_jit();
+    } else if !null_input {
         if files.is_empty() {
             if raw_input && !slurp {
                 filter.compile_jit();

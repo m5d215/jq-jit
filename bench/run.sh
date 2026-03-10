@@ -95,6 +95,12 @@ TESTS=(
     'select|field:-c:select(.x > 1000000) | .name'
     'select|remap:-c:select(.x > 1000000) | {n:.name, v:.y}'
     'computed remap:-c:{name: .name, double: (.x * 2), sum: (.x + .y)}'
+    '[.x,.y]|add:-c:[.x, .y] | add'
+    'keys|length:-c:keys | length'
+    '.+{z:0}:-c:. + {z: 0}'
+    'split|first:-c:.name | split("_") | .[0]'
+    'slice:-c:.name[0:5]'
+    '{(.name):.x}:-c:{(.name): .x}'
 )
 
 for test in "${TESTS[@]}"; do
