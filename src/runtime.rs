@@ -649,6 +649,7 @@ fn rt_ge(a: &Value, b: &Value) -> Result<Value> {
     Ok(Value::from_bool(compare_values(a, b) != std::cmp::Ordering::Less))
 }
 
+#[inline]
 pub fn values_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Null, Value::Null) => true,
@@ -666,6 +667,7 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
     }
 }
 
+#[inline]
 pub fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
