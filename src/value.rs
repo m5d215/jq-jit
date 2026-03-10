@@ -1050,6 +1050,107 @@ pub fn json_object_del_field(b: &[u8], pos: usize, field: &str, buf: &mut Vec<u8
     true
 }
 
+/// Merge literal key-value pairs into a raw JSON object.
+/// `pairs` is a list of (key_name, json_value_bytes).
+/// Existing keys are replaced (last-write-wins), new keys are appended.
+/// Returns true on success.
+pub fn json_object_merge_literal(b: &[u8], pos: usize, merge_pairs: &[(String, Vec<u8>)], buf: &mut Vec<u8>) -> bool {
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    let mut i = pos + 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < b.len() && b[i] == b'}' {
+        // Empty object — just output the merge pairs
+        buf.push(b'{');
+        for (idx, (k, v)) in merge_pairs.iter().enumerate() {
+            if idx > 0 { buf.push(b','); }
+            buf.push(b'"');
+            buf.extend_from_slice(k.as_bytes());
+            buf.push(b'"');
+            buf.push(b':');
+            buf.extend_from_slice(v);
+        }
+        buf.push(b'}');
+        return true;
+    }
+    // Parse existing key-value pairs, collecting (key_bytes_start, key_bytes_end, val_start, val_end, key_str)
+    // key_bytes = raw key content WITHOUT quotes
+    let mut existing: Vec<(usize, usize, usize, usize)> = Vec::new();
+    let mut existing_keys: Vec<&[u8]> = Vec::new();
+    loop {
+        if i >= b.len() || b[i] != b'"' { return false; }
+        i += 1;
+        let key_content_start = i;
+        while i < b.len() {
+            match b[i] { b'"' => break, b'\\' => { i += 2; continue }, _ => i += 1 }
+        }
+        let key_content_end = i;
+        i += 1; // skip closing quote
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        let val_start = i;
+        i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return false };
+        let val_end = i;
+        existing_keys.push(&b[key_content_start..key_content_end]);
+        existing.push((key_content_start, key_content_end, val_start, val_end));
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { return false; }
+        if b[i] == b'}' { break; }
+        if b[i] != b',' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
+    // Build output: existing pairs (replacing values for matching keys) + new pairs
+    buf.push(b'{');
+    let mut first = true;
+    // Track which merge keys have been emitted
+    let mut merge_emitted = vec![false; merge_pairs.len()];
+    for (idx, (_, _, vs, ve)) in existing.iter().enumerate() {
+        let existing_key = existing_keys[idx];
+        // Check if this key matches any merge pair
+        let mut replaced = false;
+        for (mi, (mk, mv)) in merge_pairs.iter().enumerate() {
+            if existing_key == mk.as_bytes() && !existing_key.iter().any(|&c| c == b'\\') {
+                // Replace value with merge value
+                if !first { buf.push(b','); }
+                first = false;
+                buf.push(b'"');
+                buf.extend_from_slice(existing_key);
+                buf.push(b'"');
+                buf.push(b':');
+                buf.extend_from_slice(mv);
+                merge_emitted[mi] = true;
+                replaced = true;
+                break;
+            }
+        }
+        if !replaced {
+            if !first { buf.push(b','); }
+            first = false;
+            buf.push(b'"');
+            buf.extend_from_slice(existing_key);
+            buf.push(b'"');
+            buf.push(b':');
+            buf.extend_from_slice(&b[*vs..*ve]);
+        }
+    }
+    // Append any merge pairs that weren't replacements
+    for (mi, (mk, mv)) in merge_pairs.iter().enumerate() {
+        if !merge_emitted[mi] {
+            if !first { buf.push(b','); }
+            first = false;
+            buf.push(b'"');
+            buf.extend_from_slice(mk.as_bytes());
+            buf.push(b'"');
+            buf.push(b':');
+            buf.extend_from_slice(mv);
+        }
+    }
+    buf.push(b'}');
+    true
+}
+
 /// Iterate over values of a JSON object or elements of a JSON array,
 /// calling `cb` with (value_start, value_end) for each. Returns true on success.
 pub fn json_each_value_raw(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {

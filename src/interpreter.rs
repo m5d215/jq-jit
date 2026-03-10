@@ -1314,6 +1314,63 @@ impl Filter {
         None
     }
 
+    /// Detect `. + {key: literal, ...}` — merge literal object into input.
+    /// Returns list of (key, json_bytes) pairs for each literal entry.
+    pub fn detect_obj_merge_literal(&self) -> Option<Vec<(String, Vec<u8>)>> {
+        use crate::ir::{Expr, Literal, BinOp};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::BinOp { op: BinOp::Add, lhs, rhs } = expr {
+            if !matches!(lhs.as_ref(), Expr::Input) { return None; }
+            if let Expr::ObjectConstruct { pairs } = rhs.as_ref() {
+                let mut result = Vec::new();
+                for (key_expr, val_expr) in pairs {
+                    // Key must be a string literal
+                    let key = match key_expr {
+                        Expr::Literal(Literal::Str(s)) => s.clone(),
+                        _ => return None,
+                    };
+                    // Value must be a literal
+                    let json_bytes = match val_expr {
+                        Expr::Literal(Literal::Num(n, _)) => {
+                            let mut buf = Vec::new();
+                            crate::value::push_jq_number_bytes(&mut buf, *n);
+                            buf
+                        }
+                        Expr::Literal(Literal::Str(s)) => {
+                            // JSON-encode the string
+                            let mut buf = Vec::new();
+                            buf.push(b'"');
+                            for ch in s.bytes() {
+                                match ch {
+                                    b'"' => buf.extend_from_slice(b"\\\""),
+                                    b'\\' => buf.extend_from_slice(b"\\\\"),
+                                    b'\n' => buf.extend_from_slice(b"\\n"),
+                                    b'\r' => buf.extend_from_slice(b"\\r"),
+                                    b'\t' => buf.extend_from_slice(b"\\t"),
+                                    c if c < 0x20 => {
+                                        buf.extend_from_slice(format!("\\u{:04x}", c).as_bytes());
+                                    }
+                                    c => buf.push(c),
+                                }
+                            }
+                            buf.push(b'"');
+                            buf
+                        }
+                        Expr::Literal(Literal::Null) => b"null".to_vec(),
+                        Expr::Literal(Literal::True) => b"true".to_vec(),
+                        Expr::Literal(Literal::False) => b"false".to_vec(),
+                        _ => return None,
+                    };
+                    result.push((key, json_bytes));
+                }
+                if !result.is_empty() {
+                    return Some(result);
+                }
+            }
+        }
+        None
+    }
+
     /// Detect nested field access `.a.b` or `.a.b.c` pattern.
     /// Returns the chain of field names if this is chained field access on input.
     pub fn detect_nested_field_access(&self) -> Option<Vec<String>> {

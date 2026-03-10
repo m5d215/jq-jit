@@ -8,7 +8,7 @@ use std::process;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw, json_object_get_nested_field_raw, parse_json_num, json_value_length, json_object_keys_to_buf, json_object_keys_unsorted_to_buf, json_object_has_key, json_type_byte, json_object_del_field, json_each_value_raw, json_to_entries_raw, is_json_compact, push_json_compact_raw, push_json_pretty_raw, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
+use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw, json_object_get_nested_field_raw, parse_json_num, json_value_length, json_object_keys_to_buf, json_object_keys_unsorted_to_buf, json_object_has_key, json_type_byte, json_object_del_field, json_object_merge_literal, json_each_value_raw, json_to_entries_raw, is_json_compact, push_json_compact_raw, push_json_pretty_raw, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
 use jq_jit::interpreter::Filter;
 
 fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -392,6 +392,9 @@ fn real_main() {
     let del_field = if use_compact_buf && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() {
         filter.detect_del_field()
     } else { None };
+    let obj_merge_lit = if use_compact_buf && !exit_status && del_field.is_none() {
+        filter.detect_obj_merge_literal()
+    } else { None };
     let is_each = use_compact_buf && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() && del_field.is_none() && field_access.is_none() && filter.is_each();
     let is_to_entries = use_compact_buf && !exit_status && !is_each && filter.is_to_entries();
     let string_interp_fields = if use_compact_buf && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() && field_str_concat.is_none() {
@@ -447,7 +450,7 @@ fn real_main() {
         || select_str_test.is_some() || select_nested_cmp.is_some()
         || select_cmp_field.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_value.is_some() || select_str_field.is_some()
         || computed_array.is_some() || array_field.is_some() || multi_field.is_some() || is_length || is_keys
-        || is_keys_unsorted || has_field.is_some() || is_type || del_field.is_some()
+        || is_keys_unsorted || has_field.is_some() || is_type || del_field.is_some() || obj_merge_lit.is_some()
         || is_each || is_to_entries || string_interp_fields.is_some() || array_join.is_some()
         || literal_output.is_some() || array_fields_format.is_some()
         || field_split_join.is_some() || filter.is_empty();
@@ -2055,6 +2058,21 @@ fn real_main() {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         if json_object_del_field(raw, 0, df, &mut compact_buf) {
+                            compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some(ref merge_pairs) = obj_merge_lit {
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if json_object_merge_literal(raw, 0, merge_pairs, &mut compact_buf) {
                             compact_buf.push(b'\n');
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
@@ -3676,6 +3694,22 @@ fn real_main() {
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
                     if json_object_del_field(raw, 0, df, &mut compact_buf) {
+                        compact_buf.push(b'\n');
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some(ref merge_pairs) = obj_merge_lit {
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if json_object_merge_literal(raw, 0, merge_pairs, &mut compact_buf) {
                         compact_buf.push(b'\n');
                     } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
