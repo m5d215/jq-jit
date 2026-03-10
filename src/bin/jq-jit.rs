@@ -416,6 +416,9 @@ fn real_main() {
     let field_slice = if use_compact_buf && !exit_status && field_access.is_none() {
         filter.detect_field_slice()
     } else { None };
+    let dynamic_key_obj = if use_compact_buf && !exit_status && field_access.is_none() && computed_remap.is_none() {
+        filter.detect_dynamic_key_obj()
+    } else { None };
     let field_alt = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
         filter.detect_field_alternative()
     } else { None };
@@ -459,7 +462,8 @@ fn real_main() {
         || is_keys_unsorted || has_field.is_some() || is_type || del_field.is_some() || obj_merge_lit.is_some()
         || is_each || is_to_entries || string_interp_fields.is_some() || array_join.is_some()
         || literal_output.is_some() || array_fields_format.is_some()
-        || field_split_join.is_some() || field_split_first.is_some() || field_slice.is_some() || filter.is_empty();
+        || field_split_join.is_some() || field_split_first.is_some() || field_slice.is_some()
+        || dynamic_key_obj.is_some() || filter.is_empty();
     let projection_fields: Option<Vec<String>> = if !has_raw_fast_path && !slurp && !raw_input {
         filter.needed_input_fields()
     } else { None };
@@ -748,6 +752,36 @@ fn real_main() {
                                 if t > f { compact_buf.extend_from_slice(&inner[f..t]); }
                                 compact_buf.push(b'"');
                                 compact_buf.push(b'\n');
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref dk_key, ref dk_val)) = dynamic_key_obj {
+                    // {(.key_field): .val_field} — extract both fields, build single-key object
+                    let fields: Vec<&str> = vec![dk_key.as_str(), dk_val.as_str()];
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some(ranges) = json_object_get_fields_raw(raw, 0, &fields) {
+                            let (ks, ke) = ranges[0];
+                            let (vs, ve) = ranges[1];
+                            let key_val = &raw[ks..ke];
+                            // Key must be a string
+                            if key_val.len() >= 2 && key_val[0] == b'"' {
+                                compact_buf.push(b'{');
+                                compact_buf.extend_from_slice(key_val);
+                                compact_buf.push(b':');
+                                compact_buf.extend_from_slice(&raw[vs..ve]);
+                                compact_buf.extend_from_slice(b"}\n");
                             } else {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -2412,6 +2446,35 @@ fn real_main() {
                             if t > f { compact_buf.extend_from_slice(&inner[f..t]); }
                             compact_buf.push(b'"');
                             compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref dk_key, ref dk_val)) = dynamic_key_obj {
+                let content_bytes = content.as_bytes();
+                let fields: Vec<&str> = vec![dk_key.as_str(), dk_val.as_str()];
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some(ranges) = json_object_get_fields_raw(raw, 0, &fields) {
+                        let (ks, ke) = ranges[0];
+                        let (vs, ve) = ranges[1];
+                        let key_val = &raw[ks..ke];
+                        if key_val.len() >= 2 && key_val[0] == b'"' {
+                            compact_buf.push(b'{');
+                            compact_buf.extend_from_slice(key_val);
+                            compact_buf.push(b':');
+                            compact_buf.extend_from_slice(&raw[vs..ve]);
+                            compact_buf.extend_from_slice(b"}\n");
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);

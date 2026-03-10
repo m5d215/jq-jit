@@ -845,6 +845,31 @@ impl Filter {
         None
     }
 
+    /// Detect `{(.field_key): .field_val}` — single dynamic-key object construction.
+    /// Returns (key_field, value_field).
+    pub fn detect_dynamic_key_obj(&self) -> Option<(String, String)> {
+        use crate::ir::{Expr, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::ObjectConstruct { pairs } = expr {
+            if pairs.len() != 1 { return None; }
+            let (k, v) = &pairs[0];
+            // Key must be a field access (.field)
+            let key_field = if let Expr::Index { expr: base, key } = k {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() }
+                else { return None; }
+            } else { return None; };
+            // Value must be a field access (.field)
+            let val_field = if let Expr::Index { expr: base, key } = v {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() }
+                else { return None; }
+            } else { return None; };
+            return Some((key_field, val_field));
+        }
+        None
+    }
+
     /// Detect `.field[from:to]` with literal numeric bounds.
     /// Returns (field_name, from_opt, to_opt).
     pub fn detect_field_slice(&self) -> Option<(String, Option<i64>, Option<i64>)> {
