@@ -5161,6 +5161,38 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 _ => {}
             }
         }
+        // Fast path: to_entries (op 27)
+        if op == 27 {
+            if let Value::Obj(o) = &*input {
+                let mut entries = Vec::with_capacity(o.len());
+                for (k, v) in o.iter() {
+                    let mut entry = crate::value::new_objmap();
+                    entry.insert("key".into(), Value::from_str(k));
+                    entry.insert("value".into(), v.clone());
+                    entries.push(Value::Obj(Rc::new(entry)));
+                }
+                std::ptr::write(dst, Value::Arr(Rc::new(entries)));
+                return 0;
+            }
+        }
+        // Fast path: tojson (op 17)
+        if op == 17 {
+            std::ptr::write(dst, Value::from_string(crate::value::value_to_json(&*input)));
+            return 0;
+        }
+        // Fast path: fromjson (op 18)
+        if op == 18 {
+            if let Value::Str(s) = &*input {
+                match crate::value::json_to_value_libjq(s) {
+                    Ok(v) => { std::ptr::write(dst, v); return 0; }
+                    Err(e) => {
+                        set_jit_error(format!("{}", e));
+                        std::ptr::write(dst, Value::Null);
+                        return GEN_ERROR;
+                    }
+                }
+            }
+        }
         // Fast path: utf8bytelength (op 43)
         if op == 43 {
             if let Value::Str(s) = &*input {
