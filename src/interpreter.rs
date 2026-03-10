@@ -322,6 +322,49 @@ impl Filter {
         None
     }
 
+    /// Detect `[.field, "lit", ...] | join("sep")` pattern.
+    /// Each element must be a field access (.field) or a string literal.
+    /// Returns (parts: Vec<(is_literal, name)>, separator).
+    pub fn detect_array_join(&self) -> Option<(Vec<(bool, String)>, String)> {
+        use crate::ir::{Expr, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::Pipe { left, right } = expr {
+            // right must be join("sep")
+            if let Expr::CallBuiltin { name, args } = right.as_ref() {
+                if name != "join" || args.len() != 1 { return None; }
+                if let Expr::Literal(Literal::Str(sep)) = &args[0] {
+                    // left must be [expr1, expr2, ...]
+                    if let Expr::Collect { generator } = left.as_ref() {
+                        let mut parts = Vec::new();
+                        fn collect_comma_parts(e: &Expr, out: &mut Vec<(bool, String)>) -> bool {
+                            match e {
+                                Expr::Comma { left, right } => {
+                                    collect_comma_parts(left, out) && collect_comma_parts(right, out)
+                                }
+                                Expr::Index { expr: base, key } => {
+                                    if !matches!(base.as_ref(), Expr::Input) { return false; }
+                                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                        out.push((false, field.clone()));
+                                        true
+                                    } else { false }
+                                }
+                                Expr::Literal(Literal::Str(s)) => {
+                                    out.push((true, s.clone()));
+                                    true
+                                }
+                                _ => false,
+                            }
+                        }
+                        if collect_comma_parts(generator, &mut parts) && !parts.is_empty() {
+                            return Some((parts, sep.clone()));
+                        }
+                    }
+                } else { return None; }
+            }
+        }
+        None
+    }
+
     /// Detect `.field / N | floor` or `.field % N` pattern (field + binop + optional unary).
     /// Returns (field_name, binop, constant, optional unary op) if detected.
     pub fn detect_field_binop_const_unary(&self) -> Option<(String, crate::ir::BinOp, f64, Option<crate::ir::UnaryOp>)> {
