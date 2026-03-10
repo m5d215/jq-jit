@@ -1108,10 +1108,7 @@ impl Parser {
 
         if self.eat(&Token::Pipe) {
             let right = self.parse_pipe()?;
-            expr = Expr::Pipe {
-                left: Box::new(expr),
-                right: Box::new(right),
-            };
+            expr = optimize_pipe(expr, right);
         }
         Ok(expr)
     }
@@ -1129,10 +1126,7 @@ impl Parser {
 
         if self.eat(&Token::Pipe) {
             let right = self.parse_pipe_nocomma()?;
-            expr = Expr::Pipe {
-                left: Box::new(expr),
-                right: Box::new(right),
-            };
+            expr = optimize_pipe(expr, right);
         }
         Ok(expr)
     }
@@ -3850,4 +3844,43 @@ fn extract_literal_str_array(expr: &Expr) -> Option<Vec<String>> {
         }
         _ => None,
     }
+}
+
+/// Peephole optimization for Pipe(left, right).
+/// - `[a, b] | add` → `a + b` (avoid array construction)
+/// - `[a, b, c, ...] | add` → `a + b + c + ...`
+fn optimize_pipe(left: Expr, right: Expr) -> Expr {
+    use crate::ir::{UnaryOp, BinOp};
+    // Check for Collect(...) | UnaryOp(Add)
+    if let Expr::UnaryOp { op: UnaryOp::Add, operand } = &right {
+        if matches!(operand.as_ref(), Expr::Input) {
+            if let Expr::Collect { generator } = &left {
+                // Extract comma-separated elements
+                let mut elems = Vec::new();
+                fn collect_comma(e: &Expr, out: &mut Vec<Expr>) {
+                    match e {
+                        Expr::Comma { left, right } => {
+                            collect_comma(left, out);
+                            collect_comma(right, out);
+                        }
+                        _ => out.push(e.clone()),
+                    }
+                }
+                collect_comma(generator, &mut elems);
+                if elems.len() >= 2 {
+                    // Rewrite [a, b, c, ...] | add → a + b + c + ...
+                    let mut result = elems.remove(0);
+                    for elem in elems {
+                        result = Expr::BinOp {
+                            op: BinOp::Add,
+                            lhs: Box::new(result),
+                            rhs: Box::new(elem),
+                        };
+                    }
+                    return result;
+                }
+            }
+        }
+    }
+    Expr::Pipe { left: Box::new(left), right: Box::new(right) }
 }
