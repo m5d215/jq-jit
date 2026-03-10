@@ -962,10 +962,16 @@ impl Flattener {
                 out
             }
             Expr::Until { cond, update } => {
-                // Try fused f64 until for simple numeric patterns
-                let fused = Self::classify_f64_until(cond, update);
-                if let Some((cond_cc, cond_const, update_op, update_const)) = fused {
-                    // Fused path: pure f64 loop in Cranelift
+                // Try narrow fused path: until(. cmp K; . op S)
+                let narrow_fused = Self::classify_f64_until_narrow(cond, update);
+                // Try general fused f64 until: both cond and update are pure f64 on .
+                let dummy_var = u16::MAX;
+                let general_f64 = narrow_fused.is_none()
+                    && Self::is_pure_f64_expr(cond, dummy_var)
+                    && Self::is_pure_f64_expr(update, dummy_var);
+
+                if let Some((cond_cc, cond_const, update_op, update_const)) = narrow_fused {
+                    // Fast narrow path: preload constants outside loop
                     let acc = self.alloc_var();
                     self.emit(JitOp::ToF64Var { dst_var: acc, src: input_slot });
                     let k_var = self.alloc_var();
@@ -985,6 +991,28 @@ impl Flattener {
                         1 => self.emit(JitOp::F64Sub { dst_var: acc, a_var: acc, b_var: s_var }),
                         2 => self.emit(JitOp::F64Mul { dst_var: acc, a_var: acc, b_var: s_var }),
                         _ => unreachable!(),
+                    }
+                    self.emit(JitOp::Jump { label: head });
+                    self.emit(JitOp::Label { id: done });
+                    let result = self.alloc_slot();
+                    self.emit(JitOp::F64Num { dst: result, src_var: acc });
+                    result
+                } else if general_f64 {
+                    // General fused path: compile_f64_expr inside loop
+                    let acc = self.alloc_var();
+                    self.emit(JitOp::ToF64Var { dst_var: acc, src: input_slot });
+                    let head = self.alloc_label();
+                    let body = self.alloc_label();
+                    let done = self.alloc_label();
+                    self.emit(JitOp::Label { id: head });
+                    let cond_v = self.compile_f64_expr(cond, dummy_var, acc, acc);
+                    self.emit(JitOp::BranchOnVar { var: cond_v, nonzero_label: done, zero_label: body });
+                    self.emit(JitOp::Label { id: body });
+                    let new_acc = self.compile_f64_expr(update, dummy_var, acc, acc);
+                    if new_acc != acc {
+                        let zero_tmp = self.alloc_var();
+                        self.emit(JitOp::F64Const { dst_var: zero_tmp, val: 0.0 });
+                        self.emit(JitOp::F64Add { dst_var: acc, a_var: new_acc, b_var: zero_tmp });
                     }
                     self.emit(JitOp::Jump { label: head });
                     self.emit(JitOp::Label { id: done });
@@ -3763,12 +3791,9 @@ impl Flattener {
         }
     }
 
-    /// Classify `until(cond; update)` for fused f64 loop.
-    /// Returns (cond_cc, cond_const, update_op, update_const) if fuseable.
-    /// cond_cc: 0=Ge, 1=Gt, 2=Le, 3=Lt, 4=Eq, 5=Ne
-    /// update_op: 0=Add, 1=Sub, 2=Mul
-    fn classify_f64_until(cond: &Expr, update: &Expr) -> Option<(u8, f64, u8, f64)> {
-        // cond must be: . cmp_op Literal(Num(K))
+
+    /// Classify simple `until(. cmp K; . op S)` for narrow fused path.
+    fn classify_f64_until_narrow(cond: &Expr, update: &Expr) -> Option<(u8, f64, u8, f64)> {
         let (cond_cc, cond_const) = match cond {
             Expr::BinOp { op, lhs, rhs } if matches!(lhs.as_ref(), Expr::Input) => {
                 if let Expr::Literal(Literal::Num(k, _)) = rhs.as_ref() {
@@ -3782,7 +3807,6 @@ impl Flattener {
             }
             _ => return None,
         };
-        // update must be: . arith_op Literal(Num(S))
         let (update_op, update_const) = match update {
             Expr::BinOp { op, lhs, rhs } if matches!(lhs.as_ref(), Expr::Input) => {
                 if let Expr::Literal(Literal::Num(s, _)) = rhs.as_ref() {
