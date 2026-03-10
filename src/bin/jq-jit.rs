@@ -303,6 +303,9 @@ fn real_main() {
     let select_cmp_remap = if use_compact_buf && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
         filter.detect_select_cmp_then_remap()
     } else { None };
+    let select_str_field = if use_compact_buf && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
+        filter.detect_select_str_then_field()
+    } else { None };
     // Field projection: if filter only accesses specific fields, skip parsing the rest.
     // Only activate when no raw byte fast path matched (those handle their own parsing).
     let has_raw_fast_path = field_access.is_some() || nested_field.is_some() || field_remap.is_some()
@@ -310,7 +313,7 @@ fn real_main() {
         || field_str_builtin.is_some() || field_ltrimstr_tonumber.is_some()
         || field_str_concat.is_some() || select_cmp.is_some() || select_str.is_some()
         || select_str_test.is_some() || select_nested_cmp.is_some()
-        || select_cmp_field.is_some() || select_cmp_remap.is_some()
+        || select_cmp_field.is_some() || select_cmp_remap.is_some() || select_str_field.is_some()
         || array_field.is_some() || multi_field.is_some() || is_length || is_keys
         || is_keys_unsorted || has_field.is_some() || is_type || del_field.is_some()
         || is_each || is_to_entries || string_interp_fields.is_some() || array_join.is_some()
@@ -1382,6 +1385,51 @@ fn real_main() {
                         }
                         Ok(())
                     })
+                } else if let Some((ref sel_field, ref test_type, ref test_arg, ref out_field)) = select_str_field {
+                    let expected_eq = if test_type == "eq" || test_type == "ne" {
+                        let mut e = Vec::with_capacity(test_arg.len() + 2);
+                        e.push(b'"'); e.extend_from_slice(test_arg.as_bytes()); e.push(b'"');
+                        Some(e)
+                    } else { None };
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        let pass = if let Some(ref expected) = expected_eq {
+                            // eq/ne test
+                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sel_field) {
+                                let val_bytes = &raw[vs..ve];
+                                let m = val_bytes == expected.as_slice();
+                                if test_type == "eq" { m } else { !m }
+                            } else { false }
+                        } else {
+                            // startswith/endswith/contains
+                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sel_field) {
+                                let val = &raw[vs..ve];
+                                if val.len() >= 2 && val[0] == b'"' && val[ve-vs-1] == b'"' && !val[1..ve-vs-1].contains(&b'\\') {
+                                    let inner = &val[1..ve-vs-1];
+                                    match test_type.as_str() {
+                                        "startswith" => inner.starts_with(test_arg.as_bytes()),
+                                        "endswith" => inner.ends_with(test_arg.as_bytes()),
+                                        "contains" => {
+                                            let ab = test_arg.as_bytes();
+                                            ab.len() <= inner.len() && inner.windows(ab.len()).any(|w| w == ab)
+                                        }
+                                        _ => false,
+                                    }
+                                } else { false }
+                            } else { false }
+                        };
+                        if pass {
+                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
+                                compact_buf.extend_from_slice(&raw[vs..ve]);
+                                compact_buf.push(b'\n');
+                            }
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
                 } else if is_length {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
@@ -1976,6 +2024,50 @@ fn real_main() {
                                 }
                             }
                             compact_buf.push(b'}');
+                            compact_buf.push(b'\n');
+                        }
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref sel_field, ref test_type, ref test_arg, ref out_field)) = select_str_field {
+                let content_bytes = content.as_bytes();
+                let expected_eq = if test_type == "eq" || test_type == "ne" {
+                    let mut e = Vec::with_capacity(test_arg.len() + 2);
+                    e.push(b'"'); e.extend_from_slice(test_arg.as_bytes()); e.push(b'"');
+                    Some(e)
+                } else { None };
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    let pass = if let Some(ref expected) = expected_eq {
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sel_field) {
+                            let val_bytes = &raw[vs..ve];
+                            let m = val_bytes == expected.as_slice();
+                            if test_type == "eq" { m } else { !m }
+                        } else { false }
+                    } else {
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sel_field) {
+                            let val = &raw[vs..ve];
+                            if val.len() >= 2 && val[0] == b'"' && val[ve-vs-1] == b'"' && !val[1..ve-vs-1].contains(&b'\\') {
+                                let inner = &val[1..ve-vs-1];
+                                match test_type.as_str() {
+                                    "startswith" => inner.starts_with(test_arg.as_bytes()),
+                                    "endswith" => inner.ends_with(test_arg.as_bytes()),
+                                    "contains" => {
+                                        let ab = test_arg.as_bytes();
+                                        ab.len() <= inner.len() && inner.windows(ab.len()).any(|w| w == ab)
+                                    }
+                                    _ => false,
+                                }
+                            } else { false }
+                        } else { false }
+                    };
+                    if pass {
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
+                            compact_buf.extend_from_slice(&raw[vs..ve]);
                             compact_buf.push(b'\n');
                         }
                     }

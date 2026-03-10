@@ -709,15 +709,14 @@ impl Filter {
         None
     }
 
-    /// Detect `select(.field > N) | {a:.x, b:.y}` pattern.
+    /// Detect `select(.field > N) | {a:.x, b:.y}` or `if .field > N then {a:.x, b:.y} else empty end`.
     /// Returns (select_field, op, threshold, output_fields).
     pub fn detect_select_cmp_then_remap(&self) -> Option<(String, crate::ir::BinOp, f64, Vec<(String, String)>)> {
         use crate::ir::{Expr, BinOp, Literal};
         let (ref expr, _) = self.parsed.as_ref()?;
-        if let Expr::Pipe { left, right } = expr {
-            // Right side: {a:.x, b:.y, ...}
+        let try_extract_remap = |cond: &Expr, output: &Expr| -> Option<(String, BinOp, f64, Vec<(String, String)>)> {
             let mut out_pairs = Vec::new();
-            if let Expr::ObjectConstruct { pairs: entries } = right.as_ref() {
+            if let Expr::ObjectConstruct { pairs: entries } = output {
                 for (k, v) in entries {
                     if let Expr::Literal(Literal::Str(key)) = k {
                         if let Expr::Index { expr: base, key: vk } = v {
@@ -730,19 +729,82 @@ impl Filter {
                 }
                 if out_pairs.is_empty() { return None; }
             } else { return None; }
-            // Left side: select(.field > N)
+            if let Expr::BinOp { op, lhs, rhs } = cond {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                    return None;
+                }
+                if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(sel_field)) = key.as_ref() {
+                        if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                            return Some((sel_field.clone(), *op, *n, out_pairs));
+                        }
+                    }
+                }
+            }
+            None
+        };
+        // Form 1: Pipe(select(.field > N), {remap})
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                    if let Some(r) = try_extract_remap(cond, right) { return Some(r); }
+                }
+            }
+        }
+        // Form 2: if .field > N then {remap} else empty end
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if matches!(else_branch.as_ref(), Expr::Empty) {
+                if let Some(r) = try_extract_remap(cond, then_branch) { return Some(r); }
+            }
+        }
+        None
+    }
+
+    /// Detect `select(.field == "str") | .output_field` or `select(.field | startswith("str")) | .output_field`.
+    /// Returns (select_field, test_type, test_arg, output_field).
+    /// test_type: "eq", "ne", "startswith", "endswith", "contains"
+    pub fn detect_select_str_then_field(&self) -> Option<(String, String, String, String)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        // Must be Pipe(select, .field)
+        if let Expr::Pipe { left, right } = expr {
+            // Right side: .output_field
+            let output_field = if let Expr::Index { expr: base, key } = right.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() } else { return None; }
+            } else { return None; };
+            // Left side: select(cond) = IfThenElse { cond, then: Input, else: Empty }
             if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
                 if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
                 if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+                // Form A: select(.field == "str")
                 if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
-                    if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
-                        return None;
+                    if matches!(op, BinOp::Eq | BinOp::Ne) {
+                        if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                            if matches!(base.as_ref(), Expr::Input) {
+                                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                    if let Expr::Literal(Literal::Str(val)) = rhs.as_ref() {
+                                        let test_type = if matches!(op, BinOp::Eq) { "eq" } else { "ne" };
+                                        return Some((field.clone(), test_type.to_string(), val.clone(), output_field));
+                                    }
+                                }
+                            }
+                        }
                     }
-                    if let Expr::Index { expr: base, key } = lhs.as_ref() {
-                        if !matches!(base.as_ref(), Expr::Input) { return None; }
-                        if let Expr::Literal(Literal::Str(sel_field)) = key.as_ref() {
-                            if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
-                                return Some((sel_field.clone(), *op, *n, out_pairs));
+                }
+                // Form B: select(.field | startswith/endswith/contains("str"))
+                if let Expr::Pipe { left: pipe_left, right: pipe_right } = cond.as_ref() {
+                    if let Expr::Index { expr: base, key } = pipe_left.as_ref() {
+                        if matches!(base.as_ref(), Expr::Input) {
+                            if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                if let Expr::CallBuiltin { name, args } = pipe_right.as_ref() {
+                                    if matches!(name.as_str(), "startswith" | "endswith" | "contains") && args.len() == 1 {
+                                        if let Expr::Literal(Literal::Str(arg)) = &args[0] {
+                                            return Some((field.clone(), name.clone(), arg.clone(), output_field));
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
