@@ -602,6 +602,26 @@ impl Filter {
         None
     }
 
+    /// Detect `[.f1,.f2,...] | @csv` or `@tsv` pattern.
+    /// Returns (field_names, format) where format is "csv" or "tsv".
+    pub fn detect_array_fields_format(&self) -> Option<(Vec<String>, String)> {
+        use crate::ir::Expr;
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Format { name, .. } = right.as_ref() {
+                if matches!(name.as_str(), "csv" | "tsv") {
+                    if let Expr::Collect { generator } = left.as_ref() {
+                        let mut fields = Vec::new();
+                        if collect_comma_fields(generator, &mut fields) && fields.len() >= 2 {
+                            return Some((fields, name.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect comma-separated field access `.f1,.f2,...` pattern.
     /// Returns the list of field names if all branches are direct field accesses on input.
     pub fn detect_multi_field_access(&self) -> Option<Vec<String>> {

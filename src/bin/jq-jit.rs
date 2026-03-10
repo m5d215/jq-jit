@@ -291,6 +291,9 @@ fn real_main() {
         filter.detect_array_join()
     } else { None };
     let literal_output = if use_compact_buf && !exit_status { filter.detect_literal_output() } else { None };
+    let array_fields_format = if use_compact_buf && !exit_status && field_access.is_none() {
+        filter.detect_array_fields_format()
+    } else { None };
     // Field projection: if filter only accesses specific fields, skip parsing the rest.
     // Only activate when no raw byte fast path matched (those handle their own parsing).
     let has_raw_fast_path = field_access.is_some() || nested_field.is_some() || field_remap.is_some()
@@ -301,7 +304,7 @@ fn real_main() {
         || array_field.is_some() || multi_field.is_some() || is_length || is_keys
         || is_keys_unsorted || has_field.is_some() || is_type || del_field.is_some()
         || is_each || is_to_entries || string_interp_fields.is_some() || array_join.is_some()
-        || literal_output.is_some() || filter.is_empty();
+        || literal_output.is_some() || array_fields_format.is_some() || filter.is_empty();
     let projection_fields: Option<Vec<String>> = if !has_raw_fast_path && !slurp && !raw_input {
         filter.needed_input_fields()
     } else { None };
@@ -419,6 +422,65 @@ fn real_main() {
                     json_stream_raw(&input_str, |_, _| {
                         compact_buf.extend_from_slice(lit);
                         compact_buf.push(b'\n');
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref aff_fields, ref aff_format)) = array_fields_format {
+                    // [.f1,.f2,...] | @csv or @tsv — raw byte field extract + format
+                    let aff_refs: Vec<&str> = aff_fields.iter().map(|s| s.as_str()).collect();
+                    let is_csv = aff_format == "csv";
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some(ranges) = json_object_get_fields_raw(raw, 0, &aff_refs) {
+                            // Check all string fields for escape sequences — fall back if any
+                            let mut has_escapes = false;
+                            for (vs, ve) in &ranges {
+                                let val = &raw[*vs..*ve];
+                                if val[0] == b'"' && val[1..val.len()-1].contains(&b'\\') {
+                                    has_escapes = true;
+                                    break;
+                                }
+                            }
+                            if has_escapes {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            } else {
+                                compact_buf.push(b'"');
+                                for (i, (vs, ve)) in ranges.iter().enumerate() {
+                                    if i > 0 {
+                                        if is_csv { compact_buf.push(b','); }
+                                        else { compact_buf.extend_from_slice(b"\\t"); }
+                                    }
+                                    let val = &raw[*vs..*ve];
+                                    if val[0] == b'"' {
+                                        // Simple string (no escapes): content is raw UTF-8
+                                        let inner = &val[1..val.len()-1];
+                                        if is_csv {
+                                            // CSV: wrap in \"...\"
+                                            compact_buf.extend_from_slice(b"\\\"");
+                                            compact_buf.extend_from_slice(inner);
+                                            compact_buf.extend_from_slice(b"\\\"");
+                                        } else {
+                                            // TSV: output raw string content
+                                            compact_buf.extend_from_slice(inner);
+                                        }
+                                    } else if val == b"null" {
+                                        // null → empty
+                                    } else {
+                                        // number, boolean — output as-is
+                                        compact_buf.extend_from_slice(val);
+                                    }
+                                }
+                                compact_buf.push(b'"');
+                                compact_buf.push(b'\n');
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
                             compact_buf.clear();
@@ -1358,6 +1420,60 @@ fn real_main() {
                 json_stream_raw(content, |_, _| {
                     compact_buf.extend_from_slice(lit);
                     compact_buf.push(b'\n');
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref aff_fields, ref aff_format)) = array_fields_format {
+                let content_bytes = content.as_bytes();
+                let aff_refs: Vec<&str> = aff_fields.iter().map(|s| s.as_str()).collect();
+                let is_csv = aff_format == "csv";
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some(ranges) = json_object_get_fields_raw(raw, 0, &aff_refs) {
+                        let mut has_escapes = false;
+                        for (vs, ve) in &ranges {
+                            let val = &raw[*vs..*ve];
+                            if val[0] == b'"' && val[1..val.len()-1].contains(&b'\\') {
+                                has_escapes = true;
+                                break;
+                            }
+                        }
+                        if has_escapes {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        } else {
+                            compact_buf.push(b'"');
+                            for (i, (vs, ve)) in ranges.iter().enumerate() {
+                                if i > 0 {
+                                    if is_csv { compact_buf.push(b','); }
+                                    else { compact_buf.extend_from_slice(b"\\t"); }
+                                }
+                                let val = &raw[*vs..*ve];
+                                if val[0] == b'"' {
+                                    let inner = &val[1..val.len()-1];
+                                    if is_csv {
+                                        compact_buf.extend_from_slice(b"\\\"");
+                                        compact_buf.extend_from_slice(inner);
+                                        compact_buf.extend_from_slice(b"\\\"");
+                                    } else {
+                                        compact_buf.extend_from_slice(inner);
+                                    }
+                                } else if val == b"null" {
+                                    // null → empty
+                                } else {
+                                    compact_buf.extend_from_slice(val);
+                                }
+                            }
+                            compact_buf.push(b'"');
+                            compact_buf.push(b'\n');
+                        }
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
                         compact_buf.clear();
