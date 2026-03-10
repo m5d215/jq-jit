@@ -201,7 +201,7 @@ fn real_main() {
         }
     };
 
-    let projection_fields: Option<Vec<String>> = None;
+    // projection_fields is set below after all pattern detections
 
     let stdout = io::stdout();
     let mut out = io::BufWriter::with_capacity(65536, stdout.lock());
@@ -285,6 +285,19 @@ fn real_main() {
         filter.detect_array_join()
     } else { None };
     let literal_output = if use_compact_buf && !exit_status { filter.detect_literal_output() } else { None };
+    // Field projection: if filter only accesses specific fields, skip parsing the rest.
+    // Only activate when no raw byte fast path matched (those handle their own parsing).
+    let has_raw_fast_path = field_access.is_some() || nested_field.is_some() || field_remap.is_some()
+        || field_binop.is_some() || field_unary_num.is_some() || field_binop_const_unary.is_some()
+        || field_str_builtin.is_some() || field_ltrimstr_tonumber.is_some()
+        || field_str_concat.is_some() || select_cmp.is_some() || select_str.is_some()
+        || array_field.is_some() || multi_field.is_some() || is_length || is_keys
+        || is_keys_unsorted || has_field.is_some() || is_type || del_field.is_some()
+        || is_each || is_to_entries || string_interp_fields.is_some() || array_join.is_some()
+        || literal_output.is_some() || filter.is_empty();
+    let projection_fields: Option<Vec<String>> = if !has_raw_fast_path && !slurp && !raw_input {
+        filter.needed_input_fields()
+    } else { None };
     let mut compact_buf: Vec<u8> = if use_compact_buf || use_pretty_buf { Vec::with_capacity(1 << 17) } else { Vec::new() };
     let process_input = |input: &Value, raw_bytes: Option<&[u8]>, out: &mut io::BufWriter<io::StdoutLock>, cbuf: &mut Vec<u8>, any_false: &mut bool, had_error: &mut bool| {
         let result = filter.execute_cb(input, &mut |result| {
