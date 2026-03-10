@@ -5066,7 +5066,9 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
             match &*input {
                 Value::Str(_) => { std::ptr::write(dst, (*input).clone()); return 0; }
                 Value::Num(n, _) => {
-                    std::ptr::write(dst, Value::from_string(crate::value::format_jq_number(*n)));
+                    let mut buf = String::with_capacity(24);
+                    crate::value::push_jq_number_str(&mut buf, *n);
+                    std::ptr::write(dst, Value::from_string(buf));
                     return 0;
                 }
                 Value::Null => { std::ptr::write(dst, Value::from_str("null")); return 0; }

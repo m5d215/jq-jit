@@ -1965,30 +1965,34 @@ pub unsafe fn jv_to_value(jv: Jv) -> Result<Value> {
 
 /// Format f64 the way jq does — shortest representation with scientific notation for large/small values.
 pub fn format_jq_number(n: f64) -> String {
+    let mut buf = String::with_capacity(24);
+    push_jq_number_str(&mut buf, n);
+    buf
+}
+
+/// Push a formatted jq number directly to a String buffer (avoids intermediate allocation).
+#[inline]
+pub fn push_jq_number_str(buf: &mut String, n: f64) {
     if n.is_nan() {
-        return "null".to_string();
+        buf.push_str("null");
+        return;
     }
     if n.is_infinite() {
-        return if n.is_sign_positive() {
-            "1.7976931348623157e+308".to_string()
-        } else {
-            "-1.7976931348623157e+308".to_string()
-        };
+        buf.push_str(if n.is_sign_positive() { "1.7976931348623157e+308" } else { "-1.7976931348623157e+308" });
+        return;
     }
     if n == 0.0 {
-        return if n.is_sign_negative() {
-            "-0".to_string()
-        } else {
-            "0".to_string()
-        };
+        buf.push_str(if n.is_sign_negative() { "-0" } else { "0" });
+        return;
     }
 
     // Integer fast path for common values (fits in i64, reasonable length)
     if n == n.trunc() && n.abs() < 1e16 {
         let i = n as i64;
         if i as f64 == n {
-            let mut buf = itoa::Buffer::new();
-            return buf.format(i).to_string();
+            let mut ibuf = itoa::Buffer::new();
+            buf.push_str(ibuf.format(i));
+            return;
         }
     }
 
@@ -1998,18 +2002,20 @@ pub fn format_jq_number(n: f64) -> String {
 
     // For very small numbers (abs < 1e-4), always use scientific notation (matching %g)
     if abs != 0.0 && abs < 1e-4 {
-        return format_as_scientific(n);
+        buf.push_str(&format_as_scientific(n));
+        return;
     }
 
     // For large numbers: compare fixed vs scientific length, prefer shorter
     if abs >= 1e16 {
         let sci = format_as_scientific(n);
         if sci.len() < s.len() {
-            return sci;
+            buf.push_str(&sci);
+            return;
         }
     }
 
-    s
+    buf.push_str(&s);
 }
 
 /// Format a number in scientific notation matching jq's style.

@@ -3014,7 +3014,7 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
                     Value::True => buf.push_str("true"),
                     Value::False => buf.push_str("false"),
                     Value::Num(n, _) => {
-                        buf.push_str(&crate::value::format_jq_number(*n));
+                        crate::value::push_jq_number_str(&mut buf, *n);
                     }
                     _ => buf.push_str(&crate::value::value_to_json(v)),
                 }
@@ -3041,7 +3041,7 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
                     Value::Null => {}
                     Value::True => buf.push_str("true"),
                     Value::False => buf.push_str("false"),
-                    Value::Num(n, _) => buf.push_str(&crate::value::format_jq_number(*n)),
+                    Value::Num(n, _) => crate::value::push_jq_number_str(&mut buf, *n),
                     _ => buf.push_str(&crate::value::value_to_json(v)),
                 }
             }
@@ -3055,7 +3055,20 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
     match name {
         "text" => Ok(s),
         "json" => Ok(serde_json::to_string(&s).unwrap_or_else(|_| format!("{:?}", s))),
-        "html" => Ok(s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('\'', "&apos;").replace('"', "&quot;")),
+        "html" => {
+            let mut r = String::with_capacity(s.len());
+            for c in s.chars() {
+                match c {
+                    '&' => r.push_str("&amp;"),
+                    '<' => r.push_str("&lt;"),
+                    '>' => r.push_str("&gt;"),
+                    '\'' => r.push_str("&apos;"),
+                    '"' => r.push_str("&quot;"),
+                    _ => r.push(c),
+                }
+            }
+            Ok(r)
+        }
         "uri" => {
             const HEX: &[u8; 16] = b"0123456789ABCDEF";
             let mut r = String::with_capacity(s.len());
