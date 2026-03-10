@@ -3094,18 +3094,169 @@ pub fn eval_slice(base: &Value, from: &Value, to: &Value) -> Result<Value> {
             Ok(if fi>=ti { Value::Arr(Rc::new(vec![])) } else { Value::Arr(Rc::new(a[fi..ti].to_vec())) })
         }
         Value::Str(s) => {
-            let chars: Vec<char> = s.chars().collect(); let len = chars.len() as i64;
-            let fi = match from { Value::Num(n, _) => slice_index_start(*n, len), Value::Null => 0, _ => bail!("slice: need number") };
-            let ti = match to { Value::Num(n, _) => slice_index_end(*n, len), Value::Null => len as usize, _ => bail!("slice: need number") };
-            Ok(if fi>=ti { Value::from_str("") } else { Value::from_str(&chars[fi..ti].iter().collect::<String>()) })
+            let s_str = s.as_str();
+            // ASCII fast path: byte index == char index, no allocation needed
+            if s_str.is_ascii() {
+                let len = s_str.len() as i64;
+                let fi = match from { Value::Num(n, _) => slice_index_start(*n, len), Value::Null => 0, _ => bail!("slice: need number") };
+                let ti = match to { Value::Num(n, _) => slice_index_end(*n, len), Value::Null => len as usize, _ => bail!("slice: need number") };
+                Ok(if fi>=ti { Value::from_str("") } else { Value::from_str(&s_str[fi..ti]) })
+            } else {
+                // Unicode: count chars without allocation, use char_indices for byte offsets
+                let char_count = s_str.chars().count() as i64;
+                let fi = match from { Value::Num(n, _) => slice_index_start(*n, char_count), Value::Null => 0, _ => bail!("slice: need number") };
+                let ti = match to { Value::Num(n, _) => slice_index_end(*n, char_count), Value::Null => char_count as usize, _ => bail!("slice: need number") };
+                Ok(if fi>=ti { Value::from_str("") } else {
+                    let mut ci = s_str.char_indices();
+                    let start_byte = ci.nth(fi).map(|(pos, _)| pos).unwrap_or(s_str.len());
+                    let end_byte = ci.nth(ti - fi - 1).map(|(pos, _)| pos).unwrap_or(s_str.len());
+                    Value::from_str(&s_str[start_byte..end_byte])
+                })
+            }
         }
         Value::Null => Ok(Value::Null),
         _ => bail!("cannot slice {}", base.type_name()),
     }
 }
 
+/// Specialized closure ops with pre-computed f64 keys — avoids eval overhead entirely.
+fn eval_closure_op_f64(op: ClosureOpKind, a: &[Value], keys: &[f64], cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
+    let cmp_f64 = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+    match op {
+        ClosureOpKind::SortBy => {
+            let mut indices: Vec<usize> = (0..a.len()).collect();
+            indices.sort_by(|&i, &j| cmp_f64(&keys[i], &keys[j]));
+            cb(Value::Arr(Rc::new(indices.iter().map(|&i| a[i].clone()).collect())))
+        }
+        ClosureOpKind::GroupBy => {
+            let mut indices: Vec<usize> = (0..a.len()).collect();
+            indices.sort_by(|&i, &j| cmp_f64(&keys[i], &keys[j]));
+            let mut groups: Vec<Value> = Vec::new();
+            let mut cg: Vec<Value> = Vec::new();
+            let mut cur_key: Option<f64> = None;
+            for &idx in &indices {
+                let k = keys[idx];
+                if let Some(ck) = cur_key {
+                    if k == ck {
+                        cg.push(a[idx].clone());
+                    } else {
+                        groups.push(Value::Arr(Rc::new(std::mem::take(&mut cg))));
+                        cg.push(a[idx].clone());
+                        cur_key = Some(k);
+                    }
+                } else {
+                    cg.push(a[idx].clone());
+                    cur_key = Some(k);
+                }
+            }
+            if !cg.is_empty() { groups.push(Value::Arr(Rc::new(cg))); }
+            cb(Value::Arr(Rc::new(groups)))
+        }
+        ClosureOpKind::UniqueBy => {
+            let mut seen: Vec<f64> = Vec::new();
+            let mut result: Vec<Value> = Vec::new();
+            for (i, item) in a.iter().enumerate() {
+                let k = keys[i];
+                if !seen.iter().any(|&s| s == k) {
+                    seen.push(k);
+                    result.push(item.clone());
+                }
+            }
+            cb(Value::Arr(Rc::new(result)))
+        }
+        ClosureOpKind::MinBy => {
+            if a.is_empty() { return cb(Value::Null); }
+            let mut mi = 0;
+            for i in 1..a.len() {
+                if cmp_f64(&keys[i], &keys[mi]) == std::cmp::Ordering::Less { mi = i; }
+            }
+            cb(a[mi].clone())
+        }
+        ClosureOpKind::MaxBy => {
+            if a.is_empty() { return cb(Value::Null); }
+            let mut mi = 0;
+            for i in 1..a.len() {
+                let c = cmp_f64(&keys[i], &keys[mi]);
+                if c == std::cmp::Ordering::Greater || c == std::cmp::Ordering::Equal { mi = i; }
+            }
+            cb(a[mi].clone())
+        }
+    }
+}
+
+/// Try to evaluate a key expression as a single f64 without full eval overhead.
+fn try_eval_key_f64(expr: &Expr, input: &Value) -> Option<f64> {
+    match expr {
+        Expr::Input => match input { Value::Num(n, _) => Some(*n), _ => None },
+        Expr::Literal(Literal::Num(n, _)) => Some(*n),
+        Expr::BinOp { op, lhs, rhs } => {
+            let l = try_eval_key_f64(lhs, input)?;
+            let r = try_eval_key_f64(rhs, input)?;
+            match op {
+                BinOp::Add => Some(l + r),
+                BinOp::Sub => Some(l - r),
+                BinOp::Mul => Some(l * r),
+                BinOp::Div => if r != 0.0 { Some(l / r) } else { None },
+                BinOp::Mod => Some(l % r),
+                _ => None,
+            }
+        }
+        Expr::Negate { operand } => try_eval_key_f64(operand, input).map(|v| -v),
+        Expr::UnaryOp { op, operand } => {
+            let v = try_eval_key_f64(operand, input)?;
+            match op {
+                UnaryOp::Floor => Some(v.floor()),
+                UnaryOp::Ceil => Some(v.ceil()),
+                UnaryOp::Sqrt => Some(v.sqrt()),
+                UnaryOp::Fabs | UnaryOp::Abs => Some(v.abs()),
+                UnaryOp::Round => Some(v.round()),
+                _ => None,
+            }
+        }
+        Expr::Index { expr: base, key } => {
+            if !matches!(base.as_ref(), Expr::Input) { return None; }
+            if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                match input {
+                    Value::Obj(o) => match o.get(field.as_str()) {
+                        Some(Value::Num(n, _)) => Some(*n),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            } else { None }
+        }
+        Expr::Pipe { left, right } => {
+            let mid_val = try_eval_key_f64(left, input)?;
+            let mid = Value::Num(mid_val, None);
+            try_eval_key_f64(right, &mid)
+        }
+        _ => None,
+    }
+}
+
 fn eval_closure_op(op: ClosureOpKind, container: &Value, key_expr: &Expr, _input: &Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
     let a = match container { Value::Arr(a) => a, _ => bail!("{} is not an array", container.type_name()) };
+
+    // Fast path: f64 key extraction — avoids eval overhead and Vec<Value> allocations
+    if !a.is_empty() {
+        if let Some(first_key) = try_eval_key_f64(key_expr, &a[0]) {
+            let mut f64_keys: Vec<f64> = Vec::with_capacity(a.len());
+            f64_keys.push(first_key);
+            let mut all_f64 = true;
+            for item in &a[1..] {
+                if let Some(k) = try_eval_key_f64(key_expr, item) {
+                    f64_keys.push(k);
+                } else {
+                    all_f64 = false;
+                    break;
+                }
+            }
+            if all_f64 {
+                return eval_closure_op_f64(op, a, &f64_keys, cb);
+            }
+        }
+    }
+
     let mut keyed: Vec<(Vec<Value>, Value)> = Vec::new();
     for item in a.iter() {
         let mut keys = Vec::new();
