@@ -297,6 +297,12 @@ fn real_main() {
     let field_split_join = if use_compact_buf && !exit_status && field_access.is_none() {
         filter.detect_field_split_join()
     } else { None };
+    let select_cmp_field = if use_compact_buf && !exit_status && select_cmp.is_none() && field_access.is_none() {
+        filter.detect_select_cmp_then_field()
+    } else { None };
+    let select_cmp_remap = if use_compact_buf && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
+        filter.detect_select_cmp_then_remap()
+    } else { None };
     // Field projection: if filter only accesses specific fields, skip parsing the rest.
     // Only activate when no raw byte fast path matched (those handle their own parsing).
     let has_raw_fast_path = field_access.is_some() || nested_field.is_some() || field_remap.is_some()
@@ -304,6 +310,7 @@ fn real_main() {
         || field_str_builtin.is_some() || field_ltrimstr_tonumber.is_some()
         || field_str_concat.is_some() || select_cmp.is_some() || select_str.is_some()
         || select_str_test.is_some() || select_nested_cmp.is_some()
+        || select_cmp_field.is_some() || select_cmp_remap.is_some()
         || array_field.is_some() || multi_field.is_some() || is_length || is_keys
         || is_keys_unsorted || has_field.is_some() || is_type || del_field.is_some()
         || is_each || is_to_entries || string_interp_fields.is_some() || array_join.is_some()
@@ -1301,6 +1308,80 @@ fn real_main() {
                         }
                         Ok(())
                     })
+                } else if let Some((ref sel_field, ref op, threshold, ref out_field)) = select_cmp_field {
+                    use jq_jit::ir::BinOp;
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some(val) = json_object_get_num(raw, 0, sel_field) {
+                            let pass = match op {
+                                BinOp::Gt => val > threshold,
+                                BinOp::Lt => val < threshold,
+                                BinOp::Ge => val >= threshold,
+                                BinOp::Le => val <= threshold,
+                                BinOp::Eq => val == threshold,
+                                BinOp::Ne => val != threshold,
+                                _ => false,
+                            };
+                            if pass {
+                                if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
+                                    compact_buf.extend_from_slice(&raw[vs..ve]);
+                                    compact_buf.push(b'\n');
+                                }
+                            }
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref sel_field, ref op, threshold, ref pairs)) = select_cmp_remap {
+                    use jq_jit::ir::BinOp;
+                    let all_fields: Vec<&str> = {
+                        let mut v: Vec<&str> = vec![sel_field.as_str()];
+                        for (_, src) in pairs { if !v.contains(&src.as_str()) { v.push(src.as_str()); } }
+                        v
+                    };
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some(val) = json_object_get_num(raw, 0, sel_field) {
+                            let pass = match op {
+                                BinOp::Gt => val > threshold,
+                                BinOp::Lt => val < threshold,
+                                BinOp::Ge => val >= threshold,
+                                BinOp::Le => val <= threshold,
+                                BinOp::Eq => val == threshold,
+                                BinOp::Ne => val != threshold,
+                                _ => false,
+                            };
+                            if pass {
+                                // Extract all needed fields raw bytes
+                                let fields_raw: Vec<Option<(usize, usize)>> = all_fields.iter()
+                                    .map(|f| json_object_get_field_raw(raw, 0, f))
+                                    .collect();
+                                compact_buf.push(b'{');
+                                for (i, (key, src)) in pairs.iter().enumerate() {
+                                    if i > 0 { compact_buf.push(b','); }
+                                    compact_buf.push(b'"');
+                                    compact_buf.extend_from_slice(key.as_bytes());
+                                    compact_buf.extend_from_slice(b"\":");
+                                    let idx = all_fields.iter().position(|&f| f == src.as_str()).unwrap();
+                                    if let Some((vs, ve)) = fields_raw[idx] {
+                                        compact_buf.extend_from_slice(&raw[vs..ve]);
+                                    } else {
+                                        compact_buf.extend_from_slice(b"null");
+                                    }
+                                }
+                                compact_buf.push(b'}');
+                                compact_buf.push(b'\n');
+                            }
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
                 } else if is_length {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
@@ -1821,6 +1902,81 @@ fn real_main() {
                                 }
                                 compact_buf.push(b'\n');
                             }
+                        }
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref sel_field, ref op, threshold, ref out_field)) = select_cmp_field {
+                use jq_jit::ir::BinOp;
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some(val) = json_object_get_num(raw, 0, sel_field) {
+                        let pass = match op {
+                            BinOp::Gt => val > threshold,
+                            BinOp::Lt => val < threshold,
+                            BinOp::Ge => val >= threshold,
+                            BinOp::Le => val <= threshold,
+                            BinOp::Eq => val == threshold,
+                            BinOp::Ne => val != threshold,
+                            _ => false,
+                        };
+                        if pass {
+                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
+                                compact_buf.extend_from_slice(&raw[vs..ve]);
+                                compact_buf.push(b'\n');
+                            }
+                        }
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref sel_field, ref op, threshold, ref pairs)) = select_cmp_remap {
+                use jq_jit::ir::BinOp;
+                let content_bytes = content.as_bytes();
+                let all_fields: Vec<&str> = {
+                    let mut v: Vec<&str> = vec![sel_field.as_str()];
+                    for (_, src) in pairs { if !v.contains(&src.as_str()) { v.push(src.as_str()); } }
+                    v
+                };
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some(val) = json_object_get_num(raw, 0, sel_field) {
+                        let pass = match op {
+                            BinOp::Gt => val > threshold,
+                            BinOp::Lt => val < threshold,
+                            BinOp::Ge => val >= threshold,
+                            BinOp::Le => val <= threshold,
+                            BinOp::Eq => val == threshold,
+                            BinOp::Ne => val != threshold,
+                            _ => false,
+                        };
+                        if pass {
+                            let fields_raw: Vec<Option<(usize, usize)>> = all_fields.iter()
+                                .map(|f| json_object_get_field_raw(raw, 0, f))
+                                .collect();
+                            compact_buf.push(b'{');
+                            for (i, (key, src)) in pairs.iter().enumerate() {
+                                if i > 0 { compact_buf.push(b','); }
+                                compact_buf.push(b'"');
+                                compact_buf.extend_from_slice(key.as_bytes());
+                                compact_buf.extend_from_slice(b"\":");
+                                let idx = all_fields.iter().position(|&f| f == src.as_str()).unwrap();
+                                if let Some((vs, ve)) = fields_raw[idx] {
+                                    compact_buf.extend_from_slice(&raw[vs..ve]);
+                                } else {
+                                    compact_buf.extend_from_slice(b"null");
+                                }
+                            }
+                            compact_buf.push(b'}');
+                            compact_buf.push(b'\n');
                         }
                     }
                     if compact_buf.len() >= 1 << 17 {

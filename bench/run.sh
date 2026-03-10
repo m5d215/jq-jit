@@ -92,6 +92,8 @@ TESTS=(
     'tostring:-c:.x | tostring'
     '@csv:-c:[.name, .x] | @csv'
     'split/join:-c:.name | split("a") | join("b")'
+    'select|field:-c:select(.x > 1000000) | .name'
+    'select|remap:-c:select(.x > 1000000) | {n:.name, v:.y}'
 )
 
 for test in "${TESTS[@]}"; do

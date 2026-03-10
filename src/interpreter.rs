@@ -664,6 +664,94 @@ impl Filter {
         }
     }
 
+    /// Detect `select(.field > N) | .output_field` or `if .field > N then .output_field else empty end`.
+    /// Returns (select_field, op, threshold, output_field).
+    pub fn detect_select_cmp_then_field(&self) -> Option<(String, crate::ir::BinOp, f64, String)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        // Helper to extract (sel_field, op, threshold, output_field) from a cond+output pair
+        let try_extract = |cond: &Expr, output: &Expr| -> Option<(String, BinOp, f64, String)> {
+            if let Expr::Index { expr: base, key } = output {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                let output_field = if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                    f.clone()
+                } else { return None; };
+                if let Expr::BinOp { op, lhs, rhs } = cond {
+                    if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                        return None;
+                    }
+                    if let Expr::Index { expr: base2, key: key2 } = lhs.as_ref() {
+                        if !matches!(base2.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(sel_field)) = key2.as_ref() {
+                            if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                return Some((sel_field.clone(), *op, *n, output_field));
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        };
+        // Form 1: select(.field > N) | .output_field = Pipe(IfThenElse{cond, then:Input, else:Empty}, Index)
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                    if let Some(r) = try_extract(cond, right) { return Some(r); }
+                }
+            }
+        }
+        // Form 2: if .field > N then .output_field else empty end = IfThenElse{cond, then:Index, else:Empty}
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if matches!(else_branch.as_ref(), Expr::Empty) {
+                if let Some(r) = try_extract(cond, then_branch) { return Some(r); }
+            }
+        }
+        None
+    }
+
+    /// Detect `select(.field > N) | {a:.x, b:.y}` pattern.
+    /// Returns (select_field, op, threshold, output_fields).
+    pub fn detect_select_cmp_then_remap(&self) -> Option<(String, crate::ir::BinOp, f64, Vec<(String, String)>)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::Pipe { left, right } = expr {
+            // Right side: {a:.x, b:.y, ...}
+            let mut out_pairs = Vec::new();
+            if let Expr::ObjectConstruct { pairs: entries } = right.as_ref() {
+                for (k, v) in entries {
+                    if let Expr::Literal(Literal::Str(key)) = k {
+                        if let Expr::Index { expr: base, key: vk } = v {
+                            if !matches!(base.as_ref(), Expr::Input) { return None; }
+                            if let Expr::Literal(Literal::Str(field)) = vk.as_ref() {
+                                out_pairs.push((key.clone(), field.clone()));
+                            } else { return None; }
+                        } else { return None; }
+                    } else { return None; }
+                }
+                if out_pairs.is_empty() { return None; }
+            } else { return None; }
+            // Left side: select(.field > N)
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
+                if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+                if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                    if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                        return None;
+                    }
+                    if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(sel_field)) = key.as_ref() {
+                            if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                return Some((sel_field.clone(), *op, *n, out_pairs));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect simple field access `.field` pattern.
     /// Returns the field name if this is a direct field access on input.
     pub fn detect_field_access(&self) -> Option<String> {
