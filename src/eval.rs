@@ -2994,35 +2994,58 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
     match name {
         "csv" => {
             let arr = match val { Value::Arr(a) => a, _ => bail!("@csv requires array input") };
-            let parts: Vec<String> = arr.iter().map(|v| {
+            let mut buf = String::with_capacity(arr.len() * 16);
+            for (i, v) in arr.iter().enumerate() {
+                if i > 0 { buf.push(','); }
                 match v {
                     Value::Str(s) => {
-                        if s.contains('"') || s.contains(',') || s.contains('\n') {
-                            format!("\"{}\"", s.replace('"', "\"\""))
+                        buf.push('"');
+                        if s.contains('"') {
+                            for c in s.chars() {
+                                if c == '"' { buf.push('"'); }
+                                buf.push(c);
+                            }
                         } else {
-                            format!("\"{}\"", s)
+                            buf.push_str(s);
                         }
+                        buf.push('"');
                     }
-                    Value::Null => "".to_string(),
-                    Value::True => "true".to_string(),
-                    Value::False => "false".to_string(),
-                    _ => crate::value::value_to_json(v),
+                    Value::Null => {}
+                    Value::True => buf.push_str("true"),
+                    Value::False => buf.push_str("false"),
+                    Value::Num(n, _) => {
+                        buf.push_str(&crate::value::format_jq_number(*n));
+                    }
+                    _ => buf.push_str(&crate::value::value_to_json(v)),
                 }
-            }).collect();
-            return Ok(parts.join(","));
+            }
+            return Ok(buf);
         }
         "tsv" => {
             let arr = match val { Value::Arr(a) => a, _ => bail!("@tsv requires array input") };
-            let parts: Vec<String> = arr.iter().map(|v| {
+            let mut buf = String::with_capacity(arr.len() * 16);
+            for (i, v) in arr.iter().enumerate() {
+                if i > 0 { buf.push('\t'); }
                 match v {
-                    Value::Str(s) => s.replace('\\', "\\\\").replace('\t', "\\t").replace('\n', "\\n").replace('\r', "\\r"),
-                    Value::Null => "".to_string(),
-                    Value::True => "true".to_string(),
-                    Value::False => "false".to_string(),
-                    _ => crate::value::value_to_json(v),
+                    Value::Str(s) => {
+                        for c in s.chars() {
+                            match c {
+                                '\\' => buf.push_str("\\\\"),
+                                '\t' => buf.push_str("\\t"),
+                                '\n' => buf.push_str("\\n"),
+                                '\r' => buf.push_str("\\r"),
+                                _ => buf.push(c),
+                            }
+                        }
+                    }
+                    Value::Null => {}
+                    Value::True => buf.push_str("true"),
+                    Value::False => buf.push_str("false"),
+                    Value::Num(n, _) => buf.push_str(&crate::value::format_jq_number(*n)),
+                    _ => buf.push_str(&crate::value::value_to_json(v)),
                 }
-            }).collect();
-            return Ok(parts.join("\t"));
+            }
+            return Ok(buf);
         }
         _ => {}
     }
@@ -3033,7 +3056,17 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
         "text" => Ok(s),
         "json" => Ok(serde_json::to_string(&s).unwrap_or_else(|_| format!("{:?}", s))),
         "html" => Ok(s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('\'', "&apos;").replace('"', "&quot;")),
-        "uri" => { let mut r = String::new(); for b in s.bytes() { match b { b'A'..=b'Z'|b'a'..=b'z'|b'0'..=b'9'|b'-'|b'_'|b'.'|b'~' => r.push(b as char), _ => r.push_str(&format!("%{:02X}", b)) } } Ok(r) }
+        "uri" => {
+            const HEX: &[u8; 16] = b"0123456789ABCDEF";
+            let mut r = String::with_capacity(s.len());
+            for b in s.bytes() {
+                match b {
+                    b'A'..=b'Z'|b'a'..=b'z'|b'0'..=b'9'|b'-'|b'_'|b'.'|b'~' => r.push(b as char),
+                    _ => { r.push('%'); r.push(HEX[(b >> 4) as usize] as char); r.push(HEX[(b & 0xf) as usize] as char); }
+                }
+            }
+            Ok(r)
+        }
         "urid" => {
             let bytes = s.as_bytes();
             let mut decoded = Vec::new();

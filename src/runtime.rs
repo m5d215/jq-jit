@@ -1401,6 +1401,21 @@ fn rt_str_index(v: &Value, target: &Value, is_rindex: bool) -> Result<Value> {
             if t.is_empty() {
                 return Ok(Value::Null);
             }
+            // ASCII fast path: byte positions == char positions
+            if s.is_ascii() && t.is_ascii() {
+                if is_rindex {
+                    return Ok(match s.rfind(t.as_str()) {
+                        Some(pos) => Value::Num(pos as f64, None),
+                        None => Value::Null,
+                    });
+                } else {
+                    return Ok(match s.find(t.as_str()) {
+                        Some(pos) => Value::Num(pos as f64, None),
+                        None => Value::Null,
+                    });
+                }
+            }
+            // Unicode: use char indices
             let chars: Vec<char> = s.chars().collect();
             let tchars: Vec<char> = t.chars().collect();
             if is_rindex {
@@ -1443,13 +1458,27 @@ fn rt_str_index(v: &Value, target: &Value, is_rindex: bool) -> Result<Value> {
 fn rt_indices(v: &Value, target: &Value) -> Result<Value> {
     match (v, target) {
         (Value::Str(s), Value::Str(t)) => {
-            // Use character indices, not byte indices
-            let chars: Vec<char> = s.chars().collect();
-            let tchars: Vec<char> = t.chars().collect();
             let mut indices = Vec::new();
-            if tchars.is_empty() {
+            if t.is_empty() {
                 return Ok(Value::Arr(Rc::new(indices)));
             }
+            // ASCII fast path: byte positions == char positions
+            if s.is_ascii() && t.is_ascii() {
+                let sb = s.as_bytes();
+                let tb = t.as_bytes();
+                let tlen = tb.len();
+                if tlen <= sb.len() {
+                    for i in 0..=sb.len() - tlen {
+                        if &sb[i..i+tlen] == tb {
+                            indices.push(Value::Num(i as f64, None));
+                        }
+                    }
+                }
+                return Ok(Value::Arr(Rc::new(indices)));
+            }
+            // Unicode: use character indices
+            let chars: Vec<char> = s.chars().collect();
+            let tchars: Vec<char> = t.chars().collect();
             for i in 0..chars.len() {
                 if i + tchars.len() <= chars.len() && chars[i..i+tchars.len()] == tchars[..] {
                     indices.push(Value::Num(i as f64, None));
