@@ -217,7 +217,7 @@ echo "--- jaq-derived ---"
 header
 BENCH_DIR="/tmp/jaq-repo/examples/benches"
 if [ -d "$BENCH_DIR" ]; then
-    for name in reverse sort group-by min-max ex-implode repeat from last cumsum cumsum-xy try-catch add reduce reduce-update kv kv-update kv-entries; do
+    for name in reverse sort group-by min-max ex-implode repeat from last cumsum cumsum-xy try-catch add reduce reduce-update kv kv-update kv-entries pyramid upto tree-flatten tree-update to-fromjson str-slice; do
         f="$BENCH_DIR/$name.jq"
         if [ -f "$f" ]; then
             case "$name" in
@@ -226,6 +226,8 @@ if [ -d "$BENCH_DIR" ]; then
                 str-slice)     n=8192   ;;
                 range-prop)    n=128    ;;
                 tree-*)        n=17     ;;
+                pyramid)       n=524288 ;;
+                upto)          n=8192   ;;
                 kv*|from)      n=131072 ;;
                 *)             n=1048576;;
             esac

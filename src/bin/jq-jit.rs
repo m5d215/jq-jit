@@ -1502,6 +1502,40 @@ fn real_main() {
                                     compact_buf.push(b'"');
                                     compact_buf.push(b'\n');
                                 }
+                                "split" => {
+                                    compact_buf.push(b'[');
+                                    if arg_bytes.is_empty() {
+                                        for (j, &byte) in content.iter().enumerate() {
+                                            if j > 0 { compact_buf.push(b','); }
+                                            compact_buf.push(b'"');
+                                            compact_buf.push(byte);
+                                            compact_buf.push(b'"');
+                                        }
+                                    } else {
+                                        let mut pos = 0;
+                                        let mut first = true;
+                                        while pos <= content.len() {
+                                            if !first { compact_buf.push(b','); }
+                                            first = false;
+                                            let next = if pos + arg_bytes.len() <= content.len() {
+                                                content[pos..].windows(arg_bytes.len())
+                                                    .position(|w| w == arg_bytes)
+                                                    .map(|i| pos + i)
+                                            } else { None };
+                                            compact_buf.push(b'"');
+                                            if let Some(found) = next {
+                                                compact_buf.extend_from_slice(&content[pos..found]);
+                                                compact_buf.push(b'"');
+                                                pos = found + arg_bytes.len();
+                                            } else {
+                                                compact_buf.extend_from_slice(&content[pos..]);
+                                                compact_buf.push(b'"');
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    compact_buf.extend_from_slice(b"]\n");
+                                }
                                 _ => {
                                     let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                     process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
