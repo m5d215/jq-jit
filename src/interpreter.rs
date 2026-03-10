@@ -155,6 +155,42 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.a.b.c > N)` pattern for nested field numeric comparison.
+    /// Returns (field_path, comparison_op, threshold) if detected.
+    pub fn detect_select_nested_cmp(&self) -> Option<(Vec<String>, crate::ir::BinOp, f64)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
+            if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+            if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                    return None;
+                }
+                if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                    // Extract nested field path
+                    let mut fields = Vec::new();
+                    let mut current = lhs.as_ref();
+                    loop {
+                        if let Expr::Index { expr: base, key } = current {
+                            if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                fields.push(field.clone());
+                                current = base.as_ref();
+                            } else { return None; }
+                        } else if matches!(current, Expr::Input) {
+                            break;
+                        } else { return None; }
+                    }
+                    if fields.len() >= 2 {
+                        fields.reverse();
+                        return Some((fields, *op, *n));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.field == "str")` pattern for string comparison select.
     /// Returns (field_name, op, string_value) if detected.
     pub fn detect_select_field_str(&self) -> Option<(String, crate::ir::BinOp, String)> {

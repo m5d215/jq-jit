@@ -8,7 +8,7 @@ use std::process;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw, json_object_get_nested_field_raw, json_value_length, json_object_keys_to_buf, json_object_keys_unsorted_to_buf, json_object_has_key, json_type_byte, json_object_del_field, json_each_value_raw, json_to_entries_raw, is_json_compact, push_json_compact_raw, push_json_pretty_raw, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
+use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw, json_object_get_nested_field_raw, parse_json_num, json_value_length, json_object_keys_to_buf, json_object_keys_unsorted_to_buf, json_object_has_key, json_type_byte, json_object_del_field, json_each_value_raw, json_to_entries_raw, is_json_compact, push_json_compact_raw, push_json_pretty_raw, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
 use jq_jit::interpreter::Filter;
 
 fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -263,6 +263,9 @@ fn real_main() {
     let select_str_test = if use_compact_buf && !exit_status && select_cmp.is_none() && select_str.is_none() && field_access.is_none() {
         filter.detect_select_field_str_test()
     } else { None };
+    let select_nested_cmp = if use_compact_buf && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() {
+        filter.detect_select_nested_cmp()
+    } else { None };
     let array_field = if use_compact_buf && !exit_status && field_access.is_none() {
         filter.detect_array_field_access()
     } else { None };
@@ -294,7 +297,7 @@ fn real_main() {
         || field_binop.is_some() || field_unary_num.is_some() || field_binop_const_unary.is_some()
         || field_str_builtin.is_some() || field_ltrimstr_tonumber.is_some()
         || field_str_concat.is_some() || select_cmp.is_some() || select_str.is_some()
-        || select_str_test.is_some()
+        || select_str_test.is_some() || select_nested_cmp.is_some()
         || array_field.is_some() || multi_field.is_some() || is_length || is_keys
         || is_keys_unsorted || has_field.is_some() || is_type || del_field.is_some()
         || is_each || is_to_entries || string_interp_fields.is_some() || array_join.is_some()
@@ -1153,6 +1156,38 @@ fn real_main() {
                         }
                         Ok(())
                     })
+                } else if let Some((ref fields, ref op, threshold)) = select_nested_cmp {
+                    use jq_jit::ir::BinOp;
+                    let field_refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some((vs, ve)) = json_object_get_nested_field_raw(raw, 0, &field_refs) {
+                            if let Some(val) = parse_json_num(&raw[vs..ve]) {
+                                let pass = match op {
+                                    BinOp::Gt => val > threshold,
+                                    BinOp::Lt => val < threshold,
+                                    BinOp::Ge => val >= threshold,
+                                    BinOp::Le => val <= threshold,
+                                    BinOp::Eq => val == threshold,
+                                    BinOp::Ne => val != threshold,
+                                    _ => false,
+                                };
+                                if pass {
+                                    if is_json_compact(raw) {
+                                        compact_buf.extend_from_slice(raw);
+                                    } else {
+                                        push_json_compact_raw(&mut compact_buf, raw);
+                                    }
+                                    compact_buf.push(b'\n');
+                                }
+                            }
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
                 } else if is_length {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
@@ -1531,6 +1566,39 @@ fn real_main() {
                                         inner.windows(ab.len()).any(|w| w == ab)
                                     } else { false }
                                 }
+                                _ => false,
+                            };
+                            if pass {
+                                if is_json_compact(raw) {
+                                    compact_buf.extend_from_slice(raw);
+                                } else {
+                                    push_json_compact_raw(&mut compact_buf, raw);
+                                }
+                                compact_buf.push(b'\n');
+                            }
+                        }
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref fields, ref op, threshold)) = select_nested_cmp {
+                use jq_jit::ir::BinOp;
+                let content_bytes = content.as_bytes();
+                let field_refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some((vs, ve)) = json_object_get_nested_field_raw(raw, 0, &field_refs) {
+                        if let Some(val) = parse_json_num(&raw[vs..ve]) {
+                            let pass = match op {
+                                BinOp::Gt => val > threshold,
+                                BinOp::Lt => val < threshold,
+                                BinOp::Ge => val >= threshold,
+                                BinOp::Le => val <= threshold,
+                                BinOp::Eq => val == threshold,
+                                BinOp::Ne => val != threshold,
                                 _ => false,
                             };
                             if pass {

@@ -765,6 +765,27 @@ pub fn json_object_get_nested_field_raw(b: &[u8], pos: usize, fields: &[&str]) -
     Some((vs, ve))
 }
 
+/// Parse a JSON number from raw bytes. Returns the f64 value or None if not a number.
+pub fn parse_json_num(b: &[u8]) -> Option<f64> {
+    if b.is_empty() { return None; }
+    let neg = b[0] == b'-';
+    let start = if neg { 1 } else { 0 };
+    if start >= b.len() || !b[start].is_ascii_digit() { return None; }
+    let mut n: i64 = (b[start] - b'0') as i64;
+    let mut k = start + 1;
+    while k < b.len() && b[k].is_ascii_digit() {
+        n = n * 10 + (b[k] - b'0') as i64;
+        k += 1;
+    }
+    if k < b.len() && (b[k] == b'.' || b[k] == b'e' || b[k] == b'E') {
+        let num_str = unsafe { std::str::from_utf8_unchecked(b) };
+        return fast_float::parse::<f64, _>(num_str).ok();
+    }
+    if k != b.len() { return None; } // trailing garbage
+    if (k - start) > 15 { return None; }
+    Some(if neg { -(n as f64) } else { n as f64 })
+}
+
 /// Count the number of key-value pairs in a JSON object without full parsing.
 /// Returns None if the input isn't a JSON object.
 pub fn json_object_length(b: &[u8], pos: usize) -> Option<usize> {
