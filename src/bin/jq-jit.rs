@@ -27,6 +27,53 @@ fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
     buf
 }
 
+/// Emit a single computed remap value into the output buffer.
+/// Shared by computed_remap, computed_array, select_cmp_cremap handlers.
+#[inline]
+fn emit_remap_value(
+    buf: &mut Vec<u8>,
+    rexpr: &jq_jit::interpreter::RemapExpr,
+    raw: &[u8],
+    ranges: &[(usize, usize)],
+    field_idx: &std::collections::HashMap<String, usize>,
+) {
+    use jq_jit::interpreter::RemapExpr;
+    use jq_jit::ir::BinOp;
+    match rexpr {
+        RemapExpr::Field(f) => {
+            let idx = field_idx[f.as_str()];
+            let (vs, ve) = ranges[idx];
+            buf.extend_from_slice(&raw[vs..ve]);
+        }
+        RemapExpr::FieldOpConst(f, op, n) => {
+            let idx = field_idx[f.as_str()];
+            let (vs, ve) = ranges[idx];
+            if let Some(a) = parse_json_num(&raw[vs..ve]) {
+                let r = match op { BinOp::Add => a + n, BinOp::Sub => a - n, BinOp::Mul => a * n, BinOp::Div => a / n, BinOp::Mod => a % n, _ => unreachable!() };
+                push_jq_number_bytes(buf, r);
+            } else { buf.extend_from_slice(b"null"); }
+        }
+        RemapExpr::FieldOpField(f1, op, f2) => {
+            let idx1 = field_idx[f1.as_str()];
+            let idx2 = field_idx[f2.as_str()];
+            let (vs1, ve1) = ranges[idx1];
+            let (vs2, ve2) = ranges[idx2];
+            if let (Some(a), Some(b)) = (parse_json_num(&raw[vs1..ve1]), parse_json_num(&raw[vs2..ve2])) {
+                let r = match op { BinOp::Add => a + b, BinOp::Sub => a - b, BinOp::Mul => a * b, BinOp::Div => a / b, BinOp::Mod => a % b, _ => unreachable!() };
+                push_jq_number_bytes(buf, r);
+            } else { buf.extend_from_slice(b"null"); }
+        }
+        RemapExpr::ConstOpField(n, op, f) => {
+            let idx = field_idx[f.as_str()];
+            let (vs, ve) = ranges[idx];
+            if let Some(b) = parse_json_num(&raw[vs..ve]) {
+                let r = match op { BinOp::Add => n + b, BinOp::Sub => n - b, BinOp::Mul => n * b, BinOp::Div => n / b, BinOp::Mod => n % b, _ => unreachable!() };
+                push_jq_number_bytes(buf, r);
+            } else { buf.extend_from_slice(b"null"); }
+        }
+    }
+}
+
 fn main() {
     // Run on a thread with a large stack to handle deep recursion.
     // macOS lazily pages the stack, so the physical memory usage is proportional to actual depth.
@@ -269,7 +316,10 @@ fn real_main() {
     let select_nested_cmp = if use_compact_buf && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() {
         filter.detect_select_nested_cmp()
     } else { None };
-    let array_field = if use_compact_buf && !exit_status && field_access.is_none() {
+    let computed_array = if use_compact_buf && !exit_status && field_access.is_none() && computed_remap.is_none() {
+        filter.detect_computed_array()
+    } else { None };
+    let array_field = if use_compact_buf && !exit_status && field_access.is_none() && computed_array.is_none() {
         filter.detect_array_field_access()
     } else { None };
     let multi_field = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && array_field.is_none() {
@@ -336,7 +386,7 @@ fn real_main() {
         || select_str.is_some()
         || select_str_test.is_some() || select_nested_cmp.is_some()
         || select_cmp_field.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_str_field.is_some()
-        || array_field.is_some() || multi_field.is_some() || is_length || is_keys
+        || computed_array.is_some() || array_field.is_some() || multi_field.is_some() || is_length || is_keys
         || is_keys_unsorted || has_field.is_some() || is_type || del_field.is_some()
         || is_each || is_to_entries || string_interp_fields.is_some() || array_join.is_some()
         || literal_output.is_some() || array_fields_format.is_some()
@@ -652,6 +702,44 @@ fn real_main() {
                             }
                         } else {
                             compact_buf.extend_from_slice(b"null\n");
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some(ref celems) = computed_array {
+                    use jq_jit::interpreter::RemapExpr;
+                    let mut all_fields: Vec<String> = Vec::new();
+                    let mut field_idx = std::collections::HashMap::new();
+                    for rexpr in celems {
+                        let names: Vec<&str> = match rexpr {
+                            RemapExpr::Field(f) => vec![f.as_str()],
+                            RemapExpr::FieldOpConst(f, _, _) => vec![f.as_str()],
+                            RemapExpr::FieldOpField(f1, _, f2) => vec![f1.as_str(), f2.as_str()],
+                            RemapExpr::ConstOpField(_, _, f) => vec![f.as_str()],
+                        };
+                        for name in names {
+                            if !field_idx.contains_key(name) {
+                                field_idx.insert(name.to_string(), all_fields.len());
+                                all_fields.push(name.to_string());
+                            }
+                        }
+                    }
+                    let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some(ranges) = json_object_get_fields_raw(raw, 0, &field_refs) {
+                            compact_buf.push(b'[');
+                            for (i, rexpr) in celems.iter().enumerate() {
+                                if i > 0 { compact_buf.push(b','); }
+                                emit_remap_value(&mut compact_buf, rexpr, raw, &ranges, &field_idx);
+                            }
+                            compact_buf.extend_from_slice(b"]\n");
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -2129,6 +2217,45 @@ fn real_main() {
                         }
                     } else {
                         compact_buf.extend_from_slice(b"null\n");
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some(ref celems) = computed_array {
+                use jq_jit::interpreter::RemapExpr;
+                let content_bytes = content.as_bytes();
+                let mut all_fields: Vec<String> = Vec::new();
+                let mut field_idx = std::collections::HashMap::new();
+                for rexpr in celems {
+                    let names: Vec<&str> = match rexpr {
+                        RemapExpr::Field(f) => vec![f.as_str()],
+                        RemapExpr::FieldOpConst(f, _, _) => vec![f.as_str()],
+                        RemapExpr::FieldOpField(f1, _, f2) => vec![f1.as_str(), f2.as_str()],
+                        RemapExpr::ConstOpField(_, _, f) => vec![f.as_str()],
+                    };
+                    for name in names {
+                        if !field_idx.contains_key(name) {
+                            field_idx.insert(name.to_string(), all_fields.len());
+                            all_fields.push(name.to_string());
+                        }
+                    }
+                }
+                let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some(ranges) = json_object_get_fields_raw(raw, 0, &field_refs) {
+                        compact_buf.push(b'[');
+                        for (i, rexpr) in celems.iter().enumerate() {
+                            if i > 0 { compact_buf.push(b','); }
+                            emit_remap_value(&mut compact_buf, rexpr, raw, &ranges, &field_idx);
+                        }
+                        compact_buf.extend_from_slice(b"]\n");
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);

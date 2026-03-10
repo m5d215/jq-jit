@@ -759,6 +759,21 @@ impl Filter {
         None
     }
 
+    /// Detect `[.x, .y, .x + .y]` — array construct with computed values.
+    /// Returns Vec of RemapExpr if at least one value is computed.
+    pub fn detect_computed_array(&self) -> Option<Vec<RemapExpr>> {
+        use crate::ir::Expr;
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::Collect { generator } = expr {
+            let mut elems = Vec::new();
+            if collect_comma_remap(generator, &mut elems) && elems.len() >= 2 {
+                let has_computed = elems.iter().any(|e| !matches!(e, RemapExpr::Field(_)));
+                if has_computed { return Some(elems); }
+            }
+        }
+        None
+    }
+
     /// Detect `[.f1,.f2,...] | @csv` or `@tsv` pattern.
     /// Returns (field_names, format) where format is "csv" or "tsv".
     pub fn detect_array_fields_format(&self) -> Option<(Vec<String>, String)> {
@@ -1334,6 +1349,23 @@ impl Filter {
 /// Recursively collect field names accessed from the input. Returns false if the filter
 /// accesses the input in a way that requires the full object (e.g., bare `.`, `.[]`, `keys`).
 /// Collect field names from a comma expression tree where all leaves are .field on input.
+fn collect_comma_remap(expr: &crate::ir::Expr, elems: &mut Vec<RemapExpr>) -> bool {
+    use crate::ir::Expr;
+    match expr {
+        Expr::Comma { left, right } => {
+            collect_comma_remap(left, elems) && collect_comma_remap(right, elems)
+        }
+        _ => {
+            if let Some(rexpr) = Filter::classify_remap_value(expr) {
+                elems.push(rexpr);
+                true
+            } else {
+                false
+            }
+        }
+    }
+}
+
 fn collect_comma_fields(expr: &crate::ir::Expr, fields: &mut Vec<String>) -> bool {
     use crate::ir::{Expr, Literal};
     match expr {
