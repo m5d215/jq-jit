@@ -5061,6 +5061,40 @@ extern "C" fn jit_rt_add_move(dst: *mut Value, lhs: *mut Value, rhs: *const Valu
 }
 extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i64 {
     unsafe {
+        // Fast path: tostring (op 15) — avoid full eval chain
+        if op == 15 {
+            match &*input {
+                Value::Str(_) => { std::ptr::write(dst, (*input).clone()); return 0; }
+                Value::Num(n, _) => {
+                    std::ptr::write(dst, Value::from_string(crate::value::format_jq_number(*n)));
+                    return 0;
+                }
+                Value::Null => { std::ptr::write(dst, Value::from_str("null")); return 0; }
+                Value::True => { std::ptr::write(dst, Value::from_str("true")); return 0; }
+                Value::False => { std::ptr::write(dst, Value::from_str("false")); return 0; }
+                _ => { /* arrays/objects → fall through to value_to_json */ }
+            }
+        }
+        // Fast path: tonumber (op 16) — avoid full eval chain
+        if op == 16 {
+            match &*input {
+                Value::Num(_, _) => { std::ptr::write(dst, (*input).clone()); return 0; }
+                Value::Str(s) => {
+                    match s.as_str().trim().parse::<f64>() {
+                        Ok(n) => {
+                            std::ptr::write(dst, Value::Num(n, None));
+                            return 0;
+                        }
+                        Err(_) => {
+                            set_jit_error(format!("invalid number: {:?}", s.as_str()));
+                            std::ptr::write(dst, Value::Null);
+                            return GEN_ERROR;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         // Fast path: inline math ops on numbers — avoids eval_unaryop → call_builtin chain
         if let Value::Num(n, repr) = &*input {
             let n = *n;
