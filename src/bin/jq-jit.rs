@@ -27,6 +27,31 @@ fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
     buf
 }
 
+/// Get field names referenced by a RemapExpr.
+fn remap_expr_fields(rexpr: &jq_jit::interpreter::RemapExpr) -> Vec<&str> {
+    use jq_jit::interpreter::RemapExpr;
+    match rexpr {
+        RemapExpr::Field(f) => vec![f.as_str()],
+        RemapExpr::FieldOpConst(f, _, _) => vec![f.as_str()],
+        RemapExpr::FieldOpField(f1, _, f2) => vec![f1.as_str(), f2.as_str()],
+        RemapExpr::ConstOpField(_, _, f) => vec![f.as_str()],
+    }
+}
+
+/// Build JSON object key prefixes: ["{\"key1\":", ",\"key2\":", ...]
+fn build_obj_key_prefixes<'a>(keys: impl Iterator<Item = &'a str>) -> Vec<Vec<u8>> {
+    let mut prefixes = Vec::new();
+    for (i, key) in keys.enumerate() {
+        let mut prefix = Vec::new();
+        if i == 0 { prefix.push(b'{'); } else { prefix.push(b','); }
+        prefix.push(b'"');
+        prefix.extend_from_slice(key.as_bytes());
+        prefix.extend_from_slice(b"\":");
+        prefixes.push(prefix);
+    }
+    prefixes
+}
+
 /// Emit a single computed remap value into the output buffer.
 /// Shared by computed_remap, computed_array, select_cmp_cremap handlers.
 #[inline]
@@ -831,19 +856,10 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some(ref cremap) = computed_remap {
-                    use jq_jit::interpreter::RemapExpr;
-                    use jq_jit::ir::BinOp;
-                    // Collect all unique input fields needed
                     let mut all_fields: Vec<String> = Vec::new();
                     let mut field_idx = std::collections::HashMap::new();
                     for (_, rexpr) in cremap {
-                        let names: Vec<&str> = match rexpr {
-                            RemapExpr::Field(f) => vec![f.as_str()],
-                            RemapExpr::FieldOpConst(f, _, _) => vec![f.as_str()],
-                            RemapExpr::FieldOpField(f1, _, f2) => vec![f1.as_str(), f2.as_str()],
-                            RemapExpr::ConstOpField(_, _, f) => vec![f.as_str()],
-                        };
-                        for name in names {
+                        for name in remap_expr_fields(rexpr) {
                             if !field_idx.contains_key(name) {
                                 field_idx.insert(name.to_string(), all_fields.len());
                                 all_fields.push(name.to_string());
@@ -851,81 +867,13 @@ fn real_main() {
                         }
                     }
                     let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
-                    // Pre-build key prefixes: {"key1":val1,"key2":val2}
-                    let mut key_prefixes: Vec<Vec<u8>> = Vec::with_capacity(cremap.len());
-                    for (i, (out_key, _)) in cremap.iter().enumerate() {
-                        let mut prefix = Vec::new();
-                        if i == 0 { prefix.push(b'{'); } else { prefix.push(b','); }
-                        prefix.push(b'"');
-                        prefix.extend_from_slice(out_key.as_bytes());
-                        prefix.extend_from_slice(b"\":");
-                        key_prefixes.push(prefix);
-                    }
+                    let key_prefixes = build_obj_key_prefixes(cremap.iter().map(|(k, _)| k.as_str()));
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         if let Some(ranges) = json_object_get_fields_raw(raw, 0, &field_refs) {
                             for (i, (_out_key, rexpr)) in cremap.iter().enumerate() {
                                 compact_buf.extend_from_slice(&key_prefixes[i]);
-                                match rexpr {
-                                    RemapExpr::Field(f) => {
-                                        let idx = field_idx[f.as_str()];
-                                        let (vs, ve) = ranges[idx];
-                                        compact_buf.extend_from_slice(&raw[vs..ve]);
-                                    }
-                                    RemapExpr::FieldOpConst(f, op, n) => {
-                                        let idx = field_idx[f.as_str()];
-                                        let (vs, ve) = ranges[idx];
-                                        if let Some(a) = parse_json_num(&raw[vs..ve]) {
-                                            let result = match op {
-                                                BinOp::Add => a + n,
-                                                BinOp::Sub => a - n,
-                                                BinOp::Mul => a * n,
-                                                BinOp::Div => a / n,
-                                                BinOp::Mod => a % n,
-                                                _ => unreachable!(),
-                                            };
-                                            push_jq_number_bytes(&mut compact_buf, result);
-                                        } else {
-                                            compact_buf.extend_from_slice(b"null");
-                                        }
-                                    }
-                                    RemapExpr::FieldOpField(f1, op, f2) => {
-                                        let idx1 = field_idx[f1.as_str()];
-                                        let idx2 = field_idx[f2.as_str()];
-                                        let (vs1, ve1) = ranges[idx1];
-                                        let (vs2, ve2) = ranges[idx2];
-                                        if let (Some(a), Some(b)) = (parse_json_num(&raw[vs1..ve1]), parse_json_num(&raw[vs2..ve2])) {
-                                            let result = match op {
-                                                BinOp::Add => a + b,
-                                                BinOp::Sub => a - b,
-                                                BinOp::Mul => a * b,
-                                                BinOp::Div => a / b,
-                                                BinOp::Mod => a % b,
-                                                _ => unreachable!(),
-                                            };
-                                            push_jq_number_bytes(&mut compact_buf, result);
-                                        } else {
-                                            compact_buf.extend_from_slice(b"null");
-                                        }
-                                    }
-                                    RemapExpr::ConstOpField(n, op, f) => {
-                                        let idx = field_idx[f.as_str()];
-                                        let (vs, ve) = ranges[idx];
-                                        if let Some(b) = parse_json_num(&raw[vs..ve]) {
-                                            let result = match op {
-                                                BinOp::Add => n + b,
-                                                BinOp::Sub => n - b,
-                                                BinOp::Mul => n * b,
-                                                BinOp::Div => n / b,
-                                                BinOp::Mod => n % b,
-                                                _ => unreachable!(),
-                                            };
-                                            push_jq_number_bytes(&mut compact_buf, result);
-                                        } else {
-                                            compact_buf.extend_from_slice(b"null");
-                                        }
-                                    }
-                                }
+                                emit_remap_value(&mut compact_buf, rexpr, raw, &ranges, &field_idx);
                             }
                             compact_buf.extend_from_slice(b"}\n");
                         } else {
