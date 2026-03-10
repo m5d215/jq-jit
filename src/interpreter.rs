@@ -716,6 +716,53 @@ impl Filter {
         }
     }
 
+    /// Detect `.field // literal` pattern (alternative with fallback).
+    /// Returns (field_name, fallback_json_bytes).
+    pub fn detect_field_alternative(&self) -> Option<(String, Vec<u8>)> {
+        use crate::ir::{Expr, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::Alternative { primary, fallback } = expr {
+            if let Expr::Index { expr: base, key } = primary.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    let fb_bytes = match fallback.as_ref() {
+                        Expr::Literal(Literal::Str(s)) => {
+                            let mut v = Vec::with_capacity(s.len() + 2);
+                            v.push(b'"');
+                            for &b in s.as_bytes() {
+                                match b {
+                                    b'"' => v.extend_from_slice(b"\\\""),
+                                    b'\\' => v.extend_from_slice(b"\\\\"),
+                                    _ => v.push(b),
+                                }
+                            }
+                            v.push(b'"');
+                            v
+                        }
+                        Expr::Literal(Literal::Num(n, repr)) => {
+                            if let Some(r) = repr {
+                                r.as_bytes().to_vec()
+                            } else {
+                                let i = *n as i64;
+                                if i as f64 == *n {
+                                    itoa::Buffer::new().format(i).as_bytes().to_vec()
+                                } else {
+                                    ryu::Buffer::new().format(*n).as_bytes().to_vec()
+                                }
+                            }
+                        }
+                        Expr::Literal(Literal::Null) => b"null".to_vec(),
+                        Expr::Literal(Literal::True) => b"true".to_vec(),
+                        Expr::Literal(Literal::False) => b"false".to_vec(),
+                        _ => return None,
+                    };
+                    return Some((field.clone(), fb_bytes));
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `if .field cmp N then literal_a else literal_b end` pattern.
     /// Returns (field, op, threshold, true_output_bytes, false_output_bytes).
     pub fn detect_cmp_branch_literals(&self) -> Option<(String, crate::ir::BinOp, f64, Vec<u8>, Vec<u8>)> {

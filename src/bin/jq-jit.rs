@@ -297,6 +297,9 @@ fn real_main() {
     let field_split_join = if use_compact_buf && !exit_status && field_access.is_none() {
         filter.detect_field_split_join()
     } else { None };
+    let field_alt = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
+        filter.detect_field_alternative()
+    } else { None };
     let cmp_branch_lit = if use_compact_buf && !exit_status && select_cmp.is_none() && field_access.is_none() {
         filter.detect_cmp_branch_literals()
     } else { None };
@@ -317,7 +320,8 @@ fn real_main() {
     let has_raw_fast_path = field_access.is_some() || nested_field.is_some() || field_remap.is_some()
         || field_binop.is_some() || field_unary_num.is_some() || field_binop_const_unary.is_some()
         || field_str_builtin.is_some() || field_ltrimstr_tonumber.is_some()
-        || field_str_concat.is_some() || select_cmp.is_some()
+        || field_str_concat.is_some() || field_alt.is_some()
+        || select_cmp.is_some()
         || cmp_branch_lit.is_some() || select_compound.is_some()
         || select_str.is_some()
         || select_str_test.is_some() || select_nested_cmp.is_some()
@@ -1319,6 +1323,27 @@ fn real_main() {
                         }
                         Ok(())
                     })
+                } else if let Some((ref alt_field, ref fallback_bytes)) = field_alt {
+                    // .field // literal: extract field, output raw or fallback if null/false
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, alt_field) {
+                            let val = &raw[vs..ve];
+                            if val == b"null" || val == b"false" {
+                                compact_buf.extend_from_slice(fallback_bytes);
+                            } else {
+                                compact_buf.extend_from_slice(val);
+                            }
+                        } else {
+                            compact_buf.extend_from_slice(fallback_bytes);
+                        }
+                        compact_buf.push(b'\n');
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
                 } else if let Some((ref field, ref op, threshold, ref t_bytes, ref f_bytes)) = cmp_branch_lit {
                     use jq_jit::ir::BinOp;
                     json_stream_raw(&input_str, |start, end| {
@@ -2018,6 +2043,27 @@ fn real_main() {
                             }
                         }
                     }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref alt_field, ref fallback_bytes)) = field_alt {
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, alt_field) {
+                        let val = &raw[vs..ve];
+                        if val == b"null" || val == b"false" {
+                            compact_buf.extend_from_slice(fallback_bytes);
+                        } else {
+                            compact_buf.extend_from_slice(val);
+                        }
+                    } else {
+                        compact_buf.extend_from_slice(fallback_bytes);
+                    }
+                    compact_buf.push(b'\n');
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
                         compact_buf.clear();
