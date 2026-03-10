@@ -3080,6 +3080,19 @@ impl Parser {
             }
             ("getpath", 1) => {
                 let path = args.into_iter().next().unwrap();
+                // Optimize getpath(["key1","key2",...]) → .key1.key2...
+                if let Some(keys) = extract_literal_str_array(&path) {
+                    if !keys.is_empty() {
+                        let mut expr = Expr::Input;
+                        for key in keys {
+                            expr = Expr::Index {
+                                expr: Box::new(expr),
+                                key: Box::new(Expr::Literal(Literal::Str(key))),
+                            };
+                        }
+                        return Ok(expr);
+                    }
+                }
                 Ok(Expr::GetPath { path: Box::new(path) })
             }
             ("setpath", 2) => {
@@ -3812,5 +3825,29 @@ fn name_to_unary_op(name: &str) -> Result<UnaryOp> {
         "isfinite" => Ok(UnaryOp::IsFinite),
         "ascii" => Ok(UnaryOp::Ascii),
         _ => bail!("unknown unary operation: {}", name),
+    }
+}
+
+/// Extract a literal string array from an expression like `Collect(Comma("a", "b", ...))`.
+/// Returns None if the expression isn't a constant string array.
+fn extract_literal_str_array(expr: &Expr) -> Option<Vec<String>> {
+    use crate::ir::Literal;
+    match expr {
+        Expr::Collect { generator } => {
+            let mut keys = Vec::new();
+            fn collect_strings(e: &Expr, out: &mut Vec<String>) -> bool {
+                match e {
+                    Expr::Literal(Literal::Str(s)) => { out.push(s.clone()); true }
+                    Expr::Comma { left, right } => collect_strings(left, out) && collect_strings(right, out),
+                    _ => false,
+                }
+            }
+            if collect_strings(generator, &mut keys) {
+                Some(keys)
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
