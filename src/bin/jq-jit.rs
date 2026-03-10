@@ -12,6 +12,16 @@ use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json
 use jq_jit::interpreter::Filter;
 
 fn main() {
+    // Run on a thread with 64MB stack to handle deep recursion (e.g. Ackermann function)
+    let builder = std::thread::Builder::new().stack_size(64 * 1024 * 1024);
+    let handler = builder.spawn(real_main).unwrap();
+    let result = handler.join();
+    if result.is_err() {
+        std::process::exit(134); // SIGABRT-like
+    }
+}
+
+fn real_main() {
     let args: Vec<String> = std::env::args().collect();
 
     let mut filter_str = None;

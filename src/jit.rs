@@ -5529,7 +5529,7 @@ impl Default for JitEnv {
 impl JitEnv {
     pub fn new() -> Self {
         JitEnv {
-            vars: vec![Value::Null; 4096],
+            vars: vec![Value::Null; 65536],
             collect_stacks: Vec::new(),
             str_bufs: Vec::new(),
             try_depth: 0,
