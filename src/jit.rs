@@ -297,6 +297,8 @@ enum JitOp {
     F64Div { dst_var: u32, a_var: u32, b_var: u32 },
     F64Rem { dst_var: u32, a_var: u32, b_var: u32 },
     F64Neg { dst_var: u32, src_var: u32 },
+    /// Unary math: 0=floor, 1=ceil, 2=sqrt, 3=fabs, 4=trunc, 5=nearest
+    F64Math { dst_var: u32, src_var: u32, kind: u8 },
     /// Float comparison: dst = 1 if a `cc` b, else 0. cc: 0=Ge, 1=Gt, 2=Le, 3=Lt, 4=Eq, 5=Ne
     F64Cmp { dst_var: u32, a_var: u32, b_var: u32, cc: u8 },
     F64Num { dst: SlotId, src_var: u32 },
@@ -3679,6 +3681,15 @@ impl Flattener {
                 && Self::is_pure_f64_expr(rhs, var_index)
             }
             Expr::Negate { operand } => Self::is_pure_f64_expr(operand, var_index),
+            Expr::Pipe { left, right } => {
+                Self::is_pure_f64_expr(left, var_index)
+                && Self::is_pure_f64_expr(right, var_index)
+            }
+            Expr::UnaryOp { op, operand } => {
+                matches!(op, UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Sqrt
+                    | UnaryOp::Fabs | UnaryOp::Round | UnaryOp::Trunc | UnaryOp::Abs)
+                && Self::is_pure_f64_expr(operand, var_index)
+            }
             Expr::IfThenElse { cond, then_branch, else_branch } => {
                 Self::is_pure_f64_expr(cond, var_index)
                 && Self::is_pure_f64_expr(then_branch, var_index)
@@ -3794,6 +3805,26 @@ impl Flattener {
                 let src = self.compile_f64_expr(operand, var_index, acc_var, x_var);
                 let dst = self.alloc_var();
                 self.emit(JitOp::F64Neg { dst_var: dst, src_var: src });
+                dst
+            }
+            Expr::Pipe { left, right } => {
+                // Compile left, then use its result as Input for right
+                let left_result = self.compile_f64_expr(left, var_index, acc_var, x_var);
+                self.compile_f64_expr(right, var_index, left_result, x_var)
+            }
+            Expr::UnaryOp { op, operand } => {
+                let src = self.compile_f64_expr(operand, var_index, acc_var, x_var);
+                let dst = self.alloc_var();
+                let kind = match op {
+                    UnaryOp::Floor => 0,
+                    UnaryOp::Ceil => 1,
+                    UnaryOp::Sqrt => 2,
+                    UnaryOp::Fabs | UnaryOp::Abs => 3,
+                    UnaryOp::Trunc => 4,
+                    UnaryOp::Round => 5,
+                    _ => unreachable!(),
+                };
+                self.emit(JitOp::F64Math { dst_var: dst, src_var: src, kind });
                 dst
             }
             _ => unreachable!("is_pure_f64_expr should have rejected this"),
@@ -7175,6 +7206,21 @@ impl JitCompiler {
                         let src_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), src_bits);
                         let neg = b.ins().fneg(src_f);
                         let bits = b.ins().bitcast(ptr_ty, cranelift_codegen::ir::MemFlags::new(), neg);
+                        b.def_var(vars[*dst_var as usize], bits);
+                    }
+                    JitOp::F64Math { dst_var, src_var, kind } => {
+                        let src_bits = b.use_var(vars[*src_var as usize]);
+                        let src_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), src_bits);
+                        let result = match kind {
+                            0 => b.ins().floor(src_f),
+                            1 => b.ins().ceil(src_f),
+                            2 => b.ins().sqrt(src_f),
+                            3 => b.ins().fabs(src_f),
+                            4 => b.ins().trunc(src_f),
+                            5 => b.ins().nearest(src_f),
+                            _ => unreachable!(),
+                        };
+                        let bits = b.ins().bitcast(ptr_ty, cranelift_codegen::ir::MemFlags::new(), result);
                         b.def_var(vars[*dst_var as usize], bits);
                     }
                     JitOp::F64Cmp { dst_var, a_var, b_var: bv, cc } => {
