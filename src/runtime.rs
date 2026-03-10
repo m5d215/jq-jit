@@ -1113,10 +1113,20 @@ fn rt_trim(v: &Value) -> Result<Value> {
 fn rt_explode(v: &Value) -> Result<Value> {
     match v {
         Value::Str(s) => {
-            let codepoints: Vec<Value> = s.chars()
-                .map(|c| Value::Num(c as u32 as f64, None))
-                .collect();
-            Ok(Value::Arr(Rc::new(codepoints)))
+            let str = s.as_str();
+            if str.is_ascii() {
+                // ASCII fast path: byte value == codepoint, pre-allocate exact size
+                let mut codepoints = Vec::with_capacity(str.len());
+                for &b in str.as_bytes() {
+                    codepoints.push(Value::Num(b as f64, None));
+                }
+                Ok(Value::Arr(Rc::new(codepoints)))
+            } else {
+                let codepoints: Vec<Value> = str.chars()
+                    .map(|c| Value::Num(c as u32 as f64, None))
+                    .collect();
+                Ok(Value::Arr(Rc::new(codepoints)))
+            }
         }
         _ => bail!("{} cannot be exploded", v.type_name()),
     }
@@ -1349,7 +1359,18 @@ fn rt_split(v: &Value, sep: &Value) -> Result<Value> {
         (Value::Str(s), Value::Str(p)) => {
             if p.is_empty() {
                 // split("") = each character as a separate element
-                let parts: Vec<Value> = s.chars().map(|c| Value::from_string(c.to_string())).collect();
+                let mut parts = Vec::with_capacity(s.len());
+                if s.is_ascii() {
+                    // ASCII fast path: &str[i..i+1] avoids char→String allocation
+                    for i in 0..s.len() {
+                        parts.push(Value::from_str(&s.as_str()[i..i+1]));
+                    }
+                } else {
+                    let mut buf = [0u8; 4];
+                    for c in s.chars() {
+                        parts.push(Value::from_str(c.encode_utf8(&mut buf)));
+                    }
+                }
                 Ok(Value::Arr(Rc::new(parts)))
             } else {
                 let parts: Vec<Value> = s.split(p.as_str())
