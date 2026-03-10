@@ -1065,6 +1065,181 @@ fn eval_one_filter(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Res
     }
 }
 
+/// Components of a linear recursive generator pattern:
+/// `if cond then pre, (transform | self), post else else_branch end`
+struct LinearRecursiveGen<'a> {
+    cond: &'a Expr,
+    pre: &'a Expr,
+    transform: &'a Expr,
+    post: &'a Expr,
+    else_branch: &'a Expr,
+}
+
+/// Detect if a function body is a linear recursive generator.
+/// Pattern: `if cond then pre, (transform | self), post else else_branch end`
+/// where cond, pre, transform, post, else_branch are all scalar (no generators).
+/// Handles both left-associated and right-associated Comma nesting.
+fn detect_linear_recursive_gen(body: &Expr, func_id: usize) -> Option<LinearRecursiveGen<'_>> {
+    let (cond, then_branch, else_branch) = match body {
+        Expr::IfThenElse { cond, then_branch, else_branch } => (cond.as_ref(), then_branch.as_ref(), else_branch.as_ref()),
+        _ => return None,
+    };
+    // Find the recursive Pipe { transform, FuncCall(func_id, []) } within the then_branch.
+    // Accept two patterns:
+    //   Left-assoc:  Comma { Comma { pre, Pipe { transform, self } }, post }
+    //   Right-assoc: Comma { pre, Comma { Pipe { transform, self }, post } }
+    let (pre, transform, post) = match then_branch {
+        Expr::Comma { left, right } => {
+            // Try left-associated: Comma(Comma(pre, Pipe), post)
+            if let Expr::Comma { left: pre, right: pipe_part } = left.as_ref() {
+                if let Some(transform) = extract_recursive_pipe(pipe_part, func_id) {
+                    (pre.as_ref(), transform, right.as_ref())
+                } else { return None; }
+            }
+            // Try right-associated: Comma(pre, Comma(Pipe, post))
+            else if let Expr::Comma { left: pipe_part, right: post } = right.as_ref() {
+                if let Some(transform) = extract_recursive_pipe(pipe_part, func_id) {
+                    (left.as_ref(), transform, post.as_ref())
+                } else { return None; }
+            } else { return None; }
+        }
+        _ => return None,
+    };
+    // All parts must be scalar (no generators)
+    if !is_eval_scalar(cond) || !is_eval_scalar(pre) || !is_eval_scalar(transform)
+        || !is_eval_scalar(post) || !is_eval_scalar(else_branch) { return None; }
+    Some(LinearRecursiveGen { cond, pre, transform, post, else_branch })
+}
+
+/// Extract the transform expression from Pipe { transform, FuncCall(func_id, []) }.
+fn extract_recursive_pipe(expr: &Expr, func_id: usize) -> Option<&Expr> {
+    if let Expr::Pipe { left, right } = expr {
+        if let Expr::FuncCall { func_id: fid, args } = right.as_ref() {
+            if *fid == func_id && args.is_empty() {
+                return Some(left.as_ref());
+            }
+        }
+    }
+    None
+}
+
+/// Check if an expression produces exactly one output (no generators).
+fn is_eval_scalar(expr: &Expr) -> bool {
+    match expr {
+        Expr::Input | Expr::Literal(_) | Expr::LoadVar { .. } | Expr::Not => true,
+        Expr::BinOp { lhs, rhs, .. } => is_eval_scalar(lhs) && is_eval_scalar(rhs),
+        Expr::UnaryOp { operand, .. } | Expr::Negate { operand } => is_eval_scalar(operand),
+        Expr::Pipe { left, right } => is_eval_scalar(left) && is_eval_scalar(right),
+        Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => is_eval_scalar(expr) && is_eval_scalar(key),
+        Expr::IfThenElse { cond, then_branch, else_branch } =>
+            is_eval_scalar(cond) && is_eval_scalar(then_branch) && is_eval_scalar(else_branch),
+        Expr::LetBinding { value, body, .. } => is_eval_scalar(value) && is_eval_scalar(body),
+        Expr::Alternative { primary, fallback } => is_eval_scalar(primary) && is_eval_scalar(fallback),
+        Expr::StringInterpolation { parts } => parts.iter().all(|p| match p {
+            StringPart::Literal(_) => true,
+            StringPart::Expr(e) => is_eval_scalar(e),
+        }),
+        _ => false,
+    }
+}
+
+/// Evaluate a linear recursive generator iteratively.
+/// Converts `if cond then pre, (transform | self), post else else_branch end`
+/// into a loop: emit pre values on the way down, emit post values on the way up.
+fn eval_linear_recursive_gen(
+    parts: LinearRecursiveGen<'_>,
+    input: Value,
+    env: &EnvRef,
+    cb: &mut dyn FnMut(Value) -> GenResult,
+) -> GenResult {
+    let LinearRecursiveGen { cond, pre, transform, post, else_branch } = parts;
+    // Try pure numeric fast path (no env borrow needed per iteration)
+    let numeric = {
+        let e = env.borrow();
+        if e.closures.is_empty() {
+            // Check if condition is a numeric comparison and transform is numeric
+            eval_bool_compound(cond, &input, &e.vars).is_some()
+                && get_num_leaf(transform, &input, &e.vars).is_some()
+        } else { false }
+    };
+
+    if numeric {
+        // Pure numeric path: avoid eval_one overhead per iteration
+        let mut current = input;
+        let mut post_stack: Vec<Value> = Vec::new();
+        loop {
+            let cond_true = {
+                let e = env.borrow();
+                eval_bool_compound(cond, &current, &e.vars).unwrap_or(false)
+            };
+            if !cond_true { break; }
+            // Emit pre
+            let pre_val = eval_one(pre, &current, env).map_err(|_| anyhow::anyhow!("linear recursive gen: pre eval failed"))?;
+            if !cb(pre_val)? { return Ok(false); }
+            // Save post for later
+            let post_val = eval_one(post, &current, env).map_err(|_| anyhow::anyhow!("linear recursive gen: post eval failed"))?;
+            post_stack.push(post_val);
+            // Transform
+            let next = eval_one(transform, &current, env).map_err(|_| anyhow::anyhow!("linear recursive gen: transform eval failed"))?;
+            current = next;
+        }
+        // Base case (else branch)
+        let else_val = eval_one(else_branch, &current, env).map_err(|_| anyhow::anyhow!("linear recursive gen: else eval failed"))?;
+        if !cb(else_val)? { return Ok(false); }
+        // Unwind post values
+        while let Some(v) = post_stack.pop() {
+            if !cb(v)? { return Ok(false); }
+        }
+        Ok(true)
+    } else {
+        // General path with full eval dispatch
+        let mut current = input;
+        let mut post_stack: Vec<Value> = Vec::new();
+        loop {
+            let cond_true = {
+                match eval_one(cond, &current, env) {
+                    Ok(v) => v.is_truthy(),
+                    Err(()) => {
+                        let mut t = false;
+                        eval(cond, current.clone(), env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
+                        t
+                    }
+                }
+            };
+            if !cond_true { break; }
+            match eval_one(pre, &current, env) {
+                Ok(v) => { if !cb(v)? { return Ok(false); } }
+                Err(()) => { if !eval(pre, current.clone(), env, cb)? { return Ok(false); } }
+            }
+            match eval_one(post, &current, env) {
+                Ok(v) => post_stack.push(v),
+                Err(()) => {
+                    let mut pv = Value::Null;
+                    eval(post, current.clone(), env, &mut |v| { pv = v; Ok(true) })?;
+                    post_stack.push(pv);
+                }
+            }
+            let next = match eval_one(transform, &current, env) {
+                Ok(v) => v,
+                Err(()) => {
+                    let mut nv = Value::Null;
+                    eval(transform, current.clone(), env, &mut |v| { nv = v; Ok(true) })?;
+                    nv
+                }
+            };
+            current = next;
+        }
+        match eval_one(else_branch, &current, env) {
+            Ok(v) => { if !cb(v)? { return Ok(false); } }
+            Err(()) => { if !eval(else_branch, current.clone(), env, cb)? { return Ok(false); } }
+        }
+        while let Some(v) = post_stack.pop() {
+            if !cb(v)? { return Ok(false); }
+        }
+        Ok(true)
+    }
+}
+
 pub fn eval(
     expr: &Expr, input: Value, env: &EnvRef,
     cb: &mut dyn FnMut(Value) -> GenResult,
@@ -2104,7 +2279,7 @@ pub fn eval(
         Expr::FuncCall { func_id, args } => {
             // Consolidated function call: single env borrow for func lookup + recursive check + cache hit
             enum FuncAction {
-                Direct(Rc<CompiledFunc>),
+                Direct(Rc<CompiledFunc>, usize),
                 Recursive(Rc<CompiledFunc>),
                 CacheHit(Rc<Expr>),
                 CacheMiss(Rc<CompiledFunc>),
@@ -2116,7 +2291,7 @@ pub fn eval(
                     None => bail!("undefined function id {}", func_id),
                 };
                 if func.param_vars.is_empty() || args.is_empty() {
-                    FuncAction::Direct(func)
+                    FuncAction::Direct(func, *func_id)
                 } else {
                     let is_recursive = e.recursive_cache.iter()
                         .find(|(k, _)| *k == *func_id)
@@ -2164,7 +2339,16 @@ pub fn eval(
                 }
             };
             match action {
-                FuncAction::Direct(func) => stacker::maybe_grow(128 * 1024, 32 * 1024 * 1024, || eval(&func.body, input, env, cb)),
+                FuncAction::Direct(func, fid) => {
+                    // Detect linear recursive generator: if cond then A, (transform | f), B else E end
+                    // Convert to iterative loop to avoid deep recursion overhead.
+                    if contains_func_call(&func.body, fid) {
+                        if let Some(parts) = detect_linear_recursive_gen(&func.body, fid) {
+                            return eval_linear_recursive_gen(parts, input, env, cb);
+                        }
+                    }
+                    stacker::maybe_grow(128 * 1024, 32 * 1024 * 1024, || eval(&func.body, input, env, cb))
+                }
                 FuncAction::CacheHit(body) => eval(&body, input, env, cb),
                 FuncAction::Recursive(func) => {
                     let mut nv = env.borrow().next_var;
