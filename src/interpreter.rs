@@ -845,6 +845,36 @@ impl Filter {
         None
     }
 
+    /// Detect `.field[from:to]` with literal numeric bounds.
+    /// Returns (field_name, from_opt, to_opt).
+    pub fn detect_field_slice(&self) -> Option<(String, Option<i64>, Option<i64>)> {
+        use crate::ir::{Expr, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::Slice { expr: base, from, to } = expr {
+            if let Expr::Index { expr: input, key } = base.as_ref() {
+                if !matches!(input.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    let from_val = match from {
+                        Some(e) => match e.as_ref() {
+                            Expr::Literal(Literal::Num(n, _)) => Some(*n as i64),
+                            _ => return None,
+                        },
+                        None => None,
+                    };
+                    let to_val = match to {
+                        Some(e) => match e.as_ref() {
+                            Expr::Literal(Literal::Num(n, _)) => Some(*n as i64),
+                            _ => return None,
+                        },
+                        None => None,
+                    };
+                    return Some((field.clone(), from_val, to_val));
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field | split("s") | .[0]` or `.field | split("s") | first`.
     /// Returns (field_name, split_delimiter).
     pub fn detect_field_split_first(&self) -> Option<(String, String)> {
