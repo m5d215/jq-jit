@@ -3847,10 +3847,21 @@ fn extract_literal_str_array(expr: &Expr) -> Option<Vec<String>> {
 }
 
 /// Peephole optimization for Pipe(left, right).
+/// - `keys | length` → `length` (same result for arrays and objects)
 /// - `[a, b] | add` → `a + b` (avoid array construction)
 /// - `[a, b, c, ...] | add` → `a + b + c + ...`
 fn optimize_pipe(left: Expr, right: Expr) -> Expr {
     use crate::ir::{UnaryOp, BinOp};
+    // keys | length → length (keys_unsorted | length too)
+    if let Expr::UnaryOp { op: UnaryOp::Length, operand } = &right {
+        if matches!(operand.as_ref(), Expr::Input) {
+            if let Expr::UnaryOp { op: UnaryOp::Keys | UnaryOp::KeysUnsorted, operand: inner } = &left {
+                if matches!(inner.as_ref(), Expr::Input) {
+                    return Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) };
+                }
+            }
+        }
+    }
     // Check for Collect(...) | UnaryOp(Add)
     if let Expr::UnaryOp { op: UnaryOp::Add, operand } = &right {
         if matches!(operand.as_ref(), Expr::Input) {
