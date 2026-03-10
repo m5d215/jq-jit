@@ -1431,8 +1431,7 @@ impl Flattener {
                         // Convert f64 accumulator back to Value::Num
                         let result = self.alloc_slot();
                         self.emit(JitOp::F64Num { dst: result, src_var: acc_f64 });
-                        self.emit(JitOp::SetVar { var_index: *acc_index, src: result });
-                        self.emit(JitOp::Drop { slot: result });
+                        self.emit(JitOp::MoveToVar { var_index: *acc_index, src: result });
                     }
                 } else if is_last_pattern {
                     // Optimized: reuse array buffer via TakeVar + PathInsert
@@ -1447,8 +1446,7 @@ impl Flattener {
                         this.emit(JitOp::PathInsert { container: acc, key, val });
                         this.emit(JitOp::Drop { slot: val });
                         this.emit(JitOp::Drop { slot: key });
-                        this.emit(JitOp::SetVar { var_index: *acc_index, src: acc });
-                        this.emit(JitOp::Drop { slot: acc });
+                        this.emit(JitOp::MoveToVar { var_index: *acc_index, src: acc });
                     });
                 } else if let Some(rhs_expr) = acc_add_rhs {
                     // Optimized: TakeVar + AddMove for `. + rhs` — in-place accumulator append
@@ -4035,8 +4033,7 @@ impl Flattener {
                     // Store final acc back to var store
                     let final_val = self.alloc_slot();
                     self.emit(JitOp::F64Num { dst: final_val, src_var: acc_f64 });
-                    self.emit(JitOp::SetVar { var_index: acc_index, src: final_val });
-                    self.emit(JitOp::Drop { slot: final_val });
+                    self.emit(JitOp::MoveToVar { var_index: acc_index, src: final_val });
                 } else {
                     let head = self.alloc_label();
                     let body = self.alloc_label();
