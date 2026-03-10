@@ -747,7 +747,7 @@ fn get_num_leaf(expr: &Expr, input: &Value, vars: &[Value]) -> Option<f64> {
                 BinOp::Sub => ln - rn,
                 BinOp::Mul => ln * rn,
                 BinOp::Div => { if rn == 0.0 { return None; } ln / rn }
-                BinOp::Mod => { let yi = rn as i64; if yi == 0 { return None; } (ln as i64 % yi) as f64 }
+                BinOp::Mod => { if !ln.is_finite() || !rn.is_finite() { return None; } let yi = rn as i64; if yi == 0 { return None; } (ln as i64 % yi) as f64 }
                 _ => return None,
             })
         }
@@ -843,7 +843,7 @@ fn get_num_leaf_override(expr: &Expr, vars: &[Value], override_vi: u16, override
                 BinOp::Sub => ln - rn,
                 BinOp::Mul => ln * rn,
                 BinOp::Div => { if rn == 0.0 { return None; } ln / rn }
-                BinOp::Mod => { let yi = rn as i64; if yi == 0 { return None; } (ln as i64 % yi) as f64 }
+                BinOp::Mod => { if !ln.is_finite() || !rn.is_finite() { return None; } let yi = rn as i64; if yi == 0 { return None; } (ln as i64 % yi) as f64 }
                 _ => return None,
             })
         }
@@ -925,6 +925,7 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
                                         Value::Num(ln / rn, None)
                                     }
                                     BinOp::Mod => {
+                                        if !ln.is_finite() || !rn.is_finite() { drop(e); return Err(()); }
                                         let yi = rn as i64;
                                         if yi == 0 { drop(e); return Err(()); }
                                         Value::Num((ln as i64 % yi) as f64, None)
@@ -953,6 +954,7 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
                                 Value::Num(ln / rn, None)
                             }
                             BinOp::Mod => {
+                                if !ln.is_finite() || !rn.is_finite() { return eval_binop(*op, &l, &r).map_err(|_| ()); }
                                 let yi = *rn as i64;
                                 if yi == 0 { return eval_binop(*op, &l, &r).map_err(|_| ()); }
                                 Value::Num((*ln as i64 % yi) as f64, None)
@@ -2773,7 +2775,7 @@ pub fn eval_binop(op: BinOp, lhs: &Value, rhs: &Value) -> Result<Value> {
                 Value::Num(ln / rn, None)
             }
             BinOp::Mod => {
-                if *rn == 0.0 || rn.is_nan() || ln.is_nan() { return crate::runtime::rt_mod(lhs, rhs); }
+                if !ln.is_finite() || !rn.is_finite() { return crate::runtime::rt_mod(lhs, rhs); }
                 let yi = *rn as i64;
                 if yi == 0 { return crate::runtime::rt_mod(lhs, rhs); }
                 Value::Num((*ln as i64 % yi) as f64, None)
@@ -2819,7 +2821,7 @@ fn eval_binop_owned(op: BinOp, lhs: Value, rhs: &Value) -> Result<Value> {
                 Value::Num(ln / rn, None)
             }
             BinOp::Mod => {
-                if *rn == 0.0 || rn.is_nan() || ln.is_nan() { return crate::runtime::rt_mod(&lhs, rhs); }
+                if !ln.is_finite() || !rn.is_finite() { return crate::runtime::rt_mod(&lhs, rhs); }
                 let yi = *rn as i64;
                 if yi == 0 { return crate::runtime::rt_mod(&lhs, rhs); }
                 Value::Num((*ln as i64 % yi) as f64, None)

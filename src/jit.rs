@@ -4999,10 +4999,13 @@ extern "C" fn jit_rt_binop(dst: *mut Value, op: i32, lhs: *const Value, rhs: *co
                     }
                 }
                 4 => { // Mod: fast path for non-zero integer modulo
-                    if !b.is_nan() && !a.is_nan() {
+                    if a.is_finite() && b.is_finite() {
                         let yi = *b as i64;
                         if yi != 0 {
-                            std::ptr::write(dst, Value::Num((*a as i64 % yi) as f64, None)); return 0;
+                            let xi = *a as i64;
+                            // Avoid overflow for i64::MIN % -1
+                            let r = if xi == i64::MIN && yi == -1 { 0 } else { xi % yi };
+                            std::ptr::write(dst, Value::Num(r as f64, None)); return 0;
                         }
                     }
                 }
