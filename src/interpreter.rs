@@ -1012,6 +1012,56 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.field > N) | {a:.x, b:(.y*2)}` — select then computed remap.
+    /// Returns (select_field, op, threshold, computed_remap_pairs).
+    pub fn detect_select_cmp_then_computed_remap(&self) -> Option<(String, crate::ir::BinOp, f64, Vec<(String, RemapExpr)>)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        let try_extract = |cond: &Expr, output: &Expr| -> Option<(String, BinOp, f64, Vec<(String, RemapExpr)>)> {
+            if let Expr::ObjectConstruct { pairs } = output {
+                if pairs.is_empty() { return None; }
+                let mut result = Vec::with_capacity(pairs.len());
+                let mut has_computed = false;
+                for (k, v) in pairs {
+                    let key = if let Expr::Literal(Literal::Str(s)) = k { s.clone() } else { return None; };
+                    let rexpr = Self::classify_remap_value(v)?;
+                    if !matches!(rexpr, RemapExpr::Field(_)) { has_computed = true; }
+                    result.push((key, rexpr));
+                }
+                if !has_computed { return None; }
+                if let Expr::BinOp { op, lhs, rhs } = cond {
+                    if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                        return None;
+                    }
+                    if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(sel_field)) = key.as_ref() {
+                            if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                return Some((sel_field.clone(), *op, *n, result));
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        };
+        // Form 1: Pipe(select(.field > N), {computed_remap})
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                    if let Some(r) = try_extract(cond, right) { return Some(r); }
+                }
+            }
+        }
+        // Form 2: if .field > N then {computed_remap} else empty end
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if matches!(else_branch.as_ref(), Expr::Empty) {
+                if let Some(r) = try_extract(cond, then_branch) { return Some(r); }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.field == "str") | .output_field` or `select(.field | startswith("str")) | .output_field`.
     /// Returns (select_field, test_type, test_arg, output_field).
     /// test_type: "eq", "ne", "startswith", "endswith", "contains"
