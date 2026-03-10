@@ -6057,6 +6057,73 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                 std::ptr::write(dst, Value::Null);
                 return GEN_ERROR;
             }
+            // Inline @csv fast path — avoid String→CompactString conversion
+            if format_name == "csv" {
+                if let Value::Arr(arr) = &args[0] {
+                    let mut buf: Vec<u8> = Vec::with_capacity(arr.len() * 16);
+                    for (i, v) in arr.iter().enumerate() {
+                        if i > 0 { buf.push(b','); }
+                        match v {
+                            Value::Str(s) => {
+                                buf.push(b'"');
+                                if s.as_bytes().contains(&b'"') {
+                                    for &b in s.as_bytes() {
+                                        if b == b'"' { buf.push(b'"'); }
+                                        buf.push(b);
+                                    }
+                                } else {
+                                    buf.extend_from_slice(s.as_bytes());
+                                }
+                                buf.push(b'"');
+                            }
+                            Value::Null => {}
+                            Value::True => buf.extend_from_slice(b"true"),
+                            Value::False => buf.extend_from_slice(b"false"),
+                            Value::Num(n, _) => crate::value::push_jq_number_bytes(&mut buf, *n),
+                            _ => buf.extend_from_slice(crate::value::value_to_json(v).as_bytes()),
+                        }
+                    }
+                    std::ptr::write(dst, Value::from_string(String::from_utf8_unchecked(buf)));
+                    return 0;
+                } else {
+                    set_jit_error("@csv requires array input".to_string());
+                    std::ptr::write(dst, Value::Null);
+                    return GEN_ERROR;
+                }
+            }
+            // Inline @tsv fast path
+            if format_name == "tsv" {
+                if let Value::Arr(arr) = &args[0] {
+                    let mut buf: Vec<u8> = Vec::with_capacity(arr.len() * 16);
+                    for (i, v) in arr.iter().enumerate() {
+                        if i > 0 { buf.push(b'\t'); }
+                        match v {
+                            Value::Str(s) => {
+                                for &b in s.as_bytes() {
+                                    match b {
+                                        b'\\' => buf.extend_from_slice(b"\\\\"),
+                                        b'\t' => buf.extend_from_slice(b"\\t"),
+                                        b'\n' => buf.extend_from_slice(b"\\n"),
+                                        b'\r' => buf.extend_from_slice(b"\\r"),
+                                        _ => buf.push(b),
+                                    }
+                                }
+                            }
+                            Value::Null => {}
+                            Value::True => buf.extend_from_slice(b"true"),
+                            Value::False => buf.extend_from_slice(b"false"),
+                            Value::Num(n, _) => crate::value::push_jq_number_bytes(&mut buf, *n),
+                            _ => buf.extend_from_slice(crate::value::value_to_json(v).as_bytes()),
+                        }
+                    }
+                    std::ptr::write(dst, Value::from_string(String::from_utf8_unchecked(buf)));
+                    return 0;
+                } else {
+                    set_jit_error("@tsv requires array input".to_string());
+                    std::ptr::write(dst, Value::Null);
+                    return GEN_ERROR;
+                }
+            }
             match crate::eval::eval_format(format_name, &args[0]) {
                 Ok(s) => { std::ptr::write(dst, Value::from_str(&s)); return 0; }
                 Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
