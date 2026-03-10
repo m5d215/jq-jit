@@ -5200,6 +5200,25 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 return 0;
             }
         }
+        // Fast path: ascii_downcase (op 22) and ascii_upcase (op 23)
+        if op == 22 || op == 23 {
+            if let Value::Str(s) = &*input {
+                if s.is_ascii() {
+                    let mut bytes = s.as_bytes().to_vec();
+                    if op == 22 { bytes.make_ascii_lowercase(); } else { bytes.make_ascii_uppercase(); }
+                    std::ptr::write(dst, Value::from_string(String::from_utf8_unchecked(bytes)));
+                } else {
+                    std::ptr::write(dst, Value::from_string(
+                        if op == 22 {
+                            s.chars().map(|c| if c.is_ascii() { c.to_ascii_lowercase() } else { c }).collect()
+                        } else {
+                            s.chars().map(|c| if c.is_ascii() { c.to_ascii_uppercase() } else { c }).collect()
+                        }
+                    ));
+                }
+                return 0;
+            }
+        }
         // Fast path: not (op 32)
         if op == 32 {
             let truthy = match &*input {
