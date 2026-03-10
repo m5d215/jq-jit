@@ -3668,24 +3668,30 @@ impl Flattener {
         }
     }
 
-    /// Check if an expression is a pure f64 function of acc (Input) and var ($x).
-    /// Returns true if the expression can be compiled entirely in f64 variables.
+    /// Check if an expression is a pure f64 function of acc (Input) and vars.
+    /// Single-var convenience wrapper.
     fn is_pure_f64_expr(expr: &Expr, var_index: u16) -> bool {
+        Self::is_pure_f64_expr_multi(expr, &[var_index])
+    }
+
+    /// Check with multiple allowed variable indices (for LetBinding support).
+    fn is_pure_f64_expr_multi(expr: &Expr, allowed: &[u16]) -> bool {
         match expr {
             Expr::Input => true,
-            Expr::LoadVar { var_index: vi } if *vi == var_index => true,
+            Expr::LoadVar { var_index } if allowed.contains(var_index) => true,
             Expr::Literal(Literal::Num(..)) => true,
             Expr::BinOp { op, lhs, rhs } => {
                 matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
                     | BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge
                     | BinOp::And | BinOp::Or)
-                && Self::is_pure_f64_expr(lhs, var_index)
-                && Self::is_pure_f64_expr(rhs, var_index)
+                && Self::is_pure_f64_expr_multi(lhs, allowed)
+                && Self::is_pure_f64_expr_multi(rhs, allowed)
             }
-            Expr::Negate { operand } => Self::is_pure_f64_expr(operand, var_index),
+            Expr::Negate { operand } => Self::is_pure_f64_expr_multi(operand, allowed),
+            Expr::Not => true, // `not` on f64: 0.0 → 1.0, nonzero → 0.0
             Expr::Pipe { left, right } => {
-                Self::is_pure_f64_expr(left, var_index)
-                && Self::is_pure_f64_expr(right, var_index)
+                Self::is_pure_f64_expr_multi(left, allowed)
+                && Self::is_pure_f64_expr_multi(right, allowed)
             }
             Expr::UnaryOp { op, operand } => {
                 matches!(op, UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Sqrt
@@ -3694,32 +3700,48 @@ impl Flattener {
                     | UnaryOp::Asin | UnaryOp::Acos | UnaryOp::Atan
                     | UnaryOp::Exp | UnaryOp::Exp2 | UnaryOp::Log | UnaryOp::Log2 | UnaryOp::Log10
                     | UnaryOp::Cbrt)
-                && Self::is_pure_f64_expr(operand, var_index)
+                && Self::is_pure_f64_expr_multi(operand, allowed)
             }
             Expr::IfThenElse { cond, then_branch, else_branch } => {
-                Self::is_pure_f64_expr(cond, var_index)
-                && Self::is_pure_f64_expr(then_branch, var_index)
-                && Self::is_pure_f64_expr(else_branch, var_index)
+                Self::is_pure_f64_expr_multi(cond, allowed)
+                && Self::is_pure_f64_expr_multi(then_branch, allowed)
+                && Self::is_pure_f64_expr_multi(else_branch, allowed)
+            }
+            Expr::LetBinding { var_index, value, body } => {
+                Self::is_pure_f64_expr_multi(value, allowed) && {
+                    let mut ext = allowed.to_vec();
+                    ext.push(*var_index);
+                    Self::is_pure_f64_expr_multi(body, &ext)
+                }
             }
             _ => false,
         }
     }
 
     /// Compile a pure f64 expression into Cranelift f64 variables.
-    /// acc_var = accumulator (Input), x_var = loop variable ($x).
+    /// acc_var = accumulator (Input). var_map maps IR var indices to f64 vars.
     /// Returns the f64 variable holding the result.
-    fn compile_f64_expr(&mut self, expr: &Expr, var_index: u16, acc_var: u32, x_var: u32) -> u32 {
+    fn compile_f64_expr(&mut self, expr: &Expr, _unused: u16, acc_var: u32, x_var: u32) -> u32 {
+        self.compile_f64_expr_multi(expr, acc_var, &[(_unused, x_var)])
+    }
+
+    fn compile_f64_expr_multi(&mut self, expr: &Expr, acc_var: u32, var_map: &[(u16, u32)]) -> u32 {
         match expr {
             Expr::Input => acc_var,
-            Expr::LoadVar { var_index: vi } if *vi == var_index => x_var,
+            Expr::LoadVar { var_index } => {
+                for &(vi, fv) in var_map {
+                    if vi == *var_index { return fv; }
+                }
+                unreachable!("is_pure_f64_expr should have rejected unknown var");
+            }
             Expr::Literal(Literal::Num(n, _)) => {
                 let v = self.alloc_var();
                 self.emit(JitOp::F64Const { dst_var: v, val: *n });
                 v
             }
             Expr::BinOp { op, lhs, rhs } => {
-                let a = self.compile_f64_expr(lhs, var_index, acc_var, x_var);
-                let b = self.compile_f64_expr(rhs, var_index, acc_var, x_var);
+                let a = self.compile_f64_expr_multi(lhs, acc_var, var_map);
+                let b = self.compile_f64_expr_multi(rhs, acc_var, var_map);
                 let dst = self.alloc_var();
                 match op {
                     BinOp::Add => self.emit(JitOp::F64Add { dst_var: dst, a_var: a, b_var: b }),
@@ -3787,20 +3809,20 @@ impl Flattener {
                 dst
             }
             Expr::IfThenElse { cond, then_branch, else_branch } => {
-                let c = self.compile_f64_expr(cond, var_index, acc_var, x_var);
+                let c = self.compile_f64_expr_multi(cond, acc_var, var_map);
                 let dst = self.alloc_var();
                 let then_l = self.alloc_label();
                 let else_l = self.alloc_label();
                 let done_l = self.alloc_label();
                 self.emit(JitOp::BranchOnVar { var: c, nonzero_label: then_l, zero_label: else_l });
                 self.emit(JitOp::Label { id: then_l });
-                let t = self.compile_f64_expr(then_branch, var_index, acc_var, x_var);
+                let t = self.compile_f64_expr_multi(then_branch, acc_var, var_map);
                 let zero = self.alloc_var();
                 self.emit(JitOp::F64Const { dst_var: zero, val: 0.0 });
                 self.emit(JitOp::F64Add { dst_var: dst, a_var: t, b_var: zero });
                 self.emit(JitOp::Jump { label: done_l });
                 self.emit(JitOp::Label { id: else_l });
-                let e = self.compile_f64_expr(else_branch, var_index, acc_var, x_var);
+                let e = self.compile_f64_expr_multi(else_branch, acc_var, var_map);
                 let zero2 = self.alloc_var();
                 self.emit(JitOp::F64Const { dst_var: zero2, val: 0.0 });
                 self.emit(JitOp::F64Add { dst_var: dst, a_var: e, b_var: zero2 });
@@ -3808,18 +3830,32 @@ impl Flattener {
                 dst
             }
             Expr::Negate { operand } => {
-                let src = self.compile_f64_expr(operand, var_index, acc_var, x_var);
+                let src = self.compile_f64_expr_multi(operand, acc_var, var_map);
                 let dst = self.alloc_var();
                 self.emit(JitOp::F64Neg { dst_var: dst, src_var: src });
                 dst
             }
+            Expr::Not => {
+                // `not` on f64: 0.0 → 1.0, nonzero → 0.0
+                let zero = self.alloc_var();
+                self.emit(JitOp::F64Const { dst_var: zero, val: 0.0 });
+                let dst = self.alloc_var();
+                self.emit(JitOp::F64Cmp { dst_var: dst, a_var: acc_var, b_var: zero, cc: 4 }); // acc == 0 → 1, else 0
+                dst
+            }
             Expr::Pipe { left, right } => {
                 // Compile left, then use its result as Input for right
-                let left_result = self.compile_f64_expr(left, var_index, acc_var, x_var);
-                self.compile_f64_expr(right, var_index, left_result, x_var)
+                let left_result = self.compile_f64_expr_multi(left, acc_var, var_map);
+                self.compile_f64_expr_multi(right, left_result, var_map)
+            }
+            Expr::LetBinding { var_index, value, body } => {
+                let val = self.compile_f64_expr_multi(value, acc_var, var_map);
+                let mut ext = var_map.to_vec();
+                ext.push((*var_index, val));
+                self.compile_f64_expr_multi(body, acc_var, &ext)
             }
             Expr::UnaryOp { op, operand } => {
-                let src = self.compile_f64_expr(operand, var_index, acc_var, x_var);
+                let src = self.compile_f64_expr_multi(operand, acc_var, var_map);
                 let dst = self.alloc_var();
                 match op {
                     UnaryOp::Floor => self.emit(JitOp::F64Math { dst_var: dst, src_var: src, kind: 0 }),
