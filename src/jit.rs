@@ -64,6 +64,85 @@ const GEN_CONTINUE: i64 = 1;
 const GEN_ERROR: i64 = -1;
 
 // ============================================================================
+// Compile-time constant evaluation
+// ============================================================================
+
+/// Try to evaluate an expression at compile time. Returns Some(Value) if the
+/// expression contains only literals and structural constructors (no Input/LoadVar).
+/// Used to constant-fold large literal arrays/objects to avoid generating
+/// hundreds of JitOps for their construction.
+fn try_const_eval(expr: &Expr) -> Option<Value> {
+    match expr {
+        Expr::Literal(lit) => Some(match lit {
+            Literal::Null => Value::Null,
+            Literal::True => Value::True,
+            Literal::False => Value::False,
+            Literal::Num(n, repr) => Value::Num(*n, repr.clone()),
+            Literal::Str(s) => Value::from_str(s),
+        }),
+        Expr::Negate { operand } => {
+            if let Value::Num(n, _) = try_const_eval(operand)? {
+                Some(Value::Num(-n, None))
+            } else { None }
+        }
+        Expr::Collect { generator } => {
+            let mut arr = Vec::new();
+            const_eval_gen(generator, &mut arr)?;
+            Some(Value::Arr(Rc::new(arr)))
+        }
+        Expr::ObjectConstruct { pairs } => {
+            let mut obj = crate::value::ObjMap::new();
+            for (k, v) in pairs {
+                let key = match try_const_eval(k)? {
+                    Value::Str(s) => s,
+                    _ => return None,
+                };
+                let val = try_const_eval(v)?;
+                obj.insert(key, val);
+            }
+            Some(Value::Obj(Rc::new(obj)))
+        }
+        Expr::BinOp { op, lhs, rhs } => {
+            let l = try_const_eval(lhs)?;
+            let r = try_const_eval(rhs)?;
+            crate::eval::eval_binop(*op, &l, &r).ok()
+        }
+        Expr::StringInterpolation { parts } => {
+            let mut s = String::new();
+            for p in parts {
+                match p {
+                    StringPart::Literal(lit) => s.push_str(lit),
+                    StringPart::Expr(e) => {
+                        let v = try_const_eval(e)?;
+                        match &v {
+                            Value::Str(vs) => s.push_str(vs.as_str()),
+                            _ => return None,
+                        }
+                    }
+                }
+            }
+            Some(Value::from_str(&s))
+        }
+        _ => None,
+    }
+}
+
+/// Collect constant generator outputs into a Vec.
+fn const_eval_gen(expr: &Expr, out: &mut Vec<Value>) -> Option<()> {
+    match expr {
+        Expr::Comma { left, right } => {
+            const_eval_gen(left, out)?;
+            const_eval_gen(right, out)?;
+            Some(())
+        }
+        _ => {
+            out.push(try_const_eval(expr)?);
+            Some(())
+        }
+    }
+}
+
+// ============================================================================
 // Expression classification
 // ============================================================================
 
@@ -191,6 +270,8 @@ enum MutateFn { Reverse, Sort }
 enum JitOp {
     // Value construction
     Clone { dst: SlotId, src: SlotId },
+    /// Clone a value from a pre-computed constant pointer (lives as long as JitCompiler).
+    LoadConst { dst: SlotId, const_ptr: *const Value },
     Drop { slot: SlotId },
     Null { dst: SlotId },
     True { dst: SlotId },
@@ -393,6 +474,11 @@ impl Flattener {
             Literal::Num(n, repr) => Value::Num(*n, repr.clone()),
             Literal::Str(s) => Value::Str(crate::value::KeyStr::from(s.as_str())),
         };
+        self.hoist_value(val)
+    }
+
+    /// Store a pre-computed Value and return a stable pointer.
+    fn hoist_value(&mut self, val: Value) -> *const Value {
         let boxed = Box::new(val);
         let ptr = &*boxed as *const Value;
         self.value_constants.push(boxed);
@@ -1530,6 +1616,13 @@ impl Flattener {
                 out
             }
             Expr::Collect { generator } => {
+                // Constant fold: if the entire Collect is pure literals, eval at compile time
+                if let Some(val) = try_const_eval(expr) {
+                    let ptr = self.hoist_value(val);
+                    let out = self.alloc_slot();
+                    self.emit(JitOp::LoadConst { dst: out, const_ptr: ptr });
+                    return out;
+                }
                 // Fused [range(n)]: single call creates the array directly
                 if let Expr::Range { from, to, step } = generator.as_ref() {
                     let is_from_zero = matches!(from.as_ref(),
@@ -6522,6 +6615,12 @@ impl JitCompiler {
                         b.switch_to_block(done_blk);
                         b.seal_block(done_blk);
                         terminated = false;
+                    }
+                    JitOp::LoadConst { dst, const_ptr } => {
+                        // Clone a pre-computed constant Value into dst
+                        let d = slot_addr(&mut b, *dst);
+                        let s = b.ins().iconst(ptr_ty, *const_ptr as i64);
+                        b.ins().call(rt["clone"], &[d, s]);
                     }
                     JitOp::Drop { slot } if *slot == 0 => { /* don't drop input */ }
                     JitOp::Drop { slot } => {
