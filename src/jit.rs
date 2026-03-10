@@ -6034,7 +6034,8 @@ impl JitCompiler {
                         b.seal_block(check_num_blk);
                         let is_num = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, tag_i32, three);
                         let check_repr_blk = b.create_block();
-                        b.ins().brif(is_num, check_repr_blk, &[], call_clone_blk, &[]);
+                        let check_str_clone_blk = b.create_block();
+                        b.ins().brif(is_num, check_repr_blk, &[], check_str_clone_blk, &[]);
 
                         // Num: check repr at offset 16
                         b.switch_to_block(check_repr_blk);
@@ -6045,6 +6046,40 @@ impl JitCompiler {
                         let repr_null = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, repr, zero);
                         let copy_num_blk = b.create_block();
                         b.ins().brif(repr_null, copy_num_blk, &[], call_clone_blk, &[]);
+
+                        // check_str_clone_blk: tag >= 4, check if Str with inline CompactString
+                        b.switch_to_block(check_str_clone_blk);
+                        b.seal_block(check_str_clone_blk);
+                        let four = b.ins().iconst(types::I32, 4);
+                        let is_str = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, tag_i32, four);
+                        let str_check_inline_blk = b.create_block();
+                        b.ins().brif(is_str, str_check_inline_blk, &[], call_clone_blk, &[]);
+
+                        // str_check_inline_blk: tag == 4, check CompactString last byte at offset 31
+                        b.switch_to_block(str_check_inline_blk);
+                        b.seal_block(str_check_inline_blk);
+                        let s_str = slot_addr(&mut b, *src);
+                        let last_byte = b.ins().load(types::I8, cranelift_codegen::ir::MemFlags::new(), s_str, 31);
+                        let last_u32 = b.ins().uextend(types::I32, last_byte);
+                        let heap_mask = b.ins().iconst(types::I32, 216);
+                        let is_inline_str = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::UnsignedLessThan, last_u32, heap_mask);
+                        let copy_str_blk = b.create_block();
+                        b.ins().brif(is_inline_str, copy_str_blk, &[], call_clone_blk, &[]);
+
+                        // copy_str_blk: inline Str clone — copy all 32 bytes (tag + CompactString)
+                        b.switch_to_block(copy_str_blk);
+                        b.seal_block(copy_str_blk);
+                        let d_str = slot_addr(&mut b, *dst);
+                        let s_str2 = slot_addr(&mut b, *src);
+                        let sw0 = b.ins().load(ptr_ty, cranelift_codegen::ir::MemFlags::new(), s_str2, 0);
+                        b.ins().store(cranelift_codegen::ir::MemFlags::new(), sw0, d_str, 0);
+                        let sw1 = b.ins().load(ptr_ty, cranelift_codegen::ir::MemFlags::new(), s_str2, 8);
+                        b.ins().store(cranelift_codegen::ir::MemFlags::new(), sw1, d_str, 8);
+                        let sw2 = b.ins().load(ptr_ty, cranelift_codegen::ir::MemFlags::new(), s_str2, 16);
+                        b.ins().store(cranelift_codegen::ir::MemFlags::new(), sw2, d_str, 16);
+                        let sw3 = b.ins().load(ptr_ty, cranelift_codegen::ir::MemFlags::new(), s_str2, 24);
+                        b.ins().store(cranelift_codegen::ir::MemFlags::new(), sw3, d_str, 24);
+                        b.ins().jump(done_blk, &[]);
 
                         // copy_num_blk: inline Num(f64, None) clone — copy all 32 bytes
                         b.switch_to_block(copy_num_blk);
@@ -6096,7 +6131,8 @@ impl JitCompiler {
                         b.seal_block(check_num_blk);
                         let is_eq_3 = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, tag_i32, three);
                         let repr_ptr_blk = b.create_block();
-                        b.ins().brif(is_eq_3, repr_ptr_blk, &[], do_drop_blk, &[]);
+                        let check_str_blk = b.create_block();
+                        b.ins().brif(is_eq_3, repr_ptr_blk, &[], check_str_blk, &[]);
 
                         // repr_ptr_blk: tag == 3 (Num), check repr at offset 16
                         b.switch_to_block(repr_ptr_blk);
@@ -6105,6 +6141,26 @@ impl JitCompiler {
                         let zero = b.ins().iconst(ptr_ty, 0);
                         let repr_is_null = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, repr, zero);
                         b.ins().brif(repr_is_null, skip_blk, &[], do_drop_blk, &[]);
+
+                        // check_str_blk: tag >= 4, check if Str with inline CompactString
+                        b.switch_to_block(check_str_blk);
+                        b.seal_block(check_str_blk);
+                        let four = b.ins().iconst(types::I32, 4);
+                        let is_eq_4 = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, tag_i32, four);
+                        let str_inline_blk = b.create_block();
+                        b.ins().brif(is_eq_4, str_inline_blk, &[], do_drop_blk, &[]);
+
+                        // str_inline_blk: tag == 4 (Str), check CompactString last byte
+                        // CompactString occupies bytes 8-31. Last byte at offset 31.
+                        // If last_byte < 216 (HEAP_MASK), string is inline → no-op drop.
+                        b.switch_to_block(str_inline_blk);
+                        b.seal_block(str_inline_blk);
+                        let a_str = slot_addr(&mut b, *slot);
+                        let last_byte = b.ins().load(types::I8, cranelift_codegen::ir::MemFlags::new(), a_str, 31);
+                        let last_byte_u32 = b.ins().uextend(types::I32, last_byte);
+                        let heap_mask = b.ins().iconst(types::I32, 216); // HEAP_MASK
+                        let is_inline = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::UnsignedLessThan, last_byte_u32, heap_mask);
+                        b.ins().brif(is_inline, skip_blk, &[], do_drop_blk, &[]);
 
                         // do_drop_blk: call jit_rt_drop
                         b.switch_to_block(do_drop_blk);
