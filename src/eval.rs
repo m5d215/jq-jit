@@ -1695,7 +1695,7 @@ pub fn eval(
                         Ok(true)
                     }
                     Value::Null => Ok(true),
-                    _ => bail!("{} ({}) is not iterable",
+                    _ => bail!("Cannot iterate over {} ({})",
                         container.type_name(), crate::value::value_to_json(&container)),
                 }
             })

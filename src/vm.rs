@@ -678,9 +678,9 @@ impl<'a> VM<'a> {
                     }
                 } else {
                     let msg = format!(
-                        "{} ({}) is not iterable",
-                        crate::value::value_to_json(&top),
-                        top.type_name()
+                        "Cannot iterate over {} ({})",
+                        top.type_name(),
+                        crate::value::value_to_json(&top)
                     );
                     if !self.propagate_error(Value::Error(Rc::new(msg)))? {
                         return Ok(());
