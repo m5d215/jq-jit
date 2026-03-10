@@ -1345,20 +1345,15 @@ impl Flattener {
                     } else { None }
                 } else { None };
 
-                // Detect fused numeric reduce: reduce range(from;to) as $x (num_init; . + $x)
+                // Detect fused numeric reduce: reduce range(from;to) as $x (num_init; f64_body)
                 // Keeps everything in f64 variables — zero Value boxing in the loop body.
-                let is_fused_range_add = if let Some(rhs_expr) = acc_add_rhs {
-                    if let Expr::LoadVar { var_index: vi } = rhs_expr {
-                        if *vi == *var_index {
-                            if let Expr::Range { from, to, step } = source.as_ref() {
-                                is_scalar(from) && is_scalar(to) && step.as_ref().is_none_or(|s| is_scalar(s))
-                                    && matches!(init.as_ref(), Expr::Literal(Literal::Num(..)) | Expr::Input)
-                            } else { false }
-                        } else { false }
-                    } else { false }
+                let is_fused_range_f64 = if let Expr::Range { from, to, step } = source.as_ref() {
+                    is_scalar(from) && is_scalar(to) && step.as_ref().is_none_or(|s| is_scalar(s))
+                        && matches!(init.as_ref(), Expr::Literal(Literal::Num(..)) | Expr::Input)
+                        && Self::is_pure_f64_expr(update, *var_index)
                 } else { false };
 
-                if is_fused_range_add {
+                if is_fused_range_f64 {
                     if let Expr::Range { from, to, step } = source.as_ref() {
                         // Set up range variables
                         let from_val = self.flatten_scalar(from, input_slot);
@@ -1389,8 +1384,14 @@ impl Flattener {
                         self.emit(JitOp::RangeCheck { dst_var: cmp, cur_var: cur, to_var: to_v, step_var: step_v });
                         self.emit(JitOp::BranchOnVar { var: cmp, nonzero_label: body, zero_label: done });
                         self.emit(JitOp::Label { id: body });
-                        // Pure f64 accumulation: acc += cur
-                        self.emit(JitOp::F64Add { dst_var: acc_f64, a_var: acc_f64, b_var: cur });
+                        // Compile update body as pure f64 expression
+                        let new_acc = self.compile_f64_expr(update, *var_index, acc_f64, cur);
+                        // Copy result to accumulator var (may be same if update = . + $x)
+                        if new_acc != acc_f64 {
+                            let zero_tmp = self.alloc_var();
+                            self.emit(JitOp::F64Const { dst_var: zero_tmp, val: 0.0 });
+                            self.emit(JitOp::F64Add { dst_var: acc_f64, a_var: new_acc, b_var: zero_tmp });
+                        }
                         self.emit(JitOp::F64Add { dst_var: cur, a_var: cur, b_var: step_v });
                         self.emit(JitOp::Jump { label: head });
                         self.emit(JitOp::Label { id: done });
@@ -3630,6 +3631,135 @@ impl Flattener {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Check if an expression is a pure f64 function of acc (Input) and var ($x).
+    /// Returns true if the expression can be compiled entirely in f64 variables.
+    fn is_pure_f64_expr(expr: &Expr, var_index: u16) -> bool {
+        match expr {
+            Expr::Input => true,
+            Expr::LoadVar { var_index: vi } if *vi == var_index => true,
+            Expr::Literal(Literal::Num(..)) => true,
+            Expr::BinOp { op, lhs, rhs } => {
+                matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Mod
+                    | BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge
+                    | BinOp::And | BinOp::Or)
+                && Self::is_pure_f64_expr(lhs, var_index)
+                && Self::is_pure_f64_expr(rhs, var_index)
+            }
+            Expr::IfThenElse { cond, then_branch, else_branch } => {
+                Self::is_pure_f64_expr(cond, var_index)
+                && Self::is_pure_f64_expr(then_branch, var_index)
+                && Self::is_pure_f64_expr(else_branch, var_index)
+            }
+            _ => false,
+        }
+    }
+
+    /// Compile a pure f64 expression into Cranelift f64 variables.
+    /// acc_var = accumulator (Input), x_var = loop variable ($x).
+    /// Returns the f64 variable holding the result.
+    fn compile_f64_expr(&mut self, expr: &Expr, var_index: u16, acc_var: u32, x_var: u32) -> u32 {
+        match expr {
+            Expr::Input => acc_var,
+            Expr::LoadVar { var_index: vi } if *vi == var_index => x_var,
+            Expr::Literal(Literal::Num(n, _)) => {
+                let v = self.alloc_var();
+                self.emit(JitOp::F64Const { dst_var: v, val: *n });
+                v
+            }
+            Expr::BinOp { op, lhs, rhs } => {
+                let a = self.compile_f64_expr(lhs, var_index, acc_var, x_var);
+                let b = self.compile_f64_expr(rhs, var_index, acc_var, x_var);
+                let dst = self.alloc_var();
+                match op {
+                    BinOp::Add => self.emit(JitOp::F64Add { dst_var: dst, a_var: a, b_var: b }),
+                    BinOp::Sub => self.emit(JitOp::F64Sub { dst_var: dst, a_var: a, b_var: b }),
+                    BinOp::Mul => self.emit(JitOp::F64Mul { dst_var: dst, a_var: a, b_var: b }),
+                    BinOp::Mod => self.emit(JitOp::F64Rem { dst_var: dst, a_var: a, b_var: b }),
+                    BinOp::Eq => self.emit(JitOp::F64Cmp { dst_var: dst, a_var: a, b_var: b, cc: 4 }),
+                    BinOp::Ne => self.emit(JitOp::F64Cmp { dst_var: dst, a_var: a, b_var: b, cc: 5 }),
+                    BinOp::Lt => self.emit(JitOp::F64Cmp { dst_var: dst, a_var: a, b_var: b, cc: 3 }),
+                    BinOp::Gt => self.emit(JitOp::F64Cmp { dst_var: dst, a_var: a, b_var: b, cc: 1 }),
+                    BinOp::Le => self.emit(JitOp::F64Cmp { dst_var: dst, a_var: a, b_var: b, cc: 2 }),
+                    BinOp::Ge => self.emit(JitOp::F64Cmp { dst_var: dst, a_var: a, b_var: b, cc: 0 }),
+                    BinOp::And => {
+                        // and: both nonzero (truthiness in f64 context: 0.0 and false=0 are falsy)
+                        // For f64: a != 0 && b != 0 → emit as: if a == 0 then 0 else b
+                        let zero = self.alloc_var();
+                        self.emit(JitOp::F64Const { dst_var: zero, val: 0.0 });
+                        let a_is_zero = self.alloc_var();
+                        self.emit(JitOp::F64Cmp { dst_var: a_is_zero, a_var: a, b_var: zero, cc: 4 });
+                        // Use BranchOnVar to select
+                        let then_l = self.alloc_label();
+                        let else_l = self.alloc_label();
+                        let done_l = self.alloc_label();
+                        self.emit(JitOp::BranchOnVar { var: a_is_zero, nonzero_label: then_l, zero_label: else_l });
+                        self.emit(JitOp::Label { id: then_l });
+                        // a is zero (falsy) → result is false
+                        self.emit(JitOp::F64Const { dst_var: dst, val: 0.0 });
+                        self.emit(JitOp::Jump { label: done_l });
+                        self.emit(JitOp::Label { id: else_l });
+                        // a is truthy → result is b's truthiness
+                        // jq 'and' actually returns the rhs value if lhs is truthy
+                        // But we just need truthiness: b
+                        let b_val = self.alloc_var();
+                        self.emit(JitOp::F64Cmp { dst_var: b_val, a_var: b, b_var: zero, cc: 5 }); // b != 0 → 1, else 0
+                        self.emit(JitOp::F64Const { dst_var: dst, val: 0.0 }); // placeholder, will be overwritten
+                        // Actually, in jq, `and`/`or` produce true/false. In f64 context, true=1.0, false=0.0.
+                        // `a and b` = if a then b else false end
+                        // But we need the result as f64. Let's use b_val (0 or 1).
+                        // Copy b_val to dst via add with 0
+                        self.emit(JitOp::F64Add { dst_var: dst, a_var: b_val, b_var: zero });
+                        self.emit(JitOp::Label { id: done_l });
+                    }
+                    BinOp::Or => {
+                        let zero = self.alloc_var();
+                        self.emit(JitOp::F64Const { dst_var: zero, val: 0.0 });
+                        let a_nz = self.alloc_var();
+                        self.emit(JitOp::F64Cmp { dst_var: a_nz, a_var: a, b_var: zero, cc: 5 }); // a != 0
+                        let then_l = self.alloc_label();
+                        let else_l = self.alloc_label();
+                        let done_l = self.alloc_label();
+                        self.emit(JitOp::BranchOnVar { var: a_nz, nonzero_label: then_l, zero_label: else_l });
+                        self.emit(JitOp::Label { id: then_l });
+                        // a is truthy → result is true (1.0)
+                        self.emit(JitOp::F64Const { dst_var: dst, val: 1.0 });
+                        self.emit(JitOp::Jump { label: done_l });
+                        self.emit(JitOp::Label { id: else_l });
+                        // a is falsy → result is b's truthiness
+                        let b_nz = self.alloc_var();
+                        self.emit(JitOp::F64Cmp { dst_var: b_nz, a_var: b, b_var: zero, cc: 5 });
+                        self.emit(JitOp::F64Add { dst_var: dst, a_var: b_nz, b_var: zero });
+                        self.emit(JitOp::Label { id: done_l });
+                    }
+                    _ => unreachable!(),
+                };
+                dst
+            }
+            Expr::IfThenElse { cond, then_branch, else_branch } => {
+                let c = self.compile_f64_expr(cond, var_index, acc_var, x_var);
+                let dst = self.alloc_var();
+                let then_l = self.alloc_label();
+                let else_l = self.alloc_label();
+                let done_l = self.alloc_label();
+                self.emit(JitOp::BranchOnVar { var: c, nonzero_label: then_l, zero_label: else_l });
+                self.emit(JitOp::Label { id: then_l });
+                let t = self.compile_f64_expr(then_branch, var_index, acc_var, x_var);
+                let zero = self.alloc_var();
+                self.emit(JitOp::F64Const { dst_var: zero, val: 0.0 });
+                self.emit(JitOp::F64Add { dst_var: dst, a_var: t, b_var: zero });
+                self.emit(JitOp::Jump { label: done_l });
+                self.emit(JitOp::Label { id: else_l });
+                let e = self.compile_f64_expr(else_branch, var_index, acc_var, x_var);
+                let zero2 = self.alloc_var();
+                self.emit(JitOp::F64Const { dst_var: zero2, val: 0.0 });
+                self.emit(JitOp::F64Add { dst_var: dst, a_var: e, b_var: zero2 });
+                self.emit(JitOp::Label { id: done_l });
+                dst
+            }
+            _ => unreachable!("is_pure_f64_expr should have rejected this"),
         }
     }
 
