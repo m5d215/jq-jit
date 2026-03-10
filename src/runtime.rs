@@ -775,10 +775,38 @@ fn rt_sort(v: &Value) -> Result<Value> {
     match v {
         Value::Arr(a) => {
             let mut sorted = (**a).clone();
-            sorted.sort_by(compare_values);
+            sort_values(&mut sorted);
             Ok(Value::Arr(Rc::new(sorted)))
         }
         _ => bail!("{} is not an array", v.type_name()),
+    }
+}
+
+/// Sort a Value slice using specialized comparators for homogeneous types.
+fn sort_values(sorted: &mut [Value]) {
+    if sorted.len() <= 1 { return; }
+    // Check first element type to select fast comparator
+    match &sorted[0] {
+        Value::Num(..) => {
+            // Optimistic: try numeric sort, fall back if mixed types
+            sorted.sort_by(|a, b| {
+                if let (Value::Num(x, _), Value::Num(y, _)) = (a, b) {
+                    x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+                } else {
+                    compare_values(a, b)
+                }
+            });
+        }
+        Value::Str(..) => {
+            sorted.sort_by(|a, b| {
+                if let (Value::Str(x), Value::Str(y)) = (a, b) {
+                    x.cmp(y)
+                } else {
+                    compare_values(a, b)
+                }
+            });
+        }
+        _ => sorted.sort_by(compare_values),
     }
 }
 
@@ -824,7 +852,7 @@ fn rt_unique(v: &Value) -> Result<Value> {
     match v {
         Value::Arr(a) => {
             let mut sorted = (**a).clone();
-            sorted.sort_by(compare_values);
+            sort_values(&mut sorted);
             sorted.dedup_by(|a, b| values_equal(a, b));
             Ok(Value::Arr(Rc::new(sorted)))
         }
