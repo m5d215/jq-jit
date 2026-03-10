@@ -1824,43 +1824,112 @@ fn real_main() {
                 } else if let Some((ref sel_field, ref sel_op, threshold, ref out_rexpr)) = select_cmp_value {
                     use jq_jit::interpreter::RemapExpr;
                     use jq_jit::ir::BinOp;
-                    // For the common case where the select field is the same as the compute field,
-                    // we can reuse the numeric value from the select check.
-                    let is_same_field_const = matches!(out_rexpr, RemapExpr::FieldOpConst(f, _, _) if f == sel_field);
+                    // Detect fused select+compute opportunities:
+                    // 1. FieldOpConst where select field == compute field → reuse val
+                    // 2. FieldOpField where select field is one of the two → use get_two_nums
+                    // 3. ConstOpField where select field == compute field → reuse val
+                    let fused_mode: u8 = match out_rexpr {
+                        RemapExpr::FieldOpConst(f, _, _) if f == sel_field => 1, // reuse val
+                        RemapExpr::FieldOpField(f1, _, f2) if f1 == sel_field || f2 == sel_field => 2, // two_nums
+                        RemapExpr::ConstOpField(_, _, f) if f == sel_field => 3, // reuse val
+                        _ => 0, // general
+                    };
+                    // For mode 2: determine the "other" field (not sel_field)
+                    let other_field: Option<&str> = if fused_mode == 2 {
+                        match out_rexpr {
+                            RemapExpr::FieldOpField(f1, _, f2) => {
+                                if f1 == sel_field { Some(f2.as_str()) } else { Some(f1.as_str()) }
+                            }
+                            _ => None,
+                        }
+                    } else { None };
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if let Some(val) = json_object_get_num(raw, 0, sel_field) {
-                            let pass = match sel_op {
-                                BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
-                                BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
-                                BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
-                                _ => false,
-                            };
-                            if pass {
-                                if is_same_field_const {
-                                    // Fused path: reuse val from select check
-                                    if let RemapExpr::FieldOpConst(_, op, n) = out_rexpr {
-                                        let r = match op { BinOp::Add => val + n, BinOp::Sub => val - n, BinOp::Mul => val * n, BinOp::Div => val / n, BinOp::Mod => val % n, _ => unreachable!() };
-                                        push_jq_number_bytes(&mut compact_buf, r);
-                                    }
-                                } else {
-                                    // General path: need to extract fields for the output expression
-                                    let mut all_fields: Vec<String> = Vec::new();
-                                    let mut field_idx = std::collections::HashMap::new();
-                                    for name in remap_expr_fields(out_rexpr) {
-                                        if !field_idx.contains_key(name) {
-                                            field_idx.insert(name.to_string(), all_fields.len());
-                                            all_fields.push(name.to_string());
+                        match fused_mode {
+                            1 => {
+                                // Fused: select field == FieldOpConst field
+                                if let Some(val) = json_object_get_num(raw, 0, sel_field) {
+                                    let pass = match sel_op {
+                                        BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
+                                        BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
+                                        BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
+                                        _ => false,
+                                    };
+                                    if pass {
+                                        if let RemapExpr::FieldOpConst(_, op, n) = out_rexpr {
+                                            let r = match op { BinOp::Add => val + n, BinOp::Sub => val - n, BinOp::Mul => val * n, BinOp::Div => val / n, BinOp::Mod => val % n, _ => unreachable!() };
+                                            push_jq_number_bytes(&mut compact_buf, r);
                                         }
-                                    }
-                                    let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
-                                    if let Some(ranges) = json_object_get_fields_raw(raw, 0, &field_refs) {
-                                        emit_remap_value(&mut compact_buf, out_rexpr, raw, &ranges, &field_idx);
-                                    } else {
-                                        compact_buf.extend_from_slice(b"null");
+                                        compact_buf.push(b'\n');
                                     }
                                 }
-                                compact_buf.push(b'\n');
+                            }
+                            2 => {
+                                // Fused: select field in FieldOpField — single-pass two_nums
+                                let of = other_field.unwrap();
+                                if let Some((v1, v2)) = json_object_get_two_nums(raw, 0, sel_field, of) {
+                                    let pass = match sel_op {
+                                        BinOp::Gt => v1 > threshold, BinOp::Lt => v1 < threshold,
+                                        BinOp::Ge => v1 >= threshold, BinOp::Le => v1 <= threshold,
+                                        BinOp::Eq => v1 == threshold, BinOp::Ne => v1 != threshold,
+                                        _ => false,
+                                    };
+                                    if pass {
+                                        if let RemapExpr::FieldOpField(f1, op, _) = out_rexpr {
+                                            // v1 is sel_field, v2 is other_field
+                                            let (lhs_val, rhs_val) = if f1 == sel_field { (v1, v2) } else { (v2, v1) };
+                                            let r = match op { BinOp::Add => lhs_val + rhs_val, BinOp::Sub => lhs_val - rhs_val, BinOp::Mul => lhs_val * rhs_val, BinOp::Div => lhs_val / rhs_val, BinOp::Mod => lhs_val % rhs_val, _ => unreachable!() };
+                                            push_jq_number_bytes(&mut compact_buf, r);
+                                        }
+                                        compact_buf.push(b'\n');
+                                    }
+                                }
+                            }
+                            3 => {
+                                // Fused: select field == ConstOpField field
+                                if let Some(val) = json_object_get_num(raw, 0, sel_field) {
+                                    let pass = match sel_op {
+                                        BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
+                                        BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
+                                        BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
+                                        _ => false,
+                                    };
+                                    if pass {
+                                        if let RemapExpr::ConstOpField(n, op, _) = out_rexpr {
+                                            let r = match op { BinOp::Add => n + val, BinOp::Sub => n - val, BinOp::Mul => n * val, BinOp::Div => n / val, BinOp::Mod => n % val, _ => unreachable!() };
+                                            push_jq_number_bytes(&mut compact_buf, r);
+                                        }
+                                        compact_buf.push(b'\n');
+                                    }
+                                }
+                            }
+                            _ => {
+                                // General path: extract select field, then output fields
+                                if let Some(val) = json_object_get_num(raw, 0, sel_field) {
+                                    let pass = match sel_op {
+                                        BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
+                                        BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
+                                        BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
+                                        _ => false,
+                                    };
+                                    if pass {
+                                        let mut all_fields: Vec<String> = Vec::new();
+                                        let mut field_idx = std::collections::HashMap::new();
+                                        for name in remap_expr_fields(out_rexpr) {
+                                            if !field_idx.contains_key(name) {
+                                                field_idx.insert(name.to_string(), all_fields.len());
+                                                all_fields.push(name.to_string());
+                                            }
+                                        }
+                                        let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                                        if let Some(ranges) = json_object_get_fields_raw(raw, 0, &field_refs) {
+                                            emit_remap_value(&mut compact_buf, out_rexpr, raw, &ranges, &field_idx);
+                                        } else {
+                                            compact_buf.extend_from_slice(b"null");
+                                        }
+                                        compact_buf.push(b'\n');
+                                    }
+                                }
                             }
                         }
                         if compact_buf.len() >= 1 << 17 {
@@ -2791,39 +2860,102 @@ fn real_main() {
                 use jq_jit::interpreter::RemapExpr;
                 use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
-                let is_same_field_const = matches!(out_rexpr, RemapExpr::FieldOpConst(f, _, _) if f == sel_field);
+                let fused_mode: u8 = match out_rexpr {
+                    RemapExpr::FieldOpConst(f, _, _) if f == sel_field => 1,
+                    RemapExpr::FieldOpField(f1, _, f2) if f1 == sel_field || f2 == sel_field => 2,
+                    RemapExpr::ConstOpField(_, _, f) if f == sel_field => 3,
+                    _ => 0,
+                };
+                let other_field: Option<&str> = if fused_mode == 2 {
+                    match out_rexpr {
+                        RemapExpr::FieldOpField(f1, _, f2) => {
+                            if f1 == sel_field { Some(f2.as_str()) } else { Some(f1.as_str()) }
+                        }
+                        _ => None,
+                    }
+                } else { None };
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if let Some(val) = json_object_get_num(raw, 0, sel_field) {
-                        let pass = match sel_op {
-                            BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
-                            BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
-                            BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
-                            _ => false,
-                        };
-                        if pass {
-                            if is_same_field_const {
-                                if let RemapExpr::FieldOpConst(_, op, n) = out_rexpr {
-                                    let r = match op { BinOp::Add => val + n, BinOp::Sub => val - n, BinOp::Mul => val * n, BinOp::Div => val / n, BinOp::Mod => val % n, _ => unreachable!() };
-                                    push_jq_number_bytes(&mut compact_buf, r);
-                                }
-                            } else {
-                                let mut all_fields: Vec<String> = Vec::new();
-                                let mut field_idx = std::collections::HashMap::new();
-                                for name in remap_expr_fields(out_rexpr) {
-                                    if !field_idx.contains_key(name) {
-                                        field_idx.insert(name.to_string(), all_fields.len());
-                                        all_fields.push(name.to_string());
+                    match fused_mode {
+                        1 => {
+                            if let Some(val) = json_object_get_num(raw, 0, sel_field) {
+                                let pass = match sel_op {
+                                    BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
+                                    BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
+                                    BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
+                                    _ => false,
+                                };
+                                if pass {
+                                    if let RemapExpr::FieldOpConst(_, op, n) = out_rexpr {
+                                        let r = match op { BinOp::Add => val + n, BinOp::Sub => val - n, BinOp::Mul => val * n, BinOp::Div => val / n, BinOp::Mod => val % n, _ => unreachable!() };
+                                        push_jq_number_bytes(&mut compact_buf, r);
                                     }
-                                }
-                                let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
-                                if let Some(ranges) = json_object_get_fields_raw(raw, 0, &field_refs) {
-                                    emit_remap_value(&mut compact_buf, out_rexpr, raw, &ranges, &field_idx);
-                                } else {
-                                    compact_buf.extend_from_slice(b"null");
+                                    compact_buf.push(b'\n');
                                 }
                             }
-                            compact_buf.push(b'\n');
+                        }
+                        2 => {
+                            let of = other_field.unwrap();
+                            if let Some((v1, v2)) = json_object_get_two_nums(raw, 0, sel_field, of) {
+                                let pass = match sel_op {
+                                    BinOp::Gt => v1 > threshold, BinOp::Lt => v1 < threshold,
+                                    BinOp::Ge => v1 >= threshold, BinOp::Le => v1 <= threshold,
+                                    BinOp::Eq => v1 == threshold, BinOp::Ne => v1 != threshold,
+                                    _ => false,
+                                };
+                                if pass {
+                                    if let RemapExpr::FieldOpField(f1, op, _) = out_rexpr {
+                                        let (lhs_val, rhs_val) = if f1 == sel_field { (v1, v2) } else { (v2, v1) };
+                                        let r = match op { BinOp::Add => lhs_val + rhs_val, BinOp::Sub => lhs_val - rhs_val, BinOp::Mul => lhs_val * rhs_val, BinOp::Div => lhs_val / rhs_val, BinOp::Mod => lhs_val % rhs_val, _ => unreachable!() };
+                                        push_jq_number_bytes(&mut compact_buf, r);
+                                    }
+                                    compact_buf.push(b'\n');
+                                }
+                            }
+                        }
+                        3 => {
+                            if let Some(val) = json_object_get_num(raw, 0, sel_field) {
+                                let pass = match sel_op {
+                                    BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
+                                    BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
+                                    BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
+                                    _ => false,
+                                };
+                                if pass {
+                                    if let RemapExpr::ConstOpField(n, op, _) = out_rexpr {
+                                        let r = match op { BinOp::Add => n + val, BinOp::Sub => n - val, BinOp::Mul => n * val, BinOp::Div => n / val, BinOp::Mod => n % val, _ => unreachable!() };
+                                        push_jq_number_bytes(&mut compact_buf, r);
+                                    }
+                                    compact_buf.push(b'\n');
+                                }
+                            }
+                        }
+                        _ => {
+                            if let Some(val) = json_object_get_num(raw, 0, sel_field) {
+                                let pass = match sel_op {
+                                    BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
+                                    BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
+                                    BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
+                                    _ => false,
+                                };
+                                if pass {
+                                    let mut all_fields: Vec<String> = Vec::new();
+                                    let mut field_idx = std::collections::HashMap::new();
+                                    for name in remap_expr_fields(out_rexpr) {
+                                        if !field_idx.contains_key(name) {
+                                            field_idx.insert(name.to_string(), all_fields.len());
+                                            all_fields.push(name.to_string());
+                                        }
+                                    }
+                                    let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                                    if let Some(ranges) = json_object_get_fields_raw(raw, 0, &field_refs) {
+                                        emit_remap_value(&mut compact_buf, out_rexpr, raw, &ranges, &field_idx);
+                                    } else {
+                                        compact_buf.extend_from_slice(b"null");
+                                    }
+                                    compact_buf.push(b'\n');
+                                }
+                            }
                         }
                     }
                     if compact_buf.len() >= 1 << 17 {
