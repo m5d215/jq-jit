@@ -5219,6 +5219,52 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 return 0;
             }
         }
+        // Fast path: from_entries (op 28)
+        if op == 28 {
+            if let Value::Arr(a) = &*input {
+                let mut obj = crate::value::new_objmap();
+                let mut ok = true;
+                for entry in a.iter() {
+                    match entry {
+                        Value::Obj(o) => {
+                            let key = o.get("key").or_else(|| o.get("Key"))
+                                .or_else(|| o.get("name")).or_else(|| o.get("Name"))
+                                .cloned().unwrap_or(Value::Null);
+                            let val = o.get("value").or_else(|| o.get("Value"))
+                                .cloned().unwrap_or(Value::Null);
+                            let key_str = match &key {
+                                Value::Str(s) => crate::value::KeyStr::from(s.as_str()),
+                                Value::Num(n, _) => crate::value::KeyStr::from(crate::value::format_jq_number(*n)),
+                                _ => crate::value::KeyStr::from(crate::value::value_to_json(&key)),
+                            };
+                            obj.insert(key_str, val);
+                        }
+                        _ => { ok = false; break; }
+                    }
+                }
+                if ok {
+                    std::ptr::write(dst, Value::Obj(Rc::new(obj)));
+                    return 0;
+                }
+            }
+        }
+        // Fast path: flatten (op 11) — recursive flatten
+        if op == 11 {
+            if let Value::Arr(a) = &*input {
+                fn flatten_into(arr: &[Value], result: &mut Vec<Value>) {
+                    for item in arr {
+                        match item {
+                            Value::Arr(inner) => flatten_into(inner, result),
+                            _ => result.push(item.clone()),
+                        }
+                    }
+                }
+                let mut result = Vec::new();
+                flatten_into(a, &mut result);
+                std::ptr::write(dst, Value::Arr(Rc::new(result)));
+                return 0;
+            }
+        }
         // Fast path: not (op 32)
         if op == 32 {
             let truthy = match &*input {
