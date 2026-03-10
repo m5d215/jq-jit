@@ -5097,6 +5097,86 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 _ => {}
             }
         }
+        // Fast path: length (op 0) — very common, avoid full dispatch
+        if op == 0 {
+            let v = match &*input {
+                Value::Null => Value::Num(0.0, None),
+                Value::False => Value::Num(0.0, None),
+                Value::True => Value::Num(1.0, None),
+                Value::Num(n, _) => Value::Num(n.abs(), None),
+                Value::Str(s) => {
+                    let len = if s.is_ascii() { s.len() } else { s.chars().count() };
+                    Value::Num(len as f64, None)
+                }
+                Value::Arr(a) => Value::Num(a.len() as f64, None),
+                Value::Obj(o) => Value::Num(o.len() as f64, None),
+                Value::Error(_) => Value::Num(0.0, None),
+            };
+            std::ptr::write(dst, v);
+            return 0;
+        }
+        // Fast path: type (op 1)
+        if op == 1 {
+            let s = match &*input {
+                Value::Null => "null",
+                Value::False | Value::True => "boolean",
+                Value::Num(_, _) => "number",
+                Value::Str(_) => "string",
+                Value::Arr(_) => "array",
+                Value::Obj(_) => "object",
+                Value::Error(_) => "error",
+            };
+            std::ptr::write(dst, Value::from_str(s));
+            return 0;
+        }
+        // Fast path: keys (op 2) and keys_unsorted (op 29)
+        if op == 2 || op == 29 {
+            match &*input {
+                Value::Obj(o) => {
+                    let mut keys: Vec<Value> = o.keys().map(|k| Value::from_str(k)).collect();
+                    if op == 2 { keys.sort_by(crate::runtime::compare_values); }
+                    std::ptr::write(dst, Value::Arr(Rc::new(keys)));
+                    return 0;
+                }
+                Value::Arr(a) => {
+                    let keys: Vec<Value> = (0..a.len()).map(|i| Value::Num(i as f64, None)).collect();
+                    std::ptr::write(dst, Value::Arr(Rc::new(keys)));
+                    return 0;
+                }
+                _ => {}
+            }
+        }
+        // Fast path: values (op 3)
+        if op == 3 {
+            match &*input {
+                Value::Obj(o) => {
+                    let vals: Vec<Value> = o.values().cloned().collect();
+                    std::ptr::write(dst, Value::Arr(Rc::new(vals)));
+                    return 0;
+                }
+                Value::Arr(_) => {
+                    std::ptr::write(dst, (*input).clone());
+                    return 0;
+                }
+                _ => {}
+            }
+        }
+        // Fast path: utf8bytelength (op 43)
+        if op == 43 {
+            if let Value::Str(s) = &*input {
+                std::ptr::write(dst, Value::Num(s.len() as f64, None));
+                return 0;
+            }
+        }
+        // Fast path: not (op 32)
+        if op == 32 {
+            let truthy = match &*input {
+                Value::Null | Value::False => false,
+                _ => true,
+            };
+            std::ptr::write(dst, if truthy { Value::False } else { Value::True });
+            return 0;
+        }
         // Fast path: inline math ops on numbers — avoids eval_unaryop → call_builtin chain
         if let Value::Num(n, repr) = &*input {
             let n = *n;
