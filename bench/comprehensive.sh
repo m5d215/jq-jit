@@ -180,7 +180,7 @@ bench_gen "reduce (sum-of-squares)"  10000000  "reduce range(1; . + 1) as \$x (0
 bench_gen "reduce (conditional)"     10000000  'reduce range(.) as $x (0; if $x % 3 == 0 or $x % 5 == 0 then . + $x else . end)'
 bench_gen "reduce (product)"         10000000  "reduce range(1; . + 1) as \$x (1; . * \$x)"
 bench_gen "foreach (conditional)"    1000000   '[foreach range(.) as $x (0; if $x % 2 == 0 then . + $x else . + 1 end)] | length'
-bench_gen "until (100M)"             100000000 '0 | until(. >= input; . + 1)'
+bench_gen "until (100M)"             100000000 '. as $n | 0 | until(. >= $n; . + 1)'
 
 bench_gen "reduce (harmonic)"       10000000  "reduce range(1; . + 1) as \$x (0; . + 1 / \$x)"
 bench_gen "reduce (floor pipe)"     10000000  "reduce range(.) as \$x (0; . + (\$x / 3 | floor))"

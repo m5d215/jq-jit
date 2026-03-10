@@ -1056,11 +1056,16 @@ impl Flattener {
             Expr::Until { cond, update } => {
                 // Try narrow fused path: until(. cmp K; . op S)
                 let narrow_fused = Self::classify_f64_until_narrow(cond, update);
-                // Try general fused f64 until: both cond and update are pure f64 on .
-                let dummy_var = u16::MAX;
+                // Collect all variable references in cond and update
+                let mut ext_vars = Vec::new();
+                if narrow_fused.is_none() {
+                    Self::collect_loadvar_indices(cond, &mut ext_vars);
+                    Self::collect_loadvar_indices(update, &mut ext_vars);
+                }
+                // Try general fused f64 until: both cond and update are pure f64 on . and vars
                 let general_f64 = narrow_fused.is_none()
-                    && Self::is_pure_f64_expr(cond, dummy_var)
-                    && Self::is_pure_f64_expr(update, dummy_var);
+                    && Self::is_pure_f64_expr_multi(cond, &ext_vars)
+                    && Self::is_pure_f64_expr_multi(update, &ext_vars);
 
                 if let Some((cond_cc, cond_const, update_op, update_const)) = narrow_fused {
                     // Fast narrow path: preload constants outside loop
@@ -1091,16 +1096,26 @@ impl Flattener {
                     result
                 } else if general_f64 {
                     // General fused path: compile_f64_expr inside loop
+                    // Pre-load external variables as f64 vars
                     let acc = self.alloc_var();
                     self.emit(JitOp::ToF64Var { dst_var: acc, src: input_slot });
+                    let mut var_map: Vec<(u16, u32)> = Vec::new();
+                    for &vi in &ext_vars {
+                        let slot = self.alloc_slot();
+                        self.emit(JitOp::GetVar { dst: slot, var_index: vi });
+                        let fvar = self.alloc_var();
+                        self.emit(JitOp::ToF64Var { dst_var: fvar, src: slot });
+                        self.emit(JitOp::Drop { slot });
+                        var_map.push((vi, fvar));
+                    }
                     let head = self.alloc_label();
                     let body = self.alloc_label();
                     let done = self.alloc_label();
                     self.emit(JitOp::Label { id: head });
-                    let cond_v = self.compile_f64_expr(cond, dummy_var, acc, acc);
+                    let cond_v = self.compile_f64_expr_multi(cond, acc, &var_map);
                     self.emit(JitOp::BranchOnVar { var: cond_v, nonzero_label: done, zero_label: body });
                     self.emit(JitOp::Label { id: body });
-                    let new_acc = self.compile_f64_expr(update, dummy_var, acc, acc);
+                    let new_acc = self.compile_f64_expr_multi(update, acc, &var_map);
                     if new_acc != acc {
                         let zero_tmp = self.alloc_var();
                         self.emit(JitOp::F64Const { dst_var: zero_tmp, val: 0.0 });
@@ -3952,6 +3967,23 @@ impl Flattener {
         }
     }
 
+
+    /// Collect all LoadVar var_indices referenced in an expression.
+    fn collect_loadvar_indices(expr: &Expr, out: &mut Vec<u16>) {
+        match expr {
+            Expr::LoadVar { var_index } => { if !out.contains(var_index) { out.push(*var_index); } }
+            Expr::BinOp { lhs, rhs, .. } => { Self::collect_loadvar_indices(lhs, out); Self::collect_loadvar_indices(rhs, out); }
+            Expr::Negate { operand } | Expr::UnaryOp { operand, .. } => Self::collect_loadvar_indices(operand, out),
+            Expr::Pipe { left, right } => { Self::collect_loadvar_indices(left, out); Self::collect_loadvar_indices(right, out); }
+            Expr::IfThenElse { cond, then_branch, else_branch } => {
+                Self::collect_loadvar_indices(cond, out);
+                Self::collect_loadvar_indices(then_branch, out);
+                Self::collect_loadvar_indices(else_branch, out);
+            }
+            Expr::LetBinding { value, body, .. } => { Self::collect_loadvar_indices(value, out); Self::collect_loadvar_indices(body, out); }
+            _ => {}
+        }
+    }
 
     /// Classify simple `until(. cmp K; . op S)` for narrow fused path.
     fn classify_f64_until_narrow(cond: &Expr, update: &Expr) -> Option<(u8, f64, u8, f64)> {
