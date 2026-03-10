@@ -2164,13 +2164,13 @@ pub fn eval(
                 }
             };
             match action {
-                FuncAction::Direct(func) => eval(&func.body, input, env, cb),
+                FuncAction::Direct(func) => stacker::maybe_grow(128 * 1024, 32 * 1024 * 1024, || eval(&func.body, input, env, cb)),
                 FuncAction::CacheHit(body) => eval(&body, input, env, cb),
                 FuncAction::Recursive(func) => {
                     let mut nv = env.borrow().next_var;
                     let body = substitute_and_rename(&func.body, &func.param_vars, args, &mut nv);
                     env.borrow_mut().next_var = nv;
-                    eval(&body, input, env, cb)
+                    stacker::maybe_grow(128 * 1024, 32 * 1024 * 1024, || eval(&body, input, env, cb))
                 }
                 FuncAction::CacheMiss(func) => {
                     // Check if recursive (first call or unknown)
@@ -2190,7 +2190,7 @@ pub fn eval(
                         let mut nv = env.borrow().next_var;
                         let body = substitute_and_rename(&func.body, &func.param_vars, args, &mut nv);
                         env.borrow_mut().next_var = nv;
-                        eval(&body, input, env, cb)
+                        stacker::maybe_grow(128 * 1024, 32 * 1024 * 1024, || eval(&body, input, env, cb))
                     } else {
                         let body = substitute_params(&func.body, &func.param_vars, args);
                         let body_rc = Rc::new(body);
@@ -2754,8 +2754,8 @@ fn eval_recurse_expr(step: &Expr, val: &Value, env: &EnvRef, cb: &mut dyn FnMut(
 fn eval_recurse_default(val: &Value, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
     if !cb(val.clone())? { return Ok(false); }
     match val {
-        Value::Arr(a) => { for item in a.iter() { if !eval_recurse_default(item, cb)? { return Ok(false); } } }
-        Value::Obj(o) => { for v in o.values() { if !eval_recurse_default(v, cb)? { return Ok(false); } } }
+        Value::Arr(a) => { for item in a.iter() { if !stacker::maybe_grow(64 * 1024, 1024 * 1024, || eval_recurse_default(item, cb))? { return Ok(false); } } }
+        Value::Obj(o) => { for v in o.values() { if !stacker::maybe_grow(64 * 1024, 1024 * 1024, || eval_recurse_default(v, cb))? { return Ok(false); } } }
         _ => {}
     }
     Ok(true)

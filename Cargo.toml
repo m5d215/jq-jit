@@ -24,6 +24,8 @@ memmap2 = "0.9"
 mimalloc = { version = "0.1", default-features = false }
 fast-float = "0.2"
 memchr = "2"
+ryu = "1"
+stacker = "0.1"
 
 [profile.release]
 lto = "thin"

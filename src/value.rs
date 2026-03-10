@@ -2524,7 +2524,6 @@ fn push_compact_value(buf: &mut Vec<u8>, v: &Value) {
 /// Write a jq-formatted number directly to a Vec<u8> buffer, avoiding intermediate String allocation.
 #[inline]
 pub fn push_jq_number_bytes(buf: &mut Vec<u8>, n: f64) {
-    use std::io::Write;
     // Fast path: exact integer in displayable range (covers vast majority of JSON numbers).
     // The i64 roundtrip check (i as f64 == n) naturally rejects NaN, infinity, and non-integers.
     let i = n as i64;
@@ -2550,8 +2549,10 @@ pub fn push_jq_number_bytes(buf: &mut Vec<u8>, n: f64) {
         buf.extend_from_slice(s.as_bytes());
         return;
     }
-    // Common decimal case: write Display format directly to buffer
-    let _ = write!(buf, "{}", n);
+    // Common decimal case: use ryu for fast f64-to-decimal conversion
+    let mut rbuf = ryu::Buffer::new();
+    let s = rbuf.format(n);
+    buf.extend_from_slice(s.as_bytes());
 }
 
 #[inline]
