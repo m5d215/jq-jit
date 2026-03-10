@@ -6187,7 +6187,6 @@ impl JitCompiler {
             ("jit_rt_sort_inplace", jit_rt_sort_inplace as *const u8),
             ("jit_rt_collect_range", jit_rt_collect_range as *const u8),
             ("jit_rt_arr_push", jit_rt_arr_push as *const u8),
-            ("jit_rt_fmod", libm::fmod as *const u8),
         ];
         for (name, ptr) in symbols {
             jit_builder.symbol(*name, *ptr);
@@ -7140,12 +7139,16 @@ impl JitCompiler {
                         b.def_var(vars[*dst_var as usize], bits);
                     }
                     JitOp::F64Rem { dst_var, a_var, b_var: bv } => {
+                        // Inline modulo: a - trunc(a / b) * b
+                        // Matches fmod semantics for non-zero b
                         let a_bits = b.use_var(vars[*a_var as usize]);
                         let b_bits = b.use_var(vars[*bv as usize]);
                         let a_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), a_bits);
                         let b_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), b_bits);
-                        let rem = b.ins().call(rt["fmod"], &[a_f, b_f]);
-                        let rem_f = b.inst_results(rem)[0];
+                        let div = b.ins().fdiv(a_f, b_f);
+                        let trunc = b.ins().trunc(div);
+                        let prod = b.ins().fmul(trunc, b_f);
+                        let rem_f = b.ins().fsub(a_f, prod);
                         let bits = b.ins().bitcast(ptr_ty, cranelift_codegen::ir::MemFlags::new(), rem_f);
                         b.def_var(vars[*dst_var as usize], bits);
                     }
@@ -7409,7 +7412,6 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("sort_inplace", [p], [p]);     // v: *mut Value -> status
     decl!("collect_range", [p, f], []);  // dst, n (f64)
     decl!("arr_push", [p, p], []);       // arr: *mut Value, val: *const Value
-    decl!("fmod", [f, f], [f]);          // f64 modulo (libm::fmod)
     Ok(())
 }
 
