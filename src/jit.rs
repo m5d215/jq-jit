@@ -297,8 +297,10 @@ enum JitOp {
     F64Div { dst_var: u32, a_var: u32, b_var: u32 },
     F64Rem { dst_var: u32, a_var: u32, b_var: u32 },
     F64Neg { dst_var: u32, src_var: u32 },
-    /// Unary math: 0=floor, 1=ceil, 2=sqrt, 3=fabs, 4=trunc, 5=nearest
+    /// Native unary math: 0=floor, 1=ceil, 2=sqrt, 3=fabs, 4=trunc, 5=nearest
     F64Math { dst_var: u32, src_var: u32, kind: u8 },
+    /// Libm unary call: 0=sin, 1=cos, 2=tan, 3=asin, 4=acos, 5=atan, 6=exp, 7=exp2, 8=log, 9=log2, 10=log10, 11=cbrt
+    F64Libm { dst_var: u32, src_var: u32, func: u8 },
     /// Float comparison: dst = 1 if a `cc` b, else 0. cc: 0=Ge, 1=Gt, 2=Le, 3=Lt, 4=Eq, 5=Ne
     F64Cmp { dst_var: u32, a_var: u32, b_var: u32, cc: u8 },
     F64Num { dst: SlotId, src_var: u32 },
@@ -3687,7 +3689,11 @@ impl Flattener {
             }
             Expr::UnaryOp { op, operand } => {
                 matches!(op, UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Sqrt
-                    | UnaryOp::Fabs | UnaryOp::Round | UnaryOp::Trunc | UnaryOp::Abs)
+                    | UnaryOp::Fabs | UnaryOp::Round | UnaryOp::Trunc | UnaryOp::Abs
+                    | UnaryOp::Sin | UnaryOp::Cos | UnaryOp::Tan
+                    | UnaryOp::Asin | UnaryOp::Acos | UnaryOp::Atan
+                    | UnaryOp::Exp | UnaryOp::Exp2 | UnaryOp::Log | UnaryOp::Log2 | UnaryOp::Log10
+                    | UnaryOp::Cbrt)
                 && Self::is_pure_f64_expr(operand, var_index)
             }
             Expr::IfThenElse { cond, then_branch, else_branch } => {
@@ -3815,16 +3821,27 @@ impl Flattener {
             Expr::UnaryOp { op, operand } => {
                 let src = self.compile_f64_expr(operand, var_index, acc_var, x_var);
                 let dst = self.alloc_var();
-                let kind = match op {
-                    UnaryOp::Floor => 0,
-                    UnaryOp::Ceil => 1,
-                    UnaryOp::Sqrt => 2,
-                    UnaryOp::Fabs | UnaryOp::Abs => 3,
-                    UnaryOp::Trunc => 4,
-                    UnaryOp::Round => 5,
+                match op {
+                    UnaryOp::Floor => self.emit(JitOp::F64Math { dst_var: dst, src_var: src, kind: 0 }),
+                    UnaryOp::Ceil => self.emit(JitOp::F64Math { dst_var: dst, src_var: src, kind: 1 }),
+                    UnaryOp::Sqrt => self.emit(JitOp::F64Math { dst_var: dst, src_var: src, kind: 2 }),
+                    UnaryOp::Fabs | UnaryOp::Abs => self.emit(JitOp::F64Math { dst_var: dst, src_var: src, kind: 3 }),
+                    UnaryOp::Trunc => self.emit(JitOp::F64Math { dst_var: dst, src_var: src, kind: 4 }),
+                    UnaryOp::Round => self.emit(JitOp::F64Math { dst_var: dst, src_var: src, kind: 5 }),
+                    UnaryOp::Sin => self.emit(JitOp::F64Libm { dst_var: dst, src_var: src, func: 0 }),
+                    UnaryOp::Cos => self.emit(JitOp::F64Libm { dst_var: dst, src_var: src, func: 1 }),
+                    UnaryOp::Tan => self.emit(JitOp::F64Libm { dst_var: dst, src_var: src, func: 2 }),
+                    UnaryOp::Asin => self.emit(JitOp::F64Libm { dst_var: dst, src_var: src, func: 3 }),
+                    UnaryOp::Acos => self.emit(JitOp::F64Libm { dst_var: dst, src_var: src, func: 4 }),
+                    UnaryOp::Atan => self.emit(JitOp::F64Libm { dst_var: dst, src_var: src, func: 5 }),
+                    UnaryOp::Exp => self.emit(JitOp::F64Libm { dst_var: dst, src_var: src, func: 6 }),
+                    UnaryOp::Exp2 => self.emit(JitOp::F64Libm { dst_var: dst, src_var: src, func: 7 }),
+                    UnaryOp::Log => self.emit(JitOp::F64Libm { dst_var: dst, src_var: src, func: 8 }),
+                    UnaryOp::Log2 => self.emit(JitOp::F64Libm { dst_var: dst, src_var: src, func: 9 }),
+                    UnaryOp::Log10 => self.emit(JitOp::F64Libm { dst_var: dst, src_var: src, func: 10 }),
+                    UnaryOp::Cbrt => self.emit(JitOp::F64Libm { dst_var: dst, src_var: src, func: 11 }),
                     _ => unreachable!(),
                 };
-                self.emit(JitOp::F64Math { dst_var: dst, src_var: src, kind });
                 dst
             }
             _ => unreachable!("is_pure_f64_expr should have rejected this"),
@@ -5292,6 +5309,20 @@ extern "C" fn jit_rt_arr_push(arr: *mut Value, val: *const Value) {
         }
     }
 }
+// System math wrappers — use platform-optimized implementations (not libm pure-Rust)
+extern "C" fn sys_sin(x: f64) -> f64 { x.sin() }
+extern "C" fn sys_cos(x: f64) -> f64 { x.cos() }
+extern "C" fn sys_tan(x: f64) -> f64 { x.tan() }
+extern "C" fn sys_asin(x: f64) -> f64 { x.asin() }
+extern "C" fn sys_acos(x: f64) -> f64 { x.acos() }
+extern "C" fn sys_atan(x: f64) -> f64 { x.atan() }
+extern "C" fn sys_exp(x: f64) -> f64 { x.exp() }
+extern "C" fn sys_exp2(x: f64) -> f64 { x.exp2() }
+extern "C" fn sys_log(x: f64) -> f64 { x.ln() }
+extern "C" fn sys_log2(x: f64) -> f64 { x.log2() }
+extern "C" fn sys_log10(x: f64) -> f64 { x.log10() }
+extern "C" fn sys_cbrt(x: f64) -> f64 { x.cbrt() }
+
 extern "C" fn jit_rt_collect_begin(env: *mut JitEnv) {
     unsafe { (*env).collect_stacks.push(Vec::with_capacity(16)); }
 }
@@ -6227,6 +6258,18 @@ impl JitCompiler {
             ("jit_rt_sort_inplace", jit_rt_sort_inplace as *const u8),
             ("jit_rt_collect_range", jit_rt_collect_range as *const u8),
             ("jit_rt_arr_push", jit_rt_arr_push as *const u8),
+            ("jit_rt_libm_sin", sys_sin as *const u8),
+            ("jit_rt_libm_cos", sys_cos as *const u8),
+            ("jit_rt_libm_tan", sys_tan as *const u8),
+            ("jit_rt_libm_asin", sys_asin as *const u8),
+            ("jit_rt_libm_acos", sys_acos as *const u8),
+            ("jit_rt_libm_atan", sys_atan as *const u8),
+            ("jit_rt_libm_exp", sys_exp as *const u8),
+            ("jit_rt_libm_exp2", sys_exp2 as *const u8),
+            ("jit_rt_libm_log", sys_log as *const u8),
+            ("jit_rt_libm_log2", sys_log2 as *const u8),
+            ("jit_rt_libm_log10", sys_log10 as *const u8),
+            ("jit_rt_libm_cbrt", sys_cbrt as *const u8),
         ];
         for (name, ptr) in symbols {
             jit_builder.symbol(*name, *ptr);
@@ -7223,6 +7266,22 @@ impl JitCompiler {
                         let bits = b.ins().bitcast(ptr_ty, cranelift_codegen::ir::MemFlags::new(), result);
                         b.def_var(vars[*dst_var as usize], bits);
                     }
+                    JitOp::F64Libm { dst_var, src_var, func } => {
+                        let src_bits = b.use_var(vars[*src_var as usize]);
+                        let src_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), src_bits);
+                        let fname = match func {
+                            0 => "libm_sin", 1 => "libm_cos", 2 => "libm_tan",
+                            3 => "libm_asin", 4 => "libm_acos", 5 => "libm_atan",
+                            6 => "libm_exp", 7 => "libm_exp2",
+                            8 => "libm_log", 9 => "libm_log2", 10 => "libm_log10",
+                            11 => "libm_cbrt",
+                            _ => unreachable!(),
+                        };
+                        let call = b.ins().call(rt[fname], &[src_f]);
+                        let result = b.inst_results(call)[0];
+                        let bits = b.ins().bitcast(ptr_ty, cranelift_codegen::ir::MemFlags::new(), result);
+                        b.def_var(vars[*dst_var as usize], bits);
+                    }
                     JitOp::F64Cmp { dst_var, a_var, b_var: bv, cc } => {
                         use cranelift_codegen::ir::condcodes::FloatCC;
                         let a_bits = b.use_var(vars[*a_var as usize]);
@@ -7483,6 +7542,19 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("sort_inplace", [p], [p]);     // v: *mut Value -> status
     decl!("collect_range", [p, f], []);  // dst, n (f64)
     decl!("arr_push", [p, p], []);       // arr: *mut Value, val: *const Value
+    // Libm transcendental functions (f64 -> f64)
+    decl!("libm_sin", [f], [f]);
+    decl!("libm_cos", [f], [f]);
+    decl!("libm_tan", [f], [f]);
+    decl!("libm_asin", [f], [f]);
+    decl!("libm_acos", [f], [f]);
+    decl!("libm_atan", [f], [f]);
+    decl!("libm_exp", [f], [f]);
+    decl!("libm_exp2", [f], [f]);
+    decl!("libm_log", [f], [f]);
+    decl!("libm_log2", [f], [f]);
+    decl!("libm_log10", [f], [f]);
+    decl!("libm_cbrt", [f], [f]);
     Ok(())
 }
 
