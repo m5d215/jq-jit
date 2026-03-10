@@ -5932,6 +5932,32 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                 }
             }
         }
+        // Fast path: startswith/endswith/ltrimstr/rtrimstr/contains — string operations
+        if args.len() == 2 {
+            if let (Value::Str(s), Value::Str(t)) = (&args[0], &args[1]) {
+                match name {
+                    "startswith" => { std::ptr::write(dst, Value::from_bool(s.starts_with(t.as_str()))); return 0; }
+                    "endswith" => { std::ptr::write(dst, Value::from_bool(s.ends_with(t.as_str()))); return 0; }
+                    "ltrimstr" => {
+                        std::ptr::write(dst, if let Some(rest) = s.strip_prefix(t.as_str()) {
+                            Value::from_str(rest)
+                        } else {
+                            args[0].clone()
+                        });
+                        return 0;
+                    }
+                    "rtrimstr" => {
+                        std::ptr::write(dst, if let Some(rest) = s.strip_suffix(t.as_str()) {
+                            Value::from_str(rest)
+                        } else {
+                            args[0].clone()
+                        });
+                        return 0;
+                    }
+                    _ => {}
+                }
+            }
+        }
         if name == "_slice" {
             // _slice(base, from, to)
             if args.len() >= 3 {
