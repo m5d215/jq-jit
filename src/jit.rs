@@ -5120,11 +5120,26 @@ extern "C" fn jit_rt_strbuf_append_lit(env: *mut JitEnv, ptr: *const u8, len: us
 }
 extern "C" fn jit_rt_strbuf_append_val(env: *mut JitEnv, val: *const Value) {
     unsafe {
-        let s = match &*val {
-            Value::Str(s) => s.as_str().to_string(),
-            v => crate::value::value_to_json(v),
-        };
-        (*env).str_bufs.last_mut().unwrap().push_str(&s);
+        let buf = (*env).str_bufs.last_mut().unwrap();
+        match &*val {
+            Value::Str(s) => buf.push_str(s.as_str()),
+            Value::Null => buf.push_str("null"),
+            Value::False => buf.push_str("false"),
+            Value::True => buf.push_str("true"),
+            Value::Num(n, repr) => {
+                if let Some(r) = repr {
+                    buf.push_str(r);
+                } else {
+                    // Write directly to the string's byte buffer — avoids intermediate String
+                    let bytes = buf.as_mut_vec();
+                    crate::value::push_jq_number_bytes(bytes, *n);
+                }
+            }
+            v => {
+                let s = crate::value::value_to_json(v);
+                buf.push_str(&s);
+            }
+        }
     }
 }
 extern "C" fn jit_rt_strbuf_finish(dst: *mut Value, env: *mut JitEnv) {

@@ -1335,23 +1335,31 @@ fn rt_split(v: &Value, sep: &Value) -> Result<Value> {
 fn rt_join(v: &Value, sep: &Value) -> Result<Value> {
     match (v, sep) {
         (Value::Arr(a), Value::Str(s)) => {
-            let mut result = String::new();
+            // Estimate capacity: average item ~8 bytes + separator
+            let cap = a.len() * (8 + s.len());
+            let mut buf: Vec<u8> = Vec::with_capacity(cap);
             for (i, item) in a.iter().enumerate() {
-                if i > 0 { result.push_str(s.as_str()); }
+                if i > 0 { buf.extend_from_slice(s.as_bytes()); }
                 match item {
-                    Value::Str(sv) => result.push_str(sv.as_str()),
+                    Value::Str(sv) => buf.extend_from_slice(sv.as_bytes()),
                     Value::Null => {},
-                    Value::Num(n, _) => result.push_str(&crate::value::format_jq_number(*n)),
-                    Value::True => result.push_str("true"),
-                    Value::False => result.push_str("false"),
+                    Value::Num(n, repr) => {
+                        if let Some(r) = repr {
+                            buf.extend_from_slice(r.as_bytes());
+                        } else {
+                            crate::value::push_jq_number_bytes(&mut buf, *n);
+                        }
+                    }
+                    Value::True => buf.extend_from_slice(b"true"),
+                    Value::False => buf.extend_from_slice(b"false"),
                     _ => {
                         // jq errors when trying to add string to object/array
-                        let partial = Value::from_string(result);
+                        let partial = Value::from_string(unsafe { String::from_utf8_unchecked(buf) });
                         bail!("{} and {} cannot be added", errdesc(&partial), errdesc(item));
                     }
                 }
             }
-            Ok(Value::from_string(result))
+            Ok(Value::from_string(unsafe { String::from_utf8_unchecked(buf) }))
         }
         _ => bail!("join requires array and string"),
     }

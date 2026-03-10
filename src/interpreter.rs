@@ -281,7 +281,7 @@ impl Filter {
                 if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                     if let Expr::CallBuiltin { name, args } = right.as_ref() {
                         if args.len() == 1 {
-                            if matches!(name.as_str(), "startswith" | "endswith" | "ltrimstr" | "rtrimstr") {
+                            if matches!(name.as_str(), "startswith" | "endswith" | "ltrimstr" | "rtrimstr" | "split") {
                                 if let Expr::Literal(Literal::Str(arg)) = &args[0] {
                                     return Some((field.clone(), name.clone(), arg.clone()));
                                 }
@@ -330,6 +330,37 @@ impl Filter {
                         }
                     }
                 }
+            }
+        }
+        None
+    }
+
+    /// Detect string interpolation with field accesses: `"\(.f1)lit\(.f2)..."`.
+    /// Returns Vec<(is_literal, content)> where content is either the literal text
+    /// or the field name for interpolation parts.
+    pub fn detect_string_interp_fields(&self) -> Option<Vec<(bool, String)>> {
+        use crate::ir::{Expr, Literal, StringPart};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::StringInterpolation { parts } = expr {
+            let mut result = Vec::new();
+            for part in parts {
+                match part {
+                    StringPart::Literal(s) => {
+                        result.push((true, s.clone()));
+                    }
+                    StringPart::Expr(Expr::Index { expr: base, key }) => {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                            result.push((false, field.clone()));
+                        } else {
+                            return None;
+                        }
+                    }
+                    _ => return None,
+                }
+            }
+            if result.iter().any(|(is_lit, _)| !is_lit) {
+                return Some(result);
             }
         }
         None

@@ -249,6 +249,9 @@ fn main() {
     } else { None };
     let is_each = use_compact_buf && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() && del_field.is_none() && field_access.is_none() && filter.is_each();
     let is_to_entries = use_compact_buf && !exit_status && !is_each && filter.is_to_entries();
+    let string_interp_fields = if use_compact_buf && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() && field_str_concat.is_none() {
+        filter.detect_string_interp_fields()
+    } else { None };
     let literal_output = if use_compact_buf && !exit_status { filter.detect_literal_output() } else { None };
     let mut compact_buf: Vec<u8> = if use_compact_buf || use_pretty_buf { Vec::with_capacity(1 << 17) } else { Vec::new() };
     let process_input = |input: &Value, raw_bytes: Option<&[u8]>, out: &mut io::BufWriter<io::StdoutLock>, cbuf: &mut Vec<u8>, any_false: &mut bool, had_error: &mut bool| {
@@ -702,6 +705,44 @@ fn main() {
                                         compact_buf.push(b'"');
                                         compact_buf.push(b'\n');
                                     }
+                                    "split" => {
+                                        // Raw byte split: split JSON string content by separator,
+                                        // output JSON array directly without Value construction
+                                        compact_buf.push(b'[');
+                                        if arg_bytes.is_empty() {
+                                            // split("") = each byte as separate string
+                                            for (j, &byte) in content.iter().enumerate() {
+                                                if j > 0 { compact_buf.push(b','); }
+                                                compact_buf.push(b'"');
+                                                compact_buf.push(byte);
+                                                compact_buf.push(b'"');
+                                            }
+                                        } else {
+                                            let mut pos = 0;
+                                            let mut first = true;
+                                            while pos <= content.len() {
+                                                if !first { compact_buf.push(b','); }
+                                                first = false;
+                                                // Find next occurrence of separator
+                                                let next = if pos + arg_bytes.len() <= content.len() {
+                                                    content[pos..].windows(arg_bytes.len())
+                                                        .position(|w| w == arg_bytes)
+                                                        .map(|i| pos + i)
+                                                } else { None };
+                                                compact_buf.push(b'"');
+                                                if let Some(found) = next {
+                                                    compact_buf.extend_from_slice(&content[pos..found]);
+                                                    compact_buf.push(b'"');
+                                                    pos = found + arg_bytes.len();
+                                                } else {
+                                                    compact_buf.extend_from_slice(&content[pos..]);
+                                                    compact_buf.push(b'"');
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        compact_buf.extend_from_slice(b"]\n");
+                                    }
                                     _ => {
                                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -758,6 +799,71 @@ fn main() {
                                 compact_buf.extend_from_slice(&suffix_escaped);
                                 compact_buf.extend_from_slice(b"\"\n");
                             }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some(ref interp_parts) = string_interp_fields {
+                    // Collect field names needed for extraction
+                    let field_names: Vec<&str> = interp_parts.iter()
+                        .filter(|(is_lit, _)| !*is_lit)
+                        .map(|(_, name)| name.as_str())
+                        .collect();
+                    // Pre-escape literal parts for JSON string output
+                    let escaped_lits: Vec<Option<Vec<u8>>> = interp_parts.iter().map(|(is_lit, s)| {
+                        if *is_lit {
+                            let mut buf = Vec::new();
+                            for &b in s.as_bytes() {
+                                match b {
+                                    b'"' => buf.extend_from_slice(b"\\\""),
+                                    b'\\' => buf.extend_from_slice(b"\\\\"),
+                                    b'\n' => buf.extend_from_slice(b"\\n"),
+                                    b'\r' => buf.extend_from_slice(b"\\r"),
+                                    b'\t' => buf.extend_from_slice(b"\\t"),
+                                    c if c < 0x20 => { let _ = write!(buf, "\\u{:04x}", c); }
+                                    _ => buf.push(b),
+                                }
+                            }
+                            Some(buf)
+                        } else {
+                            None
+                        }
+                    }).collect();
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if raw[0] != b'{' {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            return Ok(());
+                        }
+                        // Extract all needed fields
+                        if let Some(ranges) = json_object_get_fields_raw(raw, 0, &field_names) {
+                            compact_buf.push(b'"');
+                            let mut field_idx = 0;
+                            for (i, (is_lit, _)) in interp_parts.iter().enumerate() {
+                                if *is_lit {
+                                    compact_buf.extend_from_slice(escaped_lits[i].as_ref().unwrap());
+                                } else {
+                                    let (vs, ve) = ranges[field_idx];
+                                    field_idx += 1;
+                                    let val = &raw[vs..ve];
+                                    if val[0] == b'"' && val.len() >= 2 {
+                                        // String: copy inner content (already JSON-escaped)
+                                        compact_buf.extend_from_slice(&val[1..val.len()-1]);
+                                    } else {
+                                        // Number/bool/null: copy as-is (jq tostring behavior)
+                                        compact_buf.extend_from_slice(val);
+                                    }
+                                }
+                            }
+                            compact_buf.push(b'"');
+                            compact_buf.push(b'\n');
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -1450,6 +1556,67 @@ fn main() {
                             compact_buf.extend_from_slice(&suffix_escaped);
                             compact_buf.extend_from_slice(b"\"\n");
                         }
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some(ref interp_parts) = string_interp_fields {
+                let content_bytes = content.as_bytes();
+                let field_names: Vec<&str> = interp_parts.iter()
+                    .filter(|(is_lit, _)| !*is_lit)
+                    .map(|(_, name)| name.as_str())
+                    .collect();
+                let escaped_lits: Vec<Option<Vec<u8>>> = interp_parts.iter().map(|(is_lit, s)| {
+                    if *is_lit {
+                        let mut buf = Vec::new();
+                        for &b in s.as_bytes() {
+                            match b {
+                                b'"' => buf.extend_from_slice(b"\\\""),
+                                b'\\' => buf.extend_from_slice(b"\\\\"),
+                                b'\n' => buf.extend_from_slice(b"\\n"),
+                                b'\r' => buf.extend_from_slice(b"\\r"),
+                                b'\t' => buf.extend_from_slice(b"\\t"),
+                                c if c < 0x20 => { let _ = write!(buf, "\\u{:04x}", c); }
+                                _ => buf.push(b),
+                            }
+                        }
+                        Some(buf)
+                    } else {
+                        None
+                    }
+                }).collect();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if raw[0] != b'{' {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        return Ok(());
+                    }
+                    if let Some(ranges) = json_object_get_fields_raw(raw, 0, &field_names) {
+                        compact_buf.push(b'"');
+                        let mut field_idx = 0;
+                        for (i, (is_lit, _)) in interp_parts.iter().enumerate() {
+                            if *is_lit {
+                                compact_buf.extend_from_slice(escaped_lits[i].as_ref().unwrap());
+                            } else {
+                                let (vs, ve) = ranges[field_idx];
+                                field_idx += 1;
+                                let val = &raw[vs..ve];
+                                if val[0] == b'"' && val.len() >= 2 {
+                                    compact_buf.extend_from_slice(&val[1..val.len()-1]);
+                                } else {
+                                    compact_buf.extend_from_slice(val);
+                                }
+                            }
+                        }
+                        compact_buf.push(b'"');
+                        compact_buf.push(b'\n');
                     } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
