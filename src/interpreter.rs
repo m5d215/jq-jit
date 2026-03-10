@@ -622,6 +622,36 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | split(x) | join(y)` pattern (string replace).
+    /// Returns (field_name, split_str, join_str) if detected.
+    pub fn detect_field_split_join(&self) -> Option<(String, String, String)> {
+        use crate::ir::{Expr, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        // .field | split("x") | join("y")
+        // Right-associative pipes: Pipe(.field, Pipe(split, join))
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::Pipe { left: split_expr, right: join_expr } = right.as_ref() {
+                        if let Expr::CallBuiltin { name: split_name, args: split_args } = split_expr.as_ref() {
+                            if split_name != "split" || split_args.len() != 1 { return None; }
+                            if let Expr::Literal(Literal::Str(split_str)) = &split_args[0] {
+                                if let Expr::CallBuiltin { name: join_name, args: join_args } = join_expr.as_ref() {
+                                    if join_name != "join" || join_args.len() != 1 { return None; }
+                                    if let Expr::Literal(Literal::Str(join_str)) = &join_args[0] {
+                                        return Some((field.clone(), split_str.clone(), join_str.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect comma-separated field access `.f1,.f2,...` pattern.
     /// Returns the list of field names if all branches are direct field accesses on input.
     pub fn detect_multi_field_access(&self) -> Option<Vec<String>> {
