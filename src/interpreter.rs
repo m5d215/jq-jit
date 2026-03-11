@@ -1197,21 +1197,39 @@ impl Filter {
     pub fn detect_field_update_num(&self) -> Option<(String, crate::ir::BinOp, f64)> {
         use crate::ir::{Expr, BinOp, Literal};
         let expr = self.detect_expr()?;
-        if let Expr::Update { path_expr, update_expr } = expr {
+        // The parser wraps `.x += N` as LetBinding { var, N, Update { .x, . + LoadVar(var) } }.
+        // Unwrap the LetBinding for constant RHS.
+        let (update_expr_outer, let_var, let_val) = if let Expr::LetBinding { var_index, value, body } = expr {
+            (body.as_ref(), Some(*var_index), Some(value.as_ref()))
+        } else {
+            (expr, None, None)
+        };
+        if let Expr::Update { path_expr, update_expr } = update_expr_outer {
             // path must be .field
             let field = if let Expr::Index { expr: base, key } = path_expr.as_ref() {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
                 if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() }
                 else { return None; }
             } else { return None; };
-            // update must be . op N
+            // update must be . op N (either literal or LoadVar from LetBinding)
             if let Expr::BinOp { op, lhs, rhs } = update_expr.as_ref() {
                 if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
                     return None;
                 }
                 if !matches!(lhs.as_ref(), Expr::Input) { return None; }
+                // Direct literal: Update { .x, . + N }
                 if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
                     return Some((field, *op, *n));
+                }
+                // LetBinding-wrapped: LetBinding { var, N, Update { .x, . + LoadVar(var) } }
+                if let (Some(var_idx), Some(val_expr)) = (let_var, let_val) {
+                    if let Expr::LoadVar { var_index } = rhs.as_ref() {
+                        if *var_index == var_idx {
+                            if let Expr::Literal(Literal::Num(n, _)) = val_expr {
+                                return Some((field, *op, *n));
+                            }
+                        }
+                    }
                 }
             }
         }
