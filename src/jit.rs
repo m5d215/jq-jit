@@ -516,10 +516,40 @@ impl Flattener {
                 // Recursively inline any FuncCalls in the resulting body
                 self.inline_func_calls(&body)
             }
-            Expr::Pipe { left, right } => Expr::Pipe {
-                left: Box::new(self.inline_func_calls(left)),
-                right: Box::new(self.inline_func_calls(right)),
-            },
+            Expr::Pipe { left, right } => {
+                let new_left = Box::new(self.inline_func_calls(left));
+                let new_right = Box::new(self.inline_func_calls(right));
+                // Semantic optimizations for to_entries pipelines
+                if let Expr::UnaryOp { op: UnaryOp::ToEntries, .. } = new_left.as_ref() {
+                    // to_entries | from_entries → identity
+                    if matches!(new_right.as_ref(), Expr::UnaryOp { op: UnaryOp::FromEntries, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                        return Expr::Input;
+                    }
+                    // to_entries | map(.value) → [.[]]
+                    // to_entries | map(.key) → keys_unsorted
+                    if let Expr::Collect { generator } = new_right.as_ref() {
+                        if let Expr::Pipe { left: map_l, right: map_r } = generator.as_ref() {
+                            if matches!(map_l.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)) {
+                                if let Expr::Index { expr: idx_e, key } = map_r.as_ref() {
+                                    if matches!(idx_e.as_ref(), Expr::Input) {
+                                        if let Expr::Literal(Literal::Str(s)) = key.as_ref() {
+                                            if s == "value" {
+                                                return Expr::Collect {
+                                                    generator: Box::new(Expr::Each { input_expr: Box::new(Expr::Input) }),
+                                                };
+                                            }
+                                            if s == "key" {
+                                                return Expr::UnaryOp { op: UnaryOp::KeysUnsorted, operand: Box::new(Expr::Input) };
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Expr::Pipe { left: new_left, right: new_right }
+            }
             Expr::Comma { left, right } => Expr::Comma {
                 left: Box::new(self.inline_func_calls(left)),
                 right: Box::new(self.inline_func_calls(right)),
@@ -6950,16 +6980,10 @@ impl JitCompiler {
         // Phase 1: Flatten
         let mut fl = Flattener::new();
         fl.funcs = funcs.to_vec();
-        // Pre-inline function calls so is_scalar sees no FuncCall nodes,
-        // enabling JIT for expressions that use user-defined functions.
-        // Skip if no functions defined (avoids unnecessary tree clone for simple filters).
-        let inlined;
-        let compile_expr = if !funcs.is_empty() {
-            inlined = fl.inline_func_calls(expr);
-            &inlined
-        } else {
-            expr
-        };
+        // Pre-inline function calls and apply semantic optimizations.
+        // Always run to catch to_entries|from_entries and similar rewrites.
+        let inlined = fl.inline_func_calls(expr);
+        let compile_expr = &inlined;
         let input_slot = fl.alloc_slot(); // slot 0 = input ptr (read-only, owned by caller)
         // Use input_slot directly — flatten_gen only reads it, never writes/drops it.
         // The codegen handles Drop{slot:0} as a no-op.
