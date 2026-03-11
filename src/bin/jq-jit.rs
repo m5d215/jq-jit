@@ -1639,30 +1639,32 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref nfields, ref arith)) = numeric_expr {
-                    let field_refs: Vec<&str> = nfields.iter().map(|s| s.as_str()).collect();
-                    let mut ranges_buf = vec![(0usize, 0usize); nfields.len()];
+                    let is_two = nfields.len() == 2;
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
-                            let mut vals = vec![0.0f64; nfields.len()];
-                            let mut all_ok = true;
-                            for (i, &(s, e)) in ranges_buf.iter().enumerate() {
-                                let fraw = &raw[s..e];
-                                if let Ok(n) = unsafe { std::str::from_utf8_unchecked(fraw) }.parse::<f64>() {
-                                    vals[i] = n;
-                                } else {
-                                    all_ok = false;
-                                    break;
+                        let got = if is_two {
+                            json_object_get_two_nums(raw, 0, &nfields[0], &nfields[1])
+                                .map(|(a, b)| vec![a, b])
+                        } else {
+                            // General N-field path: extract byte ranges then parse
+                            let field_refs: Vec<&str> = nfields.iter().map(|s| s.as_str()).collect();
+                            let mut ranges = vec![(0usize, 0usize); nfields.len()];
+                            if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges) {
+                                let mut vals = Vec::with_capacity(nfields.len());
+                                let mut ok = true;
+                                for &(s, e) in &ranges {
+                                    match fast_float::parse::<f64, _>(unsafe { std::str::from_utf8_unchecked(&raw[s..e]) }) {
+                                        Ok(n) => vals.push(n),
+                                        Err(_) => { ok = false; break; }
+                                    }
                                 }
-                            }
-                            if all_ok {
-                                let result = arith.eval(&vals);
-                                push_jq_number_bytes(&mut compact_buf, result);
-                                compact_buf.push(b'\n');
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            }
+                                if ok { Some(vals) } else { None }
+                            } else { None }
+                        };
+                        if let Some(vals) = got {
+                            let result = arith.eval(&vals);
+                            push_jq_number_bytes(&mut compact_buf, result);
+                            compact_buf.push(b'\n');
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -4437,31 +4439,32 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some((ref nfields, ref arith)) = numeric_expr {
-                let field_refs: Vec<&str> = nfields.iter().map(|s| s.as_str()).collect();
-                let mut ranges_buf = vec![(0usize, 0usize); nfields.len()];
+                let is_two = nfields.len() == 2;
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
-                        let mut vals = vec![0.0f64; nfields.len()];
-                        let mut all_ok = true;
-                        for (i, &(s, e)) in ranges_buf.iter().enumerate() {
-                            let fraw = &raw[s..e];
-                            if let Ok(n) = unsafe { std::str::from_utf8_unchecked(fraw) }.parse::<f64>() {
-                                vals[i] = n;
-                            } else {
-                                all_ok = false;
-                                break;
+                    let got = if is_two {
+                        json_object_get_two_nums(raw, 0, &nfields[0], &nfields[1])
+                            .map(|(a, b)| vec![a, b])
+                    } else {
+                        let field_refs: Vec<&str> = nfields.iter().map(|s| s.as_str()).collect();
+                        let mut ranges = vec![(0usize, 0usize); nfields.len()];
+                        if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges) {
+                            let mut vals = Vec::with_capacity(nfields.len());
+                            let mut ok = true;
+                            for &(s, e) in &ranges {
+                                match fast_float::parse::<f64, _>(unsafe { std::str::from_utf8_unchecked(&raw[s..e]) }) {
+                                    Ok(n) => vals.push(n),
+                                    Err(_) => { ok = false; break; }
+                                }
                             }
-                        }
-                        if all_ok {
-                            let result = arith.eval(&vals);
-                            push_jq_number_bytes(&mut compact_buf, result);
-                            compact_buf.push(b'\n');
-                        } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                        }
+                            if ok { Some(vals) } else { None }
+                        } else { None }
+                    };
+                    if let Some(vals) = got {
+                        let result = arith.eval(&vals);
+                        push_jq_number_bytes(&mut compact_buf, result);
+                        compact_buf.push(b'\n');
                     } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
