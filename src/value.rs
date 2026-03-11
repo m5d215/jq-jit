@@ -1128,6 +1128,116 @@ pub fn json_object_del_field(b: &[u8], pos: usize, field: &str, buf: &mut Vec<u8
     true
 }
 
+/// Replace a single field's value in a JSON object, writing compact output.
+/// Copies the object structure, substituting only the target field's value with `new_val`.
+/// If the field is not found, writes the object unchanged (compact).
+/// Returns true on success.
+pub fn json_object_replace_field(b: &[u8], pos: usize, field: &str, new_val: &[u8], buf: &mut Vec<u8>) -> bool {
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    let field_bytes = field.as_bytes();
+    let mut i = pos + 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < b.len() && b[i] == b'}' {
+        buf.extend_from_slice(b"{}");
+        return true;
+    }
+    let mut first = true;
+    buf.push(b'{');
+    loop {
+        if i >= b.len() || b[i] != b'"' { return false; }
+        let key_start = i;
+        i += 1;
+        let mut j = i;
+        while j < b.len() { match b[j] { b'"' => break, b'\\' => { j += 2; continue }, _ => j += 1 } }
+        if j >= b.len() { return false; }
+        let key_matches = (j - i) == field_bytes.len() && b[i..j] == *field_bytes;
+        let key_end = j + 1;
+        i = key_end;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        let val_start = i;
+        i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return false };
+        let val_end = i;
+        if !first { buf.push(b','); }
+        first = false;
+        buf.extend_from_slice(&b[key_start..key_end]);
+        buf.push(b':');
+        if key_matches {
+            buf.extend_from_slice(new_val);
+        } else {
+            buf.extend_from_slice(&b[val_start..val_end]);
+        }
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { return false; }
+        if b[i] == b'}' { break; }
+        if b[i] != b',' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
+    buf.push(b'}');
+    true
+}
+
+/// Update a single numeric field in a JSON object in one pass: find + compute + replace.
+/// Writes compact output to `buf`. Returns true on success (field found and was numeric).
+pub fn json_object_update_field_num(b: &[u8], pos: usize, field: &str, op: crate::ir::BinOp, n: f64, buf: &mut Vec<u8>) -> bool {
+    use crate::ir::BinOp;
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    let field_bytes = field.as_bytes();
+    let mut i = pos + 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < b.len() && b[i] == b'}' {
+        buf.extend_from_slice(b"{}");
+        return true;
+    }
+    let mut first = true;
+    let mut found = false;
+    buf.push(b'{');
+    loop {
+        if i >= b.len() || b[i] != b'"' { return false; }
+        let key_start = i;
+        i += 1;
+        let mut j = i;
+        while j < b.len() { match b[j] { b'"' => break, b'\\' => { j += 2; continue }, _ => j += 1 } }
+        if j >= b.len() { return false; }
+        let key_matches = (j - i) == field_bytes.len() && b[i..j] == *field_bytes;
+        let key_end = j + 1;
+        i = key_end;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        let val_start = i;
+        i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return false };
+        let val_end = i;
+        if !first { buf.push(b','); }
+        first = false;
+        buf.extend_from_slice(&b[key_start..key_end]);
+        buf.push(b':');
+        if key_matches {
+            if let Some(a) = parse_json_num(&b[val_start..val_end]) {
+                let r = match op { BinOp::Add => a + n, BinOp::Sub => a - n, BinOp::Mul => a * n, BinOp::Div => a / n, BinOp::Mod => a % n, _ => a };
+                push_jq_number_bytes(buf, r);
+                found = true;
+            } else {
+                return false; // not numeric
+            }
+        } else {
+            buf.extend_from_slice(&b[val_start..val_end]);
+        }
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { return false; }
+        if b[i] == b'}' { break; }
+        if b[i] != b',' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
+    buf.push(b'}');
+    found
+}
+
 /// Merge literal key-value pairs into a raw JSON object.
 /// `pairs` is a list of (key_name, json_value_bytes).
 /// Existing keys are replaced (last-write-wins), new keys are appended.

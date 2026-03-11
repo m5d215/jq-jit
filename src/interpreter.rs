@@ -1192,6 +1192,32 @@ impl Filter {
         None
     }
 
+    /// Detect `.field op= N` where op is +, -, *, /, %.
+    /// Returns (field_name, BinOp, constant).
+    pub fn detect_field_update_num(&self) -> Option<(String, crate::ir::BinOp, f64)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::Update { path_expr, update_expr } = expr {
+            // path must be .field
+            let field = if let Expr::Index { expr: base, key } = path_expr.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() }
+                else { return None; }
+            } else { return None; };
+            // update must be . op N
+            if let Expr::BinOp { op, lhs, rhs } = update_expr.as_ref() {
+                if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+                    return None;
+                }
+                if !matches!(lhs.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                    return Some((field, *op, *n));
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field[from:to]` with literal numeric bounds.
     /// Returns (field_name, from_opt, to_opt).
     pub fn detect_field_slice(&self) -> Option<(String, Option<i64>, Option<i64>)> {
