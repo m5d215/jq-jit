@@ -969,6 +969,90 @@ impl Filter {
         None
     }
 
+    /// Detect `has("a") and has("b") [and ...]` or `has("a") or has("b") [or ...]`.
+    /// Returns (fields, is_and) where is_and=true means AND, false means OR.
+    pub fn detect_has_multi_field(&self) -> Option<(Vec<String>, bool)> {
+        use crate::ir::{Expr, Literal, BinOp};
+        let expr = self.detect_expr()?;
+        fn extract_has_chain(e: &Expr) -> Option<(Vec<String>, bool)> {
+            if let Expr::BinOp { op: op @ (BinOp::And | BinOp::Or), .. } = e {
+                let is_and = matches!(op, BinOp::And);
+                let mut fields = Vec::new();
+                fn collect(e: &Expr, fields: &mut Vec<String>, is_and: bool) -> bool {
+                    if let Expr::BinOp { op, lhs, rhs } = e {
+                        let same_op = if is_and { matches!(op, BinOp::And) } else { matches!(op, BinOp::Or) };
+                        if same_op {
+                            return collect(lhs, fields, is_and) && collect(rhs, fields, is_and);
+                        }
+                    }
+                    if let Expr::CallBuiltin { name, args } = e {
+                        if name == "has" && args.len() == 1 {
+                            if let Expr::Literal(Literal::Str(f)) = &args[0] {
+                                fields.push(f.clone());
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                }
+                if collect(e, &mut fields, is_and) && fields.len() >= 2 {
+                    return Some((fields, is_and));
+                }
+            }
+            None
+        }
+        extract_has_chain(expr)
+    }
+
+    /// Detect `select(has("a") and has("b") [and ...])` or with `or`.
+    /// Returns (fields, is_and) if matched.
+    pub fn detect_select_has_multi(&self) -> Option<(Vec<String>, bool)> {
+        use crate::ir::Expr;
+        let expr = self.detect_expr()?;
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
+            if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+            // Also handle single has: select(has("a"))
+            if let Expr::CallBuiltin { name, args } = cond.as_ref() {
+                if name == "has" && args.len() == 1 {
+                    if let crate::ir::Literal::Str(f) = match &args[0] {
+                        Expr::Literal(l) => l,
+                        _ => return None,
+                    } {
+                        return Some((vec![f.clone()], true));
+                    }
+                }
+            }
+            // Try multi-has chain
+            use crate::ir::{Literal, BinOp};
+            fn collect_has(e: &Expr, fields: &mut Vec<String>, is_and: bool) -> bool {
+                if let Expr::BinOp { op, lhs, rhs } = e {
+                    let same_op = if is_and { matches!(op, BinOp::And) } else { matches!(op, BinOp::Or) };
+                    if same_op {
+                        return collect_has(lhs, fields, is_and) && collect_has(rhs, fields, is_and);
+                    }
+                }
+                if let Expr::CallBuiltin { name, args } = e {
+                    if name == "has" && args.len() == 1 {
+                        if let Expr::Literal(Literal::Str(f)) = &args[0] {
+                            fields.push(f.clone());
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            if let Expr::BinOp { op: op @ (BinOp::And | BinOp::Or), .. } = cond.as_ref() {
+                let is_and = matches!(op, BinOp::And);
+                let mut fields = Vec::new();
+                if collect_has(cond, &mut fields, is_and) && !fields.is_empty() {
+                    return Some((fields, is_and));
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `keys_unsorted` on input.
     pub fn is_keys_unsorted(&self) -> bool {
         use crate::ir::{Expr, UnaryOp};

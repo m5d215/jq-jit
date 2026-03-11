@@ -967,6 +967,84 @@ pub fn json_object_has_key(b: &[u8], pos: usize, field: &str) -> Option<bool> {
     }
 }
 
+/// Check if a raw JSON object has ALL of the given keys in a single pass.
+/// Returns Some(true) if all keys found, Some(false) if any missing, None if not a valid object.
+pub fn json_object_has_all_keys(b: &[u8], pos: usize, fields: &[&str]) -> Option<bool> {
+    if pos >= b.len() || b[pos] != b'{' { return None; }
+    let n = fields.len();
+    if n == 0 { return Some(true); }
+    let mut found = 0u64; // bitmask of found fields (supports up to 64 fields)
+    if n > 64 { return None; }
+    let all_found = (1u64 << n) - 1;
+    let mut i = pos + 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < b.len() && b[i] == b'}' { return Some(false); }
+    loop {
+        if i >= b.len() || b[i] != b'"' { return None; }
+        let key_start = i + 1;
+        let mut j = key_start;
+        while j < b.len() {
+            match b[j] { b'"' => break, b'\\' => { j += 2; continue }, _ => j += 1 }
+        }
+        let key_len = j - key_start;
+        for (idx, f) in fields.iter().enumerate() {
+            if key_len == f.len() && b[key_start..j] == *f.as_bytes() {
+                found |= 1u64 << idx;
+                if found == all_found { return Some(true); }
+                break;
+            }
+        }
+        i = j + 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { return None; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return None };
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { return None; }
+        if b[i] == b'}' { return Some(false); }
+        if b[i] != b',' { return None; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
+}
+
+/// Check if a raw JSON object has ANY of the given keys in a single pass.
+/// Returns Some(true) if any key found, Some(false) if none found, None if not a valid object.
+pub fn json_object_has_any_key(b: &[u8], pos: usize, fields: &[&str]) -> Option<bool> {
+    if pos >= b.len() || b[pos] != b'{' { return None; }
+    if fields.is_empty() { return Some(false); }
+    let mut i = pos + 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < b.len() && b[i] == b'}' { return Some(false); }
+    loop {
+        if i >= b.len() || b[i] != b'"' { return None; }
+        let key_start = i + 1;
+        let mut j = key_start;
+        while j < b.len() {
+            match b[j] { b'"' => break, b'\\' => { j += 2; continue }, _ => j += 1 }
+        }
+        let key_len = j - key_start;
+        for f in fields.iter() {
+            if key_len == f.len() && b[key_start..j] == *f.as_bytes() {
+                return Some(true);
+            }
+        }
+        i = j + 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { return None; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return None };
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { return None; }
+        if b[i] == b'}' { return Some(false); }
+        if b[i] != b',' { return None; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
+}
+
 /// Get the jq type name for a JSON value by its first byte, without parsing.
 /// Returns the type string literal (e.g., "object", "array", "string", "number", "boolean", "null").
 pub fn json_type_byte(first: u8) -> &'static [u8] {
