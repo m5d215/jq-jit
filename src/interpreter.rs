@@ -591,6 +591,47 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.field <arith_ops> <cmp> N)` — select with arithmetic chain, outputting the full object.
+    /// Returns (field, arith_ops, cmp_op, threshold).
+    pub fn detect_select_arith_cmp(&self) -> Option<(String, Vec<(crate::ir::BinOp, f64)>, crate::ir::BinOp, f64)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
+            if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+            if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                    return None;
+                }
+                if let Expr::Literal(Literal::Num(threshold, _)) = rhs.as_ref() {
+                    let mut arith_ops = Vec::new();
+                    let mut cur = lhs.as_ref();
+                    loop {
+                        if let Expr::BinOp { op: aop, lhs: al, rhs: ar } = cur {
+                            if matches!(aop, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+                                if let Expr::Literal(Literal::Num(n, _)) = ar.as_ref() {
+                                    arith_ops.push((*aop, *n));
+                                    cur = al.as_ref();
+                                    continue;
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    if arith_ops.is_empty() { return None; }
+                    arith_ops.reverse();
+                    if let Expr::Index { expr: base, key } = cur {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                            return Some((field.clone(), arith_ops, *op, *threshold));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.f1 > N and .f2 < M)` or `select(.f1 > N or .f2 < M)` pattern.
     /// Returns (conjunct, Vec<(field, op, threshold)>) where conjunct is And or Or.
     pub fn detect_select_compound_cmp(&self) -> Option<(crate::ir::BinOp, Vec<(String, crate::ir::BinOp, f64)>)> {

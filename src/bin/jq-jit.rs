@@ -692,6 +692,9 @@ fn real_main() {
     let select_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() && field_str_concat.is_none() {
         filter.detect_select_field_cmp()
     } else { None };
+    let select_arith_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() {
+        filter.detect_select_arith_cmp()
+    } else { None };
     let select_str = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() {
         filter.detect_select_field_str()
     } else { None };
@@ -838,7 +841,7 @@ fn real_main() {
         || field_field_cmp.is_some() || field_const_cmp.is_some() || arith_chain_cmp.is_some() || compound_field_cmp.is_some()
         || field_str_builtin.is_some() || field_test.is_some() || field_gsub.is_some() || field_format.is_some() || field_ltrimstr_tonumber.is_some()
         || field_str_concat.is_some() || field_alt.is_some() || field_field_alt.is_some()
-        || select_cmp.is_some()
+        || select_cmp.is_some() || select_arith_cmp.is_some()
         || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some()
         || select_str.is_some()
         || select_str_test.is_some() || select_regex_test.is_some() || select_nested_cmp.is_some()
@@ -2802,6 +2805,34 @@ fn real_main() {
                                 BinOp::Le => val <= threshold,
                                 BinOp::Eq => val == threshold,
                                 BinOp::Ne => val != threshold,
+                                _ => false,
+                            };
+                            if pass {
+                                emit_raw_ln!(&mut compact_buf, raw);
+                                if compact_buf.len() >= 1 << 17 {
+                                    let _ = out.write_all(&compact_buf);
+                                    compact_buf.clear();
+                                }
+                            }
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref field, ref arith_ops, ref cmp_op, threshold)) = select_arith_cmp {
+                    use jq_jit::ir::BinOp;
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some(mut val) = json_object_get_num(raw, 0, field) {
+                            for (aop, n) in arith_ops {
+                                val = match aop {
+                                    BinOp::Add => val + n, BinOp::Sub => val - n,
+                                    BinOp::Mul => val * n, BinOp::Div => val / n,
+                                    BinOp::Mod => val % n, _ => val,
+                                };
+                            }
+                            let pass = match cmp_op {
+                                BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
+                                BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
+                                BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
                                 _ => false,
                             };
                             if pass {
@@ -4976,6 +5007,35 @@ fn real_main() {
                             BinOp::Le => val <= threshold,
                             BinOp::Eq => val == threshold,
                             BinOp::Ne => val != threshold,
+                            _ => false,
+                        };
+                        if pass {
+                            emit_raw_ln!(&mut compact_buf, raw);
+                            if compact_buf.len() >= 1 << 17 {
+                                let _ = out.write_all(&compact_buf);
+                                compact_buf.clear();
+                            }
+                        }
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref field, ref arith_ops, ref cmp_op, threshold)) = select_arith_cmp {
+                use jq_jit::ir::BinOp;
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some(mut val) = json_object_get_num(raw, 0, field) {
+                        for (aop, n) in arith_ops {
+                            val = match aop {
+                                BinOp::Add => val + n, BinOp::Sub => val - n,
+                                BinOp::Mul => val * n, BinOp::Div => val / n,
+                                BinOp::Mod => val % n, _ => val,
+                            };
+                        }
+                        let pass = match cmp_op {
+                            BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
+                            BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
+                            BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
                             _ => false,
                         };
                         if pass {
