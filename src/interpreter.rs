@@ -1926,6 +1926,37 @@ impl Filter {
         matches!(expr, Expr::UnaryOp { op: UnaryOp::ToEntries, operand } if matches!(operand.as_ref(), Expr::Input))
     }
 
+    /// Detect `{k1:.f1, k2:.f2, ...} | to_entries` pattern.
+    /// Returns Vec of (output_key, source_field) pairs.
+    pub fn detect_remap_to_entries(&self) -> Option<Vec<(String, String)>> {
+        use crate::ir::{Expr, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left, right } = expr {
+            // right must be to_entries on input
+            if !matches!(right.as_ref(), Expr::UnaryOp { op: UnaryOp::ToEntries, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                return None;
+            }
+            // left must be an ObjectConstruct with field refs
+            if let Expr::ObjectConstruct { pairs } = left.as_ref() {
+                let mut result = Vec::with_capacity(pairs.len());
+                for (k, v) in pairs {
+                    let key = if let Expr::Literal(Literal::Str(s)) = k {
+                        s.clone()
+                    } else { return None; };
+                    if let Expr::Index { expr: base, key: field_key } = v {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f)) = field_key.as_ref() {
+                            result.push((key, f.clone()));
+                        } else { return None; }
+                    } else { return None; }
+                }
+                if result.is_empty() { return None; }
+                return Some(result);
+            }
+        }
+        None
+    }
+
     /// Detect `tojson` on input.
     pub fn is_tojson(&self) -> bool {
         use crate::ir::{Expr, UnaryOp};

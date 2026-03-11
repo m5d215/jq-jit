@@ -760,7 +760,10 @@ fn real_main() {
     } else { None };
     let is_each = (use_compact_buf || use_pretty_buf) && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() && del_field.is_none() && field_access.is_none() && filter.is_each();
     let is_to_entries = (use_compact_buf || use_pretty_buf) && !exit_status && !is_each && filter.is_to_entries();
-    let is_tojson = (use_compact_buf || use_pretty_buf) && !exit_status && !is_each && !is_to_entries && filter.is_tojson();
+    let remap_to_entries = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_to_entries && field_remap.is_none() {
+        filter.detect_remap_to_entries()
+    } else { None };
+    let is_tojson = (use_compact_buf || use_pretty_buf) && !exit_status && !is_each && !is_to_entries && remap_to_entries.is_none() && filter.is_tojson();
     let string_interp_fields = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() && field_str_concat.is_none() {
         filter.detect_string_interp_fields()
     } else { None };
@@ -874,7 +877,7 @@ fn real_main() {
         || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_value.is_some() || select_ff_cmp_field.is_some() || select_str_field.is_some()
         || computed_array.is_some() || array_field.is_some() || multi_field.is_some() || is_length || is_keys
         || is_keys_unsorted || has_field.is_some() || has_multi.is_some() || select_has_multi.is_some() || is_type || del_field.is_some() || obj_merge_lit.is_some()
-        || is_each || is_to_entries || is_tojson || string_interp_fields.is_some() || string_add_chain.is_some() || array_join.is_some()
+        || is_each || is_to_entries || remap_to_entries.is_some() || is_tojson || string_interp_fields.is_some() || string_add_chain.is_some() || array_join.is_some()
         || literal_output.is_some() || array_fields_format.is_some() || raw_csv_fields.is_some()
         || field_split_join.is_some() || field_split_first.is_some() || field_split_length.is_some() || field_strop_length.is_some() || field_length_cmp.is_some() || select_length_cmp_field.is_some() || field_slice.is_some()
         || dynamic_key_obj.is_some() || field_update_num.is_some()
@@ -4242,6 +4245,46 @@ fn real_main() {
                         }
                         Ok(())
                     })
+                } else if let Some(ref rte_pairs) = remap_to_entries {
+                    // {k1:.f1, k2:.f2} | to_entries → emit entries array from raw fields
+                    let rte_src: Vec<&str> = rte_pairs.iter().map(|(_, src)| src.as_str()).collect();
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        // Extract all source field values
+                        let mut vals: Vec<Option<(usize, usize)>> = Vec::with_capacity(rte_src.len());
+                        for src in &rte_src {
+                            vals.push(json_object_get_field_raw(raw, 0, src));
+                        }
+                        compact_buf.push(b'[');
+                        let mut first = true;
+                        for (i, (out_key, _)) in rte_pairs.iter().enumerate() {
+                            if !first { compact_buf.push(b','); }
+                            first = false;
+                            compact_buf.extend_from_slice(b"{\"key\":");
+                            // Write key as JSON string
+                            compact_buf.push(b'"');
+                            for &b in out_key.as_bytes() {
+                                match b {
+                                    b'"' => compact_buf.extend_from_slice(b"\\\""),
+                                    b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                                    _ => compact_buf.push(b),
+                                }
+                            }
+                            compact_buf.extend_from_slice(b"\",\"value\":");
+                            if let Some((vs, ve)) = vals[i] {
+                                compact_buf.extend_from_slice(&raw[vs..ve]);
+                            } else {
+                                compact_buf.extend_from_slice(b"null");
+                            }
+                            compact_buf.push(b'}');
+                        }
+                        compact_buf.extend_from_slice(b"]\n");
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
                 } else if is_tojson {
                     // tojson: single-pass compact + escape
                     json_stream_raw(&input_str, |start, end| {
@@ -7449,6 +7492,44 @@ fn real_main() {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some(ref rte_pairs) = remap_to_entries {
+                let content_bytes = content.as_bytes();
+                let rte_src: Vec<&str> = rte_pairs.iter().map(|(_, src)| src.as_str()).collect();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    let mut vals: Vec<Option<(usize, usize)>> = Vec::with_capacity(rte_src.len());
+                    for src in &rte_src {
+                        vals.push(json_object_get_field_raw(raw, 0, src));
+                    }
+                    compact_buf.push(b'[');
+                    let mut first = true;
+                    for (i, (out_key, _)) in rte_pairs.iter().enumerate() {
+                        if !first { compact_buf.push(b','); }
+                        first = false;
+                        compact_buf.extend_from_slice(b"{\"key\":");
+                        compact_buf.push(b'"');
+                        for &b in out_key.as_bytes() {
+                            match b {
+                                b'"' => compact_buf.extend_from_slice(b"\\\""),
+                                b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                                _ => compact_buf.push(b),
+                            }
+                        }
+                        compact_buf.extend_from_slice(b"\",\"value\":");
+                        if let Some((vs, ve)) = vals[i] {
+                            compact_buf.extend_from_slice(&raw[vs..ve]);
+                        } else {
+                            compact_buf.extend_from_slice(b"null");
+                        }
+                        compact_buf.push(b'}');
+                    }
+                    compact_buf.extend_from_slice(b"]\n");
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
                         compact_buf.clear();
