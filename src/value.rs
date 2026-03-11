@@ -2018,7 +2018,6 @@ fn parse_json_object_project(b: &[u8], pos: usize, depth: usize, fields: &[&str]
     let n = fields.len();
     let mut map = new_objmap_with_capacity(n);
     if i < b.len() && b[i] == b'}' {
-        // Empty object: fill with nulls
         for &f in fields { map.push_unique(KeyStr::from(f), Value::Null); }
         return Ok((Value::Obj(Rc::new(map)), i + 1));
     }
@@ -2026,13 +2025,38 @@ fn parse_json_object_project(b: &[u8], pos: usize, depth: usize, fields: &[&str]
     let all_found: u64 = if n < 64 { (1u64 << n) - 1 } else { u64::MAX };
     loop {
         if i >= b.len() || b[i] != b'"' { bail!("Expected string key at position {}", i); }
-        let (key, end) = parse_json_key(b, i)?;
-        i = skip_ws(b, end);
+        // Scan key bytes directly without creating KeyStr for non-matching keys
+        let key_start = i + 1;
+        let mut j = key_start;
+        let mut has_escape = false;
+        while j < b.len() {
+            match b[j] { b'"' => break, b'\\' => { has_escape = true; j += 2; continue }, _ => j += 1 }
+        }
+        let key_end = j; // exclusive, points at closing quote
+        let key_byte_end = j + 1;
+        i = skip_ws(b, key_byte_end);
         if i >= b.len() || b[i] != b':' { bail!("Expected ':' at position {}", i); }
         i = skip_ws(b, i + 1);
-        // Check if key is in projection set
+        // Compare key bytes against projection fields (avoid KeyStr allocation for non-matches)
         let mut matched = false;
-        if found != all_found {
+        if found != all_found && !has_escape {
+            let key_len = key_end - key_start;
+            let key_bytes = &b[key_start..key_end];
+            for (fi, &f) in fields.iter().enumerate() {
+                if fi < 64 && (found & (1u64 << fi)) != 0 { continue; }
+                if key_len == f.len() && key_bytes == f.as_bytes() {
+                    let key = KeyStr::from(unsafe { std::str::from_utf8_unchecked(key_bytes) });
+                    let (val, end) = parse_json_value(b, i, depth + 1)?;
+                    map.push_unique(key, val);
+                    found |= 1u64 << fi;
+                    i = end;
+                    matched = true;
+                    break;
+                }
+            }
+        } else if found != all_found {
+            // Escaped key: use full parser for correct handling
+            let (key, _) = parse_json_key(b, key_start - 1)?;
             let key_str = key.as_str();
             for (fi, &f) in fields.iter().enumerate() {
                 if fi < 64 && (found & (1u64 << fi)) != 0 { continue; }
@@ -2054,9 +2078,7 @@ fn parse_json_object_project(b: &[u8], pos: usize, depth: usize, fields: &[&str]
         if b[i] == b'}' { break; }
         if b[i] != b',' { bail!("Expected ',' or '}}' at position {}", i); }
         i = skip_ws(b, i + 1);
-        // Early exit: all needed fields found — skip rest of object
         if found == all_found {
-            // Find closing brace, handling nesting
             let mut nest = 1u32;
             while i < b.len() && nest > 0 {
                 match b[i] {
@@ -2069,7 +2091,6 @@ fn parse_json_object_project(b: &[u8], pos: usize, depth: usize, fields: &[&str]
             break;
         }
     }
-    // Add null for missing fields (in field order)
     for (fi, &f) in fields.iter().enumerate() {
         if fi < 64 && (found & (1u64 << fi)) != 0 { continue; }
         map.push_unique(KeyStr::from(f), Value::Null);

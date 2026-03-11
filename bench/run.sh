@@ -134,6 +134,10 @@ TESTS=(
     'if .x*2+1>1M:-c:if .x * 2 + 1 > 1000000 then "big" else "small" end'
     'sel(.x%2==0)|.name:-c:select(.x % 2 == 0) | .name'
     'sel(.x*2+1>1M):-c:select(.x * 2 + 1 > 1000000)'
+    '.x|@json:-c:.x | @json'
+    '.x|@text:-c:.x | @text'
+    '.name|@json:-c:.name | @json'
+    'computed remap:-c:{name: .name, double: (.x * 2), sum: (.x + .y)}'
 )
 
 for test in "${TESTS[@]}"; do
