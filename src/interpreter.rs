@@ -72,6 +72,8 @@ pub enum BranchOutput {
     Literal(Vec<u8>),
     /// `.field` — extract raw bytes from input
     Field(String),
+    /// `empty` — produce no output
+    Empty,
 }
 
 /// Right-hand side of a condition: either a constant or a field reference.
@@ -2547,6 +2549,10 @@ impl Filter {
         let expr = self.detect_expr()?;
 
         let expr_to_output = |e: &Expr| -> Option<BranchOutput> {
+            // empty
+            if matches!(e, Expr::Empty) {
+                return Some(BranchOutput::Empty);
+            }
             // .field
             if let Expr::Index { expr: base, key } = e {
                 if matches!(base.as_ref(), Expr::Input) {

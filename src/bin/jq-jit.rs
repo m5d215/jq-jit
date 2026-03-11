@@ -3013,7 +3013,10 @@ fn real_main() {
                             }
                             let out_branch = output.unwrap_or(else_output);
                             match out_branch {
-                                BranchOutput::Literal(ref bytes) => compact_buf.extend_from_slice(bytes),
+                                BranchOutput::Literal(ref bytes) => {
+                                    compact_buf.extend_from_slice(bytes);
+                                    compact_buf.push(b'\n');
+                                }
                                 BranchOutput::Field(ref f) => {
                                     let idx = field_idx[f];
                                     let (vs, ve) = ranges_buf[idx];
@@ -3023,9 +3026,10 @@ fn real_main() {
                                     } else {
                                         compact_buf.extend_from_slice(val);
                                     }
+                                    compact_buf.push(b'\n');
                                 }
+                                BranchOutput::Empty => { /* produce no output */ }
                             }
-                            compact_buf.push(b'\n');
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -4847,7 +4851,10 @@ fn real_main() {
                         }
                         let out_branch = output.unwrap_or(else_output);
                         match out_branch {
-                            BranchOutput::Literal(ref bytes) => compact_buf.extend_from_slice(bytes),
+                            BranchOutput::Literal(ref bytes) => {
+                                compact_buf.extend_from_slice(bytes);
+                                compact_buf.push(b'\n');
+                            }
                             BranchOutput::Field(ref f) => {
                                 let idx = field_idx[f];
                                 let (vs, ve) = ranges_buf[idx];
@@ -4857,9 +4864,10 @@ fn real_main() {
                                 } else {
                                     compact_buf.extend_from_slice(val);
                                 }
+                                compact_buf.push(b'\n');
                             }
+                            BranchOutput::Empty => { /* produce no output */ }
                         }
-                        compact_buf.push(b'\n');
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
