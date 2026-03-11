@@ -2158,18 +2158,17 @@ impl Flattener {
 
             Expr::Repeat { update } => {
                 if !is_scalar(update) { return false; }
-                let current = self.alloc_slot();
-                self.emit(JitOp::Clone { dst: current, src: input_slot });
+                // repeat(f) = def _repeat: f, _repeat; _repeat;
+                // Each iteration applies f to the SAME input (comma semantics),
+                // not chaining outputs.
                 let head = self.alloc_label();
                 self.emit(JitOp::Label { id: head });
-                self.emit_yield(current);
-                let new_val = self.flatten_scalar(update, current);
-                self.emit(JitOp::Drop { slot: current });
-                self.emit(JitOp::Clone { dst: current, src: new_val });
-                self.emit(JitOp::Drop { slot: new_val });
+                let result = self.flatten_scalar(update, input_slot);
+                self.emit_yield(result);
+                self.emit(JitOp::Drop { slot: result });
                 self.emit(JitOp::Jump { label: head });
                 // Note: no "done" label — this is an infinite loop.
-                // Early termination happens via Yield returning stop.
+                // Early termination happens via Yield returning stop or limit.
                 true
             }
 

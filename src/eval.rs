@@ -2526,16 +2526,10 @@ pub fn eval(
         }
 
         Expr::Repeat { update } => {
-            let mut current = input;
+            // repeat(f) = def _repeat: f, _repeat; _repeat;
+            // Comma semantics: apply f to the SAME input each time, not chaining outputs.
             loop {
-                if !cb(current.clone())? { return Ok(false); }
-                if let Ok(next) = eval_one(update, &current, env) {
-                    current = next;
-                } else {
-                    let mut next = Value::Null;
-                    eval(update, current, env, &mut |v| { next = v; Ok(true) })?;
-                    current = next;
-                }
+                if !eval(update, input.clone(), env, cb)? { return Ok(false); }
             }
         }
 
