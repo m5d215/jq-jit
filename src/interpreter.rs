@@ -23,6 +23,40 @@ pub enum RemapExpr {
     ConstOpField(f64, crate::ir::BinOp, String),
 }
 
+/// A pure numeric expression over fields and constants.
+/// Used for raw byte fast path evaluation.
+#[derive(Debug, Clone)]
+pub enum ArithExpr {
+    /// `.field` — extract numeric field
+    Field(usize), // index into field list
+    /// Numeric constant
+    Const(f64),
+    /// Binary operation
+    BinOp(crate::ir::BinOp, Box<ArithExpr>, Box<ArithExpr>),
+}
+
+impl ArithExpr {
+    pub fn eval(&self, fields: &[f64]) -> f64 {
+        match self {
+            ArithExpr::Field(idx) => fields[*idx],
+            ArithExpr::Const(n) => *n,
+            ArithExpr::BinOp(op, lhs, rhs) => {
+                let l = lhs.eval(fields);
+                let r = rhs.eval(fields);
+                use crate::ir::BinOp;
+                match op {
+                    BinOp::Add => l + r,
+                    BinOp::Sub => l - r,
+                    BinOp::Mul => l * r,
+                    BinOp::Div => l / r,
+                    BinOp::Mod => l % r,
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+}
+
 /// Output of a conditional branch — either a literal or a field access.
 #[derive(Debug, Clone)]
 pub enum BranchOutput {
@@ -994,6 +1028,44 @@ impl Filter {
             }
         }
         None
+    }
+
+    /// Detect a general numeric expression over multiple fields.
+    /// Matches patterns like `.x + .y * 2`, `(.x + .y) / 2`, `.x * .x + .y * .y`.
+    /// Returns (field_names, arith_expr) where arith_expr uses field indices.
+    /// Only matches when simpler detectors don't (multi-field or complex trees).
+    pub fn detect_numeric_expr(&self) -> Option<(Vec<String>, ArithExpr)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        let mut fields: Vec<String> = Vec::new();
+        fn build_arith(expr: &Expr, fields: &mut Vec<String>) -> Option<ArithExpr> {
+            match expr {
+                Expr::BinOp { op, lhs, rhs } => {
+                    if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) { return None; }
+                    let l = build_arith(lhs, fields)?;
+                    let r = build_arith(rhs, fields)?;
+                    Some(ArithExpr::BinOp(*op, Box::new(l), Box::new(r)))
+                }
+                Expr::Index { expr: base, key } => {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        let idx = if let Some(pos) = fields.iter().position(|f| f == field) {
+                            pos
+                        } else {
+                            fields.push(field.clone());
+                            fields.len() - 1
+                        };
+                        Some(ArithExpr::Field(idx))
+                    } else { None }
+                }
+                Expr::Literal(Literal::Num(n, _)) => Some(ArithExpr::Const(*n)),
+                _ => None,
+            }
+        }
+        let arith = build_arith(expr, &mut fields)?;
+        // Only match if there are ≥2 field references (single-field handled by other detectors)
+        if fields.len() < 2 { return None; }
+        Some((fields, arith))
     }
 
     /// Detect string interpolation with field accesses: `"\(.f1)lit\(.f2)..."`.
