@@ -615,6 +615,32 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | test("regex")` pattern.
+    /// Returns (field_name, regex_pattern, flags_str) if detected.
+    pub fn detect_field_test(&self) -> Option<(String, String, Option<String>)> {
+        use crate::ir::{Expr, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::RegexTest { input_expr, re, flags } = right.as_ref() {
+                        if !matches!(input_expr.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(pattern)) = re.as_ref() {
+                            let flags_str = match flags.as_ref() {
+                                Expr::Literal(Literal::Null) => None,
+                                Expr::Literal(Literal::Str(f)) => Some(f.clone()),
+                                _ => return None,
+                            };
+                            return Some((field.clone(), pattern.clone(), flags_str));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field | ltrimstr("prefix") | tonumber` pattern.
     /// Returns (field_name, prefix) if detected.
     pub fn detect_field_ltrimstr_tonumber(&self) -> Option<(String, String)> {

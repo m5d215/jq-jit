@@ -359,7 +359,10 @@ fn real_main() {
     let field_str_builtin = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_unary_num.is_none() {
         filter.detect_field_str_builtin()
     } else { None };
-    let field_ltrimstr_tonumber = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() {
+    let field_test = if use_compact_buf && !exit_status && field_access.is_none() && field_str_builtin.is_none() {
+        filter.detect_field_test()
+    } else { None };
+    let field_ltrimstr_tonumber = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() {
         filter.detect_field_ltrimstr_tonumber()
     } else { None };
     let field_str_concat = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() {
@@ -455,7 +458,7 @@ fn real_main() {
     let has_raw_fast_path = field_access.is_some() || nested_field.is_some() || field_remap.is_some()
         || computed_remap.is_some()
         || field_binop.is_some() || field_unary_num.is_some() || field_binop_const_unary.is_some()
-        || field_str_builtin.is_some() || field_ltrimstr_tonumber.is_some()
+        || field_str_builtin.is_some() || field_test.is_some() || field_ltrimstr_tonumber.is_some()
         || field_str_concat.is_some() || field_alt.is_some()
         || select_cmp.is_some()
         || cond_chain.is_some() || cmp_branch_lit.is_some() || select_compound.is_some()
@@ -1307,6 +1310,59 @@ fn real_main() {
                         }
                         Ok(())
                     })
+                } else if let Some((ref ft_field, ref ft_pattern, ref ft_flags)) = field_test {
+                    // Build regex pattern with flags
+                    let re_pattern = if let Some(flags) = ft_flags {
+                        let mut prefix = String::from("(?");
+                        for c in flags.chars() {
+                            match c { 'i' | 'm' | 's' => prefix.push(c), _ => {} }
+                        }
+                        prefix.push(')');
+                        prefix.push_str(ft_pattern);
+                        prefix
+                    } else {
+                        ft_pattern.clone()
+                    };
+                    let re = regex::Regex::new(&re_pattern);
+                    if let Ok(re) = re {
+                        json_stream_raw(&input_str, |start, end| {
+                            let raw = &input_bytes[start..end];
+                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, ft_field) {
+                                let val = &raw[vs..ve];
+                                if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                                    && !val[1..val.len()-1].contains(&b'\\')
+                                {
+                                    let content = &val[1..val.len()-1];
+                                    let content_str = unsafe { std::str::from_utf8_unchecked(content) };
+                                    if re.is_match(content_str) {
+                                        compact_buf.extend_from_slice(b"true\n");
+                                    } else {
+                                        compact_buf.extend_from_slice(b"false\n");
+                                    }
+                                } else {
+                                    // Has escape sequences — fallback
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                            if compact_buf.len() >= 1 << 17 {
+                                let _ = out.write_all(&compact_buf);
+                                compact_buf.clear();
+                            }
+                            Ok(())
+                        })
+                    } else {
+                        // Regex compilation failed — fallback to JIT
+                        json_stream_raw(&input_str, |start, end| {
+                            let raw = &input_bytes[start..end];
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            Ok(())
+                        })
+                    }
                 } else if let Some((ref lt_field, ref lt_prefix)) = field_ltrimstr_tonumber {
                     let prefix_bytes = lt_prefix.as_bytes();
                     json_stream_raw(&input_str, |start, end| {
@@ -3633,6 +3689,59 @@ fn real_main() {
                     }
                     Ok(())
                 })
+            } else if let Some((ref ft_field, ref ft_pattern, ref ft_flags)) = field_test {
+                let re_pattern = if let Some(flags) = ft_flags {
+                    let mut prefix = String::from("(?");
+                    for c in flags.chars() {
+                        match c { 'i' | 'm' | 's' => prefix.push(c), _ => {} }
+                    }
+                    prefix.push(')');
+                    prefix.push_str(ft_pattern);
+                    prefix
+                } else {
+                    ft_pattern.clone()
+                };
+                let re = regex::Regex::new(&re_pattern);
+                if let Ok(re) = re {
+                    let content_bytes = content.as_bytes();
+                    json_stream_raw(content, |start, end| {
+                        let raw = &content_bytes[start..end];
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, ft_field) {
+                            let val = &raw[vs..ve];
+                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                                && !val[1..val.len()-1].contains(&b'\\')
+                            {
+                                let content = &val[1..val.len()-1];
+                                let content_str = unsafe { std::str::from_utf8_unchecked(content) };
+                                if re.is_match(content_str) {
+                                    compact_buf.extend_from_slice(b"true\n");
+                                } else {
+                                    compact_buf.extend_from_slice(b"false\n");
+                                }
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else {
+                    // If for some reason we have a file path with invalid regex, fall through to JIT
+                    let content_bytes = content.as_bytes();
+                    json_stream_raw(content, |start, end| {
+                        let raw = &content_bytes[start..end];
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        Ok(())
+                    })
+                }
             } else if let Some((ref lt_field, ref lt_prefix)) = field_ltrimstr_tonumber {
                 let prefix_bytes = lt_prefix.as_bytes();
                 let content_bytes = content.as_bytes();
