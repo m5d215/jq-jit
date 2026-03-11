@@ -1245,7 +1245,7 @@ impl Filter {
     pub fn detect_field_format(&self) -> Option<(String, String)> {
         use crate::ir::{Expr, Literal};
         let expr = self.detect_expr()?;
-        let is_supported = |name: &str| matches!(name, "base64" | "uri" | "html");
+        let is_supported = |name: &str| matches!(name, "base64" | "uri" | "html" | "json" | "text");
         // Pipe form: .field | @format
         if let Expr::Pipe { left, right } = expr {
             if let Expr::Index { expr: base, key } = left.as_ref() {

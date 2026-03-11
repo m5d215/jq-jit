@@ -2493,14 +2493,28 @@ fn real_main() {
                                 && !val[1..val.len()-1].contains(&b'\\')
                             {
                                 let content = &val[1..val.len()-1];
-                                compact_buf.push(b'"');
                                 match ff_format.as_str() {
-                                    "base64" => base64_encode_to(content, &mut compact_buf),
-                                    "uri" => uri_encode_to(content, &mut compact_buf),
-                                    "html" => html_encode_to(content, &mut compact_buf),
-                                    _ => {}
+                                    "text" => {
+                                        // @text on string: identity — output the JSON string as-is
+                                        compact_buf.extend_from_slice(val);
+                                        compact_buf.push(b'\n');
+                                    }
+                                    "json" => {
+                                        // @json on string: wrap the JSON string value in extra quotes + escape
+                                        push_tojson_raw(&mut compact_buf, val);
+                                        compact_buf.push(b'\n');
+                                    }
+                                    _ => {
+                                        compact_buf.push(b'"');
+                                        match ff_format.as_str() {
+                                            "base64" => base64_encode_to(content, &mut compact_buf),
+                                            "uri" => uri_encode_to(content, &mut compact_buf),
+                                            "html" => html_encode_to(content, &mut compact_buf),
+                                            _ => {}
+                                        }
+                                        compact_buf.extend_from_slice(b"\"\n");
+                                    }
                                 }
-                                compact_buf.extend_from_slice(b"\"\n");
                             } else {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -6818,14 +6832,26 @@ fn real_main() {
                             && !val[1..val.len()-1].contains(&b'\\')
                         {
                             let content = &val[1..val.len()-1];
-                            compact_buf.push(b'"');
                             match ff_format.as_str() {
-                                "base64" => base64_encode_to(content, &mut compact_buf),
-                                "uri" => uri_encode_to(content, &mut compact_buf),
-                                "html" => html_encode_to(content, &mut compact_buf),
-                                _ => {}
+                                "text" => {
+                                    compact_buf.extend_from_slice(val);
+                                    compact_buf.push(b'\n');
+                                }
+                                "json" => {
+                                    push_tojson_raw(&mut compact_buf, val);
+                                    compact_buf.push(b'\n');
+                                }
+                                _ => {
+                                    compact_buf.push(b'"');
+                                    match ff_format.as_str() {
+                                        "base64" => base64_encode_to(content, &mut compact_buf),
+                                        "uri" => uri_encode_to(content, &mut compact_buf),
+                                        "html" => html_encode_to(content, &mut compact_buf),
+                                        _ => {}
+                                    }
+                                    compact_buf.extend_from_slice(b"\"\n");
+                                }
                             }
-                            compact_buf.extend_from_slice(b"\"\n");
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
