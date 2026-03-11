@@ -2017,10 +2017,12 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref nfields, ref arith)) = numeric_expr {
-                    let is_two = nfields.len() == 2;
+                    let nf_count = nfields.len();
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        let got = if is_two {
+                        let got = if nf_count == 1 {
+                            json_object_get_num(raw, 0, &nfields[0]).map(|v| vec![v])
+                        } else if nf_count == 2 {
                             json_object_get_two_nums(raw, 0, &nfields[0], &nfields[1])
                                 .map(|(a, b)| vec![a, b])
                         } else {
@@ -5666,11 +5668,13 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some((ref nfields, ref arith)) = numeric_expr {
-                let is_two = nfields.len() == 2;
+                let nf_count = nfields.len();
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    let got = if is_two {
+                    let got = if nf_count == 1 {
+                        json_object_get_num(raw, 0, &nfields[0]).map(|v| vec![v])
+                    } else if nf_count == 2 {
                         json_object_get_two_nums(raw, 0, &nfields[0], &nfields[1])
                             .map(|(a, b)| vec![a, b])
                     } else {

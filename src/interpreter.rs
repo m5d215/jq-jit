@@ -1469,8 +1469,20 @@ impl Filter {
             }
         }
         let arith = build_arith(expr, &mut fields)?;
-        // Only match if there are ≥2 field references (single-field handled by other detectors)
-        if fields.len() < 2 { return None; }
+        if fields.is_empty() { return None; }
+        // For single-field, only match complex exprs (e.g. .x * .x + 1)
+        // Simple single-field exprs are already handled by field_binop/field_arith_chain
+        if fields.len() == 1 {
+            // Must have field used multiple times (otherwise simpler detectors handle it)
+            fn count_field_refs(e: &ArithExpr) -> usize {
+                match e {
+                    ArithExpr::Field(_) => 1,
+                    ArithExpr::Const(_) => 0,
+                    ArithExpr::BinOp(_, l, r) => count_field_refs(l) + count_field_refs(r),
+                }
+            }
+            if count_field_refs(&arith) < 2 { return None; }
+        }
         Some((fields, arith))
     }
 
