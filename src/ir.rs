@@ -374,6 +374,22 @@ pub enum BinOp {
     Or,
 }
 
+impl BinOp {
+    /// Invert a comparison operator (for `cmp | not` → inverted cmp).
+    /// Returns None for non-comparison operators.
+    pub fn invert_cmp(self) -> Option<BinOp> {
+        match self {
+            BinOp::Eq => Some(BinOp::Ne),
+            BinOp::Ne => Some(BinOp::Eq),
+            BinOp::Lt => Some(BinOp::Ge),
+            BinOp::Ge => Some(BinOp::Lt),
+            BinOp::Gt => Some(BinOp::Le),
+            BinOp::Le => Some(BinOp::Gt),
+            _ => None,
+        }
+    }
+}
+
 /// Unary operators (builtins with 1 argument).
 #[derive(Debug, Clone, Copy)]
 pub enum UnaryOp {

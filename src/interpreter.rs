@@ -114,6 +114,14 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             {
                 return Expr::Input;
             }
+            // Semantic: cmp_expr | not → inverted cmp_expr
+            if matches!(&sr, Expr::Not) {
+                if let Expr::BinOp { op, lhs, rhs } = &sl {
+                    if let Some(inv) = op.invert_cmp() {
+                        return Expr::BinOp { op: inv, lhs: lhs.clone(), rhs: rhs.clone() };
+                    }
+                }
+            }
             // Beta-reduction: .x | . + 1 → .x + 1
             if sl.is_simple_scalar() && sr.is_input_free() {
                 return sr.substitute_input(&sl);

@@ -522,6 +522,14 @@ impl Flattener {
                 // Pipe identity simplification: . | X → X, X | . → X
                 if matches!(new_left.as_ref(), Expr::Input) { return *new_right; }
                 if matches!(new_right.as_ref(), Expr::Input) { return *new_left; }
+                // Semantic: cmp_expr | not → inverted cmp_expr (must run before beta-reduction)
+                if matches!(new_right.as_ref(), Expr::Not) {
+                    if let Expr::BinOp { op, lhs, rhs } = new_left.as_ref() {
+                        if let Some(inv) = op.invert_cmp() {
+                            return Expr::BinOp { op: inv, lhs: lhs.clone(), rhs: rhs.clone() };
+                        }
+                    }
+                }
                 // Semantic optimizations for to_entries pipelines (must run before beta-reduction)
                 if let Expr::UnaryOp { op: UnaryOp::ToEntries, .. } = new_left.as_ref() {
                     // to_entries | from_entries → identity
