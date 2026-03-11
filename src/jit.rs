@@ -5932,11 +5932,19 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             }
         }
         if name == "__env__" {
-            let mut obj = crate::value::new_objmap();
-            for (k, v) in std::env::vars() {
-                obj.insert(crate::value::KeyStr::from(k), Value::from_string(v));
+            // Cache env object — environment is constant during execution
+            struct EnvCache(std::cell::UnsafeCell<Option<Value>>);
+            unsafe impl Sync for EnvCache {}
+            static ENV_CACHE: EnvCache = EnvCache(std::cell::UnsafeCell::new(None));
+            let cached = &mut *ENV_CACHE.0.get();
+            if cached.is_none() {
+                let mut obj = crate::value::new_objmap();
+                for (k, v) in std::env::vars() {
+                    obj.insert(crate::value::KeyStr::from(k), Value::from_string(v));
+                }
+                *cached = Some(Value::Obj(Rc::new(obj)));
             }
-            std::ptr::write(dst, Value::Obj(Rc::new(obj)));
+            std::ptr::write(dst, cached.as_ref().unwrap().clone());
             return 0;
         }
         if name == "__each_error__" {

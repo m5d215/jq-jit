@@ -2850,9 +2850,16 @@ pub fn eval(
         }
 
         Expr::Env => {
-            let mut obj = crate::value::new_objmap();
-            for (k, v) in std::env::vars() { obj.insert(KeyStr::from(k), Value::from_str(&v)); }
-            cb(Value::Obj(Rc::new(obj)))
+            struct EnvCache(std::cell::UnsafeCell<Option<Value>>);
+            unsafe impl Sync for EnvCache {}
+            static ENV_CACHE: EnvCache = EnvCache(std::cell::UnsafeCell::new(None));
+            let cached = unsafe { &mut *ENV_CACHE.0.get() };
+            if cached.is_none() {
+                let mut obj = crate::value::new_objmap();
+                for (k, v) in std::env::vars() { obj.insert(KeyStr::from(k), Value::from_str(&v)); }
+                *cached = Some(Value::Obj(Rc::new(obj)));
+            }
+            cb(cached.as_ref().unwrap().clone())
         }
 
         Expr::Builtins => cb(crate::runtime::rt_builtins()),
