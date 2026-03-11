@@ -148,6 +148,18 @@ fn build_obj_key_prefixes<'a>(keys: impl Iterator<Item = &'a str>) -> Vec<Vec<u8
     prefixes
 }
 
+fn build_obj_key_prefixes_pretty<'a>(keys: impl Iterator<Item = &'a str>) -> Vec<Vec<u8>> {
+    let mut prefixes = Vec::new();
+    for (i, key) in keys.enumerate() {
+        let mut prefix = Vec::new();
+        if i == 0 { prefix.extend_from_slice(b"{\n  \""); } else { prefix.extend_from_slice(b",\n  \""); }
+        prefix.extend_from_slice(key.as_bytes());
+        prefix.extend_from_slice(b"\": ");
+        prefixes.push(prefix);
+    }
+    prefixes
+}
+
 /// Emit a single computed remap value into the output buffer.
 /// Shared by computed_remap, computed_array, select_cmp_cremap handlers.
 #[inline]
@@ -456,7 +468,7 @@ fn real_main() {
     let field_remap = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && nested_field.is_none() {
         filter.detect_field_remap()
     } else { None };
-    let computed_remap = if use_compact_buf && !exit_status && field_access.is_none() && nested_field.is_none() && field_remap.is_none() {
+    let computed_remap = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && nested_field.is_none() && field_remap.is_none() {
         filter.detect_computed_remap()
     } else { None };
     let field_binop = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && computed_remap.is_none() {
@@ -523,11 +535,11 @@ fn real_main() {
     let del_field = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() {
         filter.detect_del_field()
     } else { None };
-    let obj_merge_lit = if use_compact_buf && !exit_status && del_field.is_none() {
+    let obj_merge_lit = if (use_compact_buf || use_pretty_buf) && !exit_status && del_field.is_none() {
         filter.detect_obj_merge_literal()
     } else { None };
     let is_each = use_compact_buf && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() && del_field.is_none() && field_access.is_none() && filter.is_each();
-    let is_to_entries = use_compact_buf && !exit_status && !is_each && filter.is_to_entries();
+    let is_to_entries = (use_compact_buf || use_pretty_buf) && !exit_status && !is_each && filter.is_to_entries();
     let is_tojson = (use_compact_buf || use_pretty_buf) && !exit_status && !is_each && !is_to_entries && filter.is_tojson();
     let string_interp_fields = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() && field_str_concat.is_none() {
         filter.detect_string_interp_fields()
@@ -1294,7 +1306,12 @@ fn real_main() {
                         }
                     }
                     let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
-                    let key_prefixes = build_obj_key_prefixes(cremap.iter().map(|(k, _)| k.as_str()));
+                    let key_prefixes = if use_pretty_buf {
+                        build_obj_key_prefixes_pretty(cremap.iter().map(|(k, _)| k.as_str()))
+                    } else {
+                        build_obj_key_prefixes(cremap.iter().map(|(k, _)| k.as_str()))
+                    };
+                    let obj_close: &[u8] = if use_pretty_buf { b"\n}\n" } else { b"}\n" };
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         if let Some(ranges) = json_object_get_fields_raw(raw, 0, &field_refs) {
@@ -1302,7 +1319,7 @@ fn real_main() {
                                 compact_buf.extend_from_slice(&key_prefixes[i]);
                                 emit_remap_value(&mut compact_buf, rexpr, raw, &ranges, &field_idx);
                             }
-                            compact_buf.extend_from_slice(b"}\n");
+                            compact_buf.extend_from_slice(obj_close);
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -2739,9 +2756,19 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some(ref merge_pairs) = obj_merge_lit {
+                    let mut tmp = Vec::new();
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if json_object_merge_literal(raw, 0, merge_pairs, &mut compact_buf) {
+                        if use_pretty_buf {
+                            tmp.clear();
+                            if json_object_merge_literal(raw, 0, merge_pairs, &mut tmp) {
+                                push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                                compact_buf.push(b'\n');
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else if json_object_merge_literal(raw, 0, merge_pairs, &mut compact_buf) {
                             compact_buf.push(b'\n');
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
@@ -2767,9 +2794,21 @@ fn real_main() {
                         Ok(())
                     })
                 } else if is_to_entries {
+                    let mut tmp = Vec::new();
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if !json_to_entries_raw(raw, 0, &mut compact_buf) {
+                        if use_pretty_buf {
+                            tmp.clear();
+                            if json_to_entries_raw(raw, 0, &mut tmp) {
+                                let len = tmp.len();
+                                if len > 0 && tmp[len-1] == b'\n' { tmp.truncate(len-1); }
+                                push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                                compact_buf.push(b'\n');
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else if !json_to_entries_raw(raw, 0, &mut compact_buf) {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -4062,15 +4101,21 @@ fn real_main() {
                     }
                 }
                 let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
-                let mut key_prefixes: Vec<Vec<u8>> = Vec::with_capacity(cremap.len());
-                for (i, (out_key, _)) in cremap.iter().enumerate() {
-                    let mut prefix = Vec::new();
-                    if i == 0 { prefix.push(b'{'); } else { prefix.push(b','); }
-                    prefix.push(b'"');
-                    prefix.extend_from_slice(out_key.as_bytes());
-                    prefix.extend_from_slice(b"\":");
-                    key_prefixes.push(prefix);
-                }
+                let key_prefixes = if use_pretty_buf {
+                    build_obj_key_prefixes_pretty(cremap.iter().map(|(k, _)| k.as_str()))
+                } else {
+                    let mut kp: Vec<Vec<u8>> = Vec::with_capacity(cremap.len());
+                    for (i, (out_key, _)) in cremap.iter().enumerate() {
+                        let mut prefix = Vec::new();
+                        if i == 0 { prefix.push(b'{'); } else { prefix.push(b','); }
+                        prefix.push(b'"');
+                        prefix.extend_from_slice(out_key.as_bytes());
+                        prefix.extend_from_slice(b"\":");
+                        kp.push(prefix);
+                    }
+                    kp
+                };
+                let obj_close: &[u8] = if use_pretty_buf { b"\n}\n" } else { b"}\n" };
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
                     if let Some(ranges) = json_object_get_fields_raw(raw, 0, &field_refs) {
@@ -4137,7 +4182,7 @@ fn real_main() {
                                 }
                             }
                         }
-                        compact_buf.extend_from_slice(b"}\n");
+                        compact_buf.extend_from_slice(obj_close);
                     } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -4894,9 +4939,19 @@ fn real_main() {
                 })
             } else if let Some(ref merge_pairs) = obj_merge_lit {
                 let content_bytes = content.as_bytes();
+                let mut tmp = Vec::new();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if json_object_merge_literal(raw, 0, merge_pairs, &mut compact_buf) {
+                    if use_pretty_buf {
+                        tmp.clear();
+                        if json_object_merge_literal(raw, 0, merge_pairs, &mut tmp) {
+                            push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                            compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                    } else if json_object_merge_literal(raw, 0, merge_pairs, &mut compact_buf) {
                         compact_buf.push(b'\n');
                     } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
@@ -4924,9 +4979,21 @@ fn real_main() {
                 })
             } else if is_to_entries {
                 let content_bytes = content.as_bytes();
+                let mut tmp = Vec::new();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if !json_to_entries_raw(raw, 0, &mut compact_buf) {
+                    if use_pretty_buf {
+                        tmp.clear();
+                        if json_to_entries_raw(raw, 0, &mut tmp) {
+                            let len = tmp.len();
+                            if len > 0 && tmp[len-1] == b'\n' { tmp.truncate(len-1); }
+                            push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                            compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                    } else if !json_to_entries_raw(raw, 0, &mut compact_buf) {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
