@@ -519,6 +519,9 @@ impl Flattener {
             Expr::Pipe { left, right } => {
                 let new_left = Box::new(self.inline_func_calls(left));
                 let new_right = Box::new(self.inline_func_calls(right));
+                // Pipe identity simplification: . | X → X, X | . → X
+                if matches!(new_left.as_ref(), Expr::Input) { return *new_right; }
+                if matches!(new_right.as_ref(), Expr::Input) { return *new_left; }
                 // Semantic optimizations for to_entries pipelines
                 if let Expr::UnaryOp { op: UnaryOp::ToEntries, .. } = new_left.as_ref() {
                     // to_entries | from_entries → identity

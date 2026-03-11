@@ -382,8 +382,11 @@ impl Filter {
         use crate::ir::{Expr, UnaryOp};
         match expr {
             Expr::Input => true,
-            // to_entries | from_entries → identity
             Expr::Pipe { left, right } => {
+                // . | X → X, X | . → X (recursive identity simplification)
+                if Self::expr_is_identity(left) { return Self::expr_is_identity(right); }
+                if Self::expr_is_identity(right) { return Self::expr_is_identity(left); }
+                // to_entries | from_entries → identity
                 matches!(left.as_ref(), Expr::UnaryOp { op: UnaryOp::ToEntries, operand } if matches!(operand.as_ref(), Expr::Input))
                 && matches!(right.as_ref(), Expr::UnaryOp { op: UnaryOp::FromEntries, operand } if matches!(operand.as_ref(), Expr::Input))
             }
