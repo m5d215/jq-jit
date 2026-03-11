@@ -202,7 +202,12 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             Expr::IndexOpt { expr: Box::new(simplify_expr(expr)), key: Box::new(simplify_expr(key)) }
         }
         Expr::CallBuiltin { name, args } => {
-            Expr::CallBuiltin { name: name.clone(), args: args.iter().map(|a| simplify_expr(a)).collect() }
+            let sargs: Vec<_> = args.iter().map(|a| simplify_expr(a)).collect();
+            // walk(.) → identity
+            if name == "walk" && sargs.len() == 1 && matches!(&sargs[0], Expr::Input) {
+                return Expr::Input;
+            }
+            Expr::CallBuiltin { name: name.clone(), args: sargs }
         }
         Expr::Alternative { primary, fallback } => {
             Expr::Alternative { primary: Box::new(simplify_expr(primary)), fallback: Box::new(simplify_expr(fallback)) }
