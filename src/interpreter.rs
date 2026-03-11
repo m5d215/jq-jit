@@ -86,6 +86,17 @@ pub struct CondBranch {
     pub output: BranchOutput,
 }
 
+/// Part of a string Add-chain: `.name + ": " + (.x | tostring)`.
+#[derive(Debug, Clone)]
+pub enum StringAddPart {
+    /// Literal string
+    Literal(String),
+    /// `.field` — string field, raw bytes copy
+    Field(String),
+    /// `.field | tostring` — numeric field, format as string
+    FieldToString(String),
+}
+
 /// A compiled jq filter, ready to execute.
 pub struct Filter {
     program: String,
@@ -1554,6 +1565,53 @@ impl Filter {
             }
         }
         None
+    }
+
+    /// Detect string concatenation chains: `.name + ": " + (.x | tostring)`.
+    /// Returns parts: (is_literal, is_tostring, text_or_field_name).
+    /// Parts are in concatenation order.
+    pub fn detect_string_add_chain(&self) -> Option<Vec<StringAddPart>> {
+        use crate::ir::{Expr, BinOp, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        fn collect(expr: &Expr, parts: &mut Vec<StringAddPart>) -> bool {
+            match expr {
+                Expr::BinOp { op: BinOp::Add, lhs, rhs } => {
+                    if !collect(lhs, parts) { return false; }
+                    if !collect(rhs, parts) { return false; }
+                    true
+                }
+                Expr::Index { expr: base, key } if matches!(base.as_ref(), Expr::Input) => {
+                    if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                        parts.push(StringAddPart::Field(f.clone()));
+                        true
+                    } else { false }
+                }
+                Expr::Literal(Literal::Str(s)) => {
+                    parts.push(StringAddPart::Literal(s.clone()));
+                    true
+                }
+                Expr::UnaryOp { op: UnaryOp::ToString, operand } => {
+                    if let Expr::Index { expr: base, key } = operand.as_ref() {
+                        if matches!(base.as_ref(), Expr::Input) {
+                            if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                                parts.push(StringAddPart::FieldToString(f.clone()));
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                }
+                _ => false,
+            }
+        }
+        let mut parts = Vec::new();
+        if collect(expr, &mut parts) && parts.len() >= 2
+            && parts.iter().any(|p| !matches!(p, StringAddPart::Literal(_)))
+        {
+            Some(parts)
+        } else {
+            None
+        }
     }
 
     /// Detect `length` applied directly to input.

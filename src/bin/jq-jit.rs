@@ -681,6 +681,9 @@ fn real_main() {
     let string_interp_fields = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() && field_str_concat.is_none() {
         filter.detect_string_interp_fields()
     } else { None };
+    let string_add_chain = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && string_interp_fields.is_none() && field_str_concat.is_none() {
+        filter.detect_string_add_chain()
+    } else { None };
     let array_join = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
         filter.detect_array_join()
     } else { None };
@@ -782,7 +785,7 @@ fn real_main() {
         || select_cmp_field.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_value.is_some() || select_ff_cmp_field.is_some() || select_str_field.is_some()
         || computed_array.is_some() || array_field.is_some() || multi_field.is_some() || is_length || is_keys
         || is_keys_unsorted || has_field.is_some() || has_multi.is_some() || select_has_multi.is_some() || is_type || del_field.is_some() || obj_merge_lit.is_some()
-        || is_each || is_to_entries || is_tojson || string_interp_fields.is_some() || array_join.is_some()
+        || is_each || is_to_entries || is_tojson || string_interp_fields.is_some() || string_add_chain.is_some() || array_join.is_some()
         || literal_output.is_some() || array_fields_format.is_some() || raw_csv_fields.is_some()
         || field_split_join.is_some() || field_split_first.is_some() || field_split_length.is_some() || field_strop_length.is_some() || field_length_cmp.is_some() || select_length_cmp_field.is_some() || field_slice.is_some()
         || dynamic_key_obj.is_some() || field_update_num.is_some()
@@ -2616,6 +2619,84 @@ fn real_main() {
                                     } else {
                                         // Number/bool/null: copy as-is (jq tostring behavior)
                                         compact_buf.extend_from_slice(val);
+                                    }
+                                }
+                            }
+                            compact_buf.push(b'"');
+                            compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some(ref sac_parts) = string_add_chain {
+                    use jq_jit::interpreter::StringAddPart;
+                    // Collect unique field names
+                    let mut field_names: Vec<&str> = Vec::new();
+                    let mut field_idx_map = std::collections::HashMap::new();
+                    for part in sac_parts.iter() {
+                        let name = match part {
+                            StringAddPart::Field(f) | StringAddPart::FieldToString(f) => f.as_str(),
+                            _ => continue,
+                        };
+                        if !field_idx_map.contains_key(name) {
+                            field_idx_map.insert(name, field_names.len());
+                            field_names.push(name);
+                        }
+                    }
+                    // Pre-escape literal parts
+                    let escaped_lits: Vec<Option<Vec<u8>>> = sac_parts.iter().map(|part| {
+                        if let StringAddPart::Literal(s) = part {
+                            let mut buf = Vec::new();
+                            for &b in s.as_bytes() {
+                                match b {
+                                    b'"' => buf.extend_from_slice(b"\\\""),
+                                    b'\\' => buf.extend_from_slice(b"\\\\"),
+                                    b'\n' => buf.extend_from_slice(b"\\n"),
+                                    b'\r' => buf.extend_from_slice(b"\\r"),
+                                    b'\t' => buf.extend_from_slice(b"\\t"),
+                                    c if c < 0x20 => { let _ = write!(compact_buf, "\\u{:04x}", c); }
+                                    _ => buf.push(b),
+                                }
+                            }
+                            Some(buf)
+                        } else { None }
+                    }).collect();
+                    let mut ranges_buf = vec![(0usize, 0usize); field_names.len()];
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
+                            compact_buf.push(b'"');
+                            for (i, part) in sac_parts.iter().enumerate() {
+                                match part {
+                                    StringAddPart::Literal(_) => {
+                                        compact_buf.extend_from_slice(escaped_lits[i].as_ref().unwrap());
+                                    }
+                                    StringAddPart::Field(f) => {
+                                        let idx = field_idx_map[f.as_str()];
+                                        let (vs, ve) = ranges_buf[idx];
+                                        let val = &raw[vs..ve];
+                                        if val[0] == b'"' && val.len() >= 2 {
+                                            compact_buf.extend_from_slice(&val[1..val.len()-1]);
+                                        } else {
+                                            compact_buf.extend_from_slice(val);
+                                        }
+                                    }
+                                    StringAddPart::FieldToString(f) => {
+                                        let idx = field_idx_map[f.as_str()];
+                                        let (vs, ve) = ranges_buf[idx];
+                                        let val = &raw[vs..ve];
+                                        if val[0] == b'"' && val.len() >= 2 {
+                                            compact_buf.extend_from_slice(&val[1..val.len()-1]);
+                                        } else {
+                                            // Number/bool/null: copy as-is
+                                            compact_buf.extend_from_slice(val);
+                                        }
                                     }
                                 }
                             }
@@ -6187,6 +6268,72 @@ fn real_main() {
                                     compact_buf.extend_from_slice(&val[1..val.len()-1]);
                                 } else {
                                     compact_buf.extend_from_slice(val);
+                                }
+                            }
+                        }
+                        compact_buf.push(b'"');
+                        compact_buf.push(b'\n');
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some(ref sac_parts) = string_add_chain {
+                use jq_jit::interpreter::StringAddPart;
+                let content_bytes = content.as_bytes();
+                let mut field_names: Vec<&str> = Vec::new();
+                let mut field_idx_map = std::collections::HashMap::new();
+                for part in sac_parts.iter() {
+                    let name = match part {
+                        StringAddPart::Field(f) | StringAddPart::FieldToString(f) => f.as_str(),
+                        _ => continue,
+                    };
+                    if !field_idx_map.contains_key(name) {
+                        field_idx_map.insert(name, field_names.len());
+                        field_names.push(name);
+                    }
+                }
+                let escaped_lits: Vec<Option<Vec<u8>>> = sac_parts.iter().map(|part| {
+                    if let StringAddPart::Literal(s) = part {
+                        let mut buf = Vec::new();
+                        for &b in s.as_bytes() {
+                            match b {
+                                b'"' => buf.extend_from_slice(b"\\\""),
+                                b'\\' => buf.extend_from_slice(b"\\\\"),
+                                b'\n' => buf.extend_from_slice(b"\\n"),
+                                b'\r' => buf.extend_from_slice(b"\\r"),
+                                b'\t' => buf.extend_from_slice(b"\\t"),
+                                c if c < 0x20 => { let _ = write!(buf, "\\u{:04x}", c); }
+                                _ => buf.push(b),
+                            }
+                        }
+                        Some(buf)
+                    } else { None }
+                }).collect();
+                let mut ranges_buf = vec![(0usize, 0usize); field_names.len()];
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
+                        compact_buf.push(b'"');
+                        for (i, part) in sac_parts.iter().enumerate() {
+                            match part {
+                                StringAddPart::Literal(_) => {
+                                    compact_buf.extend_from_slice(escaped_lits[i].as_ref().unwrap());
+                                }
+                                StringAddPart::Field(f) | StringAddPart::FieldToString(f) => {
+                                    let idx = field_idx_map[f.as_str()];
+                                    let (vs, ve) = ranges_buf[idx];
+                                    let val = &raw[vs..ve];
+                                    if val[0] == b'"' && val.len() >= 2 {
+                                        compact_buf.extend_from_slice(&val[1..val.len()-1]);
+                                    } else {
+                                        compact_buf.extend_from_slice(val);
+                                    }
                                 }
                             }
                         }
