@@ -569,6 +569,9 @@ fn real_main() {
     let field_const_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_binop.is_none() && field_field_cmp.is_none() {
         filter.detect_field_const_cmp()
     } else { None };
+    let compound_field_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_const_cmp.is_none() && field_field_cmp.is_none() {
+        filter.detect_compound_field_cmp()
+    } else { None };
     let field_str_builtin = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_unary_num.is_none() {
         filter.detect_field_str_builtin()
     } else { None };
@@ -697,7 +700,7 @@ fn real_main() {
     let has_raw_fast_path = field_access.is_some() || nested_field.is_some() || field_remap.is_some()
         || computed_remap.is_some()
         || field_binop.is_some() || field_unary_num.is_some() || field_binop_const_unary.is_some() || field_arith_chain.is_some() || numeric_expr.is_some()
-        || field_field_cmp.is_some() || field_const_cmp.is_some()
+        || field_field_cmp.is_some() || field_const_cmp.is_some() || compound_field_cmp.is_some()
         || field_str_builtin.is_some() || field_test.is_some() || field_gsub.is_some() || field_format.is_some() || field_ltrimstr_tonumber.is_some()
         || field_str_concat.is_some() || field_alt.is_some() || field_field_alt.is_some()
         || select_cmp.is_some()
@@ -1718,6 +1721,62 @@ fn real_main() {
                                 BinOp::Eq => n == cval, BinOp::Ne => n != cval,
                                 _ => unreachable!(),
                             };
+                            compact_buf.extend_from_slice(if result { b"true\n" } else { b"false\n" });
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref conjunct, ref cmps)) = compound_field_cmp {
+                    use jq_jit::ir::BinOp;
+                    let is_and = matches!(conjunct, BinOp::And);
+                    // Collect unique field names for lookup
+                    let mut field_names: Vec<String> = Vec::new();
+                    let mut field_idx: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                    for (f, _, _) in cmps {
+                        if !field_idx.contains_key(f) {
+                            field_idx.insert(f.clone(), field_names.len());
+                            field_names.push(f.clone());
+                        }
+                    }
+                    let cmp_spec: Vec<(usize, BinOp, f64)> = cmps.iter().map(|(f, op, n)| (field_idx[f], *op, *n)).collect();
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        // Fast path for exactly 2 unique fields
+                        let got = if field_names.len() == 2 {
+                            json_object_get_two_nums(raw, 0, &field_names[0], &field_names[1])
+                                .map(|(a, b)| vec![a, b])
+                        } else {
+                            let mut vals = vec![f64::NAN; field_names.len()];
+                            let mut ok = true;
+                            for (i, fname) in field_names.iter().enumerate() {
+                                if let Some(n) = json_object_get_num(raw, 0, fname) {
+                                    vals[i] = n;
+                                } else { ok = false; break; }
+                            }
+                            if ok { Some(vals) } else { None }
+                        };
+                        if let Some(vals) = got {
+                            let mut result = is_and;
+                            for (idx, op, threshold) in &cmp_spec {
+                                let v = vals[*idx];
+                                let cmp_result = match op {
+                                    BinOp::Gt => v > *threshold, BinOp::Lt => v < *threshold,
+                                    BinOp::Ge => v >= *threshold, BinOp::Le => v <= *threshold,
+                                    BinOp::Eq => v == *threshold, BinOp::Ne => v != *threshold,
+                                    _ => unreachable!(),
+                                };
+                                if is_and {
+                                    if !cmp_result { result = false; break; }
+                                } else {
+                                    if cmp_result { result = true; break; }
+                                }
+                            }
                             compact_buf.extend_from_slice(if result { b"true\n" } else { b"false\n" });
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
@@ -4630,6 +4689,61 @@ fn real_main() {
                             BinOp::Eq => n == cval, BinOp::Ne => n != cval,
                             _ => unreachable!(),
                         };
+                        compact_buf.extend_from_slice(if result { b"true\n" } else { b"false\n" });
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref conjunct, ref cmps)) = compound_field_cmp {
+                use jq_jit::ir::BinOp;
+                let is_and = matches!(conjunct, BinOp::And);
+                let mut field_names: Vec<String> = Vec::new();
+                let mut field_idx: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                for (f, _, _) in cmps {
+                    if !field_idx.contains_key(f) {
+                        field_idx.insert(f.clone(), field_names.len());
+                        field_names.push(f.clone());
+                    }
+                }
+                let cmp_spec: Vec<(usize, BinOp, f64)> = cmps.iter().map(|(f, op, n)| (field_idx[f], *op, *n)).collect();
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    let got = if field_names.len() == 2 {
+                        json_object_get_two_nums(raw, 0, &field_names[0], &field_names[1])
+                            .map(|(a, b)| vec![a, b])
+                    } else {
+                        let mut vals = vec![f64::NAN; field_names.len()];
+                        let mut ok = true;
+                        for (i, fname) in field_names.iter().enumerate() {
+                            if let Some(n) = json_object_get_num(raw, 0, fname) {
+                                vals[i] = n;
+                            } else { ok = false; break; }
+                        }
+                        if ok { Some(vals) } else { None }
+                    };
+                    if let Some(vals) = got {
+                        let mut result = is_and;
+                        for (idx, op, threshold) in &cmp_spec {
+                            let v = vals[*idx];
+                            let cmp_result = match op {
+                                BinOp::Gt => v > *threshold, BinOp::Lt => v < *threshold,
+                                BinOp::Ge => v >= *threshold, BinOp::Le => v <= *threshold,
+                                BinOp::Eq => v == *threshold, BinOp::Ne => v != *threshold,
+                                _ => unreachable!(),
+                            };
+                            if is_and {
+                                if !cmp_result { result = false; break; }
+                            } else {
+                                if cmp_result { result = true; break; }
+                            }
+                        }
                         compact_buf.extend_from_slice(if result { b"true\n" } else { b"false\n" });
                     } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;

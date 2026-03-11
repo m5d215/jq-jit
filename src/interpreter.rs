@@ -1212,6 +1212,45 @@ impl Filter {
         None
     }
 
+    /// Detect `.f1 cmp1 N1 and/or .f2 cmp2 N2` producing boolean output.
+    /// Returns (conjunct, Vec<(field, op, threshold)>).
+    pub fn detect_compound_field_cmp(&self) -> Option<(crate::ir::BinOp, Vec<(String, crate::ir::BinOp, f64)>)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        let extract_cmp = |e: &Expr| -> Option<(String, BinOp, f64)> {
+            if let Expr::BinOp { op, lhs, rhs } = e {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                            return Some((field.clone(), *op, *n));
+                        }
+                    }
+                }
+            }
+            None
+        };
+        if let Expr::BinOp { op: conjunct @ (BinOp::And | BinOp::Or), lhs, rhs } = expr {
+            let mut cmps = Vec::new();
+            // Flatten nested and/or of same type
+            fn collect_cmps(e: &Expr, conjunct: BinOp, extract: &dyn Fn(&Expr) -> Option<(String, BinOp, f64)>, out: &mut Vec<(String, BinOp, f64)>) -> bool {
+                if let Expr::BinOp { op, lhs, rhs } = e {
+                    if std::mem::discriminant(op) == std::mem::discriminant(&conjunct) {
+                        return collect_cmps(lhs, conjunct, extract, out) && collect_cmps(rhs, conjunct, extract, out);
+                    }
+                }
+                if let Some(cmp) = extract(e) { out.push(cmp); true } else { false }
+            }
+            if collect_cmps(lhs, *conjunct, &extract_cmp, &mut cmps) && collect_cmps(rhs, *conjunct, &extract_cmp, &mut cmps) {
+                if cmps.len() >= 2 {
+                    return Some((*conjunct, cmps));
+                }
+            }
+        }
+        None
+    }
+
     /// Detect string interpolation with field accesses: `"\(.f1)lit\(.f2)..."`.
     /// Returns Vec<(is_literal, content)> where content is either the literal text
     /// or the field name for interpolation parts.
