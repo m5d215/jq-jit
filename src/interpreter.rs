@@ -1143,7 +1143,19 @@ impl Filter {
     /// Detect `length` applied directly to input.
     pub fn is_length(&self) -> bool {
         let expr = match self.detect_expr() { Some(e) => e, None => return false };
-        matches!(expr, crate::ir::Expr::UnaryOp { op: crate::ir::UnaryOp::Length, operand } if matches!(operand.as_ref(), crate::ir::Expr::Input))
+        // Direct: `length`
+        if matches!(expr, crate::ir::Expr::UnaryOp { op: crate::ir::UnaryOp::Length, operand } if matches!(operand.as_ref(), crate::ir::Expr::Input)) {
+            return true;
+        }
+        // `to_entries | length`, `keys | length`, `values | length` — all equivalent to `length` for objects
+        if let crate::ir::Expr::Pipe { left, right } = expr {
+            if matches!(right.as_ref(), crate::ir::Expr::UnaryOp { op: crate::ir::UnaryOp::Length, operand } if matches!(operand.as_ref(), crate::ir::Expr::Input)) {
+                if matches!(left.as_ref(), crate::ir::Expr::UnaryOp { op: crate::ir::UnaryOp::ToEntries | crate::ir::UnaryOp::Keys | crate::ir::UnaryOp::KeysUnsorted, .. }) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Detect `keys` applied directly to input.
