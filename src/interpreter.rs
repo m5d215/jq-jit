@@ -671,6 +671,37 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | gsub("pattern"; "replacement")` or `.field | sub("pattern"; "replacement")`.
+    /// Returns (field_name, is_global, regex_pattern, replacement, flags) if detected.
+    pub fn detect_field_gsub(&self) -> Option<(String, bool, String, String, Option<String>)> {
+        use crate::ir::{Expr, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    let (is_global, input_expr, re, tostr, flags) = match right.as_ref() {
+                        Expr::RegexGsub { input_expr, re, tostr, flags } => (true, input_expr, re, tostr, flags),
+                        Expr::RegexSub { input_expr, re, tostr, flags } => (false, input_expr, re, tostr, flags),
+                        _ => return None,
+                    };
+                    if !matches!(input_expr.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(pattern)) = re.as_ref() {
+                        if let Expr::Literal(Literal::Str(replacement)) = tostr.as_ref() {
+                            let flags_str = match flags.as_ref() {
+                                Expr::Literal(Literal::Null) => None,
+                                Expr::Literal(Literal::Str(f)) => Some(f.clone()),
+                                _ => return None,
+                            };
+                            return Some((field.clone(), is_global, pattern.clone(), replacement.clone(), flags_str));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field | ltrimstr("prefix") | tonumber` pattern.
     /// Returns (field_name, prefix) if detected.
     pub fn detect_field_ltrimstr_tonumber(&self) -> Option<(String, String)> {
