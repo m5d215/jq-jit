@@ -1106,7 +1106,7 @@ pub fn json_object_del_field(b: &[u8], pos: usize, field: &str, buf: &mut Vec<u8
     let field_bytes = field.as_bytes();
 
     // Fast path for compact input: stream pairs directly, skip target field (no Vec alloc)
-    if pos + 1 < b.len() && !matches!(b[pos + 1], b' ' | b'\t' | b'\n' | b'\r') {
+    if is_json_compact(&b[pos..]) {
         buf.push(b'{');
         let mut i = pos + 1;
         if i < b.len() && b[i] == b'}' { buf.push(b'}'); return true; }
@@ -1136,17 +1136,14 @@ pub fn json_object_del_field(b: &[u8], pos: usize, field: &str, buf: &mut Vec<u8
         return true;
     }
 
-    // General path for non-compact input
+    // General path for non-compact input: stream directly (no Vec alloc)
+    buf.push(b'{');
     let mut i = pos + 1;
     while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
-    if i < b.len() && b[i] == b'}' {
-        buf.extend_from_slice(b"{}");
-        return true;
-    }
-    let mut pairs: Vec<(usize, usize, usize, usize)> = Vec::new();
-    let mut del_found = false;
+    if i < b.len() && b[i] == b'}' { buf.push(b'}'); return true; }
+    let mut first_out = true;
     loop {
-        if i >= b.len() || b[i] != b'"' { return false; }
+        if i >= b.len() || b[i] != b'"' { break; }
         let key_start = i;
         i += 1;
         let mut j = i;
@@ -1157,41 +1154,24 @@ pub fn json_object_del_field(b: &[u8], pos: usize, field: &str, buf: &mut Vec<u8
         let key_end = j + 1;
         i = key_end;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
-        if i >= b.len() || b[i] != b':' { return false; }
+        if i >= b.len() || b[i] != b':' { break; }
         i += 1;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
-        let val_start = i;
-        i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return false };
-        let val_end = i;
-        if key_matches {
-            del_found = true;
-        } else {
-            pairs.push((key_start, key_end, val_start, val_end));
-        }
-        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
-        if i >= b.len() { return false; }
-        if b[i] == b'}' { break; }
-        if b[i] != b',' { return false; }
-        i += 1;
-        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
-    }
-    if !del_found {
-        buf.push(b'{');
-        for (idx, (ks, ke, vs, ve)) in pairs.iter().enumerate() {
-            if idx > 0 { buf.push(b','); }
-            buf.extend_from_slice(&b[*ks..*ke]);
+        let val_end = match skip_json_value(b, i) { Ok(e) => e, Err(_) => break };
+        if !key_matches {
+            if !first_out { buf.push(b','); }
+            first_out = false;
+            buf.extend_from_slice(&b[key_start..key_end]);
             buf.push(b':');
-            buf.extend_from_slice(&b[*vs..*ve]);
+            buf.extend_from_slice(&b[i..val_end]);
         }
-        buf.push(b'}');
-        return true;
-    }
-    buf.push(b'{');
-    for (idx, (ks, ke, vs, ve)) in pairs.iter().enumerate() {
-        if idx > 0 { buf.push(b','); }
-        buf.extend_from_slice(&b[*ks..*ke]);
-        buf.push(b':');
-        buf.extend_from_slice(&b[*vs..*ve]);
+        i = val_end;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { break; }
+        if b[i] == b'}' { break; }
+        if b[i] != b',' { break; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
     }
     buf.push(b'}');
     true
