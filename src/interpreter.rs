@@ -190,6 +190,40 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
         Expr::Index { expr, key } => {
             Expr::Index { expr: Box::new(simplify_expr(expr)), key: Box::new(simplify_expr(key)) }
         }
+        Expr::IndexOpt { expr, key } => {
+            Expr::IndexOpt { expr: Box::new(simplify_expr(expr)), key: Box::new(simplify_expr(key)) }
+        }
+        Expr::CallBuiltin { name, args } => {
+            Expr::CallBuiltin { name: name.clone(), args: args.iter().map(|a| simplify_expr(a)).collect() }
+        }
+        Expr::Alternative { primary, fallback } => {
+            Expr::Alternative { primary: Box::new(simplify_expr(primary)), fallback: Box::new(simplify_expr(fallback)) }
+        }
+        Expr::Each { input_expr } => {
+            Expr::Each { input_expr: Box::new(simplify_expr(input_expr)) }
+        }
+        Expr::EachOpt { input_expr } => {
+            Expr::EachOpt { input_expr: Box::new(simplify_expr(input_expr)) }
+        }
+        Expr::Negate { operand } => {
+            Expr::Negate { operand: Box::new(simplify_expr(operand)) }
+        }
+        Expr::Slice { expr, from, to } => {
+            Expr::Slice {
+                expr: Box::new(simplify_expr(expr)),
+                from: from.as_ref().map(|e| Box::new(simplify_expr(e))),
+                to: to.as_ref().map(|e| Box::new(simplify_expr(e))),
+            }
+        }
+        Expr::Update { path_expr, update_expr } => {
+            Expr::Update { path_expr: Box::new(simplify_expr(path_expr)), update_expr: Box::new(simplify_expr(update_expr)) }
+        }
+        Expr::Assign { path_expr, value_expr } => {
+            Expr::Assign { path_expr: Box::new(simplify_expr(path_expr)), value_expr: Box::new(simplify_expr(value_expr)) }
+        }
+        Expr::TryCatch { try_expr, catch_expr } => {
+            Expr::TryCatch { try_expr: Box::new(simplify_expr(try_expr)), catch_expr: Box::new(simplify_expr(catch_expr)) }
+        }
         _ => expr.clone(),
     }
 }
