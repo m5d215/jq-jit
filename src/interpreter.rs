@@ -619,6 +619,85 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.x > N and .y < M) | {a:.f1, b:.f2}` — compound select then field remap.
+    /// Returns (conjunction, comparisons, remap_pairs[(key, field)]).
+    pub fn detect_select_compound_cmp_then_remap(&self) -> Option<(crate::ir::BinOp, Vec<(String, crate::ir::BinOp, f64)>, Vec<(String, String)>)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        let extract_cmps = |cond: &Expr| -> Option<(BinOp, Vec<(String, BinOp, f64)>)> {
+            let extract_cmp = |e: &Expr| -> Option<(String, BinOp, f64)> {
+                if let Expr::BinOp { op, lhs, rhs } = e {
+                    if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                    if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                            if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                return Some((f.clone(), *op, *n));
+                            }
+                        }
+                    }
+                }
+                None
+            };
+            fn collect_conds<'a>(e: &'a Expr, conj: BinOp, out: &mut Vec<&'a Expr>) -> bool {
+                if let Expr::BinOp { op, lhs, rhs } = e {
+                    if std::mem::discriminant(op) == std::mem::discriminant(&conj) {
+                        return collect_conds(lhs, conj, out) && collect_conds(rhs, conj, out);
+                    }
+                }
+                out.push(e);
+                true
+            }
+            for conj in [BinOp::And, BinOp::Or] {
+                if let Expr::BinOp { op, .. } = cond {
+                    if std::mem::discriminant(op) == std::mem::discriminant(&conj) {
+                        let mut parts = Vec::new();
+                        if collect_conds(cond, conj, &mut parts) && parts.len() >= 2 {
+                            let cmps: Vec<_> = parts.iter().filter_map(|e| extract_cmp(e)).collect();
+                            if cmps.len() == parts.len() { return Some((conj, cmps)); }
+                        }
+                    }
+                }
+            }
+            None
+        };
+        let extract_remap = |output: &Expr| -> Option<Vec<(String, String)>> {
+            if let Expr::ObjectConstruct { pairs } = output {
+                let mut remap = Vec::new();
+                for (k, v) in pairs {
+                    let key = if let Expr::Literal(Literal::Str(s)) = k { s.clone() } else { return None; };
+                    if let Expr::Index { expr: base, key: fk } = v {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f)) = fk.as_ref() {
+                            remap.push((key, f.clone()));
+                        } else { return None; }
+                    } else { return None; }
+                }
+                if !remap.is_empty() { return Some(remap); }
+            }
+            None
+        };
+        // Form 1: Pipe(select(compound), {remap})
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                    if let (Some((conj, cmps)), Some(remap)) = (extract_cmps(cond), extract_remap(right)) {
+                        return Some((conj, cmps, remap));
+                    }
+                }
+            }
+        }
+        // Form 2: IfThenElse{compound_cond, {remap}, empty}
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if matches!(else_branch.as_ref(), Expr::Empty) {
+                if let (Some((conj, cmps)), Some(remap)) = (extract_cmps(cond), extract_remap(then_branch)) {
+                    return Some((conj, cmps, remap));
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.a.b.c > N)` pattern for nested field numeric comparison.
     /// Returns (field_path, comparison_op, threshold) if detected.
     pub fn detect_select_nested_cmp(&self) -> Option<(Vec<String>, crate::ir::BinOp, f64)> {
