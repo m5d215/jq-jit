@@ -2374,28 +2374,28 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref branches, ref else_output)) = cond_chain {
-                    use jq_jit::interpreter::BranchOutput;
+                    use jq_jit::interpreter::{BranchOutput, CondRhs};
                     use jq_jit::ir::BinOp;
                     // Collect all unique fields needed for conditions and field outputs
                     let mut all_fields: Vec<String> = Vec::new();
                     let mut field_idx = std::collections::HashMap::new();
+                    let ensure_field = |f: &String, all: &mut Vec<String>, idx: &mut std::collections::HashMap<String, usize>| {
+                        if !idx.contains_key(f) {
+                            idx.insert(f.clone(), all.len());
+                            all.push(f.clone());
+                        }
+                    };
                     for br in branches {
-                        if !field_idx.contains_key(&br.cond_field) {
-                            field_idx.insert(br.cond_field.clone(), all_fields.len());
-                            all_fields.push(br.cond_field.clone());
+                        ensure_field(&br.cond_field, &mut all_fields, &mut field_idx);
+                        if let CondRhs::Field(ref f) = br.cond_rhs {
+                            ensure_field(f, &mut all_fields, &mut field_idx);
                         }
                         if let BranchOutput::Field(ref f) = br.output {
-                            if !field_idx.contains_key(f) {
-                                field_idx.insert(f.clone(), all_fields.len());
-                                all_fields.push(f.clone());
-                            }
+                            ensure_field(f, &mut all_fields, &mut field_idx);
                         }
                     }
                     if let BranchOutput::Field(ref f) = else_output {
-                        if !field_idx.contains_key(f) {
-                            field_idx.insert(f.clone(), all_fields.len());
-                            all_fields.push(f.clone());
-                        }
+                        ensure_field(f, &mut all_fields, &mut field_idx);
                     }
                     let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
                     let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
@@ -2407,10 +2407,18 @@ fn real_main() {
                                 let idx = field_idx[&br.cond_field];
                                 let (vs, ve) = ranges_buf[idx];
                                 if let Some(val) = parse_json_num(&raw[vs..ve]) {
+                                    let rhs_val = match &br.cond_rhs {
+                                        CondRhs::Const(n) => *n,
+                                        CondRhs::Field(ref f) => {
+                                            let ri = field_idx[f];
+                                            let (rs, re) = ranges_buf[ri];
+                                            match parse_json_num(&raw[rs..re]) { Some(v) => v, None => { continue; } }
+                                        }
+                                    };
                                     let pass = match br.cond_op {
-                                        BinOp::Gt => val > br.cond_threshold, BinOp::Lt => val < br.cond_threshold,
-                                        BinOp::Ge => val >= br.cond_threshold, BinOp::Le => val <= br.cond_threshold,
-                                        BinOp::Eq => val == br.cond_threshold, BinOp::Ne => val != br.cond_threshold,
+                                        BinOp::Gt => val > rhs_val, BinOp::Lt => val < rhs_val,
+                                        BinOp::Ge => val >= rhs_val, BinOp::Le => val <= rhs_val,
+                                        BinOp::Eq => val == rhs_val, BinOp::Ne => val != rhs_val,
                                         _ => false,
                                     };
                                     if pass { output = Some(&br.output); break; }
@@ -3813,28 +3821,28 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some((ref branches, ref else_output)) = cond_chain {
-                use jq_jit::interpreter::BranchOutput;
+                use jq_jit::interpreter::{BranchOutput, CondRhs};
                 use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
                 let mut all_fields: Vec<String> = Vec::new();
                 let mut field_idx = std::collections::HashMap::new();
+                let ensure_field = |f: &String, all: &mut Vec<String>, idx: &mut std::collections::HashMap<String, usize>| {
+                    if !idx.contains_key(f) {
+                        idx.insert(f.clone(), all.len());
+                        all.push(f.clone());
+                    }
+                };
                 for br in branches {
-                    if !field_idx.contains_key(&br.cond_field) {
-                        field_idx.insert(br.cond_field.clone(), all_fields.len());
-                        all_fields.push(br.cond_field.clone());
+                    ensure_field(&br.cond_field, &mut all_fields, &mut field_idx);
+                    if let CondRhs::Field(ref f) = br.cond_rhs {
+                        ensure_field(f, &mut all_fields, &mut field_idx);
                     }
                     if let BranchOutput::Field(ref f) = br.output {
-                        if !field_idx.contains_key(f) {
-                            field_idx.insert(f.clone(), all_fields.len());
-                            all_fields.push(f.clone());
-                        }
+                        ensure_field(f, &mut all_fields, &mut field_idx);
                     }
                 }
                 if let BranchOutput::Field(ref f) = else_output {
-                    if !field_idx.contains_key(f) {
-                        field_idx.insert(f.clone(), all_fields.len());
-                        all_fields.push(f.clone());
-                    }
+                    ensure_field(f, &mut all_fields, &mut field_idx);
                 }
                 let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
                 let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
@@ -3846,10 +3854,18 @@ fn real_main() {
                             let idx = field_idx[&br.cond_field];
                             let (vs, ve) = ranges_buf[idx];
                             if let Some(val) = parse_json_num(&raw[vs..ve]) {
+                                let rhs_val = match &br.cond_rhs {
+                                    CondRhs::Const(n) => *n,
+                                    CondRhs::Field(ref f) => {
+                                        let ri = field_idx[f];
+                                        let (rs, re) = ranges_buf[ri];
+                                        match parse_json_num(&raw[rs..re]) { Some(v) => v, None => { continue; } }
+                                    }
+                                };
                                 let pass = match br.cond_op {
-                                    BinOp::Gt => val > br.cond_threshold, BinOp::Lt => val < br.cond_threshold,
-                                    BinOp::Ge => val >= br.cond_threshold, BinOp::Le => val <= br.cond_threshold,
-                                    BinOp::Eq => val == br.cond_threshold, BinOp::Ne => val != br.cond_threshold,
+                                    BinOp::Gt => val > rhs_val, BinOp::Lt => val < rhs_val,
+                                    BinOp::Ge => val >= rhs_val, BinOp::Le => val <= rhs_val,
+                                    BinOp::Eq => val == rhs_val, BinOp::Ne => val != rhs_val,
                                     _ => false,
                                 };
                                 if pass { output = Some(&br.output); break; }

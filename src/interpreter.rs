@@ -66,12 +66,19 @@ pub enum BranchOutput {
     Field(String),
 }
 
-/// One branch in a conditional chain: if .field cmp N then output.
+/// Right-hand side of a condition: either a constant or a field reference.
+#[derive(Debug, Clone)]
+pub enum CondRhs {
+    Const(f64),
+    Field(String),
+}
+
+/// One branch in a conditional chain: if .field cmp (N | .field2) then output.
 #[derive(Debug, Clone)]
 pub struct CondBranch {
     pub cond_field: String,
     pub cond_op: crate::ir::BinOp,
-    pub cond_threshold: f64,
+    pub cond_rhs: CondRhs,
     pub output: BranchOutput,
 }
 
@@ -1728,7 +1735,7 @@ impl Filter {
             }
         };
 
-        let extract_cond = |cond: &Expr| -> Option<(String, BinOp, f64)> {
+        let extract_cond = |cond: &Expr| -> Option<(String, BinOp, CondRhs)> {
             if let Expr::BinOp { op, lhs, rhs } = cond {
                 if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
                     return None;
@@ -1736,8 +1743,17 @@ impl Filter {
                 if let Expr::Index { expr: base, key } = lhs.as_ref() {
                     if !matches!(base.as_ref(), Expr::Input) { return None; }
                     if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        // .field cmp N
                         if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
-                            return Some((field.clone(), *op, *n));
+                            return Some((field.clone(), *op, CondRhs::Const(*n)));
+                        }
+                        // .field1 cmp .field2
+                        if let Expr::Index { expr: base2, key: key2 } = rhs.as_ref() {
+                            if matches!(base2.as_ref(), Expr::Input) {
+                                if let Expr::Literal(Literal::Str(f2)) = key2.as_ref() {
+                                    return Some((field.clone(), *op, CondRhs::Field(f2.clone())));
+                                }
+                            }
                         }
                     }
                 }
@@ -1750,16 +1766,17 @@ impl Filter {
         let mut current = expr;
         loop {
             if let Expr::IfThenElse { cond, then_branch, else_branch } = current {
-                let (field, op, threshold) = extract_cond(cond)?;
+                let (field, op, rhs) = extract_cond(cond)?;
                 let output = expr_to_output(then_branch)?;
-                branches.push(CondBranch { cond_field: field, cond_op: op, cond_threshold: threshold, output });
+                branches.push(CondBranch { cond_field: field, cond_op: op, cond_rhs: rhs, output });
                 current = else_branch;
             } else {
                 let else_output = expr_to_output(current)?;
                 // Only use this if it adds value over detect_cmp_branch_literals
                 let has_field_output = branches.iter().any(|b| matches!(b.output, BranchOutput::Field(_)))
                     || matches!(else_output, BranchOutput::Field(_));
-                if branches.len() < 2 && !has_field_output { return None; }
+                let has_field_rhs = branches.iter().any(|b| matches!(b.cond_rhs, CondRhs::Field(_)));
+                if branches.len() < 2 && !has_field_output && !has_field_rhs { return None; }
                 return Some((branches, else_output));
             }
         }
