@@ -1451,6 +1451,13 @@ pub fn json_to_entries_raw(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {
 /// More efficient than calling json_object_get_num twice (single scan).
 pub fn json_object_get_two_nums(b: &[u8], pos: usize, field1: &str, field2: &str) -> Option<(f64, f64)> {
     if pos >= b.len() || b[pos] != b'{' { return None; }
+    // Same field optimization: just need one lookup
+    if field1 == field2 {
+        if let Some(v) = json_object_get_num(b, pos, field1) {
+            return Some((v, v));
+        }
+        return None;
+    }
     let f1 = field1.as_bytes();
     let f2 = field2.as_bytes();
     let mut val1: Option<f64> = None;
