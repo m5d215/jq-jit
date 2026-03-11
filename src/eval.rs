@@ -685,10 +685,21 @@ fn expr_uses_outer_input(expr: &Expr) -> bool {
         Expr::AllShort { generator, .. } | Expr::AnyShort { generator, .. } => {
             expr_uses_outer_input(generator)
         }
+        Expr::ObjectConstruct { pairs } => {
+            pairs.iter().any(|(k, v)| expr_uses_outer_input(k) || expr_uses_outer_input(v))
+        }
+        Expr::StringInterpolation { parts } => {
+            parts.iter().any(|p| matches!(p, StringPart::Expr(e) if expr_uses_outer_input(e)))
+        }
+        Expr::Slice { expr: e, from, to } => {
+            expr_uses_outer_input(e)
+                || from.as_ref().is_some_and(|f| expr_uses_outer_input(f))
+                || to.as_ref().is_some_and(|t| expr_uses_outer_input(t))
+        }
         // Conservative: assume these use input
-        Expr::FuncCall { .. } | Expr::CallBuiltin { .. } | Expr::ObjectConstruct { .. }
-        | Expr::StringInterpolation { .. } | Expr::Label { .. } | Expr::Break { .. }
-        | Expr::Error { .. } | Expr::ClosureOp { .. } | Expr::Slice { .. }
+        Expr::FuncCall { .. } | Expr::CallBuiltin { .. }
+        | Expr::Label { .. } | Expr::Break { .. }
+        | Expr::Error { .. } | Expr::ClosureOp { .. }
         | Expr::RegexTest { .. } | Expr::RegexMatch { .. } | Expr::RegexCapture { .. }
         | Expr::RegexScan { .. } | Expr::RegexSub { .. } | Expr::RegexGsub { .. }
         | Expr::AlternativeDestructure { .. } => true,
@@ -2298,11 +2309,33 @@ pub fn eval(
         }
 
         Expr::SetPath { path, value } => {
-            eval(path, input.clone(), env, &mut |pv| {
-                eval(value, input.clone(), env, &mut |v| {
-                    cb(crate::runtime::rt_setpath(&input, &pv, &v)?)
+            if !expr_uses_outer_input(path) && !expr_uses_outer_input(value) {
+                // path and value don't reference `.` — avoid cloning input so
+                // Rc refcount stays 1 and rt_setpath_mut can mutate in-place.
+                let pv = {
+                    let mut r = Value::Null;
+                    eval(path, Value::Null, env, &mut |v| { r = v; Ok(true) })?;
+                    r
+                };
+                let val = {
+                    let mut r = Value::Null;
+                    eval(value, Value::Null, env, &mut |v| { r = v; Ok(true) })?;
+                    r
+                };
+                let mut base = input;
+                if let Value::Arr(ref p) = pv {
+                    crate::runtime::rt_setpath_mut(&mut base, p, val)?;
+                    cb(base)
+                } else {
+                    cb(crate::runtime::rt_setpath(&base, &pv, &val)?)
+                }
+            } else {
+                eval(path, input.clone(), env, &mut |pv| {
+                    eval(value, input.clone(), env, &mut |v| {
+                        cb(crate::runtime::rt_setpath(&input, &pv, &v)?)
+                    })
                 })
-            })
+            }
         }
 
         Expr::GetPath { path } => {

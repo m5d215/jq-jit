@@ -1754,8 +1754,11 @@ pub fn rt_setpath_mut(v: &mut Value, path: &[Value], val: Value) -> Result<()> {
                 }
                 Ok(())
             } else {
-                bail!("Cannot index {} with number", v.type_name());
+                bail!("Cannot index {} with number ({})", v.type_name(), crate::value::format_jq_number(*n));
             }
+        }
+        Value::Arr(_) => {
+            bail!("Cannot update field at array index of array");
         }
         _ => bail!("Cannot set path with {} key", key.type_name()),
     }
