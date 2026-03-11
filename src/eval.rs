@@ -1912,6 +1912,16 @@ pub fn eval(
         }
 
         Expr::Reduce { source, init, var_index, acc_index, update } => {
+            // Unwrap `. |= f` and `. = f` to just `f` — path `.` is identity.
+            let update = match update.as_ref() {
+                Expr::Update { path_expr, update_expr }
+                    if matches!(path_expr.as_ref(), Expr::Input) => {
+                        update_expr.as_ref()
+                    },
+                Expr::Assign { path_expr, value_expr }
+                    if matches!(path_expr.as_ref(), Expr::Input) => value_expr.as_ref(),
+                _ => update.as_ref(),
+            };
             let mut acc = if let Ok(v) = eval_one(init, &input, env) {
                 v
             } else {
@@ -1927,7 +1937,7 @@ pub fn eval(
             // update = LetBinding(tmp, Input, LetBinding(a, Index(tmp, 0), LetBinding(b, Index(tmp, 1), inner)))
             // where inner doesn't use tmp and body doesn't use outer input.
             let fused = if !acc_used_in_update {
-                if let Expr::LetBinding { var_index: tmp_vi, value, body } = update.as_ref() {
+                if let Expr::LetBinding { var_index: tmp_vi, value, body } = update {
                     if matches!(value.as_ref(), Expr::Input) && !expr_uses_outer_input(body) {
                         let mut bindings: Vec<(u16, usize)> = Vec::new();
                         let mut inner = body.as_ref();
@@ -1993,12 +2003,27 @@ pub fn eval(
                 cb(acc)
             } else if !acc_used_in_update {
                 // Detect `. + rhs` pattern where rhs doesn't use accumulator — in-place merge
-                let add_inplace = if let Expr::BinOp { op: BinOp::Add, lhs, rhs } = update.as_ref() {
+                // Also detect `+= rhs` which is: LetBinding { var, value: rhs, body: Update { path: ., update: . + LoadVar(var) } }
+                let add_inplace = if let Expr::BinOp { op: BinOp::Add, lhs, rhs } = update {
                     if matches!(lhs.as_ref(), Expr::Input) && !expr_uses_outer_input(rhs) {
-                        Some(rhs.as_ref())
+                        Some((rhs.as_ref(), None::<u16>))
+                    } else { None }
+                } else if let Expr::LetBinding { var_index: rhs_var, value: rhs_value, body } = update {
+                    // `. += rhs` pattern
+                    if let Expr::Update { path_expr, update_expr } = body.as_ref() {
+                        if matches!(path_expr.as_ref(), Expr::Input) {
+                            if let Expr::BinOp { op: BinOp::Add, lhs, rhs } = update_expr.as_ref() {
+                                if matches!(lhs.as_ref(), Expr::Input)
+                                    && matches!(rhs.as_ref(), Expr::LoadVar { var_index: v } if *v == *rhs_var)
+                                    && !expr_uses_outer_input(rhs_value)
+                                {
+                                    Some((rhs_value.as_ref(), Some(*rhs_var)))
+                                } else { None }
+                            } else { None }
+                        } else { None }
                     } else { None }
                 } else { None };
-                if let Some(add_rhs) = add_inplace {
+                if let Some((add_rhs, _temp_var)) = add_inplace {
                     eval(source, input.clone(), env, &mut |val| {
                         let old_var = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], val);
                         let rhs_val = {

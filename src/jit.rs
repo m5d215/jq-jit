@@ -1462,9 +1462,23 @@ impl Flattener {
                 );
 
                 // Detect accumulator-add pattern: reduce ... (init; . + rhs) — in-place via TakeVar + AddMove
+                // Also detect `+= rhs` which is: LetBinding { var, value: rhs, body: Update { path: ., update: . + LoadVar(var) } }
                 let acc_add_rhs = if let Expr::BinOp { op, lhs, rhs } = update.as_ref() {
                     if matches!(op, BinOp::Add) && matches!(lhs.as_ref(), Expr::Input) && is_scalar(rhs) {
                         Some(rhs.as_ref())
+                    } else { None }
+                } else if let Expr::LetBinding { var_index: rhs_var, value: rhs_value, body } = update.as_ref() {
+                    if let Expr::Update { path_expr, update_expr } = body.as_ref() {
+                        if matches!(path_expr.as_ref(), Expr::Input) {
+                            if let Expr::BinOp { op: BinOp::Add, lhs, rhs } = update_expr.as_ref() {
+                                if matches!(lhs.as_ref(), Expr::Input)
+                                    && matches!(rhs.as_ref(), Expr::LoadVar { var_index: v } if *v == *rhs_var)
+                                    && is_scalar(rhs_value)
+                                {
+                                    Some(rhs_value.as_ref())
+                                } else { None }
+                            } else { None }
+                        } else { None }
                     } else { None }
                 } else { None };
 
@@ -3636,9 +3650,23 @@ impl Flattener {
         );
 
         // Detect accumulator-add pattern: reduce ... (init; . + rhs)
+        // Also detect `+= rhs` which is: LetBinding { var, value: rhs, body: Update { path: ., update: . + LoadVar(var) } }
         let acc_add_rhs = if let Expr::BinOp { op, lhs, rhs } = update {
             if matches!(op, BinOp::Add) && matches!(lhs.as_ref(), Expr::Input) && is_scalar(rhs) {
                 Some(rhs.as_ref())
+            } else { None }
+        } else if let Expr::LetBinding { var_index: rhs_var, value: rhs_value, body } = update {
+            if let Expr::Update { path_expr, update_expr } = body.as_ref() {
+                if matches!(path_expr.as_ref(), Expr::Input) {
+                    if let Expr::BinOp { op: BinOp::Add, lhs, rhs } = update_expr.as_ref() {
+                        if matches!(lhs.as_ref(), Expr::Input)
+                            && matches!(rhs.as_ref(), Expr::LoadVar { var_index: v } if *v == *rhs_var)
+                            && is_scalar(rhs_value)
+                        {
+                            Some(rhs_value.as_ref())
+                        } else { None }
+                    } else { None }
+                } else { None }
             } else { None }
         } else { None };
 
