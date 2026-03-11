@@ -470,7 +470,7 @@ fn real_main() {
     let field_str_concat = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() {
         filter.detect_field_str_concat()
     } else { None };
-    let select_cmp = if use_compact_buf && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() && field_str_concat.is_none() {
+    let select_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() && field_str_concat.is_none() {
         filter.detect_select_field_cmp()
     } else { None };
     let select_str = if use_compact_buf && !exit_status && select_cmp.is_none() && field_access.is_none() {
@@ -1890,7 +1890,10 @@ fn real_main() {
                                 _ => false,
                             };
                             if pass {
-                                if is_json_compact(raw) {
+                                if use_pretty_buf {
+                                    push_json_pretty_raw(&mut compact_buf, raw, 2, false);
+                                    compact_buf.push(b'\n');
+                                } else if is_json_compact(raw) {
                                     compact_buf.extend_from_slice(raw);
                                     compact_buf.push(b'\n');
                                 } else {
@@ -3241,7 +3244,10 @@ fn real_main() {
                             _ => false,
                         };
                         if pass {
-                            if is_json_compact(raw) {
+                            if use_pretty_buf {
+                                push_json_pretty_raw(&mut compact_buf, raw, 2, false);
+                                compact_buf.push(b'\n');
+                            } else if is_json_compact(raw) {
                                 compact_buf.extend_from_slice(raw);
                                 compact_buf.push(b'\n');
                             } else {
