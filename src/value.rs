@@ -1257,6 +1257,56 @@ pub fn json_object_merge_literal(b: &[u8], pos: usize, merge_pairs: &[(String, V
         buf.push(b'}');
         return true;
     }
+    // Fast path for compact input: if no merge key appears in the raw bytes,
+    // skip key-by-key scanning and just copy-and-append.
+    if is_json_compact(&b[pos..]) {
+        // Check if any merge key pattern ("key":) appears in the object bytes
+        let obj_end = b.len();
+        let mut any_key_found = false;
+        for (mk, _) in merge_pairs.iter() {
+            // Build search pattern "key":
+            let kb = mk.as_bytes();
+            // Quick length check: need at least "k": = 4+key_len bytes
+            if kb.len() + 3 <= obj_end {
+                // Search for "key": in the raw bytes
+                let mut search_pos = pos + 1;
+                while search_pos + kb.len() + 2 < obj_end {
+                    if let Some(p) = memchr::memchr(b'"', &b[search_pos..obj_end]) {
+                        let abs = search_pos + p;
+                        if abs + 1 + kb.len() + 1 <= obj_end
+                            && &b[abs + 1..abs + 1 + kb.len()] == kb
+                            && b[abs + 1 + kb.len()] == b'"'
+                        {
+                            any_key_found = true;
+                            break;
+                        }
+                        search_pos = abs + 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            if any_key_found { break; }
+        }
+        if !any_key_found {
+            // No merge key exists in input — copy object, append merge pairs
+            // Find the closing } (last byte for compact NDJSON)
+            let mut close = obj_end - 1;
+            while close > pos && b[close] != b'}' { close -= 1; }
+            if b[close] == b'}' {
+                buf.extend_from_slice(&b[pos..close]);
+                for (mk, mv) in merge_pairs.iter() {
+                    buf.push(b',');
+                    buf.push(b'"');
+                    buf.extend_from_slice(mk.as_bytes());
+                    buf.extend_from_slice(b"\":");
+                    buf.extend_from_slice(mv);
+                }
+                buf.push(b'}');
+                return true;
+            }
+        }
+    }
     // Single-pass: scan keys, write output directly (no Vec allocations)
     let mut merge_emitted: u64 = 0;
     buf.push(b'{');

@@ -3432,24 +3432,23 @@ fn real_main() {
                         build_obj_key_prefixes(cremap.iter().map(|(k, _)| k.as_str()))
                     };
                     let obj_close: &[u8] = if use_pretty_buf { b"\n}\n" } else { b"}\n" };
-                    let sel_idx = field_idx[sel_field.as_str()];
                     let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
-                            // Check select condition from extracted field
-                            let (vs, ve) = ranges_buf[sel_idx];
-                            if let Some(val) = parse_json_num(&raw[vs..ve]) {
-                                let pass = match sel_op {
-                                    BinOp::Gt => val > threshold,
-                                    BinOp::Lt => val < threshold,
-                                    BinOp::Ge => val >= threshold,
-                                    BinOp::Le => val <= threshold,
-                                    BinOp::Eq => val == threshold,
-                                    BinOp::Ne => val != threshold,
-                                    _ => false,
-                                };
-                                if pass {
+                        // Lazy fetch: check select condition first with fast single-field lookup
+                        if let Some(val) = json_object_get_num(raw, 0, sel_field) {
+                            let pass = match sel_op {
+                                BinOp::Gt => val > threshold,
+                                BinOp::Lt => val < threshold,
+                                BinOp::Ge => val >= threshold,
+                                BinOp::Le => val <= threshold,
+                                BinOp::Eq => val == threshold,
+                                BinOp::Ne => val != threshold,
+                                _ => false,
+                            };
+                            if pass {
+                                // Only now extract all remap fields
+                                if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
                                     for (i, res) in resolved.iter().enumerate() {
                                         compact_buf.extend_from_slice(&key_prefixes[i]);
                                         emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
@@ -5400,20 +5399,20 @@ fn real_main() {
                     build_obj_key_prefixes(cremap.iter().map(|(k, _)| k.as_str()))
                 };
                 let obj_close: &[u8] = if use_pretty_buf { b"\n}\n" } else { b"}\n" };
-                let sel_idx = field_idx[sel_field.as_str()];
                 let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
-                        let (vs, ve) = ranges_buf[sel_idx];
-                        if let Some(val) = parse_json_num(&raw[vs..ve]) {
-                            let pass = match sel_op {
-                                BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
-                                BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
-                                BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
-                                _ => false,
-                            };
-                            if pass {
+                    // Lazy fetch: check select condition first with fast single-field lookup
+                    if let Some(val) = json_object_get_num(raw, 0, sel_field) {
+                        let pass = match sel_op {
+                            BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
+                            BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
+                            BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
+                            _ => false,
+                        };
+                        if pass {
+                            // Only now extract all remap fields
+                            if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
                                 for (i, res) in resolved.iter().enumerate() {
                                     compact_buf.extend_from_slice(&key_prefixes[i]);
                                     emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
