@@ -53,6 +53,80 @@ pub struct Filter {
     lib_dirs: Vec<String>,
 }
 
+/// Serialize a constant expression to JSON bytes. Returns false if expression is not fully constant.
+fn push_const_json(expr: &crate::ir::Expr, buf: &mut Vec<u8>) -> bool {
+    use crate::ir::{Expr, Literal};
+    match expr {
+        Expr::Literal(Literal::Null) => { buf.extend_from_slice(b"null"); true }
+        Expr::Literal(Literal::True) => { buf.extend_from_slice(b"true"); true }
+        Expr::Literal(Literal::False) => { buf.extend_from_slice(b"false"); true }
+        Expr::Literal(Literal::Num(_, Some(raw))) => { buf.extend_from_slice(raw.as_bytes()); true }
+        Expr::Literal(Literal::Num(n, None)) => {
+            crate::value::push_jq_number_bytes(buf, *n);
+            true
+        }
+        Expr::Literal(Literal::Str(s)) => {
+            buf.push(b'"');
+            for &b in s.as_bytes() {
+                match b {
+                    b'"' => buf.extend_from_slice(b"\\\""),
+                    b'\\' => buf.extend_from_slice(b"\\\\"),
+                    b'\n' => buf.extend_from_slice(b"\\n"),
+                    b'\r' => buf.extend_from_slice(b"\\r"),
+                    b'\t' => buf.extend_from_slice(b"\\t"),
+                    0x08 => buf.extend_from_slice(b"\\b"),
+                    0x0c => buf.extend_from_slice(b"\\f"),
+                    c if c < 0x20 => {
+                        let hex = format!("\\u{:04x}", c);
+                        buf.extend_from_slice(hex.as_bytes());
+                    },
+                    _ => buf.push(b),
+                }
+            }
+            buf.push(b'"');
+            true
+        }
+        Expr::ObjectConstruct { pairs } => {
+            buf.push(b'{');
+            for (i, (key, val)) in pairs.iter().enumerate() {
+                if i > 0 { buf.push(b','); }
+                // Key must be a literal string
+                if let Expr::Literal(Literal::Str(k)) = key {
+                    buf.push(b'"');
+                    buf.extend_from_slice(k.as_bytes());
+                    buf.push(b'"');
+                } else {
+                    return false;
+                }
+                buf.push(b':');
+                if !push_const_json(val, buf) { return false; }
+            }
+            buf.push(b'}');
+            true
+        }
+        Expr::Collect { generator } => {
+            // [expr] — could be a Comma list of constants
+            buf.push(b'[');
+            if !push_const_comma_list(generator, buf, true) { return false; }
+            buf.push(b']');
+            true
+        }
+        _ => false,
+    }
+}
+
+fn push_const_comma_list(expr: &crate::ir::Expr, buf: &mut Vec<u8>, first: bool) -> bool {
+    use crate::ir::Expr;
+    if let Expr::Comma { left, right } = expr {
+        if !push_const_comma_list(left, buf, first) { return false; }
+        if !push_const_comma_list(right, buf, false) { return false; }
+        true
+    } else {
+        if !first { buf.push(b','); }
+        push_const_json(expr, buf)
+    }
+}
+
 impl Filter {
     /// Get the inner expression for pattern detection, unwrapping top-level
     /// `try EXPR` (TryCatch with Empty catch) since the raw byte fast paths
@@ -265,41 +339,12 @@ impl Filter {
     /// Detect a literal filter that doesn't reference input.
     /// Returns the compact JSON bytes for the literal, or None.
     pub fn detect_literal_output(&self) -> Option<Vec<u8>> {
-        use crate::ir::{Expr, Literal};
         let expr = self.detect_expr()?;
-        match expr {
-            Expr::Literal(Literal::Null) => Some(b"null".to_vec()),
-            Expr::Literal(Literal::True) => Some(b"true".to_vec()),
-            Expr::Literal(Literal::False) => Some(b"false".to_vec()),
-            Expr::Literal(Literal::Num(_, Some(raw))) => Some(raw.as_bytes().to_vec()),
-            Expr::Literal(Literal::Num(n, None)) => {
-                let mut buf = Vec::new();
-                crate::value::push_jq_number_bytes(&mut buf, *n);
-                Some(buf)
-            }
-            Expr::Literal(Literal::Str(s)) => {
-                let mut buf = Vec::new();
-                buf.push(b'"');
-                for &b in s.as_bytes() {
-                    match b {
-                        b'"' => buf.extend_from_slice(b"\\\""),
-                        b'\\' => buf.extend_from_slice(b"\\\\"),
-                        b'\n' => buf.extend_from_slice(b"\\n"),
-                        b'\r' => buf.extend_from_slice(b"\\r"),
-                        b'\t' => buf.extend_from_slice(b"\\t"),
-                        0x08 => buf.extend_from_slice(b"\\b"),
-                        0x0c => buf.extend_from_slice(b"\\f"),
-                        c if c < 0x20 => {
-                            let hex = format!("\\u{:04x}", c);
-                            buf.extend_from_slice(hex.as_bytes());
-                        },
-                        _ => buf.push(b),
-                    }
-                }
-                buf.push(b'"');
-                Some(buf)
-            }
-            _ => None,
+        let mut buf = Vec::new();
+        if push_const_json(expr, &mut buf) {
+            Some(buf)
+        } else {
+            None
         }
     }
 
