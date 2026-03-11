@@ -101,6 +101,7 @@ TESTS=(
     'split|first:-c:.name | split("_") | .[0]'
     'slice[0..5]:-c:.name[0:5]'
     'dynkey {(.name)}:-c:{(.name): .x}'
+    '.x += 1:-c:.x += 1'
 )
 
 for test in "${TESTS[@]}"; do
