@@ -962,6 +962,40 @@ impl Filter {
         None
     }
 
+    /// Detect chained field arithmetic: `.field op1 N1 op2 N2 ...` (e.g. `.x * 2 + 1`).
+    /// Returns (field_name, [(op, val), ...]) if detected. Only matches chains ≥2 ops.
+    pub fn detect_field_arith_chain(&self) -> Option<(String, Vec<(crate::ir::BinOp, f64)>)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        // Walk the left-nested BinOp chain: BinOp(op2, BinOp(op1, .field, N1), N2)
+        let mut ops = Vec::new();
+        let mut cur = expr;
+        loop {
+            if let Expr::BinOp { op, lhs, rhs } = cur {
+                if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) { return None; }
+                if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                    if matches!(op, BinOp::Div | BinOp::Mod) && *n == 0.0 { return None; }
+                    ops.push((*op, *n));
+                    cur = lhs.as_ref();
+                } else {
+                    return None;
+                }
+            } else {
+                break;
+            }
+        }
+        if ops.len() < 2 { return None; } // Single op is handled by detect_field_binop_const_unary
+        ops.reverse(); // Inner-first to outer → execution order
+        // cur should be .field
+        if let Expr::Index { expr: base, key } = cur {
+            if !matches!(base.as_ref(), Expr::Input) { return None; }
+            if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                return Some((field.clone(), ops));
+            }
+        }
+        None
+    }
+
     /// Detect string interpolation with field accesses: `"\(.f1)lit\(.f2)..."`.
     /// Returns Vec<(is_literal, content)> where content is either the literal text
     /// or the field name for interpolation parts.
