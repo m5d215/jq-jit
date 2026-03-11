@@ -2513,15 +2513,22 @@ impl Filter {
     /// Returns the set of input fields accessed by the filter, if it can be statically determined.
     /// Returns None if the filter might access any/all fields (e.g., identity, iteration).
     pub fn needed_input_fields(&self) -> Option<Vec<String>> {
-        if let Some((ref expr, _)) = self.parsed {
-            let mut fields = Vec::new();
-            if collect_input_fields(expr, &mut fields) {
-                // Deduplicate
-                fields.sort();
-                fields.dedup();
-                if !fields.is_empty() {
-                    return Some(fields);
-                }
+        // Use simplified expression (beta-reduced) if available, since the raw parsed
+        // expression has Input references that refer to pipe inputs, not the original input.
+        // After beta-reduction, all Input references refer to the actual top-level input.
+        let expr = if let Some(ref simplified) = self.simplified {
+            simplified
+        } else if let Some((ref expr, _)) = self.parsed {
+            expr
+        } else {
+            return None;
+        };
+        let mut fields = Vec::new();
+        if collect_input_fields(expr, &mut fields) {
+            fields.sort();
+            fields.dedup();
+            if !fields.is_empty() {
+                return Some(fields);
             }
         }
         None
