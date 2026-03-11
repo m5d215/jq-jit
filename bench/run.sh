@@ -103,6 +103,10 @@ TESTS=(
     'dynkey {(.name)}:-c:{(.name): .x}'
     '.x += 1:-c:.x += 1'
     '{a}+{b} merge:-c:{a: .name} + {b: .x}'
+    '.x*2+1:-c:.x * 2 + 1'
+    '.x+.y*2:-c:.x + .y * 2'
+    '.x > .y:-c:.x > .y'
+    'to_entries|len:-c:to_entries | length'
 )
 
 for test in "${TESTS[@]}"; do
