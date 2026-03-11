@@ -1812,14 +1812,15 @@ fn skip_json_value(b: &[u8], pos: usize) -> Result<usize> {
         b'f' => { if b.get(pos..pos+5) == Some(b"false") { Ok(pos + 5) } else { bail!("Invalid JSON at position {}", pos) } }
         b'"' => {
             let mut i = pos + 1;
-            while i < b.len() {
-                match b[i] {
-                    b'"' => return Ok(i + 1),
-                    b'\\' => i += 2,
-                    _ => i += 1,
+            loop {
+                match memchr::memchr2(b'"', b'\\', &b[i..]) {
+                    Some(offset) => {
+                        if b[i + offset] == b'"' { return Ok(i + offset + 1); }
+                        i += offset + 2; // skip backslash + escaped char
+                    }
+                    None => bail!("Unterminated string"),
                 }
             }
-            bail!("Unterminated string")
         }
         b'[' => {
             let mut i = skip_ws(b, pos + 1);

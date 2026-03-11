@@ -125,6 +125,11 @@ TESTS=(
     'sel(len>5)|.x:-c:select(.name | length > 5) | .x'
     'if .x>.y .name:-c:if .x > .y then .name else .x end'
     'sel(.x>.y)|.name:-c:select(.x > .y) | .name'
+    '.x*2|tostring:-c:.x * 2 | tostring'
+    '.x*.x+1:-c:.x | . * . + 1'
+    '{k:.name,v:tostr}:-c:{key:.name,val:(.x|tostring)}'
+    'str add chain:-c:.name + ":" + (.x|tostring)'
+    'if>.y .name|empty:-c:if .x > .y then .name else empty end'
 )
 
 for test in "${TESTS[@]}"; do
