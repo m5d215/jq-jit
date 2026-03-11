@@ -2085,31 +2085,34 @@ fn real_main() {
                     })
                 } else if let Some((ref nfields, ref arith)) = numeric_expr {
                     let nf_count = nfields.len();
+                    // Hoist allocations outside the hot loop
+                    let field_refs: Vec<&str> = nfields.iter().map(|s| s.as_str()).collect();
+                    let mut ranges_buf = vec![(0usize, 0usize); nf_count];
+                    let mut vals_buf: Vec<f64> = vec![0.0; nf_count];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        let got = if nf_count == 1 {
-                            json_object_get_num(raw, 0, &nfields[0]).map(|v| vec![v])
+                        let ok = if nf_count == 1 {
+                            if let Some(v) = json_object_get_num(raw, 0, &nfields[0]) {
+                                vals_buf[0] = v; true
+                            } else { false }
                         } else if nf_count == 2 {
-                            json_object_get_two_nums(raw, 0, &nfields[0], &nfields[1])
-                                .map(|(a, b)| vec![a, b])
+                            if let Some((a, b)) = json_object_get_two_nums(raw, 0, &nfields[0], &nfields[1]) {
+                                vals_buf[0] = a; vals_buf[1] = b; true
+                            } else { false }
                         } else {
-                            // General N-field path: extract byte ranges then parse
-                            let field_refs: Vec<&str> = nfields.iter().map(|s| s.as_str()).collect();
-                            let mut ranges = vec![(0usize, 0usize); nfields.len()];
-                            if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges) {
-                                let mut vals = Vec::with_capacity(nfields.len());
-                                let mut ok = true;
-                                for &(s, e) in &ranges {
+                            if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                                let mut all_ok = true;
+                                for (i, &(s, e)) in ranges_buf.iter().enumerate() {
                                     match fast_float::parse::<f64, _>(unsafe { std::str::from_utf8_unchecked(&raw[s..e]) }) {
-                                        Ok(n) => vals.push(n),
-                                        Err(_) => { ok = false; break; }
+                                        Ok(n) => vals_buf[i] = n,
+                                        Err(_) => { all_ok = false; break; }
                                     }
                                 }
-                                if ok { Some(vals) } else { None }
-                            } else { None }
+                                all_ok
+                            } else { false }
                         };
-                        if let Some(vals) = got {
-                            let result = arith.eval(&vals);
+                        if ok {
+                            let result = arith.eval(&vals_buf);
                             push_jq_number_bytes(&mut compact_buf, result);
                             compact_buf.push(b'\n');
                         } else {
@@ -3444,11 +3447,23 @@ fn real_main() {
                     })
                 } else if let Some((ref sel_field, ref op, threshold, ref pairs)) = select_cmp_remap {
                     use jq_jit::ir::BinOp;
-                    let all_fields: Vec<&str> = {
-                        let mut v: Vec<&str> = vec![sel_field.as_str()];
+                    // Collect unique remap source fields (excluding sel_field which is checked via get_num)
+                    let remap_fields: Vec<&str> = {
+                        let mut v: Vec<&str> = Vec::new();
                         for (_, src) in pairs { if !v.contains(&src.as_str()) { v.push(src.as_str()); } }
                         v
                     };
+                    // Pre-compute output indices: for each pair, the index into remap_fields
+                    let pair_indices: Vec<usize> = pairs.iter().map(|(_, src)| {
+                        remap_fields.iter().position(|&f| f == src.as_str()).unwrap()
+                    }).collect();
+                    let key_prefixes = if use_pretty_buf {
+                        build_obj_key_prefixes_pretty(pairs.iter().map(|(k, _)| k.as_str()))
+                    } else {
+                        build_obj_key_prefixes(pairs.iter().map(|(k, _)| k.as_str()))
+                    };
+                    let obj_close: &[u8] = if use_pretty_buf { b"\n}\n" } else { b"}\n" };
+                    let mut ranges_buf = vec![(0usize, 0usize); remap_fields.len()];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         if let Some(val) = json_object_get_num(raw, 0, sel_field) {
@@ -3462,46 +3477,22 @@ fn real_main() {
                                 _ => false,
                             };
                             if pass {
-                                // Extract all needed fields raw bytes
-                                let fields_raw: Vec<Option<(usize, usize)>> = all_fields.iter()
-                                    .map(|f| json_object_get_field_raw(raw, 0, f))
-                                    .collect();
-                                if use_pretty_buf {
-                                    compact_buf.extend_from_slice(b"{\n");
-                                    for (i, (key, src)) in pairs.iter().enumerate() {
-                                        if i > 0 { compact_buf.extend_from_slice(b",\n"); }
-                                        compact_buf.extend_from_slice(b"  \"");
-                                        compact_buf.extend_from_slice(key.as_bytes());
-                                        compact_buf.extend_from_slice(b"\": ");
-                                        let idx = all_fields.iter().position(|&f| f == src.as_str()).unwrap();
-                                        if let Some((vs, ve)) = fields_raw[idx] {
-                                            let val = &raw[vs..ve];
-                                            if val[0] == b'{' || val[0] == b'[' {
-                                                push_json_pretty_raw_at(&mut compact_buf, val, 2, false, 1);
+                                if json_object_get_fields_raw_buf(raw, 0, &remap_fields, &mut ranges_buf) {
+                                    for (i, &idx) in pair_indices.iter().enumerate() {
+                                        compact_buf.extend_from_slice(&key_prefixes[i]);
+                                        let (vs, ve) = ranges_buf[idx];
+                                        if use_pretty_buf {
+                                            let val_bytes = &raw[vs..ve];
+                                            if val_bytes[0] == b'{' || val_bytes[0] == b'[' {
+                                                push_json_pretty_raw_at(&mut compact_buf, val_bytes, 2, false, 1);
                                             } else {
-                                                compact_buf.extend_from_slice(val);
+                                                compact_buf.extend_from_slice(val_bytes);
                                             }
                                         } else {
-                                            compact_buf.extend_from_slice(b"null");
-                                        }
-                                    }
-                                    compact_buf.extend_from_slice(b"\n}\n");
-                                } else {
-                                    compact_buf.push(b'{');
-                                    for (i, (key, src)) in pairs.iter().enumerate() {
-                                        if i > 0 { compact_buf.push(b','); }
-                                        compact_buf.push(b'"');
-                                        compact_buf.extend_from_slice(key.as_bytes());
-                                        compact_buf.extend_from_slice(b"\":");
-                                        let idx = all_fields.iter().position(|&f| f == src.as_str()).unwrap();
-                                        if let Some((vs, ve)) = fields_raw[idx] {
                                             compact_buf.extend_from_slice(&raw[vs..ve]);
-                                        } else {
-                                            compact_buf.extend_from_slice(b"null");
                                         }
                                     }
-                                    compact_buf.push(b'}');
-                                    compact_buf.push(b'\n');
+                                    compact_buf.extend_from_slice(obj_close);
                                 }
                             }
                         }
@@ -5510,11 +5501,21 @@ fn real_main() {
             } else if let Some((ref sel_field, ref op, threshold, ref pairs)) = select_cmp_remap {
                 use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
-                let all_fields: Vec<&str> = {
-                    let mut v: Vec<&str> = vec![sel_field.as_str()];
+                let remap_fields: Vec<&str> = {
+                    let mut v: Vec<&str> = Vec::new();
                     for (_, src) in pairs { if !v.contains(&src.as_str()) { v.push(src.as_str()); } }
                     v
                 };
+                let pair_indices: Vec<usize> = pairs.iter().map(|(_, src)| {
+                    remap_fields.iter().position(|&f| f == src.as_str()).unwrap()
+                }).collect();
+                let key_prefixes = if use_pretty_buf {
+                    build_obj_key_prefixes_pretty(pairs.iter().map(|(k, _)| k.as_str()))
+                } else {
+                    build_obj_key_prefixes(pairs.iter().map(|(k, _)| k.as_str()))
+                };
+                let obj_close: &[u8] = if use_pretty_buf { b"\n}\n" } else { b"}\n" };
+                let mut ranges_buf = vec![(0usize, 0usize); remap_fields.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
                     if let Some(val) = json_object_get_num(raw, 0, sel_field) {
@@ -5528,46 +5529,22 @@ fn real_main() {
                             _ => false,
                         };
                         if pass {
-                            // Extract all needed fields raw bytes
-                            let fields_raw: Vec<Option<(usize, usize)>> = all_fields.iter()
-                                .map(|f| json_object_get_field_raw(raw, 0, f))
-                                .collect();
-                            if use_pretty_buf {
-                                compact_buf.extend_from_slice(b"{\n");
-                                for (i, (key, src)) in pairs.iter().enumerate() {
-                                    if i > 0 { compact_buf.extend_from_slice(b",\n"); }
-                                    compact_buf.extend_from_slice(b"  \"");
-                                    compact_buf.extend_from_slice(key.as_bytes());
-                                    compact_buf.extend_from_slice(b"\": ");
-                                    let idx = all_fields.iter().position(|&f| f == src.as_str()).unwrap();
-                                    if let Some((vs, ve)) = fields_raw[idx] {
-                                        let val = &raw[vs..ve];
-                                        if val[0] == b'{' || val[0] == b'[' {
-                                            push_json_pretty_raw_at(&mut compact_buf, val, 2, false, 1);
+                            if json_object_get_fields_raw_buf(raw, 0, &remap_fields, &mut ranges_buf) {
+                                for (i, &idx) in pair_indices.iter().enumerate() {
+                                    compact_buf.extend_from_slice(&key_prefixes[i]);
+                                    let (vs, ve) = ranges_buf[idx];
+                                    if use_pretty_buf {
+                                        let val_bytes = &raw[vs..ve];
+                                        if val_bytes[0] == b'{' || val_bytes[0] == b'[' {
+                                            push_json_pretty_raw_at(&mut compact_buf, val_bytes, 2, false, 1);
                                         } else {
-                                            compact_buf.extend_from_slice(val);
+                                            compact_buf.extend_from_slice(val_bytes);
                                         }
                                     } else {
-                                        compact_buf.extend_from_slice(b"null");
-                                    }
-                                }
-                                compact_buf.extend_from_slice(b"\n}\n");
-                            } else {
-                                compact_buf.push(b'{');
-                                for (i, (key, src)) in pairs.iter().enumerate() {
-                                    if i > 0 { compact_buf.push(b','); }
-                                    compact_buf.push(b'"');
-                                    compact_buf.extend_from_slice(key.as_bytes());
-                                    compact_buf.extend_from_slice(b"\":");
-                                    let idx = all_fields.iter().position(|&f| f == src.as_str()).unwrap();
-                                    if let Some((vs, ve)) = fields_raw[idx] {
                                         compact_buf.extend_from_slice(&raw[vs..ve]);
-                                    } else {
-                                        compact_buf.extend_from_slice(b"null");
                                     }
                                 }
-                                compact_buf.push(b'}');
-                                compact_buf.push(b'\n');
+                                compact_buf.extend_from_slice(obj_close);
                             }
                         }
                     }
@@ -6181,30 +6158,33 @@ fn real_main() {
             } else if let Some((ref nfields, ref arith)) = numeric_expr {
                 let nf_count = nfields.len();
                 let content_bytes = content.as_bytes();
+                let field_refs: Vec<&str> = nfields.iter().map(|s| s.as_str()).collect();
+                let mut ranges_buf = vec![(0usize, 0usize); nf_count];
+                let mut vals_buf: Vec<f64> = vec![0.0; nf_count];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    let got = if nf_count == 1 {
-                        json_object_get_num(raw, 0, &nfields[0]).map(|v| vec![v])
+                    let ok = if nf_count == 1 {
+                        if let Some(v) = json_object_get_num(raw, 0, &nfields[0]) {
+                            vals_buf[0] = v; true
+                        } else { false }
                     } else if nf_count == 2 {
-                        json_object_get_two_nums(raw, 0, &nfields[0], &nfields[1])
-                            .map(|(a, b)| vec![a, b])
+                        if let Some((a, b)) = json_object_get_two_nums(raw, 0, &nfields[0], &nfields[1]) {
+                            vals_buf[0] = a; vals_buf[1] = b; true
+                        } else { false }
                     } else {
-                        let field_refs: Vec<&str> = nfields.iter().map(|s| s.as_str()).collect();
-                        let mut ranges = vec![(0usize, 0usize); nfields.len()];
-                        if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges) {
-                            let mut vals = Vec::with_capacity(nfields.len());
-                            let mut ok = true;
-                            for &(s, e) in &ranges {
+                        if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                            let mut all_ok = true;
+                            for (i, &(s, e)) in ranges_buf.iter().enumerate() {
                                 match fast_float::parse::<f64, _>(unsafe { std::str::from_utf8_unchecked(&raw[s..e]) }) {
-                                    Ok(n) => vals.push(n),
-                                    Err(_) => { ok = false; break; }
+                                    Ok(n) => vals_buf[i] = n,
+                                    Err(_) => { all_ok = false; break; }
                                 }
                             }
-                            if ok { Some(vals) } else { None }
-                        } else { None }
+                            all_ok
+                        } else { false }
                     };
-                    if let Some(vals) = got {
-                        let result = arith.eval(&vals);
+                    if ok {
+                        let result = arith.eval(&vals_buf);
                         push_jq_number_bytes(&mut compact_buf, result);
                         compact_buf.push(b'\n');
                     } else {
