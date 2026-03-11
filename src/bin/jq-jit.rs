@@ -3212,7 +3212,12 @@ fn real_main() {
                 } else if let Some((ref conj, ref cmps, ref out_field)) = select_compound_field {
                     use jq_jit::ir::BinOp;
                     let is_and = matches!(conj, BinOp::And);
-                    // Collect all fields: comparison fields + output field
+                    // Specialized path for 2 comparisons on different fields: lazy fetch output
+                    let two_field_lazy = if cmps.len() == 2 && cmps[0].0 != cmps[1].0
+                        && cmps[0].0 != *out_field && cmps[1].0 != *out_field {
+                        Some((cmps[0].0.as_str(), cmps[1].0.as_str(), out_field.as_str()))
+                    } else { None };
+                    // General path: Collect all fields
                     let mut all_fields: Vec<String> = cmps.iter().map(|(f, _, _)| f.clone()).collect();
                     if !all_fields.contains(out_field) { all_fields.push(out_field.clone()); }
                     let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
@@ -3223,32 +3228,62 @@ fn real_main() {
                     let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if !json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
-                            return Ok(());
-                        }
-                        let check = |idx: usize, op: &BinOp, thr: &f64| -> bool {
-                            let (vs, ve) = ranges_buf[idx];
-                            parse_json_num(&raw[vs..ve]).map_or(false, |val| match op {
-                                BinOp::Gt => val > *thr, BinOp::Lt => val < *thr,
-                                BinOp::Ge => val >= *thr, BinOp::Le => val <= *thr,
-                                BinOp::Eq => val == *thr, BinOp::Ne => val != *thr,
-                                _ => false,
-                            })
-                        };
-                        let pass = if is_and {
-                            cmp_indices.iter().all(|(idx, op, thr)| check(*idx, op, thr))
-                        } else {
-                            cmp_indices.iter().any(|(idx, op, thr)| check(*idx, op, thr))
-                        };
-                        if pass {
-                            let (vs, ve) = ranges_buf[out_idx];
-                            let val = &raw[vs..ve];
-                            if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
-                                push_json_pretty_raw(&mut compact_buf, val, 2, false);
-                            } else {
-                                compact_buf.extend_from_slice(val);
+                        if let Some((f1, f2, of)) = two_field_lazy {
+                            // Lazy fetch: check comparison fields first, output field only on pass
+                            if let Some((v1, v2)) = json_object_get_two_nums(raw, 0, f1, f2) {
+                                let c1 = match &cmps[0].1 {
+                                    BinOp::Gt => v1 > cmps[0].2, BinOp::Lt => v1 < cmps[0].2,
+                                    BinOp::Ge => v1 >= cmps[0].2, BinOp::Le => v1 <= cmps[0].2,
+                                    BinOp::Eq => v1 == cmps[0].2, BinOp::Ne => v1 != cmps[0].2,
+                                    _ => false,
+                                };
+                                let c2 = match &cmps[1].1 {
+                                    BinOp::Gt => v2 > cmps[1].2, BinOp::Lt => v2 < cmps[1].2,
+                                    BinOp::Ge => v2 >= cmps[1].2, BinOp::Le => v2 <= cmps[1].2,
+                                    BinOp::Eq => v2 == cmps[1].2, BinOp::Ne => v2 != cmps[1].2,
+                                    _ => false,
+                                };
+                                let pass = if is_and { c1 && c2 } else { c1 || c2 };
+                                if pass {
+                                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, of) {
+                                        let val = &raw[vs..ve];
+                                        if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
+                                            push_json_pretty_raw(&mut compact_buf, val, 2, false);
+                                        } else {
+                                            compact_buf.extend_from_slice(val);
+                                        }
+                                        compact_buf.push(b'\n');
+                                    }
+                                }
                             }
-                            compact_buf.push(b'\n');
+                        } else {
+                            if !json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                                return Ok(());
+                            }
+                            let check = |idx: usize, op: &BinOp, thr: &f64| -> bool {
+                                let (vs, ve) = ranges_buf[idx];
+                                parse_json_num(&raw[vs..ve]).map_or(false, |val| match op {
+                                    BinOp::Gt => val > *thr, BinOp::Lt => val < *thr,
+                                    BinOp::Ge => val >= *thr, BinOp::Le => val <= *thr,
+                                    BinOp::Eq => val == *thr, BinOp::Ne => val != *thr,
+                                    _ => false,
+                                })
+                            };
+                            let pass = if is_and {
+                                cmp_indices.iter().all(|(idx, op, thr)| check(*idx, op, thr))
+                            } else {
+                                cmp_indices.iter().any(|(idx, op, thr)| check(*idx, op, thr))
+                            };
+                            if pass {
+                                let (vs, ve) = ranges_buf[out_idx];
+                                let val = &raw[vs..ve];
+                                if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
+                                    push_json_pretty_raw(&mut compact_buf, val, 2, false);
+                                } else {
+                                    compact_buf.extend_from_slice(val);
+                                }
+                                compact_buf.push(b'\n');
+                            }
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -5198,6 +5233,10 @@ fn real_main() {
                 use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
                 let is_and = matches!(conj, BinOp::And);
+                let two_field_lazy = if cmps.len() == 2 && cmps[0].0 != cmps[1].0
+                    && cmps[0].0 != *out_field && cmps[1].0 != *out_field {
+                    Some((cmps[0].0.as_str(), cmps[1].0.as_str(), out_field.as_str()))
+                } else { None };
                 let mut all_fields: Vec<String> = cmps.iter().map(|(f, _, _)| f.clone()).collect();
                 if !all_fields.contains(out_field) { all_fields.push(out_field.clone()); }
                 let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
@@ -5208,32 +5247,61 @@ fn real_main() {
                 let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if !json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
-                        return Ok(());
-                    }
-                    let check = |idx: usize, op: &BinOp, thr: &f64| -> bool {
-                        let (vs, ve) = ranges_buf[idx];
-                        parse_json_num(&raw[vs..ve]).map_or(false, |val| match op {
-                            BinOp::Gt => val > *thr, BinOp::Lt => val < *thr,
-                            BinOp::Ge => val >= *thr, BinOp::Le => val <= *thr,
-                            BinOp::Eq => val == *thr, BinOp::Ne => val != *thr,
-                            _ => false,
-                        })
-                    };
-                    let pass = if is_and {
-                        cmp_indices.iter().all(|(idx, op, thr)| check(*idx, op, thr))
-                    } else {
-                        cmp_indices.iter().any(|(idx, op, thr)| check(*idx, op, thr))
-                    };
-                    if pass {
-                        let (vs, ve) = ranges_buf[out_idx];
-                        let val = &raw[vs..ve];
-                        if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
-                            push_json_pretty_raw(&mut compact_buf, val, 2, false);
-                        } else {
-                            compact_buf.extend_from_slice(val);
+                    if let Some((f1, f2, of)) = two_field_lazy {
+                        if let Some((v1, v2)) = json_object_get_two_nums(raw, 0, f1, f2) {
+                            let c1 = match &cmps[0].1 {
+                                BinOp::Gt => v1 > cmps[0].2, BinOp::Lt => v1 < cmps[0].2,
+                                BinOp::Ge => v1 >= cmps[0].2, BinOp::Le => v1 <= cmps[0].2,
+                                BinOp::Eq => v1 == cmps[0].2, BinOp::Ne => v1 != cmps[0].2,
+                                _ => false,
+                            };
+                            let c2 = match &cmps[1].1 {
+                                BinOp::Gt => v2 > cmps[1].2, BinOp::Lt => v2 < cmps[1].2,
+                                BinOp::Ge => v2 >= cmps[1].2, BinOp::Le => v2 <= cmps[1].2,
+                                BinOp::Eq => v2 == cmps[1].2, BinOp::Ne => v2 != cmps[1].2,
+                                _ => false,
+                            };
+                            let pass = if is_and { c1 && c2 } else { c1 || c2 };
+                            if pass {
+                                if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, of) {
+                                    let val = &raw[vs..ve];
+                                    if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
+                                        push_json_pretty_raw(&mut compact_buf, val, 2, false);
+                                    } else {
+                                        compact_buf.extend_from_slice(val);
+                                    }
+                                    compact_buf.push(b'\n');
+                                }
+                            }
                         }
-                        compact_buf.push(b'\n');
+                    } else {
+                        if !json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                            return Ok(());
+                        }
+                        let check = |idx: usize, op: &BinOp, thr: &f64| -> bool {
+                            let (vs, ve) = ranges_buf[idx];
+                            parse_json_num(&raw[vs..ve]).map_or(false, |val| match op {
+                                BinOp::Gt => val > *thr, BinOp::Lt => val < *thr,
+                                BinOp::Ge => val >= *thr, BinOp::Le => val <= *thr,
+                                BinOp::Eq => val == *thr, BinOp::Ne => val != *thr,
+                                _ => false,
+                            })
+                        };
+                        let pass = if is_and {
+                            cmp_indices.iter().all(|(idx, op, thr)| check(*idx, op, thr))
+                        } else {
+                            cmp_indices.iter().any(|(idx, op, thr)| check(*idx, op, thr))
+                        };
+                        if pass {
+                            let (vs, ve) = ranges_buf[out_idx];
+                            let val = &raw[vs..ve];
+                            if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
+                                push_json_pretty_raw(&mut compact_buf, val, 2, false);
+                            } else {
+                                compact_buf.extend_from_slice(val);
+                            }
+                            compact_buf.push(b'\n');
+                        }
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
