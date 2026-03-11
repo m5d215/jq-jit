@@ -237,6 +237,12 @@ impl Filter {
                 Expr::Update { path_expr, update_expr } | Expr::Assign { path_expr, value_expr: update_expr } => walk(path_expr) || walk(update_expr),
                 Expr::ClosureOp { input_expr, key_expr, .. } => walk(input_expr) || walk(key_expr),
                 Expr::Format { expr: e, .. } => walk(e),
+                Expr::Limit { count, generator } => walk(count) || walk(generator),
+                Expr::While { cond, update, .. } | Expr::Until { cond, update } => walk(cond) || walk(update),
+                Expr::Repeat { update, .. } => walk(update),
+                Expr::Range { from, to, step } => {
+                    walk(from) || walk(to) || step.as_ref().map_or(false, |s| walk(s))
+                }
                 _ => false,
             }
         }
