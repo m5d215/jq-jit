@@ -54,6 +54,19 @@ pub struct Filter {
 }
 
 impl Filter {
+    /// Get the inner expression for pattern detection, unwrapping top-level
+    /// `try EXPR` (TryCatch with Empty catch) since the raw byte fast paths
+    /// handle missing fields gracefully (return null/nothing).
+    fn detect_expr(&self) -> Option<&crate::ir::Expr> {
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let crate::ir::Expr::TryCatch { try_expr, catch_expr } = expr {
+            if matches!(catch_expr.as_ref(), crate::ir::Expr::Empty) {
+                return Some(try_expr);
+            }
+        }
+        Some(expr)
+    }
+
     pub fn new(program: &str) -> Result<Self> {
         Self::with_options(program, &[], true)
     }
@@ -210,7 +223,7 @@ impl Filter {
     /// Returns the compact JSON bytes for the literal, or None.
     pub fn detect_literal_output(&self) -> Option<Vec<u8>> {
         use crate::ir::{Expr, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         match expr {
             Expr::Literal(Literal::Null) => Some(b"null".to_vec()),
             Expr::Literal(Literal::True) => Some(b"true".to_vec()),
@@ -260,7 +273,7 @@ impl Filter {
     /// Returns (field_name, comparison_op, threshold) if detected.
     pub fn detect_select_field_cmp(&self) -> Option<(String, crate::ir::BinOp, f64)> {
         use crate::ir::{Expr, BinOp, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         // select(cond) compiles to if cond then . else empty end
         if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
             if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
@@ -288,7 +301,7 @@ impl Filter {
     /// Returns (conjunct, Vec<(field, op, threshold)>) where conjunct is And or Or.
     pub fn detect_select_compound_cmp(&self) -> Option<(crate::ir::BinOp, Vec<(String, crate::ir::BinOp, f64)>)> {
         use crate::ir::{Expr, BinOp, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
             if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
             if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
@@ -340,7 +353,7 @@ impl Filter {
     /// Returns (field_path, comparison_op, threshold) if detected.
     pub fn detect_select_nested_cmp(&self) -> Option<(Vec<String>, crate::ir::BinOp, f64)> {
         use crate::ir::{Expr, BinOp, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
             if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
             if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
@@ -376,7 +389,7 @@ impl Filter {
     /// Returns (field_name, op, string_value) if detected.
     pub fn detect_select_field_str(&self) -> Option<(String, crate::ir::BinOp, String)> {
         use crate::ir::{Expr, BinOp, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
             if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
             if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
@@ -399,7 +412,7 @@ impl Filter {
     /// Returns (field_name, builtin_name, string_arg) if detected.
     pub fn detect_select_field_str_test(&self) -> Option<(String, String, String)> {
         use crate::ir::{Expr, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
             if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
             if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
@@ -428,7 +441,7 @@ impl Filter {
     /// Returns (field_name, regex_pattern, flags_str) if detected.
     pub fn detect_select_field_regex_test(&self) -> Option<(String, String, Option<String>)> {
         use crate::ir::{Expr, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
             if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
             if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
@@ -458,7 +471,7 @@ impl Filter {
     /// Returns Vec of (output_key, input_field) pairs if detected.
     pub fn detect_field_remap(&self) -> Option<Vec<(String, String)>> {
         use crate::ir::{Expr, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::ObjectConstruct { pairs } = expr {
             if pairs.is_empty() { return None; }
             let mut result = Vec::with_capacity(pairs.len());
@@ -486,7 +499,7 @@ impl Filter {
     /// Only matches when detect_field_remap fails (i.e., at least one value is computed).
     pub fn detect_computed_remap(&self) -> Option<Vec<(String, RemapExpr)>> {
         use crate::ir::{Expr, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::ObjectConstruct { pairs } = expr {
             if pairs.is_empty() { return None; }
             let mut result = Vec::with_capacity(pairs.len());
@@ -558,7 +571,7 @@ impl Filter {
     /// Returns (field1, op, field2) if detected.
     pub fn detect_field_binop(&self) -> Option<(String, crate::ir::BinOp, String)> {
         use crate::ir::{Expr, BinOp, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::BinOp { op, lhs, rhs } = expr {
             if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) { return None; }
             if let Expr::Index { expr: base1, key: key1 } = lhs.as_ref() {
@@ -580,7 +593,7 @@ impl Filter {
     /// Returns (field_name, suffix) if detected.
     pub fn detect_field_str_concat(&self) -> Option<(String, String)> {
         use crate::ir::{Expr, BinOp, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::BinOp { op: BinOp::Add, lhs, rhs } = expr {
             if let Expr::Index { expr: base, key } = lhs.as_ref() {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
@@ -600,7 +613,7 @@ impl Filter {
     /// string ops (ascii_downcase/ascii_upcase).
     pub fn detect_field_unary_num(&self) -> Option<(String, crate::ir::UnaryOp)> {
         use crate::ir::{Expr, UnaryOp, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::Pipe { left, right } = expr {
             // left = .field
             if let Expr::Index { expr: base, key } = left.as_ref() {
@@ -625,7 +638,7 @@ impl Filter {
     /// Returns (field_name, builtin_name, string_arg) if detected.
     pub fn detect_field_str_builtin(&self) -> Option<(String, String, String)> {
         use crate::ir::{Expr, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::Pipe { left, right } = expr {
             if let Expr::Index { expr: base, key } = left.as_ref() {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
@@ -649,7 +662,7 @@ impl Filter {
     /// Returns (field_name, regex_pattern, flags_str) if detected.
     pub fn detect_field_test(&self) -> Option<(String, String, Option<String>)> {
         use crate::ir::{Expr, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::Pipe { left, right } = expr {
             if let Expr::Index { expr: base, key } = left.as_ref() {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
@@ -675,7 +688,7 @@ impl Filter {
     /// Returns (field_name, format_name) if detected.
     pub fn detect_field_format(&self) -> Option<(String, String)> {
         use crate::ir::{Expr, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::Pipe { left, right } = expr {
             if let Expr::Index { expr: base, key } = left.as_ref() {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
@@ -697,7 +710,7 @@ impl Filter {
     /// Returns (field_name, is_global, regex_pattern, replacement, flags) if detected.
     pub fn detect_field_gsub(&self) -> Option<(String, bool, String, String, Option<String>)> {
         use crate::ir::{Expr, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::Pipe { left, right } = expr {
             if let Expr::Index { expr: base, key } = left.as_ref() {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
@@ -728,7 +741,7 @@ impl Filter {
     /// Returns (field_name, prefix) if detected.
     pub fn detect_field_ltrimstr_tonumber(&self) -> Option<(String, String)> {
         use crate::ir::{Expr, Literal, UnaryOp};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::Pipe { left, right } = expr {
             if let Expr::Index { expr: base, key } = left.as_ref() {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
@@ -757,7 +770,7 @@ impl Filter {
     /// Returns (parts: Vec<(is_literal, name)>, separator).
     pub fn detect_array_join(&self) -> Option<(Vec<(bool, String)>, String)> {
         use crate::ir::{Expr, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::Pipe { left, right } = expr {
             // right must be join("sep")
             if let Expr::CallBuiltin { name, args } = right.as_ref() {
@@ -799,7 +812,7 @@ impl Filter {
     /// Returns (field_name, binop, constant, optional unary op) if detected.
     pub fn detect_field_binop_const_unary(&self) -> Option<(String, crate::ir::BinOp, f64, Option<crate::ir::UnaryOp>)> {
         use crate::ir::{Expr, BinOp, UnaryOp, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         // Case 1: `.field / N | floor` — Pipe { left: BinOp(.field, N), right: UnaryOp }
         if let Expr::Pipe { left, right } = expr {
             if let Expr::BinOp { op, lhs, rhs } = left.as_ref() {
@@ -841,7 +854,7 @@ impl Filter {
     /// or the field name for interpolation parts.
     pub fn detect_string_interp_fields(&self) -> Option<Vec<(bool, String)>> {
         use crate::ir::{Expr, Literal, StringPart};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::StringInterpolation { parts } = expr {
             let mut result = Vec::new();
             for part in parts {
@@ -889,7 +902,7 @@ impl Filter {
     /// Returns the field name to delete.
     pub fn detect_del_field(&self) -> Option<String> {
         use crate::ir::{Expr, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::CallBuiltin { name, args } = expr {
             if name == "del" && args.len() == 1 {
                 if let Expr::Index { expr: base, key } = &args[0] {
@@ -917,7 +930,7 @@ impl Filter {
     /// Returns the field name if this is `has("literal_string")`.
     pub fn detect_has_field(&self) -> Option<String> {
         use crate::ir::{Expr, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::CallBuiltin { name, args } = expr {
             if name == "has" && args.len() == 1 {
                 if let Expr::Literal(Literal::Str(field)) = &args[0] {
@@ -964,7 +977,7 @@ impl Filter {
     /// Returns the list of field names if this is Collect over comma field accesses.
     pub fn detect_array_field_access(&self) -> Option<Vec<String>> {
         use crate::ir::Expr;
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::Collect { generator } = expr {
             let mut fields = Vec::new();
             if collect_comma_fields(generator, &mut fields) && fields.len() >= 2 {
@@ -978,7 +991,7 @@ impl Filter {
     /// Returns Vec of RemapExpr if at least one value is computed.
     pub fn detect_computed_array(&self) -> Option<Vec<RemapExpr>> {
         use crate::ir::Expr;
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::Collect { generator } = expr {
             let mut elems = Vec::new();
             if collect_comma_remap(generator, &mut elems) && elems.len() >= 2 {
@@ -993,7 +1006,7 @@ impl Filter {
     /// Returns (field_names, format) where format is "csv" or "tsv".
     pub fn detect_array_fields_format(&self) -> Option<(Vec<String>, String)> {
         use crate::ir::Expr;
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::Pipe { left, right } = expr {
             if let Expr::Format { name, .. } = right.as_ref() {
                 if matches!(name.as_str(), "csv" | "tsv") {
@@ -1013,7 +1026,7 @@ impl Filter {
     /// Returns (field_name, split_str, join_str) if detected.
     pub fn detect_field_split_join(&self) -> Option<(String, String, String)> {
         use crate::ir::{Expr, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         // .field | split("x") | join("y")
         // Right-associative pipes: Pipe(.field, Pipe(split, join))
         if let Expr::Pipe { left, right } = expr {
@@ -1043,7 +1056,7 @@ impl Filter {
     /// Returns (key_field, value_field).
     pub fn detect_dynamic_key_obj(&self) -> Option<(String, String)> {
         use crate::ir::{Expr, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::ObjectConstruct { pairs } = expr {
             if pairs.len() != 1 { return None; }
             let (k, v) = &pairs[0];
@@ -1068,7 +1081,7 @@ impl Filter {
     /// Returns (field_name, from_opt, to_opt).
     pub fn detect_field_slice(&self) -> Option<(String, Option<i64>, Option<i64>)> {
         use crate::ir::{Expr, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::Slice { expr: base, from, to } = expr {
             if let Expr::Index { expr: input, key } = base.as_ref() {
                 if !matches!(input.as_ref(), Expr::Input) { return None; }
@@ -1098,7 +1111,7 @@ impl Filter {
     /// Returns (field_name, split_delimiter).
     pub fn detect_field_split_first(&self) -> Option<(String, String)> {
         use crate::ir::{Expr, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         // Pipe(.field, Pipe(split("s"), .[0]))
         if let Expr::Pipe { left, right } = expr {
             if let Expr::Index { expr: base, key } = left.as_ref() {
@@ -1131,7 +1144,7 @@ impl Filter {
     /// Detect comma-separated field access `.f1,.f2,...` pattern.
     /// Returns the list of field names if all branches are direct field accesses on input.
     pub fn detect_multi_field_access(&self) -> Option<Vec<String>> {
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         let mut fields = Vec::new();
         if collect_comma_fields(expr, &mut fields) && fields.len() >= 2 {
             Some(fields)
@@ -1144,7 +1157,7 @@ impl Filter {
     /// Returns (field_name, fallback_json_bytes).
     pub fn detect_field_alternative(&self) -> Option<(String, Vec<u8>)> {
         use crate::ir::{Expr, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::Alternative { primary, fallback } = expr {
             if let Expr::Index { expr: base, key } = primary.as_ref() {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
@@ -1191,7 +1204,7 @@ impl Filter {
     /// Returns (field, op, threshold, true_output_bytes, false_output_bytes).
     pub fn detect_cmp_branch_literals(&self) -> Option<(String, crate::ir::BinOp, f64, Vec<u8>, Vec<u8>)> {
         use crate::ir::{Expr, BinOp, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         let literal_to_json = |lit: &Expr| -> Option<Vec<u8>> {
             match lit {
                 Expr::Literal(Literal::Str(s)) => {
@@ -1258,7 +1271,7 @@ impl Filter {
     /// (i.e., has >1 branch, or has a field output).
     pub fn detect_cond_chain(&self) -> Option<(Vec<CondBranch>, BranchOutput)> {
         use crate::ir::{Expr, BinOp, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
 
         let expr_to_output = |e: &Expr| -> Option<BranchOutput> {
             // .field
@@ -1347,7 +1360,7 @@ impl Filter {
     /// Returns (select_field, op, threshold, output_field).
     pub fn detect_select_cmp_then_field(&self) -> Option<(String, crate::ir::BinOp, f64, String)> {
         use crate::ir::{Expr, BinOp, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         // Helper to extract (sel_field, op, threshold, output_field) from a cond+output pair
         let try_extract = |cond: &Expr, output: &Expr| -> Option<(String, BinOp, f64, String)> {
             if let Expr::Index { expr: base, key } = output {
@@ -1394,7 +1407,7 @@ impl Filter {
     /// is handled by detect_select_cmp_then_field).
     pub fn detect_select_cmp_then_value(&self) -> Option<(String, crate::ir::BinOp, f64, RemapExpr)> {
         use crate::ir::{Expr, BinOp, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         let try_extract = |cond: &Expr, output: &Expr| -> Option<(String, BinOp, f64, RemapExpr)> {
             let rexpr = Self::classify_remap_value(output)?;
             if matches!(rexpr, RemapExpr::Field(_)) { return None; } // handled by detect_select_cmp_then_field
@@ -1432,7 +1445,7 @@ impl Filter {
     /// Returns (select_field, op, threshold, output_fields).
     pub fn detect_select_cmp_then_remap(&self) -> Option<(String, crate::ir::BinOp, f64, Vec<(String, String)>)> {
         use crate::ir::{Expr, BinOp, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         let try_extract_remap = |cond: &Expr, output: &Expr| -> Option<(String, BinOp, f64, Vec<(String, String)>)> {
             let mut out_pairs = Vec::new();
             if let Expr::ObjectConstruct { pairs: entries } = output {
@@ -1484,7 +1497,7 @@ impl Filter {
     /// Returns (select_field, op, threshold, computed_remap_pairs).
     pub fn detect_select_cmp_then_computed_remap(&self) -> Option<(String, crate::ir::BinOp, f64, Vec<(String, RemapExpr)>)> {
         use crate::ir::{Expr, BinOp, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         let try_extract = |cond: &Expr, output: &Expr| -> Option<(String, BinOp, f64, Vec<(String, RemapExpr)>)> {
             if let Expr::ObjectConstruct { pairs } = output {
                 if pairs.is_empty() { return None; }
@@ -1535,7 +1548,7 @@ impl Filter {
     /// test_type: "eq", "ne", "startswith", "endswith", "contains"
     pub fn detect_select_str_then_field(&self) -> Option<(String, String, String, String)> {
         use crate::ir::{Expr, BinOp, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         // Must be Pipe(select, .field)
         if let Expr::Pipe { left, right } = expr {
             // Right side: .output_field
@@ -1587,7 +1600,7 @@ impl Filter {
     /// Returns the field name if this is a direct field access on input.
     pub fn detect_field_access(&self) -> Option<String> {
         use crate::ir::{Expr, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::Index { expr: base, key } = expr {
             if !matches!(base.as_ref(), Expr::Input) { return None; }
             if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
@@ -1601,7 +1614,7 @@ impl Filter {
     /// Returns list of (key, json_bytes) pairs for each literal entry.
     pub fn detect_obj_merge_literal(&self) -> Option<Vec<(String, Vec<u8>)>> {
         use crate::ir::{Expr, Literal, BinOp};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         if let Expr::BinOp { op: BinOp::Add, lhs, rhs } = expr {
             if !matches!(lhs.as_ref(), Expr::Input) { return None; }
             if let Expr::ObjectConstruct { pairs } = rhs.as_ref() {
@@ -1658,7 +1671,7 @@ impl Filter {
     /// Returns the chain of field names if this is chained field access on input.
     pub fn detect_nested_field_access(&self) -> Option<Vec<String>> {
         use crate::ir::{Expr, Literal};
-        let (ref expr, _) = self.parsed.as_ref()?;
+        let expr = self.detect_expr()?;
         let mut fields = Vec::new();
         let mut current = expr;
         loop {
