@@ -2516,8 +2516,19 @@ fn real_main() {
                                     }
                                 }
                             } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                // Non-string field values (numbers, booleans, null)
+                                match ff_format.as_str() {
+                                    "json" | "text" => {
+                                        // @json/@text on non-string: wrap raw bytes in quotes
+                                        compact_buf.push(b'"');
+                                        compact_buf.extend_from_slice(val);
+                                        compact_buf.extend_from_slice(b"\"\n");
+                                    }
+                                    _ => {
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    }
+                                }
                             }
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
@@ -6853,8 +6864,18 @@ fn real_main() {
                                 }
                             }
                         } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            // Non-string field values (numbers, booleans, null)
+                            match ff_format.as_str() {
+                                "json" | "text" => {
+                                    compact_buf.push(b'"');
+                                    compact_buf.extend_from_slice(val);
+                                    compact_buf.extend_from_slice(b"\"\n");
+                                }
+                                _ => {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                            }
                         }
                     } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
