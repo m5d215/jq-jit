@@ -99,16 +99,26 @@ pub struct Filter {
 /// Recursively strip identity pipes and beta-reduce scalar pipes.
 /// Pipe(Input, X) → X, Pipe(X, Input) → X.
 /// Pipe(E, F) → F[E/.] when E is scalar and F has free Input.
+/// Preserves pipes needed for fast path detection (e.g., to_entries|length).
 fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
-    use crate::ir::Expr;
+    use crate::ir::{Expr, UnaryOp};
     match expr {
         Expr::Pipe { left, right } => {
             let sl = simplify_expr(left);
             let sr = simplify_expr(right);
             if matches!(&sl, Expr::Input) { return sr; }
             if matches!(&sr, Expr::Input) { return sl; }
+            // Semantic: to_entries | from_entries → identity
+            if matches!(&sl, Expr::UnaryOp { op: UnaryOp::ToEntries, .. })
+                && matches!(&sr, Expr::UnaryOp { op: UnaryOp::FromEntries, operand } if matches!(operand.as_ref(), Expr::Input))
+            {
+                return Expr::Input;
+            }
             // Beta-reduction: .x | . + 1 → .x + 1
-            if sl.is_simple_scalar() && sr.is_input_free() {
+            // Skip for UnaryOp pipes — fast path detection needs Pipe form
+            // for patterns like to_entries|length, keys|length
+            let skip_beta = matches!(&sl, Expr::UnaryOp { .. });
+            if !skip_beta && sl.is_simple_scalar() && sr.is_input_free() {
                 return sr.substitute_input(&sl);
             }
             Expr::Pipe { left: Box::new(sl), right: Box::new(sr) }
