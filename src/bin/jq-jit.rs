@@ -1134,6 +1134,7 @@ fn real_main() {
                 } else if let Some((ref fsj_field, ref fsj_split, ref fsj_join)) = field_split_join {
                     // .field | split("x") | join("y") — raw byte string replace
                     let split_bytes = fsj_split.as_bytes();
+                    let single_split = if split_bytes.len() == 1 { Some(split_bytes[0]) } else { None };
                     // Pre-escape join string for JSON output
                     let escaped_join = json_escape_bytes(fsj_join.as_bytes());
                     json_stream_raw(&input_str, |start, end| {
@@ -1141,7 +1142,7 @@ fn real_main() {
                         if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, fsj_field) {
                             let val = &raw[vs..ve];
                             if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                                && !val[1..val.len()-1].contains(&b'\\')
+                                && memchr::memchr(b'\\', &val[1..val.len()-1]).is_none()
                                 && !split_bytes.is_empty()
                             {
                                 let inner = &val[1..val.len()-1];
@@ -1151,7 +1152,12 @@ fn real_main() {
                                 let mut first = true;
                                 loop {
                                     let rest = &inner[pos..];
-                                    if let Some(idx) = rest.windows(split_bytes.len()).position(|w| w == split_bytes) {
+                                    let found = if let Some(d) = single_split {
+                                        memchr::memchr(d, rest)
+                                    } else {
+                                        rest.windows(split_bytes.len()).position(|w| w == split_bytes)
+                                    };
+                                    if let Some(idx) = found {
                                         if !first { compact_buf.extend_from_slice(&escaped_join); }
                                         first = false;
                                         compact_buf.extend_from_slice(&rest[..idx]);
@@ -1181,17 +1187,23 @@ fn real_main() {
                 } else if let Some((ref sf_field, ref sf_delim)) = field_split_first {
                     // .field | split("s") | .[0] — extract first split segment from raw bytes
                     let delim_bytes = sf_delim.as_bytes();
+                    let single_delim = if delim_bytes.len() == 1 { Some(delim_bytes[0]) } else { None };
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sf_field) {
                             let val = &raw[vs..ve];
                             if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                                && !val[1..val.len()-1].contains(&b'\\')
+                                && memchr::memchr(b'\\', &val[1..val.len()-1]).is_none()
                                 && !delim_bytes.is_empty()
                             {
                                 let inner = &val[1..val.len()-1];
                                 compact_buf.push(b'"');
-                                if let Some(idx) = inner.windows(delim_bytes.len()).position(|w| w == delim_bytes) {
+                                let split_pos = if let Some(d) = single_delim {
+                                    memchr::memchr(d, inner)
+                                } else {
+                                    inner.windows(delim_bytes.len()).position(|w| w == delim_bytes)
+                                };
+                                if let Some(idx) = split_pos {
                                     compact_buf.extend_from_slice(&inner[..idx]);
                                 } else {
                                     compact_buf.extend_from_slice(inner);
@@ -1215,18 +1227,19 @@ fn real_main() {
                 } else if let Some((ref spl_field, ref spl_delim)) = field_split_length {
                     // .field | split("s") | length — count delimiter occurrences + 1
                     let delim_bytes = spl_delim.as_bytes();
+                    let single_delim = if delim_bytes.len() == 1 { Some(delim_bytes[0]) } else { None };
                     let mut ibuf = itoa::Buffer::new();
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, spl_field) {
                             let val = &raw[vs..ve];
                             if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                                && !val[1..val.len()-1].contains(&b'\\')
+                                && memchr::memchr(b'\\', &val[1..val.len()-1]).is_none()
                                 && !delim_bytes.is_empty()
                             {
                                 let inner = &val[1..val.len()-1];
-                                let count = if delim_bytes.len() == 1 {
-                                    inner.iter().filter(|&&b| b == delim_bytes[0]).count() + 1
+                                let count = if let Some(d) = single_delim {
+                                    memchr::memchr_iter(d, inner).count() + 1
                                 } else {
                                     inner.windows(delim_bytes.len()).filter(|w| *w == delim_bytes).count() + 1
                                 };
@@ -4151,13 +4164,14 @@ fn real_main() {
             } else if let Some((ref fsj_field, ref fsj_split, ref fsj_join)) = field_split_join {
                 let content_bytes = content.as_bytes();
                 let split_bytes = fsj_split.as_bytes();
+                let single_split = if split_bytes.len() == 1 { Some(split_bytes[0]) } else { None };
                 let escaped_join = json_escape_bytes(fsj_join.as_bytes());
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
                     if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, fsj_field) {
                         let val = &raw[vs..ve];
                         if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                            && !val[1..val.len()-1].contains(&b'\\')
+                            && memchr::memchr(b'\\', &val[1..val.len()-1]).is_none()
                             && !split_bytes.is_empty()
                         {
                             let inner = &val[1..val.len()-1];
@@ -4166,7 +4180,12 @@ fn real_main() {
                             let mut first = true;
                             loop {
                                 let rest = &inner[pos..];
-                                if let Some(idx) = rest.windows(split_bytes.len()).position(|w| w == split_bytes) {
+                                let found = if let Some(d) = single_split {
+                                    memchr::memchr(d, rest)
+                                } else {
+                                    rest.windows(split_bytes.len()).position(|w| w == split_bytes)
+                                };
+                                if let Some(idx) = found {
                                     if !first { compact_buf.extend_from_slice(&escaped_join); }
                                     first = false;
                                     compact_buf.extend_from_slice(&rest[..idx]);
@@ -4196,17 +4215,23 @@ fn real_main() {
             } else if let Some((ref sf_field, ref sf_delim)) = field_split_first {
                 let content_bytes = content.as_bytes();
                 let delim_bytes = sf_delim.as_bytes();
+                let single_delim = if delim_bytes.len() == 1 { Some(delim_bytes[0]) } else { None };
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
                     if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sf_field) {
                         let val = &raw[vs..ve];
                         if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                            && !val[1..val.len()-1].contains(&b'\\')
+                            && memchr::memchr(b'\\', &val[1..val.len()-1]).is_none()
                             && !delim_bytes.is_empty()
                         {
                             let inner = &val[1..val.len()-1];
                             compact_buf.push(b'"');
-                            if let Some(idx) = inner.windows(delim_bytes.len()).position(|w| w == delim_bytes) {
+                            let split_pos = if let Some(d) = single_delim {
+                                memchr::memchr(d, inner)
+                            } else {
+                                inner.windows(delim_bytes.len()).position(|w| w == delim_bytes)
+                            };
+                            if let Some(idx) = split_pos {
                                 compact_buf.extend_from_slice(&inner[..idx]);
                             } else {
                                 compact_buf.extend_from_slice(inner);
@@ -4230,18 +4255,19 @@ fn real_main() {
             } else if let Some((ref spl_field, ref spl_delim)) = field_split_length {
                 let content_bytes = content.as_bytes();
                 let delim_bytes = spl_delim.as_bytes();
+                let single_delim = if delim_bytes.len() == 1 { Some(delim_bytes[0]) } else { None };
                 let mut ibuf = itoa::Buffer::new();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
                     if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, spl_field) {
                         let val = &raw[vs..ve];
                         if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                            && !val[1..val.len()-1].contains(&b'\\')
+                            && memchr::memchr(b'\\', &val[1..val.len()-1]).is_none()
                             && !delim_bytes.is_empty()
                         {
                             let inner = &val[1..val.len()-1];
-                            let count = if delim_bytes.len() == 1 {
-                                inner.iter().filter(|&&b| b == delim_bytes[0]).count() + 1
+                            let count = if let Some(d) = single_delim {
+                                memchr::memchr_iter(d, inner).count() + 1
                             } else {
                                 inner.windows(delim_bytes.len()).filter(|w| *w == delim_bytes).count() + 1
                             };
