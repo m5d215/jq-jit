@@ -2794,6 +2794,64 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.field <arith_ops> <cmp> N) | .output_field`.
+    /// E.g. `select(.x % 2 == 0) | .name`
+    /// Returns (cond_field, arith_ops, cmp_op, threshold, output_field).
+    pub fn detect_select_arith_cmp_then_field(&self) -> Option<(String, Vec<(crate::ir::BinOp, f64)>, crate::ir::BinOp, f64, String)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        let try_extract = |cond: &Expr, output: &Expr| -> Option<(String, Vec<(BinOp, f64)>, BinOp, f64, String)> {
+            if let Expr::Index { expr: base, key } = output {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                let output_field = if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() } else { return None; };
+                if let Expr::BinOp { op, lhs, rhs } = cond {
+                    if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                    if let Expr::Literal(Literal::Num(threshold, _)) = rhs.as_ref() {
+                        // Unwrap arithmetic chain
+                        let mut arith_ops = Vec::new();
+                        let mut cur = lhs.as_ref();
+                        loop {
+                            if let Expr::BinOp { op: aop, lhs: al, rhs: ar } = cur {
+                                if matches!(aop, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+                                    if let Expr::Literal(Literal::Num(n, _)) = ar.as_ref() {
+                                        arith_ops.push((*aop, *n));
+                                        cur = al.as_ref();
+                                        continue;
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        if arith_ops.is_empty() { return None; } // Plain .field cmp N handled by detect_select_cmp_then_field
+                        arith_ops.reverse();
+                        if let Expr::Index { expr: base2, key: key2 } = cur {
+                            if !matches!(base2.as_ref(), Expr::Input) { return None; }
+                            if let Expr::Literal(Literal::Str(field)) = key2.as_ref() {
+                                return Some((field.clone(), arith_ops, *op, *threshold, output_field));
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        };
+        // Form 1: select(.field arith cmp N) | .output = Pipe(IfThenElse, Index)
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                    if let Some(r) = try_extract(cond, right) { return Some(r); }
+                }
+            }
+        }
+        // Form 2: if .field arith cmp N then .output else empty end
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if matches!(else_branch.as_ref(), Expr::Empty) {
+                if let Some(r) = try_extract(cond, then_branch) { return Some(r); }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.f1 cmp .f2) | .output_field` — field-field comparison select then field.
     /// Returns (cmp_field1, op, cmp_field2, output_field).
     pub fn detect_select_field_cmp_field_then_field(&self) -> Option<(String, crate::ir::BinOp, String, String)> {

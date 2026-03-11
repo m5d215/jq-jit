@@ -812,6 +812,9 @@ fn real_main() {
     let select_cmp_field = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() {
         filter.detect_select_cmp_then_field()
     } else { None };
+    let select_arith_cmp_field = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
+        filter.detect_select_arith_cmp_then_field()
+    } else { None };
     let select_cmp_remap = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
         filter.detect_select_cmp_then_remap()
     } else { None };
@@ -839,7 +842,7 @@ fn real_main() {
         || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some()
         || select_str.is_some()
         || select_str_test.is_some() || select_regex_test.is_some() || select_nested_cmp.is_some()
-        || select_cmp_field.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_value.is_some() || select_ff_cmp_field.is_some() || select_str_field.is_some()
+        || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_value.is_some() || select_ff_cmp_field.is_some() || select_str_field.is_some()
         || computed_array.is_some() || array_field.is_some() || multi_field.is_some() || is_length || is_keys
         || is_keys_unsorted || has_field.is_some() || has_multi.is_some() || select_has_multi.is_some() || is_type || del_field.is_some() || obj_merge_lit.is_some()
         || is_each || is_to_entries || is_tojson || string_interp_fields.is_some() || string_add_chain.is_some() || array_join.is_some()
@@ -3494,6 +3497,37 @@ fn real_main() {
                         }
                         Ok(())
                     })
+                } else if let Some((ref sel_field, ref arith_ops, ref cmp_op, threshold, ref out_field)) = select_arith_cmp_field {
+                    use jq_jit::ir::BinOp;
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some(mut val) = json_object_get_num(raw, 0, sel_field) {
+                            for (aop, n) in arith_ops {
+                                val = match aop {
+                                    BinOp::Add => val + n, BinOp::Sub => val - n,
+                                    BinOp::Mul => val * n, BinOp::Div => val / n,
+                                    BinOp::Mod => val % n, _ => val,
+                                };
+                            }
+                            let pass = match cmp_op {
+                                BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
+                                BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
+                                BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
+                                _ => false,
+                            };
+                            if pass {
+                                if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
+                                    compact_buf.extend_from_slice(&raw[vs..ve]);
+                                    compact_buf.push(b'\n');
+                                }
+                            }
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
                 } else if let Some((ref sel_field, ref op, threshold, ref pairs)) = select_cmp_remap {
                     use jq_jit::ir::BinOp;
                     // Collect unique remap source fields (excluding sel_field which is checked via get_num)
@@ -5621,6 +5655,38 @@ fn real_main() {
                             BinOp::Le => val <= threshold,
                             BinOp::Eq => val == threshold,
                             BinOp::Ne => val != threshold,
+                            _ => false,
+                        };
+                        if pass {
+                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
+                                compact_buf.extend_from_slice(&raw[vs..ve]);
+                                compact_buf.push(b'\n');
+                            }
+                        }
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref sel_field, ref arith_ops, ref cmp_op, threshold, ref out_field)) = select_arith_cmp_field {
+                use jq_jit::ir::BinOp;
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some(mut val) = json_object_get_num(raw, 0, sel_field) {
+                        for (aop, n) in arith_ops {
+                            val = match aop {
+                                BinOp::Add => val + n, BinOp::Sub => val - n,
+                                BinOp::Mul => val * n, BinOp::Div => val / n,
+                                BinOp::Mod => val % n, _ => val,
+                            };
+                        }
+                        let pass = match cmp_op {
+                            BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
+                            BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
+                            BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
                             _ => false,
                         };
                         if pass {
