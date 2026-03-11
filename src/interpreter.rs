@@ -1992,6 +1992,110 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | length cmp N` — string length comparison.
+    /// Returns (field, cmp_op, threshold).
+    pub fn detect_field_length_cmp(&self) -> Option<(String, crate::ir::BinOp, f64)> {
+        use crate::ir::{Expr, BinOp, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        // Beta-reduced: BinOp(cmp, UnaryOp(Length, Index(Input, field)), Literal(N))
+        if let Expr::BinOp { op, lhs, rhs } = expr {
+            if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+            if let Expr::UnaryOp { op: UnaryOp::Length, operand } = lhs.as_ref() {
+                if let Expr::Index { expr: base, key } = operand.as_ref() {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                            if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                return Some((field.clone(), *op, *n));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Non-reduced: Pipe(.field, Pipe(UnaryOp(Length, Input), BinOp(cmp, Input, Literal(N))))
+        // or: Pipe(.field, BinOp(cmp, UnaryOp(Length, Input), Literal(N)))
+        if let Expr::Pipe { left, right } = expr {
+            let field = if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() }
+                else { return None; }
+            } else { return None; };
+            // Pipe(.field, Pipe(length, . > N))
+            if let Expr::Pipe { left: len_expr, right: cmp_expr } = right.as_ref() {
+                if matches!(len_expr.as_ref(), Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                    if let Expr::BinOp { op, lhs, rhs } = cmp_expr.as_ref() {
+                        if matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                            if matches!(lhs.as_ref(), Expr::Input) {
+                                if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                    return Some((field, *op, *n));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `select(.field | length cmp N) | .output_field`.
+    /// Returns (cond_field, cmp_op, threshold, output_field).
+    pub fn detect_select_field_length_cmp_then_field(&self) -> Option<(String, crate::ir::BinOp, f64, String)> {
+        use crate::ir::{Expr, BinOp, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        let extract_length_cmp = |cond: &Expr| -> Option<(String, BinOp, f64)> {
+            // BinOp(cmp, UnaryOp(Length, Index(Input, field)), Literal(N))
+            if let Expr::BinOp { op, lhs, rhs } = cond {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                if let Expr::UnaryOp { op: UnaryOp::Length, operand } = lhs.as_ref() {
+                    if let Expr::Index { expr: base, key } = operand.as_ref() {
+                        if matches!(base.as_ref(), Expr::Input) {
+                            if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                    return Some((field.clone(), *op, *n));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        };
+        let extract_output_field = |out: &Expr| -> Option<String> {
+            if let Expr::Index { expr: base, key } = out {
+                if matches!(base.as_ref(), Expr::Input) {
+                    if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                        return Some(f.clone());
+                    }
+                }
+            }
+            None
+        };
+        // Form 1: Pipe(IfThenElse{cond, then:Input, else:Empty}, Index(.output))
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                    if let Some((field, op, n)) = extract_length_cmp(cond) {
+                        if let Some(out_field) = extract_output_field(right) {
+                            return Some((field, op, n, out_field));
+                        }
+                    }
+                }
+            }
+        }
+        // Form 2: IfThenElse{cond, then:Index(.output), else:Empty}
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if matches!(else_branch.as_ref(), Expr::Empty) {
+                if let Some((field, op, n)) = extract_length_cmp(cond) {
+                    if let Some(out_field) = extract_output_field(then_branch) {
+                        return Some((field, op, n, out_field));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `[.x, .y] | sort | .[0]` — min of two numeric fields.
     /// Returns (field1, field2).
     pub fn detect_min_two_fields(&self) -> Option<(String, String)> {

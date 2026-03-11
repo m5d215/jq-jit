@@ -121,6 +121,9 @@ TESTS=(
     '[x,y]|min:-c:[.x, .y] | min'
     '[x,y]|max:-c:[.x, .y] | max'
     '[x,y]|sort|.[0]:-c:[.x, .y] | sort | .[0]'
+    '.name|len>5:-c:.name | length > 5'
+    'sel(len>5)|.x:-c:select(.name | length > 5) | .x'
+    'if .x>.y .name:-c:if .x > .y then .name else .x end'
 )
 
 for test in "${TESTS[@]}"; do
