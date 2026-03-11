@@ -3180,13 +3180,14 @@ impl Parser {
                 Ok(Expr::CallBuiltin { name: "flatten".to_string(), args: vec![depth] })
             }
             ("splits", 1) | ("splits", 2) => {
-                let mut args = args.into_iter();
-                let re = args.next().unwrap();
-                let flags = args.next().unwrap_or(Expr::Literal(Literal::Null));
-                Ok(Expr::RegexScan {
-                    input_expr: Box::new(Expr::Input),
-                    re: Box::new(re),
-                    flags: Box::new(flags),
+                // splits(re) = split(re; null) | .[] — regex split streamed
+                // splits(re; flags) = split(re; flags) | .[]
+                let mut args_iter = args.into_iter();
+                let re = args_iter.next().unwrap();
+                let flags = args_iter.next().unwrap_or(Expr::Literal(Literal::Null));
+                Ok(Expr::Pipe {
+                    left: Box::new(Expr::CallBuiltin { name: "split".to_string(), args: vec![re, flags] }),
+                    right: Box::new(Expr::Each { input_expr: Box::new(Expr::Input) }),
                 })
             }
             ("split", 1) | ("split", 2) => {
@@ -3195,11 +3196,7 @@ impl Parser {
                 let sep = args.next().unwrap();
                 if n == 2 {
                     let flags = args.next().unwrap();
-                    Ok(Expr::RegexScan {
-                        input_expr: Box::new(Expr::Input),
-                        re: Box::new(sep),
-                        flags: Box::new(flags),
-                    })
+                    Ok(Expr::CallBuiltin { name: "split".to_string(), args: vec![sep, flags] })
                 } else {
                     Ok(Expr::CallBuiltin { name: "split".to_string(), args: vec![sep] })
                 }

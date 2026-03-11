@@ -131,7 +131,13 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "endswith" => binary_arg(args, rt_endswith),
         "ltrimstr" => binary_arg(args, rt_ltrimstr),
         "rtrimstr" => binary_arg(args, rt_rtrimstr),
-        "split" => binary_arg(args, rt_split),
+        "split" if args.len() <= 2 => binary_arg(args, rt_split),
+        "split" => {
+            // split(re; flags) — regex split
+            let flags = &args[2];
+            let re = &args[1];
+            rt_regex_split(&args[0], re, flags)
+        }
         "join" => binary_arg(args, rt_join),
         "index" | "rindex" => binary_arg(args, |a, b| rt_str_index(a, b, name == "rindex")),
         "indices" | "rindices" => binary_arg(args, rt_indices),
@@ -1403,6 +1409,30 @@ fn rt_split(v: &Value, sep: &Value) -> Result<Value> {
                     .collect();
                 Ok(Value::Arr(Rc::new(parts)))
             }
+        }
+        _ => bail!("split requires strings"),
+    }
+}
+
+fn rt_regex_split(v: &Value, re: &Value, flags: &Value) -> Result<Value> {
+    match (v, re) {
+        (Value::Str(s), Value::Str(r)) => {
+            let mut pat = String::new();
+            if let Value::Str(f) = flags {
+                // Build regex with flags (e.g., "ix" → (?ix)pattern)
+                if !f.is_empty() {
+                    pat.push_str("(?");
+                    pat.push_str(f.as_str());
+                    pat.push(')');
+                }
+            }
+            pat.push_str(r.as_str());
+            with_regex(&pat, |regex| {
+                let parts: Vec<Value> = regex.split(s.as_str())
+                    .map(Value::from_str)
+                    .collect();
+                Value::Arr(Rc::new(parts))
+            })
         }
         _ => bail!("split requires strings"),
     }
