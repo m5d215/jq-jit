@@ -666,4 +666,81 @@ impl Expr {
             _ => self.clone(),
         }
     }
+
+    /// Substitute all LoadVar references with the given var_index with the replacement expression.
+    pub fn substitute_var(&self, var_index: u16, replacement: &Expr) -> Expr {
+        match self {
+            Expr::LoadVar { var_index: idx } if *idx == var_index => replacement.clone(),
+            Expr::LoadVar { .. } | Expr::Literal(_) | Expr::Input | Expr::Empty
+            | Expr::Not | Expr::Env | Expr::Builtins | Expr::ReadInput
+            | Expr::ReadInputs | Expr::ModuleMeta | Expr::GenLabel
+            | Expr::Loc { .. } => self.clone(),
+            Expr::BinOp { op, lhs, rhs } => Expr::BinOp {
+                op: *op,
+                lhs: Box::new(lhs.substitute_var(var_index, replacement)),
+                rhs: Box::new(rhs.substitute_var(var_index, replacement)),
+            },
+            Expr::UnaryOp { op, operand } => Expr::UnaryOp {
+                op: *op,
+                operand: Box::new(operand.substitute_var(var_index, replacement)),
+            },
+            Expr::Index { expr, key } => Expr::Index {
+                expr: Box::new(expr.substitute_var(var_index, replacement)),
+                key: Box::new(key.substitute_var(var_index, replacement)),
+            },
+            Expr::IndexOpt { expr, key } => Expr::IndexOpt {
+                expr: Box::new(expr.substitute_var(var_index, replacement)),
+                key: Box::new(key.substitute_var(var_index, replacement)),
+            },
+            Expr::Negate { operand } => Expr::Negate {
+                operand: Box::new(operand.substitute_var(var_index, replacement)),
+            },
+            Expr::Collect { generator } => Expr::Collect {
+                generator: Box::new(generator.substitute_var(var_index, replacement)),
+            },
+            Expr::Comma { left, right } => Expr::Comma {
+                left: Box::new(left.substitute_var(var_index, replacement)),
+                right: Box::new(right.substitute_var(var_index, replacement)),
+            },
+            Expr::Pipe { left, right } => Expr::Pipe {
+                left: Box::new(left.substitute_var(var_index, replacement)),
+                right: Box::new(right.substitute_var(var_index, replacement)),
+            },
+            Expr::IfThenElse { cond, then_branch, else_branch } => Expr::IfThenElse {
+                cond: Box::new(cond.substitute_var(var_index, replacement)),
+                then_branch: Box::new(then_branch.substitute_var(var_index, replacement)),
+                else_branch: Box::new(else_branch.substitute_var(var_index, replacement)),
+            },
+            Expr::ObjectConstruct { pairs } => Expr::ObjectConstruct {
+                pairs: pairs.iter().map(|(k, v)| {
+                    (k.substitute_var(var_index, replacement), v.substitute_var(var_index, replacement))
+                }).collect(),
+            },
+            Expr::Alternative { primary, fallback } => Expr::Alternative {
+                primary: Box::new(primary.substitute_var(var_index, replacement)),
+                fallback: Box::new(fallback.substitute_var(var_index, replacement)),
+            },
+            Expr::Each { input_expr } => Expr::Each {
+                input_expr: Box::new(input_expr.substitute_var(var_index, replacement)),
+            },
+            Expr::EachOpt { input_expr } => Expr::EachOpt {
+                input_expr: Box::new(input_expr.substitute_var(var_index, replacement)),
+            },
+            // Don't substitute into LetBinding that rebinds the same variable
+            Expr::LetBinding { var_index: vi, value, body } => {
+                let new_value = Box::new(value.substitute_var(var_index, replacement));
+                if *vi == var_index {
+                    // Inner binding shadows; don't substitute in body
+                    Expr::LetBinding { var_index: *vi, value: new_value, body: body.clone() }
+                } else {
+                    Expr::LetBinding { var_index: *vi, value: new_value, body: Box::new(body.substitute_var(var_index, replacement)) }
+                }
+            },
+            Expr::CallBuiltin { name, args } => Expr::CallBuiltin {
+                name: name.clone(),
+                args: args.iter().map(|a| a.substitute_var(var_index, replacement)).collect(),
+            },
+            _ => self.clone(),
+        }
+    }
 }

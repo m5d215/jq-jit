@@ -136,9 +136,27 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
         Expr::IfThenElse { cond, then_branch, else_branch } => {
             Expr::IfThenElse {
                 cond: Box::new(simplify_expr(cond)),
-                then_branch: then_branch.clone(),
-                else_branch: else_branch.clone(),
+                then_branch: Box::new(simplify_expr(then_branch)),
+                else_branch: Box::new(simplify_expr(else_branch)),
             }
+        }
+        // Inline LetBinding: (E as $x | F) → F[$x := E] when E is simple
+        Expr::LetBinding { var_index, value, body } => {
+            let sv = simplify_expr(value);
+            let sb = simplify_expr(body);
+            if sv.is_simple_scalar() {
+                return sb.substitute_var(*var_index, &sv);
+            }
+            Expr::LetBinding { var_index: *var_index, value: Box::new(sv), body: Box::new(sb) }
+        }
+        // Recurse into ObjectConstruct, BinOp, etc.
+        Expr::ObjectConstruct { pairs } => {
+            Expr::ObjectConstruct {
+                pairs: pairs.iter().map(|(k, v)| (simplify_expr(k), simplify_expr(v))).collect(),
+            }
+        }
+        Expr::BinOp { op, lhs, rhs } => {
+            Expr::BinOp { op: *op, lhs: Box::new(simplify_expr(lhs)), rhs: Box::new(simplify_expr(rhs)) }
         }
         _ => expr.clone(),
     }
