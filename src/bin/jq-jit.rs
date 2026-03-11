@@ -513,10 +513,10 @@ fn real_main() {
     let select_nested_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() {
         filter.detect_select_nested_cmp()
     } else { None };
-    let computed_array = if use_compact_buf && !exit_status && field_access.is_none() && computed_remap.is_none() {
+    let computed_array = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && computed_remap.is_none() {
         filter.detect_computed_array()
     } else { None };
-    let array_field = if use_compact_buf && !exit_status && field_access.is_none() && computed_array.is_none() {
+    let array_field = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && computed_array.is_none() {
         filter.detect_array_field_access()
     } else { None };
     let multi_field = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && array_field.is_none() {
@@ -564,7 +564,7 @@ fn real_main() {
     let field_slice = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
         filter.detect_field_slice()
     } else { None };
-    let dynamic_key_obj = if use_compact_buf && !exit_status && field_access.is_none() && computed_remap.is_none() {
+    let dynamic_key_obj = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && computed_remap.is_none() {
         filter.detect_dynamic_key_obj()
     } else { None };
     let field_alt = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
@@ -1030,11 +1030,24 @@ fn real_main() {
                             let key_val = &raw[ks..ke];
                             // Key must be a string
                             if key_val.len() >= 2 && key_val[0] == b'"' {
-                                compact_buf.push(b'{');
-                                compact_buf.extend_from_slice(key_val);
-                                compact_buf.push(b':');
-                                compact_buf.extend_from_slice(&raw[vs..ve]);
-                                compact_buf.extend_from_slice(b"}\n");
+                                if use_pretty_buf {
+                                    compact_buf.extend_from_slice(b"{\n  ");
+                                    compact_buf.extend_from_slice(key_val);
+                                    compact_buf.extend_from_slice(b": ");
+                                    let val = &raw[vs..ve];
+                                    if val[0] == b'{' || val[0] == b'[' {
+                                        push_json_pretty_raw_at(&mut compact_buf, val, 2, false, 1);
+                                    } else {
+                                        compact_buf.extend_from_slice(val);
+                                    }
+                                    compact_buf.extend_from_slice(b"\n}\n");
+                                } else {
+                                    compact_buf.push(b'{');
+                                    compact_buf.extend_from_slice(key_val);
+                                    compact_buf.push(b':');
+                                    compact_buf.extend_from_slice(&raw[vs..ve]);
+                                    compact_buf.extend_from_slice(b"}\n");
+                                }
                             } else {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -1161,12 +1174,22 @@ fn real_main() {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         if let Some(ranges) = json_object_get_fields_raw(raw, 0, &field_refs) {
-                            compact_buf.push(b'[');
-                            for (i, rexpr) in celems.iter().enumerate() {
-                                if i > 0 { compact_buf.push(b','); }
-                                emit_remap_value(&mut compact_buf, rexpr, raw, &ranges, &field_idx);
+                            if use_pretty_buf {
+                                compact_buf.extend_from_slice(b"[\n");
+                                for (i, rexpr) in celems.iter().enumerate() {
+                                    if i > 0 { compact_buf.extend_from_slice(b",\n"); }
+                                    compact_buf.extend_from_slice(b"  ");
+                                    emit_remap_value(&mut compact_buf, rexpr, raw, &ranges, &field_idx);
+                                }
+                                compact_buf.extend_from_slice(b"\n]\n");
+                            } else {
+                                compact_buf.push(b'[');
+                                for (i, rexpr) in celems.iter().enumerate() {
+                                    if i > 0 { compact_buf.push(b','); }
+                                    emit_remap_value(&mut compact_buf, rexpr, raw, &ranges, &field_idx);
+                                }
+                                compact_buf.extend_from_slice(b"]\n");
                             }
-                            compact_buf.extend_from_slice(b"]\n");
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -1182,12 +1205,27 @@ fn real_main() {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         if let Some(ranges) = json_object_get_fields_raw(raw, 0, &af_refs) {
-                            compact_buf.push(b'[');
-                            for (i, (vs, ve)) in ranges.iter().enumerate() {
-                                if i > 0 { compact_buf.push(b','); }
-                                compact_buf.extend_from_slice(&raw[*vs..*ve]);
+                            if use_pretty_buf {
+                                compact_buf.extend_from_slice(b"[\n");
+                                for (i, (vs, ve)) in ranges.iter().enumerate() {
+                                    if i > 0 { compact_buf.extend_from_slice(b",\n"); }
+                                    compact_buf.extend_from_slice(b"  ");
+                                    let val = &raw[*vs..*ve];
+                                    if val[0] == b'{' || val[0] == b'[' {
+                                        push_json_pretty_raw_at(&mut compact_buf, val, 2, false, 1);
+                                    } else {
+                                        compact_buf.extend_from_slice(val);
+                                    }
+                                }
+                                compact_buf.extend_from_slice(b"\n]\n");
+                            } else {
+                                compact_buf.push(b'[');
+                                for (i, (vs, ve)) in ranges.iter().enumerate() {
+                                    if i > 0 { compact_buf.push(b','); }
+                                    compact_buf.extend_from_slice(&raw[*vs..*ve]);
+                                }
+                                compact_buf.extend_from_slice(b"]\n");
                             }
-                            compact_buf.extend_from_slice(b"]\n");
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -3172,11 +3210,24 @@ fn real_main() {
                         let (vs, ve) = ranges[1];
                         let key_val = &raw[ks..ke];
                         if key_val.len() >= 2 && key_val[0] == b'"' {
-                            compact_buf.push(b'{');
-                            compact_buf.extend_from_slice(key_val);
-                            compact_buf.push(b':');
-                            compact_buf.extend_from_slice(&raw[vs..ve]);
-                            compact_buf.extend_from_slice(b"}\n");
+                            if use_pretty_buf {
+                                compact_buf.extend_from_slice(b"{\n  ");
+                                compact_buf.extend_from_slice(key_val);
+                                compact_buf.extend_from_slice(b": ");
+                                let val = &raw[vs..ve];
+                                if val[0] == b'{' || val[0] == b'[' {
+                                    push_json_pretty_raw_at(&mut compact_buf, val, 2, false, 1);
+                                } else {
+                                    compact_buf.extend_from_slice(val);
+                                }
+                                compact_buf.extend_from_slice(b"\n}\n");
+                            } else {
+                                compact_buf.push(b'{');
+                                compact_buf.extend_from_slice(key_val);
+                                compact_buf.push(b':');
+                                compact_buf.extend_from_slice(&raw[vs..ve]);
+                                compact_buf.extend_from_slice(b"}\n");
+                            }
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -3281,12 +3332,22 @@ fn real_main() {
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
                     if let Some(ranges) = json_object_get_fields_raw(raw, 0, &field_refs) {
-                        compact_buf.push(b'[');
-                        for (i, rexpr) in celems.iter().enumerate() {
-                            if i > 0 { compact_buf.push(b','); }
-                            emit_remap_value(&mut compact_buf, rexpr, raw, &ranges, &field_idx);
+                        if use_pretty_buf {
+                            compact_buf.extend_from_slice(b"[\n");
+                            for (i, rexpr) in celems.iter().enumerate() {
+                                if i > 0 { compact_buf.extend_from_slice(b",\n"); }
+                                compact_buf.extend_from_slice(b"  ");
+                                emit_remap_value(&mut compact_buf, rexpr, raw, &ranges, &field_idx);
+                            }
+                            compact_buf.extend_from_slice(b"\n]\n");
+                        } else {
+                            compact_buf.push(b'[');
+                            for (i, rexpr) in celems.iter().enumerate() {
+                                if i > 0 { compact_buf.push(b','); }
+                                emit_remap_value(&mut compact_buf, rexpr, raw, &ranges, &field_idx);
+                            }
+                            compact_buf.extend_from_slice(b"]\n");
                         }
-                        compact_buf.extend_from_slice(b"]\n");
                     } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -3303,12 +3364,27 @@ fn real_main() {
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
                     if let Some(ranges) = json_object_get_fields_raw(raw, 0, &af_refs) {
-                        compact_buf.push(b'[');
-                        for (i, (vs, ve)) in ranges.iter().enumerate() {
-                            if i > 0 { compact_buf.push(b','); }
-                            compact_buf.extend_from_slice(&raw[*vs..*ve]);
+                        if use_pretty_buf {
+                            compact_buf.extend_from_slice(b"[\n");
+                            for (i, (vs, ve)) in ranges.iter().enumerate() {
+                                if i > 0 { compact_buf.extend_from_slice(b",\n"); }
+                                compact_buf.extend_from_slice(b"  ");
+                                let val = &raw[*vs..*ve];
+                                if val[0] == b'{' || val[0] == b'[' {
+                                    push_json_pretty_raw_at(&mut compact_buf, val, 2, false, 1);
+                                } else {
+                                    compact_buf.extend_from_slice(val);
+                                }
+                            }
+                            compact_buf.extend_from_slice(b"\n]\n");
+                        } else {
+                            compact_buf.push(b'[');
+                            for (i, (vs, ve)) in ranges.iter().enumerate() {
+                                if i > 0 { compact_buf.push(b','); }
+                                compact_buf.extend_from_slice(&raw[*vs..*ve]);
+                            }
+                            compact_buf.extend_from_slice(b"]\n");
                         }
-                        compact_buf.extend_from_slice(b"]\n");
                     } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
