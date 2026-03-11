@@ -2675,6 +2675,21 @@ impl Flattener {
                         return true;
                     }
                 }
+                // Native path(recurse) — bypass eval engine, generate paths directly
+                if let Expr::Recurse { input_expr } = path_expr.as_ref() {
+                    if matches!(input_expr.as_ref(), Expr::Input) {
+                        let inp = self.alloc_slot();
+                        self.emit(JitOp::Clone { dst: inp, src: input_slot });
+                        let arr = self.alloc_slot();
+                        self.emit(JitOp::CallBuiltin { dst: arr, name: "paths_collect_all".to_string(), args: vec![inp] });
+                        self.emit(JitOp::Drop { slot: inp });
+                        self.flatten_each_with_action(arr, false, &|s, elem| {
+                            s.emit_yield(elem);
+                        });
+                        self.emit(JitOp::Drop { slot: arr });
+                        return true;
+                    }
+                }
                 // Delegate complex path expressions to runtime
                 let idx = self.closure_ops.len();
                 self.closure_ops.push((**path_expr).clone());
@@ -5978,6 +5993,54 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                         Value::Obj(o) => {
                             for val in o.values().rev() {
                                 stack.push(val.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                std::ptr::write(dst, Value::Arr(Rc::new(results)));
+            } else {
+                std::ptr::write(dst, Value::Arr(Rc::new(vec![])));
+            }
+            return 0;
+        }
+        if name == "paths_collect_all" {
+            // Native path(recurse): generate all paths (including root []) via DFS
+            if !args.is_empty() {
+                let mut results = Vec::new();
+                // Root path []
+                results.push(Value::Arr(Rc::new(vec![])));
+                // DFS stack: (child_value, path_to_child)
+                let mut stack: Vec<(Value, Vec<Value>)> = Vec::new();
+                // Push root's children in reverse order for correct DFS ordering
+                match &args[0] {
+                    Value::Obj(o) => {
+                        for (key, val) in o.iter().rev() {
+                            stack.push((val.clone(), vec![Value::from_str(key.as_str())]));
+                        }
+                    }
+                    Value::Arr(a) => {
+                        for (i, val) in a.iter().enumerate().rev() {
+                            stack.push((val.clone(), vec![Value::Num(i as f64, None)]));
+                        }
+                    }
+                    _ => {}
+                }
+                while let Some((val, path)) = stack.pop() {
+                    results.push(Value::Arr(Rc::new(path.clone())));
+                    match &val {
+                        Value::Obj(o) => {
+                            for (key, child) in o.iter().rev() {
+                                let mut p = path.clone();
+                                p.push(Value::from_str(key.as_str()));
+                                stack.push((child.clone(), p));
+                            }
+                        }
+                        Value::Arr(a) => {
+                            for (i, child) in a.iter().enumerate().rev() {
+                                let mut p = path.clone();
+                                p.push(Value::Num(i as f64, None));
+                                stack.push((child.clone(), p));
                             }
                         }
                         _ => {}
