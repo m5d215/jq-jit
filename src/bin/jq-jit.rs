@@ -2963,7 +2963,92 @@ fn real_main() {
                 } else if let Some((ref branches, ref else_output)) = cond_chain {
                     use jq_jit::interpreter::{BranchOutput, CondRhs};
                     use jq_jit::ir::BinOp;
-                    // Collect all unique fields needed for conditions and field outputs
+
+                    // Specialized path: single-branch with lazy output fetch
+                    if branches.len() == 1 {
+                        let br = &branches[0];
+                        let cond_field = br.cond_field.as_str();
+                        let cond_op = &br.cond_op;
+                        let then_out = &br.output;
+                        let rhs_field: Option<&str> = if let CondRhs::Field(ref f) = br.cond_rhs { Some(f.as_str()) } else { None };
+                        let rhs_const: Option<f64> = if let CondRhs::Const(n) = br.cond_rhs { Some(n) } else { None };
+                        json_stream_raw(&input_str, |start, end| {
+                            let raw = &input_bytes[start..end];
+                            // Get comparison values
+                            let (lv, rv, got) = if let Some(rf) = rhs_field {
+                                if let Some((l, r)) = json_object_get_two_nums(raw, 0, cond_field, rf) {
+                                    (l, r, true)
+                                } else { (0.0, 0.0, false) }
+                            } else {
+                                let thr = rhs_const.unwrap();
+                                if let Some(l) = json_object_get_num(raw, 0, cond_field) {
+                                    (l, thr, true)
+                                } else { (0.0, 0.0, false) }
+                            };
+                            if got {
+                                let pass = match cond_op {
+                                    BinOp::Gt => lv > rv, BinOp::Lt => lv < rv,
+                                    BinOp::Ge => lv >= rv, BinOp::Le => lv <= rv,
+                                    BinOp::Eq => lv == rv, BinOp::Ne => lv != rv,
+                                    _ => false,
+                                };
+                                let out_br = if pass { then_out } else { else_output };
+                                match out_br {
+                                    BranchOutput::Literal(ref bytes) => {
+                                        compact_buf.extend_from_slice(bytes);
+                                        compact_buf.push(b'\n');
+                                    }
+                                    BranchOutput::Field(ref f) => {
+                                        let fs = f.as_str();
+                                        if fs == cond_field {
+                                            push_jq_number_bytes(&mut compact_buf, lv);
+                                            compact_buf.push(b'\n');
+                                        } else if rhs_field.map_or(false, |rf| fs == rf) {
+                                            push_jq_number_bytes(&mut compact_buf, rv);
+                                            compact_buf.push(b'\n');
+                                        } else {
+                                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, f) {
+                                                let val = &raw[vs..ve];
+                                                if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
+                                                    push_json_pretty_raw(&mut compact_buf, val, 2, false);
+                                                } else {
+                                                    compact_buf.extend_from_slice(val);
+                                                }
+                                                compact_buf.push(b'\n');
+                                            }
+                                        }
+                                    }
+                                    BranchOutput::Empty => {}
+                                }
+                            } else {
+                                // Fields not numeric — take else branch
+                                match else_output {
+                                    BranchOutput::Literal(ref bytes) => {
+                                        compact_buf.extend_from_slice(bytes);
+                                        compact_buf.push(b'\n');
+                                    }
+                                    BranchOutput::Field(ref f) => {
+                                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, f) {
+                                            let val = &raw[vs..ve];
+                                            if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
+                                                push_json_pretty_raw(&mut compact_buf, val, 2, false);
+                                            } else {
+                                                compact_buf.extend_from_slice(val);
+                                            }
+                                            compact_buf.push(b'\n');
+                                        }
+                                    }
+                                    BranchOutput::Empty => {}
+                                }
+                            }
+                            if compact_buf.len() >= 1 << 17 {
+                                let _ = out.write_all(&compact_buf);
+                                compact_buf.clear();
+                            }
+                            Ok(())
+                        })
+                    } else {
+                    // General path: collect all unique fields needed for conditions and field outputs
                     let mut all_fields: Vec<String> = Vec::new();
                     let mut field_idx = std::collections::HashMap::new();
                     let ensure_field = |f: &String, all: &mut Vec<String>, idx: &mut std::collections::HashMap<String, usize>| {
@@ -3037,6 +3122,7 @@ fn real_main() {
                         }
                         Ok(())
                     })
+                    } // end general path
                 } else if let Some((ref field, ref op, threshold, ref t_bytes, ref f_bytes)) = cmp_branch_lit {
                     use jq_jit::ir::BinOp;
                     json_stream_raw(&input_str, |start, end| {
@@ -4830,6 +4916,90 @@ fn real_main() {
                 use jq_jit::interpreter::{BranchOutput, CondRhs};
                 use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
+
+                // Specialized path: single-branch with lazy output fetch
+                if branches.len() == 1 {
+                    let br = &branches[0];
+                    let cond_field = br.cond_field.as_str();
+                    let cond_op = &br.cond_op;
+                    let then_out = &br.output;
+                    let rhs_field: Option<&str> = if let CondRhs::Field(ref f) = br.cond_rhs { Some(f.as_str()) } else { None };
+                    let rhs_const: Option<f64> = if let CondRhs::Const(n) = br.cond_rhs { Some(n) } else { None };
+                    json_stream_raw(content, |start, end| {
+                        let raw = &content_bytes[start..end];
+                        let (lv, rv, got) = if let Some(rf) = rhs_field {
+                            if let Some((l, r)) = json_object_get_two_nums(raw, 0, cond_field, rf) {
+                                (l, r, true)
+                            } else { (0.0, 0.0, false) }
+                        } else {
+                            let thr = rhs_const.unwrap();
+                            if let Some(l) = json_object_get_num(raw, 0, cond_field) {
+                                (l, thr, true)
+                            } else { (0.0, 0.0, false) }
+                        };
+                        if got {
+                            let pass = match cond_op {
+                                BinOp::Gt => lv > rv, BinOp::Lt => lv < rv,
+                                BinOp::Ge => lv >= rv, BinOp::Le => lv <= rv,
+                                BinOp::Eq => lv == rv, BinOp::Ne => lv != rv,
+                                _ => false,
+                            };
+                            let out_br = if pass { then_out } else { else_output };
+                            match out_br {
+                                BranchOutput::Literal(ref bytes) => {
+                                    compact_buf.extend_from_slice(bytes);
+                                    compact_buf.push(b'\n');
+                                }
+                                BranchOutput::Field(ref f) => {
+                                    let fs = f.as_str();
+                                    if fs == cond_field {
+                                        push_jq_number_bytes(&mut compact_buf, lv);
+                                        compact_buf.push(b'\n');
+                                    } else if rhs_field.map_or(false, |rf| fs == rf) {
+                                        push_jq_number_bytes(&mut compact_buf, rv);
+                                        compact_buf.push(b'\n');
+                                    } else {
+                                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, f) {
+                                            let val = &raw[vs..ve];
+                                            if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
+                                                push_json_pretty_raw(&mut compact_buf, val, 2, false);
+                                            } else {
+                                                compact_buf.extend_from_slice(val);
+                                            }
+                                            compact_buf.push(b'\n');
+                                        }
+                                    }
+                                }
+                                BranchOutput::Empty => {}
+                            }
+                        } else {
+                            match else_output {
+                                BranchOutput::Literal(ref bytes) => {
+                                    compact_buf.extend_from_slice(bytes);
+                                    compact_buf.push(b'\n');
+                                }
+                                BranchOutput::Field(ref f) => {
+                                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, f) {
+                                        let val = &raw[vs..ve];
+                                        if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
+                                            push_json_pretty_raw(&mut compact_buf, val, 2, false);
+                                        } else {
+                                            compact_buf.extend_from_slice(val);
+                                        }
+                                        compact_buf.push(b'\n');
+                                    }
+                                }
+                                BranchOutput::Empty => {}
+                            }
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else {
+                // General path
                 let mut all_fields: Vec<String> = Vec::new();
                 let mut field_idx = std::collections::HashMap::new();
                 let ensure_field = |f: &String, all: &mut Vec<String>, idx: &mut std::collections::HashMap<String, usize>| {
@@ -4903,6 +5073,7 @@ fn real_main() {
                     }
                     Ok(())
                 })
+                } // end general path
             } else if let Some((ref field, ref op, threshold, ref t_bytes, ref f_bytes)) = cmp_branch_lit {
                 use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
