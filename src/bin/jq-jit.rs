@@ -1095,21 +1095,7 @@ fn real_main() {
                         if raw[0] == b'{' {
                             if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, fa_field) {
                                 let val_bytes = &raw[vs..ve];
-                                let first = val_bytes[0];
-                                if first != b'{' && first != b'[' {
-                                    compact_buf.extend_from_slice(val_bytes);
-                                    compact_buf.push(b'\n');
-                                } else if use_compact_buf && is_json_compact(val_bytes) {
-                                    compact_buf.extend_from_slice(val_bytes);
-                                    compact_buf.push(b'\n');
-                                } else {
-                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(val_bytes) })?;
-                                    if use_compact_buf {
-                                        push_compact_line(&mut compact_buf, &v);
-                                    } else {
-                                        push_pretty_line(&mut compact_buf, &v, indent_n, tab);
-                                    }
-                                }
+                                emit_raw_ln!(&mut compact_buf, val_bytes);
                             } else {
                                 compact_buf.extend_from_slice(b"null\n");
                             }
@@ -1128,21 +1114,7 @@ fn real_main() {
                         let raw = &input_bytes[start..end];
                         if let Some((vs, ve)) = json_object_get_nested_field_raw(raw, 0, &nf_refs) {
                             let val_bytes = &raw[vs..ve];
-                            let first = val_bytes[0];
-                            if first != b'{' && first != b'[' {
-                                compact_buf.extend_from_slice(val_bytes);
-                                compact_buf.push(b'\n');
-                            } else if use_compact_buf && is_json_compact(val_bytes) {
-                                compact_buf.extend_from_slice(val_bytes);
-                                compact_buf.push(b'\n');
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(val_bytes) })?;
-                                if use_compact_buf {
-                                    push_compact_line(&mut compact_buf, &v);
-                                } else {
-                                    push_pretty_line(&mut compact_buf, &v, indent_n, tab);
-                                }
-                            }
+                            emit_raw_ln!(&mut compact_buf, val_bytes);
                         } else {
                             compact_buf.extend_from_slice(b"null\n");
                         }
@@ -1243,21 +1215,7 @@ fn real_main() {
                         if let Some(ranges) = json_object_get_fields_raw(raw, 0, &mf_refs) {
                             for (vs, ve) in &ranges {
                                 let val_bytes = &raw[*vs..*ve];
-                                let first = val_bytes[0];
-                                if first != b'{' && first != b'[' {
-                                    compact_buf.extend_from_slice(val_bytes);
-                                    compact_buf.push(b'\n');
-                                } else if use_compact_buf && is_json_compact(val_bytes) {
-                                    compact_buf.extend_from_slice(val_bytes);
-                                    compact_buf.push(b'\n');
-                                } else {
-                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(val_bytes) })?;
-                                    if use_compact_buf {
-                                        push_compact_line(&mut compact_buf, &v);
-                                    } else {
-                                        push_pretty_line(&mut compact_buf, &v, indent_n, tab);
-                                    }
-                                }
+                                emit_raw_ln!(&mut compact_buf, val_bytes);
                             }
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
@@ -3250,22 +3208,7 @@ fn real_main() {
                     if raw[0] == b'{' {
                         if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, fa_field) {
                             let val_bytes = &raw[vs..ve];
-                            let first = val_bytes[0];
-                            if first != b'{' && first != b'[' {
-                                // Scalar: same in compact and pretty
-                                compact_buf.extend_from_slice(val_bytes);
-                                compact_buf.push(b'\n');
-                            } else if use_compact_buf && is_json_compact(val_bytes) {
-                                compact_buf.extend_from_slice(val_bytes);
-                                compact_buf.push(b'\n');
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(val_bytes) })?;
-                                if use_compact_buf {
-                                    push_compact_line(&mut compact_buf, &v);
-                                } else {
-                                    push_pretty_line(&mut compact_buf, &v, indent_n, tab);
-                                }
-                            }
+                            emit_raw_ln!(&mut compact_buf, val_bytes);
                         } else {
                             compact_buf.extend_from_slice(b"null\n");
                         }
@@ -3285,21 +3228,7 @@ fn real_main() {
                     let raw = &content_bytes[start..end];
                     if let Some((vs, ve)) = json_object_get_nested_field_raw(raw, 0, &nf_refs) {
                         let val_bytes = &raw[vs..ve];
-                        let first = val_bytes[0];
-                        if first != b'{' && first != b'[' {
-                            compact_buf.extend_from_slice(val_bytes);
-                            compact_buf.push(b'\n');
-                        } else if use_compact_buf && is_json_compact(val_bytes) {
-                            compact_buf.extend_from_slice(val_bytes);
-                            compact_buf.push(b'\n');
-                        } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(val_bytes) })?;
-                            if use_compact_buf {
-                                push_compact_line(&mut compact_buf, &v);
-                            } else {
-                                push_pretty_line(&mut compact_buf, &v, indent_n, tab);
-                            }
-                        }
+                        emit_raw_ln!(&mut compact_buf, val_bytes);
                     } else {
                         compact_buf.extend_from_slice(b"null\n");
                     }
@@ -3403,24 +3332,9 @@ fn real_main() {
                     if let Some(ranges) = json_object_get_fields_raw(raw, 0, &mf_refs) {
                         for (vs, ve) in &ranges {
                             let val_bytes = &raw[*vs..*ve];
-                            let first = val_bytes[0];
-                            if first != b'{' && first != b'[' {
-                                compact_buf.extend_from_slice(val_bytes);
-                                compact_buf.push(b'\n');
-                            } else if use_compact_buf && is_json_compact(val_bytes) {
-                                compact_buf.extend_from_slice(val_bytes);
-                                compact_buf.push(b'\n');
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(val_bytes) })?;
-                                if use_compact_buf {
-                                    push_compact_line(&mut compact_buf, &v);
-                                } else {
-                                    push_pretty_line(&mut compact_buf, &v, indent_n, tab);
-                                }
-                            }
+                            emit_raw_ln!(&mut compact_buf, val_bytes);
                         }
                     } else {
-                        // Missing field → fall back to parse + JIT for all values
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
