@@ -87,11 +87,29 @@ pub struct Filter {
     program: String,
     /// Our parsed IR (if parsing succeeded).
     parsed: Option<(crate::ir::Expr, Vec<CompiledFunc>)>,
+    /// Simplified expression for fast path detection (identity pipes stripped).
+    simplified: Option<crate::ir::Expr>,
     /// JIT-compiled function (if JIT compilation succeeded).
     jit_fn: Option<crate::jit::JitFilterFn>,
     /// JIT compiler kept alive to own the compiled code.
     _jit_compiler: Option<Box<crate::jit::JitCompiler>>,
     lib_dirs: Vec<String>,
+}
+
+/// Recursively strip identity pipes: Pipe(Input, X) → X, Pipe(X, Input) → X.
+fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
+    use crate::ir::Expr;
+    match expr {
+        Expr::Pipe { left, right } => {
+            let sl = simplify_expr(left);
+            let sr = simplify_expr(right);
+            if matches!(&sl, Expr::Input) { return sr; }
+            if matches!(&sr, Expr::Input) { return sl; }
+            Expr::Pipe { left: Box::new(sl), right: Box::new(sr) }
+        }
+        // Don't recurse into everything — just handle the top-level pipe chain
+        _ => expr.clone(),
+    }
 }
 
 /// Serialize a constant expression to JSON bytes. Returns false if expression is not fully constant.
@@ -173,6 +191,15 @@ impl Filter {
     /// `try EXPR` (TryCatch with Empty catch) since the raw byte fast paths
     /// handle missing fields gracefully (return null/nothing).
     fn detect_expr(&self) -> Option<&crate::ir::Expr> {
+        // Use simplified expression (identity pipes stripped) for pattern detection
+        if let Some(ref simplified) = self.simplified {
+            if let crate::ir::Expr::TryCatch { try_expr, catch_expr } = simplified {
+                if matches!(catch_expr.as_ref(), crate::ir::Expr::Empty) {
+                    return Some(try_expr);
+                }
+            }
+            return Some(simplified);
+        }
         let (ref expr, _) = self.parsed.as_ref()?;
         if let crate::ir::Expr::TryCatch { try_expr, catch_expr } = expr {
             if matches!(catch_expr.as_ref(), crate::ir::Expr::Empty) {
@@ -218,9 +245,12 @@ impl Filter {
             }
         }
 
+        let simplified = parsed.as_ref().map(|(expr, _)| simplify_expr(expr));
+
         Ok(Filter {
             program: program.to_string(),
             parsed,
+            simplified,
             jit_fn,
             _jit_compiler: jit_compiler,
             lib_dirs: lib_dirs.to_vec(),
@@ -371,11 +401,8 @@ impl Filter {
     /// Returns true if this filter is a simple identity (`.`) that passes through input unchanged.
     /// Also recognizes semantic equivalences like `to_entries | from_entries`.
     pub fn is_identity(&self) -> bool {
-        if let Some((ref expr, _)) = self.parsed {
-            Self::expr_is_identity(expr)
-        } else {
-            false
-        }
+        let expr = match self.detect_expr() { Some(e) => e, None => return false };
+        Self::expr_is_identity(expr)
     }
 
     fn expr_is_identity(expr: &crate::ir::Expr) -> bool {
@@ -406,13 +433,10 @@ impl Filter {
         }
     }
 
-    /// Returns true if this filter produces no output (e.g. `empty`).
+    /// Returns true if this filter produces no output (e.g. `empty`, `. | empty`).
     pub fn is_empty(&self) -> bool {
-        if let Some((ref expr, _)) = self.parsed {
-            matches!(expr, crate::ir::Expr::Empty)
-        } else {
-            false
-        }
+        let expr = match self.detect_expr() { Some(e) => e, None => return false };
+        matches!(expr, crate::ir::Expr::Empty)
     }
 
     /// Detect `select(.field > N)` pattern for fast-path select.
