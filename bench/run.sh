@@ -117,6 +117,10 @@ TESTS=(
     'sel(and)|remap:-c:select(.x > 100 and .y < 500) | {n:.name, v:.y}'
     'arith|cmp:-c:.x | . * 2 | . + 1 | . > 1000000'
     'if cmp .field:-c:if .x > 1000000 then .name else .y end'
+    'split|length:-c:.name | split("_") | length'
+    '[x,y]|min:-c:[.x, .y] | min'
+    '[x,y]|max:-c:[.x, .y] | max'
+    '[x,y]|sort|.[0]:-c:[.x, .y] | sort | .[0]'
 )
 
 for test in "${TESTS[@]}"; do

@@ -707,6 +707,9 @@ fn real_main() {
     let field_split_length = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
         filter.detect_field_split_length()
     } else { None };
+    let field_strop_length = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_split_length.is_none() {
+        filter.detect_field_strop_length()
+    } else { None };
     let min_two_fields = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
         filter.detect_min_two_fields()
     } else { None };
@@ -769,7 +772,7 @@ fn real_main() {
         || is_keys_unsorted || has_field.is_some() || has_multi.is_some() || select_has_multi.is_some() || is_type || del_field.is_some() || obj_merge_lit.is_some()
         || is_each || is_to_entries || is_tojson || string_interp_fields.is_some() || array_join.is_some()
         || literal_output.is_some() || array_fields_format.is_some() || raw_csv_fields.is_some()
-        || field_split_join.is_some() || field_split_first.is_some() || field_split_length.is_some() || field_slice.is_some()
+        || field_split_join.is_some() || field_split_first.is_some() || field_split_length.is_some() || field_strop_length.is_some() || field_slice.is_some()
         || dynamic_key_obj.is_some() || field_update_num.is_some()
         || min_two_fields.is_some() || minmax_two.is_some() || filter.is_empty();
     let projection_fields: Option<Vec<String>> = if !has_raw_fast_path && !slurp && !raw_input {
@@ -1172,6 +1175,67 @@ fn real_main() {
                                     let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                     process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                 }
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref sol_field, ref sol_op, ref sol_arg)) = field_strop_length {
+                    // .field | str_op | length — compute length from raw bytes
+                    let mut ibuf = itoa::Buffer::new();
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sol_field) {
+                            let val = &raw[vs..ve];
+                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                                && !val[1..val.len()-1].contains(&b'\\')
+                            {
+                                let inner = &val[1..val.len()-1];
+                                let result = match sol_op.as_str() {
+                                    "ltrimstr" => {
+                                        let prefix = sol_arg.as_ref().unwrap().as_bytes();
+                                        if inner.starts_with(prefix) {
+                                            // Count UTF-8 codepoints in remaining bytes
+                                            let remaining = &inner[prefix.len()..];
+                                            remaining.iter().filter(|&&b| (b & 0xC0) != 0x80).count()
+                                        } else {
+                                            inner.iter().filter(|&&b| (b & 0xC0) != 0x80).count()
+                                        }
+                                    }
+                                    "rtrimstr" => {
+                                        let suffix = sol_arg.as_ref().unwrap().as_bytes();
+                                        if inner.ends_with(suffix) {
+                                            let remaining = &inner[..inner.len() - suffix.len()];
+                                            remaining.iter().filter(|&&b| (b & 0xC0) != 0x80).count()
+                                        } else {
+                                            inner.iter().filter(|&&b| (b & 0xC0) != 0x80).count()
+                                        }
+                                    }
+                                    "identity_length" => {
+                                        // ascii_downcase/upcase don't change length
+                                        inner.iter().filter(|&&b| (b & 0xC0) != 0x80).count()
+                                    }
+                                    "explode" => {
+                                        // explode | length = codepoint count
+                                        inner.iter().filter(|&&b| (b & 0xC0) != 0x80).count()
+                                    }
+                                    _ => {
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                        return Ok(());
+                                    }
+                                };
+                                compact_buf.extend_from_slice(ibuf.format(result).as_bytes());
+                                compact_buf.push(b'\n');
                             } else {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -3734,6 +3798,59 @@ fn real_main() {
                                 inner.windows(delim_bytes.len()).filter(|w| *w == delim_bytes).count() + 1
                             };
                             compact_buf.extend_from_slice(ibuf.format(count).as_bytes());
+                            compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref sol_field, ref sol_op, ref sol_arg)) = field_strop_length {
+                let content_bytes = content.as_bytes();
+                let mut ibuf = itoa::Buffer::new();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sol_field) {
+                        let val = &raw[vs..ve];
+                        if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                            && !val[1..val.len()-1].contains(&b'\\')
+                        {
+                            let inner = &val[1..val.len()-1];
+                            let result = match sol_op.as_str() {
+                                "ltrimstr" => {
+                                    let prefix = sol_arg.as_ref().unwrap().as_bytes();
+                                    if inner.starts_with(prefix) {
+                                        inner[prefix.len()..].iter().filter(|&&b| (b & 0xC0) != 0x80).count()
+                                    } else {
+                                        inner.iter().filter(|&&b| (b & 0xC0) != 0x80).count()
+                                    }
+                                }
+                                "rtrimstr" => {
+                                    let suffix = sol_arg.as_ref().unwrap().as_bytes();
+                                    if inner.ends_with(suffix) {
+                                        inner[..inner.len() - suffix.len()].iter().filter(|&&b| (b & 0xC0) != 0x80).count()
+                                    } else {
+                                        inner.iter().filter(|&&b| (b & 0xC0) != 0x80).count()
+                                    }
+                                }
+                                "identity_length" | "explode" => {
+                                    inner.iter().filter(|&&b| (b & 0xC0) != 0x80).count()
+                                }
+                                _ => {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    return Ok(());
+                                }
+                            };
+                            compact_buf.extend_from_slice(ibuf.format(result).as_bytes());
                             compact_buf.push(b'\n');
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;

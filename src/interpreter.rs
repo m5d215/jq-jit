@@ -1921,6 +1921,77 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | str_op | length` chains — returns (field, op_name, op_arg).
+    /// Handles ltrimstr, rtrimstr, ascii_downcase, ascii_upcase, explode.
+    pub fn detect_field_strop_length(&self) -> Option<(String, String, Option<String>)> {
+        use crate::ir::{Expr, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        // Fully beta-reduced: UnaryOp(Length, UnaryOp(op, .field))
+        if let Expr::UnaryOp { op: UnaryOp::Length, operand: inner } = expr {
+            if let Expr::UnaryOp { op, operand: field_expr } = inner.as_ref() {
+                if let Expr::Index { expr: base, key } = field_expr.as_ref() {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                            match op {
+                                UnaryOp::AsciiDowncase | UnaryOp::AsciiUpcase => {
+                                    return Some((field.clone(), "identity_length".to_string(), None));
+                                }
+                                UnaryOp::Explode => {
+                                    return Some((field.clone(), "explode".to_string(), None));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Expr::Pipe { left, right } = expr {
+            let field = if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() }
+                else { return None; }
+            } else { return None; };
+            // Non-reduced: Pipe(.field, Pipe(str_op, length))
+            if let Expr::Pipe { left: op_expr, right: len_expr } = right.as_ref() {
+                if matches!(len_expr.as_ref(), Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                    match op_expr.as_ref() {
+                        Expr::CallBuiltin { name, args } if args.len() == 1 => {
+                            if let Expr::Literal(Literal::Str(arg)) = &args[0] {
+                                match name.as_str() {
+                                    "ltrimstr" | "rtrimstr" => return Some((field, name.clone(), Some(arg.clone()))),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // Beta-reduced: Pipe(.field, UnaryOp(Length, UnaryOp(op, Input)))
+            if let Expr::UnaryOp { op: UnaryOp::Length, operand: inner } = right.as_ref() {
+                match inner.as_ref() {
+                    Expr::UnaryOp { op, operand } if matches!(operand.as_ref(), Expr::Input) => {
+                        match op {
+                            UnaryOp::AsciiDowncase | UnaryOp::AsciiUpcase => {
+                                return Some((field, "identity_length".to_string(), None));
+                            }
+                            UnaryOp::Explode => {
+                                return Some((field, "explode".to_string(), None));
+                            }
+                            _ => {}
+                        }
+                    }
+                    Expr::Input => {
+                        // .field | length — already handled by other fast paths
+                    }
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `[.x, .y] | sort | .[0]` — min of two numeric fields.
     /// Returns (field1, field2).
     pub fn detect_min_two_fields(&self) -> Option<(String, String)> {
