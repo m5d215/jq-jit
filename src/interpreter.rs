@@ -2472,6 +2472,49 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.f1 cmp .f2) | .output_field` — field-field comparison select then field.
+    /// Returns (cmp_field1, op, cmp_field2, output_field).
+    pub fn detect_select_field_cmp_field_then_field(&self) -> Option<(String, crate::ir::BinOp, String, String)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        let try_extract = |cond: &Expr, output: &Expr| -> Option<(String, BinOp, String, String)> {
+            if let Expr::Index { expr: base, key } = output {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                let output_field = if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() } else { return None; };
+                if let Expr::BinOp { op, lhs, rhs } = cond {
+                    if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                    if let Expr::Index { expr: base1, key: key1 } = lhs.as_ref() {
+                        if !matches!(base1.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f1)) = key1.as_ref() {
+                            if let Expr::Index { expr: base2, key: key2 } = rhs.as_ref() {
+                                if !matches!(base2.as_ref(), Expr::Input) { return None; }
+                                if let Expr::Literal(Literal::Str(f2)) = key2.as_ref() {
+                                    return Some((f1.clone(), *op, f2.clone(), output_field));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        };
+        // Form 1: Pipe(IfThenElse{cond, then:Input, else:Empty}, Index)
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                    if let Some(r) = try_extract(cond, right) { return Some(r); }
+                }
+            }
+        }
+        // Form 2: IfThenElse{cond, then:Index, else:Empty}
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if matches!(else_branch.as_ref(), Expr::Empty) {
+                if let Some(r) = try_extract(cond, then_branch) { return Some(r); }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.field > N) | RemapExpr` — select then single computed value.
     /// Returns (sel_field, op, threshold, output_expr).
     /// Only matches when the output is a computed expression (not a simple .field, which

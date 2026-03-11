@@ -124,6 +124,7 @@ TESTS=(
     '.name|len>5:-c:.name | length > 5'
     'sel(len>5)|.x:-c:select(.name | length > 5) | .x'
     'if .x>.y .name:-c:if .x > .y then .name else .x end'
+    'sel(.x>.y)|.name:-c:select(.x > .y) | .name'
 )
 
 for test in "${TESTS[@]}"; do
