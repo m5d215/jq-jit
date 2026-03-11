@@ -1284,6 +1284,58 @@ pub fn json_each_value_raw(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {
     }
 }
 
+/// Iterator-style `.[]` that calls a closure for each value span.
+/// Returns true if successful. The callback receives (value_start, value_end) byte offsets into `b`.
+pub fn json_each_value_cb(b: &[u8], pos: usize, mut cb: impl FnMut(usize, usize)) -> bool {
+    if pos >= b.len() { return false; }
+    match b[pos] {
+        b'{' => {
+            let mut i = pos + 1;
+            while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+            if i < b.len() && b[i] == b'}' { return true; }
+            loop {
+                if i >= b.len() || b[i] != b'"' { return false; }
+                i += 1;
+                while i < b.len() { match b[i] { b'"' => break, b'\\' => { i += 2; continue }, _ => i += 1 } }
+                if i >= b.len() { return false; }
+                i += 1;
+                while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+                if i >= b.len() || b[i] != b':' { return false; }
+                i += 1;
+                while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+                let vs = i;
+                i = match skip_json_value(b, i) { Ok(e) => e, Err(_) => return false };
+                cb(vs, i);
+                while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+                if i >= b.len() { return false; }
+                if b[i] == b'}' { break; }
+                if b[i] != b',' { return false; }
+                i += 1;
+                while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+            }
+            true
+        }
+        b'[' => {
+            let mut i = pos + 1;
+            while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+            if i < b.len() && b[i] == b']' { return true; }
+            loop {
+                let vs = i;
+                i = match skip_json_value(b, i) { Ok(e) => e, Err(_) => return false };
+                cb(vs, i);
+                while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+                if i >= b.len() { return false; }
+                if b[i] == b']' { break; }
+                if b[i] != b',' { return false; }
+                i += 1;
+                while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Convert a JSON object to `to_entries` format directly from raw bytes.
 /// Produces `[{"key":"k1","value":v1},{"key":"k2","value":v2},...]\n`.
 pub fn json_to_entries_raw(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {
