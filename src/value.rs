@@ -902,6 +902,39 @@ pub fn json_object_keys_to_buf_reuse(b: &[u8], pos: usize, buf: &mut Vec<u8>, ke
     true
 }
 
+/// Extract unsorted key byte ranges from a JSON object without output.
+/// Returns Some(count) if successful, populating `keys` with (start, end) ranges
+/// including the surrounding quotes. Returns None on non-object.
+pub fn json_object_extract_keys_only(b: &[u8], pos: usize, keys: &mut Vec<(usize, usize)>) -> Option<usize> {
+    keys.clear();
+    if pos >= b.len() || b[pos] != b'{' { return None; }
+    let mut i = pos + 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < b.len() && b[i] == b'}' { return Some(0); }
+    loop {
+        if i >= b.len() || b[i] != b'"' { return None; }
+        let key_start = i;
+        i += 1;
+        while i < b.len() { match b[i] { b'"' => break, b'\\' => i += 2, _ => i += 1 } }
+        if i >= b.len() { return None; }
+        let key_end = i + 1;
+        keys.push((key_start, key_end));
+        i = key_end;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { return None; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return None };
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { return None; }
+        if b[i] == b'}' { break; }
+        if b[i] != b',' { return None; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
+    Some(keys.len())
+}
+
 /// Extract unsorted keys from a JSON object without full parsing.
 /// Writes `["key1","key2",...]\n` to buf. Returns false on non-object.
 pub fn json_object_keys_unsorted_to_buf(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {

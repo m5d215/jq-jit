@@ -8,7 +8,7 @@ use std::process;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, json_object_get_nested_field_raw, parse_json_num, json_value_length, json_object_keys_to_buf_reuse, json_object_keys_unsorted_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_type_byte, json_object_del_field, json_object_merge_literal, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_object_update_field_num, is_json_compact, push_json_compact_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
+use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, json_object_get_nested_field_raw, parse_json_num, json_value_length, json_object_keys_to_buf_reuse, json_object_extract_keys_only, json_object_keys_unsorted_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_type_byte, json_object_del_field, json_object_merge_literal, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_object_update_field_num, is_json_compact, push_json_compact_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
 use jq_jit::interpreter::Filter;
 
 fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -3824,23 +3824,80 @@ fn real_main() {
                 } else if is_keys {
                     let mut tmp = Vec::new();
                     let mut keys_buf: Vec<(usize, usize)> = Vec::new();
+                    // Cache sorted output for identical key sets
+                    let mut cached_output: Vec<u8> = Vec::new();
+                    let mut cached_keys: Vec<Vec<u8>> = Vec::new(); // unsorted key bytes
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
+                        // Try cached permutation: extract unsorted keys, check if same set
+                        if !cached_keys.is_empty() {
+                            if let Some(extracted) = json_object_extract_keys_only(raw, 0, &mut keys_buf) {
+                                if extracted == cached_keys.len() {
+                                    // Check if all keys match
+                                    let mut same = true;
+                                    for (i, (ks, ke)) in keys_buf.iter().enumerate() {
+                                        if &raw[*ks..*ke] != cached_keys[i].as_slice() {
+                                            same = false;
+                                            break;
+                                        }
+                                    }
+                                    if same {
+                                        if use_pretty_buf {
+                                            // cached_output has no trailing \n
+                                            push_json_pretty_raw(&mut compact_buf, &cached_output, 2, false);
+                                            compact_buf.push(b'\n');
+                                        } else {
+                                            compact_buf.extend_from_slice(&cached_output);
+                                            compact_buf.push(b'\n');
+                                        }
+                                        if compact_buf.len() >= 1 << 17 {
+                                            let _ = out.write_all(&compact_buf);
+                                            compact_buf.clear();
+                                        }
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                        }
+                        // Full path: extract, sort, output
                         if use_pretty_buf {
                             tmp.clear();
                             if json_object_keys_to_buf_reuse(raw, 0, &mut tmp, &mut keys_buf) {
-                                // tmp has compact "["a","b",...]\n", strip trailing \n
                                 let len = tmp.len();
                                 if len > 0 && tmp[len-1] == b'\n' { tmp.truncate(len-1); }
+                                // Cache for future objects
+                                if cached_keys.is_empty() {
+                                    cached_output = tmp.clone();
+                                    // We need to re-extract unsorted keys for caching
+                                    // keys_buf was sorted in-place, so re-extract
+                                    let mut unsorted: Vec<(usize, usize)> = Vec::new();
+                                    if let Some(_) = json_object_extract_keys_only(raw, 0, &mut unsorted) {
+                                        cached_keys = unsorted.iter().map(|(s, e)| raw[*s..*e].to_vec()).collect();
+                                    }
+                                }
                                 push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
                                 compact_buf.push(b'\n');
                             } else {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             }
-                        } else if !json_object_keys_to_buf_reuse(raw, 0, &mut compact_buf, &mut keys_buf) {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        } else {
+                            let before = compact_buf.len();
+                            if json_object_keys_to_buf_reuse(raw, 0, &mut compact_buf, &mut keys_buf) {
+                                // Cache the output (without trailing \n)
+                                if cached_keys.is_empty() {
+                                    let end_pos = compact_buf.len();
+                                    // Output is [...]\n, cache [...] (without \n)
+                                    cached_output = compact_buf[before..end_pos-1].to_vec();
+                                    let mut unsorted: Vec<(usize, usize)> = Vec::new();
+                                    if let Some(_) = json_object_extract_keys_only(raw, 0, &mut unsorted) {
+                                        cached_keys = unsorted.iter().map(|(s, e)| raw[*s..*e].to_vec()).collect();
+                                    }
+                                }
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -6865,23 +6922,70 @@ fn real_main() {
                 let content_bytes = content.as_bytes();
                 let mut tmp = Vec::new();
                 let mut keys_buf: Vec<(usize, usize)> = Vec::new();
+                let mut cached_output: Vec<u8> = Vec::new();
+                let mut cached_keys: Vec<Vec<u8>> = Vec::new();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
+                    if !cached_keys.is_empty() {
+                        if let Some(extracted) = json_object_extract_keys_only(raw, 0, &mut keys_buf) {
+                            if extracted == cached_keys.len() {
+                                let mut same = true;
+                                for (i, (ks, ke)) in keys_buf.iter().enumerate() {
+                                    if &raw[*ks..*ke] != cached_keys[i].as_slice() {
+                                        same = false;
+                                        break;
+                                    }
+                                }
+                                if same {
+                                    if use_pretty_buf {
+                                        push_json_pretty_raw(&mut compact_buf, &cached_output, 2, false);
+                                        compact_buf.push(b'\n');
+                                    } else {
+                                        compact_buf.extend_from_slice(&cached_output);
+                                        compact_buf.push(b'\n');
+                                    }
+                                    if compact_buf.len() >= 1 << 17 {
+                                        let _ = out.write_all(&compact_buf);
+                                        compact_buf.clear();
+                                    }
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
                     if use_pretty_buf {
                         tmp.clear();
                         if json_object_keys_to_buf_reuse(raw, 0, &mut tmp, &mut keys_buf) {
-                            // tmp has compact "["a","b",...]\n", strip trailing \n
                             let len = tmp.len();
                             if len > 0 && tmp[len-1] == b'\n' { tmp.truncate(len-1); }
+                            if cached_keys.is_empty() {
+                                cached_output = tmp.clone();
+                                let mut unsorted: Vec<(usize, usize)> = Vec::new();
+                                if let Some(_) = json_object_extract_keys_only(raw, 0, &mut unsorted) {
+                                    cached_keys = unsorted.iter().map(|(s, e)| raw[*s..*e].to_vec()).collect();
+                                }
+                            }
                             push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
                             compact_buf.push(b'\n');
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
-                    } else if !json_object_keys_to_buf_reuse(raw, 0, &mut compact_buf, &mut keys_buf) {
-                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    } else {
+                        let before = compact_buf.len();
+                        if json_object_keys_to_buf_reuse(raw, 0, &mut compact_buf, &mut keys_buf) {
+                            if cached_keys.is_empty() {
+                                let end_pos = compact_buf.len();
+                                cached_output = compact_buf[before..end_pos-1].to_vec();
+                                let mut unsorted: Vec<(usize, usize)> = Vec::new();
+                                if let Some(_) = json_object_extract_keys_only(raw, 0, &mut unsorted) {
+                                    cached_keys = unsorted.iter().map(|(s, e)| raw[*s..*e].to_vec()).collect();
+                                }
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
