@@ -1185,57 +1185,24 @@ pub fn json_object_replace_field(b: &[u8], pos: usize, field: &str, new_val: &[u
 pub fn json_object_update_field_num(b: &[u8], pos: usize, field: &str, op: crate::ir::BinOp, n: f64, buf: &mut Vec<u8>) -> bool {
     use crate::ir::BinOp;
     if pos >= b.len() || b[pos] != b'{' { return false; }
-    let field_bytes = field.as_bytes();
-    let mut i = pos + 1;
-    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
-    if i < b.len() && b[i] == b'}' {
-        buf.extend_from_slice(b"{}");
-        return true;
-    }
-    let mut first = true;
-    let mut found = false;
-    buf.push(b'{');
-    loop {
-        if i >= b.len() || b[i] != b'"' { return false; }
-        let key_start = i;
-        i += 1;
-        let mut j = i;
-        while j < b.len() { match b[j] { b'"' => break, b'\\' => { j += 2; continue }, _ => j += 1 } }
-        if j >= b.len() { return false; }
-        let key_matches = (j - i) == field_bytes.len() && b[i..j] == *field_bytes;
-        let key_end = j + 1;
-        i = key_end;
-        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
-        if i >= b.len() || b[i] != b':' { return false; }
-        i += 1;
-        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
-        let val_start = i;
-        i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return false };
-        let val_end = i;
-        if !first { buf.push(b','); }
-        first = false;
-        buf.extend_from_slice(&b[key_start..key_end]);
-        buf.push(b':');
-        if key_matches {
-            if let Some(a) = parse_json_num(&b[val_start..val_end]) {
-                let r = match op { BinOp::Add => a + n, BinOp::Sub => a - n, BinOp::Mul => a * n, BinOp::Div => a / n, BinOp::Mod => a % n, _ => a };
-                push_jq_number_bytes(buf, r);
-                found = true;
-            } else {
-                return false; // not numeric
-            }
-        } else {
-            buf.extend_from_slice(&b[val_start..val_end]);
+    // Find the target field value range, then do 3-way copy:
+    // (bytes before value) + (new number) + (bytes after value including closing brace)
+    if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
+        if let Some(a) = parse_json_num(&b[val_start..val_end]) {
+            let r = match op { BinOp::Add => a + n, BinOp::Sub => a - n, BinOp::Mul => a * n, BinOp::Div => a / n, BinOp::Mod => { if n == 0.0 || !a.is_finite() { return false; } a % n }, _ => a };
+            if !r.is_finite() { return false; }
+            // Find object end by scanning backward for '}' — avoids full re-parse
+            let mut obj_end = b.len();
+            while obj_end > val_end && b[obj_end - 1] != b'}' { obj_end -= 1; }
+            if obj_end <= val_end { return false; }
+            // 3-way bulk copy: prefix + new number + suffix
+            buf.extend_from_slice(&b[pos..val_start]);
+            push_jq_number_bytes(buf, r);
+            buf.extend_from_slice(&b[val_end..obj_end]);
+            return true;
         }
-        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
-        if i >= b.len() { return false; }
-        if b[i] == b'}' { break; }
-        if b[i] != b',' { return false; }
-        i += 1;
-        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
     }
-    buf.push(b'}');
-    found
+    false
 }
 
 /// Merge literal key-value pairs into a raw JSON object.

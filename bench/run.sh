@@ -110,6 +110,13 @@ TESTS=(
     '.x|.+1 (pipe):-c:.x | . + 1'
     '.x|.*2|.+1:-c:.x | . * 2 | . + 1'
     '.name|.+"_x":-c:.name | . + "_x"'
+    '.x>N | not:-c:.x > 1000000 | not'
+    'and (2 cmp):-c:.x > 100 and .y < 500'
+    'if-then-else:-c:if .x > 1000000 then "big" else "small" end'
+    'sel(and)|field:-c:select(.x > 100 and .y < 500) | .name'
+    'sel(and)|remap:-c:select(.x > 100 and .y < 500) | {n:.name, v:.y}'
+    'arith|cmp:-c:.x | . * 2 | . + 1 | . > 1000000'
+    'if cmp .field:-c:if .x > 1000000 then .name else .y end'
 )
 
 for test in "${TESTS[@]}"; do

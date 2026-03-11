@@ -740,6 +740,18 @@ impl Expr {
                 name: name.clone(),
                 args: args.iter().map(|a| a.substitute_var(var_index, replacement)).collect(),
             },
+            Expr::Update { path_expr, update_expr } => Expr::Update {
+                path_expr: Box::new(path_expr.substitute_var(var_index, replacement)),
+                update_expr: Box::new(update_expr.substitute_var(var_index, replacement)),
+            },
+            Expr::Assign { path_expr, value_expr } => Expr::Assign {
+                path_expr: Box::new(path_expr.substitute_var(var_index, replacement)),
+                value_expr: Box::new(value_expr.substitute_var(var_index, replacement)),
+            },
+            Expr::TryCatch { try_expr, catch_expr } => Expr::TryCatch {
+                try_expr: Box::new(try_expr.substitute_var(var_index, replacement)),
+                catch_expr: Box::new(catch_expr.substitute_var(var_index, replacement)),
+            },
             _ => self.clone(),
         }
     }
