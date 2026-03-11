@@ -370,7 +370,7 @@ fn real_main() {
     // since their runtime dominates regardless of input size.
     // Must be done before process_input closure captures &filter.
     const JIT_THRESHOLD: usize = 4096;
-    if filter.has_loop_constructs() {
+    if filter.has_loop_constructs() || null_input {
         filter.compile_jit();
     } else if !null_input {
         if files.is_empty() {

@@ -2042,6 +2042,9 @@ pub fn eval(
                                 let arr = Rc::make_mut(a);
                                 arr.extend(rhs_arr.iter().cloned());
                             }
+                            (Value::Str(s), Value::Str(rhs_s)) => {
+                                s.push_str(rhs_s.as_str());
+                            }
                             (acc_ref, rhs_val) => {
                                 let acc_val = std::mem::replace(acc_ref, Value::Null);
                                 *acc_ref = crate::runtime::rt_add(&acc_val, &rhs_val)?;
