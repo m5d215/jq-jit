@@ -17,6 +17,45 @@ use crate::value::{Value, KeyStr};
 type GenResult = Result<bool>;
 type EnvRef = Rc<RefCell<Env>>;
 
+/// Global inputs queue for `input`/`inputs` builtins.
+/// Pre-populated by CLI before eval/JIT execution.
+/// SAFETY: jq-jit is single-threaded — no concurrent access.
+struct InputsCell(std::cell::UnsafeCell<(Vec<Value>, usize)>);
+unsafe impl Sync for InputsCell {}
+static INPUTS_STATE: InputsCell = InputsCell(std::cell::UnsafeCell::new((Vec::new(), 0)));
+
+/// Set the inputs queue for `input`/`inputs` builtins.
+pub fn set_inputs_queue(values: Vec<Value>) {
+    unsafe {
+        let state = &mut *INPUTS_STATE.0.get();
+        state.0 = values;
+        state.1 = 0;
+    }
+}
+
+/// Clear the inputs queue.
+pub fn clear_inputs_queue() {
+    unsafe {
+        let state = &mut *INPUTS_STATE.0.get();
+        state.0.clear();
+        state.1 = 0;
+    }
+}
+
+/// Read the next input value. Returns None if exhausted.
+pub fn read_next_input() -> Option<Value> {
+    unsafe {
+        let state = &mut *INPUTS_STATE.0.get();
+        if state.1 < state.0.len() {
+            let idx = state.1;
+            state.1 += 1;
+            Some(state.0[idx].clone())
+        } else {
+            None
+        }
+    }
+}
+
 /// Typed error for label/break to avoid string formatting/parsing overhead.
 #[derive(Debug)]
 struct BreakError(u64);
@@ -2724,8 +2763,19 @@ pub fn eval(
 
         Expr::Builtins => cb(crate::runtime::rt_builtins()),
 
-        Expr::ReadInput | Expr::ReadInputs => {
-            if matches!(expr, Expr::ReadInput) { bail!("break") }
+        Expr::ReadInput => {
+            // `input` — read one value
+            if let Some(v) = read_next_input() {
+                cb(v)
+            } else {
+                bail!("break")
+            }
+        }
+        Expr::ReadInputs => {
+            // `inputs` — yield all remaining values
+            while let Some(v) = read_next_input() {
+                if !cb(v)? { return Ok(false); }
+            }
             Ok(true)
         }
 

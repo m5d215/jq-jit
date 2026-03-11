@@ -608,8 +608,48 @@ fn real_main() {
     };
 
     if null_input {
-        // Single input — eval is faster than JIT + compile overhead
+        // Pre-read inputs for `input`/`inputs` builtins
+        if filter.uses_inputs() {
+            let mut inputs_values = Vec::new();
+            if files.is_empty() {
+                // Read from stdin
+                let mut input_str = String::new();
+                io::stdin().lock().read_to_string(&mut input_str).unwrap_or(0);
+                if raw_input {
+                    for line in input_str.lines() {
+                        inputs_values.push(Value::from_str(line));
+                    }
+                } else if let Err(e) = json_stream(&input_str, |v| {
+                    inputs_values.push(v);
+                    Ok(())
+                }) {
+                    eprintln!("jq: error (at <stdin>:0): {}", e);
+                    process::exit(2);
+                }
+            } else {
+                // Read from files
+                for file in &files {
+                    let content = match std::fs::read_to_string(file) {
+                        Ok(c) => c,
+                        Err(e) => { eprintln!("jq: error: Could not open file {}: {}", file, e); process::exit(2); }
+                    };
+                    if raw_input {
+                        for line in content.lines() {
+                            inputs_values.push(Value::from_str(line));
+                        }
+                    } else if let Err(e) = json_stream(&content, |v| {
+                        inputs_values.push(v);
+                        Ok(())
+                    }) {
+                        eprintln!("jq: error (at {}:0): {}", file, e);
+                        process::exit(2);
+                    }
+                }
+            }
+            jq_jit::eval::set_inputs_queue(inputs_values);
+        }
         process_input(&Value::Null, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+        jq_jit::eval::clear_inputs_queue();
     } else if files.is_empty() {
         // Read from stdin
         let stdin = io::stdin();
