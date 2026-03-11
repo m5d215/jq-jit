@@ -545,7 +545,7 @@ fn real_main() {
     let cond_chain = if use_compact_buf && !exit_status && select_cmp.is_none() && field_access.is_none() {
         filter.detect_cond_chain()
     } else { None };
-    let cmp_branch_lit = if use_compact_buf && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() {
+    let cmp_branch_lit = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() {
         filter.detect_cmp_branch_literals()
     } else { None };
     let select_compound = if use_compact_buf && !exit_status && select_cmp.is_none() && field_access.is_none() && cmp_branch_lit.is_none() && cond_chain.is_none() {
