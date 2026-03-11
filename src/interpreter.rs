@@ -551,6 +551,74 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.x > N and .y < M) | .output` — compound select then field access.
+    /// Returns (conjunction, comparisons, output_field).
+    pub fn detect_select_compound_cmp_then_field(&self) -> Option<(crate::ir::BinOp, Vec<(String, crate::ir::BinOp, f64)>, String)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        let extract_cmp = |e: &Expr| -> Option<(String, BinOp, f64)> {
+            if let Expr::BinOp { op, lhs, rhs } = e {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                    return None;
+                }
+                if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                            return Some((field.clone(), *op, *n));
+                        }
+                    }
+                }
+            }
+            None
+        };
+        fn collect_conds<'a>(e: &'a Expr, conj: BinOp, out: &mut Vec<&'a Expr>) -> bool {
+            if let Expr::BinOp { op, lhs, rhs } = e {
+                if std::mem::discriminant(op) == std::mem::discriminant(&conj) {
+                    return collect_conds(lhs, conj, out) && collect_conds(rhs, conj, out);
+                }
+            }
+            out.push(e);
+            true
+        }
+        // Extract select condition and output field from Pipe(IfThenElse, .field)
+        let try_extract = |cond: &Expr, output: &Expr| -> Option<(BinOp, Vec<(String, BinOp, f64)>, String)> {
+            let out_field = if let Expr::Index { expr: base, key } = output {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() } else { return None; }
+            } else { return None; };
+            for conj in [BinOp::And, BinOp::Or] {
+                if let Expr::BinOp { op, .. } = cond {
+                    if std::mem::discriminant(op) == std::mem::discriminant(&conj) {
+                        let mut parts = Vec::new();
+                        if collect_conds(cond, conj, &mut parts) && parts.len() >= 2 {
+                            let cmps: Vec<_> = parts.iter().filter_map(|e| extract_cmp(e)).collect();
+                            if cmps.len() == parts.len() {
+                                return Some((conj, cmps, out_field));
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        };
+        // Form 1: Pipe(select(compound), .field)
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                    return try_extract(cond, right);
+                }
+            }
+        }
+        // Form 2: IfThenElse{compound_cond, .field, empty}
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if matches!(else_branch.as_ref(), Expr::Empty) {
+                return try_extract(cond, then_branch);
+            }
+        }
+        None
+    }
+
     /// Detect `select(.a.b.c > N)` pattern for nested field numeric comparison.
     /// Returns (field_path, comparison_op, threshold) if detected.
     pub fn detect_select_nested_cmp(&self) -> Option<(Vec<String>, crate::ir::BinOp, f64)> {

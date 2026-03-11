@@ -716,6 +716,9 @@ fn real_main() {
     let select_compound = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() && cmp_branch_lit.is_none() && cond_chain.is_none() {
         filter.detect_select_compound_cmp()
     } else { None };
+    let select_compound_field = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_compound.is_none() && field_access.is_none() {
+        filter.detect_select_compound_cmp_then_field()
+    } else { None };
     let select_has_multi = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() {
         filter.detect_select_has_multi()
     } else { None };
@@ -743,7 +746,7 @@ fn real_main() {
         || field_str_builtin.is_some() || field_test.is_some() || field_gsub.is_some() || field_format.is_some() || field_ltrimstr_tonumber.is_some()
         || field_str_concat.is_some() || field_alt.is_some() || field_field_alt.is_some()
         || select_cmp.is_some()
-        || cond_chain.is_some() || cmp_branch_lit.is_some() || select_compound.is_some()
+        || cond_chain.is_some() || cmp_branch_lit.is_some() || select_compound.is_some() || select_compound_field.is_some()
         || select_str.is_some()
         || select_str_test.is_some() || select_regex_test.is_some() || select_nested_cmp.is_some()
         || select_cmp_field.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_value.is_some() || select_str_field.is_some()
@@ -2591,6 +2594,53 @@ fn real_main() {
                         }
                         Ok(())
                     })
+                } else if let Some((ref conj, ref cmps, ref out_field)) = select_compound_field {
+                    use jq_jit::ir::BinOp;
+                    let is_and = matches!(conj, BinOp::And);
+                    // Collect all fields: comparison fields + output field
+                    let mut all_fields: Vec<String> = cmps.iter().map(|(f, _, _)| f.clone()).collect();
+                    if !all_fields.contains(out_field) { all_fields.push(out_field.clone()); }
+                    let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                    let out_idx = all_fields.iter().position(|f| f == out_field).unwrap();
+                    let cmp_indices: Vec<(usize, BinOp, f64)> = cmps.iter().map(|(f, op, thr)| {
+                        (all_fields.iter().position(|af| af == f).unwrap(), *op, *thr)
+                    }).collect();
+                    let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if !json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                            return Ok(());
+                        }
+                        let check = |idx: usize, op: &BinOp, thr: &f64| -> bool {
+                            let (vs, ve) = ranges_buf[idx];
+                            parse_json_num(&raw[vs..ve]).map_or(false, |val| match op {
+                                BinOp::Gt => val > *thr, BinOp::Lt => val < *thr,
+                                BinOp::Ge => val >= *thr, BinOp::Le => val <= *thr,
+                                BinOp::Eq => val == *thr, BinOp::Ne => val != *thr,
+                                _ => false,
+                            })
+                        };
+                        let pass = if is_and {
+                            cmp_indices.iter().all(|(idx, op, thr)| check(*idx, op, thr))
+                        } else {
+                            cmp_indices.iter().any(|(idx, op, thr)| check(*idx, op, thr))
+                        };
+                        if pass {
+                            let (vs, ve) = ranges_buf[out_idx];
+                            let val = &raw[vs..ve];
+                            if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
+                                push_json_pretty_raw(&mut compact_buf, val, 2, false);
+                            } else {
+                                compact_buf.extend_from_slice(val);
+                            }
+                            compact_buf.push(b'\n');
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
                 } else if let Some((ref shm_fields, shm_is_and)) = select_has_multi {
                     let field_refs: Vec<&str> = shm_fields.iter().map(|s| s.as_str()).collect();
                     json_stream_raw(&input_str, |start, end| {
@@ -4027,6 +4077,53 @@ fn real_main() {
                     };
                     if pass {
                         emit_raw_ln!(&mut compact_buf, raw);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref conj, ref cmps, ref out_field)) = select_compound_field {
+                use jq_jit::ir::BinOp;
+                let content_bytes = content.as_bytes();
+                let is_and = matches!(conj, BinOp::And);
+                let mut all_fields: Vec<String> = cmps.iter().map(|(f, _, _)| f.clone()).collect();
+                if !all_fields.contains(out_field) { all_fields.push(out_field.clone()); }
+                let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                let out_idx = all_fields.iter().position(|f| f == out_field).unwrap();
+                let cmp_indices: Vec<(usize, BinOp, f64)> = cmps.iter().map(|(f, op, thr)| {
+                    (all_fields.iter().position(|af| af == f).unwrap(), *op, *thr)
+                }).collect();
+                let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if !json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                        return Ok(());
+                    }
+                    let check = |idx: usize, op: &BinOp, thr: &f64| -> bool {
+                        let (vs, ve) = ranges_buf[idx];
+                        parse_json_num(&raw[vs..ve]).map_or(false, |val| match op {
+                            BinOp::Gt => val > *thr, BinOp::Lt => val < *thr,
+                            BinOp::Ge => val >= *thr, BinOp::Le => val <= *thr,
+                            BinOp::Eq => val == *thr, BinOp::Ne => val != *thr,
+                            _ => false,
+                        })
+                    };
+                    let pass = if is_and {
+                        cmp_indices.iter().all(|(idx, op, thr)| check(*idx, op, thr))
+                    } else {
+                        cmp_indices.iter().any(|(idx, op, thr)| check(*idx, op, thr))
+                    };
+                    if pass {
+                        let (vs, ve) = ranges_buf[out_idx];
+                        let val = &raw[vs..ve];
+                        if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
+                            push_json_pretty_raw(&mut compact_buf, val, 2, false);
+                        } else {
+                            compact_buf.extend_from_slice(val);
+                        }
+                        compact_buf.push(b'\n');
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
