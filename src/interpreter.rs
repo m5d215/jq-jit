@@ -96,10 +96,10 @@ pub struct Filter {
     lib_dirs: Vec<String>,
 }
 
-/// Recursively strip identity pipes and beta-reduce scalar pipes.
+/// Recursively strip identity pipes and beta-reduce for fast path detection.
 /// Pipe(Input, X) → X, Pipe(X, Input) → X.
 /// Pipe(E, F) → F[E/.] when E is scalar and F has free Input.
-/// Preserves pipes needed for fast path detection (e.g., to_entries|length).
+/// Also applies semantic rewrites (to_entries|from_entries → identity).
 fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
     use crate::ir::{Expr, UnaryOp};
     match expr {
@@ -115,10 +115,7 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                 return Expr::Input;
             }
             // Beta-reduction: .x | . + 1 → .x + 1
-            // Skip for UnaryOp pipes — fast path detection needs Pipe form
-            // for patterns like to_entries|length, keys|length
-            let skip_beta = matches!(&sl, Expr::UnaryOp { .. });
-            if !skip_beta && sl.is_simple_scalar() && sr.is_input_free() {
+            if sl.is_simple_scalar() && sr.is_input_free() {
                 return sr.substitute_input(&sl);
             }
             Expr::Pipe { left: Box::new(sl), right: Box::new(sr) }
@@ -825,17 +822,31 @@ impl Filter {
     pub fn detect_field_unary_num(&self) -> Option<(String, crate::ir::UnaryOp)> {
         use crate::ir::{Expr, UnaryOp, Literal};
         let expr = self.detect_expr()?;
+        let is_supported = |op: &UnaryOp| matches!(op,
+            UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Sqrt |
+            UnaryOp::Fabs | UnaryOp::Abs | UnaryOp::ToString |
+            UnaryOp::AsciiDowncase | UnaryOp::AsciiUpcase |
+            UnaryOp::Length | UnaryOp::Utf8ByteLength);
+        // Pipe form: .field | op
         if let Expr::Pipe { left, right } = expr {
-            // left = .field
             if let Expr::Index { expr: base, key } = left.as_ref() {
-                if !matches!(base.as_ref(), Expr::Input) { return None; }
-                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
-                    if let Expr::UnaryOp { op, operand } = right.as_ref() {
-                        if !matches!(operand.as_ref(), Expr::Input) { return None; }
-                        if matches!(op, UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Sqrt |
-                            UnaryOp::Fabs | UnaryOp::Abs | UnaryOp::ToString |
-                            UnaryOp::AsciiDowncase | UnaryOp::AsciiUpcase |
-                            UnaryOp::Length | UnaryOp::Utf8ByteLength) {
+                if matches!(base.as_ref(), Expr::Input) {
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        if let Expr::UnaryOp { op, operand } = right.as_ref() {
+                            if matches!(operand.as_ref(), Expr::Input) && is_supported(op) {
+                                return Some((field.clone(), *op));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Beta-reduced form: op(.field) — from simplify_expr
+        if let Expr::UnaryOp { op, operand } = expr {
+            if is_supported(op) {
+                if let Expr::Index { expr: base, key } = operand.as_ref() {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                             return Some((field.clone(), *op));
                         }
                     }
@@ -900,15 +911,28 @@ impl Filter {
     pub fn detect_field_format(&self) -> Option<(String, String)> {
         use crate::ir::{Expr, Literal};
         let expr = self.detect_expr()?;
+        let is_supported = |name: &str| matches!(name, "base64" | "uri" | "html");
+        // Pipe form: .field | @format
         if let Expr::Pipe { left, right } = expr {
             if let Expr::Index { expr: base, key } = left.as_ref() {
-                if !matches!(base.as_ref(), Expr::Input) { return None; }
-                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
-                    if let Expr::Format { name, expr: fmt_expr } = right.as_ref() {
-                        if matches!(fmt_expr.as_ref(), Expr::Input) {
-                            if matches!(name.as_str(), "base64" | "uri" | "html") {
+                if matches!(base.as_ref(), Expr::Input) {
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        if let Expr::Format { name, expr: fmt_expr } = right.as_ref() {
+                            if matches!(fmt_expr.as_ref(), Expr::Input) && is_supported(name) {
                                 return Some((field.clone(), name.clone()));
                             }
+                        }
+                    }
+                }
+            }
+        }
+        // Beta-reduced form: @format(.field)
+        if let Expr::Format { name, expr: fmt_expr } = expr {
+            if is_supported(name) {
+                if let Expr::Index { expr: base, key } = fmt_expr.as_ref() {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                            return Some((field.clone(), name.clone()));
                         }
                     }
                 }
@@ -1206,15 +1230,24 @@ impl Filter {
 
     /// Detect `length` applied directly to input.
     pub fn is_length(&self) -> bool {
+        use crate::ir::{Expr, UnaryOp};
         let expr = match self.detect_expr() { Some(e) => e, None => return false };
         // Direct: `length`
-        if matches!(expr, crate::ir::Expr::UnaryOp { op: crate::ir::UnaryOp::Length, operand } if matches!(operand.as_ref(), crate::ir::Expr::Input)) {
+        if matches!(expr, Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
             return true;
         }
-        // `to_entries | length`, `keys | length`, `values | length` — all equivalent to `length` for objects
-        if let crate::ir::Expr::Pipe { left, right } = expr {
-            if matches!(right.as_ref(), crate::ir::Expr::UnaryOp { op: crate::ir::UnaryOp::Length, operand } if matches!(operand.as_ref(), crate::ir::Expr::Input)) {
-                if matches!(left.as_ref(), crate::ir::Expr::UnaryOp { op: crate::ir::UnaryOp::ToEntries | crate::ir::UnaryOp::Keys | crate::ir::UnaryOp::KeysUnsorted, .. }) {
+        // Pipe form: `to_entries | length`, `keys | length`
+        if let Expr::Pipe { left, right } = expr {
+            if matches!(right.as_ref(), Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                if matches!(left.as_ref(), Expr::UnaryOp { op: UnaryOp::ToEntries | UnaryOp::Keys | UnaryOp::KeysUnsorted, .. }) {
+                    return true;
+                }
+            }
+        }
+        // Beta-reduced form: `length(to_entries(.))`, `length(keys(.))`
+        if let Expr::UnaryOp { op: UnaryOp::Length, operand } = expr {
+            if let Expr::UnaryOp { op: UnaryOp::ToEntries | UnaryOp::Keys | UnaryOp::KeysUnsorted, operand: inner } = operand.as_ref() {
+                if matches!(inner.as_ref(), Expr::Input) {
                     return true;
                 }
             }
