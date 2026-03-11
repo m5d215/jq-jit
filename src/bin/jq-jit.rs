@@ -1943,9 +1943,14 @@ fn real_main() {
                                         }
                                     }
                                     b'[' | b'{' => {
-                                        // Array/object: fall through to full parse for element counting
-                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                        // Array/object: count elements using raw byte scanning
+                                        if let Some(len) = json_value_length(val, 0) {
+                                            push_jq_number_bytes(&mut compact_buf, len as f64);
+                                            compact_buf.push(b'\n');
+                                        } else {
+                                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                        }
                                     }
                                     b'n' => {
                                         // null: length is 0
@@ -2755,59 +2760,56 @@ fn real_main() {
                             field_names.push(name);
                         }
                     }
-                    // Pre-escape literal parts
-                    let escaped_lits: Vec<Option<Vec<u8>>> = sac_parts.iter().map(|part| {
-                        if let StringAddPart::Literal(s) = part {
-                            let mut buf = Vec::new();
-                            for &b in s.as_bytes() {
-                                match b {
-                                    b'"' => buf.extend_from_slice(b"\\\""),
-                                    b'\\' => buf.extend_from_slice(b"\\\\"),
-                                    b'\n' => buf.extend_from_slice(b"\\n"),
-                                    b'\r' => buf.extend_from_slice(b"\\r"),
-                                    b'\t' => buf.extend_from_slice(b"\\t"),
-                                    c if c < 0x20 => { let _ = write!(compact_buf, "\\u{:04x}", c); }
-                                    _ => buf.push(b),
+                    // Pre-compute actions for hot loop: avoid HashMap lookups per object
+                    // 0 = literal (strip_quotes=false), 1 = field (strip_quotes=true), 2 = field_tostring (strip_quotes=true)
+                    // We encode as (field_idx_or_lit_idx, strip_quotes)
+                    let mut actions: Vec<(usize, bool)> = Vec::with_capacity(sac_parts.len()); // (idx, is_field)
+                    let mut lit_bufs: Vec<Vec<u8>> = Vec::new();
+                    for part in sac_parts.iter() {
+                        match part {
+                            StringAddPart::Literal(s) => {
+                                let mut buf = Vec::new();
+                                for &b in s.as_bytes() {
+                                    match b {
+                                        b'"' => buf.extend_from_slice(b"\\\""),
+                                        b'\\' => buf.extend_from_slice(b"\\\\"),
+                                        b'\n' => buf.extend_from_slice(b"\\n"),
+                                        b'\r' => buf.extend_from_slice(b"\\r"),
+                                        b'\t' => buf.extend_from_slice(b"\\t"),
+                                        c if c < 0x20 => { let _ = write!(buf, "\\u{:04x}", c); }
+                                        _ => buf.push(b),
+                                    }
                                 }
+                                let lit_idx = lit_bufs.len();
+                                lit_bufs.push(buf);
+                                actions.push((lit_idx, false)); // not a field
                             }
-                            Some(buf)
-                        } else { None }
-                    }).collect();
+                            StringAddPart::Field(f) | StringAddPart::FieldToString(f) => {
+                                actions.push((field_idx_map[f.as_str()], true)); // is a field
+                            }
+                        }
+                    }
                     let mut ranges_buf = vec![(0usize, 0usize); field_names.len()];
+                    let mut lit_idx_counter = 0usize;
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
                             compact_buf.push(b'"');
-                            for (i, part) in sac_parts.iter().enumerate() {
-                                match part {
-                                    StringAddPart::Literal(_) => {
-                                        compact_buf.extend_from_slice(escaped_lits[i].as_ref().unwrap());
+                            lit_idx_counter = 0;
+                            for &(idx, is_field) in &actions {
+                                if is_field {
+                                    let (vs, ve) = ranges_buf[idx];
+                                    let val = &raw[vs..ve];
+                                    if val[0] == b'"' && val.len() >= 2 {
+                                        compact_buf.extend_from_slice(&val[1..val.len()-1]);
+                                    } else {
+                                        compact_buf.extend_from_slice(val);
                                     }
-                                    StringAddPart::Field(f) => {
-                                        let idx = field_idx_map[f.as_str()];
-                                        let (vs, ve) = ranges_buf[idx];
-                                        let val = &raw[vs..ve];
-                                        if val[0] == b'"' && val.len() >= 2 {
-                                            compact_buf.extend_from_slice(&val[1..val.len()-1]);
-                                        } else {
-                                            compact_buf.extend_from_slice(val);
-                                        }
-                                    }
-                                    StringAddPart::FieldToString(f) => {
-                                        let idx = field_idx_map[f.as_str()];
-                                        let (vs, ve) = ranges_buf[idx];
-                                        let val = &raw[vs..ve];
-                                        if val[0] == b'"' && val.len() >= 2 {
-                                            compact_buf.extend_from_slice(&val[1..val.len()-1]);
-                                        } else {
-                                            // Number/bool/null: copy as-is
-                                            compact_buf.extend_from_slice(val);
-                                        }
-                                    }
+                                } else {
+                                    compact_buf.extend_from_slice(&lit_bufs[idx]);
                                 }
                             }
-                            compact_buf.push(b'"');
-                            compact_buf.push(b'\n');
+                            compact_buf.extend_from_slice(b"\"\n");
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -6305,8 +6307,13 @@ fn real_main() {
                                 }
                                 b'n' => { compact_buf.extend_from_slice(b"0\n"); }
                                 b'[' | b'{' => {
-                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    if let Some(len) = json_value_length(val, 0) {
+                                        push_jq_number_bytes(&mut compact_buf, len as f64);
+                                        compact_buf.push(b'\n');
+                                    } else {
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    }
                                 }
                                 _ => {
                                     if let Some(n) = json_object_get_num(raw, 0, field) {
@@ -7104,47 +7111,52 @@ fn real_main() {
                         field_names.push(name);
                     }
                 }
-                let escaped_lits: Vec<Option<Vec<u8>>> = sac_parts.iter().map(|part| {
-                    if let StringAddPart::Literal(s) = part {
-                        let mut buf = Vec::new();
-                        for &b in s.as_bytes() {
-                            match b {
-                                b'"' => buf.extend_from_slice(b"\\\""),
-                                b'\\' => buf.extend_from_slice(b"\\\\"),
-                                b'\n' => buf.extend_from_slice(b"\\n"),
-                                b'\r' => buf.extend_from_slice(b"\\r"),
-                                b'\t' => buf.extend_from_slice(b"\\t"),
-                                c if c < 0x20 => { let _ = write!(buf, "\\u{:04x}", c); }
-                                _ => buf.push(b),
+                // Pre-compute actions for hot loop
+                let mut actions: Vec<(usize, bool)> = Vec::with_capacity(sac_parts.len());
+                let mut lit_bufs: Vec<Vec<u8>> = Vec::new();
+                for part in sac_parts.iter() {
+                    match part {
+                        StringAddPart::Literal(s) => {
+                            let mut buf = Vec::new();
+                            for &b in s.as_bytes() {
+                                match b {
+                                    b'"' => buf.extend_from_slice(b"\\\""),
+                                    b'\\' => buf.extend_from_slice(b"\\\\"),
+                                    b'\n' => buf.extend_from_slice(b"\\n"),
+                                    b'\r' => buf.extend_from_slice(b"\\r"),
+                                    b'\t' => buf.extend_from_slice(b"\\t"),
+                                    c if c < 0x20 => { let _ = write!(buf, "\\u{:04x}", c); }
+                                    _ => buf.push(b),
+                                }
                             }
+                            let lit_idx = lit_bufs.len();
+                            lit_bufs.push(buf);
+                            actions.push((lit_idx, false));
                         }
-                        Some(buf)
-                    } else { None }
-                }).collect();
+                        StringAddPart::Field(f) | StringAddPart::FieldToString(f) => {
+                            actions.push((field_idx_map[f.as_str()], true));
+                        }
+                    }
+                }
                 let mut ranges_buf = vec![(0usize, 0usize); field_names.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
                     if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
                         compact_buf.push(b'"');
-                        for (i, part) in sac_parts.iter().enumerate() {
-                            match part {
-                                StringAddPart::Literal(_) => {
-                                    compact_buf.extend_from_slice(escaped_lits[i].as_ref().unwrap());
+                        for &(idx, is_field) in &actions {
+                            if is_field {
+                                let (vs, ve) = ranges_buf[idx];
+                                let val = &raw[vs..ve];
+                                if val[0] == b'"' && val.len() >= 2 {
+                                    compact_buf.extend_from_slice(&val[1..val.len()-1]);
+                                } else {
+                                    compact_buf.extend_from_slice(val);
                                 }
-                                StringAddPart::Field(f) | StringAddPart::FieldToString(f) => {
-                                    let idx = field_idx_map[f.as_str()];
-                                    let (vs, ve) = ranges_buf[idx];
-                                    let val = &raw[vs..ve];
-                                    if val[0] == b'"' && val.len() >= 2 {
-                                        compact_buf.extend_from_slice(&val[1..val.len()-1]);
-                                    } else {
-                                        compact_buf.extend_from_slice(val);
-                                    }
-                                }
+                            } else {
+                                compact_buf.extend_from_slice(&lit_bufs[idx]);
                             }
                         }
-                        compact_buf.push(b'"');
-                        compact_buf.push(b'\n');
+                        compact_buf.extend_from_slice(b"\"\n");
                     } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
