@@ -15,7 +15,7 @@ use crate::ir::*;
 use crate::value::{Value, KeyStr};
 
 type GenResult = Result<bool>;
-type EnvRef = Rc<RefCell<Env>>;
+pub type EnvRef = Rc<RefCell<Env>>;
 
 /// Global inputs queue for `input`/`inputs` builtins.
 /// Pre-populated by CLI before eval/JIT execution.
@@ -91,6 +91,19 @@ impl Env {
     }
     pub fn with_lib_dirs(funcs: Vec<CompiledFunc>, lib_dirs: Vec<String>) -> Self {
         Env { vars: vec![Value::Null; 65536], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs, closures: Vec::new(), recursive_cache: Vec::new(), subst_cache: Vec::new(), subst_ptr_cache: Vec::new() }
+    }
+    /// Reset env state for reuse across multiple inputs.
+    /// Keeps allocated buffers (vars, caches) but resets mutable state.
+    pub fn reset(&mut self) {
+        // Only reset vars that were actually used (0..next_var), not all 65536
+        let used = self.next_var as usize;
+        for v in self.vars[..used].iter_mut() {
+            *v = Value::Null;
+        }
+        self.next_label = 0;
+        self.next_var = 256;
+        self.closures.clear();
+        // Keep recursive_cache, subst_cache, subst_ptr_cache — they stay valid across inputs
     }
     #[inline(always)]
     fn get_var(&self, idx: u16) -> Value {
@@ -4362,6 +4375,27 @@ pub fn execute_ir_with_libs_cb(
 ) -> Result<bool> {
     let env = Rc::new(RefCell::new(Env::with_lib_dirs(funcs, lib_dirs)));
     let result = eval(expr, input, &env, &mut |val| {
+        cb(val)
+    });
+    match result {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            if e.downcast_ref::<BreakError>().is_some() {
+                Ok(true)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Streaming variant that reuses an existing Env (avoids re-allocation).
+pub fn execute_ir_with_env_cb(
+    expr: &Expr, input: Value, env: &EnvRef,
+    cb: &mut dyn FnMut(Value) -> Result<bool>,
+) -> Result<bool> {
+    env.borrow_mut().reset();
+    let result = eval(expr, input, env, &mut |val| {
         cb(val)
     });
     match result {

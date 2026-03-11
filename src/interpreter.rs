@@ -117,6 +117,8 @@ pub struct Filter {
     /// JIT compiler kept alive to own the compiled code.
     _jit_compiler: Option<Box<crate::jit::JitCompiler>>,
     lib_dirs: Vec<String>,
+    /// Cached eval environment to avoid re-allocating per call.
+    cached_env: std::cell::RefCell<Option<crate::eval::EnvRef>>,
 }
 
 /// Recursively strip identity pipes and beta-reduce for fast path detection.
@@ -383,6 +385,7 @@ impl Filter {
             jit_fn,
             _jit_compiler: jit_compiler,
             lib_dirs: lib_dirs.to_vec(),
+            cached_env: std::cell::RefCell::new(None),
         })
     }
 
@@ -3291,10 +3294,21 @@ impl Filter {
         }
 
         if let Some((ref expr, ref funcs)) = self.parsed {
-            // Stream results directly via eval callback
-            return crate::eval::execute_ir_with_libs_cb(
-                expr, input.clone(), funcs.clone(),
-                self.lib_dirs.clone(),
+            // Use cached env to avoid re-allocation per call
+            let env = {
+                let mut cached = self.cached_env.borrow_mut();
+                if let Some(ref env) = *cached {
+                    env.clone()
+                } else {
+                    let env = std::rc::Rc::new(std::cell::RefCell::new(
+                        crate::eval::Env::with_lib_dirs(funcs.clone(), self.lib_dirs.clone())
+                    ));
+                    *cached = Some(env.clone());
+                    env
+                }
+            };
+            return crate::eval::execute_ir_with_env_cb(
+                expr, input.clone(), &env,
                 &mut |val| {
                     if let Value::Error(e) = &val {
                         eprintln!("jq: error: {}", e.as_str());
