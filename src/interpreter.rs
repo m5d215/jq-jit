@@ -513,25 +513,36 @@ impl Filter {
     /// Detect `{a: .x, b: .y}` pattern (object construction from field access).
     /// Returns Vec of (output_key, input_field) pairs if detected.
     pub fn detect_field_remap(&self) -> Option<Vec<(String, String)>> {
-        use crate::ir::{Expr, Literal};
+        use crate::ir::{Expr, Literal, BinOp};
         let expr = self.detect_expr()?;
-        if let Expr::ObjectConstruct { pairs } = expr {
-            if pairs.is_empty() { return None; }
-            let mut result = Vec::with_capacity(pairs.len());
-            for (k, v) in pairs {
-                // Key must be a literal string
-                let key = if let Expr::Literal(Literal::Str(s)) = k {
-                    s.clone()
-                } else { return None; };
-                // Value must be .field (Index on Input with literal string key)
-                if let Expr::Index { expr: base, key: field_key } = v {
-                    if !matches!(base.as_ref(), Expr::Input) { return None; }
-                    if let Expr::Literal(Literal::Str(f)) = field_key.as_ref() {
-                        result.push((key, f.clone()));
+        // Helper to extract pairs from an ObjectConstruct
+        fn extract_remap_pairs(expr: &Expr) -> Option<Vec<(String, String)>> {
+            if let Expr::ObjectConstruct { pairs } = expr {
+                let mut result = Vec::with_capacity(pairs.len());
+                for (k, v) in pairs {
+                    let key = if let Expr::Literal(Literal::Str(s)) = k {
+                        s.clone()
+                    } else { return None; };
+                    if let Expr::Index { expr: base, key: field_key } = v {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f)) = field_key.as_ref() {
+                            result.push((key, f.clone()));
+                        } else { return None; }
                     } else { return None; }
-                } else { return None; }
+                }
+                if result.is_empty() { return None; }
+                return Some(result);
             }
-            return Some(result);
+            None
+        }
+        // Direct ObjectConstruct
+        if let Some(r) = extract_remap_pairs(expr) { return Some(r); }
+        // {a:.x} + {b:.y} — merged object constructs
+        if let Expr::BinOp { op: BinOp::Add, lhs, rhs } = expr {
+            if let (Some(mut left), Some(right)) = (extract_remap_pairs(lhs), extract_remap_pairs(rhs)) {
+                left.extend(right);
+                return Some(left);
+            }
         }
         None
     }
@@ -541,23 +552,37 @@ impl Filter {
     /// Returns Vec of (output_key, RemapExpr) if detected.
     /// Only matches when detect_field_remap fails (i.e., at least one value is computed).
     pub fn detect_computed_remap(&self) -> Option<Vec<(String, RemapExpr)>> {
-        use crate::ir::{Expr, Literal};
+        use crate::ir::{Expr, Literal, BinOp};
         let expr = self.detect_expr()?;
-        if let Expr::ObjectConstruct { pairs } = expr {
-            if pairs.is_empty() { return None; }
-            let mut result = Vec::with_capacity(pairs.len());
-            let mut has_computed = false;
-            for (k, v) in pairs {
-                let key = if let Expr::Literal(Literal::Str(s)) = k {
-                    s.clone()
-                } else { return None; };
-                let rexpr = Self::classify_remap_value(v)?;
-                if !matches!(rexpr, RemapExpr::Field(_)) { has_computed = true; }
-                result.push((key, rexpr));
+        fn extract_computed_pairs(this: &Filter, expr: &Expr) -> Option<(Vec<(String, RemapExpr)>, bool)> {
+            if let Expr::ObjectConstruct { pairs } = expr {
+                if pairs.is_empty() { return None; }
+                let mut result = Vec::with_capacity(pairs.len());
+                let mut has_computed = false;
+                for (k, v) in pairs {
+                    let key = if let Expr::Literal(Literal::Str(s)) = k {
+                        s.clone()
+                    } else { return None; };
+                    let rexpr = Filter::classify_remap_value(v)?;
+                    if !matches!(rexpr, RemapExpr::Field(_)) { has_computed = true; }
+                    result.push((key, rexpr));
+                }
+                return Some((result, has_computed));
             }
-            // Only use this if there's at least one computed value;
-            // pure field remap is handled by detect_field_remap (which is faster).
+            let _ = this; // silence unused
+            None
+        }
+        // Direct ObjectConstruct
+        if let Some((result, has_computed)) = extract_computed_pairs(self, expr) {
             if has_computed { return Some(result); }
+            return None;
+        }
+        // {a:.x,b:(.y*2)} + {c:.z} — merged object constructs
+        if let Expr::BinOp { op: BinOp::Add, lhs, rhs } = expr {
+            if let (Some((mut left, lc)), Some((right, rc))) = (extract_computed_pairs(self, lhs), extract_computed_pairs(self, rhs)) {
+                left.extend(right);
+                if lc || rc { return Some(left); }
+            }
         }
         None
     }
