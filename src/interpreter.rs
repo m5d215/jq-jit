@@ -133,8 +133,10 @@ impl Filter {
         self.jit_fn.is_some()
     }
 
-    /// Returns true if this filter has O(n²) eval path that benefits from JIT.
-    /// Specifically: Update (.[] |= f), and Reduce/Foreach over input-derived ranges.
+    /// Returns true if this filter has loop constructs that benefit from JIT.
+    /// Specifically: Update (.[] |= f), While/Until/Repeat, and Reduce/Foreach
+    /// whose source references the input (e.g. `.[]` but not `range(N)`).
+    /// For constant-range reduces on small inputs, eval.rs handles them efficiently.
     pub fn has_loop_constructs(&self) -> bool {
         use crate::ir::Expr;
         fn references_input(e: &Expr) -> bool {
