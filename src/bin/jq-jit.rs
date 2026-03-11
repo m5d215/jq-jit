@@ -704,6 +704,15 @@ fn real_main() {
     let field_update_num = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && computed_remap.is_none() && dynamic_key_obj.is_none() {
         filter.detect_field_update_num()
     } else { None };
+    let field_split_length = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
+        filter.detect_field_split_length()
+    } else { None };
+    let min_two_fields = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
+        filter.detect_min_two_fields()
+    } else { None };
+    let minmax_two = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && min_two_fields.is_none() {
+        filter.detect_minmax_two_fields()
+    } else { None };
     let field_alt = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
         filter.detect_field_alternative()
     } else { None };
@@ -760,8 +769,9 @@ fn real_main() {
         || is_keys_unsorted || has_field.is_some() || has_multi.is_some() || select_has_multi.is_some() || is_type || del_field.is_some() || obj_merge_lit.is_some()
         || is_each || is_to_entries || is_tojson || string_interp_fields.is_some() || array_join.is_some()
         || literal_output.is_some() || array_fields_format.is_some() || raw_csv_fields.is_some()
-        || field_split_join.is_some() || field_split_first.is_some() || field_slice.is_some()
-        || dynamic_key_obj.is_some() || field_update_num.is_some() || filter.is_empty();
+        || field_split_join.is_some() || field_split_first.is_some() || field_split_length.is_some() || field_slice.is_some()
+        || dynamic_key_obj.is_some() || field_update_num.is_some()
+        || min_two_fields.is_some() || minmax_two.is_some() || filter.is_empty();
     let projection_fields: Option<Vec<String>> = if !has_raw_fast_path && !slurp && !raw_input {
         filter.needed_input_fields()
     } else { None };
@@ -1115,6 +1125,108 @@ fn real_main() {
                                     compact_buf.extend_from_slice(inner);
                                 }
                                 compact_buf.push(b'"');
+                                compact_buf.push(b'\n');
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref spl_field, ref spl_delim)) = field_split_length {
+                    // .field | split("s") | length — count delimiter occurrences + 1
+                    let delim_bytes = spl_delim.as_bytes();
+                    let mut ibuf = itoa::Buffer::new();
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, spl_field) {
+                            let val = &raw[vs..ve];
+                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                                && !val[1..val.len()-1].contains(&b'\\')
+                                && !delim_bytes.is_empty()
+                            {
+                                let inner = &val[1..val.len()-1];
+                                let count = if delim_bytes.len() == 1 {
+                                    inner.iter().filter(|&&b| b == delim_bytes[0]).count() + 1
+                                } else {
+                                    inner.windows(delim_bytes.len()).filter(|w| *w == delim_bytes).count() + 1
+                                };
+                                compact_buf.extend_from_slice(ibuf.format(count).as_bytes());
+                                compact_buf.push(b'\n');
+                            } else if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"' && delim_bytes.is_empty() {
+                                // split("") gives array of single chars — length = char count
+                                let inner = &val[1..val.len()-1];
+                                // Count UTF-8 codepoints (handles escapes approximately — fall back for escaped strings)
+                                if !inner.contains(&b'\\') {
+                                    let cp_count = inner.iter().filter(|&&b| (b & 0xC0) != 0x80).count();
+                                    compact_buf.extend_from_slice(ibuf.format(cp_count).as_bytes());
+                                    compact_buf.push(b'\n');
+                                } else {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref m2_f1, ref m2_f2)) = min_two_fields {
+                    // [.x, .y] | sort | .[0] — min of two numeric fields
+                    let fields: Vec<&str> = vec![m2_f1.as_str(), m2_f2.as_str()];
+                    let mut ranges_buf = vec![(0usize, 0usize); 2];
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if json_object_get_fields_raw_buf(raw, 0, &fields, &mut ranges_buf) {
+                            if let (Some(a), Some(b)) = (
+                                parse_json_num(&raw[ranges_buf[0].0..ranges_buf[0].1]),
+                                parse_json_num(&raw[ranges_buf[1].0..ranges_buf[1].1]),
+                            ) {
+                                let r = if a <= b { a } else { b };
+                                push_jq_number_bytes(&mut compact_buf, r);
+                                compact_buf.push(b'\n');
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref mm_f1, ref mm_f2, mm_is_max)) = minmax_two {
+                    // [.x, .y] | max or min — raw byte fast path
+                    let fields: Vec<&str> = vec![mm_f1.as_str(), mm_f2.as_str()];
+                    let mut ranges_buf = vec![(0usize, 0usize); 2];
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if json_object_get_fields_raw_buf(raw, 0, &fields, &mut ranges_buf) {
+                            if let (Some(a), Some(b)) = (
+                                parse_json_num(&raw[ranges_buf[0].0..ranges_buf[0].1]),
+                                parse_json_num(&raw[ranges_buf[1].0..ranges_buf[1].1]),
+                            ) {
+                                let r = if mm_is_max { if a >= b { a } else { b } } else { if a <= b { a } else { b } };
+                                push_jq_number_bytes(&mut compact_buf, r);
                                 compact_buf.push(b'\n');
                             } else {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
@@ -3588,6 +3700,96 @@ fn real_main() {
                                 compact_buf.extend_from_slice(inner);
                             }
                             compact_buf.push(b'"');
+                            compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref spl_field, ref spl_delim)) = field_split_length {
+                let content_bytes = content.as_bytes();
+                let delim_bytes = spl_delim.as_bytes();
+                let mut ibuf = itoa::Buffer::new();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, spl_field) {
+                        let val = &raw[vs..ve];
+                        if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                            && !val[1..val.len()-1].contains(&b'\\')
+                            && !delim_bytes.is_empty()
+                        {
+                            let inner = &val[1..val.len()-1];
+                            let count = if delim_bytes.len() == 1 {
+                                inner.iter().filter(|&&b| b == delim_bytes[0]).count() + 1
+                            } else {
+                                inner.windows(delim_bytes.len()).filter(|w| *w == delim_bytes).count() + 1
+                            };
+                            compact_buf.extend_from_slice(ibuf.format(count).as_bytes());
+                            compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref m2_f1, ref m2_f2)) = min_two_fields {
+                let content_bytes = content.as_bytes();
+                let fields: Vec<&str> = vec![m2_f1.as_str(), m2_f2.as_str()];
+                let mut ranges_buf = vec![(0usize, 0usize); 2];
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if json_object_get_fields_raw_buf(raw, 0, &fields, &mut ranges_buf) {
+                        if let (Some(a), Some(b)) = (
+                            parse_json_num(&raw[ranges_buf[0].0..ranges_buf[0].1]),
+                            parse_json_num(&raw[ranges_buf[1].0..ranges_buf[1].1]),
+                        ) {
+                            let r = if a <= b { a } else { b };
+                            push_jq_number_bytes(&mut compact_buf, r);
+                            compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref mm_f1, ref mm_f2, mm_is_max)) = minmax_two {
+                let content_bytes = content.as_bytes();
+                let fields: Vec<&str> = vec![mm_f1.as_str(), mm_f2.as_str()];
+                let mut ranges_buf = vec![(0usize, 0usize); 2];
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if json_object_get_fields_raw_buf(raw, 0, &fields, &mut ranges_buf) {
+                        if let (Some(a), Some(b)) = (
+                            parse_json_num(&raw[ranges_buf[0].0..ranges_buf[0].1]),
+                            parse_json_num(&raw[ranges_buf[1].0..ranges_buf[1].1]),
+                        ) {
+                            let r = if mm_is_max { if a >= b { a } else { b } } else { if a <= b { a } else { b } };
+                            push_jq_number_bytes(&mut compact_buf, r);
                             compact_buf.push(b'\n');
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;

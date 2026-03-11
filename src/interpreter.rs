@@ -1896,6 +1896,116 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | split("str") | length` — returns (field_name, delimiter).
+    pub fn detect_field_split_length(&self) -> Option<(String, String)> {
+        use crate::ir::{Expr, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        // Pipe(.field, Pipe(split("s"), length))
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::Pipe { left: split_expr, right: len_expr } = right.as_ref() {
+                        if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
+                            if name != "split" || args.len() != 1 { return None; }
+                            if let Expr::Literal(Literal::Str(delim)) = &args[0] {
+                                if matches!(len_expr.as_ref(), Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                                    return Some((field.clone(), delim.clone()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `[.x, .y] | sort | .[0]` — min of two numeric fields.
+    /// Returns (field1, field2).
+    pub fn detect_min_two_fields(&self) -> Option<(String, String)> {
+        use crate::ir::{Expr, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        // Pipe(Collect(Comma(.x, .y)), Index(UnaryOp(Sort, Input), Literal(0)))
+        // after beta-reduction: sort | .[0] → (sort)[0]
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Collect { generator } = left.as_ref() {
+                if let Expr::Comma { left: f1, right: f2 } = generator.as_ref() {
+                    let field1 = if let Expr::Index { expr: base, key } = f1.as_ref() {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() }
+                        else { return None; }
+                    } else { return None; };
+                    let field2 = if let Expr::Index { expr: base, key } = f2.as_ref() {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() }
+                        else { return None; }
+                    } else { return None; };
+                    // Beta-reduced form: Index(UnaryOp(Sort, Input), Literal(0))
+                    if let Expr::Index { expr: sort_expr, key } = right.as_ref() {
+                        if matches!(sort_expr.as_ref(), Expr::UnaryOp { op: UnaryOp::Sort, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                            if let Expr::Literal(Literal::Num(n, _)) = key.as_ref() {
+                                if *n == 0.0 {
+                                    return Some((field1, field2));
+                                }
+                            }
+                        }
+                    }
+                    // Non-reduced form: Pipe(sort, .[0])
+                    if let Expr::Pipe { left: sort_expr, right: idx_expr } = right.as_ref() {
+                        if matches!(sort_expr.as_ref(), Expr::UnaryOp { op: UnaryOp::Sort, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                            if let Expr::Index { expr: base, key } = idx_expr.as_ref() {
+                                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                                if let Expr::Literal(Literal::Num(n, _)) = key.as_ref() {
+                                    if *n == 0.0 {
+                                        return Some((field1, field2));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `[.x, .y] | max` or `[.x, .y] | min` — returns (field1, field2, is_max).
+    pub fn detect_minmax_two_fields(&self) -> Option<(String, String, bool)> {
+        use crate::ir::{Expr, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Collect { generator } = left.as_ref() {
+                if let Expr::Comma { left: f1, right: f2 } = generator.as_ref() {
+                    let field1 = if let Expr::Index { expr: base, key } = f1.as_ref() {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() }
+                        else { return None; }
+                    } else { return None; };
+                    let field2 = if let Expr::Index { expr: base, key } = f2.as_ref() {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() }
+                        else { return None; }
+                    } else { return None; };
+                    match right.as_ref() {
+                        Expr::CallBuiltin { name, args } if args.is_empty() => {
+                            if name == "max" { return Some((field1, field2, true)); }
+                            if name == "min" { return Some((field1, field2, false)); }
+                        }
+                        Expr::UnaryOp { op: UnaryOp::Max, operand } if matches!(operand.as_ref(), Expr::Input) => {
+                            return Some((field1, field2, true));
+                        }
+                        Expr::UnaryOp { op: UnaryOp::Min, operand } if matches!(operand.as_ref(), Expr::Input) => {
+                            return Some((field1, field2, false));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect comma-separated field access `.f1,.f2,...` pattern.
     /// Returns the list of field names if all branches are direct field accesses on input.
     pub fn detect_multi_field_access(&self) -> Option<Vec<String>> {
