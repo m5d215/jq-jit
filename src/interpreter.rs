@@ -128,7 +128,14 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             }
             Expr::Pipe { left: Box::new(sl), right: Box::new(sr) }
         }
-        // Don't recurse into everything — just handle the top-level pipe chain
+        // Recurse into IfThenElse conditions (select patterns)
+        Expr::IfThenElse { cond, then_branch, else_branch } => {
+            Expr::IfThenElse {
+                cond: Box::new(simplify_expr(cond)),
+                then_branch: then_branch.clone(),
+                else_branch: else_branch.clone(),
+            }
+        }
         _ => expr.clone(),
     }
 }
