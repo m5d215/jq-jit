@@ -27,6 +27,43 @@ fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
     buf
 }
 
+/// Unescape a JSON string's inner bytes (between quotes).
+/// Handles \\", \\\\, \\n, \\r, \\t, \\/, \\uXXXX.
+fn json_unescape_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            match bytes[i + 1] {
+                b'"' => { buf.push(b'"'); i += 2; }
+                b'\\' => { buf.push(b'\\'); i += 2; }
+                b'/' => { buf.push(b'/'); i += 2; }
+                b'n' => { buf.push(b'\n'); i += 2; }
+                b'r' => { buf.push(b'\r'); i += 2; }
+                b't' => { buf.push(b'\t'); i += 2; }
+                b'b' => { buf.push(0x08); i += 2; }
+                b'f' => { buf.push(0x0c); i += 2; }
+                b'u' if i + 5 < bytes.len() => {
+                    if let Ok(s) = std::str::from_utf8(&bytes[i+2..i+6]) {
+                        if let Ok(cp) = u32::from_str_radix(s, 16) {
+                            if let Some(c) = char::from_u32(cp) {
+                                let mut tmp = [0u8; 4];
+                                buf.extend_from_slice(c.encode_utf8(&mut tmp).as_bytes());
+                            }
+                        }
+                    }
+                    i += 6;
+                }
+                _ => { buf.push(bytes[i]); i += 1; }
+            }
+        } else {
+            buf.push(bytes[i]);
+            i += 1;
+        }
+    }
+    buf
+}
+
 /// Base64 encode bytes directly into output buffer.
 fn base64_encode_to(input: &[u8], out: &mut Vec<u8>) {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -486,6 +523,10 @@ fn real_main() {
     let array_fields_format = if use_compact_buf && !exit_status && field_access.is_none() {
         filter.detect_array_fields_format()
     } else { None };
+    // For -r mode: raw CSV/TSV output bypasses JSON encoding entirely
+    let raw_csv_fields = if raw_output && !exit_status && !slurp && !join_output && array_fields_format.is_none() {
+        filter.detect_array_fields_format()
+    } else { None };
     let field_split_join = if use_compact_buf && !exit_status && field_access.is_none() {
         filter.detect_field_split_join()
     } else { None };
@@ -543,13 +584,13 @@ fn real_main() {
         || computed_array.is_some() || array_field.is_some() || multi_field.is_some() || is_length || is_keys
         || is_keys_unsorted || has_field.is_some() || has_multi.is_some() || select_has_multi.is_some() || is_type || del_field.is_some() || obj_merge_lit.is_some()
         || is_each || is_to_entries || is_tojson || string_interp_fields.is_some() || array_join.is_some()
-        || literal_output.is_some() || array_fields_format.is_some()
+        || literal_output.is_some() || array_fields_format.is_some() || raw_csv_fields.is_some()
         || field_split_join.is_some() || field_split_first.is_some() || field_slice.is_some()
         || dynamic_key_obj.is_some() || filter.is_empty();
     let projection_fields: Option<Vec<String>> = if !has_raw_fast_path && !slurp && !raw_input {
         filter.needed_input_fields()
     } else { None };
-    let mut compact_buf: Vec<u8> = if use_compact_buf || use_pretty_buf { Vec::with_capacity(1 << 17) } else { Vec::new() };
+    let mut compact_buf: Vec<u8> = if use_compact_buf || use_pretty_buf || raw_csv_fields.is_some() { Vec::with_capacity(1 << 17) } else { Vec::new() };
     let process_input = |input: &Value, raw_bytes: Option<&[u8]>, out: &mut io::BufWriter<io::StdoutLock>, cbuf: &mut Vec<u8>, any_false: &mut bool, had_error: &mut bool| {
         let result = filter.execute_cb(input, &mut |result| {
             if let Value::Error(e) = result {
@@ -759,6 +800,68 @@ fn real_main() {
                                 compact_buf.push(b'"');
                                 compact_buf.push(b'\n');
                             }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref rcf_fields, ref rcf_format)) = raw_csv_fields {
+                    // [.f1,.f2,...] | @csv/@tsv with -r flag — direct raw CSV/TSV output
+                    let rcf_refs: Vec<&str> = rcf_fields.iter().map(|s| s.as_str()).collect();
+                    let is_csv = rcf_format == "csv";
+                    let sep = if is_csv { b',' } else { b'\t' };
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some(ranges) = json_object_get_fields_raw(raw, 0, &rcf_refs) {
+                            for (i, (vs, ve)) in ranges.iter().enumerate() {
+                                if i > 0 { compact_buf.push(sep); }
+                                let val = &raw[*vs..*ve];
+                                if val[0] == b'"' {
+                                    let inner = &val[1..val.len()-1];
+                                    if is_csv {
+                                        compact_buf.push(b'"');
+                                        if inner.contains(&b'\\') {
+                                            // Has JSON escapes — decode first
+                                            let decoded = json_unescape_bytes(inner);
+                                            // CSV-escape: double any quotes
+                                            for &b in &decoded {
+                                                if b == b'"' { compact_buf.push(b'"'); }
+                                                compact_buf.push(b);
+                                            }
+                                        } else if inner.contains(&b'"') {
+                                            for &b in inner.iter() {
+                                                if b == b'"' { compact_buf.push(b'"'); }
+                                                compact_buf.push(b);
+                                            }
+                                        } else {
+                                            compact_buf.extend_from_slice(inner);
+                                        }
+                                        compact_buf.push(b'"');
+                                    } else {
+                                        // TSV: output raw
+                                        if inner.contains(&b'\\') {
+                                            compact_buf.extend_from_slice(&json_unescape_bytes(inner));
+                                        } else {
+                                            compact_buf.extend_from_slice(inner);
+                                        }
+                                    }
+                                } else if val == b"null" {
+                                    // null → empty
+                                } else if val == b"true" {
+                                    compact_buf.extend_from_slice(b"true");
+                                } else if val == b"false" {
+                                    compact_buf.extend_from_slice(b"false");
+                                } else {
+                                    // number
+                                    compact_buf.extend_from_slice(val);
+                                }
+                            }
+                            compact_buf.push(b'\n');
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -2744,6 +2847,64 @@ fn real_main() {
                             compact_buf.push(b'"');
                             compact_buf.push(b'\n');
                         }
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref rcf_fields, ref rcf_format)) = raw_csv_fields {
+                let content_bytes = content.as_bytes();
+                let rcf_refs: Vec<&str> = rcf_fields.iter().map(|s| s.as_str()).collect();
+                let is_csv = rcf_format == "csv";
+                let sep = if is_csv { b',' } else { b'\t' };
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some(ranges) = json_object_get_fields_raw(raw, 0, &rcf_refs) {
+                        for (i, (vs, ve)) in ranges.iter().enumerate() {
+                            if i > 0 { compact_buf.push(sep); }
+                            let val = &raw[*vs..*ve];
+                            if val[0] == b'"' {
+                                let inner = &val[1..val.len()-1];
+                                if is_csv {
+                                    compact_buf.push(b'"');
+                                    if inner.contains(&b'\\') {
+                                        let decoded = json_unescape_bytes(inner);
+                                        for &b in &decoded {
+                                            if b == b'"' { compact_buf.push(b'"'); }
+                                            compact_buf.push(b);
+                                        }
+                                    } else if inner.contains(&b'"') {
+                                        for &b in inner.iter() {
+                                            if b == b'"' { compact_buf.push(b'"'); }
+                                            compact_buf.push(b);
+                                        }
+                                    } else {
+                                        compact_buf.extend_from_slice(inner);
+                                    }
+                                    compact_buf.push(b'"');
+                                } else {
+                                    if inner.contains(&b'\\') {
+                                        compact_buf.extend_from_slice(&json_unescape_bytes(inner));
+                                    } else {
+                                        compact_buf.extend_from_slice(inner);
+                                    }
+                                }
+                            } else if val == b"null" {
+                                // null → empty
+                            } else if val == b"true" {
+                                compact_buf.extend_from_slice(b"true");
+                            } else if val == b"false" {
+                                compact_buf.extend_from_slice(b"false");
+                            } else {
+                                compact_buf.extend_from_slice(val);
+                            }
+                        }
+                        compact_buf.push(b'\n');
                     } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
