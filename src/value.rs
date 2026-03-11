@@ -1765,6 +1765,46 @@ pub fn push_json_compact_raw(buf: &mut Vec<u8>, b: &[u8]) {
     }
 }
 
+/// Single-pass tojson: strip whitespace + escape `"` and `\` into a JSON string.
+/// Writes `"<escaped_compact_json>"` to buf (no trailing newline).
+pub fn push_tojson_raw(buf: &mut Vec<u8>, b: &[u8]) {
+    buf.push(b'"');
+    let mut i = 0;
+    let len = b.len();
+    while i < len {
+        match b[i] {
+            b' ' | b'\t' | b'\n' | b'\r' => { i += 1; }
+            b'"' => {
+                buf.extend_from_slice(b"\\\"");
+                i += 1;
+                // Inside JSON string: scan chunks between special chars
+                loop {
+                    let chunk_start = i;
+                    while i < len && b[i] != b'"' && b[i] != b'\\' { i += 1; }
+                    if i > chunk_start { buf.extend_from_slice(&b[chunk_start..i]); }
+                    if i >= len { break; }
+                    if b[i] == b'"' {
+                        buf.extend_from_slice(b"\\\"");
+                        i += 1;
+                        break;
+                    }
+                    // backslash escape sequence
+                    buf.extend_from_slice(b"\\\\");
+                    i += 1;
+                    if i < len {
+                        if b[i] == b'"' { buf.extend_from_slice(b"\\\""); }
+                        else if b[i] == b'\\' { buf.extend_from_slice(b"\\\\"); }
+                        else { buf.push(b[i]); }
+                        i += 1;
+                    }
+                }
+            }
+            c => { buf.push(c); i += 1; }
+        }
+    }
+    buf.push(b'"');
+}
+
 /// Pretty-print raw JSON bytes without parsing into Value.
 /// Produces jq-compatible indented output with trailing newline.
 pub fn push_json_pretty_raw(buf: &mut Vec<u8>, b: &[u8], indent_n: usize, use_tab: bool) {
