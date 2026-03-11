@@ -891,6 +891,14 @@ impl Filter {
         } else { false }
     }
 
+    /// Detect `tojson` on input.
+    pub fn is_tojson(&self) -> bool {
+        use crate::ir::{Expr, UnaryOp};
+        if let Some((ref expr, _)) = self.parsed {
+            matches!(expr, Expr::UnaryOp { op: UnaryOp::ToJson, operand } if matches!(operand.as_ref(), Expr::Input))
+        } else { false }
+    }
+
     /// Detect `.[]` — each/iteration on input.
     pub fn is_each(&self) -> bool {
         use crate::ir::Expr;

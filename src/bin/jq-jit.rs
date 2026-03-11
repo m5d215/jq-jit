@@ -407,6 +407,7 @@ fn real_main() {
     } else { None };
     let is_each = use_compact_buf && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() && del_field.is_none() && field_access.is_none() && filter.is_each();
     let is_to_entries = use_compact_buf && !exit_status && !is_each && filter.is_to_entries();
+    let is_tojson = use_compact_buf && !exit_status && !is_each && !is_to_entries && filter.is_tojson();
     let string_interp_fields = if use_compact_buf && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() && field_str_concat.is_none() {
         filter.detect_string_interp_fields()
     } else { None };
@@ -470,7 +471,7 @@ fn real_main() {
         || select_cmp_field.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_value.is_some() || select_str_field.is_some()
         || computed_array.is_some() || array_field.is_some() || multi_field.is_some() || is_length || is_keys
         || is_keys_unsorted || has_field.is_some() || is_type || del_field.is_some() || obj_merge_lit.is_some()
-        || is_each || is_to_entries || string_interp_fields.is_some() || array_join.is_some()
+        || is_each || is_to_entries || is_tojson || string_interp_fields.is_some() || array_join.is_some()
         || literal_output.is_some() || array_fields_format.is_some()
         || field_split_join.is_some() || field_split_first.is_some() || field_slice.is_some()
         || dynamic_key_obj.is_some() || filter.is_empty();
@@ -2331,6 +2332,33 @@ fn real_main() {
                         }
                         Ok(())
                     })
+                } else if is_tojson {
+                    // tojson: wrap compact JSON in a JSON string
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        // Ensure input is compact first
+                        let compact: std::borrow::Cow<[u8]> = if is_json_compact(raw) {
+                            std::borrow::Cow::Borrowed(raw)
+                        } else {
+                            let mut tmp = Vec::with_capacity(raw.len());
+                            push_json_compact_raw(&mut tmp, raw);
+                            std::borrow::Cow::Owned(tmp)
+                        };
+                        compact_buf.push(b'"');
+                        for &b in compact.as_ref() {
+                            match b {
+                                b'"' => compact_buf.extend_from_slice(b"\\\""),
+                                b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                                _ => compact_buf.push(b),
+                            }
+                        }
+                        compact_buf.extend_from_slice(b"\"\n");
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
                 } else if let Some(ref pf) = projection_fields {
                     let field_refs: Vec<&str> = pf.iter().map(|s| s.as_str()).collect();
                     json_stream_project(&input_str, &field_refs, |v| {
@@ -4165,6 +4193,32 @@ fn real_main() {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if is_tojson {
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    let compact: std::borrow::Cow<[u8]> = if is_json_compact(raw) {
+                        std::borrow::Cow::Borrowed(raw)
+                    } else {
+                        let mut tmp = Vec::with_capacity(raw.len());
+                        push_json_compact_raw(&mut tmp, raw);
+                        std::borrow::Cow::Owned(tmp)
+                    };
+                    compact_buf.push(b'"');
+                    for &b in compact.as_ref() {
+                        match b {
+                            b'"' => compact_buf.extend_from_slice(b"\\\""),
+                            b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                            _ => compact_buf.push(b),
+                        }
+                    }
+                    compact_buf.extend_from_slice(b"\"\n");
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
                         compact_buf.clear();
