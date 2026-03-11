@@ -1294,6 +1294,43 @@ impl Filter {
         None
     }
 
+    /// Detect `(.field * 2 + 1) cmp N` — arith chain then comparison.
+    /// Returns (field, arith_ops, cmp_op, threshold).
+    pub fn detect_arith_chain_cmp(&self) -> Option<(String, Vec<(crate::ir::BinOp, f64)>, crate::ir::BinOp, f64)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::BinOp { op, lhs, rhs } = expr {
+            if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+            if let Expr::Literal(Literal::Num(threshold, _)) = rhs.as_ref() {
+                // LHS should be an arith chain: BinOp(op2, BinOp(op1, .field, N1), N2)
+                let mut ops = Vec::new();
+                let mut cur = lhs.as_ref();
+                loop {
+                    if let Expr::BinOp { op: aop, lhs: al, rhs: ar } = cur {
+                        if !matches!(aop, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) { return None; }
+                        if let Expr::Literal(Literal::Num(n, _)) = ar.as_ref() {
+                            ops.push((*aop, *n));
+                            cur = al.as_ref();
+                        } else {
+                            return None;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                if ops.len() < 1 { return None; }
+                ops.reverse();
+                if let Expr::Index { expr: base, key } = cur {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        return Some((field.clone(), ops, *op, *threshold));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.f1 cmp1 N1 and/or .f2 cmp2 N2` producing boolean output.
     /// Returns (conjunct, Vec<(field, op, threshold)>).
     pub fn detect_compound_field_cmp(&self) -> Option<(crate::ir::BinOp, Vec<(String, crate::ir::BinOp, f64)>)> {
