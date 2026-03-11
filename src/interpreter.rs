@@ -671,6 +671,28 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | @base64` (or other simple format operations).
+    /// Returns (field_name, format_name) if detected.
+    pub fn detect_field_format(&self) -> Option<(String, String)> {
+        use crate::ir::{Expr, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::Format { name, expr: fmt_expr } = right.as_ref() {
+                        if matches!(fmt_expr.as_ref(), Expr::Input) {
+                            if matches!(name.as_str(), "base64" | "uri" | "html") {
+                                return Some((field.clone(), name.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field | gsub("pattern"; "replacement")` or `.field | sub("pattern"; "replacement")`.
     /// Returns (field_name, is_global, regex_pattern, replacement, flags) if detected.
     pub fn detect_field_gsub(&self) -> Option<(String, bool, String, String, Option<String>)> {

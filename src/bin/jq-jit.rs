@@ -27,6 +27,65 @@ fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
     buf
 }
 
+/// Base64 encode bytes directly into output buffer.
+fn base64_encode_to(input: &[u8], out: &mut Vec<u8>) {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut i = 0;
+    while i + 3 <= input.len() {
+        let b0 = input[i] as u32;
+        let b1 = input[i + 1] as u32;
+        let b2 = input[i + 2] as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((n >> 18) & 63) as usize]);
+        out.push(TABLE[((n >> 12) & 63) as usize]);
+        out.push(TABLE[((n >> 6) & 63) as usize]);
+        out.push(TABLE[(n & 63) as usize]);
+        i += 3;
+    }
+    let rem = input.len() - i;
+    if rem == 2 {
+        let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8);
+        out.push(TABLE[((n >> 18) & 63) as usize]);
+        out.push(TABLE[((n >> 12) & 63) as usize]);
+        out.push(TABLE[((n >> 6) & 63) as usize]);
+        out.push(b'=');
+    } else if rem == 1 {
+        let n = (input[i] as u32) << 16;
+        out.push(TABLE[((n >> 18) & 63) as usize]);
+        out.push(TABLE[((n >> 12) & 63) as usize]);
+        out.push(b'=');
+        out.push(b'=');
+    }
+}
+
+/// URI-encode bytes directly into output buffer (RFC 3986).
+fn uri_encode_to(input: &[u8], out: &mut Vec<u8>) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for &b in input {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b),
+            _ => {
+                out.push(b'%');
+                out.push(HEX[(b >> 4) as usize]);
+                out.push(HEX[(b & 0x0f) as usize]);
+            }
+        }
+    }
+}
+
+/// HTML-escape bytes directly into output buffer.
+fn html_encode_to(input: &[u8], out: &mut Vec<u8>) {
+    for &b in input {
+        match b {
+            b'<' => out.extend_from_slice(b"&lt;"),
+            b'>' => out.extend_from_slice(b"&gt;"),
+            b'&' => out.extend_from_slice(b"&amp;"),
+            b'\'' => out.extend_from_slice(b"&#39;"),
+            _ => out.push(b),
+        }
+    }
+}
+
 /// Get field names referenced by a RemapExpr.
 fn remap_expr_fields(rexpr: &jq_jit::interpreter::RemapExpr) -> Vec<&str> {
     use jq_jit::interpreter::RemapExpr;
@@ -365,6 +424,9 @@ fn real_main() {
     let field_gsub = if use_compact_buf && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() {
         filter.detect_field_gsub()
     } else { None };
+    let field_format = if use_compact_buf && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() && field_gsub.is_none() {
+        filter.detect_field_format()
+    } else { None };
     let field_ltrimstr_tonumber = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() {
         filter.detect_field_ltrimstr_tonumber()
     } else { None };
@@ -465,7 +527,7 @@ fn real_main() {
     let has_raw_fast_path = field_access.is_some() || nested_field.is_some() || field_remap.is_some()
         || computed_remap.is_some()
         || field_binop.is_some() || field_unary_num.is_some() || field_binop_const_unary.is_some()
-        || field_str_builtin.is_some() || field_test.is_some() || field_gsub.is_some() || field_ltrimstr_tonumber.is_some()
+        || field_str_builtin.is_some() || field_test.is_some() || field_gsub.is_some() || field_format.is_some() || field_ltrimstr_tonumber.is_some()
         || field_str_concat.is_some() || field_alt.is_some()
         || select_cmp.is_some()
         || cond_chain.is_some() || cmp_branch_lit.is_some() || select_compound.is_some()
@@ -1434,6 +1496,38 @@ fn real_main() {
                             Ok(())
                         })
                     }
+                } else if let Some((ref ff_field, ref ff_format)) = field_format {
+                    // .field | @base64 / @uri / @html — raw byte format
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, ff_field) {
+                            let val = &raw[vs..ve];
+                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                                && !val[1..val.len()-1].contains(&b'\\')
+                            {
+                                let content = &val[1..val.len()-1];
+                                compact_buf.push(b'"');
+                                match ff_format.as_str() {
+                                    "base64" => base64_encode_to(content, &mut compact_buf),
+                                    "uri" => uri_encode_to(content, &mut compact_buf),
+                                    "html" => html_encode_to(content, &mut compact_buf),
+                                    _ => {}
+                                }
+                                compact_buf.extend_from_slice(b"\"\n");
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
                 } else if let Some((ref lt_field, ref lt_prefix)) = field_ltrimstr_tonumber {
                     let prefix_bytes = lt_prefix.as_bytes();
                     json_stream_raw(&input_str, |start, end| {
@@ -3997,6 +4091,38 @@ fn real_main() {
                         Ok(())
                     })
                 }
+            } else if let Some((ref ff_field, ref ff_format)) = field_format {
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, ff_field) {
+                        let val = &raw[vs..ve];
+                        if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                            && !val[1..val.len()-1].contains(&b'\\')
+                        {
+                            let content = &val[1..val.len()-1];
+                            compact_buf.push(b'"');
+                            match ff_format.as_str() {
+                                "base64" => base64_encode_to(content, &mut compact_buf),
+                                "uri" => uri_encode_to(content, &mut compact_buf),
+                                "html" => html_encode_to(content, &mut compact_buf),
+                                _ => {}
+                            }
+                            compact_buf.extend_from_slice(b"\"\n");
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
             } else if let Some((ref lt_field, ref lt_prefix)) = field_ltrimstr_tonumber {
                 let prefix_bytes = lt_prefix.as_bytes();
                 let content_bytes = content.as_bytes();
