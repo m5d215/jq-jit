@@ -6197,6 +6197,36 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             };
             if let Some(v) = result { std::ptr::write(dst, v); return 0; }
         }
+        // Fast path: indices(str) — avoid call_builtin dispatch
+        if (name == "indices" || name == "rindices") && args.len() == 2 {
+            if let (Value::Str(s), Value::Str(t)) = (&args[0], &args[1]) {
+                if !t.is_empty() && s.is_ascii() && t.is_ascii() {
+                    let sb = s.as_bytes();
+                    let tb = t.as_bytes();
+                    let mut indices: Vec<Value> = Vec::new();
+                    if tb.len() == 1 {
+                        let needle = tb[0];
+                        let mut pos = 0;
+                        while pos < sb.len() {
+                            if let Some(found) = memchr::memchr(needle, &sb[pos..]) {
+                                indices.push(Value::Num((pos + found) as f64, None));
+                                pos += found + 1;
+                            } else {
+                                break;
+                            }
+                        }
+                    } else if tb.len() <= sb.len() {
+                        for i in 0..=sb.len() - tb.len() {
+                            if &sb[i..i+tb.len()] == tb {
+                                indices.push(Value::Num(i as f64, None));
+                            }
+                        }
+                    }
+                    std::ptr::write(dst, Value::Arr(Rc::new(indices)));
+                    return 0;
+                }
+            }
+        }
         // Fast path: contains(str) — direct string containment check
         if name == "contains" && args.len() == 2 {
             if let (Value::Str(s), Value::Str(t)) = (&args[0], &args[1]) {

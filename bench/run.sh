@@ -132,6 +132,8 @@ TESTS=(
     'if>.y .name|empty:-c:if .x > .y then .name else empty end'
     'if .x%2==0:-c:if .x % 2 == 0 then "even" else "odd" end'
     'if .x*2+1>1M:-c:if .x * 2 + 1 > 1000000 then "big" else "small" end'
+    'sel(.x%2==0)|.name:-c:select(.x % 2 == 0) | .name'
+    'sel(.x*2+1>1M):-c:select(.x * 2 + 1 > 1000000)'
 )
 
 for test in "${TESTS[@]}"; do

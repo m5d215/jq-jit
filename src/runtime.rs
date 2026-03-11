@@ -1543,7 +1543,19 @@ fn rt_indices(v: &Value, target: &Value) -> Result<Value> {
                 let sb = s.as_bytes();
                 let tb = t.as_bytes();
                 let tlen = tb.len();
-                if tlen <= sb.len() {
+                if tlen == 1 {
+                    // Single-byte search: use memchr for SIMD acceleration
+                    let needle = tb[0];
+                    let mut pos = 0;
+                    while pos < sb.len() {
+                        if let Some(found) = memchr::memchr(needle, &sb[pos..]) {
+                            indices.push(Value::Num((pos + found) as f64, None));
+                            pos += found + 1;
+                        } else {
+                            break;
+                        }
+                    }
+                } else if tlen <= sb.len() {
                     for i in 0..=sb.len() - tlen {
                         if &sb[i..i+tlen] == tb {
                             indices.push(Value::Num(i as f64, None));
