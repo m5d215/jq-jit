@@ -3489,6 +3489,9 @@ fn real_main() {
                 } else if let Some((ref sff_f1, sff_op, ref sff_f2, ref sff_out)) = select_ff_cmp_field {
                     // select(.f1 cmp .f2) | .output — field-field comparison select
                     use jq_jit::ir::BinOp;
+                    // Optimization: if output field differs from comparison fields,
+                    // first get comparison nums cheaply, only fetch output on pass
+                    let out_is_separate = sff_out != sff_f1 && sff_out != sff_f2;
                     let mut all_fields: Vec<&str> = Vec::new();
                     let mut idx = std::collections::HashMap::new();
                     for f in [sff_f1.as_str(), sff_f2.as_str(), sff_out.as_str()] {
@@ -3497,7 +3500,32 @@ fn real_main() {
                     let mut ranges_buf = vec![(0usize, 0usize); all_fields.len()];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if json_object_get_fields_raw_buf(raw, 0, &all_fields, &mut ranges_buf) {
+                        if out_is_separate {
+                            // Fast path: first get comparison numbers only
+                            if let Some((v1, v2)) = json_object_get_two_nums(raw, 0, sff_f1, sff_f2) {
+                                let pass = match sff_op {
+                                    BinOp::Gt => v1 > v2, BinOp::Lt => v1 < v2,
+                                    BinOp::Ge => v1 >= v2, BinOp::Le => v1 <= v2,
+                                    BinOp::Eq => v1 == v2, BinOp::Ne => v1 != v2,
+                                    _ => false,
+                                };
+                                if pass {
+                                    // Only now fetch the output field
+                                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sff_out) {
+                                        let out_val = &raw[vs..ve];
+                                        if use_pretty_buf && (out_val[0] == b'{' || out_val[0] == b'[') {
+                                            push_json_pretty_raw(&mut compact_buf, out_val, 2, false);
+                                        } else {
+                                            compact_buf.extend_from_slice(out_val);
+                                        }
+                                        compact_buf.push(b'\n');
+                                    }
+                                }
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else if json_object_get_fields_raw_buf(raw, 0, &all_fields, &mut ranges_buf) {
                             let i1 = idx[sff_f1.as_str()];
                             let i2 = idx[sff_f2.as_str()];
                             if let (Some(v1), Some(v2)) = (
@@ -5319,6 +5347,7 @@ fn real_main() {
                 // select(.f1 cmp .f2) | .output — stdin path
                 use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
+                let out_is_separate = sff_out != sff_f1 && sff_out != sff_f2;
                 let mut all_fields: Vec<&str> = Vec::new();
                 let mut idx = std::collections::HashMap::new();
                 for f in [sff_f1.as_str(), sff_f2.as_str(), sff_out.as_str()] {
@@ -5327,7 +5356,30 @@ fn real_main() {
                 let mut ranges_buf = vec![(0usize, 0usize); all_fields.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if json_object_get_fields_raw_buf(raw, 0, &all_fields, &mut ranges_buf) {
+                    if out_is_separate {
+                        if let Some((v1, v2)) = json_object_get_two_nums(raw, 0, sff_f1, sff_f2) {
+                            let pass = match sff_op {
+                                BinOp::Gt => v1 > v2, BinOp::Lt => v1 < v2,
+                                BinOp::Ge => v1 >= v2, BinOp::Le => v1 <= v2,
+                                BinOp::Eq => v1 == v2, BinOp::Ne => v1 != v2,
+                                _ => false,
+                            };
+                            if pass {
+                                if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sff_out) {
+                                    let out_val = &raw[vs..ve];
+                                    if use_pretty_buf && (out_val[0] == b'{' || out_val[0] == b'[') {
+                                        push_json_pretty_raw(&mut compact_buf, out_val, 2, false);
+                                    } else {
+                                        compact_buf.extend_from_slice(out_val);
+                                    }
+                                    compact_buf.push(b'\n');
+                                }
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                    } else if json_object_get_fields_raw_buf(raw, 0, &all_fields, &mut ranges_buf) {
                         let i1 = idx[sff_f1.as_str()];
                         let i2 = idx[sff_f2.as_str()];
                         if let (Some(v1), Some(v2)) = (
