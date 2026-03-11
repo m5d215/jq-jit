@@ -8,7 +8,7 @@ use std::process;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw, json_object_get_fields_raw_buf, json_object_get_nested_field_raw, parse_json_num, json_value_length, json_object_keys_to_buf, json_object_keys_unsorted_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_type_byte, json_object_del_field, json_object_merge_literal, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_object_update_field_num, is_json_compact, push_json_compact_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
+use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, json_object_get_nested_field_raw, parse_json_num, json_value_length, json_object_keys_to_buf, json_object_keys_unsorted_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_type_byte, json_object_del_field, json_object_merge_literal, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_object_update_field_num, is_json_compact, push_json_compact_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
 use jq_jit::interpreter::Filter;
 
 fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -4091,12 +4091,13 @@ fn real_main() {
             } else if let Some(ref remap) = field_remap {
                 let content_bytes = content.as_bytes();
                 let input_fields: Vec<&str> = remap.iter().map(|(_, f)| f.as_str()).collect();
+                let mut ranges_buf = vec![(0usize, 0usize); input_fields.len()];
                 if use_pretty_buf {
                     json_stream_raw(content, |start, end| {
                         let raw = &content_bytes[start..end];
-                        if let Some(ranges) = json_object_get_fields_raw(raw, 0, &input_fields) {
+                        if json_object_get_fields_raw_buf(raw, 0, &input_fields, &mut ranges_buf) {
                             compact_buf.extend_from_slice(b"{\n");
-                            for (i, (vs, ve)) in ranges.iter().enumerate() {
+                            for (i, (vs, ve)) in ranges_buf.iter().enumerate() {
                                 if i > 0 { compact_buf.extend_from_slice(b",\n"); }
                                 compact_buf.extend_from_slice(b"  \"");
                                 compact_buf.extend_from_slice(remap[i].0.as_bytes());
@@ -4131,8 +4132,8 @@ fn real_main() {
                     }
                     json_stream_raw(content, |start, end| {
                         let raw = &content_bytes[start..end];
-                        if let Some(ranges) = json_object_get_fields_raw(raw, 0, &input_fields) {
-                            for (i, (vs, ve)) in ranges.iter().enumerate() {
+                        if json_object_get_fields_raw_buf(raw, 0, &input_fields, &mut ranges_buf) {
+                            for (i, (vs, ve)) in ranges_buf.iter().enumerate() {
                                 compact_buf.extend_from_slice(&key_prefixes[i]);
                                 compact_buf.extend_from_slice(&raw[*vs..*ve]);
                             }
@@ -4687,6 +4688,7 @@ fn real_main() {
                 let escaped_lits: Vec<Option<Vec<u8>>> = join_parts.iter().map(|(is_lit, s)| {
                     if *is_lit { Some(json_escape_bytes(s.as_bytes())) } else { None }
                 }).collect();
+                let mut ranges_buf = vec![(0usize, 0usize); field_names.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
                     if raw[0] != b'{' {
@@ -4694,7 +4696,7 @@ fn real_main() {
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         return Ok(());
                     }
-                    if let Some(ranges) = json_object_get_fields_raw(raw, 0, &field_names) {
+                    if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
                         compact_buf.push(b'"');
                         let mut field_idx = 0;
                         for (i, (is_lit, _)) in join_parts.iter().enumerate() {
@@ -4702,7 +4704,7 @@ fn real_main() {
                             if *is_lit {
                                 compact_buf.extend_from_slice(escaped_lits[i].as_ref().unwrap());
                             } else {
-                                let (vs, ve) = ranges[field_idx];
+                                let (vs, ve) = ranges_buf[field_idx];
                                 field_idx += 1;
                                 let val = &raw[vs..ve];
                                 if val[0] == b'"' && val.len() >= 2 {
@@ -4749,6 +4751,7 @@ fn real_main() {
                         None
                     }
                 }).collect();
+                let mut ranges_buf = vec![(0usize, 0usize); field_names.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
                     if raw[0] != b'{' {
@@ -4756,14 +4759,14 @@ fn real_main() {
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         return Ok(());
                     }
-                    if let Some(ranges) = json_object_get_fields_raw(raw, 0, &field_names) {
+                    if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
                         compact_buf.push(b'"');
                         let mut field_idx = 0;
                         for (i, (is_lit, _)) in interp_parts.iter().enumerate() {
                             if *is_lit {
                                 compact_buf.extend_from_slice(escaped_lits[i].as_ref().unwrap());
                             } else {
-                                let (vs, ve) = ranges[field_idx];
+                                let (vs, ve) = ranges_buf[field_idx];
                                 field_idx += 1;
                                 let val = &raw[vs..ve];
                                 if val[0] == b'"' && val.len() >= 2 {
