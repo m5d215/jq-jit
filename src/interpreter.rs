@@ -83,10 +83,12 @@ pub enum CondRhs {
     Field(String),
 }
 
-/// One branch in a conditional chain: if .field cmp (N | .field2) then output.
+/// One branch in a conditional chain: if .field [arith_ops...] cmp (N | .field2) then output.
 #[derive(Debug, Clone)]
 pub struct CondBranch {
     pub cond_field: String,
+    /// Arithmetic ops applied to field value before comparison (e.g., % 2 for modulo).
+    pub cond_arith_ops: Vec<(crate::ir::BinOp, f64)>,
     pub cond_op: crate::ir::BinOp,
     pub cond_rhs: CondRhs,
     pub output: BranchOutput,
@@ -2681,23 +2683,41 @@ impl Filter {
             }
         };
 
-        let extract_cond = |cond: &Expr| -> Option<(String, BinOp, CondRhs)> {
+        let extract_cond = |cond: &Expr| -> Option<(String, Vec<(BinOp, f64)>, BinOp, CondRhs)> {
             if let Expr::BinOp { op, lhs, rhs } = cond {
                 if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
                     return None;
                 }
-                if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                // Unwrap arithmetic chain from LHS (e.g., .x % 2 → ops=[(Mod,2)], field="x")
+                let mut arith_ops = Vec::new();
+                let mut cur = lhs.as_ref();
+                loop {
+                    if let Expr::BinOp { op: aop, lhs: al, rhs: ar } = cur {
+                        if matches!(aop, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+                            if let Expr::Literal(Literal::Num(n, _)) = ar.as_ref() {
+                                arith_ops.push((*aop, *n));
+                                cur = al.as_ref();
+                                continue;
+                            }
+                        }
+                    }
+                    break;
+                }
+                arith_ops.reverse();
+                if let Expr::Index { expr: base, key } = cur {
                     if !matches!(base.as_ref(), Expr::Input) { return None; }
                     if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
-                        // .field cmp N
+                        // .field [arith_ops...] cmp N
                         if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
-                            return Some((field.clone(), *op, CondRhs::Const(*n)));
+                            return Some((field.clone(), arith_ops, *op, CondRhs::Const(*n)));
                         }
-                        // .field1 cmp .field2
-                        if let Expr::Index { expr: base2, key: key2 } = rhs.as_ref() {
-                            if matches!(base2.as_ref(), Expr::Input) {
-                                if let Expr::Literal(Literal::Str(f2)) = key2.as_ref() {
-                                    return Some((field.clone(), *op, CondRhs::Field(f2.clone())));
+                        // .field1 [arith_ops...] cmp .field2 (only without arith ops)
+                        if arith_ops.is_empty() {
+                            if let Expr::Index { expr: base2, key: key2 } = rhs.as_ref() {
+                                if matches!(base2.as_ref(), Expr::Input) {
+                                    if let Expr::Literal(Literal::Str(f2)) = key2.as_ref() {
+                                        return Some((field.clone(), arith_ops, *op, CondRhs::Field(f2.clone())));
+                                    }
                                 }
                             }
                         }
@@ -2712,17 +2732,18 @@ impl Filter {
         let mut current = expr;
         loop {
             if let Expr::IfThenElse { cond, then_branch, else_branch } = current {
-                let (field, op, rhs) = extract_cond(cond)?;
+                let (field, arith_ops, op, rhs) = extract_cond(cond)?;
                 let output = expr_to_output(then_branch)?;
-                branches.push(CondBranch { cond_field: field, cond_op: op, cond_rhs: rhs, output });
+                branches.push(CondBranch { cond_field: field, cond_arith_ops: arith_ops, cond_op: op, cond_rhs: rhs, output });
                 current = else_branch;
             } else {
                 let else_output = expr_to_output(current)?;
-                // Only use this if it adds value over detect_cmp_branch_literals
+                // Only use this if it adds value over detect_cmp_branch_literals / detect_arith_cmp_branch_literals
                 let has_field_output = branches.iter().any(|b| matches!(b.output, BranchOutput::Field(_)))
                     || matches!(else_output, BranchOutput::Field(_));
                 let has_field_rhs = branches.iter().any(|b| matches!(b.cond_rhs, CondRhs::Field(_)));
-                if branches.len() < 2 && !has_field_output && !has_field_rhs { return None; }
+                let has_arith_ops = branches.iter().any(|b| !b.cond_arith_ops.is_empty());
+                if branches.len() < 2 && !has_field_output && !has_field_rhs && !has_arith_ops { return None; }
                 return Some((branches, else_output));
             }
         }

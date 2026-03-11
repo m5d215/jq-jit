@@ -2987,6 +2987,7 @@ fn real_main() {
                     if branches.len() == 1 {
                         let br = &branches[0];
                         let cond_field = br.cond_field.as_str();
+                        let cond_arith = &br.cond_arith_ops;
                         let cond_op = &br.cond_op;
                         let then_out = &br.output;
                         let rhs_field: Option<&str> = if let CondRhs::Field(ref f) = br.cond_rhs { Some(f.as_str()) } else { None };
@@ -3005,10 +3006,20 @@ fn real_main() {
                                 } else { (0.0, 0.0, false) }
                             };
                             if got {
+                                // Apply arithmetic chain to LHS (keep original for field output)
+                                let orig_lv = lv;
+                                let mut cmp_lv = lv;
+                                for (aop, n) in cond_arith {
+                                    cmp_lv = match aop {
+                                        BinOp::Add => cmp_lv + n, BinOp::Sub => cmp_lv - n,
+                                        BinOp::Mul => cmp_lv * n, BinOp::Div => cmp_lv / n,
+                                        BinOp::Mod => cmp_lv % n, _ => cmp_lv,
+                                    };
+                                }
                                 let pass = match cond_op {
-                                    BinOp::Gt => lv > rv, BinOp::Lt => lv < rv,
-                                    BinOp::Ge => lv >= rv, BinOp::Le => lv <= rv,
-                                    BinOp::Eq => lv == rv, BinOp::Ne => lv != rv,
+                                    BinOp::Gt => cmp_lv > rv, BinOp::Lt => cmp_lv < rv,
+                                    BinOp::Ge => cmp_lv >= rv, BinOp::Le => cmp_lv <= rv,
+                                    BinOp::Eq => cmp_lv == rv, BinOp::Ne => cmp_lv != rv,
                                     _ => false,
                                 };
                                 let out_br = if pass { then_out } else { else_output };
@@ -3020,7 +3031,7 @@ fn real_main() {
                                     BranchOutput::Field(ref f) => {
                                         let fs = f.as_str();
                                         if fs == cond_field {
-                                            push_jq_number_bytes(&mut compact_buf, lv);
+                                            push_jq_number_bytes(&mut compact_buf, orig_lv);
                                             compact_buf.push(b'\n');
                                         } else if rhs_field.map_or(false, |rf| fs == rf) {
                                             push_jq_number_bytes(&mut compact_buf, rv);
@@ -3097,7 +3108,15 @@ fn real_main() {
                             for br in branches {
                                 let idx = field_idx[&br.cond_field];
                                 let (vs, ve) = ranges_buf[idx];
-                                if let Some(val) = parse_json_num(&raw[vs..ve]) {
+                                if let Some(mut val) = parse_json_num(&raw[vs..ve]) {
+                                    // Apply arithmetic chain
+                                    for (aop, n) in &br.cond_arith_ops {
+                                        val = match aop {
+                                            BinOp::Add => val + n, BinOp::Sub => val - n,
+                                            BinOp::Mul => val * n, BinOp::Div => val / n,
+                                            BinOp::Mod => val % n, _ => val,
+                                        };
+                                    }
                                     let rhs_val = match &br.cond_rhs {
                                         CondRhs::Const(n) => *n,
                                         CondRhs::Field(ref f) => {
@@ -5113,6 +5132,7 @@ fn real_main() {
                 if branches.len() == 1 {
                     let br = &branches[0];
                     let cond_field = br.cond_field.as_str();
+                    let cond_arith = &br.cond_arith_ops;
                     let cond_op = &br.cond_op;
                     let then_out = &br.output;
                     let rhs_field: Option<&str> = if let CondRhs::Field(ref f) = br.cond_rhs { Some(f.as_str()) } else { None };
@@ -5130,10 +5150,20 @@ fn real_main() {
                             } else { (0.0, 0.0, false) }
                         };
                         if got {
+                            // Apply arithmetic chain to LHS (keep original for field output)
+                            let orig_lv = lv;
+                            let mut cmp_lv = lv;
+                            for (aop, n) in cond_arith {
+                                cmp_lv = match aop {
+                                    BinOp::Add => cmp_lv + n, BinOp::Sub => cmp_lv - n,
+                                    BinOp::Mul => cmp_lv * n, BinOp::Div => cmp_lv / n,
+                                    BinOp::Mod => cmp_lv % n, _ => cmp_lv,
+                                };
+                            }
                             let pass = match cond_op {
-                                BinOp::Gt => lv > rv, BinOp::Lt => lv < rv,
-                                BinOp::Ge => lv >= rv, BinOp::Le => lv <= rv,
-                                BinOp::Eq => lv == rv, BinOp::Ne => lv != rv,
+                                BinOp::Gt => cmp_lv > rv, BinOp::Lt => cmp_lv < rv,
+                                BinOp::Ge => cmp_lv >= rv, BinOp::Le => cmp_lv <= rv,
+                                BinOp::Eq => cmp_lv == rv, BinOp::Ne => cmp_lv != rv,
                                 _ => false,
                             };
                             let out_br = if pass { then_out } else { else_output };
@@ -5145,7 +5175,7 @@ fn real_main() {
                                 BranchOutput::Field(ref f) => {
                                     let fs = f.as_str();
                                     if fs == cond_field {
-                                        push_jq_number_bytes(&mut compact_buf, lv);
+                                        push_jq_number_bytes(&mut compact_buf, orig_lv);
                                         compact_buf.push(b'\n');
                                     } else if rhs_field.map_or(false, |rf| fs == rf) {
                                         push_jq_number_bytes(&mut compact_buf, rv);
@@ -5221,7 +5251,15 @@ fn real_main() {
                         for br in branches {
                             let idx = field_idx[&br.cond_field];
                             let (vs, ve) = ranges_buf[idx];
-                            if let Some(val) = parse_json_num(&raw[vs..ve]) {
+                            if let Some(mut val) = parse_json_num(&raw[vs..ve]) {
+                                // Apply arithmetic chain
+                                for (aop, n) in &br.cond_arith_ops {
+                                    val = match aop {
+                                        BinOp::Add => val + n, BinOp::Sub => val - n,
+                                        BinOp::Mul => val * n, BinOp::Div => val / n,
+                                        BinOp::Mod => val % n, _ => val,
+                                    };
+                                }
                                 let rhs_val = match &br.cond_rhs {
                                     CondRhs::Const(n) => *n,
                                     CondRhs::Field(ref f) => {
