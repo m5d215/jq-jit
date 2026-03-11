@@ -21,6 +21,10 @@ pub enum RemapExpr {
     FieldOpField(String, crate::ir::BinOp, String),
     /// `N op .field` — constant op field (e.g., `100 - .x`)
     ConstOpField(f64, crate::ir::BinOp, String),
+    /// `.field cmp N` — boolean comparison result (true/false)
+    FieldCmpConst(String, crate::ir::BinOp, f64),
+    /// `.field1 cmp .field2` — boolean comparison between two fields
+    FieldCmpField(String, crate::ir::BinOp, String),
 }
 
 /// A pure numeric expression over fields and constants.
@@ -756,32 +760,42 @@ impl Filter {
         }
         // .field op N or .field op .field2
         if let Expr::BinOp { op, lhs, rhs } = v {
-            if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
-                return None;
-            }
+            let is_arith = matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod);
+            let is_cmp = matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne);
+            if !is_arith && !is_cmp { return None; }
             if let Expr::Index { expr: base, key } = lhs.as_ref() {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
                 if let Expr::Literal(Literal::Str(f1)) = key.as_ref() {
-                    // .field op N
+                    // .field op/cmp N
                     if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
-                        if matches!(op, BinOp::Div | BinOp::Mod) && *n == 0.0 { return None; }
-                        return Some(RemapExpr::FieldOpConst(f1.clone(), *op, *n));
+                        if is_arith {
+                            if matches!(op, BinOp::Div | BinOp::Mod) && *n == 0.0 { return None; }
+                            return Some(RemapExpr::FieldOpConst(f1.clone(), *op, *n));
+                        } else {
+                            return Some(RemapExpr::FieldCmpConst(f1.clone(), *op, *n));
+                        }
                     }
-                    // .field1 op .field2
+                    // .field1 op/cmp .field2
                     if let Expr::Index { expr: base2, key: key2 } = rhs.as_ref() {
                         if !matches!(base2.as_ref(), Expr::Input) { return None; }
                         if let Expr::Literal(Literal::Str(f2)) = key2.as_ref() {
-                            return Some(RemapExpr::FieldOpField(f1.clone(), *op, f2.clone()));
+                            if is_arith {
+                                return Some(RemapExpr::FieldOpField(f1.clone(), *op, f2.clone()));
+                            } else {
+                                return Some(RemapExpr::FieldCmpField(f1.clone(), *op, f2.clone()));
+                            }
                         }
                     }
                 }
             }
-            // N op .field (e.g., 100 - .x)
-            if let Expr::Literal(Literal::Num(n, _)) = lhs.as_ref() {
-                if let Expr::Index { expr: base, key } = rhs.as_ref() {
-                    if matches!(base.as_ref(), Expr::Input) {
-                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
-                            return Some(RemapExpr::ConstOpField(*n, *op, f.clone()));
+            // N op .field (e.g., 100 - .x), only for arithmetic
+            if is_arith {
+                if let Expr::Literal(Literal::Num(n, _)) = lhs.as_ref() {
+                    if let Expr::Index { expr: base, key } = rhs.as_ref() {
+                        if matches!(base.as_ref(), Expr::Input) {
+                            if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                                return Some(RemapExpr::ConstOpField(*n, *op, f.clone()));
+                            }
                         }
                     }
                 }

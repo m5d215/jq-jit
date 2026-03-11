@@ -128,8 +128,8 @@ fn remap_expr_fields(rexpr: &jq_jit::interpreter::RemapExpr) -> Vec<&str> {
     use jq_jit::interpreter::RemapExpr;
     match rexpr {
         RemapExpr::Field(f) => vec![f.as_str()],
-        RemapExpr::FieldOpConst(f, _, _) => vec![f.as_str()],
-        RemapExpr::FieldOpField(f1, _, f2) => vec![f1.as_str(), f2.as_str()],
+        RemapExpr::FieldOpConst(f, _, _) | RemapExpr::FieldCmpConst(f, _, _) => vec![f.as_str()],
+        RemapExpr::FieldOpField(f1, _, f2) | RemapExpr::FieldCmpField(f1, _, f2) => vec![f1.as_str(), f2.as_str()],
         RemapExpr::ConstOpField(_, _, f) => vec![f.as_str()],
     }
 }
@@ -168,6 +168,8 @@ enum ResolvedRemap {
     FieldOpConst(usize, jq_jit::ir::BinOp, f64),
     FieldOpField(usize, jq_jit::ir::BinOp, usize),
     ConstOpField(f64, jq_jit::ir::BinOp, usize),
+    FieldCmpConst(usize, jq_jit::ir::BinOp, f64),
+    FieldCmpField(usize, jq_jit::ir::BinOp, usize),
 }
 
 /// Pre-resolve RemapExpr → ResolvedRemap using a field→index map.
@@ -181,6 +183,8 @@ fn resolve_remap_exprs(
         RemapExpr::FieldOpConst(f, op, n) => ResolvedRemap::FieldOpConst(field_idx[f.as_str()], *op, *n),
         RemapExpr::FieldOpField(f1, op, f2) => ResolvedRemap::FieldOpField(field_idx[f1.as_str()], *op, field_idx[f2.as_str()]),
         RemapExpr::ConstOpField(n, op, f) => ResolvedRemap::ConstOpField(*n, *op, field_idx[f.as_str()]),
+        RemapExpr::FieldCmpConst(f, op, n) => ResolvedRemap::FieldCmpConst(field_idx[f.as_str()], *op, *n),
+        RemapExpr::FieldCmpField(f1, op, f2) => ResolvedRemap::FieldCmpField(field_idx[f1.as_str()], *op, field_idx[f2.as_str()]),
     }).collect()
 }
 
@@ -195,6 +199,8 @@ fn resolve_remap_exprs_array(
         RemapExpr::FieldOpConst(f, op, n) => ResolvedRemap::FieldOpConst(field_idx[f.as_str()], *op, *n),
         RemapExpr::FieldOpField(f1, op, f2) => ResolvedRemap::FieldOpField(field_idx[f1.as_str()], *op, field_idx[f2.as_str()]),
         RemapExpr::ConstOpField(n, op, f) => ResolvedRemap::ConstOpField(*n, *op, field_idx[f.as_str()]),
+        RemapExpr::FieldCmpConst(f, op, n) => ResolvedRemap::FieldCmpConst(field_idx[f.as_str()], *op, *n),
+        RemapExpr::FieldCmpField(f1, op, f2) => ResolvedRemap::FieldCmpField(field_idx[f1.as_str()], *op, field_idx[f2.as_str()]),
     }).collect()
 }
 
@@ -242,6 +248,24 @@ fn emit_remap_value(
                 push_jq_number_bytes(buf, r);
             } else { buf.extend_from_slice(b"null"); }
         }
+        RemapExpr::FieldCmpConst(f, op, n) => {
+            let idx = field_idx[f.as_str()];
+            let (vs, ve) = ranges[idx];
+            if let Some(a) = parse_json_num(&raw[vs..ve]) {
+                let r = match op { BinOp::Gt => a > *n, BinOp::Lt => a < *n, BinOp::Ge => a >= *n, BinOp::Le => a <= *n, BinOp::Eq => a == *n, BinOp::Ne => a != *n, _ => unreachable!() };
+                buf.extend_from_slice(if r { b"true" } else { b"false" });
+            } else { buf.extend_from_slice(b"null"); }
+        }
+        RemapExpr::FieldCmpField(f1, op, f2) => {
+            let idx1 = field_idx[f1.as_str()];
+            let idx2 = field_idx[f2.as_str()];
+            let (vs1, ve1) = ranges[idx1];
+            let (vs2, ve2) = ranges[idx2];
+            if let (Some(a), Some(b)) = (parse_json_num(&raw[vs1..ve1]), parse_json_num(&raw[vs2..ve2])) {
+                let r = match op { BinOp::Gt => a > b, BinOp::Lt => a < b, BinOp::Ge => a >= b, BinOp::Le => a <= b, BinOp::Eq => a == b, BinOp::Ne => a != b, _ => unreachable!() };
+                buf.extend_from_slice(if r { b"true" } else { b"false" });
+            } else { buf.extend_from_slice(b"null"); }
+        }
     }
 }
 
@@ -279,6 +303,21 @@ fn emit_resolved_value(
             if let Some(b) = parse_json_num(&raw[vs..ve]) {
                 let r = match op { BinOp::Add => n + b, BinOp::Sub => n - b, BinOp::Mul => n * b, BinOp::Div => n / b, BinOp::Mod => n % b, _ => unreachable!() };
                 push_jq_number_bytes(buf, r);
+            } else { buf.extend_from_slice(b"null"); }
+        }
+        ResolvedRemap::FieldCmpConst(idx, ref op, n) => {
+            let (vs, ve) = ranges[idx];
+            if let Some(a) = parse_json_num(&raw[vs..ve]) {
+                let r = match op { BinOp::Gt => a > n, BinOp::Lt => a < n, BinOp::Ge => a >= n, BinOp::Le => a <= n, BinOp::Eq => a == n, BinOp::Ne => a != n, _ => unreachable!() };
+                buf.extend_from_slice(if r { b"true" } else { b"false" });
+            } else { buf.extend_from_slice(b"null"); }
+        }
+        ResolvedRemap::FieldCmpField(idx1, ref op, idx2) => {
+            let (vs1, ve1) = ranges[idx1];
+            let (vs2, ve2) = ranges[idx2];
+            if let (Some(a), Some(b)) = (parse_json_num(&raw[vs1..ve1]), parse_json_num(&raw[vs2..ve2])) {
+                let r = match op { BinOp::Gt => a > b, BinOp::Lt => a < b, BinOp::Ge => a >= b, BinOp::Le => a <= b, BinOp::Eq => a == b, BinOp::Ne => a != b, _ => unreachable!() };
+                buf.extend_from_slice(if r { b"true" } else { b"false" });
             } else { buf.extend_from_slice(b"null"); }
         }
     }
@@ -1252,16 +1291,10 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some(ref celems) = computed_array {
-                    use jq_jit::interpreter::RemapExpr;
                     let mut all_fields: Vec<String> = Vec::new();
                     let mut field_idx = std::collections::HashMap::new();
                     for rexpr in celems {
-                        let names: Vec<&str> = match rexpr {
-                            RemapExpr::Field(f) => vec![f.as_str()],
-                            RemapExpr::FieldOpConst(f, _, _) => vec![f.as_str()],
-                            RemapExpr::FieldOpField(f1, _, f2) => vec![f1.as_str(), f2.as_str()],
-                            RemapExpr::ConstOpField(_, _, f) => vec![f.as_str()],
-                        };
+                        let names = remap_expr_fields(rexpr);
                         for name in names {
                             if !field_idx.contains_key(name) {
                                 field_idx.insert(name.to_string(), all_fields.len());
@@ -3575,17 +3608,11 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some(ref celems) = computed_array {
-                use jq_jit::interpreter::RemapExpr;
                 let content_bytes = content.as_bytes();
                 let mut all_fields: Vec<String> = Vec::new();
                 let mut field_idx = std::collections::HashMap::new();
                 for rexpr in celems {
-                    let names: Vec<&str> = match rexpr {
-                        RemapExpr::Field(f) => vec![f.as_str()],
-                        RemapExpr::FieldOpConst(f, _, _) => vec![f.as_str()],
-                        RemapExpr::FieldOpField(f1, _, f2) => vec![f1.as_str(), f2.as_str()],
-                        RemapExpr::ConstOpField(_, _, f) => vec![f.as_str()],
-                    };
+                    let names = remap_expr_fields(rexpr);
                     for name in names {
                         if !field_idx.contains_key(name) {
                             field_idx.insert(name.to_string(), all_fields.len());
