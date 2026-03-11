@@ -3201,12 +3201,11 @@ fn eval_closure_op_f64(op: ClosureOpKind, a: &[Value], keys: &[f64], cb: &mut dy
             cb(Value::Arr(Rc::new(groups)))
         }
         ClosureOpKind::UniqueBy => {
-            let mut seen: Vec<f64> = Vec::new();
+            let mut seen = std::collections::HashSet::with_capacity(a.len().min(4096));
             let mut result: Vec<Value> = Vec::new();
             for (i, item) in a.iter().enumerate() {
-                let k = keys[i];
-                if !seen.iter().any(|&s| s == k) {
-                    seen.push(k);
+                let k = keys[i].to_bits();
+                if seen.insert(k) {
                     result.push(item.clone());
                 }
             }
@@ -3228,6 +3227,68 @@ fn eval_closure_op_f64(op: ClosureOpKind, a: &[Value], keys: &[f64], cb: &mut dy
                 if c == std::cmp::Ordering::Greater || c == std::cmp::Ordering::Equal { mi = i; }
             }
             cb(a[mi].clone())
+        }
+    }
+}
+
+/// Specialized closure ops with pre-extracted Value references — avoids eval and clone overhead.
+fn eval_closure_op_value_ref(op: ClosureOpKind, a: &[Value], keyed: Vec<(&Value, &Value)>, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
+    match op {
+        ClosureOpKind::SortBy => {
+            let mut indexed: Vec<(usize, &Value)> = keyed.iter().enumerate().map(|(i, (k, _))| (i, *k)).collect();
+            indexed.sort_by(|(_, ka), (_, kb)| crate::runtime::compare_values(ka, kb));
+            cb(Value::Arr(Rc::new(indexed.iter().map(|&(i, _)| a[i].clone()).collect())))
+        }
+        ClosureOpKind::GroupBy => {
+            let mut indexed: Vec<(usize, &Value)> = keyed.iter().enumerate().map(|(i, (k, _))| (i, *k)).collect();
+            indexed.sort_by(|(_, ka), (_, kb)| crate::runtime::compare_values(ka, kb));
+            let mut groups: Vec<Value> = Vec::new();
+            let mut cg: Vec<Value> = Vec::new();
+            let mut cur_key: Option<&Value> = None;
+            for &(idx, key) in &indexed {
+                if let Some(ck) = cur_key {
+                    if crate::runtime::values_equal(key, ck) {
+                        cg.push(a[idx].clone());
+                    } else {
+                        groups.push(Value::Arr(Rc::new(std::mem::take(&mut cg))));
+                        cg.push(a[idx].clone());
+                        cur_key = Some(key);
+                    }
+                } else {
+                    cg.push(a[idx].clone());
+                    cur_key = Some(key);
+                }
+            }
+            if !cg.is_empty() { groups.push(Value::Arr(Rc::new(cg))); }
+            cb(Value::Arr(Rc::new(groups)))
+        }
+        ClosureOpKind::UniqueBy => {
+            let mut seen = std::collections::HashSet::with_capacity(keyed.len().min(4096));
+            let mut result: Vec<Value> = Vec::new();
+            for (key, item) in &keyed {
+                let hash_key = crate::value::value_to_json(key);
+                if seen.insert(hash_key) {
+                    result.push((*item).clone());
+                }
+            }
+            cb(Value::Arr(Rc::new(result)))
+        }
+        ClosureOpKind::MinBy => {
+            if keyed.is_empty() { return cb(Value::Null); }
+            let mut mi = 0;
+            for i in 1..keyed.len() {
+                if crate::runtime::compare_values(keyed[i].0, keyed[mi].0) == std::cmp::Ordering::Less { mi = i; }
+            }
+            cb(keyed[mi].1.clone())
+        }
+        ClosureOpKind::MaxBy => {
+            if keyed.is_empty() { return cb(Value::Null); }
+            let mut mi = 0;
+            for i in 1..keyed.len() {
+                let c = crate::runtime::compare_values(keyed[i].0, keyed[mi].0);
+                if c == std::cmp::Ordering::Greater || c == std::cmp::Ordering::Equal { mi = i; }
+            }
+            cb(keyed[mi].1.clone())
         }
     }
 }
@@ -3282,6 +3343,26 @@ fn try_eval_key_f64(expr: &Expr, input: &Value) -> Option<f64> {
     }
 }
 
+fn try_eval_key_value<'a>(expr: &Expr, input: &'a Value) -> Option<&'a Value> {
+    match expr {
+        Expr::Input => Some(input),
+        Expr::Index { expr: base, key } => {
+            if !matches!(base.as_ref(), Expr::Input) { return None; }
+            if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                match input {
+                    Value::Obj(o) => o.get(field.as_str()),
+                    _ => None,
+                }
+            } else { None }
+        }
+        Expr::Pipe { left, right } => {
+            let mid = try_eval_key_value(left, input)?;
+            try_eval_key_value(right, mid)
+        }
+        _ => None,
+    }
+}
+
 fn eval_closure_op(op: ClosureOpKind, container: &Value, key_expr: &Expr, _input: &Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
     let a = match container { Value::Arr(a) => a, _ => bail!("{} is not an array", container.type_name()) };
 
@@ -3302,6 +3383,23 @@ fn eval_closure_op(op: ClosureOpKind, container: &Value, key_expr: &Expr, _input
             if all_f64 {
                 return eval_closure_op_f64(op, a, &f64_keys, cb);
             }
+        }
+    }
+
+    // Fast path: direct Value key extraction (handles .field with any type)
+    if !a.is_empty() && try_eval_key_value(key_expr, &a[0]).is_some() {
+        let mut all_ok = true;
+        let mut keyed: Vec<(&Value, &Value)> = Vec::with_capacity(a.len());
+        for item in a.iter() {
+            if let Some(k) = try_eval_key_value(key_expr, item) {
+                keyed.push((k, item));
+            } else {
+                all_ok = false;
+                break;
+            }
+        }
+        if all_ok {
+            return eval_closure_op_value_ref(op, a, keyed, cb);
         }
     }
 
@@ -3326,8 +3424,19 @@ fn eval_closure_op(op: ClosureOpKind, container: &Value, key_expr: &Expr, _input
             cb(Value::Arr(Rc::new(groups)))
         }
         ClosureOpKind::UniqueBy => {
-            let mut seen: Vec<Vec<Value>> = Vec::new(); let mut result: Vec<Value> = Vec::new();
-            for (keys, val) in keyed { if !seen.iter().any(|k| k.len()==keys.len()&&k.iter().zip(keys.iter()).all(|(a,b)| crate::runtime::values_equal(a,b))) { seen.push(keys); result.push(val); } }
+            let mut seen = std::collections::HashSet::with_capacity(keyed.len().min(4096));
+            let mut result: Vec<Value> = Vec::new();
+            for (keys, val) in keyed {
+                // Hash by JSON serialization of keys
+                let hash_key = if keys.len() == 1 {
+                    crate::value::value_to_json(&keys[0])
+                } else {
+                    keys.iter().map(|k| crate::value::value_to_json(k)).collect::<Vec<_>>().join("\x00")
+                };
+                if seen.insert(hash_key) {
+                    result.push(val);
+                }
+            }
             cb(Value::Arr(Rc::new(result)))
         }
         ClosureOpKind::MinBy => {

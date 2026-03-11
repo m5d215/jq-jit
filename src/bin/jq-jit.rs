@@ -2549,6 +2549,7 @@ fn real_main() {
         }
     } else {
         // Process files
+        let mut slurp_values: Vec<Value> = Vec::new();
         for file in &files {
             let f = match std::fs::File::open(file) {
                 Ok(f) => f,
@@ -2574,7 +2575,27 @@ fn real_main() {
                 content = "";
             }
             let _ = &mmap; // keep mmap alive
-            let parse_result = if filter.is_empty() {
+            let parse_result = if slurp {
+                // Slurp: collect all JSON values into an array, process once
+                let mut values = Vec::new();
+                let r = if raw_input {
+                    for line in content.lines() {
+                        values.push(Value::from_str(line));
+                    }
+                    Ok(())
+                } else {
+                    json_stream(content, |v| {
+                        values.push(v);
+                        Ok(())
+                    })
+                };
+                if let Err(e) = r {
+                    eprintln!("jq: error (at {}:0): {}", file, e);
+                    process::exit(2);
+                }
+                slurp_values.extend(values);
+                Ok(())
+            } else if filter.is_empty() {
                 // Empty fast path: just validate JSON structure, produce no output.
                 json_stream_raw(content, |_, _| Ok(()))
             } else if let Some(ref lit) = literal_output {
@@ -4538,6 +4559,10 @@ fn real_main() {
                 eprintln!("jq: error: {}", e);
                 process::exit(2);
             }
+        }
+        if slurp && !slurp_values.is_empty() {
+            let arr = Value::Arr(std::rc::Rc::new(slurp_values));
+            process_input(&arr, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
         }
     }
 
