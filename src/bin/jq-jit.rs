@@ -548,7 +548,7 @@ fn real_main() {
         filter.detect_array_join()
     } else { None };
     let literal_output = if (use_compact_buf || use_pretty_buf) && !exit_status { filter.detect_literal_output() } else { None };
-    let array_fields_format = if use_compact_buf && !exit_status && field_access.is_none() {
+    let array_fields_format = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
         filter.detect_array_fields_format()
     } else { None };
     // For -r mode: raw CSV/TSV output bypasses JSON encoding entirely
