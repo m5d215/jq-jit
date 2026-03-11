@@ -230,6 +230,32 @@ fn emit_tostring_raw(buf: &mut Vec<u8>, val: &[u8]) {
     }
 }
 
+/// Fast substring search using memchr for the first byte.
+#[inline]
+fn bytes_contains(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() { return true; }
+    if needle.len() > haystack.len() { return false; }
+    if needle.len() == 1 {
+        return memchr::memchr(needle[0], haystack).is_some();
+    }
+    let first = needle[0];
+    let rest = &needle[1..];
+    let max_start = haystack.len() - needle.len();
+    let mut pos = 0;
+    loop {
+        match memchr::memchr(first, &haystack[pos..=max_start]) {
+            Some(offset) => {
+                let start = pos + offset;
+                if haystack[start + 1..start + needle.len()] == *rest {
+                    return true;
+                }
+                pos = start + 1;
+            }
+            None => return false,
+        }
+    }
+}
+
 /// Emit a single computed remap value into the output buffer.
 /// Shared by computed_remap, computed_array, select_cmp_cremap handlers.
 #[inline]
@@ -2907,12 +2933,7 @@ fn real_main() {
                                 let pass = match builtin.as_str() {
                                     "startswith" => inner.starts_with(arg.as_bytes()),
                                     "endswith" => inner.ends_with(arg.as_bytes()),
-                                    "contains" => {
-                                        let ab = arg.as_bytes();
-                                        if ab.len() <= inner.len() {
-                                            inner.windows(ab.len()).any(|w| w == ab)
-                                        } else { false }
-                                    }
+                                    "contains" => bytes_contains(inner, arg.as_bytes()),
                                     _ => false,
                                 };
                                 if pass {
@@ -3920,10 +3941,7 @@ fn real_main() {
                                     match test_type.as_str() {
                                         "startswith" => inner.starts_with(test_arg.as_bytes()),
                                         "endswith" => inner.ends_with(test_arg.as_bytes()),
-                                        "contains" => {
-                                            let ab = test_arg.as_bytes();
-                                            ab.len() <= inner.len() && inner.windows(ab.len()).any(|w| w == ab)
-                                        }
+                                        "contains" => bytes_contains(inner, test_arg.as_bytes()),
                                         _ => false,
                                     }
                                 } else { false }
@@ -5109,12 +5127,7 @@ fn real_main() {
                             let pass = match builtin.as_str() {
                                 "startswith" => inner.starts_with(arg.as_bytes()),
                                 "endswith" => inner.ends_with(arg.as_bytes()),
-                                "contains" => {
-                                    let ab = arg.as_bytes();
-                                    if ab.len() <= inner.len() {
-                                        inner.windows(ab.len()).any(|w| w == ab)
-                                    } else { false }
-                                }
+                                "contains" => bytes_contains(inner, arg.as_bytes()),
                                 _ => false,
                             };
                             if pass {
@@ -6105,10 +6118,7 @@ fn real_main() {
                                 match test_type.as_str() {
                                     "startswith" => inner.starts_with(test_arg.as_bytes()),
                                     "endswith" => inner.ends_with(test_arg.as_bytes()),
-                                    "contains" => {
-                                        let ab = test_arg.as_bytes();
-                                        ab.len() <= inner.len() && inner.windows(ab.len()).any(|w| w == ab)
-                                    }
+                                    "contains" => bytes_contains(inner, test_arg.as_bytes()),
                                     _ => false,
                                 }
                             } else { false }
