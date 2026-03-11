@@ -424,6 +424,36 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.field | test("regex"))` pattern.
+    /// Returns (field_name, regex_pattern, flags_str) if detected.
+    pub fn detect_select_field_regex_test(&self) -> Option<(String, String, Option<String>)> {
+        use crate::ir::{Expr, Literal};
+        let (ref expr, _) = self.parsed.as_ref()?;
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
+            if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+            if let Expr::Pipe { left, right } = cond.as_ref() {
+                if let Expr::Index { expr: base, key } = left.as_ref() {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        if let Expr::RegexTest { input_expr, re, flags } = right.as_ref() {
+                            if !matches!(input_expr.as_ref(), Expr::Input) { return None; }
+                            if let Expr::Literal(Literal::Str(pattern)) = re.as_ref() {
+                                let flags_str = match flags.as_ref() {
+                                    Expr::Literal(Literal::Null) => None,
+                                    Expr::Literal(Literal::Str(f)) => Some(f.clone()),
+                                    _ => return None,
+                                };
+                                return Some((field.clone(), pattern.clone(), flags_str));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `{a: .x, b: .y}` pattern (object construction from field access).
     /// Returns Vec of (output_key, input_field) pairs if detected.
     pub fn detect_field_remap(&self) -> Option<Vec<(String, String)>> {
