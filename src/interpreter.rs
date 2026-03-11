@@ -882,20 +882,14 @@ impl Filter {
 
     /// Detect `length` applied directly to input.
     pub fn is_length(&self) -> bool {
-        if let Some((ref expr, _)) = self.parsed {
-            matches!(expr, crate::ir::Expr::UnaryOp { op: crate::ir::UnaryOp::Length, operand } if matches!(operand.as_ref(), crate::ir::Expr::Input))
-        } else {
-            false
-        }
+        let expr = match self.detect_expr() { Some(e) => e, None => return false };
+        matches!(expr, crate::ir::Expr::UnaryOp { op: crate::ir::UnaryOp::Length, operand } if matches!(operand.as_ref(), crate::ir::Expr::Input))
     }
 
     /// Detect `keys` applied directly to input.
     pub fn is_keys(&self) -> bool {
-        if let Some((ref expr, _)) = self.parsed {
-            matches!(expr, crate::ir::Expr::UnaryOp { op: crate::ir::UnaryOp::Keys, operand } if matches!(operand.as_ref(), crate::ir::Expr::Input))
-        } else {
-            false
-        }
+        let expr = match self.detect_expr() { Some(e) => e, None => return false };
+        matches!(expr, crate::ir::Expr::UnaryOp { op: crate::ir::UnaryOp::Keys, operand } if matches!(operand.as_ref(), crate::ir::Expr::Input))
     }
 
     /// Detect `del(.field)` applied directly to input.
@@ -919,11 +913,8 @@ impl Filter {
 
     /// Detect `type` applied directly to input.
     pub fn is_type(&self) -> bool {
-        if let Some((ref expr, _)) = self.parsed {
-            matches!(expr, crate::ir::Expr::UnaryOp { op: crate::ir::UnaryOp::Type, operand } if matches!(operand.as_ref(), crate::ir::Expr::Input))
-        } else {
-            false
-        }
+        let expr = match self.detect_expr() { Some(e) => e, None => return false };
+        matches!(expr, crate::ir::Expr::UnaryOp { op: crate::ir::UnaryOp::Type, operand } if matches!(operand.as_ref(), crate::ir::Expr::Input))
     }
 
     /// Detect `has("field")` applied directly to input.
@@ -944,33 +935,30 @@ impl Filter {
     /// Detect `keys_unsorted` on input.
     pub fn is_keys_unsorted(&self) -> bool {
         use crate::ir::{Expr, UnaryOp};
-        if let Some((ref expr, _)) = self.parsed {
-            matches!(expr, Expr::UnaryOp { op: UnaryOp::KeysUnsorted, operand } if matches!(operand.as_ref(), Expr::Input))
-        } else { false }
+        let expr = match self.detect_expr() { Some(e) => e, None => return false };
+        matches!(expr, Expr::UnaryOp { op: UnaryOp::KeysUnsorted, operand } if matches!(operand.as_ref(), Expr::Input))
     }
 
     /// Detect `to_entries` on input.
     pub fn is_to_entries(&self) -> bool {
         use crate::ir::{Expr, UnaryOp};
-        if let Some((ref expr, _)) = self.parsed {
-            matches!(expr, Expr::UnaryOp { op: UnaryOp::ToEntries, operand } if matches!(operand.as_ref(), Expr::Input))
-        } else { false }
+        let expr = match self.detect_expr() { Some(e) => e, None => return false };
+        matches!(expr, Expr::UnaryOp { op: UnaryOp::ToEntries, operand } if matches!(operand.as_ref(), Expr::Input))
     }
 
     /// Detect `tojson` on input.
     pub fn is_tojson(&self) -> bool {
         use crate::ir::{Expr, UnaryOp};
-        if let Some((ref expr, _)) = self.parsed {
-            matches!(expr, Expr::UnaryOp { op: UnaryOp::ToJson, operand } if matches!(operand.as_ref(), Expr::Input))
-        } else { false }
+        let expr = match self.detect_expr() { Some(e) => e, None => return false };
+        matches!(expr, Expr::UnaryOp { op: UnaryOp::ToJson, operand } if matches!(operand.as_ref(), Expr::Input))
+            || matches!(expr, Expr::Format { name, expr: inner } if (name == "json" || name == "text") && matches!(inner.as_ref(), Expr::Input))
     }
 
     /// Detect `.[]` — each/iteration on input.
     pub fn is_each(&self) -> bool {
         use crate::ir::Expr;
-        if let Some((ref expr, _)) = self.parsed {
-            matches!(expr, Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input))
-        } else { false }
+        let expr = match self.detect_expr() { Some(e) => e, None => return false };
+        matches!(expr, Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input))
     }
 
     /// Detect array-of-field-access `[.f1,.f2,...]` pattern.
