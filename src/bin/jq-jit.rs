@@ -511,8 +511,8 @@ fn real_main() {
         filter.detect_multi_field_access()
     } else { None };
     let is_length = (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && multi_field.is_none() && select_cmp.is_none() && filter.is_length();
-    let is_keys = use_compact_buf && !exit_status && field_access.is_none() && select_cmp.is_none() && !is_length && filter.is_keys();
-    let is_keys_unsorted = use_compact_buf && !exit_status && !is_keys && !is_length && filter.is_keys_unsorted();
+    let is_keys = (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && select_cmp.is_none() && !is_length && filter.is_keys();
+    let is_keys_unsorted = (use_compact_buf || use_pretty_buf) && !exit_status && !is_keys && !is_length && filter.is_keys_unsorted();
     let has_field = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_length && !is_keys {
         filter.detect_has_field()
     } else { None };
@@ -520,7 +520,7 @@ fn real_main() {
         filter.detect_has_multi_field()
     } else { None };
     let is_type = (use_compact_buf || use_pretty_buf) && !exit_status && !is_length && !is_keys && has_field.is_none() && has_multi.is_none() && filter.is_type();
-    let del_field = if use_compact_buf && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() {
+    let del_field = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() {
         filter.detect_del_field()
     } else { None };
     let obj_merge_lit = if use_compact_buf && !exit_status && del_field.is_none() {
@@ -528,7 +528,7 @@ fn real_main() {
     } else { None };
     let is_each = use_compact_buf && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() && del_field.is_none() && field_access.is_none() && filter.is_each();
     let is_to_entries = use_compact_buf && !exit_status && !is_each && filter.is_to_entries();
-    let is_tojson = use_compact_buf && !exit_status && !is_each && !is_to_entries && filter.is_tojson();
+    let is_tojson = (use_compact_buf || use_pretty_buf) && !exit_status && !is_each && !is_to_entries && filter.is_tojson();
     let string_interp_fields = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() && field_str_concat.is_none() {
         filter.detect_string_interp_fields()
     } else { None };
@@ -2616,9 +2616,22 @@ fn real_main() {
                         Ok(())
                     })
                 } else if is_keys {
+                    let mut tmp = Vec::new();
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if !json_object_keys_to_buf(raw, 0, &mut compact_buf) {
+                        if use_pretty_buf {
+                            tmp.clear();
+                            if json_object_keys_to_buf(raw, 0, &mut tmp) {
+                                // tmp has compact "["a","b",...]\n", strip trailing \n
+                                let len = tmp.len();
+                                if len > 0 && tmp[len-1] == b'\n' { tmp.truncate(len-1); }
+                                push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                                compact_buf.push(b'\n');
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else if !json_object_keys_to_buf(raw, 0, &mut compact_buf) {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -2629,9 +2642,21 @@ fn real_main() {
                         Ok(())
                     })
                 } else if is_keys_unsorted {
+                    let mut tmp = Vec::new();
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if !json_object_keys_unsorted_to_buf(raw, 0, &mut compact_buf) {
+                        if use_pretty_buf {
+                            tmp.clear();
+                            if json_object_keys_unsorted_to_buf(raw, 0, &mut tmp) {
+                                let len = tmp.len();
+                                if len > 0 && tmp[len-1] == b'\n' { tmp.truncate(len-1); }
+                                push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                                compact_buf.push(b'\n');
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else if !json_object_keys_unsorted_to_buf(raw, 0, &mut compact_buf) {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -2689,9 +2714,19 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some(ref df) = del_field {
+                    let mut tmp = Vec::new();
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if json_object_del_field(raw, 0, df, &mut compact_buf) {
+                        if use_pretty_buf {
+                            tmp.clear();
+                            if json_object_del_field(raw, 0, df, &mut tmp) {
+                                push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                                compact_buf.push(b'\n');
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else if json_object_del_field(raw, 0, df, &mut compact_buf) {
                             compact_buf.push(b'\n');
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
@@ -4730,9 +4765,22 @@ fn real_main() {
                 })
             } else if is_keys {
                 let content_bytes = content.as_bytes();
+                let mut tmp = Vec::new();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if !json_object_keys_to_buf(raw, 0, &mut compact_buf) {
+                    if use_pretty_buf {
+                        tmp.clear();
+                        if json_object_keys_to_buf(raw, 0, &mut tmp) {
+                            // tmp has compact "["a","b",...]\n", strip trailing \n
+                            let len = tmp.len();
+                            if len > 0 && tmp[len-1] == b'\n' { tmp.truncate(len-1); }
+                            push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                            compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                    } else if !json_object_keys_to_buf(raw, 0, &mut compact_buf) {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
@@ -4744,9 +4792,21 @@ fn real_main() {
                 })
             } else if is_keys_unsorted {
                 let content_bytes = content.as_bytes();
+                let mut tmp = Vec::new();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if !json_object_keys_unsorted_to_buf(raw, 0, &mut compact_buf) {
+                    if use_pretty_buf {
+                        tmp.clear();
+                        if json_object_keys_unsorted_to_buf(raw, 0, &mut tmp) {
+                            let len = tmp.len();
+                            if len > 0 && tmp[len-1] == b'\n' { tmp.truncate(len-1); }
+                            push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                            compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                    } else if !json_object_keys_unsorted_to_buf(raw, 0, &mut compact_buf) {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
@@ -4808,9 +4868,19 @@ fn real_main() {
                 })
             } else if let Some(ref df) = del_field {
                 let content_bytes = content.as_bytes();
+                let mut tmp = Vec::new();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if json_object_del_field(raw, 0, df, &mut compact_buf) {
+                    if use_pretty_buf {
+                        tmp.clear();
+                        if json_object_del_field(raw, 0, df, &mut tmp) {
+                            push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                            compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                    } else if json_object_del_field(raw, 0, df, &mut compact_buf) {
                         compact_buf.push(b'\n');
                     } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
