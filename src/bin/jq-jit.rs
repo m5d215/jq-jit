@@ -554,7 +554,7 @@ fn real_main() {
     let select_has_multi = if use_compact_buf && !exit_status && select_cmp.is_none() && field_access.is_none() {
         filter.detect_select_has_multi()
     } else { None };
-    let select_cmp_field = if use_compact_buf && !exit_status && select_cmp.is_none() && field_access.is_none() {
+    let select_cmp_field = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() {
         filter.detect_select_cmp_then_field()
     } else { None };
     let select_cmp_remap = if use_compact_buf && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
@@ -563,7 +563,7 @@ fn real_main() {
     let select_cmp_cremap = if use_compact_buf && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && field_access.is_none() {
         filter.detect_select_cmp_then_computed_remap()
     } else { None };
-    let select_cmp_value = if use_compact_buf && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && select_cmp_cremap.is_none() && field_access.is_none() {
+    let select_cmp_value = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && select_cmp_cremap.is_none() && field_access.is_none() {
         filter.detect_select_cmp_then_value()
     } else { None };
     let select_str_field = if use_compact_buf && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
