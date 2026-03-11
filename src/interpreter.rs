@@ -369,11 +369,25 @@ impl Filter {
     }
 
     /// Returns true if this filter is a simple identity (`.`) that passes through input unchanged.
+    /// Also recognizes semantic equivalences like `to_entries | from_entries`.
     pub fn is_identity(&self) -> bool {
         if let Some((ref expr, _)) = self.parsed {
-            matches!(expr, crate::ir::Expr::Input)
+            Self::expr_is_identity(expr)
         } else {
             false
+        }
+    }
+
+    fn expr_is_identity(expr: &crate::ir::Expr) -> bool {
+        use crate::ir::{Expr, UnaryOp};
+        match expr {
+            Expr::Input => true,
+            // to_entries | from_entries → identity
+            Expr::Pipe { left, right } => {
+                matches!(left.as_ref(), Expr::UnaryOp { op: UnaryOp::ToEntries, operand } if matches!(operand.as_ref(), Expr::Input))
+                && matches!(right.as_ref(), Expr::UnaryOp { op: UnaryOp::FromEntries, operand } if matches!(operand.as_ref(), Expr::Input))
+            }
+            _ => false,
         }
     }
 
