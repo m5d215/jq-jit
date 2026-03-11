@@ -102,6 +102,7 @@ TESTS=(
     'slice[0..5]:-c:.name[0:5]'
     'dynkey {(.name)}:-c:{(.name): .x}'
     '.x += 1:-c:.x += 1'
+    '{a}+{b} merge:-c:{a: .name} + {b: .x}'
 )
 
 for test in "${TESTS[@]}"; do
