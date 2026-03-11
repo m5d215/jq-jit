@@ -599,6 +599,9 @@ fn real_main() {
     let field_arith_chain = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_binop.is_none() && field_binop_const_unary.is_none() {
         filter.detect_field_arith_chain()
     } else { None };
+    let field_arith_tostring = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_arith_chain.is_none() {
+        filter.detect_field_arith_chain_tostring()
+    } else { None };
     let numeric_expr = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_binop.is_none() && field_binop_const_unary.is_none() && field_arith_chain.is_none() {
         filter.detect_numeric_expr()
     } else { None };
@@ -768,7 +771,7 @@ fn real_main() {
     // Only activate when no raw byte fast path matched (those handle their own parsing).
     let has_raw_fast_path = field_access.is_some() || nested_field.is_some() || field_remap.is_some()
         || computed_remap.is_some()
-        || field_binop.is_some() || field_unary_num.is_some() || field_binop_const_unary.is_some() || field_arith_chain.is_some() || numeric_expr.is_some()
+        || field_binop.is_some() || field_unary_num.is_some() || field_binop_const_unary.is_some() || field_arith_chain.is_some() || field_arith_tostring.is_some() || numeric_expr.is_some()
         || field_field_cmp.is_some() || field_const_cmp.is_some() || arith_chain_cmp.is_some() || compound_field_cmp.is_some()
         || field_str_builtin.is_some() || field_test.is_some() || field_gsub.is_some() || field_format.is_some() || field_ltrimstr_tonumber.is_some()
         || field_str_concat.is_some() || field_alt.is_some() || field_field_alt.is_some()
@@ -1964,6 +1967,42 @@ fn real_main() {
                             }
                             push_jq_number_bytes(&mut compact_buf, result);
                             compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref field, ref ops)) = field_arith_tostring {
+                    // .field arith_chain | tostring — arithmetic then format as string
+                    use jq_jit::ir::BinOp;
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some(n) = json_object_get_num(raw, 0, field) {
+                            let mut result = n;
+                            for &(ref op, c) in ops.iter() {
+                                result = match op {
+                                    BinOp::Add => result + c,
+                                    BinOp::Sub => result - c,
+                                    BinOp::Mul => result * c,
+                                    BinOp::Div => result / c,
+                                    BinOp::Mod => result % c,
+                                    _ => unreachable!(),
+                                };
+                            }
+                            // Output as quoted string
+                            compact_buf.push(b'"');
+                            let i = result as i64;
+                            if i as f64 == result {
+                                compact_buf.extend_from_slice(itoa::Buffer::new().format(i).as_bytes());
+                            } else {
+                                compact_buf.extend_from_slice(ryu::Buffer::new().format(result).as_bytes());
+                            }
+                            compact_buf.extend_from_slice(b"\"\n");
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -5499,6 +5538,42 @@ fn real_main() {
                         }
                         push_jq_number_bytes(&mut compact_buf, result);
                         compact_buf.push(b'\n');
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref field, ref ops)) = field_arith_tostring {
+                // .field arith_chain | tostring — stdin path
+                use jq_jit::ir::BinOp;
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some(n) = json_object_get_num(raw, 0, field) {
+                        let mut result = n;
+                        for &(ref op, c) in ops.iter() {
+                            result = match op {
+                                BinOp::Add => result + c,
+                                BinOp::Sub => result - c,
+                                BinOp::Mul => result * c,
+                                BinOp::Div => result / c,
+                                BinOp::Mod => result % c,
+                                _ => unreachable!(),
+                            };
+                        }
+                        compact_buf.push(b'"');
+                        let i = result as i64;
+                        if i as f64 == result {
+                            compact_buf.extend_from_slice(itoa::Buffer::new().format(i).as_bytes());
+                        } else {
+                            compact_buf.extend_from_slice(ryu::Buffer::new().format(result).as_bytes());
+                        }
+                        compact_buf.extend_from_slice(b"\"\n");
                     } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);

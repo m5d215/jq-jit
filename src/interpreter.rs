@@ -1312,6 +1312,64 @@ impl Filter {
         None
     }
 
+    /// Detect `.field arith_chain | tostring` — arithmetic chain followed by tostring.
+    /// Returns (field, ops) where ops is the arithmetic chain.
+    pub fn detect_field_arith_chain_tostring(&self) -> Option<(String, Vec<(crate::ir::BinOp, f64)>)> {
+        use crate::ir::{Expr, BinOp, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        // Beta-reduced: UnaryOp(ToString, BinOp(Add, BinOp(Mul, .field, N), N2))
+        if let Expr::UnaryOp { op: UnaryOp::ToString, operand } = expr {
+            let mut ops = Vec::new();
+            let mut cur = operand.as_ref();
+            loop {
+                if let Expr::BinOp { op, lhs, rhs } = cur {
+                    if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) { return None; }
+                    if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                        if matches!(op, BinOp::Div | BinOp::Mod) && *n == 0.0 { return None; }
+                        ops.push((*op, *n));
+                        cur = lhs.as_ref();
+                    } else { return None; }
+                } else { break; }
+            }
+            if ops.is_empty() { return None; }
+            ops.reverse();
+            if let Expr::Index { expr: base, key } = cur {
+                if matches!(base.as_ref(), Expr::Input) {
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        return Some((field.clone(), ops));
+                    }
+                }
+            }
+        }
+        // Non-reduced: Pipe(arith_chain, UnaryOp(ToString, Input))
+        if let Expr::Pipe { left, right } = expr {
+            if matches!(right.as_ref(), Expr::UnaryOp { op: UnaryOp::ToString, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                let mut ops = Vec::new();
+                let mut cur = left.as_ref();
+                loop {
+                    if let Expr::BinOp { op, lhs, rhs } = cur {
+                        if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) { return None; }
+                        if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                            if matches!(op, BinOp::Div | BinOp::Mod) && *n == 0.0 { return None; }
+                            ops.push((*op, *n));
+                            cur = lhs.as_ref();
+                        } else { return None; }
+                    } else { break; }
+                }
+                if ops.is_empty() { return None; }
+                ops.reverse();
+                if let Expr::Index { expr: base, key } = cur {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                            return Some((field.clone(), ops));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect a general numeric expression over multiple fields.
     /// Matches patterns like `.x + .y * 2`, `(.x + .y) / 2`, `.x * .x + .y * .y`.
     /// Returns (field_names, arith_expr) where arith_expr uses field indices.
