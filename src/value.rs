@@ -1260,19 +1260,21 @@ pub fn json_object_merge_literal(b: &[u8], pos: usize, merge_pairs: &[(String, V
         buf.push(b'}');
         return true;
     }
-    // Parse existing key-value pairs, collecting (key_bytes_start, key_bytes_end, val_start, val_end, key_str)
-    // key_bytes = raw key content WITHOUT quotes
-    let mut existing: Vec<(usize, usize, usize, usize)> = Vec::new();
-    let mut existing_keys: Vec<&[u8]> = Vec::new();
+    // Single-pass: scan keys, write output directly (no Vec allocations)
+    let mut merge_emitted: u64 = 0;
+    buf.push(b'{');
+    let mut first = true;
     loop {
         if i >= b.len() || b[i] != b'"' { return false; }
         i += 1;
-        let key_content_start = i;
+        let key_start = i;
+        let mut has_escape = false;
         while i < b.len() {
-            match b[i] { b'"' => break, b'\\' => { i += 2; continue }, _ => i += 1 }
+            match b[i] { b'"' => break, b'\\' => { has_escape = true; i += 2; continue }, _ => i += 1 }
         }
-        let key_content_end = i;
-        i += 1; // skip closing quote
+        let key_end = i;
+        let key_bytes = &b[key_start..key_end];
+        i += 1;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
         if i >= b.len() || b[i] != b':' { return false; }
         i += 1;
@@ -1280,8 +1282,31 @@ pub fn json_object_merge_literal(b: &[u8], pos: usize, merge_pairs: &[(String, V
         let val_start = i;
         i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return false };
         let val_end = i;
-        existing_keys.push(&b[key_content_start..key_content_end]);
-        existing.push((key_content_start, key_content_end, val_start, val_end));
+        // Check if this key matches any merge pair
+        let mut replaced = false;
+        if !has_escape {
+            for (mi, (mk, mv)) in merge_pairs.iter().enumerate() {
+                if key_bytes == mk.as_bytes() {
+                    if !first { buf.push(b','); }
+                    first = false;
+                    buf.push(b'"');
+                    buf.extend_from_slice(key_bytes);
+                    buf.extend_from_slice(b"\":");
+                    buf.extend_from_slice(mv);
+                    merge_emitted |= 1u64 << mi;
+                    replaced = true;
+                    break;
+                }
+            }
+        }
+        if !replaced {
+            if !first { buf.push(b','); }
+            first = false;
+            buf.push(b'"');
+            buf.extend_from_slice(key_bytes);
+            buf.extend_from_slice(b"\":");
+            buf.extend_from_slice(&b[val_start..val_end]);
+        }
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
         if i >= b.len() { return false; }
         if b[i] == b'}' { break; }
@@ -1289,49 +1314,14 @@ pub fn json_object_merge_literal(b: &[u8], pos: usize, merge_pairs: &[(String, V
         i += 1;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
     }
-    // Build output: existing pairs (replacing values for matching keys) + new pairs
-    buf.push(b'{');
-    let mut first = true;
-    // Track which merge keys have been emitted
-    let mut merge_emitted = vec![false; merge_pairs.len()];
-    for (idx, (_, _, vs, ve)) in existing.iter().enumerate() {
-        let existing_key = existing_keys[idx];
-        // Check if this key matches any merge pair
-        let mut replaced = false;
-        for (mi, (mk, mv)) in merge_pairs.iter().enumerate() {
-            if existing_key == mk.as_bytes() && !existing_key.iter().any(|&c| c == b'\\') {
-                // Replace value with merge value
-                if !first { buf.push(b','); }
-                first = false;
-                buf.push(b'"');
-                buf.extend_from_slice(existing_key);
-                buf.push(b'"');
-                buf.push(b':');
-                buf.extend_from_slice(mv);
-                merge_emitted[mi] = true;
-                replaced = true;
-                break;
-            }
-        }
-        if !replaced {
-            if !first { buf.push(b','); }
-            first = false;
-            buf.push(b'"');
-            buf.extend_from_slice(existing_key);
-            buf.push(b'"');
-            buf.push(b':');
-            buf.extend_from_slice(&b[*vs..*ve]);
-        }
-    }
     // Append any merge pairs that weren't replacements
     for (mi, (mk, mv)) in merge_pairs.iter().enumerate() {
-        if !merge_emitted[mi] {
+        if (merge_emitted >> mi) & 1 == 0 {
             if !first { buf.push(b','); }
             first = false;
             buf.push(b'"');
             buf.extend_from_slice(mk.as_bytes());
-            buf.push(b'"');
-            buf.push(b':');
+            buf.extend_from_slice(b"\":");
             buf.extend_from_slice(mv);
         }
     }
@@ -1621,6 +1611,59 @@ pub fn json_object_get_fields_raw(b: &[u8], pos: usize, input_fields: &[&str]) -
         out.push(r?);
     }
     Some(out)
+}
+
+/// Like json_object_get_fields_raw but writes into a pre-allocated `&mut [(usize, usize)]`.
+/// Returns true if all fields were found; false otherwise.
+/// `out` must have length >= `input_fields.len()`.
+pub fn json_object_get_fields_raw_buf(b: &[u8], pos: usize, input_fields: &[&str], out: &mut [(usize, usize)]) -> bool {
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    let n = input_fields.len();
+    debug_assert!(out.len() >= n);
+    // Track which fields have been found using a bitmask (supports up to 64 fields)
+    let mut found_mask: u64 = 0;
+    let mut found = 0usize;
+    let mut i = pos + 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < b.len() && b[i] == b'}' { return false; }
+    loop {
+        if i >= b.len() || b[i] != b'"' { return false; }
+        let key_start = i + 1;
+        let mut j = key_start;
+        while j < b.len() {
+            match b[j] { b'"' => break, b'\\' => { j += 2; continue }, _ => j += 1 }
+        }
+        let key_len = j - key_start;
+        let mut matched_idx = None;
+        for (idx, field) in input_fields.iter().enumerate() {
+            if (found_mask >> idx) & 1 == 0 && key_len == field.len() && b[key_start..j] == *field.as_bytes() {
+                matched_idx = Some(idx);
+                break;
+            }
+        }
+        i = j + 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if let Some(idx) = matched_idx {
+            let val_start = i;
+            let val_end = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return false };
+            out[idx] = (val_start, val_end);
+            found_mask |= 1u64 << idx;
+            found += 1;
+            if found == n { return true; }
+            i = val_end;
+        } else {
+            i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return false };
+        }
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { return false; }
+        if b[i] == b'}' { return found == n; }
+        if b[i] != b',' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
 }
 
 /// Compact a JSON value by stripping whitespace outside strings.
