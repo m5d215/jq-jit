@@ -1991,26 +1991,65 @@ pub fn eval(
                     Ok(true)
                 })?;
                 cb(acc)
-            } else {
-                eval(source, input.clone(), env, &mut |val| {
-                    let acc_val = std::mem::replace(&mut acc, Value::Null);
-                    if acc_used_in_update {
-                        let (old_var, old_acc) = {
-                            let mut e = env.borrow_mut();
-                            let ov = std::mem::replace(&mut e.vars[vi as usize], val);
-                            let oa = std::mem::replace(&mut e.vars[ai as usize], acc_val.clone());
-                            (ov, oa)
+            } else if !acc_used_in_update {
+                // Detect `. + rhs` pattern where rhs doesn't use accumulator — in-place merge
+                let add_inplace = if let Expr::BinOp { op: BinOp::Add, lhs, rhs } = update.as_ref() {
+                    if matches!(lhs.as_ref(), Expr::Input) && !expr_uses_outer_input(rhs) {
+                        Some(rhs.as_ref())
+                    } else { None }
+                } else { None };
+                if let Some(add_rhs) = add_inplace {
+                    eval(source, input.clone(), env, &mut |val| {
+                        let old_var = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], val);
+                        let rhs_val = {
+                            let mut r = Value::Null;
+                            eval(add_rhs, Value::Null, env, &mut |v| { r = v; Ok(true) })?;
+                            r
                         };
-                        eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
-                        {
-                            let mut e = env.borrow_mut();
-                            e.vars[ai as usize] = old_acc;
-                            e.vars[vi as usize] = old_var;
+                        match (&mut acc, rhs_val) {
+                            (Value::Obj(o), Value::Obj(rhs_obj)) => {
+                                let obj = Rc::make_mut(o);
+                                for (k, v) in rhs_obj.iter() {
+                                    obj.insert(k.clone(), v.clone());
+                                }
+                            }
+                            (Value::Arr(a), Value::Arr(rhs_arr)) => {
+                                let arr = Rc::make_mut(a);
+                                arr.extend(rhs_arr.iter().cloned());
+                            }
+                            (acc_ref, rhs_val) => {
+                                let acc_val = std::mem::replace(acc_ref, Value::Null);
+                                *acc_ref = crate::runtime::rt_add(&acc_val, &rhs_val)?;
+                            }
                         }
-                    } else {
+                        env.borrow_mut().vars[vi as usize] = old_var;
+                        Ok(true)
+                    })?;
+                    cb(acc)
+                } else {
+                    eval(source, input.clone(), env, &mut |val| {
+                        let acc_val = std::mem::replace(&mut acc, Value::Null);
                         let old_var = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], val);
                         eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
                         env.borrow_mut().vars[vi as usize] = old_var;
+                        Ok(true)
+                    })?;
+                    cb(acc)
+                }
+            } else {
+                eval(source, input.clone(), env, &mut |val| {
+                    let acc_val = std::mem::replace(&mut acc, Value::Null);
+                    let (old_var, old_acc) = {
+                        let mut e = env.borrow_mut();
+                        let ov = std::mem::replace(&mut e.vars[vi as usize], val);
+                        let oa = std::mem::replace(&mut e.vars[ai as usize], acc_val.clone());
+                        (ov, oa)
+                    };
+                    eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
+                    {
+                        let mut e = env.borrow_mut();
+                        e.vars[ai as usize] = old_acc;
+                        e.vars[vi as usize] = old_var;
                     }
                     Ok(true)
                 })?;
