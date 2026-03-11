@@ -130,6 +130,8 @@ TESTS=(
     '{k:.name,v:tostr}:-c:{key:.name,val:(.x|tostring)}'
     'str add chain:-c:.name + ":" + (.x|tostring)'
     'if>.y .name|empty:-c:if .x > .y then .name else empty end'
+    'if .x%2==0:-c:if .x % 2 == 0 then "even" else "odd" end'
+    'if .x*2+1>1M:-c:if .x * 2 + 1 > 1000000 then "big" else "small" end'
 )
 
 for test in "${TESTS[@]}"; do
