@@ -96,7 +96,9 @@ pub struct Filter {
     lib_dirs: Vec<String>,
 }
 
-/// Recursively strip identity pipes: Pipe(Input, X) → X, Pipe(X, Input) → X.
+/// Recursively strip identity pipes and beta-reduce scalar pipes.
+/// Pipe(Input, X) → X, Pipe(X, Input) → X.
+/// Pipe(E, F) → F[E/.] when E is scalar and F has free Input.
 fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
     use crate::ir::Expr;
     match expr {
@@ -105,6 +107,10 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             let sr = simplify_expr(right);
             if matches!(&sl, Expr::Input) { return sr; }
             if matches!(&sr, Expr::Input) { return sl; }
+            // Beta-reduction: .x | . + 1 → .x + 1
+            if sl.is_simple_scalar() && sr.is_input_free() {
+                return sr.substitute_input(&sl);
+            }
             Expr::Pipe { left: Box::new(sl), right: Box::new(sr) }
         }
         // Don't recurse into everything — just handle the top-level pipe chain

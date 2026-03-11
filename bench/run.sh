@@ -107,6 +107,9 @@ TESTS=(
     '.x+.y*2:-c:.x + .y * 2'
     '.x > .y:-c:.x > .y'
     'to_entries|len:-c:to_entries | length'
+    '.x|.+1 (pipe):-c:.x | . + 1'
+    '.x|.*2|.+1:-c:.x | . * 2 | . + 1'
+    '.name|.+"_x":-c:.name | . + "_x"'
 )
 
 for test in "${TESTS[@]}"; do

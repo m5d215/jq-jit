@@ -522,6 +522,10 @@ impl Flattener {
                 // Pipe identity simplification: . | X → X, X | . → X
                 if matches!(new_left.as_ref(), Expr::Input) { return *new_right; }
                 if matches!(new_right.as_ref(), Expr::Input) { return *new_left; }
+                // Beta-reduction: Pipe(E, F) → F[E/Input] when E is scalar and F has free Input
+                if new_left.is_simple_scalar() && new_right.is_input_free() {
+                    return new_right.substitute_input(&new_left);
+                }
                 // Semantic optimizations for to_entries pipelines
                 if let Expr::UnaryOp { op: UnaryOp::ToEntries, .. } = new_left.as_ref() {
                     // to_entries | from_entries → identity

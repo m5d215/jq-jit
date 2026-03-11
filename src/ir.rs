@@ -479,3 +479,171 @@ pub struct CompiledFunc {
     pub body: Expr,
     pub param_vars: Vec<u16>,
 }
+
+// ============================================================================
+// Pipe beta-reduction helpers
+// ============================================================================
+
+impl Expr {
+    /// Check if this expression is a simple scalar — always produces exactly one output,
+    /// cheap and side-effect-free, safe to substitute (even if duplicated).
+    pub fn is_simple_scalar(&self) -> bool {
+        match self {
+            Expr::Input | Expr::Literal(_) | Expr::LoadVar { .. } => true,
+            Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => {
+                expr.is_simple_scalar() && matches!(key.as_ref(), Expr::Literal(_))
+            }
+            Expr::BinOp { lhs, rhs, .. } => lhs.is_simple_scalar() && rhs.is_simple_scalar(),
+            Expr::UnaryOp { operand, .. } => operand.is_simple_scalar(),
+            Expr::Negate { operand } => operand.is_simple_scalar(),
+            _ => false,
+        }
+    }
+
+    /// Check if all Input references in this expression are "free" — not bound by
+    /// Pipe, Reduce, Foreach, LetBinding, TryCatch, or other binding constructs.
+    /// When true, it is safe to substitute a replacement for all Input nodes.
+    pub fn is_input_free(&self) -> bool {
+        match self {
+            Expr::Input | Expr::Literal(_) | Expr::LoadVar { .. }
+            | Expr::Empty | Expr::Not | Expr::Env | Expr::Builtins
+            | Expr::ReadInput | Expr::ReadInputs | Expr::ModuleMeta
+            | Expr::GenLabel | Expr::Loc { .. } => true,
+            Expr::BinOp { lhs, rhs, .. } => lhs.is_input_free() && rhs.is_input_free(),
+            Expr::UnaryOp { operand, .. } => operand.is_input_free(),
+            Expr::Index { expr, key } => expr.is_input_free() && key.is_input_free(),
+            Expr::IndexOpt { expr, key } => expr.is_input_free() && key.is_input_free(),
+            Expr::Negate { operand } => operand.is_input_free(),
+            Expr::Collect { generator } => generator.is_input_free(),
+            Expr::Comma { left, right } => left.is_input_free() && right.is_input_free(),
+            Expr::Each { input_expr } | Expr::EachOpt { input_expr } => input_expr.is_input_free(),
+            Expr::IfThenElse { cond, then_branch, else_branch } => {
+                cond.is_input_free() && then_branch.is_input_free() && else_branch.is_input_free()
+            }
+            Expr::ObjectConstruct { pairs } => {
+                pairs.iter().all(|(k, v)| k.is_input_free() && v.is_input_free())
+            }
+            Expr::Alternative { primary, fallback } => {
+                primary.is_input_free() && fallback.is_input_free()
+            }
+            Expr::Format { expr, .. } => expr.is_input_free(),
+            Expr::Debug { expr } | Expr::Stderr { expr } => expr.is_input_free(),
+            Expr::Slice { expr, from, to } => {
+                expr.is_input_free()
+                    && from.as_ref().map_or(true, |e| e.is_input_free())
+                    && to.as_ref().map_or(true, |e| e.is_input_free())
+            }
+            Expr::StringInterpolation { parts } => {
+                parts.iter().all(|p| match p {
+                    StringPart::Literal(_) => true,
+                    StringPart::Expr(e) => e.is_input_free(),
+                })
+            }
+            Expr::CallBuiltin { args, .. } => args.iter().all(|a| a.is_input_free()),
+            Expr::Error { msg } => msg.as_ref().map_or(true, |e| e.is_input_free()),
+            // Binding constructs — Input in sub-exprs may refer to different values
+            Expr::Pipe { .. } | Expr::Reduce { .. } | Expr::Foreach { .. }
+            | Expr::LetBinding { .. } | Expr::TryCatch { .. } | Expr::While { .. }
+            | Expr::Until { .. } | Expr::Repeat { .. } | Expr::Label { .. }
+            | Expr::Update { .. } | Expr::Assign { .. } | Expr::AllShort { .. }
+            | Expr::AnyShort { .. } | Expr::Limit { .. } => false,
+            // Regex/closure ops — conservatively refuse
+            Expr::RegexTest { .. } | Expr::RegexMatch { .. } | Expr::RegexCapture { .. }
+            | Expr::RegexScan { .. } | Expr::RegexSub { .. } | Expr::RegexGsub { .. }
+            | Expr::ClosureOp { .. } | Expr::AlternativeDestructure { .. } => false,
+            // Complex constructs
+            Expr::Recurse { .. } | Expr::Range { .. } | Expr::PathExpr { .. }
+            | Expr::SetPath { .. } | Expr::GetPath { .. } | Expr::DelPaths { .. }
+            | Expr::Break { .. } | Expr::FuncCall { .. } => false,
+        }
+    }
+
+    /// Substitute all Input nodes with `replacement`.
+    /// Only valid when `is_input_free()` is true.
+    pub fn substitute_input(&self, replacement: &Expr) -> Expr {
+        match self {
+            Expr::Input => replacement.clone(),
+            Expr::Literal(_) | Expr::LoadVar { .. } | Expr::Empty
+            | Expr::Not | Expr::Env | Expr::Builtins | Expr::ReadInput
+            | Expr::ReadInputs | Expr::ModuleMeta | Expr::GenLabel
+            | Expr::Loc { .. } => self.clone(),
+            Expr::BinOp { op, lhs, rhs } => Expr::BinOp {
+                op: *op,
+                lhs: Box::new(lhs.substitute_input(replacement)),
+                rhs: Box::new(rhs.substitute_input(replacement)),
+            },
+            Expr::UnaryOp { op, operand } => Expr::UnaryOp {
+                op: *op,
+                operand: Box::new(operand.substitute_input(replacement)),
+            },
+            Expr::Index { expr, key } => Expr::Index {
+                expr: Box::new(expr.substitute_input(replacement)),
+                key: Box::new(key.substitute_input(replacement)),
+            },
+            Expr::IndexOpt { expr, key } => Expr::IndexOpt {
+                expr: Box::new(expr.substitute_input(replacement)),
+                key: Box::new(key.substitute_input(replacement)),
+            },
+            Expr::Negate { operand } => Expr::Negate {
+                operand: Box::new(operand.substitute_input(replacement)),
+            },
+            Expr::Collect { generator } => Expr::Collect {
+                generator: Box::new(generator.substitute_input(replacement)),
+            },
+            Expr::Comma { left, right } => Expr::Comma {
+                left: Box::new(left.substitute_input(replacement)),
+                right: Box::new(right.substitute_input(replacement)),
+            },
+            Expr::Each { input_expr } => Expr::Each {
+                input_expr: Box::new(input_expr.substitute_input(replacement)),
+            },
+            Expr::EachOpt { input_expr } => Expr::EachOpt {
+                input_expr: Box::new(input_expr.substitute_input(replacement)),
+            },
+            Expr::IfThenElse { cond, then_branch, else_branch } => Expr::IfThenElse {
+                cond: Box::new(cond.substitute_input(replacement)),
+                then_branch: Box::new(then_branch.substitute_input(replacement)),
+                else_branch: Box::new(else_branch.substitute_input(replacement)),
+            },
+            Expr::ObjectConstruct { pairs } => Expr::ObjectConstruct {
+                pairs: pairs.iter().map(|(k, v)| {
+                    (k.substitute_input(replacement), v.substitute_input(replacement))
+                }).collect(),
+            },
+            Expr::Alternative { primary, fallback } => Expr::Alternative {
+                primary: Box::new(primary.substitute_input(replacement)),
+                fallback: Box::new(fallback.substitute_input(replacement)),
+            },
+            Expr::Format { name, expr } => Expr::Format {
+                name: name.clone(),
+                expr: Box::new(expr.substitute_input(replacement)),
+            },
+            Expr::Debug { expr } => Expr::Debug {
+                expr: Box::new(expr.substitute_input(replacement)),
+            },
+            Expr::Stderr { expr } => Expr::Stderr {
+                expr: Box::new(expr.substitute_input(replacement)),
+            },
+            Expr::Slice { expr, from, to } => Expr::Slice {
+                expr: Box::new(expr.substitute_input(replacement)),
+                from: from.as_ref().map(|e| Box::new(e.substitute_input(replacement))),
+                to: to.as_ref().map(|e| Box::new(e.substitute_input(replacement))),
+            },
+            Expr::StringInterpolation { parts } => Expr::StringInterpolation {
+                parts: parts.iter().map(|p| match p {
+                    StringPart::Literal(s) => StringPart::Literal(s.clone()),
+                    StringPart::Expr(e) => StringPart::Expr(e.substitute_input(replacement)),
+                }).collect(),
+            },
+            Expr::CallBuiltin { name, args } => Expr::CallBuiltin {
+                name: name.clone(),
+                args: args.iter().map(|a| a.substitute_input(replacement)).collect(),
+            },
+            Expr::Error { msg } => Expr::Error {
+                msg: msg.as_ref().map(|e| Box::new(e.substitute_input(replacement))),
+            },
+            // Safety fallback — should not reach here if is_input_free() was true
+            _ => self.clone(),
+        }
+    }
+}
