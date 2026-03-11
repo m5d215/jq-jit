@@ -8,7 +8,7 @@ use std::process;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw, json_object_get_nested_field_raw, parse_json_num, json_value_length, json_object_keys_to_buf, json_object_keys_unsorted_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_type_byte, json_object_del_field, json_object_merge_literal, json_each_value_raw, json_to_entries_raw, is_json_compact, push_json_compact_raw, push_json_pretty_raw, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
+use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw, json_object_get_nested_field_raw, parse_json_num, json_value_length, json_object_keys_to_buf, json_object_keys_unsorted_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_type_byte, json_object_del_field, json_object_merge_literal, json_each_value_raw, json_to_entries_raw, is_json_compact, push_json_compact_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
 use jq_jit::interpreter::Filter;
 
 fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -431,6 +431,22 @@ fn real_main() {
     // Use Vec-based buffering for compact output to avoid per-value write_all overhead
     let use_compact_buf = compact && !raw_output && !sort_keys && !join_output;
     let use_pretty_buf = !compact && !raw_output && !sort_keys && !join_output && !tab;
+    // Helper macro: emit raw JSON bytes to buffer with trailing newline,
+    // handling compact vs pretty output.
+    macro_rules! emit_raw_ln {
+        ($buf:expr, $raw:expr) => {
+            if use_pretty_buf {
+                push_json_pretty_raw($buf, $raw, 2, false);
+                $buf.push(b'\n');
+            } else if is_json_compact($raw) {
+                $buf.extend_from_slice($raw);
+                $buf.push(b'\n');
+            } else {
+                push_json_compact_raw($buf, $raw);
+                $buf.push(b'\n');
+            }
+        };
+    }
     let field_access = if (use_compact_buf || use_pretty_buf) && !exit_status {
         filter.detect_field_access()
     } else { None };
@@ -455,13 +471,13 @@ fn real_main() {
     let field_str_builtin = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_unary_num.is_none() {
         filter.detect_field_str_builtin()
     } else { None };
-    let field_test = if use_compact_buf && !exit_status && field_access.is_none() && field_str_builtin.is_none() {
+    let field_test = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() {
         filter.detect_field_test()
     } else { None };
-    let field_gsub = if use_compact_buf && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() {
+    let field_gsub = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() {
         filter.detect_field_gsub()
     } else { None };
-    let field_format = if use_compact_buf && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() && field_gsub.is_none() {
+    let field_format = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() && field_gsub.is_none() {
         filter.detect_field_format()
     } else { None };
     let field_ltrimstr_tonumber = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() {
@@ -473,16 +489,16 @@ fn real_main() {
     let select_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() && field_str_concat.is_none() {
         filter.detect_select_field_cmp()
     } else { None };
-    let select_str = if use_compact_buf && !exit_status && select_cmp.is_none() && field_access.is_none() {
+    let select_str = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() {
         filter.detect_select_field_str()
     } else { None };
-    let select_str_test = if use_compact_buf && !exit_status && select_cmp.is_none() && select_str.is_none() && field_access.is_none() {
+    let select_str_test = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_str.is_none() && field_access.is_none() {
         filter.detect_select_field_str_test()
     } else { None };
-    let select_regex_test = if use_compact_buf && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() && field_access.is_none() {
+    let select_regex_test = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() && field_access.is_none() {
         filter.detect_select_field_regex_test()
     } else { None };
-    let select_nested_cmp = if use_compact_buf && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() {
+    let select_nested_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() {
         filter.detect_select_nested_cmp()
     } else { None };
     let computed_array = if use_compact_buf && !exit_status && field_access.is_none() && computed_remap.is_none() {
@@ -513,13 +529,13 @@ fn real_main() {
     let is_each = use_compact_buf && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() && del_field.is_none() && field_access.is_none() && filter.is_each();
     let is_to_entries = use_compact_buf && !exit_status && !is_each && filter.is_to_entries();
     let is_tojson = use_compact_buf && !exit_status && !is_each && !is_to_entries && filter.is_tojson();
-    let string_interp_fields = if use_compact_buf && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() && field_str_concat.is_none() {
+    let string_interp_fields = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() && field_str_concat.is_none() {
         filter.detect_string_interp_fields()
     } else { None };
-    let array_join = if use_compact_buf && !exit_status && field_access.is_none() {
+    let array_join = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
         filter.detect_array_join()
     } else { None };
-    let literal_output = if use_compact_buf && !exit_status { filter.detect_literal_output() } else { None };
+    let literal_output = if (use_compact_buf || use_pretty_buf) && !exit_status { filter.detect_literal_output() } else { None };
     let array_fields_format = if use_compact_buf && !exit_status && field_access.is_none() {
         filter.detect_array_fields_format()
     } else { None };
@@ -527,13 +543,13 @@ fn real_main() {
     let raw_csv_fields = if raw_output && !exit_status && !slurp && !join_output && array_fields_format.is_none() {
         filter.detect_array_fields_format()
     } else { None };
-    let field_split_join = if use_compact_buf && !exit_status && field_access.is_none() {
+    let field_split_join = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
         filter.detect_field_split_join()
     } else { None };
-    let field_split_first = if use_compact_buf && !exit_status && field_access.is_none() && field_split_join.is_none() {
+    let field_split_first = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_split_join.is_none() {
         filter.detect_field_split_first()
     } else { None };
-    let field_slice = if use_compact_buf && !exit_status && field_access.is_none() {
+    let field_slice = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
         filter.detect_field_slice()
     } else { None };
     let dynamic_key_obj = if use_compact_buf && !exit_status && field_access.is_none() && computed_remap.is_none() {
@@ -542,31 +558,31 @@ fn real_main() {
     let field_alt = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
         filter.detect_field_alternative()
     } else { None };
-    let cond_chain = if use_compact_buf && !exit_status && select_cmp.is_none() && field_access.is_none() {
+    let cond_chain = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() {
         filter.detect_cond_chain()
     } else { None };
     let cmp_branch_lit = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() {
         filter.detect_cmp_branch_literals()
     } else { None };
-    let select_compound = if use_compact_buf && !exit_status && select_cmp.is_none() && field_access.is_none() && cmp_branch_lit.is_none() && cond_chain.is_none() {
+    let select_compound = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() && cmp_branch_lit.is_none() && cond_chain.is_none() {
         filter.detect_select_compound_cmp()
     } else { None };
-    let select_has_multi = if use_compact_buf && !exit_status && select_cmp.is_none() && field_access.is_none() {
+    let select_has_multi = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() {
         filter.detect_select_has_multi()
     } else { None };
     let select_cmp_field = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() {
         filter.detect_select_cmp_then_field()
     } else { None };
-    let select_cmp_remap = if use_compact_buf && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
+    let select_cmp_remap = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
         filter.detect_select_cmp_then_remap()
     } else { None };
-    let select_cmp_cremap = if use_compact_buf && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && field_access.is_none() {
+    let select_cmp_cremap = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && field_access.is_none() {
         filter.detect_select_cmp_then_computed_remap()
     } else { None };
     let select_cmp_value = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && select_cmp_cremap.is_none() && field_access.is_none() {
         filter.detect_select_cmp_then_value()
     } else { None };
-    let select_str_field = if use_compact_buf && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
+    let select_str_field = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
         filter.detect_select_str_then_field()
     } else { None };
     // Field projection: if filter only accesses specific fields, skip parsing the rest.
@@ -1041,6 +1057,7 @@ fn real_main() {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         push_json_pretty_raw(&mut compact_buf, raw, indent_n, tab);
+                        compact_buf.push(b'\n');
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
                             compact_buf.clear();
@@ -1220,7 +1237,7 @@ fn real_main() {
                                     compact_buf.extend_from_slice(b"\": ");
                                     let val = &raw[*vs..*ve];
                                     if val[0] == b'{' || val[0] == b'[' {
-                                        push_json_pretty_raw(&mut compact_buf, val, 2, false);
+                                        push_json_pretty_raw_at(&mut compact_buf, val, 2, false, 1);
                                     } else {
                                         compact_buf.extend_from_slice(val);
                                     }
@@ -1924,16 +1941,7 @@ fn real_main() {
                                 _ => false,
                             };
                             if pass {
-                                if use_pretty_buf {
-                                    push_json_pretty_raw(&mut compact_buf, raw, 2, false);
-                                    compact_buf.push(b'\n');
-                                } else if is_json_compact(raw) {
-                                    compact_buf.extend_from_slice(raw);
-                                    compact_buf.push(b'\n');
-                                } else {
-                                    push_json_compact_raw(&mut compact_buf, raw);
-                                    compact_buf.push(b'\n');
-                                }
+                                emit_raw_ln!(&mut compact_buf, raw);
                                 if compact_buf.len() >= 1 << 17 {
                                     let _ = out.write_all(&compact_buf);
                                     compact_buf.clear();
@@ -1956,13 +1964,7 @@ fn real_main() {
                             let matches = val_bytes == expected.as_slice();
                             let pass = match op { BinOp::Eq => matches, BinOp::Ne => !matches, _ => false };
                             if pass {
-                                if is_json_compact(raw) {
-                                    compact_buf.extend_from_slice(raw);
-                                    compact_buf.push(b'\n');
-                                } else {
-                                    push_json_compact_raw(&mut compact_buf, raw);
-                                    compact_buf.push(b'\n');
-                                }
+                                emit_raw_ln!(&mut compact_buf, raw);
                                 if compact_buf.len() >= 1 << 17 {
                                     let _ = out.write_all(&compact_buf);
                                     compact_buf.clear();
@@ -1992,12 +1994,7 @@ fn real_main() {
                                     _ => false,
                                 };
                                 if pass {
-                                    if is_json_compact(raw) {
-                                        compact_buf.extend_from_slice(raw);
-                                    } else {
-                                        push_json_compact_raw(&mut compact_buf, raw);
-                                    }
-                                    compact_buf.push(b'\n');
+                                    emit_raw_ln!(&mut compact_buf, raw);
                                 }
                             }
                         }
@@ -2030,12 +2027,7 @@ fn real_main() {
                                 {
                                     let content = unsafe { std::str::from_utf8_unchecked(&val[1..val.len()-1]) };
                                     if re.is_match(content) {
-                                        if is_json_compact(raw) {
-                                            compact_buf.extend_from_slice(raw);
-                                        } else {
-                                            push_json_compact_raw(&mut compact_buf, raw);
-                                        }
-                                        compact_buf.push(b'\n');
+                                        emit_raw_ln!(&mut compact_buf, raw);
                                     }
                                 }
                             }
@@ -2070,12 +2062,7 @@ fn real_main() {
                                     _ => false,
                                 };
                                 if pass {
-                                    if is_json_compact(raw) {
-                                        compact_buf.extend_from_slice(raw);
-                                    } else {
-                                        push_json_compact_raw(&mut compact_buf, raw);
-                                    }
-                                    compact_buf.push(b'\n');
+                                    emit_raw_ln!(&mut compact_buf, raw);
                                 }
                             }
                         }
@@ -2154,7 +2141,12 @@ fn real_main() {
                                 BranchOutput::Field(ref f) => {
                                     let idx = field_idx[f];
                                     let (vs, ve) = ranges[idx];
-                                    compact_buf.extend_from_slice(&raw[vs..ve]);
+                                    let val = &raw[vs..ve];
+                                    if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
+                                        push_json_pretty_raw(&mut compact_buf, val, 2, false);
+                                    } else {
+                                        compact_buf.extend_from_slice(val);
+                                    }
                                 }
                             }
                             compact_buf.push(b'\n');
@@ -2210,12 +2202,7 @@ fn real_main() {
                             })
                         };
                         if pass {
-                            if is_json_compact(raw) {
-                                compact_buf.extend_from_slice(raw);
-                            } else {
-                                push_json_compact_raw(&mut compact_buf, raw);
-                            }
-                            compact_buf.push(b'\n');
+                            emit_raw_ln!(&mut compact_buf, raw);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -2235,12 +2222,7 @@ fn real_main() {
                             json_object_has_any_key(raw, 0, &field_refs).unwrap_or(false)
                         };
                         if pass {
-                            if is_json_compact(raw) {
-                                compact_buf.extend_from_slice(raw);
-                            } else {
-                                push_json_compact_raw(&mut compact_buf, raw);
-                            }
-                            compact_buf.push(b'\n');
+                            emit_raw_ln!(&mut compact_buf, raw);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -2299,21 +2281,43 @@ fn real_main() {
                                 let fields_raw: Vec<Option<(usize, usize)>> = all_fields.iter()
                                     .map(|f| json_object_get_field_raw(raw, 0, f))
                                     .collect();
-                                compact_buf.push(b'{');
-                                for (i, (key, src)) in pairs.iter().enumerate() {
-                                    if i > 0 { compact_buf.push(b','); }
-                                    compact_buf.push(b'"');
-                                    compact_buf.extend_from_slice(key.as_bytes());
-                                    compact_buf.extend_from_slice(b"\":");
-                                    let idx = all_fields.iter().position(|&f| f == src.as_str()).unwrap();
-                                    if let Some((vs, ve)) = fields_raw[idx] {
-                                        compact_buf.extend_from_slice(&raw[vs..ve]);
-                                    } else {
-                                        compact_buf.extend_from_slice(b"null");
+                                if use_pretty_buf {
+                                    compact_buf.extend_from_slice(b"{\n");
+                                    for (i, (key, src)) in pairs.iter().enumerate() {
+                                        if i > 0 { compact_buf.extend_from_slice(b",\n"); }
+                                        compact_buf.extend_from_slice(b"  \"");
+                                        compact_buf.extend_from_slice(key.as_bytes());
+                                        compact_buf.extend_from_slice(b"\": ");
+                                        let idx = all_fields.iter().position(|&f| f == src.as_str()).unwrap();
+                                        if let Some((vs, ve)) = fields_raw[idx] {
+                                            let val = &raw[vs..ve];
+                                            if val[0] == b'{' || val[0] == b'[' {
+                                                push_json_pretty_raw_at(&mut compact_buf, val, 2, false, 1);
+                                            } else {
+                                                compact_buf.extend_from_slice(val);
+                                            }
+                                        } else {
+                                            compact_buf.extend_from_slice(b"null");
+                                        }
                                     }
+                                    compact_buf.extend_from_slice(b"\n}\n");
+                                } else {
+                                    compact_buf.push(b'{');
+                                    for (i, (key, src)) in pairs.iter().enumerate() {
+                                        if i > 0 { compact_buf.push(b','); }
+                                        compact_buf.push(b'"');
+                                        compact_buf.extend_from_slice(key.as_bytes());
+                                        compact_buf.extend_from_slice(b"\":");
+                                        let idx = all_fields.iter().position(|&f| f == src.as_str()).unwrap();
+                                        if let Some((vs, ve)) = fields_raw[idx] {
+                                            compact_buf.extend_from_slice(&raw[vs..ve]);
+                                        } else {
+                                            compact_buf.extend_from_slice(b"null");
+                                        }
+                                    }
+                                    compact_buf.push(b'}');
+                                    compact_buf.push(b'\n');
                                 }
-                                compact_buf.push(b'}');
-                                compact_buf.push(b'\n');
                             }
                         }
                         if compact_buf.len() >= 1 << 17 {
@@ -2349,10 +2353,16 @@ fn real_main() {
                     let mut key_prefixes: Vec<Vec<u8>> = Vec::with_capacity(cremap.len());
                     for (i, (out_key, _)) in cremap.iter().enumerate() {
                         let mut prefix = Vec::new();
-                        if i == 0 { prefix.push(b'{'); } else { prefix.push(b','); }
-                        prefix.push(b'"');
-                        prefix.extend_from_slice(out_key.as_bytes());
-                        prefix.extend_from_slice(b"\":");
+                        if use_pretty_buf {
+                            if i == 0 { prefix.extend_from_slice(b"{\n  \""); } else { prefix.extend_from_slice(b",\n  \""); }
+                            prefix.extend_from_slice(out_key.as_bytes());
+                            prefix.extend_from_slice(b"\": ");
+                        } else {
+                            if i == 0 { prefix.push(b'{'); } else { prefix.push(b','); }
+                            prefix.push(b'"');
+                            prefix.extend_from_slice(out_key.as_bytes());
+                            prefix.extend_from_slice(b"\":");
+                        }
                         key_prefixes.push(prefix);
                     }
                     let sel_idx = field_idx[sel_field.as_str()];
@@ -2408,7 +2418,11 @@ fn real_main() {
                                             }
                                         }
                                     }
-                                    compact_buf.extend_from_slice(b"}\n");
+                                    if use_pretty_buf {
+                                        compact_buf.extend_from_slice(b"\n}\n");
+                                    } else {
+                                        compact_buf.extend_from_slice(b"}\n");
+                                    }
                                 }
                             }
                         }
@@ -2570,7 +2584,12 @@ fn real_main() {
                         };
                         if pass {
                             if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
-                                compact_buf.extend_from_slice(&raw[vs..ve]);
+                                let val = &raw[vs..ve];
+                                if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
+                                    push_json_pretty_raw(&mut compact_buf, val, 2, false);
+                                } else {
+                                    compact_buf.extend_from_slice(val);
+                                }
                                 compact_buf.push(b'\n');
                             }
                         }
@@ -3278,16 +3297,7 @@ fn real_main() {
                             _ => false,
                         };
                         if pass {
-                            if use_pretty_buf {
-                                push_json_pretty_raw(&mut compact_buf, raw, 2, false);
-                                compact_buf.push(b'\n');
-                            } else if is_json_compact(raw) {
-                                compact_buf.extend_from_slice(raw);
-                                compact_buf.push(b'\n');
-                            } else {
-                                push_json_compact_raw(&mut compact_buf, raw);
-                                compact_buf.push(b'\n');
-                            }
+                            emit_raw_ln!(&mut compact_buf, raw);
                             if compact_buf.len() >= 1 << 17 {
                                 let _ = out.write_all(&compact_buf);
                                 compact_buf.clear();
@@ -3310,13 +3320,7 @@ fn real_main() {
                         let matches = val_bytes == expected.as_slice();
                         let pass = match op { BinOp::Eq => matches, BinOp::Ne => !matches, _ => false };
                         if pass {
-                            if is_json_compact(raw) {
-                                compact_buf.extend_from_slice(raw);
-                                compact_buf.push(b'\n');
-                            } else {
-                                push_json_compact_raw(&mut compact_buf, raw);
-                                compact_buf.push(b'\n');
-                            }
+                            emit_raw_ln!(&mut compact_buf, raw);
                             if compact_buf.len() >= 1 << 17 {
                                 let _ = out.write_all(&compact_buf);
                                 compact_buf.clear();
@@ -3345,12 +3349,7 @@ fn real_main() {
                                 _ => false,
                             };
                             if pass {
-                                if is_json_compact(raw) {
-                                    compact_buf.extend_from_slice(raw);
-                                } else {
-                                    push_json_compact_raw(&mut compact_buf, raw);
-                                }
-                                compact_buf.push(b'\n');
+                                emit_raw_ln!(&mut compact_buf, raw);
                             }
                         }
                     }
@@ -3383,12 +3382,7 @@ fn real_main() {
                             {
                                 let content_str = unsafe { std::str::from_utf8_unchecked(&val[1..val.len()-1]) };
                                 if re.is_match(content_str) {
-                                    if is_json_compact(raw) {
-                                        compact_buf.extend_from_slice(raw);
-                                    } else {
-                                        push_json_compact_raw(&mut compact_buf, raw);
-                                    }
-                                    compact_buf.push(b'\n');
+                                    emit_raw_ln!(&mut compact_buf, raw);
                                 }
                             }
                         }
@@ -3425,12 +3419,7 @@ fn real_main() {
                                 _ => false,
                             };
                             if pass {
-                                if is_json_compact(raw) {
-                                    compact_buf.extend_from_slice(raw);
-                                } else {
-                                    push_json_compact_raw(&mut compact_buf, raw);
-                                }
-                                compact_buf.push(b'\n');
+                                emit_raw_ln!(&mut compact_buf, raw);
                             }
                         }
                     }
@@ -3509,7 +3498,12 @@ fn real_main() {
                             BranchOutput::Field(ref f) => {
                                 let idx = field_idx[f];
                                 let (vs, ve) = ranges[idx];
-                                compact_buf.extend_from_slice(&raw[vs..ve]);
+                                let val = &raw[vs..ve];
+                                if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
+                                    push_json_pretty_raw(&mut compact_buf, val, 2, false);
+                                } else {
+                                    compact_buf.extend_from_slice(val);
+                                }
                             }
                         }
                         compact_buf.push(b'\n');
@@ -3567,12 +3561,7 @@ fn real_main() {
                         })
                     };
                     if pass {
-                        if is_json_compact(raw) {
-                            compact_buf.extend_from_slice(raw);
-                        } else {
-                            push_json_compact_raw(&mut compact_buf, raw);
-                        }
-                        compact_buf.push(b'\n');
+                        emit_raw_ln!(&mut compact_buf, raw);
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
@@ -3593,12 +3582,7 @@ fn real_main() {
                         json_object_has_any_key(raw, 0, &field_refs).unwrap_or(false)
                     };
                     if pass {
-                        if is_json_compact(raw) {
-                            compact_buf.extend_from_slice(raw);
-                        } else {
-                            push_json_compact_raw(&mut compact_buf, raw);
-                        }
-                        compact_buf.push(b'\n');
+                        emit_raw_ln!(&mut compact_buf, raw);
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
@@ -3655,24 +3639,47 @@ fn real_main() {
                             _ => false,
                         };
                         if pass {
+                            // Extract all needed fields raw bytes
                             let fields_raw: Vec<Option<(usize, usize)>> = all_fields.iter()
                                 .map(|f| json_object_get_field_raw(raw, 0, f))
                                 .collect();
-                            compact_buf.push(b'{');
-                            for (i, (key, src)) in pairs.iter().enumerate() {
-                                if i > 0 { compact_buf.push(b','); }
-                                compact_buf.push(b'"');
-                                compact_buf.extend_from_slice(key.as_bytes());
-                                compact_buf.extend_from_slice(b"\":");
-                                let idx = all_fields.iter().position(|&f| f == src.as_str()).unwrap();
-                                if let Some((vs, ve)) = fields_raw[idx] {
-                                    compact_buf.extend_from_slice(&raw[vs..ve]);
-                                } else {
-                                    compact_buf.extend_from_slice(b"null");
+                            if use_pretty_buf {
+                                compact_buf.extend_from_slice(b"{\n");
+                                for (i, (key, src)) in pairs.iter().enumerate() {
+                                    if i > 0 { compact_buf.extend_from_slice(b",\n"); }
+                                    compact_buf.extend_from_slice(b"  \"");
+                                    compact_buf.extend_from_slice(key.as_bytes());
+                                    compact_buf.extend_from_slice(b"\": ");
+                                    let idx = all_fields.iter().position(|&f| f == src.as_str()).unwrap();
+                                    if let Some((vs, ve)) = fields_raw[idx] {
+                                        let val = &raw[vs..ve];
+                                        if val[0] == b'{' || val[0] == b'[' {
+                                            push_json_pretty_raw_at(&mut compact_buf, val, 2, false, 1);
+                                        } else {
+                                            compact_buf.extend_from_slice(val);
+                                        }
+                                    } else {
+                                        compact_buf.extend_from_slice(b"null");
+                                    }
                                 }
+                                compact_buf.extend_from_slice(b"\n}\n");
+                            } else {
+                                compact_buf.push(b'{');
+                                for (i, (key, src)) in pairs.iter().enumerate() {
+                                    if i > 0 { compact_buf.push(b','); }
+                                    compact_buf.push(b'"');
+                                    compact_buf.extend_from_slice(key.as_bytes());
+                                    compact_buf.extend_from_slice(b"\":");
+                                    let idx = all_fields.iter().position(|&f| f == src.as_str()).unwrap();
+                                    if let Some((vs, ve)) = fields_raw[idx] {
+                                        compact_buf.extend_from_slice(&raw[vs..ve]);
+                                    } else {
+                                        compact_buf.extend_from_slice(b"null");
+                                    }
+                                }
+                                compact_buf.push(b'}');
+                                compact_buf.push(b'\n');
                             }
-                            compact_buf.push(b'}');
-                            compact_buf.push(b'\n');
                         }
                     }
                     if compact_buf.len() >= 1 << 17 {
@@ -3707,10 +3714,16 @@ fn real_main() {
                 let mut key_prefixes: Vec<Vec<u8>> = Vec::with_capacity(cremap.len());
                 for (i, (out_key, _)) in cremap.iter().enumerate() {
                     let mut prefix = Vec::new();
-                    if i == 0 { prefix.push(b'{'); } else { prefix.push(b','); }
-                    prefix.push(b'"');
-                    prefix.extend_from_slice(out_key.as_bytes());
-                    prefix.extend_from_slice(b"\":");
+                    if use_pretty_buf {
+                        if i == 0 { prefix.extend_from_slice(b"{\n  \""); } else { prefix.extend_from_slice(b",\n  \""); }
+                        prefix.extend_from_slice(out_key.as_bytes());
+                        prefix.extend_from_slice(b"\": ");
+                    } else {
+                        if i == 0 { prefix.push(b'{'); } else { prefix.push(b','); }
+                        prefix.push(b'"');
+                        prefix.extend_from_slice(out_key.as_bytes());
+                        prefix.extend_from_slice(b"\":");
+                    }
                     key_prefixes.push(prefix);
                 }
                 let sel_idx = field_idx[sel_field.as_str()];
@@ -3762,7 +3775,11 @@ fn real_main() {
                                         }
                                     }
                                 }
-                                compact_buf.extend_from_slice(b"}\n");
+                                if use_pretty_buf {
+                                    compact_buf.extend_from_slice(b"\n}\n");
+                                } else {
+                                    compact_buf.extend_from_slice(b"}\n");
+                                }
                             }
                         }
                     }
@@ -3914,7 +3931,12 @@ fn real_main() {
                     };
                     if pass {
                         if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
-                            compact_buf.extend_from_slice(&raw[vs..ve]);
+                            let val = &raw[vs..ve];
+                            if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
+                                push_json_pretty_raw(&mut compact_buf, val, 2, false);
+                            } else {
+                                compact_buf.extend_from_slice(val);
+                            }
                             compact_buf.push(b'\n');
                         }
                     }
@@ -3939,7 +3961,7 @@ fn real_main() {
                                 compact_buf.extend_from_slice(b"\": ");
                                 let val = &raw[*vs..*ve];
                                 if val[0] == b'{' || val[0] == b'[' {
-                                    push_json_pretty_raw(&mut compact_buf, val, 2, false);
+                                    push_json_pretty_raw_at(&mut compact_buf, val, 2, false, 1);
                                 } else {
                                     compact_buf.extend_from_slice(val);
                                 }
@@ -4894,6 +4916,7 @@ fn real_main() {
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
                     push_json_pretty_raw(&mut compact_buf, raw, indent_n, tab);
+                    compact_buf.push(b'\n');
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
                         compact_buf.clear();

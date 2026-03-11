@@ -1490,7 +1490,12 @@ pub fn push_json_compact_raw(buf: &mut Vec<u8>, b: &[u8]) {
 /// Pretty-print raw JSON bytes without parsing into Value.
 /// Produces jq-compatible indented output with trailing newline.
 pub fn push_json_pretty_raw(buf: &mut Vec<u8>, b: &[u8], indent_n: usize, use_tab: bool) {
-    let mut depth: usize = 0;
+    push_json_pretty_raw_at(buf, b, indent_n, use_tab, 0);
+}
+
+/// Pretty-print raw JSON bytes with a base indentation depth.
+pub fn push_json_pretty_raw_at(buf: &mut Vec<u8>, b: &[u8], indent_n: usize, use_tab: bool, base_depth: usize) {
+    let mut depth: usize = base_depth;
     let mut i = 0;
     let len = b.len();
     let indent_char = if use_tab { b'\t' } else { b' ' };
@@ -1570,7 +1575,6 @@ pub fn push_json_pretty_raw(buf: &mut Vec<u8>, b: &[u8], indent_n: usize, use_ta
             }
         }
     }
-    buf.push(b'\n');
 }
 
 /// Check if raw JSON bytes are compact (no whitespace outside of strings).
