@@ -853,6 +853,13 @@ pub fn json_value_length(b: &[u8], pos: usize) -> Option<usize> {
 /// Extract all keys from a JSON object and write them as a sorted JSON array into buf.
 /// Returns true if successful, false if the input isn't a JSON object.
 pub fn json_object_keys_to_buf(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {
+    let mut keys: Vec<(usize, usize)> = Vec::new();
+    json_object_keys_to_buf_reuse(b, pos, buf, &mut keys)
+}
+
+/// Extract sorted keys from a JSON object, reusing a key-range buffer to avoid allocations.
+pub fn json_object_keys_to_buf_reuse(b: &[u8], pos: usize, buf: &mut Vec<u8>, keys: &mut Vec<(usize, usize)>) -> bool {
+    keys.clear();
     if pos >= b.len() || b[pos] != b'{' { return false; }
     let mut i = pos + 1;
     while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
@@ -861,7 +868,6 @@ pub fn json_object_keys_to_buf(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool 
         return true;
     }
     // Collect raw key byte ranges
-    let mut keys: Vec<(usize, usize)> = Vec::new();
     loop {
         if i >= b.len() || b[i] != b'"' { return false; }
         let key_start = i; // include the opening quote
