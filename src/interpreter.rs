@@ -169,6 +169,27 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
         Expr::BinOp { op, lhs, rhs } => {
             Expr::BinOp { op: *op, lhs: Box::new(simplify_expr(lhs)), rhs: Box::new(simplify_expr(rhs)) }
         }
+        Expr::StringInterpolation { parts } => {
+            use crate::ir::StringPart;
+            Expr::StringInterpolation {
+                parts: parts.iter().map(|p| match p {
+                    StringPart::Literal(s) => StringPart::Literal(s.clone()),
+                    StringPart::Expr(e) => StringPart::Expr(simplify_expr(e)),
+                }).collect(),
+            }
+        }
+        Expr::UnaryOp { op, operand } => {
+            Expr::UnaryOp { op: *op, operand: Box::new(simplify_expr(operand)) }
+        }
+        Expr::Collect { generator } => {
+            Expr::Collect { generator: Box::new(simplify_expr(generator)) }
+        }
+        Expr::Comma { left, right } => {
+            Expr::Comma { left: Box::new(simplify_expr(left)), right: Box::new(simplify_expr(right)) }
+        }
+        Expr::Index { expr, key } => {
+            Expr::Index { expr: Box::new(simplify_expr(expr)), key: Box::new(simplify_expr(key)) }
+        }
         _ => expr.clone(),
     }
 }

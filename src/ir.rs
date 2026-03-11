@@ -752,6 +752,42 @@ impl Expr {
                 try_expr: Box::new(try_expr.substitute_var(var_index, replacement)),
                 catch_expr: Box::new(catch_expr.substitute_var(var_index, replacement)),
             },
+            Expr::StringInterpolation { parts } => Expr::StringInterpolation {
+                parts: parts.iter().map(|p| match p {
+                    StringPart::Literal(s) => StringPart::Literal(s.clone()),
+                    StringPart::Expr(e) => StringPart::Expr(e.substitute_var(var_index, replacement)),
+                }).collect(),
+            },
+            Expr::Slice { expr, from, to } => Expr::Slice {
+                expr: Box::new(expr.substitute_var(var_index, replacement)),
+                from: from.as_ref().map(|e| Box::new(e.substitute_var(var_index, replacement))),
+                to: to.as_ref().map(|e| Box::new(e.substitute_var(var_index, replacement))),
+            },
+            Expr::Reduce { source, init, var_index: vi, acc_index, update } => {
+                let new_source = Box::new(source.substitute_var(var_index, replacement));
+                let new_init = Box::new(init.substitute_var(var_index, replacement));
+                if *vi == var_index || *acc_index == var_index {
+                    Expr::Reduce { source: new_source, init: new_init, var_index: *vi, acc_index: *acc_index, update: update.clone() }
+                } else {
+                    Expr::Reduce { source: new_source, init: new_init, var_index: *vi, acc_index: *acc_index, update: Box::new(update.substitute_var(var_index, replacement)) }
+                }
+            },
+            Expr::Foreach { source, init, var_index: vi, acc_index, update, extract } => {
+                let new_source = Box::new(source.substitute_var(var_index, replacement));
+                let new_init = Box::new(init.substitute_var(var_index, replacement));
+                if *vi == var_index || *acc_index == var_index {
+                    Expr::Foreach { source: new_source, init: new_init, var_index: *vi, acc_index: *acc_index, update: update.clone(), extract: extract.clone() }
+                } else {
+                    Expr::Foreach {
+                        source: new_source, init: new_init, var_index: *vi, acc_index: *acc_index,
+                        update: Box::new(update.substitute_var(var_index, replacement)),
+                        extract: extract.as_ref().map(|e| Box::new(e.substitute_var(var_index, replacement))),
+                    }
+                }
+            },
+            Expr::Error { msg } => Expr::Error {
+                msg: msg.as_ref().map(|e| Box::new(e.substitute_var(var_index, replacement))),
+            },
             _ => self.clone(),
         }
     }
