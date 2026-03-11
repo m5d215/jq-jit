@@ -1068,6 +1068,47 @@ impl Filter {
         Some((fields, arith))
     }
 
+    /// Detect two-field numeric comparison: `.x > .y`, `.x == .y`, etc.
+    /// Returns (field1, cmp_op, field2) if detected.
+    pub fn detect_field_field_cmp(&self) -> Option<(String, crate::ir::BinOp, String)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::BinOp { op, lhs, rhs } = expr {
+            if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+            if let Expr::Index { expr: base1, key: key1 } = lhs.as_ref() {
+                if !matches!(base1.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(f1)) = key1.as_ref() {
+                    if let Expr::Index { expr: base2, key: key2 } = rhs.as_ref() {
+                        if !matches!(base2.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f2)) = key2.as_ref() {
+                            return Some((f1.clone(), *op, f2.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `.field cmp N` producing boolean output (not in select context).
+    /// Returns (field, op, value) if detected.
+    pub fn detect_field_const_cmp(&self) -> Option<(String, crate::ir::BinOp, f64)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::BinOp { op, lhs, rhs } = expr {
+            if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+            if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                        return Some((field.clone(), *op, *n));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect string interpolation with field accesses: `"\(.f1)lit\(.f2)..."`.
     /// Returns Vec<(is_literal, content)> where content is either the literal text
     /// or the field name for interpolation parts.

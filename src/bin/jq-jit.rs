@@ -563,6 +563,12 @@ fn real_main() {
     let numeric_expr = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_binop.is_none() && field_binop_const_unary.is_none() && field_arith_chain.is_none() {
         filter.detect_numeric_expr()
     } else { None };
+    let field_field_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_binop.is_none() {
+        filter.detect_field_field_cmp()
+    } else { None };
+    let field_const_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_binop.is_none() && field_field_cmp.is_none() {
+        filter.detect_field_const_cmp()
+    } else { None };
     let field_str_builtin = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_unary_num.is_none() {
         filter.detect_field_str_builtin()
     } else { None };
@@ -688,6 +694,7 @@ fn real_main() {
     let has_raw_fast_path = field_access.is_some() || nested_field.is_some() || field_remap.is_some()
         || computed_remap.is_some()
         || field_binop.is_some() || field_unary_num.is_some() || field_binop_const_unary.is_some() || field_arith_chain.is_some() || numeric_expr.is_some()
+        || field_field_cmp.is_some() || field_const_cmp.is_some()
         || field_str_builtin.is_some() || field_test.is_some() || field_gsub.is_some() || field_format.is_some() || field_ltrimstr_tonumber.is_some()
         || field_str_concat.is_some() || field_alt.is_some()
         || select_cmp.is_some()
@@ -1665,6 +1672,50 @@ fn real_main() {
                             let result = arith.eval(&vals);
                             push_jq_number_bytes(&mut compact_buf, result);
                             compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref f1, ref cmp_op, ref f2)) = field_field_cmp {
+                    use jq_jit::ir::BinOp;
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some((n1, n2)) = json_object_get_two_nums(raw, 0, f1, f2) {
+                            let result = match cmp_op {
+                                BinOp::Gt => n1 > n2, BinOp::Lt => n1 < n2,
+                                BinOp::Ge => n1 >= n2, BinOp::Le => n1 <= n2,
+                                BinOp::Eq => n1 == n2, BinOp::Ne => n1 != n2,
+                                _ => unreachable!(),
+                            };
+                            compact_buf.extend_from_slice(if result { b"true\n" } else { b"false\n" });
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref field, ref cmp_op, cval)) = field_const_cmp {
+                    use jq_jit::ir::BinOp;
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some(n) = json_object_get_num(raw, 0, field) {
+                            let result = match cmp_op {
+                                BinOp::Gt => n > cval, BinOp::Lt => n < cval,
+                                BinOp::Ge => n >= cval, BinOp::Le => n <= cval,
+                                BinOp::Eq => n == cval, BinOp::Ne => n != cval,
+                                _ => unreachable!(),
+                            };
+                            compact_buf.extend_from_slice(if result { b"true\n" } else { b"false\n" });
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -4465,6 +4516,52 @@ fn real_main() {
                         let result = arith.eval(&vals);
                         push_jq_number_bytes(&mut compact_buf, result);
                         compact_buf.push(b'\n');
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref f1, ref cmp_op, ref f2)) = field_field_cmp {
+                use jq_jit::ir::BinOp;
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some((n1, n2)) = json_object_get_two_nums(raw, 0, f1, f2) {
+                        let result = match cmp_op {
+                            BinOp::Gt => n1 > n2, BinOp::Lt => n1 < n2,
+                            BinOp::Ge => n1 >= n2, BinOp::Le => n1 <= n2,
+                            BinOp::Eq => n1 == n2, BinOp::Ne => n1 != n2,
+                            _ => unreachable!(),
+                        };
+                        compact_buf.extend_from_slice(if result { b"true\n" } else { b"false\n" });
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref field, ref cmp_op, cval)) = field_const_cmp {
+                use jq_jit::ir::BinOp;
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some(n) = json_object_get_num(raw, 0, field) {
+                        let result = match cmp_op {
+                            BinOp::Gt => n > cval, BinOp::Lt => n < cval,
+                            BinOp::Ge => n >= cval, BinOp::Le => n <= cval,
+                            BinOp::Eq => n == cval, BinOp::Ne => n != cval,
+                            _ => unreachable!(),
+                        };
+                        compact_buf.extend_from_slice(if result { b"true\n" } else { b"false\n" });
                     } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
