@@ -127,8 +127,8 @@ fn html_encode_to(input: &[u8], out: &mut Vec<u8>) {
 fn remap_expr_fields(rexpr: &jq_jit::interpreter::RemapExpr) -> Vec<&str> {
     use jq_jit::interpreter::RemapExpr;
     match rexpr {
-        RemapExpr::Field(f) => vec![f.as_str()],
-        RemapExpr::FieldOpConst(f, _, _) | RemapExpr::FieldCmpConst(f, _, _) => vec![f.as_str()],
+        RemapExpr::Field(f) | RemapExpr::FieldToString(f) => vec![f.as_str()],
+        RemapExpr::FieldOpConst(f, _, _) | RemapExpr::FieldCmpConst(f, _, _) | RemapExpr::FieldOpConstToString(f, _, _) => vec![f.as_str()],
         RemapExpr::FieldOpField(f1, _, f2) | RemapExpr::FieldCmpField(f1, _, f2) => vec![f1.as_str(), f2.as_str()],
         RemapExpr::ConstOpField(_, _, f) => vec![f.as_str()],
     }
@@ -170,6 +170,8 @@ enum ResolvedRemap {
     ConstOpField(f64, jq_jit::ir::BinOp, usize),
     FieldCmpConst(usize, jq_jit::ir::BinOp, f64),
     FieldCmpField(usize, jq_jit::ir::BinOp, usize),
+    FieldToString(usize),
+    FieldOpConstToString(usize, jq_jit::ir::BinOp, f64),
 }
 
 /// Pre-resolve RemapExpr → ResolvedRemap using a field→index map.
@@ -177,15 +179,24 @@ fn resolve_remap_exprs(
     exprs: &[(impl AsRef<str>, jq_jit::interpreter::RemapExpr)],
     field_idx: &std::collections::HashMap<String, usize>,
 ) -> Vec<ResolvedRemap> {
+    exprs.iter().map(|(_, rexpr)| resolve_one_remap(rexpr, field_idx)).collect()
+}
+
+fn resolve_one_remap(
+    rexpr: &jq_jit::interpreter::RemapExpr,
+    field_idx: &std::collections::HashMap<String, usize>,
+) -> ResolvedRemap {
     use jq_jit::interpreter::RemapExpr;
-    exprs.iter().map(|(_, rexpr)| match rexpr {
+    match rexpr {
         RemapExpr::Field(f) => ResolvedRemap::Field(field_idx[f.as_str()]),
         RemapExpr::FieldOpConst(f, op, n) => ResolvedRemap::FieldOpConst(field_idx[f.as_str()], *op, *n),
         RemapExpr::FieldOpField(f1, op, f2) => ResolvedRemap::FieldOpField(field_idx[f1.as_str()], *op, field_idx[f2.as_str()]),
         RemapExpr::ConstOpField(n, op, f) => ResolvedRemap::ConstOpField(*n, *op, field_idx[f.as_str()]),
         RemapExpr::FieldCmpConst(f, op, n) => ResolvedRemap::FieldCmpConst(field_idx[f.as_str()], *op, *n),
         RemapExpr::FieldCmpField(f1, op, f2) => ResolvedRemap::FieldCmpField(field_idx[f1.as_str()], *op, field_idx[f2.as_str()]),
-    }).collect()
+        RemapExpr::FieldToString(f) => ResolvedRemap::FieldToString(field_idx[f.as_str()]),
+        RemapExpr::FieldOpConstToString(f, op, n) => ResolvedRemap::FieldOpConstToString(field_idx[f.as_str()], *op, *n),
+    }
 }
 
 /// Resolve a slice of RemapExpr (without keys) for computed_array.
@@ -193,15 +204,30 @@ fn resolve_remap_exprs_array(
     exprs: &[jq_jit::interpreter::RemapExpr],
     field_idx: &std::collections::HashMap<String, usize>,
 ) -> Vec<ResolvedRemap> {
-    use jq_jit::interpreter::RemapExpr;
-    exprs.iter().map(|rexpr| match rexpr {
-        RemapExpr::Field(f) => ResolvedRemap::Field(field_idx[f.as_str()]),
-        RemapExpr::FieldOpConst(f, op, n) => ResolvedRemap::FieldOpConst(field_idx[f.as_str()], *op, *n),
-        RemapExpr::FieldOpField(f1, op, f2) => ResolvedRemap::FieldOpField(field_idx[f1.as_str()], *op, field_idx[f2.as_str()]),
-        RemapExpr::ConstOpField(n, op, f) => ResolvedRemap::ConstOpField(*n, *op, field_idx[f.as_str()]),
-        RemapExpr::FieldCmpConst(f, op, n) => ResolvedRemap::FieldCmpConst(field_idx[f.as_str()], *op, *n),
-        RemapExpr::FieldCmpField(f1, op, f2) => ResolvedRemap::FieldCmpField(field_idx[f1.as_str()], *op, field_idx[f2.as_str()]),
-    }).collect()
+    exprs.iter().map(|rexpr| resolve_one_remap(rexpr, field_idx)).collect()
+}
+
+/// Emit tostring on a raw JSON value: numbers → "N", strings → as-is, booleans/null → "true"/"false"/"null".
+#[inline]
+fn emit_tostring_raw(buf: &mut Vec<u8>, val: &[u8]) {
+    if val.is_empty() { buf.extend_from_slice(b"null"); return; }
+    match val[0] {
+        b'"' => buf.extend_from_slice(val), // string → as-is
+        b't' => buf.extend_from_slice(b"\"true\""),
+        b'f' => buf.extend_from_slice(b"\"false\""),
+        b'n' => buf.extend_from_slice(b"\"null\""),
+        _ => {
+            // number → wrap in quotes
+            buf.push(b'"');
+            // Re-format through push_jq_number_bytes for jq compat
+            if let Some(n) = parse_json_num(val) {
+                push_jq_number_bytes(buf, n);
+            } else {
+                buf.extend_from_slice(val);
+            }
+            buf.push(b'"');
+        }
+    }
 }
 
 /// Emit a single computed remap value into the output buffer.
@@ -266,6 +292,21 @@ fn emit_remap_value(
                 buf.extend_from_slice(if r { b"true" } else { b"false" });
             } else { buf.extend_from_slice(b"null"); }
         }
+        RemapExpr::FieldToString(f) => {
+            let idx = field_idx[f.as_str()];
+            let (vs, ve) = ranges[idx];
+            emit_tostring_raw(buf, &raw[vs..ve]);
+        }
+        RemapExpr::FieldOpConstToString(f, op, n) => {
+            let idx = field_idx[f.as_str()];
+            let (vs, ve) = ranges[idx];
+            if let Some(a) = parse_json_num(&raw[vs..ve]) {
+                let r = match op { BinOp::Add => a + n, BinOp::Sub => a - n, BinOp::Mul => a * n, BinOp::Div => a / n, BinOp::Mod => a % n, _ => unreachable!() };
+                buf.push(b'"');
+                push_jq_number_bytes(buf, r);
+                buf.push(b'"');
+            } else { buf.extend_from_slice(b"null"); }
+        }
     }
 }
 
@@ -318,6 +359,19 @@ fn emit_resolved_value(
             if let (Some(a), Some(b)) = (parse_json_num(&raw[vs1..ve1]), parse_json_num(&raw[vs2..ve2])) {
                 let r = match op { BinOp::Gt => a > b, BinOp::Lt => a < b, BinOp::Ge => a >= b, BinOp::Le => a <= b, BinOp::Eq => a == b, BinOp::Ne => a != b, _ => unreachable!() };
                 buf.extend_from_slice(if r { b"true" } else { b"false" });
+            } else { buf.extend_from_slice(b"null"); }
+        }
+        ResolvedRemap::FieldToString(idx) => {
+            let (vs, ve) = ranges[idx];
+            emit_tostring_raw(buf, &raw[vs..ve]);
+        }
+        ResolvedRemap::FieldOpConstToString(idx, ref op, n) => {
+            let (vs, ve) = ranges[idx];
+            if let Some(a) = parse_json_num(&raw[vs..ve]) {
+                let r = match op { BinOp::Add => a + n, BinOp::Sub => a - n, BinOp::Mul => a * n, BinOp::Div => a / n, BinOp::Mod => a % n, _ => unreachable!() };
+                buf.push(b'"');
+                push_jq_number_bytes(buf, r);
+                buf.push(b'"');
             } else { buf.extend_from_slice(b"null"); }
         }
     }

@@ -25,6 +25,10 @@ pub enum RemapExpr {
     FieldCmpConst(String, crate::ir::BinOp, f64),
     /// `.field1 cmp .field2` — boolean comparison between two fields
     FieldCmpField(String, crate::ir::BinOp, String),
+    /// `.field | tostring` — convert field value to string
+    FieldToString(String),
+    /// `.field op N | tostring` — arithmetic then tostring
+    FieldOpConstToString(String, crate::ir::BinOp, f64),
 }
 
 /// A pure numeric expression over fields and constants.
@@ -979,7 +983,7 @@ impl Filter {
 
     /// Classify a single remap value expression.
     fn classify_remap_value(v: &crate::ir::Expr) -> Option<RemapExpr> {
-        use crate::ir::{Expr, BinOp, Literal};
+        use crate::ir::{Expr, BinOp, Literal, UnaryOp};
         // .field
         if let Expr::Index { expr: base, key } = v {
             if matches!(base.as_ref(), Expr::Input) {
@@ -988,6 +992,31 @@ impl Filter {
                 }
             }
             return None;
+        }
+        // .field | tostring (beta-reduced: UnaryOp(ToString, Index(Input, field)))
+        if let Expr::UnaryOp { op: UnaryOp::ToString, operand } = v {
+            if let Expr::Index { expr: base, key } = operand.as_ref() {
+                if matches!(base.as_ref(), Expr::Input) {
+                    if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                        return Some(RemapExpr::FieldToString(f.clone()));
+                    }
+                }
+            }
+            // .field op N | tostring (beta-reduced: UnaryOp(ToString, BinOp(op, Index, Num)))
+            if let Expr::BinOp { op, lhs, rhs } = operand.as_ref() {
+                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+                    if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                        if matches!(base.as_ref(), Expr::Input) {
+                            if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                                if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                    if matches!(op, BinOp::Div | BinOp::Mod) && *n == 0.0 { return None; }
+                                    return Some(RemapExpr::FieldOpConstToString(f.clone(), *op, *n));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         // .field op N or .field op .field2
         if let Expr::BinOp { op, lhs, rhs } = v {
