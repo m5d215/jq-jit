@@ -506,7 +506,7 @@ impl Expr {
     pub fn is_input_free(&self) -> bool {
         match self {
             Expr::Input | Expr::Literal(_) | Expr::LoadVar { .. }
-            | Expr::Empty | Expr::Not | Expr::Env | Expr::Builtins
+            | Expr::Empty | Expr::Env | Expr::Builtins
             | Expr::ReadInput | Expr::ReadInputs | Expr::ModuleMeta
             | Expr::GenLabel | Expr::Loc { .. } => true,
             Expr::BinOp { lhs, rhs, .. } => lhs.is_input_free() && rhs.is_input_free(),
@@ -527,7 +527,8 @@ impl Expr {
                 primary.is_input_free() && fallback.is_input_free()
             }
             Expr::Format { expr, .. } => expr.is_input_free(),
-            Expr::Debug { expr } | Expr::Stderr { expr } => expr.is_input_free(),
+            // Debug/Stderr use implicit input (pass through current input)
+            Expr::Debug { .. } | Expr::Stderr { .. } => false,
             Expr::Slice { expr, from, to } => {
                 expr.is_input_free()
                     && from.as_ref().map_or(true, |e| e.is_input_free())
@@ -539,8 +540,11 @@ impl Expr {
                     StringPart::Expr(e) => e.is_input_free(),
                 })
             }
-            Expr::CallBuiltin { args, .. } => args.iter().all(|a| a.is_input_free()),
+            // CallBuiltin uses the current input implicitly (passed as first arg by JIT)
+            Expr::CallBuiltin { .. } => false,
             Expr::Error { msg } => msg.as_ref().map_or(true, |e| e.is_input_free()),
+            // Not uses implicit input (negates truthiness of current input)
+            Expr::Not => false,
             // Binding constructs — Input in sub-exprs may refer to different values
             Expr::Pipe { .. } | Expr::Reduce { .. } | Expr::Foreach { .. }
             | Expr::LetBinding { .. } | Expr::TryCatch { .. } | Expr::While { .. }
