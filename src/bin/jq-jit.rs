@@ -662,6 +662,9 @@ fn real_main() {
     let field_alt = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
         filter.detect_field_alternative()
     } else { None };
+    let field_field_alt = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_alt.is_none() {
+        filter.detect_field_field_alternative()
+    } else { None };
     let cond_chain = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() {
         filter.detect_cond_chain()
     } else { None };
@@ -696,7 +699,7 @@ fn real_main() {
         || field_binop.is_some() || field_unary_num.is_some() || field_binop_const_unary.is_some() || field_arith_chain.is_some() || numeric_expr.is_some()
         || field_field_cmp.is_some() || field_const_cmp.is_some()
         || field_str_builtin.is_some() || field_test.is_some() || field_gsub.is_some() || field_format.is_some() || field_ltrimstr_tonumber.is_some()
-        || field_str_concat.is_some() || field_alt.is_some()
+        || field_str_concat.is_some() || field_alt.is_some() || field_field_alt.is_some()
         || select_cmp.is_some()
         || cond_chain.is_some() || cmp_branch_lit.is_some() || select_compound.is_some()
         || select_str.is_some()
@@ -2345,6 +2348,31 @@ fn real_main() {
                         }
                         Ok(())
                     })
+                } else if let Some((ref prim_field, ref fallback_field)) = field_field_alt {
+                    // .field1 // .field2: try primary, if null/false/missing use fallback
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        let use_primary = if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, prim_field) {
+                            let pval = &raw[vs..ve];
+                            if pval != b"null" && pval != b"false" {
+                                compact_buf.extend_from_slice(pval);
+                                true
+                            } else { false }
+                        } else { false };
+                        if !use_primary {
+                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, fallback_field) {
+                                compact_buf.extend_from_slice(&raw[vs..ve]);
+                            } else {
+                                compact_buf.extend_from_slice(b"null");
+                            }
+                        }
+                        compact_buf.push(b'\n');
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
                 } else if let Some((ref branches, ref else_output)) = cond_chain {
                     use jq_jit::interpreter::BranchOutput;
                     use jq_jit::ir::BinOp;
@@ -3751,6 +3779,31 @@ fn real_main() {
                         }
                     } else {
                         compact_buf.extend_from_slice(fallback_bytes);
+                    }
+                    compact_buf.push(b'\n');
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref prim_field, ref fallback_field)) = field_field_alt {
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    let use_primary = if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, prim_field) {
+                        let pval = &raw[vs..ve];
+                        if pval != b"null" && pval != b"false" {
+                            compact_buf.extend_from_slice(pval);
+                            true
+                        } else { false }
+                    } else { false };
+                    if !use_primary {
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, fallback_field) {
+                            compact_buf.extend_from_slice(&raw[vs..ve]);
+                        } else {
+                            compact_buf.extend_from_slice(b"null");
+                        }
                     }
                     compact_buf.push(b'\n');
                     if compact_buf.len() >= 1 << 17 {

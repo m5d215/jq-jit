@@ -1588,6 +1588,27 @@ impl Filter {
         None
     }
 
+    /// Detect `.field1 // .field2` pattern (field alternative with field fallback).
+    /// Returns (primary_field, fallback_field) if detected.
+    pub fn detect_field_field_alternative(&self) -> Option<(String, String)> {
+        use crate::ir::{Expr, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::Alternative { primary, fallback } = expr {
+            if let Expr::Index { expr: base1, key: key1 } = primary.as_ref() {
+                if !matches!(base1.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(f1)) = key1.as_ref() {
+                    if let Expr::Index { expr: base2, key: key2 } = fallback.as_ref() {
+                        if !matches!(base2.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f2)) = key2.as_ref() {
+                            return Some((f1.clone(), f2.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `if .field cmp N then literal_a else literal_b end` pattern.
     /// Returns (field, op, threshold, true_output_bytes, false_output_bytes).
     pub fn detect_cmp_branch_literals(&self) -> Option<(String, crate::ir::BinOp, f64, Vec<u8>, Vec<u8>)> {
