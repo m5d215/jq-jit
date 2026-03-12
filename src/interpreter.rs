@@ -1440,7 +1440,25 @@ impl Filter {
                 }
             }
         }
-        // Case 2: `.field op N` — top-level BinOp (all arithmetic ops)
+        // Case 2: beta-reduced `.field / N | floor` → UnaryOp(floor, BinOp(.field, N))
+        if let Expr::UnaryOp { op: uop, operand } = expr {
+            if matches!(uop, UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Sqrt | UnaryOp::Fabs | UnaryOp::Abs) {
+                if let Expr::BinOp { op, lhs, rhs } = operand.as_ref() {
+                    if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+                        if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                            if matches!(base.as_ref(), Expr::Input) {
+                                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                    if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                        return Some((field.clone(), *op, *n, Some(*uop)));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Case 3: `.field op N` — top-level BinOp (all arithmetic ops)
         if let Expr::BinOp { op, lhs, rhs } = expr {
             if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) { return None; }
             if let Expr::Index { expr: base, key } = lhs.as_ref() {
