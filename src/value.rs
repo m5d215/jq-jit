@@ -1546,6 +1546,163 @@ pub fn json_to_entries_raw(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {
     true
 }
 
+/// Filter an object's key-value pairs by a numeric comparison on the value.
+/// `with_entries(select(.value CMP threshold))` as raw byte operation.
+/// Emits the filtered object into `buf` followed by newline. Returns true on success.
+pub fn json_with_entries_select_value_cmp(
+    b: &[u8], pos: usize, cmp: u8, threshold: f64, buf: &mut Vec<u8>,
+) -> bool {
+    // cmp: b'>' = Gt, b'G' = Ge, b'<' = Lt, b'L' = Le, b'=' = Eq, b'!' = Ne
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    let mut i = pos + 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < b.len() && b[i] == b'}' {
+        buf.extend_from_slice(b"{}\n");
+        return true;
+    }
+    buf.push(b'{');
+    let mut first = true;
+    loop {
+        if i >= b.len() || b[i] != b'"' { return false; }
+        let key_start = i; // includes opening quote
+        i += 1;
+        while i < b.len() { match b[i] { b'"' => break, b'\\' => { i += 2; continue }, _ => i += 1 } }
+        if i >= b.len() { return false; }
+        let key_end = i + 1; // includes closing quote
+        i = key_end;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        let vs = i;
+        i = match skip_json_value(b, i) { Ok(e) => e, Err(_) => return false };
+        let ve = i;
+        // Check value against threshold using jq type ordering:
+        // null(0) < false(1) < true(2) < number(3) < string(4) < array(5) < object(6)
+        let val_bytes = &b[vs..ve];
+        let include = if let Some(num) = parse_json_num(val_bytes) {
+            match cmp {
+                b'>' => num > threshold,
+                b'G' => num >= threshold,
+                b'<' => num < threshold,
+                b'L' => num <= threshold,
+                b'=' => num == threshold,
+                b'!' => num != threshold,
+                _ => false,
+            }
+        } else if !val_bytes.is_empty() {
+            // Determine type order relative to number(3)
+            // type > number: string("), array([), object({)
+            // type < number: null(n), false(f), true(t)
+            let type_gt_num = matches!(val_bytes[0], b'"' | b'[' | b'{');
+            let type_lt_num = matches!(val_bytes[0], b'n' | b'f' | b't');
+            match cmp {
+                b'>' => type_gt_num,
+                b'G' => type_gt_num,
+                b'<' => type_lt_num,
+                b'L' => type_lt_num,
+                b'=' => false, // different type never equal to number
+                b'!' => true,  // different type always != number
+                _ => false,
+            }
+        } else {
+            false
+        };
+        if include {
+            if !first { buf.push(b','); }
+            first = false;
+            buf.extend_from_slice(&b[key_start..key_end]);
+            buf.push(b':');
+            buf.extend_from_slice(val_bytes);
+        }
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { return false; }
+        if b[i] == b'}' { break; }
+        if b[i] != b',' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
+    buf.extend_from_slice(b"}\n");
+    true
+}
+
+/// Set a field in a JSON object to a constant value (raw bytes).
+/// `.field = value` or `setpath(["field"]; value)` as raw byte operation.
+/// `new_val` is the raw JSON bytes of the new value (e.g. b"99").
+/// Preserves key ordering: if field exists, replaces value in-place; otherwise appends.
+pub fn json_object_set_field_raw(
+    b: &[u8], pos: usize, field: &str, new_val: &[u8], buf: &mut Vec<u8>,
+) -> bool {
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    let field_bytes = field.as_bytes();
+    let mut i = pos + 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < b.len() && b[i] == b'}' {
+        // Empty object: just create {"field":val}
+        buf.push(b'{');
+        buf.push(b'"');
+        buf.extend_from_slice(field_bytes);
+        buf.extend_from_slice(b"\":");
+        buf.extend_from_slice(new_val);
+        buf.extend_from_slice(b"}\n");
+        return true;
+    }
+    buf.push(b'{');
+    let mut first = true;
+    let mut found = false;
+    loop {
+        if i >= b.len() || b[i] != b'"' { return false; }
+        let key_start = i + 1;
+        i += 1;
+        let mut j = i;
+        while j < b.len() { match b[j] { b'"' => break, b'\\' => { j += 2; continue }, _ => j += 1 } }
+        if j >= b.len() { return false; }
+        let key_matches = (j - key_start) == field_bytes.len()
+            && b[key_start..j] == *field_bytes;
+        let key_q_start = key_start - 1; // includes opening quote
+        let key_q_end = j + 1; // includes closing quote
+        i = j + 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        let vs = i;
+        i = match skip_json_value(b, i) { Ok(e) => e, Err(_) => return false };
+        if !first { buf.push(b','); }
+        first = false;
+        buf.extend_from_slice(&b[key_q_start..key_q_end]);
+        buf.push(b':');
+        if key_matches {
+            buf.extend_from_slice(new_val);
+            found = true;
+        } else {
+            buf.extend_from_slice(&b[vs..i]);
+        }
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { return false; }
+        if b[i] == b'}' { break; }
+        if b[i] != b',' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
+    if !found {
+        // Append new field
+        buf.push(b',');
+        buf.push(b'"');
+        for &byte in field_bytes {
+            match byte {
+                b'"' => buf.extend_from_slice(b"\\\""),
+                b'\\' => buf.extend_from_slice(b"\\\\"),
+                _ => buf.push(byte),
+            }
+        }
+        buf.extend_from_slice(b"\":");
+        buf.extend_from_slice(new_val);
+    }
+    buf.extend_from_slice(b"}\n");
+    true
+}
+
 /// Extract two numeric field values from a JSON object without full parsing.
 /// More efficient than calling json_object_get_num twice (single scan).
 pub fn json_object_get_two_nums(b: &[u8], pos: usize, field1: &str, field2: &str) -> Option<(f64, f64)> {

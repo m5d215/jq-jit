@@ -151,6 +151,37 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             if sl.is_simple_scalar() && sr.is_input_free() {
                 return sr.substitute_input(&sl);
             }
+            // [gen] | map(f) = [gen] | [.[] | f] → [gen | f]
+            // where gen is a comma of simple scalars and f is input-free
+            if let Expr::Collect { generator: ref lg } = sl {
+                if let Expr::Collect { generator: ref rg } = sr {
+                    if let Expr::Pipe { left: ref rl, right: ref rr } = rg.as_ref() {
+                        if matches!(rl.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)) {
+                            if rr.is_input_free() {
+                                // Distribute f over each element of gen
+                                fn distribute_map(gen: &Expr, f: &Expr) -> Expr {
+                                    match gen {
+                                        Expr::Comma { left, right } => {
+                                            Expr::Comma {
+                                                left: Box::new(distribute_map(left, f)),
+                                                right: Box::new(distribute_map(right, f)),
+                                            }
+                                        }
+                                        other => {
+                                            let piped = Expr::Pipe {
+                                                left: Box::new(other.clone()),
+                                                right: Box::new(f.clone()),
+                                            };
+                                            simplify_expr(&piped)
+                                        }
+                                    }
+                                }
+                                return Expr::Collect { generator: Box::new(distribute_map(lg, rr)) };
+                            }
+                        }
+                    }
+                }
+            }
             Expr::Pipe { left: Box::new(sl), right: Box::new(sr) }
         }
         // Recurse into IfThenElse conditions (select patterns)
@@ -1965,6 +1996,105 @@ impl Filter {
         None
     }
 
+    /// Detect `with_entries(select(.value CMP N))` pattern.
+    /// Returns (cmp_op, threshold) for numeric value comparison.
+    /// This matches: to_entries | [.[] | select(.value CMP N)] | from_entries
+    pub fn detect_with_entries_select_value_cmp(&self) -> Option<(crate::ir::BinOp, f64)> {
+        use crate::ir::{BinOp, Expr, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        // Pattern: Pipe(UnaryOp(ToEntries), Pipe(Collect(Pipe(Each, IfThenElse(cond, Input, Empty))), UnaryOp(FromEntries)))
+        if let Expr::Pipe { left: l1, right: r1 } = expr {
+            // l1 = to_entries
+            if !matches!(l1.as_ref(), Expr::UnaryOp { op: UnaryOp::ToEntries, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                return None;
+            }
+            // r1 = Pipe(Collect(...), from_entries)
+            if let Expr::Pipe { left: l2, right: r2 } = r1.as_ref() {
+                // r2 = from_entries
+                if !matches!(r2.as_ref(), Expr::UnaryOp { op: UnaryOp::FromEntries, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                    return None;
+                }
+                // l2 = Collect(Pipe(Each(Input), IfThenElse(...)))
+                if let Expr::Collect { generator } = l2.as_ref() {
+                    if let Expr::Pipe { left: l3, right: r3 } = generator.as_ref() {
+                        if !matches!(l3.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)) {
+                            return None;
+                        }
+                        // r3 = IfThenElse(cond, Input, Empty) i.e. select(cond)
+                        if let Expr::IfThenElse { cond, then_branch, else_branch } = r3.as_ref() {
+                            if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
+                            if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+                            // cond = BinOp(cmp, Index(Input, "value"), Literal(Num(n)))
+                            if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                                if matches!(op, BinOp::Gt | BinOp::Ge | BinOp::Lt | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                                    // .value CMP N
+                                    if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                                        if matches!(base.as_ref(), Expr::Input) {
+                                            if let Expr::Literal(Literal::Str(s)) = key.as_ref() {
+                                                if s == "value" {
+                                                    if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                                        return Some((*op, *n));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // N CMP .value → flip
+                                    if let Expr::Index { expr: base, key } = rhs.as_ref() {
+                                        if matches!(base.as_ref(), Expr::Input) {
+                                            if let Expr::Literal(Literal::Str(s)) = key.as_ref() {
+                                                if s == "value" {
+                                                    if let Expr::Literal(Literal::Num(n, _)) = lhs.as_ref() {
+                                                        let flipped = match op {
+                                                            BinOp::Gt => BinOp::Lt,
+                                                            BinOp::Ge => BinOp::Le,
+                                                            BinOp::Lt => BinOp::Gt,
+                                                            BinOp::Le => BinOp::Ge,
+                                                            _ => *op,
+                                                        };
+                                                        return Some((flipped, *n));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `.field = CONST` or `setpath(["field"]; CONST)` pattern.
+    /// Returns (field_name, json_bytes_of_value) for raw byte replacement.
+    pub fn detect_field_assign_const(&self) -> Option<(String, Vec<u8>)> {
+        use crate::ir::{Expr, Literal};
+        let expr = self.detect_expr()?;
+        // .field = CONST
+        if let Expr::Assign { path_expr, value_expr } = expr {
+            let field = if let Expr::Index { expr: base, key } = path_expr.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() }
+                else { return None; }
+            } else { return None; };
+            let val_bytes = literal_to_json_bytes(value_expr)?;
+            return Some((field, val_bytes));
+        }
+        // setpath(["field"]; CONST) — path is Collect(Literal(Str(field)))
+        if let Expr::SetPath { path, value, .. } = expr {
+            if let Expr::Collect { generator } = path.as_ref() {
+                if let Expr::Literal(Literal::Str(f)) = generator.as_ref() {
+                    let val_bytes = literal_to_json_bytes(value)?;
+                    return Some((f.clone(), val_bytes));
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `tojson` on input.
     pub fn is_tojson(&self) -> bool {
         use crate::ir::{Expr, UnaryOp};
@@ -3369,6 +3499,41 @@ fn collect_comma_remap(expr: &crate::ir::Expr, elems: &mut Vec<RemapExpr>) -> bo
                 false
             }
         }
+    }
+}
+
+/// Convert a literal Expr to its JSON byte representation.
+fn literal_to_json_bytes(expr: &crate::ir::Expr) -> Option<Vec<u8>> {
+    use crate::ir::{Expr, Literal};
+    match expr {
+        Expr::Literal(Literal::Num(n, _)) => {
+            let mut buf = Vec::new();
+            crate::value::push_jq_number_bytes(&mut buf, *n);
+            Some(buf)
+        }
+        Expr::Literal(Literal::Str(s)) => {
+            let mut buf = Vec::with_capacity(s.len() + 2);
+            buf.push(b'"');
+            for &b in s.as_bytes() {
+                match b {
+                    b'"' => buf.extend_from_slice(b"\\\""),
+                    b'\\' => buf.extend_from_slice(b"\\\\"),
+                    b'\n' => buf.extend_from_slice(b"\\n"),
+                    b'\r' => buf.extend_from_slice(b"\\r"),
+                    b'\t' => buf.extend_from_slice(b"\\t"),
+                    _ if b < 0x20 => {
+                        buf.extend_from_slice(format!("\\u{:04x}", b).as_bytes());
+                    }
+                    _ => buf.push(b),
+                }
+            }
+            buf.push(b'"');
+            Some(buf)
+        }
+        Expr::Literal(Literal::Null) => Some(b"null".to_vec()),
+        Expr::Literal(Literal::True) => Some(b"true".to_vec()),
+        Expr::Literal(Literal::False) => Some(b"false".to_vec()),
+        _ => None,
     }
 }
 

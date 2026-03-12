@@ -8,7 +8,7 @@ use std::process;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, json_object_get_nested_field_raw, parse_json_num, json_value_length, json_object_keys_to_buf_reuse, json_object_extract_keys_only, json_object_keys_unsorted_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_type_byte, json_object_del_field, json_object_merge_literal, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_object_update_field_num, is_json_compact, push_json_compact_raw, push_tojson_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
+use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, json_object_get_nested_field_raw, parse_json_num, json_value_length, json_object_keys_to_buf_reuse, json_object_extract_keys_only, json_object_keys_unsorted_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_type_byte, json_object_del_field, json_object_merge_literal, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_with_entries_select_value_cmp, json_object_set_field_raw, json_object_update_field_num, is_json_compact, push_json_compact_raw, push_tojson_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, pool_value};
 use jq_jit::interpreter::Filter;
 
 fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -763,7 +763,10 @@ fn real_main() {
     let remap_to_entries = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_to_entries && field_remap.is_none() {
         filter.detect_remap_to_entries()
     } else { None };
-    let is_tojson = (use_compact_buf || use_pretty_buf) && !exit_status && !is_each && !is_to_entries && remap_to_entries.is_none() && filter.is_tojson();
+    let with_entries_select = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_to_entries && remap_to_entries.is_none() {
+        filter.detect_with_entries_select_value_cmp()
+    } else { None };
+    let is_tojson = (use_compact_buf || use_pretty_buf) && !exit_status && !is_each && !is_to_entries && remap_to_entries.is_none() && with_entries_select.is_none() && filter.is_tojson();
     let string_interp_fields = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() && field_str_concat.is_none() {
         filter.detect_string_interp_fields()
     } else { None };
@@ -795,6 +798,9 @@ fn real_main() {
     } else { None };
     let field_update_num = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && computed_remap.is_none() && dynamic_key_obj.is_none() {
         filter.detect_field_update_num()
+    } else { None };
+    let field_assign_const = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_update_num.is_none() {
+        filter.detect_field_assign_const()
     } else { None };
     let field_split_length = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
         filter.detect_field_split_length()
@@ -877,10 +883,10 @@ fn real_main() {
         || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_value.is_some() || select_ff_cmp_field.is_some() || select_str_field.is_some()
         || computed_array.is_some() || array_field.is_some() || multi_field.is_some() || is_length || is_keys
         || is_keys_unsorted || has_field.is_some() || has_multi.is_some() || select_has_multi.is_some() || is_type || del_field.is_some() || obj_merge_lit.is_some()
-        || is_each || is_to_entries || remap_to_entries.is_some() || is_tojson || string_interp_fields.is_some() || string_add_chain.is_some() || array_join.is_some()
+        || is_each || is_to_entries || remap_to_entries.is_some() || with_entries_select.is_some() || is_tojson || string_interp_fields.is_some() || string_add_chain.is_some() || array_join.is_some()
         || literal_output.is_some() || array_fields_format.is_some() || raw_csv_fields.is_some()
         || field_split_join.is_some() || field_split_first.is_some() || field_split_length.is_some() || field_strop_length.is_some() || field_length_cmp.is_some() || select_length_cmp_field.is_some() || field_slice.is_some()
-        || dynamic_key_obj.is_some() || field_update_num.is_some()
+        || dynamic_key_obj.is_some() || field_update_num.is_some() || field_assign_const.is_some()
         || min_two_fields.is_some() || minmax_two.is_some() || filter.is_empty();
     let projection_fields: Option<Vec<String>> = if !has_raw_fast_path && !slurp && !raw_input {
         filter.needed_input_fields()
@@ -1622,6 +1628,31 @@ fn real_main() {
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         } else {
                             compact_buf.push(b'\n');
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref fa_field, ref fa_val)) = field_assign_const {
+                    let mut tmp = Vec::with_capacity(256);
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if use_pretty_buf {
+                            tmp.clear();
+                            if json_object_set_field_raw(raw, 0, fa_field, fa_val, &mut tmp) {
+                                let len = tmp.len();
+                                if len > 0 && tmp[len-1] == b'\n' { tmp.truncate(len-1); }
+                                push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                                compact_buf.push(b'\n');
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else if !json_object_set_field_raw(raw, 0, fa_field, fa_val, &mut compact_buf) {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -4285,6 +4316,27 @@ fn real_main() {
                         }
                         Ok(())
                     })
+                } else if let Some((ref we_op, we_threshold)) = with_entries_select {
+                    // with_entries(select(.value CMP N)) → filter object entries by value
+                    use jq_jit::ir::BinOp;
+                    let cmp_byte = match we_op {
+                        BinOp::Gt => b'>',
+                        BinOp::Ge => b'G',
+                        BinOp::Lt => b'<',
+                        BinOp::Le => b'L',
+                        BinOp::Eq => b'=',
+                        BinOp::Ne => b'!',
+                        _ => b'>',
+                    };
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        json_with_entries_select_value_cmp(raw, 0, cmp_byte, we_threshold, &mut compact_buf);
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
                 } else if is_tojson {
                     // tojson: single-pass compact + escape
                     json_stream_raw(&input_str, |start, end| {
@@ -4932,6 +4984,32 @@ fn real_main() {
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     } else {
                         compact_buf.push(b'\n');
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref fa_set_field, ref fa_set_val)) = field_assign_const {
+                let content_bytes = content.as_bytes();
+                let mut tmp = Vec::with_capacity(256);
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if use_pretty_buf {
+                        tmp.clear();
+                        if json_object_set_field_raw(raw, 0, fa_set_field, fa_set_val, &mut tmp) {
+                            let len = tmp.len();
+                            if len > 0 && tmp[len-1] == b'\n' { tmp.truncate(len-1); }
+                            push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                            compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                    } else if !json_object_set_field_raw(raw, 0, fa_set_field, fa_set_val, &mut compact_buf) {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
@@ -7530,6 +7608,27 @@ fn real_main() {
                         compact_buf.push(b'}');
                     }
                     compact_buf.extend_from_slice(b"]\n");
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref we_op, we_threshold)) = with_entries_select {
+                let content_bytes = content.as_bytes();
+                use jq_jit::ir::BinOp;
+                let cmp_byte = match we_op {
+                    BinOp::Gt => b'>',
+                    BinOp::Ge => b'G',
+                    BinOp::Lt => b'<',
+                    BinOp::Le => b'L',
+                    BinOp::Eq => b'=',
+                    BinOp::Ne => b'!',
+                    _ => b'>',
+                };
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    json_with_entries_select_value_cmp(raw, 0, cmp_byte, we_threshold, &mut compact_buf);
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
                         compact_buf.clear();
