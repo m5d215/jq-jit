@@ -1961,6 +1961,9 @@ fn real_main() {
     let select_compound_remap = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_compound.is_none() && select_compound_field.is_none() && field_access.is_none() {
         filter.detect_select_compound_cmp_then_remap()
     } else { None };
+    let select_compound_computed = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_compound.is_none() && select_compound_field.is_none() && select_compound_remap.is_none() && field_access.is_none() {
+        filter.detect_select_compound_cmp_then_computed()
+    } else { None };
     let select_has_multi = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() {
         filter.detect_select_has_multi()
     } else { None };
@@ -2030,7 +2033,7 @@ fn real_main() {
         || field_str_builtin.is_some() || field_test.is_some() || field_gsub.is_some() || field_format.is_some() || field_ltrimstr_tonumber.is_some()
         || field_str_concat.is_some() || field_alt.is_some() || field_field_alt.is_some()
         || select_cmp.is_some() || select_arith_cmp.is_some()
-        || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || field_field_cmp_branch.is_some() || if_cmp_arrays.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some()
+        || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || field_field_cmp_branch.is_some() || if_cmp_arrays.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some() || select_compound_computed.is_some()
         || select_str.is_some()
         || select_str_test.is_some() || select_regex_test.is_some() || select_nested_cmp.is_some()
         || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_field_unary.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_array.is_some() || select_arith_cmp_array.is_some() || select_cmp_value.is_some() || select_ff_cmp_field.is_some() || select_ff_cmp.is_some() || select_ff_cmp_cremap.is_some() || select_ff_cmp_value.is_some() || select_ff_cmp_array.is_some() || select_compound_array.is_some() || select_str_field.is_some() || select_str_cremap.is_some() || select_str_array.is_some()
@@ -5397,6 +5400,52 @@ fn real_main() {
                                 }
                                 compact_buf.extend_from_slice(b"}\n");
                             }
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref conj, ref cmps, ref rexpr)) = select_compound_computed {
+                    use jq_jit::ir::BinOp;
+                    let is_and = matches!(conj, BinOp::And);
+                    // Collect all needed fields
+                    let mut all_fields: Vec<String> = Vec::new();
+                    let mut field_idx = std::collections::HashMap::new();
+                    let ensure_field = |f: &str, all: &mut Vec<String>, idx: &mut std::collections::HashMap<String, usize>| {
+                        if !idx.contains_key(f) { idx.insert(f.to_string(), all.len()); all.push(f.to_string()); }
+                    };
+                    for (f, _, _) in cmps { ensure_field(f.as_str(), &mut all_fields, &mut field_idx); }
+                    for f in remap_expr_fields(rexpr) { ensure_field(f, &mut all_fields, &mut field_idx); }
+                    let resolved = resolve_one_remap(rexpr, &field_idx);
+                    let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                    let cmp_indices: Vec<(usize, BinOp, f64)> = cmps.iter().map(|(f, op, thr)| {
+                        (field_idx[f.as_str()], *op, *thr)
+                    }).collect();
+                    let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if !json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                            return Ok(());
+                        }
+                        let check = |idx: usize, op: &BinOp, thr: &f64| -> bool {
+                            let (vs, ve) = ranges_buf[idx];
+                            parse_json_num(&raw[vs..ve]).map_or(false, |val| match op {
+                                BinOp::Gt => val > *thr, BinOp::Lt => val < *thr,
+                                BinOp::Ge => val >= *thr, BinOp::Le => val <= *thr,
+                                BinOp::Eq => val == *thr, BinOp::Ne => val != *thr,
+                                _ => false,
+                            })
+                        };
+                        let pass = if is_and {
+                            cmp_indices.iter().all(|(idx, op, thr)| check(*idx, op, thr))
+                        } else {
+                            cmp_indices.iter().any(|(idx, op, thr)| check(*idx, op, thr))
+                        };
+                        if pass {
+                            emit_resolved_value(&mut compact_buf, &resolved, raw, &ranges_buf);
+                            compact_buf.push(b'\n');
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -8970,6 +9019,52 @@ fn real_main() {
                             }
                             compact_buf.extend_from_slice(b"}\n");
                         }
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref conj, ref cmps, ref rexpr)) = select_compound_computed {
+                use jq_jit::ir::BinOp;
+                let content_bytes = content.as_bytes();
+                let is_and = matches!(conj, BinOp::And);
+                let mut all_fields: Vec<String> = Vec::new();
+                let mut field_idx = std::collections::HashMap::new();
+                let ensure_field3 = |f: &str, all: &mut Vec<String>, idx: &mut std::collections::HashMap<String, usize>| {
+                    if !idx.contains_key(f) { idx.insert(f.to_string(), all.len()); all.push(f.to_string()); }
+                };
+                for (f, _, _) in cmps { ensure_field3(f.as_str(), &mut all_fields, &mut field_idx); }
+                for f in remap_expr_fields(rexpr) { ensure_field3(f, &mut all_fields, &mut field_idx); }
+                let resolved = resolve_one_remap(rexpr, &field_idx);
+                let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                let cmp_indices: Vec<(usize, BinOp, f64)> = cmps.iter().map(|(f, op, thr)| {
+                    (field_idx[f.as_str()], *op, *thr)
+                }).collect();
+                let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if !json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                        return Ok(());
+                    }
+                    let check = |idx: usize, op: &BinOp, thr: &f64| -> bool {
+                        let (vs, ve) = ranges_buf[idx];
+                        parse_json_num(&raw[vs..ve]).map_or(false, |val| match op {
+                            BinOp::Gt => val > *thr, BinOp::Lt => val < *thr,
+                            BinOp::Ge => val >= *thr, BinOp::Le => val <= *thr,
+                            BinOp::Eq => val == *thr, BinOp::Ne => val != *thr,
+                            _ => false,
+                        })
+                    };
+                    let pass = if is_and {
+                        cmp_indices.iter().all(|(idx, op, thr)| check(*idx, op, thr))
+                    } else {
+                        cmp_indices.iter().any(|(idx, op, thr)| check(*idx, op, thr))
+                    };
+                    if pass {
+                        emit_resolved_value(&mut compact_buf, &resolved, raw, &ranges_buf);
+                        compact_buf.push(b'\n');
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
