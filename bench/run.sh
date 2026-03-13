@@ -144,6 +144,9 @@ TESTS=(
     'if sw then .f:-c:if .name | startswith("user_1") then .x else .y end'
     'dynkey {(.n):.x*2}:-c:{(.name): (.x * 2)}'
     'sel(and)|.x*.y:-c:select(.x > 500 and .y < 1000) | .x * .y'
+    'sel>N|str chain:-c:select(.x > 1000) | (.name + ":" + (.x | tostring))'
+    '.f+"_"+arith_ts:-c:.name + "_" + (.x * 2 | tostring)'
+    'sel(sw)|str ch:-c:select(.name | startswith("item_1")) | (.name + ":" + (.x | tostring))'
 )
 
 for test in "${TESTS[@]}"; do
