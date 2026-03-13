@@ -3476,6 +3476,22 @@ fn try_eval_key_f64(expr: &Expr, input: &Value) -> Option<f64> {
         }
         Expr::Negate { operand } => try_eval_key_f64(operand, input).map(|v| -v),
         Expr::UnaryOp { op, operand } => {
+            // Length can work on any type (string→charcount, array→len, object→len, number→fabs)
+            if matches!(op, UnaryOp::Length) {
+                // Try to get the original Value for length calculation
+                if let Some(v) = try_eval_key_value(operand, input) {
+                    return match v {
+                        Value::Str(s) => Some(s.chars().count() as f64),
+                        Value::Arr(a) => Some(a.len() as f64),
+                        Value::Obj(o) => Some(o.len() as f64),
+                        Value::Num(n, _) => Some(n.abs()),
+                        Value::Null => Some(0.0),
+                        _ => None,
+                    };
+                }
+                // Fallback: try as f64 (for piped numeric expressions)
+                return try_eval_key_f64(operand, input).map(|v| v.abs());
+            }
             let v = try_eval_key_f64(operand, input)?;
             match op {
                 UnaryOp::Floor => Some(v.floor()),
@@ -3499,9 +3515,16 @@ fn try_eval_key_f64(expr: &Expr, input: &Value) -> Option<f64> {
             } else { None }
         }
         Expr::Pipe { left, right } => {
-            let mid_val = try_eval_key_f64(left, input)?;
-            let mid = Value::Num(mid_val, None);
-            try_eval_key_f64(right, &mid)
+            // Try f64 pipe first
+            if let Some(mid_val) = try_eval_key_f64(left, input) {
+                let mid = Value::Num(mid_val, None);
+                return try_eval_key_f64(right, &mid);
+            }
+            // Try Value pipe (e.g., .name | length)
+            if let Some(mid_val) = try_eval_key_value(left, input) {
+                return try_eval_key_f64(right, mid_val);
+            }
+            None
         }
         _ => None,
     }
