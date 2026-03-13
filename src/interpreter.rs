@@ -4171,6 +4171,34 @@ impl Filter {
         None
     }
 
+    /// Detect `[.[] | select(type == "TYPE")]` — collect values of given type.
+    /// Returns the type string ("number", "string", "object", "array", "boolean", "null").
+    pub fn detect_collect_each_select_type(&self) -> Option<String> {
+        use crate::ir::{Expr, Literal, BinOp, UnaryOp};
+        let expr = self.detect_expr()?;
+        if let Expr::Collect { generator } = expr {
+            if let Expr::Pipe { left, right } = generator.as_ref() {
+                if matches!(left.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)) {
+                    // select(type == "T") = IfThenElse { cond: type == "T", then: ., else: empty }
+                    if let Expr::IfThenElse { cond, then_branch, else_branch } = right.as_ref() {
+                        if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                            if let Expr::BinOp { op: BinOp::Eq, lhs, rhs } = cond.as_ref() {
+                                if matches!(lhs.as_ref(), Expr::UnaryOp { op: UnaryOp::Type, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                                    if let Expr::Literal(Literal::Str(t)) = rhs.as_ref() {
+                                        if matches!(t.as_str(), "number" | "string" | "object" | "array" | "boolean" | "null") {
+                                            return Some(t.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `[.x, .y] | sort` — two-field sort into array.
     /// Returns (field1, field2).
     pub fn detect_sort_two_fields(&self) -> Option<(String, String)> {
