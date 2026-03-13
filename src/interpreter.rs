@@ -74,6 +74,8 @@ pub enum BranchOutput {
     Field(String),
     /// `empty` — produce no output
     Empty,
+    /// `{key: value, ...}` — object construction with computed values
+    Remap(Vec<(String, RemapExpr)>),
 }
 
 /// Right-hand side of a condition: either a constant or a field reference.
@@ -3354,6 +3356,15 @@ impl Filter {
                 Expr::Literal(Literal::Null) => Some(BranchOutput::Literal(b"null".to_vec())),
                 Expr::Literal(Literal::True) => Some(BranchOutput::Literal(b"true".to_vec())),
                 Expr::Literal(Literal::False) => Some(BranchOutput::Literal(b"false".to_vec())),
+                Expr::ObjectConstruct { pairs } if !pairs.is_empty() => {
+                    let mut result = Vec::with_capacity(pairs.len());
+                    for (k, v) in pairs {
+                        let key = if let Expr::Literal(Literal::Str(s)) = k { s.clone() } else { return None; };
+                        let rexpr = Self::classify_remap_value(v)?;
+                        result.push((key, rexpr));
+                    }
+                    Some(BranchOutput::Remap(result))
+                }
                 _ => None,
             }
         };
@@ -3416,9 +3427,11 @@ impl Filter {
                 // Only use this if it adds value over detect_cmp_branch_literals / detect_arith_cmp_branch_literals
                 let has_field_output = branches.iter().any(|b| matches!(b.output, BranchOutput::Field(_)))
                     || matches!(else_output, BranchOutput::Field(_));
+                let has_remap_output = branches.iter().any(|b| matches!(b.output, BranchOutput::Remap(_)))
+                    || matches!(else_output, BranchOutput::Remap(_));
                 let has_field_rhs = branches.iter().any(|b| matches!(b.cond_rhs, CondRhs::Field(_)));
                 let has_arith_ops = branches.iter().any(|b| !b.cond_arith_ops.is_empty());
-                if branches.len() < 2 && !has_field_output && !has_field_rhs && !has_arith_ops { return None; }
+                if branches.len() < 2 && !has_field_output && !has_remap_output && !has_field_rhs && !has_arith_ops { return None; }
                 return Some((branches, else_output));
             }
         }

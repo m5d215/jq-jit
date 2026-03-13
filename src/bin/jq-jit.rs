@@ -3250,8 +3250,8 @@ fn real_main() {
                     use jq_jit::interpreter::{BranchOutput, CondRhs};
                     use jq_jit::ir::BinOp;
 
-                    // Specialized path: single-branch with lazy output fetch
-                    if branches.len() == 1 {
+                    // Specialized path: single-branch with lazy output fetch (no remap outputs)
+                    if branches.len() == 1 && !matches!(branches[0].output, BranchOutput::Remap(_)) && !matches!(else_output, BranchOutput::Remap(_)) {
                         let br = &branches[0];
                         let cond_field = br.cond_field.as_str();
                         let cond_arith = &br.cond_arith_ops;
@@ -3316,6 +3316,7 @@ fn real_main() {
                                         }
                                     }
                                     BranchOutput::Empty => {}
+                                    BranchOutput::Remap(_) => unreachable!(),
                                 }
                             } else {
                                 // Fields not numeric — take else branch
@@ -3336,6 +3337,7 @@ fn real_main() {
                                         }
                                     }
                                     BranchOutput::Empty => {}
+                                    BranchOutput::Remap(_) => unreachable!(),
                                 }
                             }
                             if compact_buf.len() >= 1 << 17 {
@@ -3354,25 +3356,57 @@ fn real_main() {
                             all.push(f.clone());
                         }
                     };
+                    let collect_output_fields = |out: &BranchOutput, all: &mut Vec<String>, idx: &mut std::collections::HashMap<String, usize>| {
+                        match out {
+                            BranchOutput::Field(ref f) => { ensure_field(f, all, idx); }
+                            BranchOutput::Remap(ref entries) => {
+                                for (_, rexpr) in entries {
+                                    for name in remap_expr_fields(rexpr) {
+                                        let s = name.to_string();
+                                        ensure_field(&s, all, idx);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    };
                     for br in branches {
                         ensure_field(&br.cond_field, &mut all_fields, &mut field_idx);
                         if let CondRhs::Field(ref f) = br.cond_rhs {
                             ensure_field(f, &mut all_fields, &mut field_idx);
                         }
-                        if let BranchOutput::Field(ref f) = br.output {
-                            ensure_field(f, &mut all_fields, &mut field_idx);
-                        }
+                        collect_output_fields(&br.output, &mut all_fields, &mut field_idx);
                     }
-                    if let BranchOutput::Field(ref f) = else_output {
-                        ensure_field(f, &mut all_fields, &mut field_idx);
-                    }
+                    collect_output_fields(else_output, &mut all_fields, &mut field_idx);
+                    // Pre-resolve remap exprs for each branch
+                    let branch_resolved: Vec<Option<(Vec<Vec<u8>>, Vec<ResolvedRemap>, &[u8])>> = branches.iter().map(|br| {
+                        if let BranchOutput::Remap(ref entries) = br.output {
+                            let kp = if use_pretty_buf {
+                                build_obj_key_prefixes_pretty(entries.iter().map(|(k, _)| k.as_str()))
+                            } else {
+                                build_obj_key_prefixes(entries.iter().map(|(k, _)| k.as_str()))
+                            };
+                            let res = resolve_remap_exprs(entries, &field_idx);
+                            Some((kp, res, if use_pretty_buf { &b"\n}\n"[..] } else { &b"}\n"[..] }))
+                        } else { None }
+                    }).collect();
+                    let else_resolved = if let BranchOutput::Remap(ref entries) = else_output {
+                        let kp = if use_pretty_buf {
+                            build_obj_key_prefixes_pretty(entries.iter().map(|(k, _)| k.as_str()))
+                        } else {
+                            build_obj_key_prefixes(entries.iter().map(|(k, _)| k.as_str()))
+                        };
+                        let res = resolve_remap_exprs(entries, &field_idx);
+                        Some((kp, res, if use_pretty_buf { &b"\n}\n"[..] } else { &b"}\n"[..] }))
+                    } else { None };
                     let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
                     let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
                             let mut output = None;
-                            for br in branches {
+                            let mut output_idx = 0usize;
+                            for (i, br) in branches.iter().enumerate() {
                                 let idx = field_idx[&br.cond_field];
                                 let (vs, ve) = ranges_buf[idx];
                                 if let Some(mut val) = parse_json_num(&raw[vs..ve]) {
@@ -3398,7 +3432,7 @@ fn real_main() {
                                         BinOp::Eq => val == rhs_val, BinOp::Ne => val != rhs_val,
                                         _ => false,
                                     };
-                                    if pass { output = Some(&br.output); break; }
+                                    if pass { output = Some(&br.output); output_idx = i; break; }
                                 }
                             }
                             let out_branch = output.unwrap_or(else_output);
@@ -3417,6 +3451,20 @@ fn real_main() {
                                         compact_buf.extend_from_slice(val);
                                     }
                                     compact_buf.push(b'\n');
+                                }
+                                BranchOutput::Remap(_) => {
+                                    let resolved_data = if output.is_some() {
+                                        branch_resolved[output_idx].as_ref()
+                                    } else {
+                                        else_resolved.as_ref()
+                                    };
+                                    if let Some((ref kp, ref res, close)) = resolved_data {
+                                        for (j, rv) in res.iter().enumerate() {
+                                            compact_buf.extend_from_slice(&kp[j]);
+                                            emit_resolved_value(&mut compact_buf, rv, raw, &ranges_buf);
+                                        }
+                                        compact_buf.extend_from_slice(close);
+                                    }
                                 }
                                 BranchOutput::Empty => { /* produce no output */ }
                             }
@@ -5824,8 +5872,8 @@ fn real_main() {
                 use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
 
-                // Specialized path: single-branch with lazy output fetch
-                if branches.len() == 1 {
+                // Specialized path: single-branch with lazy output fetch (no remap outputs)
+                if branches.len() == 1 && !matches!(branches[0].output, BranchOutput::Remap(_)) && !matches!(else_output, BranchOutput::Remap(_)) {
                     let br = &branches[0];
                     let cond_field = br.cond_field.as_str();
                     let cond_arith = &br.cond_arith_ops;
@@ -5889,6 +5937,7 @@ fn real_main() {
                                     }
                                 }
                                 BranchOutput::Empty => {}
+                                BranchOutput::Remap(_) => unreachable!(),
                             }
                         } else {
                             match else_output {
@@ -5908,6 +5957,7 @@ fn real_main() {
                                     }
                                 }
                                 BranchOutput::Empty => {}
+                                BranchOutput::Remap(_) => unreachable!(),
                             }
                         }
                         if compact_buf.len() >= 1 << 17 {
@@ -5926,25 +5976,57 @@ fn real_main() {
                         all.push(f.clone());
                     }
                 };
+                let collect_output_fields = |out: &BranchOutput, all: &mut Vec<String>, idx: &mut std::collections::HashMap<String, usize>| {
+                    match out {
+                        BranchOutput::Field(ref f) => { ensure_field(f, all, idx); }
+                        BranchOutput::Remap(ref entries) => {
+                            for (_, rexpr) in entries {
+                                for name in remap_expr_fields(rexpr) {
+                                    let s = name.to_string();
+                                    ensure_field(&s, all, idx);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                };
                 for br in branches {
                     ensure_field(&br.cond_field, &mut all_fields, &mut field_idx);
                     if let CondRhs::Field(ref f) = br.cond_rhs {
                         ensure_field(f, &mut all_fields, &mut field_idx);
                     }
-                    if let BranchOutput::Field(ref f) = br.output {
-                        ensure_field(f, &mut all_fields, &mut field_idx);
-                    }
+                    collect_output_fields(&br.output, &mut all_fields, &mut field_idx);
                 }
-                if let BranchOutput::Field(ref f) = else_output {
-                    ensure_field(f, &mut all_fields, &mut field_idx);
-                }
+                collect_output_fields(else_output, &mut all_fields, &mut field_idx);
+                // Pre-resolve remap exprs for each branch
+                let branch_resolved: Vec<Option<(Vec<Vec<u8>>, Vec<ResolvedRemap>, &[u8])>> = branches.iter().map(|br| {
+                    if let BranchOutput::Remap(ref entries) = br.output {
+                        let kp = if use_pretty_buf {
+                            build_obj_key_prefixes_pretty(entries.iter().map(|(k, _)| k.as_str()))
+                        } else {
+                            build_obj_key_prefixes(entries.iter().map(|(k, _)| k.as_str()))
+                        };
+                        let res = resolve_remap_exprs(entries, &field_idx);
+                        Some((kp, res, if use_pretty_buf { &b"\n}\n"[..] } else { &b"}\n"[..] }))
+                    } else { None }
+                }).collect();
+                let else_resolved = if let BranchOutput::Remap(ref entries) = else_output {
+                    let kp = if use_pretty_buf {
+                        build_obj_key_prefixes_pretty(entries.iter().map(|(k, _)| k.as_str()))
+                    } else {
+                        build_obj_key_prefixes(entries.iter().map(|(k, _)| k.as_str()))
+                    };
+                    let res = resolve_remap_exprs(entries, &field_idx);
+                    Some((kp, res, if use_pretty_buf { &b"\n}\n"[..] } else { &b"}\n"[..] }))
+                } else { None };
                 let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
                 let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
                     if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
                         let mut output = None;
-                        for br in branches {
+                        let mut output_idx = 0usize;
+                        for (i, br) in branches.iter().enumerate() {
                             let idx = field_idx[&br.cond_field];
                             let (vs, ve) = ranges_buf[idx];
                             if let Some(mut val) = parse_json_num(&raw[vs..ve]) {
@@ -5970,7 +6052,7 @@ fn real_main() {
                                     BinOp::Eq => val == rhs_val, BinOp::Ne => val != rhs_val,
                                     _ => false,
                                 };
-                                if pass { output = Some(&br.output); break; }
+                                if pass { output = Some(&br.output); output_idx = i; break; }
                             }
                         }
                         let out_branch = output.unwrap_or(else_output);
@@ -5989,6 +6071,20 @@ fn real_main() {
                                     compact_buf.extend_from_slice(val);
                                 }
                                 compact_buf.push(b'\n');
+                            }
+                            BranchOutput::Remap(_) => {
+                                let resolved_data = if output.is_some() {
+                                    branch_resolved[output_idx].as_ref()
+                                } else {
+                                    else_resolved.as_ref()
+                                };
+                                if let Some((ref kp, ref res, close)) = resolved_data {
+                                    for (j, rv) in res.iter().enumerate() {
+                                        compact_buf.extend_from_slice(&kp[j]);
+                                        emit_resolved_value(&mut compact_buf, rv, raw, &ranges_buf);
+                                    }
+                                    compact_buf.extend_from_slice(close);
+                                }
                             }
                             BranchOutput::Empty => { /* produce no output */ }
                         }
