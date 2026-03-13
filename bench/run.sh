@@ -157,6 +157,12 @@ TESTS=(
     '.name|rindex:-c:.name | rindex("_")'
     '.name|indices:-c:.name | indices("_")'
     '[x,y]|sort:-c:[.x, .y] | sort'
+    '.name|scan:-c:.name | scan("[0-9]+")'
+    '.name|gsub:-c:.name | gsub("_"; "-")'
+    'walk(if num .+1):-c:walk(if type == "number" then . + 1 else . end)'
+    'tojson:-c:tojson'
+    '{name,x}:-c:{name,x}'
+    '.z//.name:-c:.z // .name'
 )
 
 for test in "${TESTS[@]}"; do

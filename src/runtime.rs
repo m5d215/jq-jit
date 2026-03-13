@@ -2019,7 +2019,7 @@ fn rt_scan(v: &Value, re: &Value) -> Result<Value> {
                             let groups: Vec<Value> = (1..caps.len())
                                 .map(|i| match caps.get(i) {
                                     Some(m) => Value::from_str(m.as_str()),
-                                    None => Value::Null,
+                                    None => Value::from_str(""),
                                 })
                                 .collect();
                             Value::Arr(Rc::new(groups))

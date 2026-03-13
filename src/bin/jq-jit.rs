@@ -4576,7 +4576,7 @@ fn real_main() {
                                                         }
                                                         compact_buf.push(b'"');
                                                     }
-                                                    None => compact_buf.extend_from_slice(b"null"),
+                                                    None => compact_buf.extend_from_slice(b"\"\""),
                                                 }
                                             }
                                             compact_buf.extend_from_slice(b"]\n");
