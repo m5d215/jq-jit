@@ -58,6 +58,8 @@ pub enum RemapExpr {
     ArithToString(ArithExpr, Vec<String>),
     /// `(arith_expr) | math_unary` — compound arithmetic then sqrt/floor/ceil
     ArithUnary(MathUnary, ArithExpr, Vec<String>),
+    /// `.field | .[from:to]` — string slice
+    FieldSlice(String, Option<i64>, Option<i64>), // field, from, to
 }
 
 /// Math unary operation for ArithUnary.
@@ -1625,6 +1627,30 @@ impl Filter {
             }
             if has_field {
                 return Some(RemapExpr::StringInterp(interp_parts));
+            }
+        }
+        // .field | .[from:to] (beta-reduced: Slice { expr: Index(Input, field), from, to })
+        if let Expr::Slice { expr: base, from, to } = v {
+            if let Expr::Index { expr: input, key } = base.as_ref() {
+                if matches!(input.as_ref(), Expr::Input) {
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        let from_val = match from {
+                            Some(e) => match e.as_ref() {
+                                Expr::Literal(Literal::Num(n, _)) => Some(*n as i64),
+                                _ => return None,
+                            },
+                            None => None,
+                        };
+                        let to_val = match to {
+                            Some(e) => match e.as_ref() {
+                                Expr::Literal(Literal::Num(n, _)) => Some(*n as i64),
+                                _ => return None,
+                            },
+                            None => None,
+                        };
+                        return Some(RemapExpr::FieldSlice(field.clone(), from_val, to_val));
+                    }
+                }
             }
         }
         // Fallback: compound arithmetic expression tree over fields and constants

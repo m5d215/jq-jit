@@ -153,6 +153,7 @@ fn remap_expr_fields(rexpr: &jq_jit::interpreter::RemapExpr) -> Vec<&str> {
         RemapExpr::FieldSplitIndex(f, _, _) => vec![f.as_str()],
         RemapExpr::FieldOpFieldToString(f1, _, f2) => vec![f1.as_str(), f2.as_str()],
         RemapExpr::ArithToString(_, fields) | RemapExpr::ArithUnary(_, _, fields) => fields.iter().map(|f| f.as_str()).collect(),
+        RemapExpr::FieldSlice(f, _, _) => vec![f.as_str()],
         RemapExpr::CondChain(branches, else_out) => {
             let mut fields: Vec<&str> = Vec::new();
             for b in branches {
@@ -244,6 +245,7 @@ enum ResolvedRemap {
     FieldOpFieldToString(usize, jq_jit::ir::BinOp, usize), // idx1, op, idx2
     ArithToString(jq_jit::interpreter::ArithExpr),
     ArithUnary(jq_jit::interpreter::MathUnary, jq_jit::interpreter::ArithExpr),
+    FieldSlice(usize, Option<i64>, Option<i64>),
 }
 
 /// Pre-resolved conditional branch for remap values.
@@ -345,6 +347,9 @@ fn resolve_one_remap(
         }
         RemapExpr::ArithUnary(math_op, arith, fields) => {
             ResolvedRemap::ArithUnary(*math_op, resolve_arith_expr(arith, fields, field_idx))
+        }
+        RemapExpr::FieldSlice(f, from, to) => {
+            ResolvedRemap::FieldSlice(field_idx[f.as_str()], *from, *to)
         }
         RemapExpr::StringInterp(parts) => {
             let resolved = parts.iter().map(|p| match p {
@@ -745,6 +750,11 @@ fn emit_remap_value(
                 let result = apply_math_unary(*math_op, r);
                 push_jq_number_bytes(buf, result);
             } else { buf.extend_from_slice(b"null"); }
+        }
+        RemapExpr::FieldSlice(f, from, to) => {
+            let idx = field_idx[f.as_str()];
+            let resolved = ResolvedRemap::FieldSlice(idx, *from, *to);
+            emit_resolved_value(buf, &resolved, raw, ranges);
         }
         RemapExpr::CondChain(_, _) => {
             // Resolve and emit (slow path, used for non-pre-resolved paths)
@@ -1159,6 +1169,36 @@ fn emit_resolved_value(
                 let result = apply_math_unary(math_op, r);
                 push_jq_number_bytes(buf, result);
             } else { buf.extend_from_slice(b"null"); }
+        }
+        ResolvedRemap::FieldSlice(idx, from, to) => {
+            let (vs, ve) = ranges[idx];
+            let val = &raw[vs..ve];
+            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                && !val[1..val.len()-1].contains(&b'\\')
+            {
+                let inner = &val[1..val.len()-1];
+                // Count UTF-8 codepoints to find byte offsets
+                let cp_count = inner.iter().filter(|&&b| (b & 0xC0) != 0x80).count() as i64;
+                let resolve = |v: i64| -> usize {
+                    let v = if v < 0 { (cp_count + v).max(0) } else { v.min(cp_count) } as usize;
+                    // Find byte offset for codepoint index v
+                    let mut cp = 0usize;
+                    for (i, &b) in inner.iter().enumerate() {
+                        if cp == v { return i; }
+                        if (b & 0xC0) != 0x80 { cp += 1; }
+                    }
+                    inner.len()
+                };
+                let start = from.map(|f| resolve(f)).unwrap_or(0);
+                let end = to.map(|t| resolve(t)).unwrap_or(inner.len());
+                buf.push(b'"');
+                if start <= end && start <= inner.len() {
+                    buf.extend_from_slice(&inner[start..end.min(inner.len())]);
+                }
+                buf.push(b'"');
+            } else {
+                buf.extend_from_slice(b"null");
+            }
         }
     }
 }
