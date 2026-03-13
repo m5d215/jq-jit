@@ -215,6 +215,60 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             {
                 return Expr::Input;
             }
+            // Semantic: to_entries | map(.key) → keys_unsorted
+            // to_entries | map(.value) → [.[]]
+            // Semantic: to_entries | map(.key) → keys_unsorted, to_entries | map(.value) → [.[]]
+            // Also handles: to_entries | map(.key) | sort → keys (composed with trailing pipe)
+            if matches!(&sl, Expr::UnaryOp { op: UnaryOp::ToEntries, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                // Helper: check if expr is map(.key) or map(.value) — returns Some("key") or Some("value")
+                fn is_map_entry_field(e: &Expr) -> Option<&str> {
+                    if let Expr::Collect { generator } = e {
+                        if let Expr::Pipe { left: gl, right: gr } = generator.as_ref() {
+                            if matches!(gl.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)) {
+                                if let Expr::Index { expr: base, key } = gr.as_ref() {
+                                    if matches!(base.as_ref(), Expr::Input) {
+                                        if let Expr::Literal(crate::ir::Literal::Str(field)) = key.as_ref() {
+                                            if field == "key" || field == "value" {
+                                                return Some(field.as_str());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    None
+                }
+                // Direct: to_entries | map(.key) or to_entries | map(.value)
+                if let Some(field) = is_map_entry_field(&sr) {
+                    if field == "key" {
+                        return Expr::UnaryOp { op: UnaryOp::KeysUnsorted, operand: Box::new(Expr::Input) };
+                    } else {
+                        return Expr::Collect { generator: Box::new(Expr::Each { input_expr: Box::new(Expr::Input) }) };
+                    }
+                }
+                // Composed: to_entries | Pipe(map(.key/.value), tail) → rewrite left, keep tail
+                if let Expr::Pipe { left: pl, right: pr } = &sr {
+                    if let Some(field) = is_map_entry_field(pl) {
+                        let rewritten = if field == "key" {
+                            Expr::UnaryOp { op: UnaryOp::KeysUnsorted, operand: Box::new(Expr::Input) }
+                        } else {
+                            Expr::Collect { generator: Box::new(Expr::Each { input_expr: Box::new(Expr::Input) }) }
+                        };
+                        // Recursively simplify the new pipe
+                        return simplify_expr(&Expr::Pipe {
+                            left: Box::new(rewritten),
+                            right: pr.clone(),
+                        });
+                    }
+                }
+            }
+            // Semantic: keys_unsorted | sort → keys
+            if matches!(&sl, Expr::UnaryOp { op: UnaryOp::KeysUnsorted, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Sort, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                    return Expr::UnaryOp { op: UnaryOp::Keys, operand: Box::new(Expr::Input) };
+                }
+            }
             // Semantic: cmp_expr | not → inverted cmp_expr
             if matches!(&sr, Expr::Not) {
                 if let Expr::BinOp { op, lhs, rhs } = &sl {
