@@ -412,6 +412,30 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                 }
             }
+            // Semantic: [a, b, c] | reverse → [c, b, a]
+            if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Reverse, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                if let Expr::Collect { generator } = &sl {
+                    fn collect_comma_elements(expr: &Expr, out: &mut Vec<Expr>) {
+                        match expr {
+                            Expr::Comma { left, right } => {
+                                collect_comma_elements(left, out);
+                                collect_comma_elements(right, out);
+                            }
+                            other => out.push(other.clone()),
+                        }
+                    }
+                    let mut elements = Vec::new();
+                    collect_comma_elements(generator, &mut elements);
+                    if elements.len() >= 2 {
+                        elements.reverse();
+                        let mut gen = elements.pop().unwrap();
+                        while let Some(e) = elements.pop() {
+                            gen = Expr::Comma { left: Box::new(e), right: Box::new(gen) };
+                        }
+                        return Expr::Collect { generator: Box::new(gen) };
+                    }
+                }
+            }
             // Beta-reduction: .x | . + 1 → .x + 1
             if sl.is_simple_scalar() && sr.is_input_free() {
                 return sr.substitute_input(&sl);
