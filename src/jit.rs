@@ -6490,7 +6490,21 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                         };
                         if let Some(op_kind) = op_kind {
                             // Use eval infrastructure to perform the closure op
-                            let env = Rc::new(RefCell::new(crate::eval::Env::new(vec![])));
+                            // Cache the Env to avoid 2MB allocation per call
+                            thread_local! {
+                                static CLOSURE_OP_ENV: RefCell<Option<Rc<RefCell<crate::eval::Env>>>> = const { RefCell::new(None) };
+                            }
+                            let env = CLOSURE_OP_ENV.with(|cell| {
+                                let mut opt = cell.borrow_mut();
+                                if let Some(ref env) = *opt {
+                                    env.borrow_mut().reset();
+                                    env.clone()
+                                } else {
+                                    let e = Rc::new(RefCell::new(crate::eval::Env::new(vec![])));
+                                    *opt = Some(e.clone());
+                                    e
+                                }
+                            });
                             let eval_result = crate::eval::eval_closure_op_standalone(
                                 op_kind, container, &key_expr, &env,
                             );
