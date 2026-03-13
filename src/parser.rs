@@ -2694,14 +2694,28 @@ impl Parser {
             }
             "leaf_paths" => {
                 // leaf_paths = paths(scalars)
-                // paths whose getpath result is a scalar
-                Ok(Expr::Pipe {
-                    left: Box::new(Expr::PathExpr {
-                        expr: Box::new(Expr::Recurse { input_expr: Box::new(Expr::Input) }),
+                // scalars = select(type != "array" and type != "object")
+                let scalars_cond = Expr::BinOp {
+                    op: BinOp::And,
+                    lhs: Box::new(Expr::BinOp {
+                        op: BinOp::Ne,
+                        lhs: Box::new(Expr::UnaryOp { op: UnaryOp::Type, operand: Box::new(Expr::Input) }),
+                        rhs: Box::new(Expr::Literal(Literal::Str("array".to_string()))),
                     }),
-                    right: Box::new(Expr::Pipe {
-                        left: Box::new(Expr::Collect { generator: Box::new(Expr::Input) }),
-                        right: Box::new(Expr::Input),
+                    rhs: Box::new(Expr::BinOp {
+                        op: BinOp::Ne,
+                        lhs: Box::new(Expr::UnaryOp { op: UnaryOp::Type, operand: Box::new(Expr::Input) }),
+                        rhs: Box::new(Expr::Literal(Literal::Str("object".to_string()))),
+                    }),
+                };
+                Ok(Expr::PathExpr {
+                    expr: Box::new(Expr::Pipe {
+                        left: Box::new(Expr::Recurse { input_expr: Box::new(Expr::Input) }),
+                        right: Box::new(Expr::IfThenElse {
+                            cond: Box::new(scalars_cond),
+                            then_branch: Box::new(Expr::Input),
+                            else_branch: Box::new(Expr::Empty),
+                        }),
                     }),
                 })
             }

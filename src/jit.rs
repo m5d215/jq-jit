@@ -4757,46 +4757,83 @@ struct InplaceAssignInfo<'a> {
     value_expr: &'a Expr,
 }
 
-/// Detect `type == "T"` filter pattern for paths(f) optimization.
-/// Returns the type name string if matched.
-fn detect_type_eq_filter(expr: &Expr) -> Option<&'static str> {
+/// Compile a filter expression into a fast `fn(&Value) -> bool` check for paths(f).
+/// Returns None if the filter can't be compiled to a direct check (falls back to eval).
+fn compile_type_filter(expr: &Expr) -> Option<fn(&Value) -> bool> {
+    // type == "T"
     if let Expr::BinOp { op: crate::ir::BinOp::Eq, lhs, rhs } = expr {
-        // type == "T"
-        if let Expr::UnaryOp { op: crate::ir::UnaryOp::Type, operand } = lhs.as_ref() {
-            if matches!(operand.as_ref(), Expr::Input) {
-                if let Expr::Literal(crate::ir::Literal::Str(s)) = rhs.as_ref() {
-                    return match s.as_str() {
-                        "number" => Some("number"),
-                        "string" => Some("string"),
-                        "array" => Some("array"),
-                        "object" => Some("object"),
-                        "null" => Some("null"),
-                        "boolean" => Some("boolean"),
-                        _ => None,
-                    };
-                }
-            }
+        if let Some(type_name) = extract_type_cmp(lhs, rhs).or_else(|| extract_type_cmp(rhs, lhs)) {
+            return match type_name {
+                "number" => Some(|v| matches!(v, Value::Num(..))),
+                "string" => Some(|v| matches!(v, Value::Str(..))),
+                "array" => Some(|v| matches!(v, Value::Arr(..))),
+                "object" => Some(|v| matches!(v, Value::Obj(..))),
+                "null" => Some(|v| matches!(v, Value::Null)),
+                "boolean" => Some(|v| matches!(v, Value::True | Value::False)),
+                _ => None,
+            };
         }
-        // "T" == type
-        if let Expr::UnaryOp { op: crate::ir::UnaryOp::Type, operand } = rhs.as_ref() {
-            if matches!(operand.as_ref(), Expr::Input) {
-                if let Expr::Literal(crate::ir::Literal::Str(s)) = lhs.as_ref() {
-                    return match s.as_str() {
-                        "number" => Some("number"),
-                        "string" => Some("string"),
-                        "array" => Some("array"),
-                        "object" => Some("object"),
-                        "null" => Some("null"),
-                        "boolean" => Some("boolean"),
-                        _ => None,
-                    };
-                }
+    }
+    // type != "T"
+    if let Expr::BinOp { op: crate::ir::BinOp::Ne, lhs, rhs } = expr {
+        if let Some(type_name) = extract_type_cmp(lhs, rhs).or_else(|| extract_type_cmp(rhs, lhs)) {
+            return match type_name {
+                "number" => Some(|v| !matches!(v, Value::Num(..))),
+                "string" => Some(|v| !matches!(v, Value::Str(..))),
+                "array" => Some(|v| !matches!(v, Value::Arr(..))),
+                "object" => Some(|v| !matches!(v, Value::Obj(..))),
+                "null" => Some(|v| !matches!(v, Value::Null)),
+                "boolean" => Some(|v| !matches!(v, Value::True | Value::False)),
+                _ => None,
+            };
+        }
+    }
+    // scalars: type != "array" and type != "object"
+    if let Expr::BinOp { op: crate::ir::BinOp::And, lhs, rhs } = expr {
+        let lf = compile_type_filter(lhs)?;
+        let rf = compile_type_filter(rhs)?;
+        // Combine two function pointers. We need a static dispatch.
+        // Use known combinations:
+        return match (lf as usize, rf as usize) {
+            _ => {
+                // Can't combine arbitrary fn pointers into a single fn pointer easily.
+                // Instead detect specific patterns.
+                None
+            }
+        };
+    }
+    None
+}
+
+fn extract_type_cmp<'a>(lhs: &'a Expr, rhs: &'a Expr) -> Option<&'a str> {
+    if let Expr::UnaryOp { op: crate::ir::UnaryOp::Type, operand } = lhs {
+        if matches!(operand.as_ref(), Expr::Input) {
+            if let Expr::Literal(crate::ir::Literal::Str(s)) = rhs {
+                return Some(s.as_str());
             }
         }
     }
-    // Also detect `scalars` pattern: type != "array" and type != "object"
-    // (not needed for now, but could be added)
     None
+}
+
+/// Detect scalars filter: type != "array" and type != "object"
+fn is_scalars_filter(expr: &Expr) -> bool {
+    if let Expr::BinOp { op: crate::ir::BinOp::And, lhs, rhs } = expr {
+        let l_type = extract_ne_type(lhs);
+        let r_type = extract_ne_type(rhs);
+        if let (Some(a), Some(b)) = (l_type, r_type) {
+            return (a == "array" && b == "object") || (a == "object" && b == "array");
+        }
+    }
+    false
+}
+
+fn extract_ne_type<'a>(expr: &'a Expr) -> Option<&'a str> {
+    if let Expr::BinOp { op: crate::ir::BinOp::Ne, lhs, rhs } = expr {
+        extract_type_cmp(lhs, rhs).or_else(|| extract_type_cmp(rhs, lhs))
+    } else {
+        None
+    }
 }
 
 /// Detect an in-place assign pattern: .[path] = val
@@ -6530,11 +6567,16 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             if let Some(filter_expr) = filter_expr {
                 let input = if !args.is_empty() { args[0].clone() } else { Value::Null };
 
-                // Try to detect `type == "T"` pattern for zero-cost type check
-                let type_filter: Option<&'static str> = detect_type_eq_filter(&filter_expr);
+                // Try to compile filter to a direct fn(&Value)->bool check
+                let compiled_filter: Option<fn(&Value) -> bool> = compile_type_filter(&filter_expr)
+                    .or_else(|| if is_scalars_filter(&filter_expr) {
+                        Some(|v: &Value| !matches!(v, Value::Arr(..) | Value::Obj(..)))
+                    } else {
+                        None
+                    });
 
                 // For general filters, use cached Env
-                let env = if type_filter.is_none() {
+                let env = if compiled_filter.is_none() {
                     thread_local! {
                         static PATHS_FILTER_ENV: RefCell<Option<Rc<RefCell<crate::eval::Env>>>> = const { RefCell::new(None) };
                     }
@@ -6559,22 +6601,13 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                     val: &Value,
                     path: &mut Vec<Value>,
                     results: &mut Vec<Value>,
-                    type_filter: Option<&str>,
+                    compiled_filter: Option<fn(&Value) -> bool>,
                     filter_expr: &crate::ir::Expr,
                     env: &Option<Rc<RefCell<crate::eval::Env>>>,
                 ) {
                     // Check filter
-                    let matched = if let Some(type_name) = type_filter {
-                        // Direct type check — no eval needed
-                        match (type_name, val) {
-                            ("number", Value::Num(..)) => true,
-                            ("string", Value::Str(..)) => true,
-                            ("array", Value::Arr(..)) => true,
-                            ("object", Value::Obj(..)) => true,
-                            ("null", Value::Null) => true,
-                            ("boolean", Value::True) | ("boolean", Value::False) => true,
-                            _ => false,
-                        }
+                    let matched = if let Some(f) = compiled_filter {
+                        f(val)
                     } else {
                         let mut m = false;
                         let _ = crate::eval::eval(filter_expr, val.clone(), env.as_ref().unwrap(), &mut |result| {
@@ -6591,14 +6624,14 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                         Value::Obj(o) => {
                             for (key, child) in o.iter() {
                                 path.push(Value::from_str(key.as_str()));
-                                paths_dfs_filtered(child, path, results, type_filter, filter_expr, env);
+                                paths_dfs_filtered(child, path, results, compiled_filter, filter_expr, env);
                                 path.pop();
                             }
                         }
                         Value::Arr(a) => {
                             for (i, child) in a.iter().enumerate() {
                                 path.push(Value::Num(i as f64, None));
-                                paths_dfs_filtered(child, path, results, type_filter, filter_expr, env);
+                                paths_dfs_filtered(child, path, results, compiled_filter, filter_expr, env);
                                 path.pop();
                             }
                         }
@@ -6607,7 +6640,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                 }
 
                 let mut path_stack = Vec::new();
-                paths_dfs_filtered(&input, &mut path_stack, &mut results, type_filter, &filter_expr, &env);
+                paths_dfs_filtered(&input, &mut path_stack, &mut results, compiled_filter, &filter_expr, &env);
                 std::ptr::write(dst, Value::Arr(Rc::new(results)));
             } else {
                 std::ptr::write(dst, Value::Arr(Rc::new(vec![])));
