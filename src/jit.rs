@@ -2768,6 +2768,31 @@ impl Flattener {
                         return true;
                     }
                 }
+                // Native paths(f) — path(recurse | if f then . else empty end)
+                // DFS with filter applied at each node
+                if let Expr::Pipe { left, right } = path_expr.as_ref() {
+                    if let Expr::Recurse { input_expr } = left.as_ref() {
+                        if matches!(input_expr.as_ref(), Expr::Input) {
+                            if let Expr::IfThenElse { cond, then_branch, else_branch } = right.as_ref() {
+                                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                                    // This is paths(f) where f = cond
+                                    let idx = self.closure_ops.len();
+                                    self.closure_ops.push((**cond).clone());
+                                    let inp = self.alloc_slot();
+                                    self.emit(JitOp::Clone { dst: inp, src: input_slot });
+                                    let arr = self.alloc_slot();
+                                    self.emit(JitOp::CallBuiltin { dst: arr, name: format!("__paths_filtered__:{}", idx), args: vec![inp] });
+                                    self.emit(JitOp::Drop { slot: inp });
+                                    self.flatten_each_with_action(arr, false, &|s, elem| {
+                                        s.emit_yield(elem);
+                                    });
+                                    self.emit(JitOp::Drop { slot: arr });
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
                 // Delegate complex path expressions to runtime
                 let idx = self.closure_ops.len();
                 self.closure_ops.push((**path_expr).clone());
@@ -4732,6 +4757,48 @@ struct InplaceAssignInfo<'a> {
     value_expr: &'a Expr,
 }
 
+/// Detect `type == "T"` filter pattern for paths(f) optimization.
+/// Returns the type name string if matched.
+fn detect_type_eq_filter(expr: &Expr) -> Option<&'static str> {
+    if let Expr::BinOp { op: crate::ir::BinOp::Eq, lhs, rhs } = expr {
+        // type == "T"
+        if let Expr::UnaryOp { op: crate::ir::UnaryOp::Type, operand } = lhs.as_ref() {
+            if matches!(operand.as_ref(), Expr::Input) {
+                if let Expr::Literal(crate::ir::Literal::Str(s)) = rhs.as_ref() {
+                    return match s.as_str() {
+                        "number" => Some("number"),
+                        "string" => Some("string"),
+                        "array" => Some("array"),
+                        "object" => Some("object"),
+                        "null" => Some("null"),
+                        "boolean" => Some("boolean"),
+                        _ => None,
+                    };
+                }
+            }
+        }
+        // "T" == type
+        if let Expr::UnaryOp { op: crate::ir::UnaryOp::Type, operand } = rhs.as_ref() {
+            if matches!(operand.as_ref(), Expr::Input) {
+                if let Expr::Literal(crate::ir::Literal::Str(s)) = lhs.as_ref() {
+                    return match s.as_str() {
+                        "number" => Some("number"),
+                        "string" => Some("string"),
+                        "array" => Some("array"),
+                        "object" => Some("object"),
+                        "null" => Some("null"),
+                        "boolean" => Some("boolean"),
+                        _ => None,
+                    };
+                }
+            }
+        }
+    }
+    // Also detect `scalars` pattern: type != "array" and type != "object"
+    // (not needed for now, but could be added)
+    None
+}
+
 /// Detect an in-place assign pattern: .[path] = val
 fn detect_inplace_assign(expr: &Expr) -> Option<InplaceAssignInfo<'_>> {
     match expr {
@@ -6454,6 +6521,98 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                     }
                 }
             }
+        }
+
+        // __paths_filtered__:idx — native paths(f) DFS with filter
+        if let Some(rest) = name.strip_prefix("__paths_filtered__:") {
+            let idx: usize = rest.parse().unwrap_or(0);
+            let filter_expr = (&*JIT_CLOSURE_OPS.0.get()).get(idx).cloned();
+            if let Some(filter_expr) = filter_expr {
+                let input = if !args.is_empty() { args[0].clone() } else { Value::Null };
+
+                // Try to detect `type == "T"` pattern for zero-cost type check
+                let type_filter: Option<&'static str> = detect_type_eq_filter(&filter_expr);
+
+                // For general filters, use cached Env
+                let env = if type_filter.is_none() {
+                    thread_local! {
+                        static PATHS_FILTER_ENV: RefCell<Option<Rc<RefCell<crate::eval::Env>>>> = const { RefCell::new(None) };
+                    }
+                    Some(PATHS_FILTER_ENV.with(|cell| {
+                        let mut opt = cell.borrow_mut();
+                        if let Some(ref env) = *opt {
+                            env.borrow_mut().reset();
+                            env.clone()
+                        } else {
+                            let e = Rc::new(RefCell::new(crate::eval::Env::new(vec![])));
+                            *opt = Some(e.clone());
+                            e
+                        }
+                    }))
+                } else {
+                    None
+                };
+
+                let mut results = Vec::new();
+                // DFS using mutable path stack
+                fn paths_dfs_filtered(
+                    val: &Value,
+                    path: &mut Vec<Value>,
+                    results: &mut Vec<Value>,
+                    type_filter: Option<&str>,
+                    filter_expr: &crate::ir::Expr,
+                    env: &Option<Rc<RefCell<crate::eval::Env>>>,
+                ) {
+                    // Check filter
+                    let matched = if let Some(type_name) = type_filter {
+                        // Direct type check — no eval needed
+                        match (type_name, val) {
+                            ("number", Value::Num(..)) => true,
+                            ("string", Value::Str(..)) => true,
+                            ("array", Value::Arr(..)) => true,
+                            ("object", Value::Obj(..)) => true,
+                            ("null", Value::Null) => true,
+                            ("boolean", Value::True) | ("boolean", Value::False) => true,
+                            _ => false,
+                        }
+                    } else {
+                        let mut m = false;
+                        let _ = crate::eval::eval(filter_expr, val.clone(), env.as_ref().unwrap(), &mut |result| {
+                            if result.is_truthy() { m = true; }
+                            Ok(true)
+                        });
+                        m
+                    };
+                    if matched {
+                        results.push(Value::Arr(Rc::new(path.clone())));
+                    }
+                    // Recurse into children
+                    match val {
+                        Value::Obj(o) => {
+                            for (key, child) in o.iter() {
+                                path.push(Value::from_str(key.as_str()));
+                                paths_dfs_filtered(child, path, results, type_filter, filter_expr, env);
+                                path.pop();
+                            }
+                        }
+                        Value::Arr(a) => {
+                            for (i, child) in a.iter().enumerate() {
+                                path.push(Value::Num(i as f64, None));
+                                paths_dfs_filtered(child, path, results, type_filter, filter_expr, env);
+                                path.pop();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                let mut path_stack = Vec::new();
+                paths_dfs_filtered(&input, &mut path_stack, &mut results, type_filter, &filter_expr, &env);
+                std::ptr::write(dst, Value::Arr(Rc::new(results)));
+            } else {
+                std::ptr::write(dst, Value::Arr(Rc::new(vec![])));
+            }
+            return 0;
         }
 
         // __path__:idx — runtime path expression evaluation
