@@ -2527,7 +2527,7 @@ impl Filter {
                 if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                     if let Expr::CallBuiltin { name, args } = right.as_ref() {
                         if args.len() == 1 {
-                            if matches!(name.as_str(), "startswith" | "endswith" | "ltrimstr" | "rtrimstr" | "split") {
+                            if matches!(name.as_str(), "startswith" | "endswith" | "ltrimstr" | "rtrimstr" | "split" | "index" | "rindex" | "indices") {
                                 if let Expr::Literal(Literal::Str(arg)) = &args[0] {
                                     return Some((field.clone(), name.clone(), arg.clone()));
                                 }

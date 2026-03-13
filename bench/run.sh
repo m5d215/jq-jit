@@ -153,6 +153,9 @@ TESTS=(
     'remap+str chain:-c:{a: (.name + "_" + (.x | tostring)), b: .y}'
     'sel(len>8):-c:select(.name | length > 8)'
     'up|split|join:-c:.name | ascii_upcase | split("_") | join("-")'
+    '.name|index:-c:.name | index("_")'
+    '.name|rindex:-c:.name | rindex("_")'
+    '.name|indices:-c:.name | indices("_")'
 )
 
 for test in "${TESTS[@]}"; do

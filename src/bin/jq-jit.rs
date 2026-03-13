@@ -4222,6 +4222,45 @@ fn real_main() {
                                         }
                                         compact_buf.extend_from_slice(b"]\n");
                                     }
+                                    "index" => {
+                                        if arg_bytes.is_empty() {
+                                            compact_buf.extend_from_slice(b"null\n");
+                                        } else if let Some(pos) = content.windows(arg_bytes.len()).position(|w| w == arg_bytes) {
+                                            compact_buf.extend_from_slice(itoa::Buffer::new().format(pos as i64).as_bytes());
+                                            compact_buf.push(b'\n');
+                                        } else {
+                                            compact_buf.extend_from_slice(b"null\n");
+                                        }
+                                    }
+                                    "rindex" => {
+                                        if arg_bytes.is_empty() {
+                                            compact_buf.extend_from_slice(b"null\n");
+                                        } else if let Some(pos) = content.windows(arg_bytes.len()).rposition(|w| w == arg_bytes) {
+                                            compact_buf.extend_from_slice(itoa::Buffer::new().format(pos as i64).as_bytes());
+                                            compact_buf.push(b'\n');
+                                        } else {
+                                            compact_buf.extend_from_slice(b"null\n");
+                                        }
+                                    }
+                                    "indices" => {
+                                        compact_buf.push(b'[');
+                                        if !arg_bytes.is_empty() {
+                                            let mut first = true;
+                                            let mut start = 0;
+                                            while start + arg_bytes.len() <= content.len() {
+                                                if let Some(pos) = content[start..].windows(arg_bytes.len()).position(|w| w == arg_bytes) {
+                                                    if !first { compact_buf.push(b','); }
+                                                    first = false;
+                                                    let abs_pos = start + pos;
+                                                    compact_buf.extend_from_slice(itoa::Buffer::new().format(abs_pos as i64).as_bytes());
+                                                    start = abs_pos + 1;
+                                                } else {
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        compact_buf.extend_from_slice(b"]\n");
+                                    }
                                     _ => {
                                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -12745,6 +12784,45 @@ fn real_main() {
                                             } else {
                                                 compact_buf.extend_from_slice(&content[pos..]);
                                                 compact_buf.push(b'"');
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    compact_buf.extend_from_slice(b"]\n");
+                                }
+                                "index" => {
+                                    if arg_bytes.is_empty() {
+                                        compact_buf.extend_from_slice(b"null\n");
+                                    } else if let Some(pos) = content.windows(arg_bytes.len()).position(|w| w == arg_bytes) {
+                                        compact_buf.extend_from_slice(itoa::Buffer::new().format(pos as i64).as_bytes());
+                                        compact_buf.push(b'\n');
+                                    } else {
+                                        compact_buf.extend_from_slice(b"null\n");
+                                    }
+                                }
+                                "rindex" => {
+                                    if arg_bytes.is_empty() {
+                                        compact_buf.extend_from_slice(b"null\n");
+                                    } else if let Some(pos) = content.windows(arg_bytes.len()).rposition(|w| w == arg_bytes) {
+                                        compact_buf.extend_from_slice(itoa::Buffer::new().format(pos as i64).as_bytes());
+                                        compact_buf.push(b'\n');
+                                    } else {
+                                        compact_buf.extend_from_slice(b"null\n");
+                                    }
+                                }
+                                "indices" => {
+                                    compact_buf.push(b'[');
+                                    if !arg_bytes.is_empty() {
+                                        let mut first = true;
+                                        let mut start = 0;
+                                        while start + arg_bytes.len() <= content.len() {
+                                            if let Some(pos) = content[start..].windows(arg_bytes.len()).position(|w| w == arg_bytes) {
+                                                if !first { compact_buf.push(b','); }
+                                                first = false;
+                                                let abs_pos = start + pos;
+                                                compact_buf.extend_from_slice(itoa::Buffer::new().format(abs_pos as i64).as_bytes());
+                                                start = abs_pos + 1;
+                                            } else {
                                                 break;
                                             }
                                         }
