@@ -101,6 +101,15 @@ pub struct CondBranch {
     pub output: BranchOutput,
 }
 
+/// One step in a chained string operation: `.field | op1 | op2 | ...`
+#[derive(Debug, Clone)]
+pub enum StringChainOp {
+    AsciiDowncase,
+    AsciiUpcase,
+    Ltrimstr(String),
+    Rtrimstr(String),
+}
+
 /// Part of a string Add-chain: `.name + ": " + (.x | tostring)`.
 #[derive(Debug, Clone)]
 pub enum StringAddPart {
@@ -1512,6 +1521,121 @@ impl Filter {
                             if matches!(name.as_str(), "startswith" | "endswith" | "ltrimstr" | "rtrimstr" | "split") {
                                 if let Expr::Literal(Literal::Str(arg)) = &args[0] {
                                     return Some((field.clone(), name.clone(), arg.clone()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `.field | op1 | op2 | ...` chained string operations.
+    /// Returns (field_name, [ops]) with 2+ ops. Single ops are handled by other detectors.
+    pub fn detect_field_string_chain(&self) -> Option<(String, Vec<StringChainOp>)> {
+        use crate::ir::{Expr, Literal};
+        let expr = self.detect_expr()?;
+        // Top level must be Pipe(.field, chain)
+        if let Expr::Pipe { left, right } = expr {
+            let field = if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() } else { return None; }
+            } else { return None; };
+            let mut ops = Vec::new();
+            Self::collect_string_chain_ops(right, &mut ops);
+            if ops.len() >= 2 {
+                return Some((field, ops));
+            }
+        }
+        None
+    }
+
+    /// Recursively collect string ops from a right-associative pipe chain.
+    fn collect_string_chain_ops(expr: &crate::ir::Expr, ops: &mut Vec<StringChainOp>) {
+        use crate::ir::Expr;
+        match expr {
+            Expr::Pipe { left, right } => {
+                if Self::try_extract_string_op(left, ops) {
+                    Self::collect_string_chain_ops(right, ops);
+                }
+            }
+            _ => {
+                Self::try_extract_string_op(expr, ops);
+            }
+        }
+    }
+
+    fn try_extract_string_op(expr: &crate::ir::Expr, ops: &mut Vec<StringChainOp>) -> bool {
+        use crate::ir::{Expr, Literal, UnaryOp};
+        match expr {
+            Expr::UnaryOp { op: UnaryOp::AsciiDowncase, operand } if matches!(operand.as_ref(), Expr::Input) => {
+                ops.push(StringChainOp::AsciiDowncase); true
+            }
+            Expr::UnaryOp { op: UnaryOp::AsciiUpcase, operand } if matches!(operand.as_ref(), Expr::Input) => {
+                ops.push(StringChainOp::AsciiUpcase); true
+            }
+            Expr::CallBuiltin { name, args } if args.len() == 1 => {
+                if let Expr::Literal(Literal::Str(arg)) = &args[0] {
+                    match name.as_str() {
+                        "ltrimstr" => { ops.push(StringChainOp::Ltrimstr(arg.clone())); true }
+                        "rtrimstr" => { ops.push(StringChainOp::Rtrimstr(arg.clone())); true }
+                        _ => false,
+                    }
+                } else { false }
+            }
+            _ => false,
+        }
+    }
+
+    /// Detect `select(.field | string_test) | {computed_remap}`.
+    /// String tests: startswith/endswith/contains("str"), .field == "str", .field != "str".
+    /// Returns (field, test_name, test_arg, remap_pairs).
+    pub fn detect_select_str_then_computed_remap(&self) -> Option<(String, String, String, Vec<(String, RemapExpr)>)> {
+        use crate::ir::{Expr, Literal, BinOp};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left, right } = expr {
+            // Right: ObjectConstruct (computed remap)
+            let remap = if let Expr::ObjectConstruct { pairs } = right.as_ref() {
+                if pairs.is_empty() { return None; }
+                let mut result = Vec::with_capacity(pairs.len());
+                for (k, v) in pairs {
+                    let key = if let Expr::Literal(Literal::Str(s)) = k { s.clone() } else { return None; };
+                    let rexpr = Self::classify_remap_value(v)?;
+                    result.push((key, rexpr));
+                }
+                result
+            } else { return None; };
+            // Left: select(cond) = IfThenElse { cond, then: Input, else: Empty }
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
+                if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+                // Form A: .field == "str" / .field != "str"
+                if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                    if matches!(op, BinOp::Eq | BinOp::Ne) {
+                        if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                            if matches!(base.as_ref(), Expr::Input) {
+                                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                    if let Expr::Literal(Literal::Str(val)) = rhs.as_ref() {
+                                        let test_type = if matches!(op, BinOp::Eq) { "eq" } else { "ne" };
+                                        return Some((field.clone(), test_type.to_string(), val.clone(), remap));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Form B: .field | startswith/endswith/contains("str")
+                if let Expr::Pipe { left: pl, right: pr } = cond.as_ref() {
+                    if let Expr::Index { expr: base, key } = pl.as_ref() {
+                        if matches!(base.as_ref(), Expr::Input) {
+                            if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                if let Expr::CallBuiltin { name, args } = pr.as_ref() {
+                                    if matches!(name.as_str(), "startswith" | "endswith" | "contains") && args.len() == 1 {
+                                        if let Expr::Literal(Literal::Str(arg)) = &args[0] {
+                                            return Some((field.clone(), name.clone(), arg.clone(), remap));
+                                        }
+                                    }
                                 }
                             }
                         }
