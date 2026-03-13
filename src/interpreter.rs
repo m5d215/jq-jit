@@ -204,6 +204,10 @@ pub enum StringChainOp {
     AsciiUpcase,
     Ltrimstr(String),
     Rtrimstr(String),
+    /// `split(sep) | join(rep)` fused as a single op (string replace)
+    SplitJoin(String, String),
+    /// `split(sep) | reverse | join(rep)` fused
+    SplitReverseJoin(String, String),
 }
 
 /// Terminal operation at the end of a string chain (returns bool or length, not string).
@@ -2515,6 +2519,38 @@ impl Filter {
                         _ => false,
                     }
                 } else { false }
+            }
+            // split(sep) | join(rep) — fused as SplitJoin
+            Expr::Pipe { left, right } => {
+                if let Expr::CallBuiltin { name: sn, args: sa } = left.as_ref() {
+                    if sn == "split" && sa.len() == 1 {
+                        if let Expr::Literal(Literal::Str(sep)) = &sa[0] {
+                            // Check for split | join
+                            if let Expr::CallBuiltin { name: jn, args: ja } = right.as_ref() {
+                                if jn == "join" && ja.len() == 1 {
+                                    if let Expr::Literal(Literal::Str(rep)) = &ja[0] {
+                                        ops.push(StringChainOp::SplitJoin(sep.clone(), rep.clone()));
+                                        return true;
+                                    }
+                                }
+                            }
+                            // Check for split | reverse | join
+                            if let Expr::Pipe { left: rev, right: join_expr } = right.as_ref() {
+                                if matches!(rev.as_ref(), Expr::UnaryOp { op: UnaryOp::Reverse, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                                    if let Expr::CallBuiltin { name: jn, args: ja } = join_expr.as_ref() {
+                                        if jn == "join" && ja.len() == 1 {
+                                            if let Expr::Literal(Literal::Str(rep)) = &ja[0] {
+                                                ops.push(StringChainOp::SplitReverseJoin(sep.clone(), rep.clone()));
+                                                return true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                false
             }
             _ => false,
         }

@@ -7037,13 +7037,88 @@ fn real_main() {
                                                 tmp_str.truncate(new_len);
                                             }
                                         }
+                                        StringChainOp::SplitJoin(ref sep, ref rep) => {
+                                            // Split and join in place (string replace)
+                                            let sb = sep.as_bytes();
+                                            let rb = rep.as_bytes();
+                                            if sb.is_empty() {
+                                                // split("") produces chars, join(rep) inserts rep between each char
+                                                let mut result = Vec::with_capacity(tmp_str.len() * (rb.len() + 1));
+                                                let mut first = true;
+                                                for &b in tmp_str.iter() {
+                                                    if !first { result.extend_from_slice(rb); }
+                                                    first = false;
+                                                    result.push(b);
+                                                }
+                                                tmp_str = result;
+                                            } else if sb.len() == 1 {
+                                                let s = sb[0];
+                                                let mut result = Vec::with_capacity(tmp_str.len());
+                                                let mut last = 0;
+                                                for i in 0..tmp_str.len() {
+                                                    if tmp_str[i] == s {
+                                                        result.extend_from_slice(&tmp_str[last..i]);
+                                                        result.extend_from_slice(rb);
+                                                        last = i + 1;
+                                                    }
+                                                }
+                                                result.extend_from_slice(&tmp_str[last..]);
+                                                tmp_str = result;
+                                            } else {
+                                                let mut result = Vec::with_capacity(tmp_str.len());
+                                                let mut last = 0;
+                                                while last + sb.len() <= tmp_str.len() {
+                                                    if let Some(pos) = tmp_str[last..].windows(sb.len()).position(|w| w == sb) {
+                                                        result.extend_from_slice(&tmp_str[last..last + pos]);
+                                                        result.extend_from_slice(rb);
+                                                        last = last + pos + sb.len();
+                                                    } else {
+                                                        break;
+                                                    }
+                                                }
+                                                result.extend_from_slice(&tmp_str[last..]);
+                                                tmp_str = result;
+                                            }
+                                        }
+                                        StringChainOp::SplitReverseJoin(ref sep, ref rep) => {
+                                            let sb = sep.as_bytes();
+                                            let rb = rep.as_bytes();
+                                            let mut parts: Vec<Vec<u8>> = Vec::new();
+                                            if sb.len() == 1 {
+                                                let s = sb[0];
+                                                let mut last = 0;
+                                                for i in 0..tmp_str.len() {
+                                                    if tmp_str[i] == s {
+                                                        parts.push(tmp_str[last..i].to_vec());
+                                                        last = i + 1;
+                                                    }
+                                                }
+                                                parts.push(tmp_str[last..].to_vec());
+                                            } else {
+                                                let mut last = 0;
+                                                while last + sb.len() <= tmp_str.len() {
+                                                    if let Some(pos) = tmp_str[last..].windows(sb.len()).position(|w| w == sb) {
+                                                        parts.push(tmp_str[last..last + pos].to_vec());
+                                                        last = last + pos + sb.len();
+                                                    } else {
+                                                        break;
+                                                    }
+                                                }
+                                                parts.push(tmp_str[last..].to_vec());
+                                            }
+                                            tmp_str.clear();
+                                            for (i, part) in parts.iter().rev().enumerate() {
+                                                if i > 0 { tmp_str.extend_from_slice(rb); }
+                                                tmp_str.extend_from_slice(part);
+                                            }
+                                        }
                                     }
                                 }
                                 // Apply terminal
                                 match chain_terminal {
                                     StringChainTerminal::None => {
                                         compact_buf.push(b'"');
-                                        compact_buf.extend_from_slice(&tmp_str);
+                                        compact_buf.extend_from_slice(&json_escape_bytes(&tmp_str));
                                         compact_buf.extend_from_slice(b"\"\n");
                                     }
                                     StringChainTerminal::Startswith(ref arg) => {
@@ -11239,12 +11314,85 @@ fn real_main() {
                                             tmp_str.truncate(new_len);
                                         }
                                     }
+                                    StringChainOp::SplitJoin(ref sep, ref rep) => {
+                                        let sb = sep.as_bytes();
+                                        let rb = rep.as_bytes();
+                                        if sb.is_empty() {
+                                            let mut result = Vec::with_capacity(tmp_str.len() * (rb.len() + 1));
+                                            let mut first = true;
+                                            for &b in tmp_str.iter() {
+                                                if !first { result.extend_from_slice(rb); }
+                                                first = false;
+                                                result.push(b);
+                                            }
+                                            tmp_str = result;
+                                        } else if sb.len() == 1 {
+                                            let s = sb[0];
+                                            let mut result = Vec::with_capacity(tmp_str.len());
+                                            let mut last = 0;
+                                            for i in 0..tmp_str.len() {
+                                                if tmp_str[i] == s {
+                                                    result.extend_from_slice(&tmp_str[last..i]);
+                                                    result.extend_from_slice(rb);
+                                                    last = i + 1;
+                                                }
+                                            }
+                                            result.extend_from_slice(&tmp_str[last..]);
+                                            tmp_str = result;
+                                        } else {
+                                            let mut result = Vec::with_capacity(tmp_str.len());
+                                            let mut last = 0;
+                                            while last + sb.len() <= tmp_str.len() {
+                                                if let Some(pos) = tmp_str[last..].windows(sb.len()).position(|w| w == sb) {
+                                                    result.extend_from_slice(&tmp_str[last..last + pos]);
+                                                    result.extend_from_slice(rb);
+                                                    last = last + pos + sb.len();
+                                                } else {
+                                                    break;
+                                                }
+                                            }
+                                            result.extend_from_slice(&tmp_str[last..]);
+                                            tmp_str = result;
+                                        }
+                                    }
+                                    StringChainOp::SplitReverseJoin(ref sep, ref rep) => {
+                                        let sb = sep.as_bytes();
+                                        let rb = rep.as_bytes();
+                                        let mut parts: Vec<Vec<u8>> = Vec::new();
+                                        if sb.len() == 1 {
+                                            let s = sb[0];
+                                            let mut last = 0;
+                                            for i in 0..tmp_str.len() {
+                                                if tmp_str[i] == s {
+                                                    parts.push(tmp_str[last..i].to_vec());
+                                                    last = i + 1;
+                                                }
+                                            }
+                                            parts.push(tmp_str[last..].to_vec());
+                                        } else {
+                                            let mut last = 0;
+                                            while last + sb.len() <= tmp_str.len() {
+                                                if let Some(pos) = tmp_str[last..].windows(sb.len()).position(|w| w == sb) {
+                                                    parts.push(tmp_str[last..last + pos].to_vec());
+                                                    last = last + pos + sb.len();
+                                                } else {
+                                                    break;
+                                                }
+                                            }
+                                            parts.push(tmp_str[last..].to_vec());
+                                        }
+                                        tmp_str.clear();
+                                        for (i, part) in parts.iter().rev().enumerate() {
+                                            if i > 0 { tmp_str.extend_from_slice(rb); }
+                                            tmp_str.extend_from_slice(part);
+                                        }
+                                    }
                                 }
                             }
                             match chain_terminal {
                                 StringChainTerminal::None => {
                                     compact_buf.push(b'"');
-                                    compact_buf.extend_from_slice(&tmp_str);
+                                    compact_buf.extend_from_slice(&json_escape_bytes(&tmp_str));
                                     compact_buf.extend_from_slice(b"\"\n");
                                 }
                                 StringChainTerminal::Startswith(ref arg) => {
