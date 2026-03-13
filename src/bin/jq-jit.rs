@@ -135,6 +135,17 @@ fn remap_expr_fields(rexpr: &jq_jit::interpreter::RemapExpr) -> Vec<&str> {
         RemapExpr::FieldMinMax(f1, f2, _) => vec![f1.as_str(), f2.as_str()],
         RemapExpr::LiteralJson(_) => vec![],
         RemapExpr::FieldLength(f) => vec![f.as_str()],
+        RemapExpr::StringInterp(parts) => {
+            let mut fields = Vec::new();
+            for part in parts {
+                if let jq_jit::interpreter::InterpPart::Field(f) = part {
+                    if !fields.contains(&f.as_str()) {
+                        fields.push(f.as_str());
+                    }
+                }
+            }
+            fields
+        }
     }
 }
 
@@ -180,6 +191,16 @@ enum ResolvedRemap {
     FieldMinMax(usize, usize, bool),
     LiteralJson(Vec<u8>),
     FieldLength(usize),
+    StringInterp(Vec<ResolvedInterpPart>),
+}
+
+/// Pre-resolved string interpolation part.
+#[derive(Clone)]
+enum ResolvedInterpPart {
+    /// Pre-escaped JSON bytes for literal text
+    Literal(Vec<u8>),
+    /// Field index
+    Field(usize),
 }
 
 /// Pre-resolve RemapExpr → ResolvedRemap using a field→index map.
@@ -208,6 +229,29 @@ fn resolve_one_remap(
         RemapExpr::FieldMinMax(f1, f2, is_max) => ResolvedRemap::FieldMinMax(field_idx[f1.as_str()], field_idx[f2.as_str()], *is_max),
         RemapExpr::LiteralJson(ref bytes) => ResolvedRemap::LiteralJson(bytes.clone()),
         RemapExpr::FieldLength(f) => ResolvedRemap::FieldLength(field_idx[f.as_str()]),
+        RemapExpr::StringInterp(parts) => {
+            let resolved = parts.iter().map(|p| match p {
+                jq_jit::interpreter::InterpPart::Literal(s) => {
+                    let mut buf = Vec::new();
+                    for &b in s.as_bytes() {
+                        match b {
+                            b'"' => buf.extend_from_slice(b"\\\""),
+                            b'\\' => buf.extend_from_slice(b"\\\\"),
+                            b'\n' => buf.extend_from_slice(b"\\n"),
+                            b'\r' => buf.extend_from_slice(b"\\r"),
+                            b'\t' => buf.extend_from_slice(b"\\t"),
+                            c if c < 0x20 => { use std::io::Write; let _ = write!(buf, "\\u{:04x}", c); }
+                            _ => buf.push(b),
+                        }
+                    }
+                    ResolvedInterpPart::Literal(buf)
+                }
+                jq_jit::interpreter::InterpPart::Field(f) => {
+                    ResolvedInterpPart::Field(field_idx[f.as_str()])
+                }
+            }).collect();
+            ResolvedRemap::StringInterp(resolved)
+        }
     }
 }
 
@@ -256,6 +300,41 @@ fn emit_tostring_raw(buf: &mut Vec<u8>, val: &[u8]) {
                 buf.extend_from_slice(val);
             }
             buf.push(b'"');
+        }
+    }
+}
+
+/// Emit a raw JSON field value into a string interpolation context (tostring, no outer quotes).
+/// Strings: copy inner content (already JSON-escaped). Numbers/bool/null: copy as-is.
+/// Arrays/objects: copy raw JSON but escape any " and \ for embedding in JSON string.
+#[inline]
+fn emit_interp_field_raw(buf: &mut Vec<u8>, val: &[u8]) {
+    if val.is_empty() { return; }
+    match val[0] {
+        b'"' if val.len() >= 2 => {
+            // String: inner content is already JSON-escaped
+            buf.extend_from_slice(&val[1..val.len()-1]);
+        }
+        b't' => buf.extend_from_slice(b"true"),
+        b'f' => buf.extend_from_slice(b"false"),
+        b'n' => buf.extend_from_slice(b"null"),
+        b'[' | b'{' => {
+            // Array/object: tojson — need to escape " and \ for embedding
+            for &b in val {
+                match b {
+                    b'"' => buf.extend_from_slice(b"\\\""),
+                    b'\\' => buf.extend_from_slice(b"\\\\"),
+                    _ => buf.push(b),
+                }
+            }
+        }
+        _ => {
+            // Number: re-format for jq compat
+            if let Some(n) = parse_json_num(val) {
+                push_jq_number_bytes(buf, n);
+            } else {
+                buf.extend_from_slice(val);
+            }
         }
     }
 }
@@ -387,6 +466,32 @@ fn emit_remap_value(
             let resolved = ResolvedRemap::FieldLength(idx);
             emit_resolved_value(buf, &resolved, raw, ranges);
         }
+        RemapExpr::StringInterp(parts) => {
+            buf.push(b'"');
+            for part in parts {
+                match part {
+                    jq_jit::interpreter::InterpPart::Literal(s) => {
+                        for &b in s.as_bytes() {
+                            match b {
+                                b'"' => buf.extend_from_slice(b"\\\""),
+                                b'\\' => buf.extend_from_slice(b"\\\\"),
+                                b'\n' => buf.extend_from_slice(b"\\n"),
+                                b'\r' => buf.extend_from_slice(b"\\r"),
+                                b'\t' => buf.extend_from_slice(b"\\t"),
+                                c if c < 0x20 => { use std::io::Write; let _ = write!(buf, "\\u{:04x}", c); }
+                                _ => buf.push(b),
+                            }
+                        }
+                    }
+                    jq_jit::interpreter::InterpPart::Field(f) => {
+                        let idx = field_idx[f.as_str()];
+                        let (vs, ve) = ranges[idx];
+                        emit_interp_field_raw(buf, &raw[vs..ve]);
+                    }
+                }
+            }
+            buf.push(b'"');
+        }
     }
 }
 
@@ -502,6 +607,21 @@ fn emit_resolved_value(
         }
         ResolvedRemap::LiteralJson(ref bytes) => {
             buf.extend_from_slice(bytes);
+        }
+        ResolvedRemap::StringInterp(ref parts) => {
+            buf.push(b'"');
+            for part in parts {
+                match part {
+                    ResolvedInterpPart::Literal(ref bytes) => {
+                        buf.extend_from_slice(bytes);
+                    }
+                    ResolvedInterpPart::Field(idx) => {
+                        let (vs, ve) = ranges[*idx];
+                        emit_interp_field_raw(buf, &raw[vs..ve]);
+                    }
+                }
+            }
+            buf.push(b'"');
         }
         ResolvedRemap::FieldLength(idx) => {
             let (vs, ve) = ranges[idx];

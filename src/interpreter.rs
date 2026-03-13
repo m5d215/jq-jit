@@ -38,6 +38,17 @@ pub enum RemapExpr {
     LiteralJson(Vec<u8>),
     /// `.field | length` — string length or array length
     FieldLength(String),
+    /// String interpolation: `"\(.x):\(.y)"` — parts are literals and field references
+    StringInterp(Vec<InterpPart>),
+}
+
+/// Part of a string interpolation for raw byte remap emission.
+#[derive(Debug, Clone)]
+pub enum InterpPart {
+    /// Literal text (decoded string content, needs JSON-escaping on output)
+    Literal(String),
+    /// `.field` — emit tostring of field value
+    Field(String),
 }
 
 /// A pure numeric expression over fields and constants.
@@ -1419,6 +1430,30 @@ impl Filter {
                         }
                     }
                 }
+            }
+        }
+        // String interpolation: "\(.x):\(.y)" etc.
+        if let Expr::StringInterpolation { parts } = v {
+            use crate::ir::StringPart;
+            let mut interp_parts = Vec::new();
+            let mut has_field = false;
+            for part in parts {
+                match part {
+                    StringPart::Literal(s) => {
+                        interp_parts.push(InterpPart::Literal(s.clone()));
+                    }
+                    StringPart::Expr(Expr::Index { expr: base, key }) => {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                            interp_parts.push(InterpPart::Field(f.clone()));
+                            has_field = true;
+                        } else { return None; }
+                    }
+                    _ => return None,
+                }
+            }
+            if has_field {
+                return Some(RemapExpr::StringInterp(interp_parts));
             }
         }
         // Fallback: compound arithmetic expression tree over fields and constants
