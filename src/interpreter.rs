@@ -4227,6 +4227,37 @@ impl Filter {
         None
     }
 
+    /// Detect `first(.[] | select(type == "T"))` or `limit(1; .[] | select(type == "T"))`.
+    /// Returns the type string.
+    pub fn detect_first_each_select_type(&self) -> Option<String> {
+        use crate::ir::{Expr, Literal, BinOp, UnaryOp};
+        let expr = self.detect_expr()?;
+        if let Expr::Limit { count, generator } = expr {
+            if let Expr::Literal(Literal::Num(n, _)) = count.as_ref() {
+                if *n == 1.0 {
+                    if let Expr::Pipe { left, right } = generator.as_ref() {
+                        if matches!(left.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)) {
+                            if let Expr::IfThenElse { cond, then_branch, else_branch } = right.as_ref() {
+                                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                                    if let Expr::BinOp { op: BinOp::Eq, lhs, rhs } = cond.as_ref() {
+                                        if matches!(lhs.as_ref(), Expr::UnaryOp { op: UnaryOp::Type, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                                            if let Expr::Literal(Literal::Str(t)) = rhs.as_ref() {
+                                                if matches!(t.as_str(), "number" | "string" | "object" | "array" | "boolean" | "null") {
+                                                    return Some(t.clone());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `[.x, .y] | sort` — two-field sort into array.
     /// Returns (field1, field2).
     pub fn detect_sort_two_fields(&self) -> Option<(String, String)> {
