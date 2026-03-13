@@ -3540,6 +3540,76 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.field cmp N) | .output_field | unary_op`.
+    /// Returns (select_field, op, threshold, output_field, unary_op).
+    pub fn detect_select_cmp_then_field_unary(&self) -> Option<(String, crate::ir::BinOp, f64, String, crate::ir::UnaryOp)> {
+        use crate::ir::{Expr, BinOp, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        let is_supported = |op: &UnaryOp| matches!(op,
+            UnaryOp::Length | UnaryOp::Utf8ByteLength | UnaryOp::ToString |
+            UnaryOp::AsciiDowncase | UnaryOp::AsciiUpcase |
+            UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Sqrt | UnaryOp::Fabs | UnaryOp::Abs);
+        // Form: Pipe(IfThenElse{cond, then: Input, else: Empty}, Pipe(.field, UnaryOp))
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                    // Right is Pipe(.field, UnaryOp(op, Input))
+                    if let Expr::Pipe { left: field_expr, right: unary_expr } = right.as_ref() {
+                        if let Expr::Index { expr: base, key } = field_expr.as_ref() {
+                            if matches!(base.as_ref(), Expr::Input) {
+                                if let Expr::Literal(Literal::Str(out_field)) = key.as_ref() {
+                                    if let Expr::UnaryOp { op: uop, operand } = unary_expr.as_ref() {
+                                        if matches!(operand.as_ref(), Expr::Input) && is_supported(uop) {
+                                            // Extract select condition
+                                            if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                                                if matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                                                    if let Expr::Index { expr: base2, key: key2 } = lhs.as_ref() {
+                                                        if matches!(base2.as_ref(), Expr::Input) {
+                                                            if let Expr::Literal(Literal::Str(sel_f)) = key2.as_ref() {
+                                                                if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                                                    return Some((sel_f.clone(), *op, *n, out_field.clone(), *uop));
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Beta-reduced: right is UnaryOp(op, Index(.field, Input))
+                    if let Expr::UnaryOp { op: uop, operand } = right.as_ref() {
+                        if is_supported(uop) {
+                            if let Expr::Index { expr: base, key } = operand.as_ref() {
+                                if matches!(base.as_ref(), Expr::Input) {
+                                    if let Expr::Literal(Literal::Str(out_field)) = key.as_ref() {
+                                        if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                                            if matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                                                if let Expr::Index { expr: base2, key: key2 } = lhs.as_ref() {
+                                                    if matches!(base2.as_ref(), Expr::Input) {
+                                                        if let Expr::Literal(Literal::Str(sel_f)) = key2.as_ref() {
+                                                            if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                                                return Some((sel_f.clone(), *op, *n, out_field.clone(), *uop));
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.f1 cmp .f2) | .output_field` — field-field comparison select then field.
     /// Returns (cmp_field1, op, cmp_field2, output_field).
     pub fn detect_select_field_cmp_field_then_field(&self) -> Option<(String, crate::ir::BinOp, String, String)> {

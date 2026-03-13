@@ -872,6 +872,9 @@ fn real_main() {
     let select_arith_cmp_field = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
         filter.detect_select_arith_cmp_then_field()
     } else { None };
+    let select_cmp_field_unary = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_arith_cmp_field.is_none() && field_access.is_none() {
+        filter.detect_select_cmp_then_field_unary()
+    } else { None };
     let select_cmp_remap = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
         filter.detect_select_cmp_then_remap()
     } else { None };
@@ -905,7 +908,7 @@ fn real_main() {
         || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || field_field_cmp_branch.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some()
         || select_str.is_some()
         || select_str_test.is_some() || select_regex_test.is_some() || select_nested_cmp.is_some()
-        || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_value.is_some() || select_ff_cmp_field.is_some() || select_ff_cmp.is_some() || select_ff_cmp_cremap.is_some() || select_str_field.is_some()
+        || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_field_unary.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_value.is_some() || select_ff_cmp_field.is_some() || select_ff_cmp.is_some() || select_ff_cmp_cremap.is_some() || select_str_field.is_some()
         || computed_array.is_some() || array_field.is_some() || multi_field.is_some() || is_length || is_keys
         || is_keys_unsorted || has_field.is_some() || has_multi.is_some() || select_has_multi.is_some() || is_type || del_field.is_some() || obj_merge_lit.is_some() || obj_merge_computed.is_some()
         || is_each || is_sort_keys || is_to_entries || remap_to_entries.is_some() || with_entries_select.is_some() || with_entries_type.is_some() || is_tojson || string_interp_fields.is_some() || string_add_chain.is_some() || array_join.is_some()
@@ -3863,6 +3866,111 @@ fn real_main() {
                         }
                         Ok(())
                     })
+                } else if let Some((ref sel_field, ref sel_op, threshold, ref out_field, ref uop)) = select_cmp_field_unary {
+                    // select(.field cmp N) | .output_field | unary_op
+                    use jq_jit::ir::{BinOp, UnaryOp};
+                    let is_string_op = matches!(uop, UnaryOp::AsciiDowncase | UnaryOp::AsciiUpcase);
+                    let is_length = matches!(uop, UnaryOp::Length | UnaryOp::Utf8ByteLength);
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some(val) = json_object_get_num(raw, 0, sel_field) {
+                            let pass = match sel_op {
+                                BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
+                                BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
+                                BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
+                                _ => false,
+                            };
+                            if pass {
+                                if is_length {
+                                    // .field | length — for strings, count chars
+                                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
+                                        let fval = &raw[vs..ve];
+                                        if fval.len() >= 2 && fval[0] == b'"' && fval[fval.len()-1] == b'"' {
+                                            let inner = &fval[1..fval.len()-1];
+                                            let len = if matches!(uop, UnaryOp::Utf8ByteLength) {
+                                                inner.iter().filter(|&&b| b != b'\\').count()
+                                            } else if !inner.contains(&b'\\') && inner.iter().all(|&b| b < 0x80) {
+                                                inner.len()
+                                            } else {
+                                                // Need to unescape and count chars
+                                                let unescaped = json_unescape_bytes(inner);
+                                                if let Ok(s) = std::str::from_utf8(&unescaped) { s.chars().count() } else { unescaped.len() }
+                                            };
+                                            compact_buf.extend_from_slice(itoa::Buffer::new().format(len).as_bytes());
+                                            compact_buf.push(b'\n');
+                                        } else if fval[0] == b'[' || fval[0] == b'{' {
+                                            // Array/object length — fall back
+                                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                        } else if let Some(n) = parse_json_num(fval) {
+                                            // Number: fabs
+                                            push_jq_number_bytes(&mut compact_buf, n.abs());
+                                            compact_buf.push(b'\n');
+                                        } else {
+                                            compact_buf.extend_from_slice(b"null\n");
+                                        }
+                                    }
+                                } else if is_string_op {
+                                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
+                                        let fval = &raw[vs..ve];
+                                        if fval.len() >= 2 && fval[0] == b'"' && !fval[1..fval.len()-1].contains(&b'\\') {
+                                            compact_buf.push(b'"');
+                                            for &b in &fval[1..fval.len()-1] {
+                                                compact_buf.push(match uop {
+                                                    UnaryOp::AsciiDowncase => if b >= b'A' && b <= b'Z' { b + 32 } else { b },
+                                                    UnaryOp::AsciiUpcase => if b >= b'a' && b <= b'z' { b - 32 } else { b },
+                                                    _ => b,
+                                                });
+                                            }
+                                            compact_buf.extend_from_slice(b"\"\n");
+                                        } else {
+                                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                        }
+                                    }
+                                } else if matches!(uop, UnaryOp::ToString) {
+                                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
+                                        let fval = &raw[vs..ve];
+                                        if fval[0] == b'"' {
+                                            compact_buf.extend_from_slice(fval);
+                                            compact_buf.push(b'\n');
+                                        } else if let Some(n) = parse_json_num(fval) {
+                                            compact_buf.push(b'"');
+                                            let i = n as i64;
+                                            if i as f64 == n {
+                                                compact_buf.extend_from_slice(itoa::Buffer::new().format(i).as_bytes());
+                                            } else {
+                                                compact_buf.extend_from_slice(ryu::Buffer::new().format(n).as_bytes());
+                                            }
+                                            compact_buf.extend_from_slice(b"\"\n");
+                                        } else {
+                                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                        }
+                                    }
+                                } else {
+                                    // Numeric unary (floor/ceil/sqrt/fabs/abs)
+                                    if let Some(n) = json_object_get_num(raw, 0, out_field) {
+                                        let result = match uop {
+                                            UnaryOp::Floor => n.floor(), UnaryOp::Ceil => n.ceil(),
+                                            UnaryOp::Sqrt => n.sqrt(), UnaryOp::Fabs | UnaryOp::Abs => n.abs(),
+                                            _ => n,
+                                        };
+                                        push_jq_number_bytes(&mut compact_buf, result);
+                                        compact_buf.push(b'\n');
+                                    } else {
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    }
+                                }
+                            }
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
                 } else if let Some((ref sel_field, ref op, threshold, ref pairs)) = select_cmp_remap {
                     use jq_jit::ir::BinOp;
                     // Collect unique remap source fields (excluding sel_field which is checked via get_num)
@@ -6475,6 +6583,106 @@ fn real_main() {
                             if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
                                 compact_buf.extend_from_slice(&raw[vs..ve]);
                                 compact_buf.push(b'\n');
+                            }
+                        }
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref sel_field, ref sel_op, threshold, ref out_field, ref uop)) = select_cmp_field_unary {
+                use jq_jit::ir::{BinOp, UnaryOp};
+                let is_string_op = matches!(uop, UnaryOp::AsciiDowncase | UnaryOp::AsciiUpcase);
+                let is_length = matches!(uop, UnaryOp::Length | UnaryOp::Utf8ByteLength);
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some(val) = json_object_get_num(raw, 0, sel_field) {
+                        let pass = match sel_op {
+                            BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
+                            BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
+                            BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
+                            _ => false,
+                        };
+                        if pass {
+                            if is_length {
+                                if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
+                                    let fval = &raw[vs..ve];
+                                    if fval.len() >= 2 && fval[0] == b'"' && fval[fval.len()-1] == b'"' {
+                                        let inner = &fval[1..fval.len()-1];
+                                        let len = if matches!(uop, UnaryOp::Utf8ByteLength) {
+                                            inner.iter().filter(|&&b| b != b'\\').count()
+                                        } else if !inner.contains(&b'\\') && inner.iter().all(|&b| b < 0x80) {
+                                            inner.len()
+                                        } else {
+                                            let unescaped = json_unescape_bytes(inner);
+                                            if let Ok(s) = std::str::from_utf8(&unescaped) { s.chars().count() } else { unescaped.len() }
+                                        };
+                                        compact_buf.extend_from_slice(itoa::Buffer::new().format(len).as_bytes());
+                                        compact_buf.push(b'\n');
+                                    } else if fval[0] == b'[' || fval[0] == b'{' {
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    } else if let Some(n) = parse_json_num(fval) {
+                                        push_jq_number_bytes(&mut compact_buf, n.abs());
+                                        compact_buf.push(b'\n');
+                                    } else {
+                                        compact_buf.extend_from_slice(b"null\n");
+                                    }
+                                }
+                            } else if is_string_op {
+                                if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
+                                    let fval = &raw[vs..ve];
+                                    if fval.len() >= 2 && fval[0] == b'"' && !fval[1..fval.len()-1].contains(&b'\\') {
+                                        compact_buf.push(b'"');
+                                        for &b in &fval[1..fval.len()-1] {
+                                            compact_buf.push(match uop {
+                                                UnaryOp::AsciiDowncase => if b >= b'A' && b <= b'Z' { b + 32 } else { b },
+                                                UnaryOp::AsciiUpcase => if b >= b'a' && b <= b'z' { b - 32 } else { b },
+                                                _ => b,
+                                            });
+                                        }
+                                        compact_buf.extend_from_slice(b"\"\n");
+                                    } else {
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    }
+                                }
+                            } else if matches!(uop, UnaryOp::ToString) {
+                                if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
+                                    let fval = &raw[vs..ve];
+                                    if fval[0] == b'"' {
+                                        compact_buf.extend_from_slice(fval);
+                                        compact_buf.push(b'\n');
+                                    } else if let Some(n) = parse_json_num(fval) {
+                                        compact_buf.push(b'"');
+                                        let i = n as i64;
+                                        if i as f64 == n {
+                                            compact_buf.extend_from_slice(itoa::Buffer::new().format(i).as_bytes());
+                                        } else {
+                                            compact_buf.extend_from_slice(ryu::Buffer::new().format(n).as_bytes());
+                                        }
+                                        compact_buf.extend_from_slice(b"\"\n");
+                                    } else {
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    }
+                                }
+                            } else {
+                                if let Some(n) = json_object_get_num(raw, 0, out_field) {
+                                    let result = match uop {
+                                        UnaryOp::Floor => n.floor(), UnaryOp::Ceil => n.ceil(),
+                                        UnaryOp::Sqrt => n.sqrt(), UnaryOp::Fabs | UnaryOp::Abs => n.abs(),
+                                        _ => n,
+                                    };
+                                    push_jq_number_bytes(&mut compact_buf, result);
+                                    compact_buf.push(b'\n');
+                                } else {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
                             }
                         }
                     }
