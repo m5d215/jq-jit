@@ -270,6 +270,24 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
         Expr::TryCatch { try_expr, catch_expr } => {
             Expr::TryCatch { try_expr: Box::new(simplify_expr(try_expr)), catch_expr: Box::new(simplify_expr(catch_expr)) }
         }
+        // delpaths([["field"]]) → del(.field)
+        Expr::DelPaths { paths } => {
+            use crate::ir::Literal;
+            if let Expr::Collect { generator } = paths.as_ref() {
+                if let Expr::Collect { generator: inner } = generator.as_ref() {
+                    if let Expr::Literal(Literal::Str(field)) = inner.as_ref() {
+                        return Expr::CallBuiltin {
+                            name: "del".into(),
+                            args: vec![Expr::Index {
+                                expr: Box::new(Expr::Input),
+                                key: Box::new(Expr::Literal(Literal::Str(field.clone()))),
+                            }],
+                        };
+                    }
+                }
+            }
+            Expr::DelPaths { paths: Box::new(simplify_expr(paths)) }
+        }
         _ => expr.clone(),
     }
 }
@@ -1418,7 +1436,9 @@ impl Filter {
 
     /// Detect `.field / N | floor` or `.field % N` pattern (field + binop + optional unary).
     /// Returns (field_name, binop, constant, optional unary op) if detected.
-    pub fn detect_field_binop_const_unary(&self) -> Option<(String, crate::ir::BinOp, f64, Option<crate::ir::UnaryOp>)> {
+    /// Returns (field, op, const, unary_op, const_on_left).
+    /// When const_on_left is true, the expression is `N op .field` instead of `.field op N`.
+    pub fn detect_field_binop_const_unary(&self) -> Option<(String, crate::ir::BinOp, f64, Option<crate::ir::UnaryOp>, bool)> {
         use crate::ir::{Expr, BinOp, UnaryOp, Literal};
         let expr = self.detect_expr()?;
         // Case 1: `.field / N | floor` — Pipe { left: BinOp(.field, N), right: UnaryOp }
@@ -1432,7 +1452,7 @@ impl Filter {
                             if let Expr::UnaryOp { op: uop, operand } = right.as_ref() {
                                 if !matches!(operand.as_ref(), Expr::Input) { return None; }
                                 if matches!(uop, UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Sqrt | UnaryOp::Fabs | UnaryOp::Abs) {
-                                    return Some((field.clone(), *op, *n, Some(*uop)));
+                                    return Some((field.clone(), *op, *n, Some(*uop), false));
                                 }
                             }
                         }
@@ -1449,7 +1469,17 @@ impl Filter {
                             if matches!(base.as_ref(), Expr::Input) {
                                 if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                                     if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
-                                        return Some((field.clone(), *op, *n, Some(*uop)));
+                                        return Some((field.clone(), *op, *n, Some(*uop), false));
+                                    }
+                                }
+                            }
+                        }
+                        // Beta-reduced N op .field | unary
+                        if let Expr::Index { expr: base, key } = rhs.as_ref() {
+                            if matches!(base.as_ref(), Expr::Input) {
+                                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                    if let Expr::Literal(Literal::Num(n, _)) = lhs.as_ref() {
+                                        return Some((field.clone(), *op, *n, Some(*uop), true));
                                     }
                                 }
                             }
@@ -1460,13 +1490,25 @@ impl Filter {
         }
         // Case 3: `.field op N` — top-level BinOp (all arithmetic ops)
         if let Expr::BinOp { op, lhs, rhs } = expr {
-            if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) { return None; }
-            if let Expr::Index { expr: base, key } = lhs.as_ref() {
-                if !matches!(base.as_ref(), Expr::Input) { return None; }
-                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
-                    if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
-                        if !matches!(op, BinOp::Div | BinOp::Mod) || *n != 0.0 {
-                            return Some((field.clone(), *op, *n, None));
+            if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+                if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                            if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                if !matches!(op, BinOp::Div | BinOp::Mod) || *n != 0.0 {
+                                    return Some((field.clone(), *op, *n, None, false));
+                                }
+                            }
+                        }
+                    }
+                }
+                // Case 4: `N op .field` — constant on left (e.g. `100 - .x`)
+                if let Expr::Literal(Literal::Num(n, _)) = lhs.as_ref() {
+                    if let Expr::Index { expr: base, key } = rhs.as_ref() {
+                        if matches!(base.as_ref(), Expr::Input) {
+                            if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                return Some((field.clone(), *op, *n, None, true));
+                            }
                         }
                     }
                 }

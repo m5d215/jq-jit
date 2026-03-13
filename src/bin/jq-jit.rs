@@ -2058,18 +2058,19 @@ fn real_main() {
                         }
                         Ok(())
                     })
-                } else if let Some((ref field, ref bop, cval, ref uop_opt)) = field_binop_const_unary {
+                } else if let Some((ref field, ref bop, cval, ref uop_opt, const_left)) = field_binop_const_unary {
                     use jq_jit::ir::BinOp;
                     use jq_jit::ir::UnaryOp;
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         if let Some(n) = json_object_get_num(raw, 0, field) {
+                            let (a, b) = if const_left { (cval, n) } else { (n, cval) };
                             let mid = match bop {
-                                BinOp::Add => n + cval,
-                                BinOp::Sub => n - cval,
-                                BinOp::Mul => n * cval,
-                                BinOp::Div => n / cval,
-                                BinOp::Mod => n % cval,
+                                BinOp::Add => a + b,
+                                BinOp::Sub => a - b,
+                                BinOp::Mul => a * b,
+                                BinOp::Div => a / b,
+                                BinOp::Mod => a % b,
                                 _ => unreachable!(),
                             };
                             let result = if let Some(uop) = uop_opt {
@@ -6481,19 +6482,20 @@ fn real_main() {
                     }
                     Ok(())
                 })
-            } else if let Some((ref field, ref bop, cval, ref uop_opt)) = field_binop_const_unary {
+            } else if let Some((ref field, ref bop, cval, ref uop_opt, const_left)) = field_binop_const_unary {
                 use jq_jit::ir::BinOp;
                 use jq_jit::ir::UnaryOp;
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
                     if let Some(n) = json_object_get_num(raw, 0, field) {
+                        let (a, b) = if const_left { (cval, n) } else { (n, cval) };
                         let mid = match bop {
-                            BinOp::Add => n + cval,
-                            BinOp::Sub => n - cval,
-                            BinOp::Mul => n * cval,
-                            BinOp::Div => n / cval,
-                            BinOp::Mod => n % cval,
+                            BinOp::Add => a + b,
+                            BinOp::Sub => a - b,
+                            BinOp::Mul => a * b,
+                            BinOp::Div => a / b,
+                            BinOp::Mod => a % b,
                             _ => unreachable!(),
                         };
                         let result = if let Some(uop) = uop_opt {
