@@ -40,6 +40,8 @@ pub enum RemapExpr {
     FieldLength(String),
     /// String interpolation: `"\(.x):\(.y)"` — parts are literals and field references
     StringInterp(Vec<InterpPart>),
+    /// `.field | split(sep) | join(rep)` — string replacement
+    FieldSplitJoin(String, String, String), // field, split_sep, join_rep
 }
 
 /// Part of a string interpolation for raw byte remap emission.
@@ -1423,6 +1425,30 @@ impl Filter {
                                             Expr::Literal(Literal::Str(f2)),
                                         ) = (key1.as_ref(), key2.as_ref()) {
                                             return Some(RemapExpr::FieldMinMax(f1.clone(), f2.clone(), is_max));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // .field | split(sep) | join(rep) — string replacement
+        if let Expr::Pipe { left, right } = v {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if matches!(base.as_ref(), Expr::Input) {
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        if let Expr::Pipe { left: split_expr, right: join_expr } = right.as_ref() {
+                            if let Expr::CallBuiltin { name: sn, args: sa } = split_expr.as_ref() {
+                                if sn == "split" && sa.len() == 1 {
+                                    if let Expr::Literal(Literal::Str(sep)) = &sa[0] {
+                                        if let Expr::CallBuiltin { name: jn, args: ja } = join_expr.as_ref() {
+                                            if jn == "join" && ja.len() == 1 {
+                                                if let Expr::Literal(Literal::Str(rep)) = &ja[0] {
+                                                    return Some(RemapExpr::FieldSplitJoin(field.clone(), sep.clone(), rep.clone()));
+                                                }
+                                            }
                                         }
                                     }
                                 }

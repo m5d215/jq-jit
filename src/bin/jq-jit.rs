@@ -146,6 +146,7 @@ fn remap_expr_fields(rexpr: &jq_jit::interpreter::RemapExpr) -> Vec<&str> {
             }
             fields
         }
+        RemapExpr::FieldSplitJoin(f, _, _) => vec![f.as_str()],
     }
 }
 
@@ -192,6 +193,7 @@ enum ResolvedRemap {
     LiteralJson(Vec<u8>),
     FieldLength(usize),
     StringInterp(Vec<ResolvedInterpPart>),
+    FieldSplitJoin(usize, Vec<u8>, Vec<u8>), // field_idx, split_sep bytes, join_rep bytes
 }
 
 /// Pre-resolved string interpolation part.
@@ -229,6 +231,9 @@ fn resolve_one_remap(
         RemapExpr::FieldMinMax(f1, f2, is_max) => ResolvedRemap::FieldMinMax(field_idx[f1.as_str()], field_idx[f2.as_str()], *is_max),
         RemapExpr::LiteralJson(ref bytes) => ResolvedRemap::LiteralJson(bytes.clone()),
         RemapExpr::FieldLength(f) => ResolvedRemap::FieldLength(field_idx[f.as_str()]),
+        RemapExpr::FieldSplitJoin(f, sep, rep) => {
+            ResolvedRemap::FieldSplitJoin(field_idx[f.as_str()], sep.as_bytes().to_vec(), rep.as_bytes().to_vec())
+        }
         RemapExpr::StringInterp(parts) => {
             let resolved = parts.iter().map(|p| match p {
                 jq_jit::interpreter::InterpPart::Literal(s) => {
@@ -337,6 +342,74 @@ fn emit_interp_field_raw(buf: &mut Vec<u8>, val: &[u8]) {
             }
         }
     }
+}
+
+/// Emit `.field | split(sep) | join(rep)` on a raw JSON string value.
+/// Replaces all occurrences of `sep` with `rep` inside the string content.
+#[inline]
+fn emit_split_join_raw(buf: &mut Vec<u8>, val: &[u8], sep: &[u8], rep: &[u8]) {
+    if val.len() < 2 || val[0] != b'"' {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let content = &val[1..val.len()-1];
+    buf.push(b'"');
+    if sep.is_empty() {
+        // split("") produces individual chars — join(rep) puts rep between each char
+        let mut first = true;
+        let mut i = 0;
+        while i < content.len() {
+            if !first {
+                // JSON-escape the replacement
+                for &b in rep {
+                    match b {
+                        b'"' => buf.extend_from_slice(b"\\\""),
+                        b'\\' => buf.extend_from_slice(b"\\\\"),
+                        _ => buf.push(b),
+                    }
+                }
+            }
+            first = false;
+            if content[i] == b'\\' && i + 1 < content.len() {
+                // Copy escape sequence as-is (already valid JSON)
+                buf.push(content[i]);
+                buf.push(content[i+1]);
+                if content[i+1] == b'u' && i + 5 < content.len() {
+                    buf.extend_from_slice(&content[i+2..i+6]);
+                    i += 6;
+                } else {
+                    i += 2;
+                }
+            } else {
+                // UTF-8: copy full codepoint bytes
+                let b0 = content[i];
+                let clen = if b0 < 0x80 { 1 } else if b0 < 0xE0 { 2 } else if b0 < 0xF0 { 3 } else { 4 };
+                let end = (i + clen).min(content.len());
+                buf.extend_from_slice(&content[i..end]);
+                i = end;
+            }
+        }
+    } else {
+        // Replace sep with rep in content bytes
+        let mut pos = 0;
+        while pos < content.len() {
+            if pos + sep.len() <= content.len() && &content[pos..pos+sep.len()] == sep {
+                // JSON-escape the replacement
+                for &b in rep {
+                    match b {
+                        b'"' => buf.extend_from_slice(b"\\\""),
+                        b'\\' => buf.extend_from_slice(b"\\\\"),
+                        _ => buf.push(b),
+                    }
+                }
+                pos += sep.len();
+            } else {
+                buf.push(content[pos]);
+                pos += 1;
+            }
+        }
+    }
+    buf.push(b'"');
 }
 
 /// Fast substring search using memchr for the first byte.
@@ -465,6 +538,11 @@ fn emit_remap_value(
             let idx = field_idx[f.as_str()];
             let resolved = ResolvedRemap::FieldLength(idx);
             emit_resolved_value(buf, &resolved, raw, ranges);
+        }
+        RemapExpr::FieldSplitJoin(f, sep, rep) => {
+            let idx = field_idx[f.as_str()];
+            let (vs, ve) = ranges[idx];
+            emit_split_join_raw(buf, &raw[vs..ve], sep.as_bytes(), rep.as_bytes());
         }
         RemapExpr::StringInterp(parts) => {
             buf.push(b'"');
@@ -622,6 +700,10 @@ fn emit_resolved_value(
                 }
             }
             buf.push(b'"');
+        }
+        ResolvedRemap::FieldSplitJoin(idx, ref sep, ref rep) => {
+            let (vs, ve) = ranges[idx];
+            emit_split_join_raw(buf, &raw[vs..ve], sep, rep);
         }
         ResolvedRemap::FieldLength(idx) => {
             let (vs, ve) = ranges[idx];
