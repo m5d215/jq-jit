@@ -56,6 +56,14 @@ pub enum RemapExpr {
     FieldOpFieldToString(String, crate::ir::BinOp, String), // f1, op, f2
     /// `(arith_expr) | tostring` — compound arithmetic then tostring
     ArithToString(ArithExpr, Vec<String>),
+    /// `(arith_expr) | math_unary` — compound arithmetic then sqrt/floor/ceil
+    ArithUnary(MathUnary, ArithExpr, Vec<String>),
+}
+
+/// Math unary operation for ArithUnary.
+#[derive(Debug, Clone, Copy)]
+pub enum MathUnary {
+    Sqrt, Floor, Ceil, Fabs, Round,
 }
 
 /// String builtin for FieldStrBuiltin.
@@ -1416,6 +1424,25 @@ impl Filter {
                 }
             }
         }
+        // compound arith | sqrt/floor/ceil/fabs/round
+        if let Expr::UnaryOp { op, operand } = v {
+            let math_op = match op {
+                UnaryOp::Sqrt => Some(MathUnary::Sqrt),
+                UnaryOp::Floor => Some(MathUnary::Floor),
+                UnaryOp::Ceil => Some(MathUnary::Ceil),
+                UnaryOp::Fabs => Some(MathUnary::Fabs),
+                UnaryOp::Round => Some(MathUnary::Round),
+                _ => None,
+            };
+            if let Some(math_op) = math_op {
+                let mut fields = Vec::new();
+                if let Some(arith) = Self::try_build_arith_expr(operand, &mut fields) {
+                    if !fields.is_empty() {
+                        return Some(RemapExpr::ArithUnary(math_op, arith, fields));
+                    }
+                }
+            }
+        }
         // .field op N or .field op .field2
         if let Expr::BinOp { op, lhs, rhs } = v {
             let is_arith = matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod);
@@ -2557,6 +2584,28 @@ impl Filter {
             if count_field_refs(&arith) < 2 { return None; }
         }
         Some((fields, arith))
+    }
+
+    /// Detect compound arithmetic with math unary: `(arith) | sqrt/floor/ceil/fabs/round`.
+    /// Returns (fields, arith_expr, math_unary) if detected.
+    pub fn detect_numeric_expr_unary(&self) -> Option<(Vec<String>, ArithExpr, MathUnary)> {
+        use crate::ir::{Expr, UnaryOp};
+        let expr = self.detect_expr()?;
+        if let Expr::UnaryOp { op, operand } = expr {
+            let math_op = match op {
+                UnaryOp::Sqrt => Some(MathUnary::Sqrt),
+                UnaryOp::Floor => Some(MathUnary::Floor),
+                UnaryOp::Ceil => Some(MathUnary::Ceil),
+                UnaryOp::Fabs => Some(MathUnary::Fabs),
+                UnaryOp::Round => Some(MathUnary::Round),
+                _ => None,
+            }?;
+            let mut fields = Vec::new();
+            let arith = Self::try_build_arith_expr(operand, &mut fields)?;
+            if fields.is_empty() { return None; }
+            return Some((fields, arith, math_op));
+        }
+        None
     }
 
     /// Detect two-field numeric comparison: `.x > .y`, `.x == .y`, etc.

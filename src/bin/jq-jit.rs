@@ -152,7 +152,7 @@ fn remap_expr_fields(rexpr: &jq_jit::interpreter::RemapExpr) -> Vec<&str> {
         RemapExpr::FieldStrBuiltin(f, _, _) => vec![f.as_str()],
         RemapExpr::FieldSplitIndex(f, _, _) => vec![f.as_str()],
         RemapExpr::FieldOpFieldToString(f1, _, f2) => vec![f1.as_str(), f2.as_str()],
-        RemapExpr::ArithToString(_, fields) => fields.iter().map(|f| f.as_str()).collect(),
+        RemapExpr::ArithToString(_, fields) | RemapExpr::ArithUnary(_, _, fields) => fields.iter().map(|f| f.as_str()).collect(),
         RemapExpr::CondChain(branches, else_out) => {
             let mut fields: Vec<&str> = Vec::new();
             for b in branches {
@@ -243,6 +243,7 @@ enum ResolvedRemap {
     FieldSplitIndex(usize, Vec<u8>, i32), // field_idx, sep_bytes, index
     FieldOpFieldToString(usize, jq_jit::ir::BinOp, usize), // idx1, op, idx2
     ArithToString(jq_jit::interpreter::ArithExpr),
+    ArithUnary(jq_jit::interpreter::MathUnary, jq_jit::interpreter::ArithExpr),
 }
 
 /// Pre-resolved conditional branch for remap values.
@@ -341,6 +342,9 @@ fn resolve_one_remap(
         }
         RemapExpr::ArithToString(arith, fields) => {
             ResolvedRemap::ArithToString(resolve_arith_expr(arith, fields, field_idx))
+        }
+        RemapExpr::ArithUnary(math_op, arith, fields) => {
+            ResolvedRemap::ArithUnary(*math_op, resolve_arith_expr(arith, fields, field_idx))
         }
         RemapExpr::StringInterp(parts) => {
             let resolved = parts.iter().map(|p| match p {
@@ -734,6 +738,12 @@ fn emit_remap_value(
                 buf.push(b'"');
                 push_jq_number_bytes(buf, r);
                 buf.push(b'"');
+            } else { buf.extend_from_slice(b"null"); }
+        }
+        RemapExpr::ArithUnary(math_op, arith, fields) => {
+            if let Some(r) = eval_arith_raw_unresolved(arith, fields, raw, ranges, field_idx) {
+                let result = apply_math_unary(*math_op, r);
+                push_jq_number_bytes(buf, result);
             } else { buf.extend_from_slice(b"null"); }
         }
         RemapExpr::CondChain(_, _) => {
@@ -1144,6 +1154,24 @@ fn emit_resolved_value(
                 buf.push(b'"');
             } else { buf.extend_from_slice(b"null"); }
         }
+        ResolvedRemap::ArithUnary(math_op, ref arith) => {
+            if let Some(r) = eval_arith_raw(arith, raw, ranges) {
+                let result = apply_math_unary(math_op, r);
+                push_jq_number_bytes(buf, result);
+            } else { buf.extend_from_slice(b"null"); }
+        }
+    }
+}
+
+#[inline]
+fn apply_math_unary(op: jq_jit::interpreter::MathUnary, v: f64) -> f64 {
+    use jq_jit::interpreter::MathUnary;
+    match op {
+        MathUnary::Sqrt => v.sqrt(),
+        MathUnary::Floor => v.floor(),
+        MathUnary::Ceil => v.ceil(),
+        MathUnary::Fabs => v.abs(),
+        MathUnary::Round => v.round(),
     }
 }
 
@@ -1462,6 +1490,9 @@ fn real_main() {
     let numeric_expr = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_binop.is_none() && field_binop_const_unary.is_none() && field_arith_chain.is_none() {
         filter.detect_numeric_expr()
     } else { None };
+    let numeric_expr_unary = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && numeric_expr.is_none() && field_binop.is_none() && field_arith_chain.is_none() {
+        filter.detect_numeric_expr_unary()
+    } else { None };
     let field_field_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_binop.is_none() {
         filter.detect_field_field_cmp()
     } else { None };
@@ -1686,7 +1717,7 @@ fn real_main() {
     // Only activate when no raw byte fast path matched (those handle their own parsing).
     let has_raw_fast_path = field_access.is_some() || nested_field.is_some() || field_remap.is_some()
         || computed_remap.is_some()
-        || field_binop.is_some() || field_binop_tostring.is_some() || field_unary_num.is_some() || field_binop_const_unary.is_some() || field_arith_chain.is_some() || field_arith_tostring.is_some() || numeric_expr.is_some()
+        || field_binop.is_some() || field_binop_tostring.is_some() || field_unary_num.is_some() || field_binop_const_unary.is_some() || field_arith_chain.is_some() || field_arith_tostring.is_some() || numeric_expr.is_some() || numeric_expr_unary.is_some()
         || field_field_cmp.is_some() || field_const_cmp.is_some() || arith_chain_cmp.is_some() || compound_field_cmp.is_some()
         || field_str_builtin.is_some() || field_test.is_some() || field_gsub.is_some() || field_format.is_some() || field_ltrimstr_tonumber.is_some()
         || field_str_concat.is_some() || field_alt.is_some() || field_field_alt.is_some()
@@ -3176,6 +3207,47 @@ fn real_main() {
                         };
                         if ok {
                             let result = arith.eval(&vals_buf);
+                            push_jq_number_bytes(&mut compact_buf, result);
+                            compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref nfields, ref arith, math_op)) = numeric_expr_unary {
+                    let nf_count = nfields.len();
+                    let field_refs: Vec<&str> = nfields.iter().map(|s| s.as_str()).collect();
+                    let mut ranges_buf = vec![(0usize, 0usize); nf_count];
+                    let mut vals_buf: Vec<f64> = vec![0.0; nf_count];
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        let ok = if nf_count == 1 {
+                            if let Some(v) = json_object_get_num(raw, 0, &nfields[0]) {
+                                vals_buf[0] = v; true
+                            } else { false }
+                        } else if nf_count == 2 {
+                            if let Some((a, b)) = json_object_get_two_nums(raw, 0, &nfields[0], &nfields[1]) {
+                                vals_buf[0] = a; vals_buf[1] = b; true
+                            } else { false }
+                        } else {
+                            if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                                let mut all_ok = true;
+                                for (i, &(s, e)) in ranges_buf.iter().enumerate() {
+                                    match fast_float::parse::<f64, _>(unsafe { std::str::from_utf8_unchecked(&raw[s..e]) }) {
+                                        Ok(n) => vals_buf[i] = n,
+                                        Err(_) => { all_ok = false; break; }
+                                    }
+                                }
+                                all_ok
+                            } else { false }
+                        };
+                        if ok {
+                            let result = apply_math_unary(math_op, arith.eval(&vals_buf));
                             push_jq_number_bytes(&mut compact_buf, result);
                             compact_buf.push(b'\n');
                         } else {
@@ -8795,6 +8867,48 @@ fn real_main() {
                     };
                     if ok {
                         let result = arith.eval(&vals_buf);
+                        push_jq_number_bytes(&mut compact_buf, result);
+                        compact_buf.push(b'\n');
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref nfields, ref arith, math_op)) = numeric_expr_unary {
+                let nf_count = nfields.len();
+                let content_bytes = content.as_bytes();
+                let field_refs: Vec<&str> = nfields.iter().map(|s| s.as_str()).collect();
+                let mut ranges_buf = vec![(0usize, 0usize); nf_count];
+                let mut vals_buf: Vec<f64> = vec![0.0; nf_count];
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    let ok = if nf_count == 1 {
+                        if let Some(v) = json_object_get_num(raw, 0, &nfields[0]) {
+                            vals_buf[0] = v; true
+                        } else { false }
+                    } else if nf_count == 2 {
+                        if let Some((a, b)) = json_object_get_two_nums(raw, 0, &nfields[0], &nfields[1]) {
+                            vals_buf[0] = a; vals_buf[1] = b; true
+                        } else { false }
+                    } else {
+                        if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                            let mut all_ok = true;
+                            for (i, &(s, e)) in ranges_buf.iter().enumerate() {
+                                match fast_float::parse::<f64, _>(unsafe { std::str::from_utf8_unchecked(&raw[s..e]) }) {
+                                    Ok(n) => vals_buf[i] = n,
+                                    Err(_) => { all_ok = false; break; }
+                                }
+                            }
+                            all_ok
+                        } else { false }
+                    };
+                    if ok {
+                        let result = apply_math_unary(math_op, arith.eval(&vals_buf));
                         push_jq_number_bytes(&mut compact_buf, result);
                         compact_buf.push(b'\n');
                     } else {
