@@ -2033,6 +2033,9 @@ fn real_main() {
     let select_str_array = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_str_field.is_none() && select_str_cremap.is_none() && field_access.is_none() {
         filter.detect_select_str_then_array()
     } else { None };
+    let select_str_str_chain = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_str_field.is_none() && select_str_cremap.is_none() && select_str_array.is_none() && field_access.is_none() {
+        filter.detect_select_str_then_str_chain()
+    } else { None };
     // Field projection: if filter only accesses specific fields, skip parsing the rest.
     // Only activate when no raw byte fast path matched (those handle their own parsing).
     let has_raw_fast_path = field_access.is_some() || nested_field.is_some() || field_remap.is_some()
@@ -2045,7 +2048,7 @@ fn real_main() {
         || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || field_field_cmp_branch.is_some() || if_cmp_arrays.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some() || select_compound_computed.is_some() || select_compound_cremap.is_some()
         || select_str.is_some()
         || select_str_test.is_some() || select_regex_test.is_some() || select_regex_value.is_some() || select_nested_cmp.is_some()
-        || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_field_unary.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_array.is_some() || select_arith_cmp_array.is_some() || select_cmp_value.is_some() || select_cmp_str_chain.is_some() || select_ff_cmp_field.is_some() || select_ff_cmp.is_some() || select_ff_cmp_cremap.is_some() || select_ff_cmp_value.is_some() || select_ff_cmp_array.is_some() || select_compound_array.is_some() || select_str_field.is_some() || select_str_cremap.is_some() || select_str_array.is_some()
+        || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_field_unary.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_array.is_some() || select_arith_cmp_array.is_some() || select_cmp_value.is_some() || select_cmp_str_chain.is_some() || select_ff_cmp_field.is_some() || select_ff_cmp.is_some() || select_ff_cmp_cremap.is_some() || select_ff_cmp_value.is_some() || select_ff_cmp_array.is_some() || select_compound_array.is_some() || select_str_field.is_some() || select_str_cremap.is_some() || select_str_array.is_some() || select_str_str_chain.is_some()
         || computed_array.is_some() || array_field.is_some() || multi_field.is_some() || is_length || is_keys
         || is_keys_unsorted || has_field.is_some() || has_multi.is_some() || select_has_multi.is_some() || is_type || del_field.is_some() || obj_merge_lit.is_some() || obj_merge_computed.is_some()
         || is_each || is_sort_keys || is_to_entries || remap_to_entries.is_some() || with_entries_select.is_some() || with_entries_type.is_some() || is_tojson || string_interp_fields.is_some() || string_add_chain.is_some() || array_join.is_some()
@@ -6701,6 +6704,123 @@ fn real_main() {
                         }
                         Ok(())
                     })
+                } else if let Some((ref sel_field, ref test_type, ref test_arg, ref sac_parts)) = select_str_str_chain {
+                    // select(.field | string_test) | str_add_chain
+                    use jq_jit::interpreter::StringAddPart;
+                    let expected_eq = if test_type == "eq" || test_type == "ne" {
+                        let mut buf = Vec::with_capacity(test_arg.len() + 2);
+                        buf.push(b'"');
+                        buf.extend_from_slice(test_arg.as_bytes());
+                        buf.push(b'"');
+                        Some(buf)
+                    } else { None };
+                    let is_ne = test_type == "ne";
+                    let sw_bytes = if test_type == "startswith" { Some(test_arg.as_bytes()) } else { None };
+                    let ew_bytes = if test_type == "endswith" { Some(test_arg.as_bytes()) } else { None };
+                    let co_bytes = if test_type == "contains" { Some(test_arg.as_bytes()) } else { None };
+                    let mut field_names: Vec<&str> = Vec::new();
+                    let mut field_idx_map: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+                    // Add condition field
+                    field_idx_map.insert(sel_field.as_str(), 0);
+                    field_names.push(sel_field.as_str());
+                    for part in sac_parts.iter() {
+                        let name = match part {
+                            StringAddPart::Field(f) | StringAddPart::FieldToString(f) | StringAddPart::FieldArithToString(f, _) => f.as_str(),
+                            _ => continue,
+                        };
+                        if !field_idx_map.contains_key(name) {
+                            field_idx_map.insert(name, field_names.len());
+                            field_names.push(name);
+                        }
+                    }
+                    let mut actions: Vec<(usize, u8, usize)> = Vec::with_capacity(sac_parts.len());
+                    let mut lit_bufs: Vec<Vec<u8>> = Vec::new();
+                    let mut arith_ops_list: Vec<&[(jq_jit::ir::BinOp, f64)]> = Vec::new();
+                    for part in sac_parts.iter() {
+                        match part {
+                            StringAddPart::Literal(s) => {
+                                let mut buf = Vec::new();
+                                for &b in s.as_bytes() {
+                                    match b {
+                                        b'"' => buf.extend_from_slice(b"\\\""),
+                                        b'\\' => buf.extend_from_slice(b"\\\\"),
+                                        b'\n' => buf.extend_from_slice(b"\\n"),
+                                        b'\r' => buf.extend_from_slice(b"\\r"),
+                                        b'\t' => buf.extend_from_slice(b"\\t"),
+                                        c if c < 0x20 => { let _ = write!(buf, "\\u{:04x}", c); }
+                                        _ => buf.push(b),
+                                    }
+                                }
+                                let li = lit_bufs.len();
+                                lit_bufs.push(buf);
+                                actions.push((li, 0, 0));
+                            }
+                            StringAddPart::Field(f) | StringAddPart::FieldToString(f) => {
+                                actions.push((field_idx_map[f.as_str()], 1, 0));
+                            }
+                            StringAddPart::FieldArithToString(f, ops) => {
+                                let ai = arith_ops_list.len();
+                                arith_ops_list.push(ops.as_slice());
+                                actions.push((field_idx_map[f.as_str()], 2, ai));
+                            }
+                        }
+                    }
+                    let mut ranges_buf = vec![(0usize, 0usize); field_names.len()];
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
+                            let (cs, ce) = ranges_buf[0]; // condition field
+                            let cond_val = &raw[cs..ce];
+                            let pass = if let Some(ref eq_bytes) = expected_eq {
+                                let m = cond_val == eq_bytes.as_slice();
+                                if is_ne { !m } else { m }
+                            } else if cond_val.len() >= 2 && cond_val[0] == b'"' {
+                                let inner = &cond_val[1..cond_val.len()-1];
+                                if let Some(sw) = sw_bytes { inner.starts_with(sw) }
+                                else if let Some(ew) = ew_bytes { inner.ends_with(ew) }
+                                else if let Some(co) = co_bytes { inner.windows(co.len()).any(|w| w == co) }
+                                else { false }
+                            } else { false };
+                            if pass {
+                                compact_buf.push(b'"');
+                                for &(idx, typ, ai) in &actions {
+                                    match typ {
+                                        0 => { compact_buf.extend_from_slice(&lit_bufs[idx]); }
+                                        1 => {
+                                            let (vs, ve) = ranges_buf[idx];
+                                            let val_bytes = &raw[vs..ve];
+                                            if val_bytes[0] == b'"' && val_bytes.len() >= 2 {
+                                                compact_buf.extend_from_slice(&val_bytes[1..val_bytes.len()-1]);
+                                            } else {
+                                                compact_buf.extend_from_slice(val_bytes);
+                                            }
+                                        }
+                                        _ => {
+                                            let (vs, ve) = ranges_buf[idx];
+                                            let s = unsafe { std::str::from_utf8_unchecked(&raw[vs..ve]) };
+                                            if let Ok(mut v) = s.trim().parse::<f64>() {
+                                                for &(ref op, n) in arith_ops_list[ai] {
+                                                    v = match op {
+                                                        jq_jit::ir::BinOp::Add => v + n, jq_jit::ir::BinOp::Sub => v - n,
+                                                        jq_jit::ir::BinOp::Mul => v * n, jq_jit::ir::BinOp::Div => v / n,
+                                                        jq_jit::ir::BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
+                                                        _ => v,
+                                                    };
+                                                }
+                                                push_jq_number_bytes(&mut compact_buf, v);
+                                            }
+                                        }
+                                    }
+                                }
+                                compact_buf.extend_from_slice(b"\"\n");
+                            }
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
                 } else if let Some((ref sel_field, ref test_type, ref test_arg, ref remap_pairs)) = select_str_cremap {
                     // select(.field | string_test) | {computed_remap}
                     let mut all_fields: Vec<String> = Vec::new();
@@ -10498,6 +10618,123 @@ fn real_main() {
                     } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref sel_field, ref test_type, ref test_arg, ref sac_parts)) = select_str_str_chain {
+                // select(.field | string_test) | str_add_chain — stdin path
+                use jq_jit::interpreter::StringAddPart;
+                let content_bytes = content.as_bytes();
+                let expected_eq = if test_type == "eq" || test_type == "ne" {
+                    let mut buf = Vec::with_capacity(test_arg.len() + 2);
+                    buf.push(b'"');
+                    buf.extend_from_slice(test_arg.as_bytes());
+                    buf.push(b'"');
+                    Some(buf)
+                } else { None };
+                let is_ne = test_type == "ne";
+                let sw_bytes = if test_type == "startswith" { Some(test_arg.as_bytes()) } else { None };
+                let ew_bytes = if test_type == "endswith" { Some(test_arg.as_bytes()) } else { None };
+                let co_bytes = if test_type == "contains" { Some(test_arg.as_bytes()) } else { None };
+                let mut field_names: Vec<&str> = Vec::new();
+                let mut field_idx_map: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+                field_idx_map.insert(sel_field.as_str(), 0);
+                field_names.push(sel_field.as_str());
+                for part in sac_parts.iter() {
+                    let name = match part {
+                        StringAddPart::Field(f) | StringAddPart::FieldToString(f) | StringAddPart::FieldArithToString(f, _) => f.as_str(),
+                        _ => continue,
+                    };
+                    if !field_idx_map.contains_key(name) {
+                        field_idx_map.insert(name, field_names.len());
+                        field_names.push(name);
+                    }
+                }
+                let mut actions: Vec<(usize, u8, usize)> = Vec::with_capacity(sac_parts.len());
+                let mut lit_bufs: Vec<Vec<u8>> = Vec::new();
+                let mut arith_ops_list: Vec<&[(jq_jit::ir::BinOp, f64)]> = Vec::new();
+                for part in sac_parts.iter() {
+                    match part {
+                        StringAddPart::Literal(s) => {
+                            let mut buf = Vec::new();
+                            for &b in s.as_bytes() {
+                                match b {
+                                    b'"' => buf.extend_from_slice(b"\\\""),
+                                    b'\\' => buf.extend_from_slice(b"\\\\"),
+                                    b'\n' => buf.extend_from_slice(b"\\n"),
+                                    b'\r' => buf.extend_from_slice(b"\\r"),
+                                    b'\t' => buf.extend_from_slice(b"\\t"),
+                                    c if c < 0x20 => { let _ = write!(buf, "\\u{:04x}", c); }
+                                    _ => buf.push(b),
+                                }
+                            }
+                            let li = lit_bufs.len();
+                            lit_bufs.push(buf);
+                            actions.push((li, 0, 0));
+                        }
+                        StringAddPart::Field(f) | StringAddPart::FieldToString(f) => {
+                            actions.push((field_idx_map[f.as_str()], 1, 0));
+                        }
+                        StringAddPart::FieldArithToString(f, ops) => {
+                            let ai = arith_ops_list.len();
+                            arith_ops_list.push(ops.as_slice());
+                            actions.push((field_idx_map[f.as_str()], 2, ai));
+                        }
+                    }
+                }
+                let mut ranges_buf = vec![(0usize, 0usize); field_names.len()];
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
+                        let (cs, ce) = ranges_buf[0];
+                        let cond_val = &raw[cs..ce];
+                        let pass = if let Some(ref eq_bytes) = expected_eq {
+                            let m = cond_val == eq_bytes.as_slice();
+                            if is_ne { !m } else { m }
+                        } else if cond_val.len() >= 2 && cond_val[0] == b'"' {
+                            let inner = &cond_val[1..cond_val.len()-1];
+                            if let Some(sw) = sw_bytes { inner.starts_with(sw) }
+                            else if let Some(ew) = ew_bytes { inner.ends_with(ew) }
+                            else if let Some(co) = co_bytes { inner.windows(co.len()).any(|w| w == co) }
+                            else { false }
+                        } else { false };
+                        if pass {
+                            compact_buf.push(b'"');
+                            for &(idx, typ, ai) in &actions {
+                                match typ {
+                                    0 => { compact_buf.extend_from_slice(&lit_bufs[idx]); }
+                                    1 => {
+                                        let (vs, ve) = ranges_buf[idx];
+                                        let val_bytes = &raw[vs..ve];
+                                        if val_bytes[0] == b'"' && val_bytes.len() >= 2 {
+                                            compact_buf.extend_from_slice(&val_bytes[1..val_bytes.len()-1]);
+                                        } else {
+                                            compact_buf.extend_from_slice(val_bytes);
+                                        }
+                                    }
+                                    _ => {
+                                        let (vs, ve) = ranges_buf[idx];
+                                        let s = unsafe { std::str::from_utf8_unchecked(&raw[vs..ve]) };
+                                        if let Ok(mut v) = s.trim().parse::<f64>() {
+                                            for &(ref op, n) in arith_ops_list[ai] {
+                                                v = match op {
+                                                    jq_jit::ir::BinOp::Add => v + n, jq_jit::ir::BinOp::Sub => v - n,
+                                                    jq_jit::ir::BinOp::Mul => v * n, jq_jit::ir::BinOp::Div => v / n,
+                                                    jq_jit::ir::BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
+                                                    _ => v,
+                                                };
+                                            }
+                                            push_jq_number_bytes(&mut compact_buf, v);
+                                        }
+                                    }
+                                }
+                            }
+                            compact_buf.extend_from_slice(b"\"\n");
+                        }
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
