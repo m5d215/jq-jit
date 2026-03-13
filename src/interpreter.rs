@@ -1368,6 +1368,33 @@ impl Filter {
         None
     }
 
+    /// Detect standalone array collect: `[expr1, expr2, ...]` where each element is classifiable.
+    /// Returns Vec<RemapExpr> for the elements.
+    pub fn detect_standalone_array(&self) -> Option<Vec<RemapExpr>> {
+        use crate::ir::Expr;
+        let expr = self.detect_expr()?;
+        if let Expr::Collect { generator } = expr {
+            fn collect_comma_elements<'a>(expr: &'a Expr, result: &mut Vec<&'a Expr>) {
+                match expr {
+                    Expr::Comma { left, right } => {
+                        collect_comma_elements(left, result);
+                        collect_comma_elements(right, result);
+                    }
+                    _ => result.push(expr),
+                }
+            }
+            let mut elements = Vec::new();
+            collect_comma_elements(generator, &mut elements);
+            if elements.len() < 2 { return None; } // single-element arrays not worth special-casing
+            let mut rexprs = Vec::with_capacity(elements.len());
+            for elem in &elements {
+                rexprs.push(Self::classify_remap_value(elem)?);
+            }
+            return Some(rexprs);
+        }
+        None
+    }
+
     /// Classify a single remap value expression.
     fn classify_remap_value(v: &crate::ir::Expr) -> Option<RemapExpr> {
         use crate::ir::{Expr, BinOp, Literal, UnaryOp};
