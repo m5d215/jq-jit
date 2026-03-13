@@ -147,6 +147,10 @@ TESTS=(
     'sel>N|str chain:-c:select(.x > 1000) | (.name + ":" + (.x | tostring))'
     '.f+"_"+arith_ts:-c:.name + "_" + (.x * 2 | tostring)'
     'sel(sw)|str ch:-c:select(.name | startswith("item_1")) | (.name + ":" + (.x | tostring))'
+    'split|rev|join:-c:.name | split("_") | reverse | join("-")'
+    'dynkey+static:-c:{(.name): .x, total: (.x + .y)}'
+    'if>.y str chain:-c:if .x > .y then .name + ":big" else .name + ":small" end'
+    'remap+str chain:-c:{a: (.name + "_" + (.x | tostring)), b: .y}'
 )
 
 for test in "${TESTS[@]}"; do
