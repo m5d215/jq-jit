@@ -1530,6 +1530,7 @@ impl Filter {
                     if let Expr::Collect { generator } = left.as_ref() {
                         let mut parts = Vec::new();
                         fn collect_comma_parts(e: &Expr, out: &mut Vec<(bool, String)>) -> bool {
+                            use crate::ir::UnaryOp;
                             match e {
                                 Expr::Comma { left, right } => {
                                     collect_comma_parts(left, out) && collect_comma_parts(right, out)
@@ -1540,6 +1541,17 @@ impl Filter {
                                         out.push((false, field.clone()));
                                         true
                                     } else { false }
+                                }
+                                // tostring(.field) — same as .field for join purposes
+                                Expr::UnaryOp { op: UnaryOp::ToString, operand } => {
+                                    if let Expr::Index { expr: base, key } = operand.as_ref() {
+                                        if !matches!(base.as_ref(), Expr::Input) { return false; }
+                                        if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                            out.push((false, field.clone()));
+                                            return true;
+                                        }
+                                    }
+                                    false
                                 }
                                 Expr::Literal(Literal::Str(s)) => {
                                     out.push((true, s.clone()));
