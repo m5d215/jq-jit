@@ -4096,6 +4096,49 @@ fn eval_pick(f: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> 
     cb(result)
 }
 
+/// Detect `if type == "T" then F else . end` pattern.
+/// Returns the type string and the then-branch if matched.
+fn detect_walk_type_guard(f: &Expr) -> Option<(&str, &Expr)> {
+    if let Expr::IfThenElse { cond, then_branch, else_branch } = f {
+        // else branch must be identity
+        if !matches!(else_branch.as_ref(), Expr::Input) {
+            return None;
+        }
+        // cond must be `type == "T"`
+        if let Expr::BinOp { op: crate::ir::BinOp::Eq, lhs, rhs } = cond.as_ref() {
+            // type == "T"
+            if let Expr::UnaryOp { op: crate::ir::UnaryOp::Type, operand } = lhs.as_ref() {
+                if matches!(operand.as_ref(), Expr::Input) {
+                    if let Expr::Literal(crate::ir::Literal::Str(s)) = rhs.as_ref() {
+                        return Some((s.as_str(), then_branch.as_ref()));
+                    }
+                }
+            }
+            // "T" == type
+            if let Expr::UnaryOp { op: crate::ir::UnaryOp::Type, operand } = rhs.as_ref() {
+                if matches!(operand.as_ref(), Expr::Input) {
+                    if let Expr::Literal(crate::ir::Literal::Str(s)) = lhs.as_ref() {
+                        return Some((s.as_str(), then_branch.as_ref()));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn value_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::False | Value::True => "boolean",
+        Value::Num(..) => "number",
+        Value::Str(..) => "string",
+        Value::Arr(..) => "array",
+        Value::Obj(..) => "object",
+        Value::Error(..) => "error",
+    }
+}
+
 // walk(f): Recursively apply f bottom-up
 fn eval_walk(f: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
     // Fast path: walk(.) is identity
@@ -4108,7 +4151,62 @@ fn eval_walk(f: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> 
             return cb(input);
         }
     }
+    // Optimization: walk(if type == "T" then F else . end)
+    // For values whose type != T, f is identity, so skip eval entirely.
+    // Only call eval(F, ...) on matching-type leaf values.
+    if let Some((type_name, then_body)) = detect_walk_type_guard(f) {
+        return walk_type_guarded(type_name, then_body, f, input, env, cb);
+    }
     walk_value_cb(f, input, env, cb)
+}
+
+fn walk_type_guarded(type_name: &str, then_body: &Expr, _full_f: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
+    let result = walk_type_guarded_inplace(type_name, then_body, input, env)?;
+    cb(result)
+}
+
+/// Walk with type guard, mutating in-place when possible.
+/// Returns a single walked value.
+fn walk_type_guarded_inplace(type_name: &str, then_body: &Expr, mut input: Value, env: &EnvRef) -> Result<Value> {
+    match input {
+        Value::Arr(ref mut rc_arr) => {
+            let arr = Rc::make_mut(rc_arr);
+            for item in arr.iter_mut() {
+                let taken = std::mem::replace(item, Value::Null);
+                *item = walk_type_guarded_inplace(type_name, then_body, taken, env)?;
+            }
+            if type_name == "array" {
+                let mut result = Value::Null;
+                eval(then_body, input, env, &mut |val| { result = val; Ok(true) })?;
+                Ok(result)
+            } else {
+                Ok(input)
+            }
+        }
+        Value::Obj(ref mut rc_obj) => {
+            let obj = Rc::make_mut(rc_obj);
+            for (_k, v) in obj.iter_mut() {
+                let taken = std::mem::replace(v, Value::Null);
+                *v = walk_type_guarded_inplace(type_name, then_body, taken, env)?;
+            }
+            if type_name == "object" {
+                let mut result = Value::Null;
+                eval(then_body, input, env, &mut |val| { result = val; Ok(true) })?;
+                Ok(result)
+            } else {
+                Ok(input)
+            }
+        }
+        _ => {
+            if value_type_name(&input) == type_name {
+                let mut result = Value::Null;
+                eval(then_body, input, env, &mut |val| { result = val; Ok(true) })?;
+                Ok(result)
+            } else {
+                Ok(input)
+            }
+        }
+    }
 }
 
 fn walk_value_cb(f: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
