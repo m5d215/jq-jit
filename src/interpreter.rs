@@ -42,6 +42,8 @@ pub enum RemapExpr {
     StringInterp(Vec<InterpPart>),
     /// `.field | split(sep) | join(rep)` — string replacement
     FieldSplitJoin(String, String, String), // field, split_sep, join_rep
+    /// `if .field cmp N then A elif ... else B end` — conditional chain
+    CondChain(Vec<CondBranch>, BranchOutput),
 }
 
 /// Part of a string interpolation for raw byte remap emission.
@@ -1458,6 +1460,14 @@ impl Filter {
                 }
             }
         }
+        // Conditional chain: if .field cmp N then A elif ... else B end
+        if let Expr::IfThenElse { .. } = v {
+            if let Some((branches, else_out)) = Self::classify_remap_cond_chain(v) {
+                if !branches.is_empty() {
+                    return Some(RemapExpr::CondChain(branches, else_out));
+                }
+            }
+        }
         // String interpolation: "\(.x):\(.y)" etc.
         if let Expr::StringInterpolation { parts } = v {
             use crate::ir::StringPart;
@@ -1492,6 +1502,102 @@ impl Filter {
             }
         }
         None
+    }
+
+    /// Classify a conditional chain (if-elif-else) as a remap value.
+    fn classify_remap_cond_chain(v: &crate::ir::Expr) -> Option<(Vec<CondBranch>, BranchOutput)> {
+        use crate::ir::{Expr, BinOp, Literal};
+
+        fn expr_to_branch_output(e: &Expr) -> Option<BranchOutput> {
+            // .field
+            if let Expr::Index { expr: base, key } = e {
+                if matches!(base.as_ref(), Expr::Input) {
+                    if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                        return Some(BranchOutput::Field(f.clone()));
+                    }
+                }
+                return None;
+            }
+            // Literal
+            if let Some(json_bytes) = const_expr_to_json(e) {
+                return Some(BranchOutput::Literal(json_bytes));
+            }
+            // ObjectConstruct → Remap
+            if let Expr::ObjectConstruct { pairs } = e {
+                if !pairs.is_empty() {
+                    let mut result = Vec::with_capacity(pairs.len());
+                    for (k, v) in pairs {
+                        let key = if let Expr::Literal(Literal::Str(s)) = k { s.clone() } else { return None; };
+                        let rexpr = Filter::classify_remap_value(v)?;
+                        result.push((key, rexpr));
+                    }
+                    return Some(BranchOutput::Remap(result));
+                }
+            }
+            None
+        }
+
+        fn extract_cond(cond: &Expr) -> Option<(String, Vec<(BinOp, f64)>, BinOp, CondRhs)> {
+            if let Expr::BinOp { op, lhs, rhs } = cond {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                    return None;
+                }
+                // Unwrap arithmetic chain from LHS
+                let mut arith_ops = Vec::new();
+                let mut cur = lhs.as_ref();
+                loop {
+                    if let Expr::BinOp { op: aop, lhs: al, rhs: ar } = cur {
+                        if matches!(aop, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+                            if let Expr::Literal(Literal::Num(n, _)) = ar.as_ref() {
+                                arith_ops.push((*aop, *n));
+                                cur = al.as_ref();
+                                continue;
+                            }
+                        }
+                    }
+                    break;
+                }
+                arith_ops.reverse();
+                if let Expr::Index { expr: base, key } = cur {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                            // RHS: number or field
+                            if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                return Some((field.clone(), arith_ops, *op, CondRhs::Const(*n)));
+                            }
+                            if let Expr::Index { expr: base2, key: key2 } = rhs.as_ref() {
+                                if matches!(base2.as_ref(), Expr::Input) {
+                                    if let Expr::Literal(Literal::Str(f2)) = key2.as_ref() {
+                                        return Some((field.clone(), arith_ops, *op, CondRhs::Field(f2.clone())));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        }
+
+        let mut branches = Vec::new();
+        let mut cur = v;
+        loop {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = cur {
+                let (field, arith_ops, op, rhs) = extract_cond(cond)?;
+                let output = expr_to_branch_output(then_branch)?;
+                branches.push(CondBranch {
+                    cond_field: field,
+                    cond_arith_ops: arith_ops,
+                    cond_op: op,
+                    cond_rhs: rhs,
+                    output,
+                });
+                cur = else_branch;
+            } else {
+                let else_out = expr_to_branch_output(cur)?;
+                return Some((branches, else_out));
+            }
+        }
     }
 
     /// Try to build an ArithExpr from an expression tree.

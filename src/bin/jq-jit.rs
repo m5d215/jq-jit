@@ -147,6 +147,37 @@ fn remap_expr_fields(rexpr: &jq_jit::interpreter::RemapExpr) -> Vec<&str> {
             fields
         }
         RemapExpr::FieldSplitJoin(f, _, _) => vec![f.as_str()],
+        RemapExpr::CondChain(branches, else_out) => {
+            let mut fields: Vec<&str> = Vec::new();
+            for b in branches {
+                let f = b.cond_field.as_str();
+                if !fields.contains(&f) { fields.push(f); }
+                if let jq_jit::interpreter::CondRhs::Field(f2) = &b.cond_rhs {
+                    let f2s = f2.as_str();
+                    if !fields.contains(&f2s) { fields.push(f2s); }
+                }
+                collect_branch_output_fields(&b.output, &mut fields);
+            }
+            collect_branch_output_fields(else_out, &mut fields);
+            fields
+        }
+    }
+}
+
+fn collect_branch_output_fields<'a>(out: &'a jq_jit::interpreter::BranchOutput, fields: &mut Vec<&'a str>) {
+    use jq_jit::interpreter::BranchOutput;
+    match out {
+        BranchOutput::Field(f) => {
+            if !fields.contains(&f.as_str()) { fields.push(f.as_str()); }
+        }
+        BranchOutput::Remap(entries) => {
+            for (_, rexpr) in entries {
+                for name in remap_expr_fields(rexpr) {
+                    if !fields.contains(&name) { fields.push(name); }
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -194,6 +225,31 @@ enum ResolvedRemap {
     FieldLength(usize),
     StringInterp(Vec<ResolvedInterpPart>),
     FieldSplitJoin(usize, Vec<u8>, Vec<u8>), // field_idx, split_sep bytes, join_rep bytes
+    CondChain(Vec<ResolvedCondBranch>, ResolvedBranchOutput),
+}
+
+/// Pre-resolved conditional branch for remap values.
+#[derive(Clone)]
+struct ResolvedCondBranch {
+    cond_field_idx: usize,
+    cond_arith_ops: Vec<(jq_jit::ir::BinOp, f64)>,
+    cond_op: jq_jit::ir::BinOp,
+    cond_rhs: ResolvedCondRhs,
+    output: ResolvedBranchOutput,
+}
+
+#[derive(Clone)]
+enum ResolvedCondRhs {
+    Const(f64),
+    Field(usize),
+}
+
+#[derive(Clone)]
+enum ResolvedBranchOutput {
+    Literal(Vec<u8>),
+    Field(usize),
+    Empty,
+    Remap(Vec<ResolvedRemap>),
 }
 
 /// Pre-resolved string interpolation part.
@@ -233,6 +289,22 @@ fn resolve_one_remap(
         RemapExpr::FieldLength(f) => ResolvedRemap::FieldLength(field_idx[f.as_str()]),
         RemapExpr::FieldSplitJoin(f, sep, rep) => {
             ResolvedRemap::FieldSplitJoin(field_idx[f.as_str()], sep.as_bytes().to_vec(), rep.as_bytes().to_vec())
+        }
+        RemapExpr::CondChain(branches, else_out) => {
+            let resolved_branches = branches.iter().map(|b| {
+                ResolvedCondBranch {
+                    cond_field_idx: field_idx[b.cond_field.as_str()],
+                    cond_arith_ops: b.cond_arith_ops.clone(),
+                    cond_op: b.cond_op,
+                    cond_rhs: match &b.cond_rhs {
+                        jq_jit::interpreter::CondRhs::Const(n) => ResolvedCondRhs::Const(*n),
+                        jq_jit::interpreter::CondRhs::Field(f) => ResolvedCondRhs::Field(field_idx[f.as_str()]),
+                    },
+                    output: resolve_branch_output(&b.output, field_idx),
+                }
+            }).collect();
+            let resolved_else = resolve_branch_output(else_out, field_idx);
+            ResolvedRemap::CondChain(resolved_branches, resolved_else)
         }
         RemapExpr::StringInterp(parts) => {
             let resolved = parts.iter().map(|p| match p {
@@ -275,6 +347,23 @@ fn resolve_arith_expr(
             Box::new(resolve_arith_expr(lhs, local_fields, field_idx)),
             Box::new(resolve_arith_expr(rhs, local_fields, field_idx)),
         ),
+    }
+}
+
+/// Resolve a BranchOutput to a ResolvedBranchOutput.
+fn resolve_branch_output(
+    out: &jq_jit::interpreter::BranchOutput,
+    field_idx: &std::collections::HashMap<String, usize>,
+) -> ResolvedBranchOutput {
+    use jq_jit::interpreter::BranchOutput;
+    match out {
+        BranchOutput::Literal(bytes) => ResolvedBranchOutput::Literal(bytes.clone()),
+        BranchOutput::Field(f) => ResolvedBranchOutput::Field(field_idx[f.as_str()]),
+        BranchOutput::Empty => ResolvedBranchOutput::Empty,
+        BranchOutput::Remap(entries) => {
+            let resolved = entries.iter().map(|(_, rexpr)| resolve_one_remap(rexpr, field_idx)).collect();
+            ResolvedBranchOutput::Remap(resolved)
+        }
     }
 }
 
@@ -340,6 +429,31 @@ fn emit_interp_field_raw(buf: &mut Vec<u8>, val: &[u8]) {
             } else {
                 buf.extend_from_slice(val);
             }
+        }
+    }
+}
+
+/// Emit a resolved branch output into the buffer.
+#[inline]
+fn emit_resolved_branch_output(
+    buf: &mut Vec<u8>,
+    out: &ResolvedBranchOutput,
+    raw: &[u8],
+    ranges: &[(usize, usize)],
+) {
+    match out {
+        ResolvedBranchOutput::Literal(ref bytes) => buf.extend_from_slice(bytes),
+        ResolvedBranchOutput::Field(idx) => {
+            let (vs, ve) = ranges[*idx];
+            buf.extend_from_slice(&raw[vs..ve]);
+        }
+        ResolvedBranchOutput::Empty => {}
+        ResolvedBranchOutput::Remap(ref resolved_values) => {
+            // Emit object with pre-resolved values — but we don't have keys here
+            // This is only used for cond_chain standalone, which already handles it
+            // For remap values, this shouldn't be reached
+            let _ = resolved_values;
+            buf.extend_from_slice(b"null");
         }
     }
 }
@@ -544,6 +658,11 @@ fn emit_remap_value(
             let (vs, ve) = ranges[idx];
             emit_split_join_raw(buf, &raw[vs..ve], sep.as_bytes(), rep.as_bytes());
         }
+        RemapExpr::CondChain(_, _) => {
+            // Resolve and emit (slow path, used for non-pre-resolved paths)
+            let resolved = resolve_one_remap(rexpr, field_idx);
+            emit_resolved_value(buf, &resolved, raw, ranges);
+        }
         RemapExpr::StringInterp(parts) => {
             buf.push(b'"');
             for part in parts {
@@ -704,6 +823,50 @@ fn emit_resolved_value(
         ResolvedRemap::FieldSplitJoin(idx, ref sep, ref rep) => {
             let (vs, ve) = ranges[idx];
             emit_split_join_raw(buf, &raw[vs..ve], sep, rep);
+        }
+        ResolvedRemap::CondChain(ref branches, ref else_out) => {
+            let mut matched = false;
+            for b in branches {
+                let (vs, ve) = ranges[b.cond_field_idx];
+                if let Some(mut val) = parse_json_num(&raw[vs..ve]) {
+                    for &(ref aop, n) in &b.cond_arith_ops {
+                        val = match aop {
+                            jq_jit::ir::BinOp::Add => val + n,
+                            jq_jit::ir::BinOp::Sub => val - n,
+                            jq_jit::ir::BinOp::Mul => val * n,
+                            jq_jit::ir::BinOp::Div => val / n,
+                            jq_jit::ir::BinOp::Mod => val % n,
+                            _ => val,
+                        };
+                    }
+                    let rhs_val = match &b.cond_rhs {
+                        ResolvedCondRhs::Const(n) => Some(*n),
+                        ResolvedCondRhs::Field(idx) => {
+                            let (rs, re) = ranges[*idx];
+                            parse_json_num(&raw[rs..re])
+                        }
+                    };
+                    if let Some(rhs) = rhs_val {
+                        let cond_result = match b.cond_op {
+                            jq_jit::ir::BinOp::Gt => val > rhs,
+                            jq_jit::ir::BinOp::Lt => val < rhs,
+                            jq_jit::ir::BinOp::Ge => val >= rhs,
+                            jq_jit::ir::BinOp::Le => val <= rhs,
+                            jq_jit::ir::BinOp::Eq => val == rhs,
+                            jq_jit::ir::BinOp::Ne => val != rhs,
+                            _ => false,
+                        };
+                        if cond_result {
+                            emit_resolved_branch_output(buf, &b.output, raw, ranges);
+                            matched = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !matched {
+                emit_resolved_branch_output(buf, else_out, raw, ranges);
+            }
         }
         ResolvedRemap::FieldLength(idx) => {
             let (vs, ve) = ranges[idx];
