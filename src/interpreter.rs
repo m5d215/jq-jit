@@ -1799,6 +1799,143 @@ impl Filter {
         None
     }
 
+    /// Detect `(.field1 op .field2) | tostring` — field-field binop piped to tostring.
+    /// Returns (field1, op, field2) if detected.
+    pub fn detect_field_binop_tostring(&self) -> Option<(String, crate::ir::BinOp, String)> {
+        use crate::ir::{Expr, BinOp, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        // Beta-reduced: UnaryOp(ToString, BinOp(.f1, op, .f2))
+        if let Expr::UnaryOp { op: UnaryOp::ToString, operand } = expr {
+            if let Expr::BinOp { op, lhs, rhs } = operand.as_ref() {
+                if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) { return None; }
+                if let Expr::Index { expr: base1, key: key1 } = lhs.as_ref() {
+                    if matches!(base1.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(f1)) = key1.as_ref() {
+                            if let Expr::Index { expr: base2, key: key2 } = rhs.as_ref() {
+                                if matches!(base2.as_ref(), Expr::Input) {
+                                    if let Expr::Literal(Literal::Str(f2)) = key2.as_ref() {
+                                        return Some((f1.clone(), *op, f2.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Non-reduced: Pipe(BinOp(.f1, op, .f2), UnaryOp(ToString, Input))
+        if let Expr::Pipe { left, right } = expr {
+            if matches!(right.as_ref(), Expr::UnaryOp { op: UnaryOp::ToString, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                if let Expr::BinOp { op, lhs, rhs } = left.as_ref() {
+                    if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) { return None; }
+                    if let Expr::Index { expr: base1, key: key1 } = lhs.as_ref() {
+                        if matches!(base1.as_ref(), Expr::Input) {
+                            if let Expr::Literal(Literal::Str(f1)) = key1.as_ref() {
+                                if let Expr::Index { expr: base2, key: key2 } = rhs.as_ref() {
+                                    if matches!(base2.as_ref(), Expr::Input) {
+                                        if let Expr::Literal(Literal::Str(f2)) = key2.as_ref() {
+                                            return Some((f1.clone(), *op, f2.clone()));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `.field | split("") | reverse | join("")` — string reversal pattern.
+    /// Returns field name if detected.
+    pub fn detect_field_str_reverse(&self) -> Option<String> {
+        use crate::ir::{Expr, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        // Right-associative: Pipe(.field, Pipe(split(""), Pipe(Reverse, join(""))))
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::Pipe { left: split_expr, right: rest } = right.as_ref() {
+                        if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
+                            if name == "split" && args.len() == 1 {
+                                if let Expr::Literal(Literal::Str(sep)) = &args[0] {
+                                    if sep.is_empty() {
+                                        if let Expr::Pipe { left: rev_expr, right: join_expr } = rest.as_ref() {
+                                            if matches!(rev_expr.as_ref(), Expr::UnaryOp { op: UnaryOp::Reverse, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                                                if let Expr::CallBuiltin { name: jn, args: ja } = join_expr.as_ref() {
+                                                    if jn == "join" && ja.len() == 1 {
+                                                        if let Expr::Literal(Literal::Str(js)) = &ja[0] {
+                                                            if js.is_empty() {
+                                                                return Some(field.clone());
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `select(.field1 cmp .field2) | {computed_remap}` — select with field-field comparison + computed remap.
+    /// Returns (field1, op, field2, remap_entries).
+    pub fn detect_select_ff_cmp_then_computed_remap(&self) -> Option<(String, crate::ir::BinOp, String, Vec<(String, RemapExpr)>)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        let try_extract = |cond: &Expr, output: &Expr| -> Option<(String, BinOp, String, Vec<(String, RemapExpr)>)> {
+            if let Expr::ObjectConstruct { pairs } = output {
+                if pairs.is_empty() { return None; }
+                let mut result = Vec::with_capacity(pairs.len());
+                for (k, v) in pairs {
+                    let key = if let Expr::Literal(Literal::Str(s)) = k { s.clone() } else { return None; };
+                    let rexpr = Self::classify_remap_value(v)?;
+                    result.push((key, rexpr));
+                }
+                if let Expr::BinOp { op, lhs, rhs } = cond {
+                    if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                        return None;
+                    }
+                    if let Expr::Index { expr: base1, key: key1 } = lhs.as_ref() {
+                        if !matches!(base1.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f1)) = key1.as_ref() {
+                            if let Expr::Index { expr: base2, key: key2 } = rhs.as_ref() {
+                                if !matches!(base2.as_ref(), Expr::Input) { return None; }
+                                if let Expr::Literal(Literal::Str(f2)) = key2.as_ref() {
+                                    return Some((f1.clone(), *op, f2.clone(), result));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        };
+        // Form 1: Pipe(select(.f1 > .f2), {computed_remap})
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                    if let Some(r) = try_extract(cond, right) { return Some(r); }
+                }
+            }
+        }
+        // Form 2: if .f1 > .f2 then {computed_remap} else empty end
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if matches!(else_branch.as_ref(), Expr::Empty) {
+                if let Some(r) = try_extract(cond, then_branch) { return Some(r); }
+            }
+        }
+        None
+    }
+
     /// Detect a general numeric expression over multiple fields.
     /// Matches patterns like `.x + .y * 2`, `(.x + .y) / 2`, `.x * .x + .y * .y`.
     /// Returns (field_names, arith_expr) where arith_expr uses field indices.
