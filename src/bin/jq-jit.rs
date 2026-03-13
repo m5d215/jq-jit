@@ -287,6 +287,9 @@ enum ResolvedCondRhs {
     Str(Vec<u8>), // raw bytes of the JSON string including quotes
     Null,
     Bool(bool),
+    Startswith(Vec<u8>), // raw pattern bytes (no quotes)
+    Endswith(Vec<u8>),
+    Contains(Vec<u8>),
 }
 
 #[derive(Clone)]
@@ -360,6 +363,9 @@ fn resolve_one_remap(
                         }
                         jq_jit::interpreter::CondRhs::Null => ResolvedCondRhs::Null,
                         jq_jit::interpreter::CondRhs::Bool(b) => ResolvedCondRhs::Bool(*b),
+                        jq_jit::interpreter::CondRhs::Startswith(s) => ResolvedCondRhs::Startswith(s.as_bytes().to_vec()),
+                        jq_jit::interpreter::CondRhs::Endswith(s) => ResolvedCondRhs::Endswith(s.as_bytes().to_vec()),
+                        jq_jit::interpreter::CondRhs::Contains(s) => ResolvedCondRhs::Contains(s.as_bytes().to_vec()),
                     },
                     output: resolve_branch_output(&b.output, field_idx),
                 }
@@ -1084,6 +1090,20 @@ fn emit_resolved_value(
                                     }
                                 } else { false }
                             }
+                        }
+                    }
+                    ResolvedCondRhs::Startswith(ref pat) => {
+                        field_bytes.len() >= 2 && field_bytes[0] == b'"'
+                            && field_bytes[1..field_bytes.len()-1].starts_with(pat)
+                    }
+                    ResolvedCondRhs::Endswith(ref pat) => {
+                        field_bytes.len() >= 2 && field_bytes[0] == b'"'
+                            && field_bytes[1..field_bytes.len()-1].ends_with(pat)
+                    }
+                    ResolvedCondRhs::Contains(ref pat) => {
+                        field_bytes.len() >= 2 && field_bytes[0] == b'"' && {
+                            let inner = &field_bytes[1..field_bytes.len()-1];
+                            inner.windows(pat.len()).any(|w| w == pat.as_slice())
                         }
                     }
                     ResolvedCondRhs::Const(_) | ResolvedCondRhs::Field(_) => {
@@ -4602,7 +4622,7 @@ fn real_main() {
                         let then_out = &br.output;
                         let rhs_field: Option<&str> = if let CondRhs::Field(ref f) = br.cond_rhs { Some(f.as_str()) } else { None };
                         let rhs_const: Option<f64> = if let CondRhs::Const(n) = br.cond_rhs { Some(n) } else { None };
-                        let is_non_numeric_cmp = matches!(br.cond_rhs, CondRhs::Null | CondRhs::Str(_) | CondRhs::Bool(_));
+                        let is_non_numeric_cmp = matches!(br.cond_rhs, CondRhs::Null | CondRhs::Str(_) | CondRhs::Bool(_) | CondRhs::Startswith(_) | CondRhs::Endswith(_) | CondRhs::Contains(_));
                         let rhs_str_json: Option<Vec<u8>> = if let CondRhs::Str(ref s) = br.cond_rhs {
                             let mut buf = Vec::with_capacity(s.len() + 2);
                             buf.push(b'"');
@@ -4638,6 +4658,22 @@ fn real_main() {
                                                 BinOp::Eq => field_bytes == rhs_json.as_slice(),
                                                 BinOp::Ne => field_bytes != rhs_json.as_slice(),
                                                 _ => false,
+                                            }
+                                        }
+                                        CondRhs::Startswith(ref s) => {
+                                            // field_bytes is JSON string like "user_123" — strip quotes
+                                            field_bytes.len() >= 2 && field_bytes[0] == b'"'
+                                                && field_bytes[1..field_bytes.len()-1].starts_with(s.as_bytes())
+                                        }
+                                        CondRhs::Endswith(ref s) => {
+                                            field_bytes.len() >= 2 && field_bytes[0] == b'"'
+                                                && field_bytes[1..field_bytes.len()-1].ends_with(s.as_bytes())
+                                        }
+                                        CondRhs::Contains(ref s) => {
+                                            field_bytes.len() >= 2 && field_bytes[0] == b'"' && {
+                                                let inner = &field_bytes[1..field_bytes.len()-1];
+                                                let sb = s.as_bytes();
+                                                inner.windows(sb.len()).any(|w| w == sb)
                                             }
                                         }
                                         _ => false,
@@ -4864,6 +4900,21 @@ fn real_main() {
                                             BinOp::Eq => field_bytes == rhs_json.as_slice(),
                                             BinOp::Ne => field_bytes != rhs_json.as_slice(),
                                             _ => false,
+                                        }
+                                    }
+                                    CondRhs::Startswith(ref s) => {
+                                        field_bytes.len() >= 2 && field_bytes[0] == b'"'
+                                            && field_bytes[1..field_bytes.len()-1].starts_with(s.as_bytes())
+                                    }
+                                    CondRhs::Endswith(ref s) => {
+                                        field_bytes.len() >= 2 && field_bytes[0] == b'"'
+                                            && field_bytes[1..field_bytes.len()-1].ends_with(s.as_bytes())
+                                    }
+                                    CondRhs::Contains(ref s) => {
+                                        field_bytes.len() >= 2 && field_bytes[0] == b'"' && {
+                                            let inner = &field_bytes[1..field_bytes.len()-1];
+                                            let sb = s.as_bytes();
+                                            inner.windows(sb.len()).any(|w| w == sb)
                                         }
                                     }
                                     _ => {
@@ -8146,7 +8197,7 @@ fn real_main() {
                     let then_out = &br.output;
                     let rhs_field: Option<&str> = if let CondRhs::Field(ref f) = br.cond_rhs { Some(f.as_str()) } else { None };
                     let rhs_const: Option<f64> = if let CondRhs::Const(n) = br.cond_rhs { Some(n) } else { None };
-                    let is_non_numeric_cmp = matches!(br.cond_rhs, CondRhs::Null | CondRhs::Str(_) | CondRhs::Bool(_));
+                    let is_non_numeric_cmp = matches!(br.cond_rhs, CondRhs::Null | CondRhs::Str(_) | CondRhs::Bool(_) | CondRhs::Startswith(_) | CondRhs::Endswith(_) | CondRhs::Contains(_));
                     let rhs_str_json: Option<Vec<u8>> = if let CondRhs::Str(ref s) = br.cond_rhs {
                         let mut buf = Vec::with_capacity(s.len() + 2);
                         buf.push(b'"');
@@ -8156,7 +8207,7 @@ fn real_main() {
                     } else { None };
                     json_stream_raw(content, |start, end| {
                         let raw = &content_bytes[start..end];
-                        // Non-numeric comparison (null/str/bool)
+                        // Non-numeric comparison (null/str/bool/strfunc)
                         if is_non_numeric_cmp {
                             let pass = if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, cond_field) {
                                 let field_bytes = &raw[vs..ve];
@@ -8180,6 +8231,21 @@ fn real_main() {
                                             BinOp::Eq => field_bytes == rhs_json.as_slice(),
                                             BinOp::Ne => field_bytes != rhs_json.as_slice(),
                                             _ => false,
+                                        }
+                                    }
+                                    CondRhs::Startswith(ref s) => {
+                                        field_bytes.len() >= 2 && field_bytes[0] == b'"'
+                                            && field_bytes[1..field_bytes.len()-1].starts_with(s.as_bytes())
+                                    }
+                                    CondRhs::Endswith(ref s) => {
+                                        field_bytes.len() >= 2 && field_bytes[0] == b'"'
+                                            && field_bytes[1..field_bytes.len()-1].ends_with(s.as_bytes())
+                                    }
+                                    CondRhs::Contains(ref s) => {
+                                        field_bytes.len() >= 2 && field_bytes[0] == b'"' && {
+                                            let inner = &field_bytes[1..field_bytes.len()-1];
+                                            let sb = s.as_bytes();
+                                            inner.windows(sb.len()).any(|w| w == sb)
                                         }
                                     }
                                     _ => false,
@@ -8402,6 +8468,21 @@ fn real_main() {
                                         BinOp::Eq => field_bytes == rhs_json.as_slice(),
                                         BinOp::Ne => field_bytes != rhs_json.as_slice(),
                                         _ => false,
+                                    }
+                                }
+                                CondRhs::Startswith(ref s) => {
+                                    field_bytes.len() >= 2 && field_bytes[0] == b'"'
+                                        && field_bytes[1..field_bytes.len()-1].starts_with(s.as_bytes())
+                                }
+                                CondRhs::Endswith(ref s) => {
+                                    field_bytes.len() >= 2 && field_bytes[0] == b'"'
+                                        && field_bytes[1..field_bytes.len()-1].ends_with(s.as_bytes())
+                                }
+                                CondRhs::Contains(ref s) => {
+                                    field_bytes.len() >= 2 && field_bytes[0] == b'"' && {
+                                        let inner = &field_bytes[1..field_bytes.len()-1];
+                                        let sb = s.as_bytes();
+                                        inner.windows(sb.len()).any(|w| w == sb)
                                     }
                                 }
                                 _ => {

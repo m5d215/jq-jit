@@ -167,6 +167,12 @@ pub enum CondRhs {
     Str(String),
     Null,
     Bool(bool),
+    /// `.field | startswith("str")` — true if field starts with str
+    Startswith(String),
+    /// `.field | endswith("str")` — true if field ends with str
+    Endswith(String),
+    /// `.field | contains("str")` — true if field contains str
+    Contains(String),
 }
 
 /// One branch in a conditional chain: if .field [arith_ops...] cmp (N | .field2) then output.
@@ -4393,6 +4399,31 @@ impl Filter {
                     }
                 }
             }
+            // .field | startswith/endswith/contains("str")
+            if let Expr::Pipe { left, right } = cond {
+                if let Expr::Index { expr: base, key } = left.as_ref() {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                            if let Expr::CallBuiltin { name, args } = right.as_ref() {
+                                if args.len() == 1 {
+                                    if let Expr::Literal(Literal::Str(s)) = &args[0] {
+                                        let rhs = match name.as_str() {
+                                            "startswith" => Some(CondRhs::Startswith(s.clone())),
+                                            "endswith" => Some(CondRhs::Endswith(s.clone())),
+                                            "contains" => Some(CondRhs::Contains(s.clone())),
+                                            _ => None,
+                                        };
+                                        if let Some(r) = rhs {
+                                            // Use BinOp::Eq as a dummy — the actual test is in the CondRhs
+                                            return Some((field.clone(), Vec::new(), BinOp::Eq, r));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             None
         };
 
@@ -4414,7 +4445,8 @@ impl Filter {
                     || matches!(else_output, BranchOutput::Remap(_));
                 let has_field_rhs = branches.iter().any(|b| matches!(b.cond_rhs, CondRhs::Field(_)));
                 let has_arith_ops = branches.iter().any(|b| !b.cond_arith_ops.is_empty());
-                if branches.len() < 2 && !has_field_output && !has_remap_output && !has_field_rhs && !has_arith_ops { return None; }
+                let has_str_func = branches.iter().any(|b| matches!(b.cond_rhs, CondRhs::Startswith(_) | CondRhs::Endswith(_) | CondRhs::Contains(_)));
+                if branches.len() < 2 && !has_field_output && !has_remap_output && !has_field_rhs && !has_arith_ops && !has_str_func { return None; }
                 return Some((branches, else_output));
             }
         }
