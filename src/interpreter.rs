@@ -48,6 +48,24 @@ pub enum RemapExpr {
     FieldStringCase(String, bool), // field, is_upper
     /// `.field | split(sep) | length` — count split segments
     FieldSplitLength(String, String), // field, separator
+    /// `.field | builtin("arg")` — string builtin with one argument
+    FieldStrBuiltin(String, StrBuiltin, String), // field, op, arg
+    /// `.field | split(sep) | .[N]` — split then index
+    FieldSplitIndex(String, String, i32), // field, separator, index
+    /// `(.f1 op .f2) | tostring` — field op field then tostring
+    FieldOpFieldToString(String, crate::ir::BinOp, String), // f1, op, f2
+    /// `(arith_expr) | tostring` — compound arithmetic then tostring
+    ArithToString(ArithExpr, Vec<String>),
+}
+
+/// String builtin for FieldStrBuiltin.
+#[derive(Debug, Clone, Copy)]
+pub enum StrBuiltin {
+    Ltrimstr,
+    Rtrimstr,
+    Startswith,
+    Endswith,
+    Index,
 }
 
 /// Part of a string interpolation for raw byte remap emission.
@@ -1375,8 +1393,25 @@ impl Filter {
                                     if matches!(op, BinOp::Div | BinOp::Mod) && *n == 0.0 { return None; }
                                     return Some(RemapExpr::FieldOpConstToString(f.clone(), *op, *n));
                                 }
+                                // .f1 op .f2 | tostring
+                                if let Expr::Index { expr: base2, key: key2 } = rhs.as_ref() {
+                                    if matches!(base2.as_ref(), Expr::Input) {
+                                        if let Expr::Literal(Literal::Str(f2)) = key2.as_ref() {
+                                            return Some(RemapExpr::FieldOpFieldToString(f.clone(), *op, f2.clone()));
+                                        }
+                                    }
+                                }
                             }
                         }
+                    }
+                }
+            }
+            // compound arith | tostring
+            {
+                let mut fields = Vec::new();
+                if let Some(arith) = Self::try_build_arith_expr(operand, &mut fields) {
+                    if !fields.is_empty() {
+                        return Some(RemapExpr::ArithToString(arith, fields));
                     }
                 }
             }
@@ -1424,18 +1459,52 @@ impl Filter {
                 }
             }
         }
-        // .field | split(sep) | length
+        // .field | Pipe patterns
         if let Expr::Pipe { left, right } = v {
             if let Expr::Index { expr: base, key } = left.as_ref() {
                 if matches!(base.as_ref(), Expr::Input) {
                     if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
-                        if let Expr::Pipe { left: split_expr, right: len_expr } = right.as_ref() {
+                        // .field | split(sep) | ...
+                        if let Expr::Pipe { left: split_expr, right: tail_expr } = right.as_ref() {
                             if let Expr::CallBuiltin { name: sn, args: sa } = split_expr.as_ref() {
                                 if sn == "split" && sa.len() == 1 {
                                     if let Expr::Literal(Literal::Str(sep)) = &sa[0] {
-                                        if matches!(len_expr.as_ref(), Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                                        // .field | split(sep) | length
+                                        if matches!(tail_expr.as_ref(), Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
                                             return Some(RemapExpr::FieldSplitLength(field.clone(), sep.clone()));
                                         }
+                                        // .field | split(sep) | .[N]
+                                        if let Expr::Index { expr: ibase, key: ikey } = tail_expr.as_ref() {
+                                            if matches!(ibase.as_ref(), Expr::Input) {
+                                                if let Expr::Literal(Literal::Num(n, _)) = ikey.as_ref() {
+                                                    return Some(RemapExpr::FieldSplitIndex(field.clone(), sep.clone(), *n as i32));
+                                                }
+                                                // Handle .[-N] parsed as Negate(Literal(N))
+                                                if let Expr::Negate { operand } = ikey.as_ref() {
+                                                    if let Expr::Literal(Literal::Num(n, _)) = operand.as_ref() {
+                                                        return Some(RemapExpr::FieldSplitIndex(field.clone(), sep.clone(), -(*n as i32)));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // .field | builtin("arg") — string builtins
+                        if let Expr::CallBuiltin { name: bn, args: ba } = right.as_ref() {
+                            if ba.len() == 1 {
+                                if let Expr::Literal(Literal::Str(arg)) = &ba[0] {
+                                    let op = match bn.as_str() {
+                                        "ltrimstr" => Some(StrBuiltin::Ltrimstr),
+                                        "rtrimstr" => Some(StrBuiltin::Rtrimstr),
+                                        "startswith" => Some(StrBuiltin::Startswith),
+                                        "endswith" => Some(StrBuiltin::Endswith),
+                                        "index" => Some(StrBuiltin::Index),
+                                        _ => None,
+                                    };
+                                    if let Some(op) = op {
+                                        return Some(RemapExpr::FieldStrBuiltin(field.clone(), op, arg.clone()));
                                     }
                                 }
                             }

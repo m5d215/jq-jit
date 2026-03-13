@@ -149,6 +149,10 @@ fn remap_expr_fields(rexpr: &jq_jit::interpreter::RemapExpr) -> Vec<&str> {
         RemapExpr::FieldSplitJoin(f, _, _) => vec![f.as_str()],
         RemapExpr::FieldStringCase(f, _) => vec![f.as_str()],
         RemapExpr::FieldSplitLength(f, _) => vec![f.as_str()],
+        RemapExpr::FieldStrBuiltin(f, _, _) => vec![f.as_str()],
+        RemapExpr::FieldSplitIndex(f, _, _) => vec![f.as_str()],
+        RemapExpr::FieldOpFieldToString(f1, _, f2) => vec![f1.as_str(), f2.as_str()],
+        RemapExpr::ArithToString(_, fields) => fields.iter().map(|f| f.as_str()).collect(),
         RemapExpr::CondChain(branches, else_out) => {
             let mut fields: Vec<&str> = Vec::new();
             for b in branches {
@@ -235,6 +239,10 @@ enum ResolvedRemap {
     FieldStringCase(usize, bool), // field_idx, is_upper
     FieldSplitLength(usize, Vec<u8>), // field_idx, separator bytes
     CondChain(Vec<ResolvedCondBranch>, Box<ResolvedBranchOutput>),
+    FieldStrBuiltin(usize, jq_jit::interpreter::StrBuiltin, Vec<u8>), // field_idx, op, arg_bytes
+    FieldSplitIndex(usize, Vec<u8>, i32), // field_idx, sep_bytes, index
+    FieldOpFieldToString(usize, jq_jit::ir::BinOp, usize), // idx1, op, idx2
+    ArithToString(jq_jit::interpreter::ArithExpr),
 }
 
 /// Pre-resolved conditional branch for remap values.
@@ -321,6 +329,18 @@ fn resolve_one_remap(
             }).collect();
             let resolved_else = resolve_branch_output(else_out, field_idx);
             ResolvedRemap::CondChain(resolved_branches, Box::new(resolved_else))
+        }
+        RemapExpr::FieldStrBuiltin(f, op, arg) => {
+            ResolvedRemap::FieldStrBuiltin(field_idx[f.as_str()], *op, arg.as_bytes().to_vec())
+        }
+        RemapExpr::FieldSplitIndex(f, sep, idx) => {
+            ResolvedRemap::FieldSplitIndex(field_idx[f.as_str()], sep.as_bytes().to_vec(), *idx)
+        }
+        RemapExpr::FieldOpFieldToString(f1, op, f2) => {
+            ResolvedRemap::FieldOpFieldToString(field_idx[f1.as_str()], *op, field_idx[f2.as_str()])
+        }
+        RemapExpr::ArithToString(arith, fields) => {
+            ResolvedRemap::ArithToString(resolve_arith_expr(arith, fields, field_idx))
         }
         RemapExpr::StringInterp(parts) => {
             let resolved = parts.iter().map(|p| match p {
@@ -687,6 +707,35 @@ fn emit_remap_value(
             let resolved = ResolvedRemap::FieldSplitLength(idx, sep.as_bytes().to_vec());
             emit_resolved_value(buf, &resolved, raw, ranges);
         }
+        RemapExpr::FieldStrBuiltin(f, op, arg) => {
+            let idx = field_idx[f.as_str()];
+            let resolved = ResolvedRemap::FieldStrBuiltin(idx, *op, arg.as_bytes().to_vec());
+            emit_resolved_value(buf, &resolved, raw, ranges);
+        }
+        RemapExpr::FieldSplitIndex(f, sep, sidx) => {
+            let idx = field_idx[f.as_str()];
+            let resolved = ResolvedRemap::FieldSplitIndex(idx, sep.as_bytes().to_vec(), *sidx);
+            emit_resolved_value(buf, &resolved, raw, ranges);
+        }
+        RemapExpr::FieldOpFieldToString(f1, op, f2) => {
+            let idx1 = field_idx[f1.as_str()];
+            let idx2 = field_idx[f2.as_str()];
+            let (vs1, ve1) = ranges[idx1];
+            let (vs2, ve2) = ranges[idx2];
+            if let (Some(a), Some(b)) = (parse_json_num(&raw[vs1..ve1]), parse_json_num(&raw[vs2..ve2])) {
+                let r = match op { BinOp::Add => a + b, BinOp::Sub => a - b, BinOp::Mul => a * b, BinOp::Div => a / b, BinOp::Mod => a % b, _ => unreachable!() };
+                buf.push(b'"');
+                push_jq_number_bytes(buf, r);
+                buf.push(b'"');
+            } else { buf.extend_from_slice(b"null"); }
+        }
+        RemapExpr::ArithToString(arith, fields) => {
+            if let Some(r) = eval_arith_raw_unresolved(arith, fields, raw, ranges, field_idx) {
+                buf.push(b'"');
+                push_jq_number_bytes(buf, r);
+                buf.push(b'"');
+            } else { buf.extend_from_slice(b"null"); }
+        }
         RemapExpr::CondChain(_, _) => {
             // Resolve and emit (slow path, used for non-pre-resolved paths)
             let resolved = resolve_one_remap(rexpr, field_idx);
@@ -984,6 +1033,116 @@ fn emit_resolved_value(
             } else {
                 buf.extend_from_slice(b"null");
             }
+        }
+        ResolvedRemap::FieldStrBuiltin(idx, ref op, ref arg) => {
+            let (vs, ve) = ranges[idx];
+            let val = &raw[vs..ve];
+            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"' {
+                let inner = &val[1..val.len()-1];
+                match op {
+                    jq_jit::interpreter::StrBuiltin::Ltrimstr => {
+                        if inner.starts_with(&arg[..]) {
+                            buf.push(b'"');
+                            buf.extend_from_slice(&inner[arg.len()..]);
+                            buf.push(b'"');
+                        } else {
+                            buf.extend_from_slice(val);
+                        }
+                    }
+                    jq_jit::interpreter::StrBuiltin::Rtrimstr => {
+                        if inner.ends_with(&arg[..]) {
+                            buf.push(b'"');
+                            buf.extend_from_slice(&inner[..inner.len()-arg.len()]);
+                            buf.push(b'"');
+                        } else {
+                            buf.extend_from_slice(val);
+                        }
+                    }
+                    jq_jit::interpreter::StrBuiltin::Startswith => {
+                        buf.extend_from_slice(if inner.starts_with(&arg[..]) { b"true" } else { b"false" });
+                    }
+                    jq_jit::interpreter::StrBuiltin::Endswith => {
+                        buf.extend_from_slice(if inner.ends_with(&arg[..]) { b"true" } else { b"false" });
+                    }
+                    jq_jit::interpreter::StrBuiltin::Index => {
+                        if arg.len() == 1 {
+                            if let Some(pos) = memchr::memchr(arg[0], inner) {
+                                let mut ibuf = itoa::Buffer::new();
+                                buf.extend_from_slice(ibuf.format(pos).as_bytes());
+                            } else {
+                                buf.extend_from_slice(b"null");
+                            }
+                        } else if let Some(pos) = inner.windows(arg.len()).position(|w| w == &arg[..]) {
+                            let mut ibuf = itoa::Buffer::new();
+                            buf.extend_from_slice(ibuf.format(pos).as_bytes());
+                        } else {
+                            buf.extend_from_slice(b"null");
+                        }
+                    }
+                }
+            } else {
+                buf.extend_from_slice(b"null");
+            }
+        }
+        ResolvedRemap::FieldSplitIndex(idx, ref sep, split_idx) => {
+            let (vs, ve) = ranges[idx];
+            let val = &raw[vs..ve];
+            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"' && !sep.is_empty() {
+                let inner = &val[1..val.len()-1];
+                // Collect split segments
+                let mut segments: Vec<&[u8]> = Vec::new();
+                if sep.len() == 1 {
+                    let sep_byte = sep[0];
+                    let mut start = 0;
+                    for pos in memchr::memchr_iter(sep_byte, inner) {
+                        segments.push(&inner[start..pos]);
+                        start = pos + 1;
+                    }
+                    segments.push(&inner[start..]);
+                } else {
+                    let mut start = 0;
+                    let mut i = 0;
+                    while i + sep.len() <= inner.len() {
+                        if &inner[i..i+sep.len()] == &sep[..] {
+                            segments.push(&inner[start..i]);
+                            start = i + sep.len();
+                            i = start;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    segments.push(&inner[start..]);
+                }
+                // Resolve index (negative wraps)
+                let len = segments.len() as i32;
+                let actual_idx = if split_idx < 0 { split_idx + len } else { split_idx };
+                if actual_idx >= 0 && actual_idx < len {
+                    buf.push(b'"');
+                    buf.extend_from_slice(segments[actual_idx as usize]);
+                    buf.push(b'"');
+                } else {
+                    buf.extend_from_slice(b"null");
+                }
+            } else {
+                buf.extend_from_slice(b"null");
+            }
+        }
+        ResolvedRemap::FieldOpFieldToString(idx1, ref op, idx2) => {
+            let (vs1, ve1) = ranges[idx1];
+            let (vs2, ve2) = ranges[idx2];
+            if let (Some(a), Some(b)) = (parse_json_num(&raw[vs1..ve1]), parse_json_num(&raw[vs2..ve2])) {
+                let r = match op { BinOp::Add => a + b, BinOp::Sub => a - b, BinOp::Mul => a * b, BinOp::Div => a / b, BinOp::Mod => a % b, _ => unreachable!() };
+                buf.push(b'"');
+                push_jq_number_bytes(buf, r);
+                buf.push(b'"');
+            } else { buf.extend_from_slice(b"null"); }
+        }
+        ResolvedRemap::ArithToString(ref arith) => {
+            if let Some(r) = eval_arith_raw(arith, raw, ranges) {
+                buf.push(b'"');
+                push_jq_number_bytes(buf, r);
+                buf.push(b'"');
+            } else { buf.extend_from_slice(b"null"); }
         }
     }
 }
