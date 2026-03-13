@@ -871,6 +871,9 @@ fn real_main() {
     let select_ff_cmp_field = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
         filter.detect_select_field_cmp_field_then_field()
     } else { None };
+    let select_ff_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_ff_cmp_field.is_none() && field_access.is_none() {
+        filter.detect_select_field_field_cmp()
+    } else { None };
     let select_str_field = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
         filter.detect_select_str_then_field()
     } else { None };
@@ -886,7 +889,7 @@ fn real_main() {
         || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || field_field_cmp_branch.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some()
         || select_str.is_some()
         || select_str_test.is_some() || select_regex_test.is_some() || select_nested_cmp.is_some()
-        || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_value.is_some() || select_ff_cmp_field.is_some() || select_str_field.is_some()
+        || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_value.is_some() || select_ff_cmp_field.is_some() || select_ff_cmp.is_some() || select_str_field.is_some()
         || computed_array.is_some() || array_field.is_some() || multi_field.is_some() || is_length || is_keys
         || is_keys_unsorted || has_field.is_some() || has_multi.is_some() || select_has_multi.is_some() || is_type || del_field.is_some() || obj_merge_lit.is_some() || obj_merge_computed.is_some()
         || is_each || is_to_entries || remap_to_entries.is_some() || with_entries_select.is_some() || is_tojson || string_interp_fields.is_some() || string_add_chain.is_some() || array_join.is_some()
@@ -3981,6 +3984,28 @@ fn real_main() {
                         }
                         Ok(())
                     })
+                } else if let Some((ref sff_f1, sff_op, ref sff_f2)) = select_ff_cmp {
+                    // select(.f1 cmp .f2) — field-to-field comparison, output whole object
+                    use jq_jit::ir::BinOp;
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some((v1, v2)) = json_object_get_two_nums(raw, 0, sff_f1, sff_f2) {
+                            let pass = match sff_op {
+                                BinOp::Gt => v1 > v2, BinOp::Lt => v1 < v2,
+                                BinOp::Ge => v1 >= v2, BinOp::Le => v1 <= v2,
+                                BinOp::Eq => v1 == v2, BinOp::Ne => v1 != v2,
+                                _ => false,
+                            };
+                            if pass {
+                                emit_raw_ln!(&mut compact_buf, raw);
+                            }
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
                 } else if let Some((ref sel_field, ref test_type, ref test_arg, ref out_field)) = select_str_field {
                     let expected_eq = if test_type == "eq" || test_type == "ne" {
                         let mut e = Vec::with_capacity(test_arg.len() + 2);
@@ -6310,6 +6335,29 @@ fn real_main() {
                     } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref sff_f1, sff_op, ref sff_f2)) = select_ff_cmp {
+                // select(.f1 cmp .f2) — stdin path, output whole object
+                use jq_jit::ir::BinOp;
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some((v1, v2)) = json_object_get_two_nums(raw, 0, sff_f1, sff_f2) {
+                        let pass = match sff_op {
+                            BinOp::Gt => v1 > v2, BinOp::Lt => v1 < v2,
+                            BinOp::Ge => v1 >= v2, BinOp::Le => v1 <= v2,
+                            BinOp::Eq => v1 == v2, BinOp::Ne => v1 != v2,
+                            _ => false,
+                        };
+                        if pass {
+                            emit_raw_ln!(&mut compact_buf, raw);
+                        }
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
