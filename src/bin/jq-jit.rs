@@ -3720,9 +3720,38 @@ fn real_main() {
                     use jq_jit::ir::UnaryOp;
                     let is_string_op = matches!(uop, UnaryOp::AsciiDowncase | UnaryOp::AsciiUpcase);
                     let is_length_op = matches!(uop, UnaryOp::Length | UnaryOp::Utf8ByteLength);
+                    let is_explode = matches!(uop, UnaryOp::Explode);
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if is_string_op {
+                        if is_explode {
+                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
+                                let val = &raw[vs..ve];
+                                if val.len() >= 2 && val[0] == b'"' && !val[1..val.len()-1].contains(&b'\\') {
+                                    let inner = &val[1..val.len()-1];
+                                    compact_buf.push(b'[');
+                                    if inner.is_ascii() {
+                                        for (i, &byte) in inner.iter().enumerate() {
+                                            if i > 0 { compact_buf.push(b','); }
+                                            compact_buf.extend_from_slice(itoa::Buffer::new().format(byte as i64).as_bytes());
+                                        }
+                                    } else {
+                                        let mut first = true;
+                                        for ch in unsafe { std::str::from_utf8_unchecked(inner) }.chars() {
+                                            if !first { compact_buf.push(b','); }
+                                            first = false;
+                                            compact_buf.extend_from_slice(itoa::Buffer::new().format(ch as i64).as_bytes());
+                                        }
+                                    }
+                                    compact_buf.extend_from_slice(b"]\n");
+                                } else {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else if is_string_op {
                             // String ops: extract raw field bytes
                             if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
                                 let val = &raw[vs..ve];
@@ -4260,6 +4289,13 @@ fn real_main() {
                                             }
                                         }
                                         compact_buf.extend_from_slice(b"]\n");
+                                    }
+                                    "contains" => {
+                                        if arg_bytes.is_empty() || content.windows(arg_bytes.len()).any(|w| w == arg_bytes) {
+                                            compact_buf.extend_from_slice(b"true\n");
+                                        } else {
+                                            compact_buf.extend_from_slice(b"false\n");
+                                        }
                                     }
                                     _ => {
                                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
@@ -12305,10 +12341,39 @@ fn real_main() {
                 use jq_jit::ir::UnaryOp;
                 let is_string_op = matches!(uop, UnaryOp::AsciiDowncase | UnaryOp::AsciiUpcase);
                 let is_length_op = matches!(uop, UnaryOp::Length | UnaryOp::Utf8ByteLength);
+                let is_explode = matches!(uop, UnaryOp::Explode);
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if is_string_op {
+                    if is_explode {
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
+                            let val = &raw[vs..ve];
+                            if val.len() >= 2 && val[0] == b'"' && !val[1..val.len()-1].contains(&b'\\') {
+                                let inner = &val[1..val.len()-1];
+                                compact_buf.push(b'[');
+                                if inner.is_ascii() {
+                                    for (i, &byte) in inner.iter().enumerate() {
+                                        if i > 0 { compact_buf.push(b','); }
+                                        compact_buf.extend_from_slice(itoa::Buffer::new().format(byte as i64).as_bytes());
+                                    }
+                                } else {
+                                    let mut first = true;
+                                    for ch in unsafe { std::str::from_utf8_unchecked(inner) }.chars() {
+                                        if !first { compact_buf.push(b','); }
+                                        first = false;
+                                        compact_buf.extend_from_slice(itoa::Buffer::new().format(ch as i64).as_bytes());
+                                    }
+                                }
+                                compact_buf.extend_from_slice(b"]\n");
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                    } else if is_string_op {
                         if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
                             let val = &raw[vs..ve];
                             if val.len() >= 2 && val[0] == b'"' && !val[1..val.len()-1].contains(&b'\\') {
@@ -12828,6 +12893,13 @@ fn real_main() {
                                         }
                                     }
                                     compact_buf.extend_from_slice(b"]\n");
+                                }
+                                "contains" => {
+                                    if arg_bytes.is_empty() || content.windows(arg_bytes.len()).any(|w| w == arg_bytes) {
+                                        compact_buf.extend_from_slice(b"true\n");
+                                    } else {
+                                        compact_buf.extend_from_slice(b"false\n");
+                                    }
                                 }
                                 _ => {
                                     let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;

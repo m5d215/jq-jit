@@ -496,8 +496,9 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             let sl = simplify_expr(lhs);
             let sr = simplify_expr(rhs);
             // {a:.x} + {b:.y} → {a:.x, b:.y} (merge object constructions)
+            // {a:.x} * {b:.y} → {a:.x, b:.y} (object multiply = merge for non-nested)
             // Only when all keys are distinct string literals (no dedup needed)
-            if matches!(op, crate::ir::BinOp::Add) {
+            if matches!(op, crate::ir::BinOp::Add | crate::ir::BinOp::Mul) {
                 if let (Expr::ObjectConstruct { pairs: p1 }, Expr::ObjectConstruct { pairs: p2 }) = (&sl, &sr) {
                     let all_literal_keys = p1.iter().chain(p2.iter()).all(|(k, _)| {
                         matches!(k, Expr::Literal(crate::ir::Literal::Str(_)))
@@ -2486,7 +2487,7 @@ impl Filter {
             UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Sqrt |
             UnaryOp::Fabs | UnaryOp::Abs | UnaryOp::ToString |
             UnaryOp::AsciiDowncase | UnaryOp::AsciiUpcase |
-            UnaryOp::Length | UnaryOp::Utf8ByteLength);
+            UnaryOp::Length | UnaryOp::Utf8ByteLength | UnaryOp::Explode);
         // Pipe form: .field | op
         if let Expr::Pipe { left, right } = expr {
             if let Expr::Index { expr: base, key } = left.as_ref() {
@@ -2527,7 +2528,7 @@ impl Filter {
                 if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                     if let Expr::CallBuiltin { name, args } = right.as_ref() {
                         if args.len() == 1 {
-                            if matches!(name.as_str(), "startswith" | "endswith" | "ltrimstr" | "rtrimstr" | "split" | "index" | "rindex" | "indices") {
+                            if matches!(name.as_str(), "startswith" | "endswith" | "ltrimstr" | "rtrimstr" | "split" | "index" | "rindex" | "indices" | "contains") {
                                 if let Expr::Literal(Literal::Str(arg)) = &args[0] {
                                     return Some((field.clone(), name.clone(), arg.clone()));
                                 }
