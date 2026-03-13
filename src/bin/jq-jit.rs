@@ -171,6 +171,19 @@ fn remap_expr_fields(rexpr: &jq_jit::interpreter::RemapExpr) -> Vec<&str> {
             fields
         }
         RemapExpr::FieldType(f) | RemapExpr::FieldNegate(f) => vec![f.as_str()],
+        RemapExpr::StringChain(ref parts) => {
+            let mut fields: Vec<&str> = Vec::new();
+            for part in parts {
+                let f = match part {
+                    jq_jit::interpreter::StringAddPart::Field(f)
+                    | jq_jit::interpreter::StringAddPart::FieldToString(f)
+                    | jq_jit::interpreter::StringAddPart::FieldArithToString(f, _) => f.as_str(),
+                    jq_jit::interpreter::StringAddPart::Literal(_) => continue,
+                };
+                if !fields.contains(&f) { fields.push(f); }
+            }
+            fields
+        }
         RemapExpr::CondChain(branches, else_out) => {
             let mut fields: Vec<&str> = Vec::new();
             for b in branches {
@@ -268,6 +281,16 @@ enum ResolvedRemap {
     FieldType(usize),
     FieldNegate(usize),
     ArithCmp(jq_jit::interpreter::ArithExpr, jq_jit::ir::BinOp, f64),
+    StringChain(Vec<ResolvedStringChainPart>),
+}
+
+/// Pre-resolved string chain part (for `.name + ":" + (.x | tostring)` in remap values).
+#[derive(Clone)]
+enum ResolvedStringChainPart {
+    Literal(Vec<u8>),
+    Field(usize),
+    FieldToString(usize),
+    FieldArithToString(usize, Vec<(jq_jit::ir::BinOp, f64)>),
 }
 
 /// Pre-resolved conditional branch for remap values.
@@ -432,6 +455,32 @@ fn resolve_one_remap(
                 }
             }).collect();
             ResolvedRemap::StringInterp(resolved)
+        }
+        RemapExpr::StringChain(ref parts) => {
+            let resolved = parts.iter().map(|p| {
+                use jq_jit::interpreter::StringAddPart;
+                match p {
+                    StringAddPart::Literal(s) => {
+                        let mut buf = Vec::new();
+                        for &b in s.as_bytes() {
+                            match b {
+                                b'"' => buf.extend_from_slice(b"\\\""),
+                                b'\\' => buf.extend_from_slice(b"\\\\"),
+                                b'\n' => buf.extend_from_slice(b"\\n"),
+                                b'\r' => buf.extend_from_slice(b"\\r"),
+                                b'\t' => buf.extend_from_slice(b"\\t"),
+                                c if c < 0x20 => { use std::io::Write; let _ = write!(buf, "\\u{:04x}", c); }
+                                _ => buf.push(b),
+                            }
+                        }
+                        ResolvedStringChainPart::Literal(buf)
+                    }
+                    StringAddPart::Field(f) => ResolvedStringChainPart::Field(field_idx[f.as_str()]),
+                    StringAddPart::FieldToString(f) => ResolvedStringChainPart::FieldToString(field_idx[f.as_str()]),
+                    StringAddPart::FieldArithToString(f, ops) => ResolvedStringChainPart::FieldArithToString(field_idx[f.as_str()], ops.clone()),
+                }
+            }).collect();
+            ResolvedRemap::StringChain(resolved)
         }
     }
 }
@@ -861,6 +910,10 @@ fn emit_remap_value(
                 }
             }
             buf.push(b'"');
+        }
+        RemapExpr::StringChain(_) => {
+            let resolved = resolve_one_remap(rexpr, field_idx);
+            emit_resolved_value(buf, &resolved, raw, ranges);
         }
     }
 }
@@ -1405,6 +1458,57 @@ fn emit_resolved_value(
             } else {
                 buf.extend_from_slice(b"null");
             }
+        }
+        ResolvedRemap::StringChain(ref parts) => {
+            buf.push(b'"');
+            for part in parts {
+                match part {
+                    ResolvedStringChainPart::Literal(ref bytes) => {
+                        buf.extend_from_slice(bytes);
+                    }
+                    ResolvedStringChainPart::Field(idx) => {
+                        let (vs, ve) = ranges[*idx];
+                        let val = &raw[vs..ve];
+                        if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"' {
+                            // String field: emit unquoted inner content
+                            // Need to check for backslash escapes inside
+                            buf.extend_from_slice(&val[1..val.len()-1]);
+                        } else {
+                            // Non-string field used in string concatenation — emit as-is
+                            buf.extend_from_slice(val);
+                        }
+                    }
+                    ResolvedStringChainPart::FieldToString(idx) => {
+                        let (vs, ve) = ranges[*idx];
+                        let val = &raw[vs..ve];
+                        if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"' {
+                            // Already a string — emit inner content
+                            buf.extend_from_slice(&val[1..val.len()-1]);
+                        } else {
+                            // Number/bool/null — emit raw bytes as string representation
+                            buf.extend_from_slice(val);
+                        }
+                    }
+                    ResolvedStringChainPart::FieldArithToString(idx, ref ops) => {
+                        let (vs, ve) = ranges[*idx];
+                        let s = unsafe { std::str::from_utf8_unchecked(&raw[vs..ve]) };
+                        if let Ok(mut v) = s.trim().parse::<f64>() {
+                            for &(ref op, n) in ops {
+                                v = match op {
+                                    jq_jit::ir::BinOp::Add => v + n,
+                                    jq_jit::ir::BinOp::Sub => v - n,
+                                    jq_jit::ir::BinOp::Mul => v * n,
+                                    jq_jit::ir::BinOp::Div => v / n,
+                                    jq_jit::ir::BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
+                                    _ => v,
+                                };
+                            }
+                            push_jq_number_bytes(buf, v);
+                        }
+                    }
+                }
+            }
+            buf.push(b'"');
         }
     }
 }
