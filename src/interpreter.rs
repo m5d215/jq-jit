@@ -180,6 +180,15 @@ pub struct CondBranch {
     pub output: BranchOutput,
 }
 
+/// Condition type for if-then-else with array outputs.
+#[derive(Debug, Clone)]
+pub enum IfArrayCond {
+    /// `.field cmp N`
+    FieldConst(String, crate::ir::BinOp, f64),
+    /// `.field1 cmp .field2`
+    FieldField(String, crate::ir::BinOp, String),
+}
+
 /// One step in a chained string operation: `.field | op1 | op2 | ...`
 #[derive(Debug, Clone)]
 pub enum StringChainOp {
@@ -4087,6 +4096,57 @@ impl Filter {
                             if let Expr::Literal(Literal::Str(field2)) = key2.as_ref() {
                                 if let (Some(t_bytes), Some(f_bytes)) = (const_expr_to_json(then_branch), const_expr_to_json(else_branch)) {
                                     return Some((field1.clone(), *op, field2.clone(), t_bytes, f_bytes));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `if cond then [arr1] else [arr2] end` where cond is a field comparison
+    /// and both branches are arrays of classifiable remap expressions.
+    /// Condition types: .field cmp N, .f1 cmp .f2
+    /// Returns (IfArrayCond, then_elems, else_elems).
+    pub fn detect_if_cmp_then_arrays(&self) -> Option<(IfArrayCond, Vec<RemapExpr>, Vec<RemapExpr>)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        let try_collect_arr = |e: &Expr| -> Option<Vec<RemapExpr>> {
+            if let Expr::Collect { generator } = e {
+                fn collect_e<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+                    match e {
+                        Expr::Comma { left, right } => { collect_e(left, out); collect_e(right, out); }
+                        _ => out.push(e),
+                    }
+                }
+                let mut elems = Vec::new();
+                collect_e(generator, &mut elems);
+                if elems.len() < 2 { return None; }
+                let mut rexprs = Vec::with_capacity(elems.len());
+                for elem in &elems { rexprs.push(Self::classify_remap_value(elem)?); }
+                Some(rexprs)
+            } else { None }
+        };
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            let then_arr = try_collect_arr(then_branch)?;
+            let else_arr = try_collect_arr(else_branch)?;
+            if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                // .field cmp N
+                if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                            if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                return Some((IfArrayCond::FieldConst(field.clone(), *op, *n), then_arr, else_arr));
+                            }
+                            // .f1 cmp .f2
+                            if let Expr::Index { expr: base2, key: key2 } = rhs.as_ref() {
+                                if matches!(base2.as_ref(), Expr::Input) {
+                                    if let Expr::Literal(Literal::Str(f2)) = key2.as_ref() {
+                                        return Some((IfArrayCond::FieldField(field.clone(), *op, f2.clone()), then_arr, else_arr));
+                                    }
                                 }
                             }
                         }

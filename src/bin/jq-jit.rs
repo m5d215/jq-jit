@@ -1926,6 +1926,9 @@ fn real_main() {
     let field_field_cmp_branch = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() {
         filter.detect_field_field_cmp_branch()
     } else { None };
+    let if_cmp_arrays = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && field_field_cmp_branch.is_none() {
+        filter.detect_if_cmp_then_arrays()
+    } else { None };
     let select_compound = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() && cond_chain.is_none() {
         filter.detect_select_compound_cmp()
     } else { None };
@@ -1998,7 +2001,7 @@ fn real_main() {
         || field_str_builtin.is_some() || field_test.is_some() || field_gsub.is_some() || field_format.is_some() || field_ltrimstr_tonumber.is_some()
         || field_str_concat.is_some() || field_alt.is_some() || field_field_alt.is_some()
         || select_cmp.is_some() || select_arith_cmp.is_some()
-        || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || field_field_cmp_branch.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some()
+        || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || field_field_cmp_branch.is_some() || if_cmp_arrays.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some()
         || select_str.is_some()
         || select_str_test.is_some() || select_regex_test.is_some() || select_nested_cmp.is_some()
         || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_field_unary.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_array.is_some() || select_cmp_value.is_some() || select_ff_cmp_field.is_some() || select_ff_cmp.is_some() || select_ff_cmp_cremap.is_some() || select_ff_cmp_array.is_some() || select_compound_array.is_some() || select_str_field.is_some() || select_str_cremap.is_some() || select_str_array.is_some()
@@ -4941,6 +4944,94 @@ fn real_main() {
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref iacond, ref then_arr, ref else_arr)) = if_cmp_arrays {
+                    use jq_jit::ir::BinOp;
+                    use jq_jit::interpreter::IfArrayCond;
+                    // Collect all fields from condition + both branches
+                    let mut all_fields: Vec<String> = Vec::new();
+                    let mut field_idx = std::collections::HashMap::new();
+                    match iacond {
+                        IfArrayCond::FieldConst(f, _, _) => {
+                            field_idx.insert(f.clone(), 0);
+                            all_fields.push(f.clone());
+                        }
+                        IfArrayCond::FieldField(f1, _, f2) => {
+                            field_idx.insert(f1.clone(), 0);
+                            all_fields.push(f1.clone());
+                            if !field_idx.contains_key(f2) {
+                                field_idx.insert(f2.clone(), 1);
+                                all_fields.push(f2.clone());
+                            }
+                        }
+                    }
+                    for rexpr in then_arr.iter().chain(else_arr.iter()) {
+                        for name in remap_expr_fields(rexpr) {
+                            if !field_idx.contains_key(name) {
+                                field_idx.insert(name.to_string(), all_fields.len());
+                                all_fields.push(name.to_string());
+                            }
+                        }
+                    }
+                    let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                    let resolved_then: Vec<ResolvedRemap> = then_arr.iter()
+                        .map(|rexpr| resolve_one_remap(rexpr, &field_idx))
+                        .collect();
+                    let resolved_else: Vec<ResolvedRemap> = else_arr.iter()
+                        .map(|rexpr| resolve_one_remap(rexpr, &field_idx))
+                        .collect();
+                    let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                            let pass = match iacond {
+                                IfArrayCond::FieldConst(f, op, threshold) => {
+                                    let idx = field_idx[f];
+                                    let r = &ranges_buf[idx];
+                                    if r.0 < r.1 {
+                                        if let Some(v) = parse_json_num(&raw[r.0..r.1]) {
+                                            match op {
+                                                BinOp::Gt => v > *threshold, BinOp::Lt => v < *threshold,
+                                                BinOp::Ge => v >= *threshold, BinOp::Le => v <= *threshold,
+                                                BinOp::Eq => v == *threshold, BinOp::Ne => v != *threshold,
+                                                _ => false,
+                                            }
+                                        } else { false }
+                                    } else { false }
+                                }
+                                IfArrayCond::FieldField(f1, op, f2) => {
+                                    let i1 = field_idx[f1];
+                                    let i2 = field_idx[f2];
+                                    let r1 = &ranges_buf[i1];
+                                    let r2 = &ranges_buf[i2];
+                                    if r1.0 < r1.1 && r2.0 < r2.1 {
+                                        if let (Some(v1), Some(v2)) = (
+                                            parse_json_num(&raw[r1.0..r1.1]),
+                                            parse_json_num(&raw[r2.0..r2.1]),
+                                        ) {
+                                            match op {
+                                                BinOp::Gt => v1 > v2, BinOp::Lt => v1 < v2,
+                                                BinOp::Ge => v1 >= v2, BinOp::Le => v1 <= v2,
+                                                BinOp::Eq => v1 == v2, BinOp::Ne => v1 != v2,
+                                                _ => false,
+                                            }
+                                        } else { false }
+                                    } else { false }
+                                }
+                            };
+                            let resolved = if pass { &resolved_then } else { &resolved_else };
+                            compact_buf.push(b'[');
+                            for (i, res) in resolved.iter().enumerate() {
+                                if i > 0 { compact_buf.push(b','); }
+                                emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                            }
+                            compact_buf.extend_from_slice(b"]\n");
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -8232,6 +8323,94 @@ fn real_main() {
                     } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref iacond, ref then_arr, ref else_arr)) = if_cmp_arrays {
+                use jq_jit::ir::BinOp;
+                use jq_jit::interpreter::IfArrayCond;
+                let content_bytes = content.as_bytes();
+                let mut all_fields: Vec<String> = Vec::new();
+                let mut field_idx = std::collections::HashMap::new();
+                match iacond {
+                    IfArrayCond::FieldConst(f, _, _) => {
+                        field_idx.insert(f.clone(), 0);
+                        all_fields.push(f.clone());
+                    }
+                    IfArrayCond::FieldField(f1, _, f2) => {
+                        field_idx.insert(f1.clone(), 0);
+                        all_fields.push(f1.clone());
+                        if !field_idx.contains_key(f2) {
+                            field_idx.insert(f2.clone(), 1);
+                            all_fields.push(f2.clone());
+                        }
+                    }
+                }
+                for rexpr in then_arr.iter().chain(else_arr.iter()) {
+                    for name in remap_expr_fields(rexpr) {
+                        if !field_idx.contains_key(name) {
+                            field_idx.insert(name.to_string(), all_fields.len());
+                            all_fields.push(name.to_string());
+                        }
+                    }
+                }
+                let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                let resolved_then: Vec<ResolvedRemap> = then_arr.iter()
+                    .map(|rexpr| resolve_one_remap(rexpr, &field_idx))
+                    .collect();
+                let resolved_else: Vec<ResolvedRemap> = else_arr.iter()
+                    .map(|rexpr| resolve_one_remap(rexpr, &field_idx))
+                    .collect();
+                let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                        let pass = match iacond {
+                            IfArrayCond::FieldConst(f, op, threshold) => {
+                                let idx = field_idx[f];
+                                let r = &ranges_buf[idx];
+                                if r.0 < r.1 {
+                                    if let Some(v) = parse_json_num(&raw[r.0..r.1]) {
+                                        match op {
+                                            BinOp::Gt => v > *threshold, BinOp::Lt => v < *threshold,
+                                            BinOp::Ge => v >= *threshold, BinOp::Le => v <= *threshold,
+                                            BinOp::Eq => v == *threshold, BinOp::Ne => v != *threshold,
+                                            _ => false,
+                                        }
+                                    } else { false }
+                                } else { false }
+                            }
+                            IfArrayCond::FieldField(f1, op, f2) => {
+                                let i1 = field_idx[f1];
+                                let i2 = field_idx[f2];
+                                let r1 = &ranges_buf[i1];
+                                let r2 = &ranges_buf[i2];
+                                if r1.0 < r1.1 && r2.0 < r2.1 {
+                                    if let (Some(v1), Some(v2)) = (
+                                        parse_json_num(&raw[r1.0..r1.1]),
+                                        parse_json_num(&raw[r2.0..r2.1]),
+                                    ) {
+                                        match op {
+                                            BinOp::Gt => v1 > v2, BinOp::Lt => v1 < v2,
+                                            BinOp::Ge => v1 >= v2, BinOp::Le => v1 <= v2,
+                                            BinOp::Eq => v1 == v2, BinOp::Ne => v1 != v2,
+                                            _ => false,
+                                        }
+                                    } else { false }
+                                } else { false }
+                            }
+                        };
+                        let resolved = if pass { &resolved_then } else { &resolved_else };
+                        compact_buf.push(b'[');
+                        for (i, res) in resolved.iter().enumerate() {
+                            if i > 0 { compact_buf.push(b','); }
+                            emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                        }
+                        compact_buf.extend_from_slice(b"]\n");
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
