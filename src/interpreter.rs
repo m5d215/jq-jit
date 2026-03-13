@@ -3505,6 +3505,52 @@ impl Filter {
         None
     }
 
+    /// Detect `. + {key: numeric_expr(.fields)}` — object enrichment with computed numeric field.
+    /// Returns (output_key, needed_fields, arith_expr) if detected.
+    /// The raw byte handler scans for existing key, falls back to JIT if found.
+    pub fn detect_obj_merge_computed(&self) -> Option<(String, Vec<String>, ArithExpr)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::BinOp { op: BinOp::Add, lhs, rhs } = expr {
+            if !matches!(lhs.as_ref(), Expr::Input) { return None; }
+            if let Expr::ObjectConstruct { pairs } = rhs.as_ref() {
+                if pairs.len() != 1 { return None; }
+                let (key_expr, val_expr) = &pairs[0];
+                let key = if let Expr::Literal(Literal::Str(k)) = key_expr { k.clone() } else { return None; };
+                // Build ArithExpr from value expression
+                let mut fields: Vec<String> = Vec::new();
+                fn build_arith(expr: &Expr, fields: &mut Vec<String>) -> Option<ArithExpr> {
+                    match expr {
+                        Expr::BinOp { op, lhs, rhs } => {
+                            if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) { return None; }
+                            let l = build_arith(lhs, fields)?;
+                            let r = build_arith(rhs, fields)?;
+                            Some(ArithExpr::BinOp(*op, Box::new(l), Box::new(r)))
+                        }
+                        Expr::Index { expr: base, key } => {
+                            if !matches!(base.as_ref(), Expr::Input) { return None; }
+                            if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                let idx = if let Some(pos) = fields.iter().position(|f| f == field) {
+                                    pos
+                                } else {
+                                    fields.push(field.clone());
+                                    fields.len() - 1
+                                };
+                                Some(ArithExpr::Field(idx))
+                            } else { None }
+                        }
+                        Expr::Literal(Literal::Num(n, _)) => Some(ArithExpr::Const(*n)),
+                        _ => None,
+                    }
+                }
+                let arith = build_arith(val_expr, &mut fields)?;
+                if fields.is_empty() { return None; } // All constants → detect_obj_merge_literal handles
+                return Some((key, fields, arith));
+            }
+        }
+        None
+    }
+
     /// Detect nested field access `.a.b` or `.a.b.c` pattern.
     /// Returns the chain of field names if this is chained field access on input.
     pub fn detect_nested_field_access(&self) -> Option<Vec<String>> {

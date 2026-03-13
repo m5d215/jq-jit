@@ -758,6 +758,9 @@ fn real_main() {
     let obj_merge_lit = if (use_compact_buf || use_pretty_buf) && !exit_status && del_field.is_none() {
         filter.detect_obj_merge_literal()
     } else { None };
+    let obj_merge_computed = if (use_compact_buf || use_pretty_buf) && !exit_status && obj_merge_lit.is_none() && del_field.is_none() {
+        filter.detect_obj_merge_computed()
+    } else { None };
     let is_each = (use_compact_buf || use_pretty_buf) && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() && del_field.is_none() && field_access.is_none() && filter.is_each();
     let is_to_entries = (use_compact_buf || use_pretty_buf) && !exit_status && !is_each && filter.is_to_entries();
     let remap_to_entries = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_to_entries && field_remap.is_none() {
@@ -885,7 +888,7 @@ fn real_main() {
         || select_str_test.is_some() || select_regex_test.is_some() || select_nested_cmp.is_some()
         || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_value.is_some() || select_ff_cmp_field.is_some() || select_str_field.is_some()
         || computed_array.is_some() || array_field.is_some() || multi_field.is_some() || is_length || is_keys
-        || is_keys_unsorted || has_field.is_some() || has_multi.is_some() || select_has_multi.is_some() || is_type || del_field.is_some() || obj_merge_lit.is_some()
+        || is_keys_unsorted || has_field.is_some() || has_multi.is_some() || select_has_multi.is_some() || is_type || del_field.is_some() || obj_merge_lit.is_some() || obj_merge_computed.is_some()
         || is_each || is_to_entries || remap_to_entries.is_some() || with_entries_select.is_some() || is_tojson || string_interp_fields.is_some() || string_add_chain.is_some() || array_join.is_some()
         || literal_output.is_some() || array_fields_format.is_some() || raw_csv_fields.is_some()
         || field_split_join.is_some() || field_split_first.is_some() || field_split_length.is_some() || field_strop_length.is_some() || field_length_cmp.is_some() || select_length_cmp_field.is_some() || field_slice.is_some()
@@ -4247,6 +4250,53 @@ fn real_main() {
                         }
                         Ok(())
                     })
+                } else if let Some((ref out_key, ref nfields, ref arith)) = obj_merge_computed {
+                    let mut tmp = Vec::new();
+                    let mut merge_pair = vec![(out_key.clone(), Vec::new())];
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        let nf_count = nfields.len();
+                        let ok = if nf_count == 1 {
+                            if let Some(v) = json_object_get_num(raw, 0, &nfields[0]) {
+                                let result = arith.eval(&[v]);
+                                merge_pair[0].1.clear();
+                                push_jq_number_bytes(&mut merge_pair[0].1, result);
+                                true
+                            } else { false }
+                        } else if nf_count == 2 {
+                            if let Some((a, b)) = json_object_get_two_nums(raw, 0, &nfields[0], &nfields[1]) {
+                                let result = arith.eval(&[a, b]);
+                                merge_pair[0].1.clear();
+                                push_jq_number_bytes(&mut merge_pair[0].1, result);
+                                true
+                            } else { false }
+                        } else { false };
+                        if ok {
+                            if use_pretty_buf {
+                                tmp.clear();
+                                if json_object_merge_literal(raw, 0, &merge_pair, &mut tmp) {
+                                    push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                                    compact_buf.push(b'\n');
+                                } else {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                            } else if json_object_merge_literal(raw, 0, &merge_pair, &mut compact_buf) {
+                                compact_buf.push(b'\n');
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
                 } else if is_each {
                     if use_pretty_buf {
                         json_stream_raw(&input_str, |start, end| {
@@ -7560,6 +7610,54 @@ fn real_main() {
                         }
                     } else if json_object_merge_literal(raw, 0, merge_pairs, &mut compact_buf) {
                         compact_buf.push(b'\n');
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref out_key, ref nfields, ref arith)) = obj_merge_computed {
+                let content_bytes = content.as_bytes();
+                let mut tmp = Vec::new();
+                let mut merge_pair = vec![(out_key.clone(), Vec::new())];
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    let nf_count = nfields.len();
+                    let ok = if nf_count == 1 {
+                        if let Some(v) = json_object_get_num(raw, 0, &nfields[0]) {
+                            let result = arith.eval(&[v]);
+                            merge_pair[0].1.clear();
+                            push_jq_number_bytes(&mut merge_pair[0].1, result);
+                            true
+                        } else { false }
+                    } else if nf_count == 2 {
+                        if let Some((a, b)) = json_object_get_two_nums(raw, 0, &nfields[0], &nfields[1]) {
+                            let result = arith.eval(&[a, b]);
+                            merge_pair[0].1.clear();
+                            push_jq_number_bytes(&mut merge_pair[0].1, result);
+                            true
+                        } else { false }
+                    } else { false };
+                    if ok {
+                        if use_pretty_buf {
+                            tmp.clear();
+                            if json_object_merge_literal(raw, 0, &merge_pair, &mut tmp) {
+                                push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                                compact_buf.push(b'\n');
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else if json_object_merge_literal(raw, 0, &merge_pair, &mut compact_buf) {
+                            compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
                     } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
