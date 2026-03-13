@@ -138,6 +138,9 @@ TESTS=(
     '.x|@text:-c:.x | @text'
     '.name|@json:-c:.name | @json'
     'computed remap:-c:{name: .name, double: (.x * 2), sum: (.x + .y)}'
+    'sel|[arr]:-c:select(.x > 500) | [.name, .x]'
+    'sel(and)|[arr]:-c:select(.x > 100 and .y < 500) | [.name, .x, .y]'
+    'if>.y [arr]:-c:if .x > .y then [.name, .x] else [.name, .y] end'
 )
 
 for test in "${TESTS[@]}"; do

@@ -3635,6 +3635,39 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | split("s") | .[N]` for any integer N (positive or negative).
+    /// Returns (field_name, split_delimiter, index).
+    pub fn detect_field_split_index(&self) -> Option<(String, String, i32)> {
+        use crate::ir::{Expr, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::Pipe { left: split_expr, right: index_expr } = right.as_ref() {
+                        if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
+                            if name != "split" || args.len() != 1 { return None; }
+                            if let Expr::Literal(Literal::Str(delim)) = &args[0] {
+                                if let Expr::Index { expr: ibase, key: ikey } = index_expr.as_ref() {
+                                    if matches!(ibase.as_ref(), Expr::Input) {
+                                        if let Expr::Literal(Literal::Num(n, _)) = ikey.as_ref() {
+                                            let idx = *n as i32;
+                                            // Skip 0 and -1 since those are handled by split_first / split_last
+                                            if idx != 0 && idx != -1 {
+                                                return Some((field.clone(), delim.clone(), idx));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field | split("s") | last` or `.field | split("s") | .[-1]`.
     /// Returns (field_name, split_delimiter).
     pub fn detect_field_split_last(&self) -> Option<(String, String)> {
