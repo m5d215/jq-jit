@@ -567,10 +567,28 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             Expr::Comma { left: Box::new(simplify_expr(left)), right: Box::new(simplify_expr(right)) }
         }
         Expr::Index { expr, key } => {
-            Expr::Index { expr: Box::new(simplify_expr(expr)), key: Box::new(simplify_expr(key)) }
+            let se = simplify_expr(expr);
+            let sk = simplify_expr(key);
+            // Normalize f[k] → f | .[k] ONLY when k is a literal (doesn't reference input)
+            // f[.baz] is NOT f | .[.baz] because .baz binds to different inputs
+            if !matches!(&se, Expr::Input) && matches!(&sk, Expr::Literal(_)) {
+                return simplify_expr(&Expr::Pipe {
+                    left: Box::new(se),
+                    right: Box::new(Expr::Index { expr: Box::new(Expr::Input), key: Box::new(sk) }),
+                });
+            }
+            Expr::Index { expr: Box::new(se), key: Box::new(sk) }
         }
         Expr::IndexOpt { expr, key } => {
-            Expr::IndexOpt { expr: Box::new(simplify_expr(expr)), key: Box::new(simplify_expr(key)) }
+            let se = simplify_expr(expr);
+            let sk = simplify_expr(key);
+            if !matches!(&se, Expr::Input) && matches!(&sk, Expr::Literal(_)) {
+                return simplify_expr(&Expr::Pipe {
+                    left: Box::new(se),
+                    right: Box::new(Expr::IndexOpt { expr: Box::new(Expr::Input), key: Box::new(sk) }),
+                });
+            }
+            Expr::IndexOpt { expr: Box::new(se), key: Box::new(sk) }
         }
         Expr::CallBuiltin { name, args } => {
             let sargs: Vec<_> = args.iter().map(|a| simplify_expr(a)).collect();
