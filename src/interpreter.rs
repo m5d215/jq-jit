@@ -228,6 +228,8 @@ pub enum StringAddPart {
     Field(String),
     /// `.field | tostring` — numeric field, format as string
     FieldToString(String),
+    /// `.field * N + M ... | tostring` — arithmetic chain then tostring
+    FieldArithToString(String, Vec<(crate::ir::BinOp, f64)>),
 }
 
 /// A compiled jq filter, ready to execute.
@@ -3186,6 +3188,44 @@ impl Filter {
     pub fn detect_string_add_chain(&self) -> Option<Vec<StringAddPart>> {
         use crate::ir::{Expr, BinOp, Literal, UnaryOp};
         let expr = self.detect_expr()?;
+        fn collect_tostring_arith(operand: &Expr, parts: &mut Vec<StringAddPart>) -> bool {
+            // Simple: .field | tostring
+            if let Expr::Index { expr: base, key } = operand {
+                if matches!(base.as_ref(), Expr::Input) {
+                    if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                        parts.push(StringAddPart::FieldToString(f.clone()));
+                        return true;
+                    }
+                }
+            }
+            // Arithmetic chain: .field * N + M ... | tostring
+            let mut arith_ops = Vec::new();
+            let mut cur = operand;
+            loop {
+                if let Expr::BinOp { op: aop, lhs, rhs } = cur {
+                    if matches!(aop, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+                        if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                            arith_ops.push((*aop, *n));
+                            cur = lhs.as_ref();
+                            continue;
+                        }
+                    }
+                }
+                break;
+            }
+            if !arith_ops.is_empty() {
+                arith_ops.reverse();
+                if let Expr::Index { expr: base, key } = cur {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                            parts.push(StringAddPart::FieldArithToString(f.clone(), arith_ops));
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
         fn collect(expr: &Expr, parts: &mut Vec<StringAddPart>) -> bool {
             match expr {
                 Expr::BinOp { op: BinOp::Add, lhs, rhs } => {
@@ -3204,15 +3244,7 @@ impl Filter {
                     true
                 }
                 Expr::UnaryOp { op: UnaryOp::ToString, operand } => {
-                    if let Expr::Index { expr: base, key } = operand.as_ref() {
-                        if matches!(base.as_ref(), Expr::Input) {
-                            if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
-                                parts.push(StringAddPart::FieldToString(f.clone()));
-                                return true;
-                            }
-                        }
-                    }
-                    false
+                    collect_tostring_arith(operand, parts)
                 }
                 _ => false,
             }
@@ -5377,6 +5409,42 @@ impl Filter {
     pub fn detect_select_cmp_then_str_chain(&self) -> Option<(String, crate::ir::BinOp, f64, Vec<StringAddPart>)> {
         use crate::ir::{Expr, BinOp, Literal, UnaryOp};
         let expr = self.detect_expr()?;
+        fn collect_str_chain_tostring(operand: &Expr, parts: &mut Vec<StringAddPart>) -> bool {
+            if let Expr::Index { expr: base, key } = operand {
+                if matches!(base.as_ref(), Expr::Input) {
+                    if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                        parts.push(StringAddPart::FieldToString(f.clone()));
+                        return true;
+                    }
+                }
+            }
+            let mut arith_ops = Vec::new();
+            let mut cur = operand;
+            loop {
+                if let Expr::BinOp { op: aop, lhs, rhs } = cur {
+                    if matches!(aop, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+                        if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                            arith_ops.push((*aop, *n));
+                            cur = lhs.as_ref();
+                            continue;
+                        }
+                    }
+                }
+                break;
+            }
+            if !arith_ops.is_empty() {
+                arith_ops.reverse();
+                if let Expr::Index { expr: base, key } = cur {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                            parts.push(StringAddPart::FieldArithToString(f.clone(), arith_ops));
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
         fn collect_str_chain(expr: &Expr, parts: &mut Vec<StringAddPart>) -> bool {
             match expr {
                 Expr::BinOp { op: BinOp::Add, lhs, rhs } => {
@@ -5395,15 +5463,7 @@ impl Filter {
                     true
                 }
                 Expr::UnaryOp { op: UnaryOp::ToString, operand } => {
-                    if let Expr::Index { expr: base, key } = operand.as_ref() {
-                        if matches!(base.as_ref(), Expr::Input) {
-                            if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
-                                parts.push(StringAddPart::FieldToString(f.clone()));
-                                return true;
-                            }
-                        }
-                    }
-                    false
+                    collect_str_chain_tostring(operand, parts)
                 }
                 _ => false,
             }

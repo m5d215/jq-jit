@@ -4346,7 +4346,7 @@ fn real_main() {
                     let mut field_idx_map = std::collections::HashMap::new();
                     for part in sac_parts.iter() {
                         let name = match part {
-                            StringAddPart::Field(f) | StringAddPart::FieldToString(f) => f.as_str(),
+                            StringAddPart::Field(f) | StringAddPart::FieldToString(f) | StringAddPart::FieldArithToString(f, _) => f.as_str(),
                             _ => continue,
                         };
                         if !field_idx_map.contains_key(name) {
@@ -4355,10 +4355,10 @@ fn real_main() {
                         }
                     }
                     // Pre-compute actions for hot loop: avoid HashMap lookups per object
-                    // 0 = literal (strip_quotes=false), 1 = field (strip_quotes=true), 2 = field_tostring (strip_quotes=true)
-                    // We encode as (field_idx_or_lit_idx, strip_quotes)
-                    let mut actions: Vec<(usize, bool)> = Vec::with_capacity(sac_parts.len()); // (idx, is_field)
+                    // type: 0=literal, 1=field (raw copy), 2=arith_tostring (parse num, compute, format)
+                    let mut actions: Vec<(usize, u8, usize)> = Vec::with_capacity(sac_parts.len()); // (idx, type, arith_idx)
                     let mut lit_bufs: Vec<Vec<u8>> = Vec::new();
+                    let mut arith_ops_list: Vec<&[(jq_jit::ir::BinOp, f64)]> = Vec::new();
                     for part in sac_parts.iter() {
                         match part {
                             StringAddPart::Literal(s) => {
@@ -4376,31 +4376,54 @@ fn real_main() {
                                 }
                                 let lit_idx = lit_bufs.len();
                                 lit_bufs.push(buf);
-                                actions.push((lit_idx, false)); // not a field
+                                actions.push((lit_idx, 0, 0));
                             }
                             StringAddPart::Field(f) | StringAddPart::FieldToString(f) => {
-                                actions.push((field_idx_map[f.as_str()], true)); // is a field
+                                actions.push((field_idx_map[f.as_str()], 1, 0));
+                            }
+                            StringAddPart::FieldArithToString(f, ops) => {
+                                let ai = arith_ops_list.len();
+                                arith_ops_list.push(ops.as_slice());
+                                actions.push((field_idx_map[f.as_str()], 2, ai));
                             }
                         }
                     }
                     let mut ranges_buf = vec![(0usize, 0usize); field_names.len()];
-                    let mut lit_idx_counter = 0usize;
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
                             compact_buf.push(b'"');
-                            lit_idx_counter = 0;
-                            for &(idx, is_field) in &actions {
-                                if is_field {
-                                    let (vs, ve) = ranges_buf[idx];
-                                    let val = &raw[vs..ve];
-                                    if val[0] == b'"' && val.len() >= 2 {
-                                        compact_buf.extend_from_slice(&val[1..val.len()-1]);
-                                    } else {
-                                        compact_buf.extend_from_slice(val);
+                            for &(idx, typ, ai) in &actions {
+                                match typ {
+                                    0 => { compact_buf.extend_from_slice(&lit_bufs[idx]); }
+                                    1 => {
+                                        let (vs, ve) = ranges_buf[idx];
+                                        let val = &raw[vs..ve];
+                                        if val[0] == b'"' && val.len() >= 2 {
+                                            compact_buf.extend_from_slice(&val[1..val.len()-1]);
+                                        } else {
+                                            compact_buf.extend_from_slice(val);
+                                        }
                                     }
-                                } else {
-                                    compact_buf.extend_from_slice(&lit_bufs[idx]);
+                                    _ => {
+                                        // FieldArithToString: parse number, apply ops, format
+                                        let (vs, ve) = ranges_buf[idx];
+                                        let val = &raw[vs..ve];
+                                        let s = unsafe { std::str::from_utf8_unchecked(val) };
+                                        if let Ok(mut v) = s.trim().parse::<f64>() {
+                                            for &(ref op, n) in arith_ops_list[ai] {
+                                                v = match op {
+                                                    jq_jit::ir::BinOp::Add => v + n,
+                                                    jq_jit::ir::BinOp::Sub => v - n,
+                                                    jq_jit::ir::BinOp::Mul => v * n,
+                                                    jq_jit::ir::BinOp::Div => v / n,
+                                                    jq_jit::ir::BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
+                                                    _ => v,
+                                                };
+                                            }
+                                            push_jq_number_bytes(&mut compact_buf, v);
+                                        }
+                                    }
                                 }
                             }
                             compact_buf.extend_from_slice(b"\"\n");
@@ -6103,7 +6126,7 @@ fn real_main() {
                     field_names.push(sel_field.as_str());
                     for part in sac_parts.iter() {
                         let name = match part {
-                            StringAddPart::Field(f) | StringAddPart::FieldToString(f) => f.as_str(),
+                            StringAddPart::Field(f) | StringAddPart::FieldToString(f) | StringAddPart::FieldArithToString(f, _) => f.as_str(),
                             _ => continue,
                         };
                         if !field_idx_map.contains_key(name) {
@@ -6112,8 +6135,9 @@ fn real_main() {
                         }
                     }
                     // Pre-compute actions for hot loop
-                    let mut actions: Vec<(usize, bool)> = Vec::with_capacity(sac_parts.len());
+                    let mut actions: Vec<(usize, u8, usize)> = Vec::with_capacity(sac_parts.len());
                     let mut lit_bufs: Vec<Vec<u8>> = Vec::new();
+                    let mut arith_ops_list: Vec<&[(jq_jit::ir::BinOp, f64)]> = Vec::new();
                     for part in sac_parts.iter() {
                         match part {
                             StringAddPart::Literal(s) => {
@@ -6131,10 +6155,15 @@ fn real_main() {
                                 }
                                 let lit_idx = lit_bufs.len();
                                 lit_bufs.push(buf);
-                                actions.push((lit_idx, false));
+                                actions.push((lit_idx, 0, 0));
                             }
                             StringAddPart::Field(f) | StringAddPart::FieldToString(f) => {
-                                actions.push((field_idx_map[f.as_str()], true));
+                                actions.push((field_idx_map[f.as_str()], 1, 0));
+                            }
+                            StringAddPart::FieldArithToString(f, ops) => {
+                                let ai = arith_ops_list.len();
+                                arith_ops_list.push(ops.as_slice());
+                                actions.push((field_idx_map[f.as_str()], 2, ai));
                             }
                         }
                     }
@@ -6152,17 +6181,36 @@ fn real_main() {
                             if pass {
                                 if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
                                     compact_buf.push(b'"');
-                                    for &(idx, is_field) in &actions {
-                                        if is_field {
-                                            let (vs, ve) = ranges_buf[idx];
-                                            let val_bytes = &raw[vs..ve];
-                                            if val_bytes[0] == b'"' && val_bytes.len() >= 2 {
-                                                compact_buf.extend_from_slice(&val_bytes[1..val_bytes.len()-1]);
-                                            } else {
-                                                compact_buf.extend_from_slice(val_bytes);
+                                    for &(idx, typ, ai) in &actions {
+                                        match typ {
+                                            0 => { compact_buf.extend_from_slice(&lit_bufs[idx]); }
+                                            1 => {
+                                                let (vs, ve) = ranges_buf[idx];
+                                                let val_bytes = &raw[vs..ve];
+                                                if val_bytes[0] == b'"' && val_bytes.len() >= 2 {
+                                                    compact_buf.extend_from_slice(&val_bytes[1..val_bytes.len()-1]);
+                                                } else {
+                                                    compact_buf.extend_from_slice(val_bytes);
+                                                }
                                             }
-                                        } else {
-                                            compact_buf.extend_from_slice(&lit_bufs[idx]);
+                                            _ => {
+                                                let (vs, ve) = ranges_buf[idx];
+                                                let val_bytes = &raw[vs..ve];
+                                                let s = unsafe { std::str::from_utf8_unchecked(val_bytes) };
+                                                if let Ok(mut v) = s.trim().parse::<f64>() {
+                                                    for &(ref op, n) in arith_ops_list[ai] {
+                                                        v = match op {
+                                                            jq_jit::ir::BinOp::Add => v + n,
+                                                            jq_jit::ir::BinOp::Sub => v - n,
+                                                            jq_jit::ir::BinOp::Mul => v * n,
+                                                            jq_jit::ir::BinOp::Div => v / n,
+                                                            jq_jit::ir::BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
+                                                            _ => v,
+                                                        };
+                                                    }
+                                                    push_jq_number_bytes(&mut compact_buf, v);
+                                                }
+                                            }
                                         }
                                     }
                                     compact_buf.extend_from_slice(b"\"\n");
@@ -9902,7 +9950,7 @@ fn real_main() {
                 field_names.push(sel_field.as_str());
                 for part in sac_parts.iter() {
                     let name = match part {
-                        StringAddPart::Field(f) | StringAddPart::FieldToString(f) => f.as_str(),
+                        StringAddPart::Field(f) | StringAddPart::FieldToString(f) | StringAddPart::FieldArithToString(f, _) => f.as_str(),
                         _ => continue,
                     };
                     if !field_idx_map.contains_key(name) {
@@ -9910,8 +9958,9 @@ fn real_main() {
                         field_names.push(name);
                     }
                 }
-                let mut actions: Vec<(usize, bool)> = Vec::with_capacity(sac_parts.len());
+                let mut actions: Vec<(usize, u8, usize)> = Vec::with_capacity(sac_parts.len());
                 let mut lit_bufs: Vec<Vec<u8>> = Vec::new();
+                let mut arith_ops_list: Vec<&[(jq_jit::ir::BinOp, f64)]> = Vec::new();
                 for part in sac_parts.iter() {
                     match part {
                         StringAddPart::Literal(s) => {
@@ -9929,10 +9978,15 @@ fn real_main() {
                             }
                             let lit_idx = lit_bufs.len();
                             lit_bufs.push(buf);
-                            actions.push((lit_idx, false));
+                            actions.push((lit_idx, 0, 0));
                         }
                         StringAddPart::Field(f) | StringAddPart::FieldToString(f) => {
-                            actions.push((field_idx_map[f.as_str()], true));
+                            actions.push((field_idx_map[f.as_str()], 1, 0));
+                        }
+                        StringAddPart::FieldArithToString(f, ops) => {
+                            let ai = arith_ops_list.len();
+                            arith_ops_list.push(ops.as_slice());
+                            actions.push((field_idx_map[f.as_str()], 2, ai));
                         }
                     }
                 }
@@ -9949,17 +10003,36 @@ fn real_main() {
                         if pass {
                             if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
                                 compact_buf.push(b'"');
-                                for &(idx, is_field) in &actions {
-                                    if is_field {
-                                        let (vs, ve) = ranges_buf[idx];
-                                        let val_bytes = &raw[vs..ve];
-                                        if val_bytes[0] == b'"' && val_bytes.len() >= 2 {
-                                            compact_buf.extend_from_slice(&val_bytes[1..val_bytes.len()-1]);
-                                        } else {
-                                            compact_buf.extend_from_slice(val_bytes);
+                                for &(idx, typ, ai) in &actions {
+                                    match typ {
+                                        0 => { compact_buf.extend_from_slice(&lit_bufs[idx]); }
+                                        1 => {
+                                            let (vs, ve) = ranges_buf[idx];
+                                            let val_bytes = &raw[vs..ve];
+                                            if val_bytes[0] == b'"' && val_bytes.len() >= 2 {
+                                                compact_buf.extend_from_slice(&val_bytes[1..val_bytes.len()-1]);
+                                            } else {
+                                                compact_buf.extend_from_slice(val_bytes);
+                                            }
                                         }
-                                    } else {
-                                        compact_buf.extend_from_slice(&lit_bufs[idx]);
+                                        _ => {
+                                            let (vs, ve) = ranges_buf[idx];
+                                            let val_bytes = &raw[vs..ve];
+                                            let s = unsafe { std::str::from_utf8_unchecked(val_bytes) };
+                                            if let Ok(mut v) = s.trim().parse::<f64>() {
+                                                for &(ref op, n) in arith_ops_list[ai] {
+                                                    v = match op {
+                                                        jq_jit::ir::BinOp::Add => v + n,
+                                                        jq_jit::ir::BinOp::Sub => v - n,
+                                                        jq_jit::ir::BinOp::Mul => v * n,
+                                                        jq_jit::ir::BinOp::Div => v / n,
+                                                        jq_jit::ir::BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
+                                                        _ => v,
+                                                    };
+                                                }
+                                                push_jq_number_bytes(&mut compact_buf, v);
+                                            }
+                                        }
                                     }
                                 }
                                 compact_buf.extend_from_slice(b"\"\n");
@@ -11701,7 +11774,7 @@ fn real_main() {
                 let mut field_idx_map = std::collections::HashMap::new();
                 for part in sac_parts.iter() {
                     let name = match part {
-                        StringAddPart::Field(f) | StringAddPart::FieldToString(f) => f.as_str(),
+                        StringAddPart::Field(f) | StringAddPart::FieldToString(f) | StringAddPart::FieldArithToString(f, _) => f.as_str(),
                         _ => continue,
                     };
                     if !field_idx_map.contains_key(name) {
@@ -11710,8 +11783,9 @@ fn real_main() {
                     }
                 }
                 // Pre-compute actions for hot loop
-                let mut actions: Vec<(usize, bool)> = Vec::with_capacity(sac_parts.len());
+                let mut actions: Vec<(usize, u8, usize)> = Vec::with_capacity(sac_parts.len());
                 let mut lit_bufs: Vec<Vec<u8>> = Vec::new();
+                let mut arith_ops_list: Vec<&[(jq_jit::ir::BinOp, f64)]> = Vec::new();
                 for part in sac_parts.iter() {
                     match part {
                         StringAddPart::Literal(s) => {
@@ -11729,10 +11803,15 @@ fn real_main() {
                             }
                             let lit_idx = lit_bufs.len();
                             lit_bufs.push(buf);
-                            actions.push((lit_idx, false));
+                            actions.push((lit_idx, 0, 0));
                         }
                         StringAddPart::Field(f) | StringAddPart::FieldToString(f) => {
-                            actions.push((field_idx_map[f.as_str()], true));
+                            actions.push((field_idx_map[f.as_str()], 1, 0));
+                        }
+                        StringAddPart::FieldArithToString(f, ops) => {
+                            let ai = arith_ops_list.len();
+                            arith_ops_list.push(ops.as_slice());
+                            actions.push((field_idx_map[f.as_str()], 2, ai));
                         }
                     }
                 }
@@ -11741,17 +11820,36 @@ fn real_main() {
                     let raw = &content_bytes[start..end];
                     if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
                         compact_buf.push(b'"');
-                        for &(idx, is_field) in &actions {
-                            if is_field {
-                                let (vs, ve) = ranges_buf[idx];
-                                let val = &raw[vs..ve];
-                                if val[0] == b'"' && val.len() >= 2 {
-                                    compact_buf.extend_from_slice(&val[1..val.len()-1]);
-                                } else {
-                                    compact_buf.extend_from_slice(val);
+                        for &(idx, typ, ai) in &actions {
+                            match typ {
+                                0 => { compact_buf.extend_from_slice(&lit_bufs[idx]); }
+                                1 => {
+                                    let (vs, ve) = ranges_buf[idx];
+                                    let val = &raw[vs..ve];
+                                    if val[0] == b'"' && val.len() >= 2 {
+                                        compact_buf.extend_from_slice(&val[1..val.len()-1]);
+                                    } else {
+                                        compact_buf.extend_from_slice(val);
+                                    }
                                 }
-                            } else {
-                                compact_buf.extend_from_slice(&lit_bufs[idx]);
+                                _ => {
+                                    let (vs, ve) = ranges_buf[idx];
+                                    let val = &raw[vs..ve];
+                                    let s = unsafe { std::str::from_utf8_unchecked(val) };
+                                    if let Ok(mut v) = s.trim().parse::<f64>() {
+                                        for &(ref op, n) in arith_ops_list[ai] {
+                                            v = match op {
+                                                jq_jit::ir::BinOp::Add => v + n,
+                                                jq_jit::ir::BinOp::Sub => v - n,
+                                                jq_jit::ir::BinOp::Mul => v * n,
+                                                jq_jit::ir::BinOp::Div => v / n,
+                                                jq_jit::ir::BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
+                                                _ => v,
+                                            };
+                                        }
+                                        push_jq_number_bytes(&mut compact_buf, v);
+                                    }
+                                }
                             }
                         }
                         compact_buf.extend_from_slice(b"\"\n");
