@@ -3697,6 +3697,39 @@ impl Filter {
         None
     }
 
+    /// Detect `del(.field1, .field2, ...)` — multi-field deletion.
+    /// Returns list of field names to delete.
+    pub fn detect_del_fields(&self) -> Option<Vec<String>> {
+        use crate::ir::{Expr, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::CallBuiltin { name, args } = expr {
+            if name == "del" && args.len() == 1 {
+                let mut fields = Vec::new();
+                fn collect_fields(expr: &Expr, fields: &mut Vec<String>) -> bool {
+                    match expr {
+                        Expr::Comma { left, right } => {
+                            collect_fields(left, fields) && collect_fields(right, fields)
+                        }
+                        Expr::Index { expr: base, key } => {
+                            if matches!(base.as_ref(), Expr::Input) {
+                                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                    fields.push(field.clone());
+                                    return true;
+                                }
+                            }
+                            false
+                        }
+                        _ => false,
+                    }
+                }
+                if collect_fields(&args[0], &mut fields) && fields.len() >= 2 {
+                    return Some(fields);
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `type` applied directly to input.
     pub fn is_type(&self) -> bool {
         let expr = match self.detect_expr() { Some(e) => e, None => return false };

@@ -1177,6 +1177,52 @@ pub fn json_object_del_field(b: &[u8], pos: usize, field: &str, buf: &mut Vec<u8
     true
 }
 
+/// Delete multiple fields from a JSON object, writing compact output.
+pub fn json_object_del_fields(b: &[u8], pos: usize, fields: &[&str], buf: &mut Vec<u8>) -> bool {
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    buf.push(b'{');
+    let mut i = pos + 1;
+    // Skip whitespace
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < b.len() && b[i] == b'}' { buf.push(b'}'); return true; }
+    let mut first_out = true;
+    loop {
+        // Skip whitespace before key
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b'"' { break; }
+        let key_start = i;
+        i += 1;
+        let mut j = i;
+        while j < b.len() {
+            match b[j] { b'"' => break, b'\\' => { j += 2; continue }, _ => j += 1 }
+        }
+        let key_content = &b[i..j];
+        let key_matches = fields.iter().any(|f| key_content == f.as_bytes());
+        let key_end = j + 1;
+        i = key_end;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { break; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        let val_end = match skip_json_value(b, i) { Ok(e) => e, Err(_) => break };
+        if !key_matches {
+            if !first_out { buf.push(b','); }
+            first_out = false;
+            buf.extend_from_slice(&b[key_start..key_end]);
+            buf.push(b':');
+            buf.extend_from_slice(&b[i..val_end]);
+        }
+        i = val_end;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { break; }
+        if b[i] == b'}' { break; }
+        if b[i] != b',' { break; }
+        i += 1;
+    }
+    buf.push(b'}');
+    true
+}
+
 /// Replace a single field's value in a JSON object, writing compact output.
 /// Copies the object structure, substituting only the target field's value with `new_val`.
 /// If the field is not found, writes the object unchanged (compact).
