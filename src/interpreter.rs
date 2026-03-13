@@ -60,6 +60,8 @@ pub enum RemapExpr {
     ArithUnary(MathUnary, ArithExpr, Vec<String>),
     /// `.field | .[from:to]` — string slice
     FieldSlice(String, Option<i64>, Option<i64>), // field, from, to
+    /// `[expr1, expr2, ...]` — array of remap expressions
+    FieldArray(Vec<RemapExpr>),
 }
 
 /// Math unary operation for ArithUnary.
@@ -76,6 +78,7 @@ pub enum StrBuiltin {
     Startswith,
     Endswith,
     Index,
+    Contains,
 }
 
 /// Part of a string interpolation for raw byte remap emission.
@@ -1530,6 +1533,7 @@ impl Filter {
                                         "startswith" => Some(StrBuiltin::Startswith),
                                         "endswith" => Some(StrBuiltin::Endswith),
                                         "index" => Some(StrBuiltin::Index),
+                                        "contains" => Some(StrBuiltin::Contains),
                                         _ => None,
                                     };
                                     if let Some(op) = op {
@@ -1627,6 +1631,31 @@ impl Filter {
             }
             if has_field {
                 return Some(RemapExpr::StringInterp(interp_parts));
+            }
+        }
+        // [expr1, expr2, ...] — array literal of remap values
+        if let Expr::Collect { generator } = v {
+            fn collect_comma_elements<'a>(expr: &'a Expr, result: &mut Vec<&'a Expr>) {
+                match expr {
+                    Expr::Comma { left, right } => {
+                        collect_comma_elements(left, result);
+                        collect_comma_elements(right, result);
+                    }
+                    _ => result.push(expr),
+                }
+            }
+            let mut elements = Vec::new();
+            collect_comma_elements(generator, &mut elements);
+            let mut rexprs = Vec::with_capacity(elements.len());
+            for elem in &elements {
+                if let Some(rexpr) = Self::classify_remap_value(elem) {
+                    rexprs.push(rexpr);
+                } else {
+                    return None;
+                }
+            }
+            if !rexprs.is_empty() {
+                return Some(RemapExpr::FieldArray(rexprs));
             }
         }
         // .field | .[from:to] (beta-reduced: Slice { expr: Index(Input, field), from, to })

@@ -154,6 +154,15 @@ fn remap_expr_fields(rexpr: &jq_jit::interpreter::RemapExpr) -> Vec<&str> {
         RemapExpr::FieldOpFieldToString(f1, _, f2) => vec![f1.as_str(), f2.as_str()],
         RemapExpr::ArithToString(_, fields) | RemapExpr::ArithUnary(_, _, fields) => fields.iter().map(|f| f.as_str()).collect(),
         RemapExpr::FieldSlice(f, _, _) => vec![f.as_str()],
+        RemapExpr::FieldArray(ref exprs) => {
+            let mut fields: Vec<&str> = Vec::new();
+            for rexpr in exprs {
+                for name in remap_expr_fields(rexpr) {
+                    if !fields.contains(&name) { fields.push(name); }
+                }
+            }
+            fields
+        }
         RemapExpr::CondChain(branches, else_out) => {
             let mut fields: Vec<&str> = Vec::new();
             for b in branches {
@@ -246,6 +255,7 @@ enum ResolvedRemap {
     ArithToString(jq_jit::interpreter::ArithExpr),
     ArithUnary(jq_jit::interpreter::MathUnary, jq_jit::interpreter::ArithExpr),
     FieldSlice(usize, Option<i64>, Option<i64>),
+    FieldArray(Vec<ResolvedRemap>),
 }
 
 /// Pre-resolved conditional branch for remap values.
@@ -350,6 +360,9 @@ fn resolve_one_remap(
         }
         RemapExpr::FieldSlice(f, from, to) => {
             ResolvedRemap::FieldSlice(field_idx[f.as_str()], *from, *to)
+        }
+        RemapExpr::FieldArray(ref exprs) => {
+            ResolvedRemap::FieldArray(exprs.iter().map(|e| resolve_one_remap(e, field_idx)).collect())
         }
         RemapExpr::StringInterp(parts) => {
             let resolved = parts.iter().map(|p| match p {
@@ -756,6 +769,14 @@ fn emit_remap_value(
             let resolved = ResolvedRemap::FieldSlice(idx, *from, *to);
             emit_resolved_value(buf, &resolved, raw, ranges);
         }
+        RemapExpr::FieldArray(ref exprs) => {
+            buf.push(b'[');
+            for (i, rexpr) in exprs.iter().enumerate() {
+                if i > 0 { buf.push(b','); }
+                emit_remap_value(buf, rexpr, raw, ranges, field_idx);
+            }
+            buf.push(b']');
+        }
         RemapExpr::CondChain(_, _) => {
             // Resolve and emit (slow path, used for non-pre-resolved paths)
             let resolved = resolve_one_remap(rexpr, field_idx);
@@ -1099,6 +1120,14 @@ fn emit_resolved_value(
                             buf.extend_from_slice(b"null");
                         }
                     }
+                    jq_jit::interpreter::StrBuiltin::Contains => {
+                        let found = if arg.len() == 1 {
+                            memchr::memchr(arg[0], inner).is_some()
+                        } else {
+                            inner.windows(arg.len()).any(|w| w == &arg[..])
+                        };
+                        buf.extend_from_slice(if found { b"true" } else { b"false" });
+                    }
                 }
             } else {
                 buf.extend_from_slice(b"null");
@@ -1169,6 +1198,14 @@ fn emit_resolved_value(
                 let result = apply_math_unary(math_op, r);
                 push_jq_number_bytes(buf, result);
             } else { buf.extend_from_slice(b"null"); }
+        }
+        ResolvedRemap::FieldArray(ref elements) => {
+            buf.push(b'[');
+            for (i, elem) in elements.iter().enumerate() {
+                if i > 0 { buf.push(b','); }
+                emit_resolved_value(buf, elem, raw, ranges);
+            }
+            buf.push(b']');
         }
         ResolvedRemap::FieldSlice(idx, from, to) => {
             let (vs, ve) = ranges[idx];
