@@ -6115,12 +6115,12 @@ impl Filter {
         None
     }
 
-    /// Detect `. + {key: literal, ...}` — merge literal object into input.
+    /// Detect `. + {key: literal, ...}` or `. * {key: literal, ...}` — merge literal object into input.
     /// Returns list of (key, json_bytes) pairs for each literal entry.
     pub fn detect_obj_merge_literal(&self) -> Option<Vec<(String, Vec<u8>)>> {
         use crate::ir::{Expr, Literal, BinOp};
         let expr = self.detect_expr()?;
-        if let Expr::BinOp { op: BinOp::Add, lhs, rhs } = expr {
+        if let Expr::BinOp { op: BinOp::Add | BinOp::Mul, lhs, rhs } = expr {
             if !matches!(lhs.as_ref(), Expr::Input) { return None; }
             if let Expr::ObjectConstruct { pairs } = rhs.as_ref() {
                 let mut result = Vec::new();
@@ -6178,7 +6178,7 @@ impl Filter {
     pub fn detect_obj_merge_computed(&self) -> Option<(String, Vec<String>, ArithExpr)> {
         use crate::ir::{Expr, BinOp, Literal};
         let expr = self.detect_expr()?;
-        if let Expr::BinOp { op: BinOp::Add, lhs, rhs } = expr {
+        if let Expr::BinOp { op: BinOp::Add | BinOp::Mul, lhs, rhs } = expr {
             if !matches!(lhs.as_ref(), Expr::Input) { return None; }
             if let Expr::ObjectConstruct { pairs } = rhs.as_ref() {
                 if pairs.len() != 1 { return None; }
