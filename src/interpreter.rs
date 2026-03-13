@@ -208,7 +208,33 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             }
         }
         Expr::BinOp { op, lhs, rhs } => {
-            Expr::BinOp { op: *op, lhs: Box::new(simplify_expr(lhs)), rhs: Box::new(simplify_expr(rhs)) }
+            let sl = simplify_expr(lhs);
+            let sr = simplify_expr(rhs);
+            // {a:.x} + {b:.y} → {a:.x, b:.y} (merge object constructions)
+            // Only when all keys are distinct string literals (no dedup needed)
+            if matches!(op, crate::ir::BinOp::Add) {
+                if let (Expr::ObjectConstruct { pairs: p1 }, Expr::ObjectConstruct { pairs: p2 }) = (&sl, &sr) {
+                    let all_literal_keys = p1.iter().chain(p2.iter()).all(|(k, _)| {
+                        matches!(k, Expr::Literal(crate::ir::Literal::Str(_)))
+                    });
+                    if all_literal_keys {
+                        let mut keys: Vec<&str> = Vec::new();
+                        let mut all_distinct = true;
+                        for (k, _) in p1.iter().chain(p2.iter()) {
+                            if let Expr::Literal(crate::ir::Literal::Str(s)) = k {
+                                if keys.contains(&s.as_str()) { all_distinct = false; break; }
+                                keys.push(s.as_str());
+                            }
+                        }
+                        if all_distinct {
+                            let mut merged = p1.clone();
+                            merged.extend(p2.iter().cloned());
+                            return Expr::ObjectConstruct { pairs: merged };
+                        }
+                    }
+                }
+            }
+            Expr::BinOp { op: *op, lhs: Box::new(sl), rhs: Box::new(sr) }
         }
         Expr::StringInterpolation { parts } => {
             use crate::ir::StringPart;

@@ -7424,14 +7424,13 @@ impl JitCompiler {
                         b.seal_block(done_blk);
                     }
                     JitOp::BinOp { dst, op, lhs, rhs } => {
-                        // Inline fast path for Num+Num arithmetic (add/sub/mul/div)
-                        // Check if we can inline: arithmetic (add/sub/mul) or comparison (eq/ne/lt/gt/le/ge)
+                        // Inline fast path for Num+Num arithmetic and comparison
                         let inline_kind: Option<u8> = match op {
                             BinOp::Add => Some(0), BinOp::Sub => Some(1), BinOp::Mul => Some(2),
+                            BinOp::Div => Some(3),
                             BinOp::Eq => Some(10), BinOp::Ne => Some(11),
                             BinOp::Lt => Some(12), BinOp::Gt => Some(13),
                             BinOp::Le => Some(14), BinOp::Ge => Some(15),
-                            // Div/Mod excluded: jq requires division-by-zero error
                             _ => None,
                         };
                         if let Some(kind) = inline_kind {
@@ -7458,7 +7457,31 @@ impl JitCompiler {
                             let lf = b.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), l2, 8);
                             let rf = b.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), r2, 8);
                             let d2 = slot_addr(&mut b, *dst);
-                            if kind < 10 {
+                            if kind == 3 {
+                                // Div: need to check for zero/NaN divisor
+                                let fzero = b.ins().f64const(0.0);
+                                let rhs_is_zero = b.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::Equal, rf, fzero);
+                                let rhs_is_nan = b.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::Unordered, rf, rf);
+                                let lhs_is_nan = b.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::Unordered, lf, lf);
+                                let bad = b.ins().bor(rhs_is_zero, rhs_is_nan);
+                                let bad = b.ins().bor(bad, lhs_is_nan);
+                                let div_ok_blk = b.create_block();
+                                b.ins().brif(bad, slow_blk, &[], div_ok_blk, &[]);
+                                b.switch_to_block(div_ok_blk);
+                                b.seal_block(div_ok_blk);
+                                let l3 = slot_addr(&mut b, *lhs);
+                                let r3 = slot_addr(&mut b, *rhs);
+                                let lf2 = b.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), l3, 8);
+                                let rf2 = b.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), r3, 8);
+                                let result = b.ins().fdiv(lf2, rf2);
+                                let d3 = slot_addr(&mut b, *dst);
+                                let tag_word = b.ins().iconst(ptr_ty, 3);
+                                b.ins().store(cranelift_codegen::ir::MemFlags::new(), tag_word, d3, 0);
+                                b.ins().store(cranelift_codegen::ir::MemFlags::new(), result, d3, 8);
+                                let zero = b.ins().iconst(ptr_ty, 0);
+                                b.ins().store(cranelift_codegen::ir::MemFlags::new(), zero, d3, 16);
+                                b.ins().store(cranelift_codegen::ir::MemFlags::new(), zero, d3, 24);
+                            } else if kind < 10 {
                                 // Arithmetic: result is f64
                                 let result = match kind {
                                     0 => b.ins().fadd(lf, rf),
