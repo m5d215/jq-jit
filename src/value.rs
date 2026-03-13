@@ -1452,6 +1452,63 @@ pub fn json_object_sort_keys(b: &[u8], pos: usize, buf: &mut Vec<u8>, pairs: &mu
     true
 }
 
+/// Filter an object's entries by value type and rebuild.
+/// `type_byte_match` is a function that checks if a value's first byte matches the desired type.
+/// Returns the filtered object in compact JSON.
+pub fn json_object_filter_by_value_type(b: &[u8], pos: usize, type_name: &str, buf: &mut Vec<u8>) -> bool {
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    let mut i = pos + 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < b.len() && b[i] == b'}' {
+        buf.extend_from_slice(b"{}");
+        return true;
+    }
+    buf.push(b'{');
+    let mut first = true;
+    loop {
+        if i >= b.len() || b[i] != b'"' { return false; }
+        let key_start = i;
+        i += 1;
+        while i < b.len() { match b[i] { b'"' => break, b'\\' => { i += 2; continue }, _ => i += 1 } }
+        if i >= b.len() { return false; }
+        let key_end = i + 1;
+        i = key_end;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        let val_start = i;
+        i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return false };
+        let val_end = i;
+        // Check if value type matches
+        let first_byte = b[val_start];
+        let matches_type = match type_name {
+            "number" => first_byte == b'-' || (first_byte >= b'0' && first_byte <= b'9'),
+            "string" => first_byte == b'"',
+            "array" => first_byte == b'[',
+            "object" => first_byte == b'{',
+            "boolean" => first_byte == b't' || first_byte == b'f',
+            "null" => first_byte == b'n',
+            _ => false,
+        };
+        if matches_type {
+            if !first { buf.push(b','); }
+            first = false;
+            buf.extend_from_slice(&b[key_start..key_end]);
+            buf.push(b':');
+            buf.extend_from_slice(&b[val_start..val_end]);
+        }
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { return false; }
+        if b[i] == b'}' { break; }
+        if b[i] != b',' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
+    buf.push(b'}');
+    true
+}
+
 /// Iterate over values of a JSON object or elements of a JSON array,
 /// calling `cb` with (value_start, value_end) for each. Returns true on success.
 pub fn json_each_value_raw(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {

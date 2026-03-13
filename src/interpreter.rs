@@ -2363,6 +2363,68 @@ impl Filter {
         None
     }
 
+    /// Detect `with_entries(select(.value | type == "type_name"))` pattern.
+    /// Returns the type name string if detected (e.g., "number", "string", "boolean", "array", "object", "null").
+    pub fn detect_with_entries_select_value_type(&self) -> Option<String> {
+        use crate::ir::{Expr, Literal, UnaryOp, BinOp};
+        let expr = self.detect_expr()?;
+        // Same structure as with_entries_select_value_cmp but condition is type(.value) == "typename"
+        if let Expr::Pipe { left: l1, right: r1 } = expr {
+            if !matches!(l1.as_ref(), Expr::UnaryOp { op: UnaryOp::ToEntries, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                return None;
+            }
+            if let Expr::Pipe { left: l2, right: r2 } = r1.as_ref() {
+                if !matches!(r2.as_ref(), Expr::UnaryOp { op: UnaryOp::FromEntries, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                    return None;
+                }
+                if let Expr::Collect { generator } = l2.as_ref() {
+                    if let Expr::Pipe { left: l3, right: r3 } = generator.as_ref() {
+                        if !matches!(l3.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)) {
+                            return None;
+                        }
+                        if let Expr::IfThenElse { cond, then_branch, else_branch } = r3.as_ref() {
+                            if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
+                            if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+                            // cond: BinOp(Eq, UnaryOp(Type, Index(Input, "value")), Literal(Str(type_name)))
+                            // or beta-reduced: BinOp(Eq, UnaryOp(Type, Index(Input, "value")), Literal(Str(type_name)))
+                            if let Expr::BinOp { op: BinOp::Eq, lhs, rhs } = cond.as_ref() {
+                                // Check: type(.value) == "typename"
+                                if let Expr::UnaryOp { op: UnaryOp::Type, operand } = lhs.as_ref() {
+                                    if let Expr::Index { expr: base, key } = operand.as_ref() {
+                                        if matches!(base.as_ref(), Expr::Input) {
+                                            if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                                                if f == "value" {
+                                                    if let Expr::Literal(Literal::Str(type_name)) = rhs.as_ref() {
+                                                        return Some(type_name.clone());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                // Check reverse: "typename" == type(.value)
+                                if let Expr::UnaryOp { op: UnaryOp::Type, operand } = rhs.as_ref() {
+                                    if let Expr::Index { expr: base, key } = operand.as_ref() {
+                                        if matches!(base.as_ref(), Expr::Input) {
+                                            if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                                                if f == "value" {
+                                                    if let Expr::Literal(Literal::Str(type_name)) = lhs.as_ref() {
+                                                        return Some(type_name.clone());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field = CONST` or `setpath(["field"]; CONST)` pattern.
     /// Returns (field_name, json_bytes_of_value) for raw byte replacement.
     pub fn detect_field_assign_const(&self) -> Option<(String, Vec<u8>)> {
