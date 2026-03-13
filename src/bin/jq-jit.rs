@@ -131,6 +131,8 @@ fn remap_expr_fields(rexpr: &jq_jit::interpreter::RemapExpr) -> Vec<&str> {
         RemapExpr::FieldOpConst(f, _, _) | RemapExpr::FieldCmpConst(f, _, _) | RemapExpr::FieldOpConstToString(f, _, _) => vec![f.as_str()],
         RemapExpr::FieldOpField(f1, _, f2) | RemapExpr::FieldCmpField(f1, _, f2) => vec![f1.as_str(), f2.as_str()],
         RemapExpr::ConstOpField(_, _, f) => vec![f.as_str()],
+        RemapExpr::Arith(_, fields) => fields.iter().map(|f| f.as_str()).collect(),
+        RemapExpr::FieldMinMax(f1, f2, _) => vec![f1.as_str(), f2.as_str()],
     }
 }
 
@@ -172,6 +174,8 @@ enum ResolvedRemap {
     FieldCmpField(usize, jq_jit::ir::BinOp, usize),
     FieldToString(usize),
     FieldOpConstToString(usize, jq_jit::ir::BinOp, f64),
+    Arith(jq_jit::interpreter::ArithExpr),
+    FieldMinMax(usize, usize, bool),
 }
 
 /// Pre-resolve RemapExpr → ResolvedRemap using a field→index map.
@@ -196,6 +200,26 @@ fn resolve_one_remap(
         RemapExpr::FieldCmpField(f1, op, f2) => ResolvedRemap::FieldCmpField(field_idx[f1.as_str()], *op, field_idx[f2.as_str()]),
         RemapExpr::FieldToString(f) => ResolvedRemap::FieldToString(field_idx[f.as_str()]),
         RemapExpr::FieldOpConstToString(f, op, n) => ResolvedRemap::FieldOpConstToString(field_idx[f.as_str()], *op, *n),
+        RemapExpr::Arith(arith, fields) => ResolvedRemap::Arith(resolve_arith_expr(arith, fields, field_idx)),
+        RemapExpr::FieldMinMax(f1, f2, is_max) => ResolvedRemap::FieldMinMax(field_idx[f1.as_str()], field_idx[f2.as_str()], *is_max),
+    }
+}
+
+/// Remap ArithExpr field indices from local (into `fields` vec) to global (into `field_idx` map).
+fn resolve_arith_expr(
+    expr: &jq_jit::interpreter::ArithExpr,
+    local_fields: &[String],
+    field_idx: &std::collections::HashMap<String, usize>,
+) -> jq_jit::interpreter::ArithExpr {
+    use jq_jit::interpreter::ArithExpr;
+    match expr {
+        ArithExpr::Field(local_idx) => ArithExpr::Field(field_idx[local_fields[*local_idx].as_str()]),
+        ArithExpr::Const(n) => ArithExpr::Const(*n),
+        ArithExpr::BinOp(op, lhs, rhs) => ArithExpr::BinOp(
+            *op,
+            Box::new(resolve_arith_expr(lhs, local_fields, field_idx)),
+            Box::new(resolve_arith_expr(rhs, local_fields, field_idx)),
+        ),
     }
 }
 
@@ -333,6 +357,55 @@ fn emit_remap_value(
                 buf.push(b'"');
             } else { buf.extend_from_slice(b"null"); }
         }
+        RemapExpr::Arith(arith, fields) => {
+            // Resolve local ArithExpr field indices to global indices on the fly
+            if let Some(r) = eval_arith_raw_unresolved(arith, fields, raw, ranges, field_idx) {
+                push_jq_number_bytes(buf, r);
+            } else { buf.extend_from_slice(b"null"); }
+        }
+        RemapExpr::FieldMinMax(f1, f2, is_max) => {
+            let idx1 = field_idx[f1.as_str()];
+            let idx2 = field_idx[f2.as_str()];
+            let (vs1, ve1) = ranges[idx1];
+            let (vs2, ve2) = ranges[idx2];
+            if let (Some(a), Some(b)) = (parse_json_num(&raw[vs1..ve1]), parse_json_num(&raw[vs2..ve2])) {
+                let r = if *is_max { if a >= b { a } else { b } } else { if a <= b { a } else { b } };
+                push_jq_number_bytes(buf, r);
+            } else { buf.extend_from_slice(b"null"); }
+        }
+    }
+}
+
+/// Evaluate an ArithExpr using unresolved field names (for emit_remap_value).
+#[inline]
+fn eval_arith_raw_unresolved(
+    expr: &jq_jit::interpreter::ArithExpr,
+    local_fields: &[String],
+    raw: &[u8],
+    ranges: &[(usize, usize)],
+    field_idx: &std::collections::HashMap<String, usize>,
+) -> Option<f64> {
+    use jq_jit::interpreter::ArithExpr;
+    use jq_jit::ir::BinOp;
+    match expr {
+        ArithExpr::Field(local_idx) => {
+            let global_idx = field_idx[local_fields[*local_idx].as_str()];
+            let (vs, ve) = ranges[global_idx];
+            parse_json_num(&raw[vs..ve])
+        }
+        ArithExpr::Const(n) => Some(*n),
+        ArithExpr::BinOp(op, lhs, rhs) => {
+            let l = eval_arith_raw_unresolved(lhs, local_fields, raw, ranges, field_idx)?;
+            let r = eval_arith_raw_unresolved(rhs, local_fields, raw, ranges, field_idx)?;
+            Some(match op {
+                BinOp::Add => l + r,
+                BinOp::Sub => l - r,
+                BinOp::Mul => l * r,
+                BinOp::Div => l / r,
+                BinOp::Mod => l % r,
+                _ => return None,
+            })
+        }
     }
 }
 
@@ -399,6 +472,49 @@ fn emit_resolved_value(
                 push_jq_number_bytes(buf, r);
                 buf.push(b'"');
             } else { buf.extend_from_slice(b"null"); }
+        }
+        ResolvedRemap::Arith(ref arith) => {
+            if let Some(r) = eval_arith_raw(arith, raw, ranges) {
+                push_jq_number_bytes(buf, r);
+            } else { buf.extend_from_slice(b"null"); }
+        }
+        ResolvedRemap::FieldMinMax(idx1, idx2, is_max) => {
+            let (vs1, ve1) = ranges[idx1];
+            let (vs2, ve2) = ranges[idx2];
+            if let (Some(a), Some(b)) = (parse_json_num(&raw[vs1..ve1]), parse_json_num(&raw[vs2..ve2])) {
+                let r = if is_max { if a >= b { a } else { b } } else { if a <= b { a } else { b } };
+                push_jq_number_bytes(buf, r);
+            } else { buf.extend_from_slice(b"null"); }
+        }
+    }
+}
+
+/// Evaluate an ArithExpr against raw byte ranges, parsing field values on demand.
+#[inline]
+fn eval_arith_raw(
+    expr: &jq_jit::interpreter::ArithExpr,
+    raw: &[u8],
+    ranges: &[(usize, usize)],
+) -> Option<f64> {
+    use jq_jit::interpreter::ArithExpr;
+    use jq_jit::ir::BinOp;
+    match expr {
+        ArithExpr::Field(idx) => {
+            let (vs, ve) = ranges[*idx];
+            parse_json_num(&raw[vs..ve])
+        }
+        ArithExpr::Const(n) => Some(*n),
+        ArithExpr::BinOp(op, lhs, rhs) => {
+            let l = eval_arith_raw(lhs, raw, ranges)?;
+            let r = eval_arith_raw(rhs, raw, ranges)?;
+            Some(match op {
+                BinOp::Add => l + r,
+                BinOp::Sub => l - r,
+                BinOp::Mul => l * r,
+                BinOp::Div => l / r,
+                BinOp::Mod => l % r,
+                _ => return None,
+            })
         }
     }
 }

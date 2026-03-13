@@ -29,6 +29,11 @@ pub enum RemapExpr {
     FieldToString(String),
     /// `.field op N | tostring` — arithmetic then tostring
     FieldOpConstToString(String, crate::ir::BinOp, f64),
+    /// Compound arithmetic expression over fields and constants.
+    /// ArithExpr::Field(i) indexes into Vec<String> field names.
+    Arith(ArithExpr, Vec<String>),
+    /// `[.field1, .field2] | min` or `| max`
+    FieldMinMax(String, String, bool), // true=max, false=min
 }
 
 /// A pure numeric expression over fields and constants.
@@ -1343,7 +1348,73 @@ impl Filter {
                 }
             }
         }
+        // [.field1, .field2] | min/max
+        if let Expr::Pipe { left, right } = v {
+            if let Expr::UnaryOp { op, operand } = right.as_ref() {
+                if matches!(operand.as_ref(), Expr::Input) {
+                    let is_max = match op {
+                        UnaryOp::Max => Some(true),
+                        UnaryOp::Min => Some(false),
+                        _ => None,
+                    };
+                    if let Some(is_max) = is_max {
+                        if let Expr::Collect { generator } = left.as_ref() {
+                            if let Expr::Comma { left: cl, right: cr } = generator.as_ref() {
+                                if let (
+                                    Expr::Index { expr: base1, key: key1 },
+                                    Expr::Index { expr: base2, key: key2 },
+                                ) = (cl.as_ref(), cr.as_ref()) {
+                                    if matches!(base1.as_ref(), Expr::Input) && matches!(base2.as_ref(), Expr::Input) {
+                                        if let (
+                                            Expr::Literal(Literal::Str(f1)),
+                                            Expr::Literal(Literal::Str(f2)),
+                                        ) = (key1.as_ref(), key2.as_ref()) {
+                                            return Some(RemapExpr::FieldMinMax(f1.clone(), f2.clone(), is_max));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Fallback: compound arithmetic expression tree over fields and constants
+        {
+            let mut fields = Vec::new();
+            if let Some(arith) = Self::try_build_arith_expr(v, &mut fields) {
+                if fields.len() >= 1 {
+                    return Some(RemapExpr::Arith(arith, fields));
+                }
+            }
+        }
         None
+    }
+
+    /// Try to build an ArithExpr from an expression tree.
+    /// ArithExpr::Field(i) indexes into the `fields` vector.
+    fn try_build_arith_expr(expr: &crate::ir::Expr, fields: &mut Vec<String>) -> Option<ArithExpr> {
+        use crate::ir::{Expr, BinOp, Literal};
+        match expr {
+            Expr::Index { expr: base, key } if matches!(base.as_ref(), Expr::Input) => {
+                if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                    let idx = if let Some(pos) = fields.iter().position(|x| x == f) {
+                        pos
+                    } else {
+                        fields.push(f.clone());
+                        fields.len() - 1
+                    };
+                    Some(ArithExpr::Field(idx))
+                } else { None }
+            }
+            Expr::Literal(Literal::Num(n, _)) => Some(ArithExpr::Const(*n)),
+            Expr::BinOp { op, lhs, rhs } if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) => {
+                let l = Self::try_build_arith_expr(lhs, fields)?;
+                let r = Self::try_build_arith_expr(rhs, fields)?;
+                Some(ArithExpr::BinOp(*op, Box::new(l), Box::new(r)))
+            }
+            _ => None,
+        }
     }
 
     /// Detect `.field1 op .field2` pattern (binary arithmetic on two input fields).
