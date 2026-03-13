@@ -1997,6 +1997,9 @@ fn real_main() {
     let select_cmp_value = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && select_cmp_cremap.is_none() && select_cmp_array.is_none() && select_arith_cmp_array.is_none() && field_access.is_none() {
         filter.detect_select_cmp_then_value()
     } else { None };
+    let select_cmp_str_chain = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_value.is_none() && field_access.is_none() {
+        filter.detect_select_cmp_then_str_chain()
+    } else { None };
     let select_ff_cmp_field = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
         filter.detect_select_field_cmp_field_then_field()
     } else { None };
@@ -2042,7 +2045,7 @@ fn real_main() {
         || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || field_field_cmp_branch.is_some() || if_cmp_arrays.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some() || select_compound_computed.is_some() || select_compound_cremap.is_some()
         || select_str.is_some()
         || select_str_test.is_some() || select_regex_test.is_some() || select_regex_value.is_some() || select_nested_cmp.is_some()
-        || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_field_unary.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_array.is_some() || select_arith_cmp_array.is_some() || select_cmp_value.is_some() || select_ff_cmp_field.is_some() || select_ff_cmp.is_some() || select_ff_cmp_cremap.is_some() || select_ff_cmp_value.is_some() || select_ff_cmp_array.is_some() || select_compound_array.is_some() || select_str_field.is_some() || select_str_cremap.is_some() || select_str_array.is_some()
+        || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_field_unary.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_array.is_some() || select_arith_cmp_array.is_some() || select_cmp_value.is_some() || select_cmp_str_chain.is_some() || select_ff_cmp_field.is_some() || select_ff_cmp.is_some() || select_ff_cmp_cremap.is_some() || select_ff_cmp_value.is_some() || select_ff_cmp_array.is_some() || select_compound_array.is_some() || select_str_field.is_some() || select_str_cremap.is_some() || select_str_array.is_some()
         || computed_array.is_some() || array_field.is_some() || multi_field.is_some() || is_length || is_keys
         || is_keys_unsorted || has_field.is_some() || has_multi.is_some() || select_has_multi.is_some() || is_type || del_field.is_some() || obj_merge_lit.is_some() || obj_merge_computed.is_some()
         || is_each || is_sort_keys || is_to_entries || remap_to_entries.is_some() || with_entries_select.is_some() || with_entries_type.is_some() || is_tojson || string_interp_fields.is_some() || string_add_chain.is_some() || array_join.is_some()
@@ -6088,6 +6091,93 @@ fn real_main() {
                         }
                         Ok(())
                     })
+                } else if let Some((ref sel_field, ref sel_op, threshold, ref sac_parts)) = select_cmp_str_chain {
+                    // select(.field op N) | str_add_chain — select + string concat
+                    use jq_jit::interpreter::StringAddPart;
+                    use jq_jit::ir::BinOp;
+                    // Collect unique field names (select field + chain fields)
+                    let mut field_names: Vec<&str> = Vec::new();
+                    let mut field_idx_map: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+                    // Ensure select field is in list
+                    field_idx_map.insert(sel_field.as_str(), 0);
+                    field_names.push(sel_field.as_str());
+                    for part in sac_parts.iter() {
+                        let name = match part {
+                            StringAddPart::Field(f) | StringAddPart::FieldToString(f) => f.as_str(),
+                            _ => continue,
+                        };
+                        if !field_idx_map.contains_key(name) {
+                            field_idx_map.insert(name, field_names.len());
+                            field_names.push(name);
+                        }
+                    }
+                    // Pre-compute actions for hot loop
+                    let mut actions: Vec<(usize, bool)> = Vec::with_capacity(sac_parts.len());
+                    let mut lit_bufs: Vec<Vec<u8>> = Vec::new();
+                    for part in sac_parts.iter() {
+                        match part {
+                            StringAddPart::Literal(s) => {
+                                let mut buf = Vec::new();
+                                for &b in s.as_bytes() {
+                                    match b {
+                                        b'"' => buf.extend_from_slice(b"\\\""),
+                                        b'\\' => buf.extend_from_slice(b"\\\\"),
+                                        b'\n' => buf.extend_from_slice(b"\\n"),
+                                        b'\r' => buf.extend_from_slice(b"\\r"),
+                                        b'\t' => buf.extend_from_slice(b"\\t"),
+                                        c if c < 0x20 => { let _ = write!(buf, "\\u{:04x}", c); }
+                                        _ => buf.push(b),
+                                    }
+                                }
+                                let lit_idx = lit_bufs.len();
+                                lit_bufs.push(buf);
+                                actions.push((lit_idx, false));
+                            }
+                            StringAddPart::Field(f) | StringAddPart::FieldToString(f) => {
+                                actions.push((field_idx_map[f.as_str()], true));
+                            }
+                        }
+                    }
+                    let mut ranges_buf = vec![(0usize, 0usize); field_names.len()];
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        // First check select condition via numeric field extraction
+                        if let Some(val) = json_object_get_num(raw, 0, sel_field) {
+                            let pass = match sel_op {
+                                BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
+                                BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
+                                BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
+                                _ => false,
+                            };
+                            if pass {
+                                if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
+                                    compact_buf.push(b'"');
+                                    for &(idx, is_field) in &actions {
+                                        if is_field {
+                                            let (vs, ve) = ranges_buf[idx];
+                                            let val_bytes = &raw[vs..ve];
+                                            if val_bytes[0] == b'"' && val_bytes.len() >= 2 {
+                                                compact_buf.extend_from_slice(&val_bytes[1..val_bytes.len()-1]);
+                                            } else {
+                                                compact_buf.extend_from_slice(val_bytes);
+                                            }
+                                        } else {
+                                            compact_buf.extend_from_slice(&lit_bufs[idx]);
+                                        }
+                                    }
+                                    compact_buf.extend_from_slice(b"\"\n");
+                                } else {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                            }
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
                 } else if let Some((ref sff_f1, sff_op, ref sff_f2, ref sff_out)) = select_ff_cmp_field {
                     // select(.f1 cmp .f2) | .output — field-field comparison select
                     use jq_jit::ir::BinOp;
@@ -9792,6 +9882,90 @@ fn real_main() {
                                     }
                                     compact_buf.push(b'\n');
                                 }
+                            }
+                        }
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref sel_field, ref sel_op, threshold, ref sac_parts)) = select_cmp_str_chain {
+                // select(.field op N) | str_add_chain — stdin path
+                use jq_jit::interpreter::StringAddPart;
+                use jq_jit::ir::BinOp;
+                let content_bytes = content.as_bytes();
+                let mut field_names: Vec<&str> = Vec::new();
+                let mut field_idx_map: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+                field_idx_map.insert(sel_field.as_str(), 0);
+                field_names.push(sel_field.as_str());
+                for part in sac_parts.iter() {
+                    let name = match part {
+                        StringAddPart::Field(f) | StringAddPart::FieldToString(f) => f.as_str(),
+                        _ => continue,
+                    };
+                    if !field_idx_map.contains_key(name) {
+                        field_idx_map.insert(name, field_names.len());
+                        field_names.push(name);
+                    }
+                }
+                let mut actions: Vec<(usize, bool)> = Vec::with_capacity(sac_parts.len());
+                let mut lit_bufs: Vec<Vec<u8>> = Vec::new();
+                for part in sac_parts.iter() {
+                    match part {
+                        StringAddPart::Literal(s) => {
+                            let mut buf = Vec::new();
+                            for &b in s.as_bytes() {
+                                match b {
+                                    b'"' => buf.extend_from_slice(b"\\\""),
+                                    b'\\' => buf.extend_from_slice(b"\\\\"),
+                                    b'\n' => buf.extend_from_slice(b"\\n"),
+                                    b'\r' => buf.extend_from_slice(b"\\r"),
+                                    b'\t' => buf.extend_from_slice(b"\\t"),
+                                    c if c < 0x20 => { let _ = write!(buf, "\\u{:04x}", c); }
+                                    _ => buf.push(b),
+                                }
+                            }
+                            let lit_idx = lit_bufs.len();
+                            lit_bufs.push(buf);
+                            actions.push((lit_idx, false));
+                        }
+                        StringAddPart::Field(f) | StringAddPart::FieldToString(f) => {
+                            actions.push((field_idx_map[f.as_str()], true));
+                        }
+                    }
+                }
+                let mut ranges_buf = vec![(0usize, 0usize); field_names.len()];
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some(val) = json_object_get_num(raw, 0, sel_field) {
+                        let pass = match sel_op {
+                            BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
+                            BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
+                            BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
+                            _ => false,
+                        };
+                        if pass {
+                            if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
+                                compact_buf.push(b'"');
+                                for &(idx, is_field) in &actions {
+                                    if is_field {
+                                        let (vs, ve) = ranges_buf[idx];
+                                        let val_bytes = &raw[vs..ve];
+                                        if val_bytes[0] == b'"' && val_bytes.len() >= 2 {
+                                            compact_buf.extend_from_slice(&val_bytes[1..val_bytes.len()-1]);
+                                        } else {
+                                            compact_buf.extend_from_slice(val_bytes);
+                                        }
+                                    } else {
+                                        compact_buf.extend_from_slice(&lit_bufs[idx]);
+                                    }
+                                }
+                                compact_buf.extend_from_slice(b"\"\n");
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             }
                         }
                     }

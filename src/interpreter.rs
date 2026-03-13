@@ -5372,6 +5372,76 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.field op N) | str_add_chain` pattern.
+    /// Returns (select_field, op, threshold, string_add_parts).
+    pub fn detect_select_cmp_then_str_chain(&self) -> Option<(String, crate::ir::BinOp, f64, Vec<StringAddPart>)> {
+        use crate::ir::{Expr, BinOp, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        fn collect_str_chain(expr: &Expr, parts: &mut Vec<StringAddPart>) -> bool {
+            match expr {
+                Expr::BinOp { op: BinOp::Add, lhs, rhs } => {
+                    if !collect_str_chain(lhs, parts) { return false; }
+                    if !collect_str_chain(rhs, parts) { return false; }
+                    true
+                }
+                Expr::Index { expr: base, key } if matches!(base.as_ref(), Expr::Input) => {
+                    if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                        parts.push(StringAddPart::Field(f.clone()));
+                        true
+                    } else { false }
+                }
+                Expr::Literal(Literal::Str(s)) => {
+                    parts.push(StringAddPart::Literal(s.clone()));
+                    true
+                }
+                Expr::UnaryOp { op: UnaryOp::ToString, operand } => {
+                    if let Expr::Index { expr: base, key } = operand.as_ref() {
+                        if matches!(base.as_ref(), Expr::Input) {
+                            if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                                parts.push(StringAddPart::FieldToString(f.clone()));
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                }
+                _ => false,
+            }
+        }
+        let try_extract = |cond: &Expr, output: &Expr| -> Option<(String, BinOp, f64, Vec<StringAddPart>)> {
+            let mut parts = Vec::new();
+            if !collect_str_chain(output, &mut parts) || parts.len() < 2 { return None; }
+            if !parts.iter().any(|p| !matches!(p, StringAddPart::Literal(_))) { return None; }
+            if let Expr::BinOp { op, lhs, rhs } = cond {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(sel_field)) = key.as_ref() {
+                        if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                            return Some((sel_field.clone(), *op, *n, parts));
+                        }
+                    }
+                }
+            }
+            None
+        };
+        // Form 1: Pipe(select(.f > N), str_chain)
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                    if let Some(r) = try_extract(cond, right) { return Some(r); }
+                }
+            }
+        }
+        // Form 2: if .f > N then str_chain else empty end
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if matches!(else_branch.as_ref(), Expr::Empty) {
+                if let Some(r) = try_extract(cond, then_branch) { return Some(r); }
+            }
+        }
+        None
+    }
+
     /// Detect simple field access `.field` pattern.
     /// Returns the field name if this is a direct field access on input.
     pub fn detect_field_access(&self) -> Option<String> {
