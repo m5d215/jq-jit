@@ -796,6 +796,17 @@ impl Flattener {
         if is_fallible {
             if let Some((catch_label, error_slot)) = self.try_catch_target {
                 self.ops.push(JitOp::CheckError { error_dst: error_slot, catch_label });
+            } else {
+                // Propagate errors even outside try-catch blocks
+                let error_slot = self.alloc_slot();
+                let error_label = self.alloc_label();
+                let ok_label = self.alloc_label();
+                self.ops.push(JitOp::CheckError { error_dst: error_slot, catch_label: error_label });
+                self.ops.push(JitOp::Jump { label: ok_label });
+                self.ops.push(JitOp::Label { id: error_label });
+                self.ops.push(JitOp::Drop { slot: error_slot });
+                self.ops.push(JitOp::ReturnError);
+                self.ops.push(JitOp::Label { id: ok_label });
             }
         }
     }
