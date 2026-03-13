@@ -1944,10 +1944,18 @@ fn real_main() {
                                 BinOp::Add => a + b,
                                 BinOp::Sub => a - b,
                                 BinOp::Mul => a * b,
+                                BinOp::Div => a / b,
+                                BinOp::Mod => a % b,
                                 _ => unreachable!(),
                             };
-                            push_jq_number_bytes(&mut compact_buf, result);
-                            compact_buf.push(b'\n');
+                            if result.is_finite() {
+                                push_jq_number_bytes(&mut compact_buf, result);
+                                compact_buf.push(b'\n');
+                            } else {
+                                // Division by zero or mod edge case: fall back to normal path for error handling
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -6552,10 +6560,16 @@ fn real_main() {
                             BinOp::Add => a + b,
                             BinOp::Sub => a - b,
                             BinOp::Mul => a * b,
+                            BinOp::Div => if b == 0.0 { f64::NAN } else { a / b },
+                            BinOp::Mod => { let r = a % b; if r.is_finite() { r } else { f64::NAN } },
                             _ => unreachable!(),
                         };
-                        push_jq_number_bytes(&mut compact_buf, result);
-                        compact_buf.push(b'\n');
+                        if result.is_nan() {
+                            compact_buf.extend_from_slice(b"null\n");
+                        } else {
+                            push_jq_number_bytes(&mut compact_buf, result);
+                            compact_buf.push(b'\n');
+                        }
                     } else {
                         // Field missing or non-numeric: fall back to parse + JIT
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;

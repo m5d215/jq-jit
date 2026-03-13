@@ -1350,7 +1350,7 @@ impl Filter {
         use crate::ir::{Expr, BinOp, Literal};
         let expr = self.detect_expr()?;
         if let Expr::BinOp { op, lhs, rhs } = expr {
-            if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) { return None; }
+            if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) { return None; }
             if let Expr::Index { expr: base1, key: key1 } = lhs.as_ref() {
                 if !matches!(base1.as_ref(), Expr::Input) { return None; }
                 if let Expr::Literal(Literal::Str(f1)) = key1.as_ref() {
