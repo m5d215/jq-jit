@@ -1993,7 +1993,10 @@ fn real_main() {
     let field_str_reverse = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
         filter.detect_field_str_reverse()
     } else { None };
-    let field_split_join = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_reverse.is_none() {
+    let field_split_rev_join = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_reverse.is_none() {
+        filter.detect_field_split_reverse_join()
+    } else { None };
+    let field_split_join = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_reverse.is_none() && field_split_rev_join.is_none() {
         filter.detect_field_split_join()
     } else { None };
     let field_split_first = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_split_join.is_none() {
@@ -2163,7 +2166,7 @@ fn real_main() {
         || is_keys_unsorted || has_field.is_some() || has_multi.is_some() || select_has_multi.is_some() || is_type || del_field.is_some() || obj_merge_lit.is_some() || obj_merge_computed.is_some()
         || is_each || is_sort_keys || is_to_entries || remap_to_entries.is_some() || with_entries_select.is_some() || with_entries_type.is_some() || is_tojson || string_interp_fields.is_some() || string_add_chain.is_some() || array_join.is_some()
         || literal_output.is_some() || array_fields_format.is_some() || raw_csv_fields.is_some()
-        || field_str_reverse.is_some() || field_split_join.is_some() || field_split_first.is_some() || field_split_last.is_some() || field_split_nth.is_some() || field_split_length.is_some() || field_strop_length.is_some() || field_length_cmp.is_some() || select_length_cmp_field.is_some() || field_slice.is_some()
+        || field_str_reverse.is_some() || field_split_rev_join.is_some() || field_split_join.is_some() || field_split_first.is_some() || field_split_last.is_some() || field_split_nth.is_some() || field_split_length.is_some() || field_strop_length.is_some() || field_length_cmp.is_some() || select_length_cmp_field.is_some() || field_slice.is_some()
         || dynamic_key_obj.is_some() || dynamic_key_mixed.is_some() || field_update_num.is_some() || field_assign_const.is_some()
         || min_two_fields.is_some() || minmax_two.is_some() || minmax_n.is_some() || field_string_chain.is_some() || remap_tostring_join.is_some() || filter.is_empty();
     let projection_fields: Option<Vec<String>> = if !has_raw_fast_path && !slurp && !raw_input {
@@ -2480,6 +2483,76 @@ fn real_main() {
                                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                     }
+                                }
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref srj_field, ref srj_split, ref srj_join)) = field_split_rev_join {
+                    // .field | split("x") | reverse | join("y") — split, reverse parts, join
+                    let split_bytes = srj_split.as_bytes();
+                    let join_escaped = json_escape_bytes(srj_join.as_bytes());
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, srj_field) {
+                            let val = &raw[vs..ve];
+                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"' {
+                                let inner = &val[1..val.len()-1];
+                                if !inner.contains(&b'\\') {
+                                    // Split on sep, collect parts
+                                    let mut parts: Vec<&[u8]> = Vec::new();
+                                    let sep = split_bytes;
+                                    if sep.len() == 1 {
+                                        let sb = sep[0];
+                                        let mut last = 0;
+                                        for (i, &b) in inner.iter().enumerate() {
+                                            if b == sb {
+                                                parts.push(&inner[last..i]);
+                                                last = i + 1;
+                                            }
+                                        }
+                                        parts.push(&inner[last..]);
+                                    } else {
+                                        let mut last = 0;
+                                        let sl = sep.len();
+                                        let il = inner.len();
+                                        while last <= il {
+                                            if last + sl <= il {
+                                                if let Some(pos) = inner[last..].windows(sl).position(|w| w == sep) {
+                                                    parts.push(&inner[last..last + pos]);
+                                                    last = last + pos + sl;
+                                                } else {
+                                                    parts.push(&inner[last..]);
+                                                    break;
+                                                }
+                                            } else {
+                                                parts.push(&inner[last..]);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    // Reverse and join
+                                    compact_buf.push(b'"');
+                                    for (i, part) in parts.iter().rev().enumerate() {
+                                        if i > 0 {
+                                            compact_buf.extend_from_slice(&join_escaped);
+                                        }
+                                        compact_buf.extend_from_slice(part);
+                                    }
+                                    compact_buf.extend_from_slice(b"\"\n");
+                                } else {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                 }
                             } else {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
@@ -7941,6 +8014,74 @@ fn real_main() {
                                     let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                     process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                 }
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref srj_field, ref srj_split, ref srj_join)) = field_split_rev_join {
+                let content_bytes = content.as_bytes();
+                let split_bytes = srj_split.as_bytes();
+                let join_escaped = json_escape_bytes(srj_join.as_bytes());
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, srj_field) {
+                        let val = &raw[vs..ve];
+                        if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"' {
+                            let inner = &val[1..val.len()-1];
+                            if !inner.contains(&b'\\') {
+                                let sep = split_bytes;
+                                let mut parts: Vec<&[u8]> = Vec::new();
+                                if sep.len() == 1 {
+                                    let sb = sep[0];
+                                    let mut last = 0;
+                                    for (i, &b) in inner.iter().enumerate() {
+                                        if b == sb {
+                                            parts.push(&inner[last..i]);
+                                            last = i + 1;
+                                        }
+                                    }
+                                    parts.push(&inner[last..]);
+                                } else {
+                                    let mut last = 0;
+                                    let sl = sep.len();
+                                    let il = inner.len();
+                                    while last <= il {
+                                        if last + sl <= il {
+                                            if let Some(pos) = inner[last..].windows(sl).position(|w| w == sep) {
+                                                parts.push(&inner[last..last + pos]);
+                                                last = last + pos + sl;
+                                            } else {
+                                                parts.push(&inner[last..]);
+                                                break;
+                                            }
+                                        } else {
+                                            parts.push(&inner[last..]);
+                                            break;
+                                        }
+                                    }
+                                }
+                                compact_buf.push(b'"');
+                                for (i, part) in parts.iter().rev().enumerate() {
+                                    if i > 0 {
+                                        compact_buf.extend_from_slice(&join_escaped);
+                                    }
+                                    compact_buf.extend_from_slice(part);
+                                }
+                                compact_buf.extend_from_slice(b"\"\n");
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             }
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;

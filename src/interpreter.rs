@@ -3048,6 +3048,42 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | split(sep) | reverse | join(sep2)` — split-reverse-join pattern.
+    /// Returns (field_name, split_sep, join_sep).
+    pub fn detect_field_split_reverse_join(&self) -> Option<(String, String, String)> {
+        use crate::ir::{Expr, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::Pipe { left: split_expr, right: rest } = right.as_ref() {
+                        if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
+                            if name == "split" && args.len() == 1 {
+                                if let Expr::Literal(Literal::Str(sep)) = &args[0] {
+                                    if let Expr::Pipe { left: rev_expr, right: join_expr } = rest.as_ref() {
+                                        if matches!(rev_expr.as_ref(), Expr::UnaryOp { op: UnaryOp::Reverse, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                                            if let Expr::CallBuiltin { name: jn, args: ja } = join_expr.as_ref() {
+                                                if jn == "join" && ja.len() == 1 {
+                                                    if let Expr::Literal(Literal::Str(js)) = &ja[0] {
+                                                        if !sep.is_empty() {
+                                                            return Some((field.clone(), sep.clone(), js.clone()));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.f1 cmp .f2) | value` — field-field select then computed value.
     /// Returns (field1, op, field2, value_rexpr).
     pub fn detect_select_ff_cmp_then_value(&self) -> Option<(String, crate::ir::BinOp, String, RemapExpr)> {
