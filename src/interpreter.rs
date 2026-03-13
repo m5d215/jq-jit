@@ -62,6 +62,8 @@ pub enum RemapExpr {
     FieldSlice(String, Option<i64>, Option<i64>), // field, from, to
     /// `[expr1, expr2, ...]` — array of remap expressions
     FieldArray(Vec<RemapExpr>),
+    /// `(cmp1) and/or (cmp2)` — boolean expression combining comparisons
+    BoolExpr(Box<RemapExpr>, crate::ir::BinOp, Box<RemapExpr>), // lhs, And/Or, rhs
 }
 
 /// Math unary operation for ArithUnary.
@@ -1450,6 +1452,15 @@ impl Filter {
         }
         // .field op N or .field op .field2
         if let Expr::BinOp { op, lhs, rhs } = v {
+            // (cmp1) and/or (cmp2) — boolean compound
+            if matches!(op, BinOp::And | BinOp::Or) {
+                let l = Self::classify_remap_value(lhs);
+                let r = Self::classify_remap_value(rhs);
+                if let (Some(l), Some(r)) = (l, r) {
+                    return Some(RemapExpr::BoolExpr(Box::new(l), *op, Box::new(r)));
+                }
+                return None;
+            }
             let is_arith = matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod);
             let is_cmp = matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne);
             if !is_arith && !is_cmp { return None; }

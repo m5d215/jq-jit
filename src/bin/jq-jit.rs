@@ -163,6 +163,13 @@ fn remap_expr_fields(rexpr: &jq_jit::interpreter::RemapExpr) -> Vec<&str> {
             }
             fields
         }
+        RemapExpr::BoolExpr(ref l, _, ref r) => {
+            let mut fields = remap_expr_fields(l);
+            for name in remap_expr_fields(r) {
+                if !fields.contains(&name) { fields.push(name); }
+            }
+            fields
+        }
         RemapExpr::CondChain(branches, else_out) => {
             let mut fields: Vec<&str> = Vec::new();
             for b in branches {
@@ -256,6 +263,7 @@ enum ResolvedRemap {
     ArithUnary(jq_jit::interpreter::MathUnary, jq_jit::interpreter::ArithExpr),
     FieldSlice(usize, Option<i64>, Option<i64>),
     FieldArray(Vec<ResolvedRemap>),
+    BoolExpr(Box<ResolvedRemap>, jq_jit::ir::BinOp, Box<ResolvedRemap>),
 }
 
 /// Pre-resolved conditional branch for remap values.
@@ -363,6 +371,13 @@ fn resolve_one_remap(
         }
         RemapExpr::FieldArray(ref exprs) => {
             ResolvedRemap::FieldArray(exprs.iter().map(|e| resolve_one_remap(e, field_idx)).collect())
+        }
+        RemapExpr::BoolExpr(ref l, op, ref r) => {
+            ResolvedRemap::BoolExpr(
+                Box::new(resolve_one_remap(l, field_idx)),
+                *op,
+                Box::new(resolve_one_remap(r, field_idx)),
+            )
         }
         RemapExpr::StringInterp(parts) => {
             let resolved = parts.iter().map(|p| match p {
@@ -776,6 +791,10 @@ fn emit_remap_value(
                 emit_remap_value(buf, rexpr, raw, ranges, field_idx);
             }
             buf.push(b']');
+        }
+        RemapExpr::BoolExpr(_, _, _) => {
+            let resolved = resolve_one_remap(rexpr, field_idx);
+            emit_resolved_value(buf, &resolved, raw, ranges);
         }
         RemapExpr::CondChain(_, _) => {
             // Resolve and emit (slow path, used for non-pre-resolved paths)
@@ -1207,6 +1226,18 @@ fn emit_resolved_value(
             }
             buf.push(b']');
         }
+        ResolvedRemap::BoolExpr(ref l, ref bool_op, ref r) => {
+            if let (Some(lv), Some(rv)) = (eval_resolved_bool(l, raw, ranges), eval_resolved_bool(r, raw, ranges)) {
+                let result = match bool_op {
+                    jq_jit::ir::BinOp::And => lv && rv,
+                    jq_jit::ir::BinOp::Or => lv || rv,
+                    _ => unreachable!(),
+                };
+                buf.extend_from_slice(if result { b"true" } else { b"false" });
+            } else {
+                buf.extend_from_slice(b"null");
+            }
+        }
         ResolvedRemap::FieldSlice(idx, from, to) => {
             let (vs, ve) = ranges[idx];
             let val = &raw[vs..ve];
@@ -1236,6 +1267,37 @@ fn emit_resolved_value(
             } else {
                 buf.extend_from_slice(b"null");
             }
+        }
+    }
+}
+
+/// Evaluate a ResolvedRemap as a boolean (for BoolExpr and/or).
+#[inline]
+fn eval_resolved_bool(resolved: &ResolvedRemap, raw: &[u8], ranges: &[(usize, usize)]) -> Option<bool> {
+    use jq_jit::ir::BinOp;
+    match resolved {
+        ResolvedRemap::FieldCmpConst(idx, ref op, n) => {
+            let (vs, ve) = ranges[*idx];
+            let a = parse_json_num(&raw[vs..ve])?;
+            Some(match op { BinOp::Gt => a > *n, BinOp::Lt => a < *n, BinOp::Ge => a >= *n, BinOp::Le => a <= *n, BinOp::Eq => a == *n, BinOp::Ne => a != *n, _ => return None })
+        }
+        ResolvedRemap::FieldCmpField(idx1, ref op, idx2) => {
+            let (vs1, ve1) = ranges[*idx1];
+            let (vs2, ve2) = ranges[*idx2];
+            let (a, b) = (parse_json_num(&raw[vs1..ve1])?, parse_json_num(&raw[vs2..ve2])?);
+            Some(match op { BinOp::Gt => a > b, BinOp::Lt => a < b, BinOp::Ge => a >= b, BinOp::Le => a <= b, BinOp::Eq => a == b, BinOp::Ne => a != b, _ => return None })
+        }
+        ResolvedRemap::BoolExpr(ref l, ref bool_op, ref r) => {
+            let lv = eval_resolved_bool(l, raw, ranges)?;
+            let rv = eval_resolved_bool(r, raw, ranges)?;
+            Some(match bool_op { BinOp::And => lv && rv, BinOp::Or => lv || rv, _ => return None })
+        }
+        _ => {
+            // Evaluate as JSON and check truthiness
+            let mut tmp = Vec::new();
+            emit_resolved_value(&mut tmp, resolved, raw, ranges);
+            // JSON truthiness: null and false are falsy, everything else is truthy
+            if tmp == b"null" || tmp == b"false" { Some(false) } else { Some(true) }
         }
     }
 }
