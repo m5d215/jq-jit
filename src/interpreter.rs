@@ -5451,6 +5451,51 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.field > N) | {(.dynkey): rexpr}` — select then dynamic-key single-pair object.
+    /// Returns (sel_field, cmp_op, threshold, dynkey_field, val_rexpr).
+    pub fn detect_select_cmp_then_dynkey(&self) -> Option<(String, crate::ir::BinOp, f64, String, RemapExpr)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        let try_extract = |cond: &Expr, output: &Expr| -> Option<(String, BinOp, f64, String, RemapExpr)> {
+            // Output: {(.field): rexpr}
+            if let Expr::ObjectConstruct { pairs } = output {
+                if pairs.len() != 1 { return None; }
+                let (k, v) = &pairs[0];
+                let dk = if let Expr::Index { expr: base, key } = k {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() } else { return None; }
+                } else { return None; };
+                let rexpr = Self::classify_remap_value(v)?;
+                // Condition: .field cmp N
+                if let Expr::BinOp { op, lhs, rhs } = cond {
+                    if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                    if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(sf)) = key.as_ref() {
+                            if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                return Some((sf.clone(), *op, *n, dk, rexpr));
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        };
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                    if let Some(r) = try_extract(cond, right) { return Some(r); }
+                }
+            }
+        }
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if matches!(else_branch.as_ref(), Expr::Empty) {
+                if let Some(r) = try_extract(cond, then_branch) { return Some(r); }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.field arith cmp N) | [array]` — arith select then array output.
     /// Returns (field, arith_ops, cmp_op, threshold, array_elements).
     pub fn detect_select_arith_cmp_then_array(&self) -> Option<(String, Vec<(crate::ir::BinOp, f64)>, crate::ir::BinOp, f64, Vec<RemapExpr>)> {

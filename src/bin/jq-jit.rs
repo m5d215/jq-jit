@@ -2107,7 +2107,10 @@ fn real_main() {
     let select_cmp_cremap = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && field_access.is_none() {
         filter.detect_select_cmp_then_computed_remap()
     } else { None };
-    let select_cmp_array = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && select_cmp_cremap.is_none() && field_access.is_none() {
+    let select_cmp_dynkey = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && select_cmp_cremap.is_none() && field_access.is_none() {
+        filter.detect_select_cmp_then_dynkey()
+    } else { None };
+    let select_cmp_array = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && select_cmp_cremap.is_none() && select_cmp_dynkey.is_none() && field_access.is_none() {
         filter.detect_select_cmp_then_array()
     } else { None };
     let select_arith_cmp_array = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_array.is_none() && field_access.is_none() {
@@ -2167,7 +2170,7 @@ fn real_main() {
         || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || field_field_cmp_branch.is_some() || if_cmp_arrays.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some() || select_compound_computed.is_some() || select_compound_cremap.is_some()
         || select_str.is_some() || select_compound_str_chain.is_some()
         || select_str_test.is_some() || select_regex_test.is_some() || select_regex_value.is_some() || select_nested_cmp.is_some()
-        || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_field_unary.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_array.is_some() || select_arith_cmp_array.is_some() || select_cmp_value.is_some() || select_cmp_str_chain.is_some() || select_ff_cmp_field.is_some() || select_ff_cmp.is_some() || select_ff_cmp_cremap.is_some() || select_ff_cmp_value.is_some() || select_ff_cmp_array.is_some() || select_compound_array.is_some() || select_str_field.is_some() || select_str_cremap.is_some() || select_str_array.is_some() || select_str_str_chain.is_some()
+        || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_field_unary.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_dynkey.is_some() || select_cmp_array.is_some() || select_arith_cmp_array.is_some() || select_cmp_value.is_some() || select_cmp_str_chain.is_some() || select_ff_cmp_field.is_some() || select_ff_cmp.is_some() || select_ff_cmp_cremap.is_some() || select_ff_cmp_value.is_some() || select_ff_cmp_array.is_some() || select_compound_array.is_some() || select_str_field.is_some() || select_str_cremap.is_some() || select_str_array.is_some() || select_str_str_chain.is_some()
         || computed_array.is_some() || array_field.is_some() || multi_field.is_some() || is_length || is_keys
         || is_keys_unsorted || has_field.is_some() || has_multi.is_some() || select_has_multi.is_some() || is_type || del_field.is_some() || obj_merge_lit.is_some() || obj_merge_computed.is_some()
         || is_each || is_sort_keys || is_to_entries || remap_to_entries.is_some() || with_entries_select.is_some() || with_entries_type.is_some() || is_tojson || string_interp_fields.is_some() || string_add_chain.is_some() || array_join.is_some()
@@ -6346,6 +6349,55 @@ fn real_main() {
                                         emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
                                     }
                                     compact_buf.extend_from_slice(obj_close);
+                                }
+                            }
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref sel_field, ref sel_op, threshold, ref dk_field, ref dk_rexpr)) = select_cmp_dynkey {
+                    // select(.field > N) | {(.dynkey): rexpr}
+                    use jq_jit::ir::BinOp;
+                    let mut all_fields: Vec<String> = Vec::new();
+                    let mut field_idx = std::collections::HashMap::new();
+                    field_idx.insert(sel_field.clone(), 0);
+                    all_fields.push(sel_field.clone());
+                    if !field_idx.contains_key(dk_field) {
+                        field_idx.insert(dk_field.clone(), all_fields.len());
+                        all_fields.push(dk_field.clone());
+                    }
+                    for name in remap_expr_fields(dk_rexpr) {
+                        if !field_idx.contains_key(name) {
+                            field_idx.insert(name.to_string(), all_fields.len());
+                            all_fields.push(name.to_string());
+                        }
+                    }
+                    let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                    let dk_idx = field_idx[dk_field];
+                    let resolved_val = resolve_one_remap(dk_rexpr, &field_idx);
+                    let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some(val) = json_object_get_num(raw, 0, sel_field) {
+                            let pass = match sel_op {
+                                BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
+                                BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
+                                BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
+                                _ => false,
+                            };
+                            if pass {
+                                if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                                    let (ks, ke) = ranges_buf[dk_idx];
+                                    let key_raw = &raw[ks..ke];
+                                    // key_raw is a JSON string like "user_123", use as-is for key
+                                    compact_buf.push(b'{');
+                                    compact_buf.extend_from_slice(key_raw);
+                                    compact_buf.push(b':');
+                                    emit_resolved_value(&mut compact_buf, &resolved_val, raw, &ranges_buf);
+                                    compact_buf.extend_from_slice(b"}\n");
                                 }
                             }
                         }
@@ -10711,6 +10763,55 @@ fn real_main() {
                                     emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
                                 }
                                 compact_buf.extend_from_slice(obj_close);
+                            }
+                        }
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref sel_field, ref sel_op, threshold, ref dk_field, ref dk_rexpr)) = select_cmp_dynkey {
+                // select(.field > N) | {(.dynkey): rexpr} — stdin path
+                use jq_jit::ir::BinOp;
+                let content_bytes = content.as_bytes();
+                let mut all_fields: Vec<String> = Vec::new();
+                let mut field_idx = std::collections::HashMap::new();
+                field_idx.insert(sel_field.clone(), 0);
+                all_fields.push(sel_field.clone());
+                if !field_idx.contains_key(dk_field) {
+                    field_idx.insert(dk_field.clone(), all_fields.len());
+                    all_fields.push(dk_field.clone());
+                }
+                for name in remap_expr_fields(dk_rexpr) {
+                    if !field_idx.contains_key(name) {
+                        field_idx.insert(name.to_string(), all_fields.len());
+                        all_fields.push(name.to_string());
+                    }
+                }
+                let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                let dk_idx = field_idx[dk_field];
+                let resolved_val = resolve_one_remap(dk_rexpr, &field_idx);
+                let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some(val) = json_object_get_num(raw, 0, sel_field) {
+                        let pass = match sel_op {
+                            BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
+                            BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
+                            BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
+                            _ => false,
+                        };
+                        if pass {
+                            if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                                let (ks, ke) = ranges_buf[dk_idx];
+                                let key_raw = &raw[ks..ke];
+                                compact_buf.push(b'{');
+                                compact_buf.extend_from_slice(key_raw);
+                                compact_buf.push(b':');
+                                emit_resolved_value(&mut compact_buf, &resolved_val, raw, &ranges_buf);
+                                compact_buf.extend_from_slice(b"}\n");
                             }
                         }
                     }
