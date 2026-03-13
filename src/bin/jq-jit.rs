@@ -2011,6 +2011,9 @@ fn real_main() {
     let dynamic_key_obj = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && computed_remap.is_none() {
         filter.detect_dynamic_key_obj()
     } else { None };
+    let dynamic_key_mixed = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && computed_remap.is_none() && dynamic_key_obj.is_none() {
+        filter.detect_dynamic_key_mixed_obj()
+    } else { None };
     let field_update_num = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && computed_remap.is_none() && dynamic_key_obj.is_none() {
         filter.detect_field_update_num()
     } else { None };
@@ -2161,7 +2164,7 @@ fn real_main() {
         || is_each || is_sort_keys || is_to_entries || remap_to_entries.is_some() || with_entries_select.is_some() || with_entries_type.is_some() || is_tojson || string_interp_fields.is_some() || string_add_chain.is_some() || array_join.is_some()
         || literal_output.is_some() || array_fields_format.is_some() || raw_csv_fields.is_some()
         || field_str_reverse.is_some() || field_split_join.is_some() || field_split_first.is_some() || field_split_last.is_some() || field_split_nth.is_some() || field_split_length.is_some() || field_strop_length.is_some() || field_length_cmp.is_some() || select_length_cmp_field.is_some() || field_slice.is_some()
-        || dynamic_key_obj.is_some() || field_update_num.is_some() || field_assign_const.is_some()
+        || dynamic_key_obj.is_some() || dynamic_key_mixed.is_some() || field_update_num.is_some() || field_assign_const.is_some()
         || min_two_fields.is_some() || minmax_two.is_some() || minmax_n.is_some() || field_string_chain.is_some() || remap_tostring_join.is_some() || filter.is_empty();
     let projection_fields: Option<Vec<String>> = if !has_raw_fast_path && !slurp && !raw_input {
         filter.needed_input_fields()
@@ -3065,6 +3068,86 @@ fn real_main() {
                                     compact_buf.extend_from_slice(key_val);
                                     compact_buf.push(b':');
                                     emit_resolved_value(&mut compact_buf, &resolved_val, raw, &ranges_buf);
+                                    compact_buf.extend_from_slice(b"}\n");
+                                }
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref dk_key2, ref dk_val2, ref static_pairs2)) = dynamic_key_mixed {
+                    // {(.key_field): val, static_key: val2, ...} — dynamic key + static keys
+                    let mut all_fields: Vec<String> = Vec::new();
+                    let mut field_idx = std::collections::HashMap::new();
+                    let ensure_field2 = |f: &str, all: &mut Vec<String>, idx: &mut std::collections::HashMap<String, usize>| {
+                        if !idx.contains_key(f) {
+                            idx.insert(f.to_string(), all.len());
+                            all.push(f.to_string());
+                        }
+                    };
+                    ensure_field2(dk_key2.as_str(), &mut all_fields, &mut field_idx);
+                    for f in remap_expr_fields(dk_val2) {
+                        ensure_field2(f, &mut all_fields, &mut field_idx);
+                    }
+                    for (_, rexpr) in static_pairs2 {
+                        for f in remap_expr_fields(rexpr) {
+                            ensure_field2(f, &mut all_fields, &mut field_idx);
+                        }
+                    }
+                    let resolved_dk_val = resolve_one_remap(dk_val2, &field_idx);
+                    let resolved_static: Vec<ResolvedRemap> = static_pairs2.iter().map(|(_, rexpr)| resolve_one_remap(rexpr, &field_idx)).collect();
+                    let key_idx = field_idx[dk_key2.as_str()];
+                    let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                    let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
+                    // Pre-build static key prefix bytes (,\"key\":)
+                    let static_key_bufs: Vec<Vec<u8>> = static_pairs2.iter().map(|(k, _)| {
+                        let mut buf = Vec::with_capacity(k.len() + 4);
+                        buf.extend_from_slice(b",\"");
+                        buf.extend_from_slice(k.as_bytes());
+                        buf.extend_from_slice(b"\":");
+                        buf
+                    }).collect();
+                    let static_key_bufs_pretty: Vec<Vec<u8>> = static_pairs2.iter().map(|(k, _)| {
+                        let mut buf = Vec::with_capacity(k.len() + 8);
+                        buf.extend_from_slice(b",\n  \"");
+                        buf.extend_from_slice(k.as_bytes());
+                        buf.extend_from_slice(b"\": ");
+                        buf
+                    }).collect();
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                            let (ks, ke) = ranges_buf[key_idx];
+                            let key_val = &raw[ks..ke];
+                            if key_val.len() >= 2 && key_val[0] == b'"' {
+                                if use_pretty_buf {
+                                    compact_buf.extend_from_slice(b"{\n  ");
+                                    compact_buf.extend_from_slice(key_val);
+                                    compact_buf.extend_from_slice(b": ");
+                                    emit_resolved_value(&mut compact_buf, &resolved_dk_val, raw, &ranges_buf);
+                                    for (i, resolved) in resolved_static.iter().enumerate() {
+                                        compact_buf.extend_from_slice(&static_key_bufs_pretty[i]);
+                                        emit_resolved_value(&mut compact_buf, resolved, raw, &ranges_buf);
+                                    }
+                                    compact_buf.extend_from_slice(b"\n}\n");
+                                } else {
+                                    compact_buf.push(b'{');
+                                    compact_buf.extend_from_slice(key_val);
+                                    compact_buf.push(b':');
+                                    emit_resolved_value(&mut compact_buf, &resolved_dk_val, raw, &ranges_buf);
+                                    for (i, resolved) in resolved_static.iter().enumerate() {
+                                        compact_buf.extend_from_slice(&static_key_bufs[i]);
+                                        emit_resolved_value(&mut compact_buf, resolved, raw, &ranges_buf);
+                                    }
                                     compact_buf.extend_from_slice(b"}\n");
                                 }
                             } else {
@@ -8424,6 +8507,85 @@ fn real_main() {
                                 compact_buf.extend_from_slice(key_val);
                                 compact_buf.push(b':');
                                 emit_resolved_value(&mut compact_buf, &resolved_val, raw, &ranges_buf);
+                                compact_buf.extend_from_slice(b"}\n");
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref dk_key2, ref dk_val2, ref static_pairs2)) = dynamic_key_mixed {
+                let content_bytes = content.as_bytes();
+                let mut all_fields: Vec<String> = Vec::new();
+                let mut field_idx = std::collections::HashMap::new();
+                let ensure_field3 = |f: &str, all: &mut Vec<String>, idx: &mut std::collections::HashMap<String, usize>| {
+                    if !idx.contains_key(f) {
+                        idx.insert(f.to_string(), all.len());
+                        all.push(f.to_string());
+                    }
+                };
+                ensure_field3(dk_key2.as_str(), &mut all_fields, &mut field_idx);
+                for f in remap_expr_fields(dk_val2) {
+                    ensure_field3(f, &mut all_fields, &mut field_idx);
+                }
+                for (_, rexpr) in static_pairs2 {
+                    for f in remap_expr_fields(rexpr) {
+                        ensure_field3(f, &mut all_fields, &mut field_idx);
+                    }
+                }
+                let resolved_dk_val = resolve_one_remap(dk_val2, &field_idx);
+                let resolved_static: Vec<ResolvedRemap> = static_pairs2.iter().map(|(_, rexpr)| resolve_one_remap(rexpr, &field_idx)).collect();
+                let key_idx = field_idx[dk_key2.as_str()];
+                let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
+                let static_key_bufs: Vec<Vec<u8>> = static_pairs2.iter().map(|(k, _)| {
+                    let mut buf = Vec::with_capacity(k.len() + 4);
+                    buf.extend_from_slice(b",\"");
+                    buf.extend_from_slice(k.as_bytes());
+                    buf.extend_from_slice(b"\":");
+                    buf
+                }).collect();
+                let static_key_bufs_pretty: Vec<Vec<u8>> = static_pairs2.iter().map(|(k, _)| {
+                    let mut buf = Vec::with_capacity(k.len() + 8);
+                    buf.extend_from_slice(b",\n  \"");
+                    buf.extend_from_slice(k.as_bytes());
+                    buf.extend_from_slice(b"\": ");
+                    buf
+                }).collect();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                        let (ks, ke) = ranges_buf[key_idx];
+                        let key_val = &raw[ks..ke];
+                        if key_val.len() >= 2 && key_val[0] == b'"' {
+                            if use_pretty_buf {
+                                compact_buf.extend_from_slice(b"{\n  ");
+                                compact_buf.extend_from_slice(key_val);
+                                compact_buf.extend_from_slice(b": ");
+                                emit_resolved_value(&mut compact_buf, &resolved_dk_val, raw, &ranges_buf);
+                                for (i, resolved) in resolved_static.iter().enumerate() {
+                                    compact_buf.extend_from_slice(&static_key_bufs_pretty[i]);
+                                    emit_resolved_value(&mut compact_buf, resolved, raw, &ranges_buf);
+                                }
+                                compact_buf.extend_from_slice(b"\n}\n");
+                            } else {
+                                compact_buf.push(b'{');
+                                compact_buf.extend_from_slice(key_val);
+                                compact_buf.push(b':');
+                                emit_resolved_value(&mut compact_buf, &resolved_dk_val, raw, &ranges_buf);
+                                for (i, resolved) in resolved_static.iter().enumerate() {
+                                    compact_buf.extend_from_slice(&static_key_bufs[i]);
+                                    emit_resolved_value(&mut compact_buf, resolved, raw, &ranges_buf);
+                                }
                                 compact_buf.extend_from_slice(b"}\n");
                             }
                         } else {
