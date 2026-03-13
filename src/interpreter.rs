@@ -3543,7 +3543,7 @@ impl Filter {
 
     /// Detect `{(.field_key): .field_val}` — single dynamic-key object construction.
     /// Returns (key_field, value_field).
-    pub fn detect_dynamic_key_obj(&self) -> Option<(String, String)> {
+    pub fn detect_dynamic_key_obj(&self) -> Option<(String, RemapExpr)> {
         use crate::ir::{Expr, Literal};
         let expr = self.detect_expr()?;
         if let Expr::ObjectConstruct { pairs } = expr {
@@ -3555,13 +3555,9 @@ impl Filter {
                 if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() }
                 else { return None; }
             } else { return None; };
-            // Value must be a field access (.field)
-            let val_field = if let Expr::Index { expr: base, key } = v {
-                if !matches!(base.as_ref(), Expr::Input) { return None; }
-                if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() }
-                else { return None; }
-            } else { return None; };
-            return Some((key_field, val_field));
+            // Value: classify as RemapExpr
+            let val_rexpr = Self::classify_remap_value(v)?;
+            return Some((key_field, val_rexpr));
         }
         None
     }

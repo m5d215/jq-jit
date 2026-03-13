@@ -2908,14 +2908,27 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref dk_key, ref dk_val)) = dynamic_key_obj {
-                    // {(.key_field): .val_field} — extract both fields, build single-key object
-                    let fields: Vec<&str> = vec![dk_key.as_str(), dk_val.as_str()];
-                    let mut ranges_buf = vec![(0usize, 0usize); fields.len()];
+                    // {(.key_field): value_expr} — extract key field + value fields, build single-key object
+                    let mut all_fields: Vec<String> = Vec::new();
+                    let mut field_idx = std::collections::HashMap::new();
+                    let ensure_field = |f: &str, all: &mut Vec<String>, idx: &mut std::collections::HashMap<String, usize>| {
+                        if !idx.contains_key(f) {
+                            idx.insert(f.to_string(), all.len());
+                            all.push(f.to_string());
+                        }
+                    };
+                    ensure_field(dk_key.as_str(), &mut all_fields, &mut field_idx);
+                    for f in remap_expr_fields(dk_val) {
+                        ensure_field(f, &mut all_fields, &mut field_idx);
+                    }
+                    let resolved_val = resolve_one_remap(dk_val, &field_idx);
+                    let key_idx = field_idx[dk_key.as_str()];
+                    let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                    let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if json_object_get_fields_raw_buf(raw, 0, &fields, &mut ranges_buf) {
-                            let (ks, ke) = ranges_buf[0];
-                            let (vs, ve) = ranges_buf[1];
+                        if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                            let (ks, ke) = ranges_buf[key_idx];
                             let key_val = &raw[ks..ke];
                             // Key must be a string
                             if key_val.len() >= 2 && key_val[0] == b'"' {
@@ -2923,18 +2936,13 @@ fn real_main() {
                                     compact_buf.extend_from_slice(b"{\n  ");
                                     compact_buf.extend_from_slice(key_val);
                                     compact_buf.extend_from_slice(b": ");
-                                    let val = &raw[vs..ve];
-                                    if val[0] == b'{' || val[0] == b'[' {
-                                        push_json_pretty_raw_at(&mut compact_buf, val, 2, false, 1);
-                                    } else {
-                                        compact_buf.extend_from_slice(val);
-                                    }
+                                    emit_resolved_value(&mut compact_buf, &resolved_val, raw, &ranges_buf);
                                     compact_buf.extend_from_slice(b"\n}\n");
                                 } else {
                                     compact_buf.push(b'{');
                                     compact_buf.extend_from_slice(key_val);
                                     compact_buf.push(b':');
-                                    compact_buf.extend_from_slice(&raw[vs..ve]);
+                                    emit_resolved_value(&mut compact_buf, &resolved_val, raw, &ranges_buf);
                                     compact_buf.extend_from_slice(b"}\n");
                                 }
                             } else {
@@ -7729,31 +7737,39 @@ fn real_main() {
                 })
             } else if let Some((ref dk_key, ref dk_val)) = dynamic_key_obj {
                 let content_bytes = content.as_bytes();
-                let fields: Vec<&str> = vec![dk_key.as_str(), dk_val.as_str()];
-                let mut ranges_buf = vec![(0usize, 0usize); fields.len()];
+                let mut all_fields: Vec<String> = Vec::new();
+                let mut field_idx = std::collections::HashMap::new();
+                let ensure_field2 = |f: &str, all: &mut Vec<String>, idx: &mut std::collections::HashMap<String, usize>| {
+                    if !idx.contains_key(f) {
+                        idx.insert(f.to_string(), all.len());
+                        all.push(f.to_string());
+                    }
+                };
+                ensure_field2(dk_key.as_str(), &mut all_fields, &mut field_idx);
+                for f in remap_expr_fields(dk_val) {
+                    ensure_field2(f, &mut all_fields, &mut field_idx);
+                }
+                let resolved_val = resolve_one_remap(dk_val, &field_idx);
+                let key_idx = field_idx[dk_key.as_str()];
+                let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if json_object_get_fields_raw_buf(raw, 0, &fields, &mut ranges_buf) {
-                        let (ks, ke) = ranges_buf[0];
-                        let (vs, ve) = ranges_buf[1];
+                    if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                        let (ks, ke) = ranges_buf[key_idx];
                         let key_val = &raw[ks..ke];
                         if key_val.len() >= 2 && key_val[0] == b'"' {
                             if use_pretty_buf {
                                 compact_buf.extend_from_slice(b"{\n  ");
                                 compact_buf.extend_from_slice(key_val);
                                 compact_buf.extend_from_slice(b": ");
-                                let val = &raw[vs..ve];
-                                if val[0] == b'{' || val[0] == b'[' {
-                                    push_json_pretty_raw_at(&mut compact_buf, val, 2, false, 1);
-                                } else {
-                                    compact_buf.extend_from_slice(val);
-                                }
+                                emit_resolved_value(&mut compact_buf, &resolved_val, raw, &ranges_buf);
                                 compact_buf.extend_from_slice(b"\n}\n");
                             } else {
                                 compact_buf.push(b'{');
                                 compact_buf.extend_from_slice(key_val);
                                 compact_buf.push(b':');
-                                compact_buf.extend_from_slice(&raw[vs..ve]);
+                                emit_resolved_value(&mut compact_buf, &resolved_val, raw, &ranges_buf);
                                 compact_buf.extend_from_slice(b"}\n");
                             }
                         } else {
