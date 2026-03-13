@@ -1489,6 +1489,28 @@ impl Flattener {
                 out
             }
             Expr::Reduce { source, init, var_index, acc_index, update } => {
+                // Detect reduce gen as $x ([]; . + [f($x)]) → [gen | f(.)]
+                // where init is [] and update is . + [inner] with inner not using accumulator
+                if matches!(init.as_ref(), Expr::Collect { generator } if matches!(generator.as_ref(), Expr::Empty)) {
+                    if let Expr::BinOp { op: BinOp::Add, lhs, rhs } = update.as_ref() {
+                        if matches!(lhs.as_ref(), Expr::Input) {
+                            if let Expr::Collect { generator: inner_gen } = rhs.as_ref() {
+                                if !uses_input(inner_gen) {
+                                    // Build equivalent expression: [source | f(.)]
+                                    // where f replaces $x with .
+                                    let f = inner_gen.substitute_var(*var_index, &Expr::Input);
+                                    let collect_gen = if matches!(&f, Expr::Input) {
+                                        source.as_ref().clone()
+                                    } else {
+                                        Expr::Pipe { left: source.clone(), right: Box::new(f) }
+                                    };
+                                    let equiv = Expr::Collect { generator: Box::new(collect_gen) };
+                                    return self.flatten_scalar(&equiv, input_slot);
+                                }
+                            }
+                        }
+                    }
+                }
                 // Scalar reduce: init is scalar, update is scalar, source is a generator
                 let acc_val = self.flatten_scalar(init, input_slot);
                 let old_acc = self.alloc_slot();
