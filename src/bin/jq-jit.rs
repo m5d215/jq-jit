@@ -1982,6 +1982,9 @@ fn real_main() {
     let collect_each_select_type = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_collect_each && collect_each_arith.is_none() && field_access.is_none() {
         filter.detect_collect_each_select_type()
     } else { None };
+    let collect_each_select_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_collect_each && collect_each_arith.is_none() && collect_each_select_type.is_none() && field_access.is_none() {
+        filter.detect_collect_each_select_cmp()
+    } else { None };
     let is_each = (use_compact_buf || use_pretty_buf) && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() && del_field.is_none() && field_access.is_none() && !is_collect_each && collect_each_arith.is_none() && collect_each_select_type.is_none() && filter.is_each();
     let is_sort_keys = (use_compact_buf || use_pretty_buf) && !exit_status && !is_each && filter.is_sort_keys();
     let is_to_entries = (use_compact_buf || use_pretty_buf) && !exit_status && !is_each && !is_sort_keys && filter.is_to_entries();
@@ -2201,7 +2204,7 @@ fn real_main() {
         || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_field_unary.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_dynkey.is_some() || select_cmp_dynkey_mixed.is_some() || select_cmp_array.is_some() || select_arith_cmp_array.is_some() || select_cmp_value.is_some() || select_cmp_str_chain.is_some() || select_ff_cmp_field.is_some() || select_ff_cmp.is_some() || select_ff_cmp_cremap.is_some() || select_ff_cmp_value.is_some() || select_ff_cmp_array.is_some() || select_compound_array.is_some() || select_str_field.is_some() || select_str_cremap.is_some() || select_str_array.is_some() || select_str_str_chain.is_some()
         || computed_array.is_some() || array_field.is_some() || multi_field.is_some() || is_length || is_keys
         || is_keys_unsorted || has_field.is_some() || has_multi.is_some() || select_has_multi.is_some() || is_type || del_field.is_some() || del_fields.is_some() || obj_merge_lit.is_some() || obj_merge_computed.is_some()
-        || is_collect_each || collect_each_arith.is_some() || collect_each_select_type.is_some() || sort_two_fields.is_some() || is_each || is_sort_keys || is_to_entries || remap_to_entries.is_some() || with_entries_select.is_some() || with_entries_type.is_some() || is_tojson || string_interp_fields.is_some() || string_add_chain.is_some() || array_join.is_some()
+        || is_collect_each || collect_each_arith.is_some() || collect_each_select_type.is_some() || collect_each_select_cmp.is_some() || sort_two_fields.is_some() || is_each || is_sort_keys || is_to_entries || remap_to_entries.is_some() || with_entries_select.is_some() || with_entries_type.is_some() || is_tojson || string_interp_fields.is_some() || string_add_chain.is_some() || array_join.is_some()
         || literal_output.is_some() || array_fields_format.is_some() || raw_csv_fields.is_some()
         || field_str_reverse.is_some() || field_split_rev_join.is_some() || field_case_split_join.is_some() || field_split_join.is_some() || field_split_first.is_some() || field_split_last.is_some() || field_split_nth.is_some() || field_split_length.is_some() || field_strop_length.is_some() || field_length_cmp.is_some() || select_length_cmp.is_some() || select_length_cmp_field.is_some() || field_slice.is_some()
         || dynamic_key_obj.is_some() || dynamic_key_mixed.is_some() || field_update_num.is_some() || field_assign_const.is_some()
@@ -8200,6 +8203,49 @@ fn real_main() {
                                 if !first_elem { compact_buf.push(b','); }
                                 first_elem = false;
                                 compact_buf.extend_from_slice(val);
+                            }
+                        });
+                        if ok {
+                            compact_buf.extend_from_slice(b"]\n");
+                        } else {
+                            compact_buf.truncate(save_len);
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref cmp_op, cmp_n)) = collect_each_select_cmp {
+                    // [.[] | select(. cmp N)] — collect values passing numeric comparison
+                    use jq_jit::ir::BinOp;
+                    let op = *cmp_op;
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        let save_len = compact_buf.len();
+                        compact_buf.push(b'[');
+                        let mut first_elem = true;
+                        let ok = json_each_value_cb(raw, 0, |vs, ve| {
+                            if let Some(v) = parse_json_num(&raw[vs..ve]) {
+                                let pass = match op {
+                                    BinOp::Gt => v > cmp_n,
+                                    BinOp::Lt => v < cmp_n,
+                                    BinOp::Ge => v >= cmp_n,
+                                    BinOp::Le => v <= cmp_n,
+                                    BinOp::Eq => v == cmp_n,
+                                    BinOp::Ne => v != cmp_n,
+                                    _ => false,
+                                };
+                                if pass {
+                                    if !first_elem { compact_buf.push(b','); }
+                                    first_elem = false;
+                                    compact_buf.extend_from_slice(&raw[vs..ve]);
+                                }
+                            } else {
+                                // Non-numeric values: in jq, comparison with number is false for strings
+                                // so they are just skipped
                             }
                         });
                         if ok {
@@ -14221,6 +14267,47 @@ fn real_main() {
                             if !first_elem { compact_buf.push(b','); }
                             first_elem = false;
                             compact_buf.extend_from_slice(val);
+                        }
+                    });
+                    if ok {
+                        compact_buf.extend_from_slice(b"]\n");
+                    } else {
+                        compact_buf.truncate(save_len);
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref cmp_op, cmp_n)) = collect_each_select_cmp {
+                // [.[] | select(. cmp N)] — collect values passing comparison (stdin)
+                use jq_jit::ir::BinOp;
+                let op = *cmp_op;
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    let save_len = compact_buf.len();
+                    compact_buf.push(b'[');
+                    let mut first_elem = true;
+                    let ok = json_each_value_cb(raw, 0, |vs, ve| {
+                        if let Some(v) = parse_json_num(&raw[vs..ve]) {
+                            let pass = match op {
+                                BinOp::Gt => v > cmp_n,
+                                BinOp::Lt => v < cmp_n,
+                                BinOp::Ge => v >= cmp_n,
+                                BinOp::Le => v <= cmp_n,
+                                BinOp::Eq => v == cmp_n,
+                                BinOp::Ne => v != cmp_n,
+                                _ => false,
+                            };
+                            if pass {
+                                if !first_elem { compact_buf.push(b','); }
+                                first_elem = false;
+                                compact_buf.extend_from_slice(&raw[vs..ve]);
+                            }
                         }
                     });
                     if ok {

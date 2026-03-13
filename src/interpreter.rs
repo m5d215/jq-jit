@@ -4199,6 +4199,34 @@ impl Filter {
         None
     }
 
+    /// Detect `[.[] | select(. cmp N)]` — collect values passing numeric comparison.
+    /// Returns (BinOp, f64).
+    pub fn detect_collect_each_select_cmp(&self) -> Option<(crate::ir::BinOp, f64)> {
+        use crate::ir::{Expr, Literal, BinOp};
+        let expr = self.detect_expr()?;
+        if let Expr::Collect { generator } = expr {
+            if let Expr::Pipe { left, right } = generator.as_ref() {
+                if matches!(left.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)) {
+                    // select(. cmp N) = IfThenElse { cond: . cmp N, then: ., else: empty }
+                    if let Expr::IfThenElse { cond, then_branch, else_branch } = right.as_ref() {
+                        if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                            if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                                if matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                                    if matches!(lhs.as_ref(), Expr::Input) {
+                                        if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                            return Some((*op, *n));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `[.x, .y] | sort` — two-field sort into array.
     /// Returns (field1, field2).
     pub fn detect_sort_two_fields(&self) -> Option<(String, String)> {
