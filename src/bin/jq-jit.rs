@@ -152,7 +152,7 @@ fn remap_expr_fields(rexpr: &jq_jit::interpreter::RemapExpr) -> Vec<&str> {
         RemapExpr::FieldStrBuiltin(f, _, _) => vec![f.as_str()],
         RemapExpr::FieldSplitIndex(f, _, _) => vec![f.as_str()],
         RemapExpr::FieldOpFieldToString(f1, _, f2) => vec![f1.as_str(), f2.as_str()],
-        RemapExpr::ArithToString(_, fields) | RemapExpr::ArithUnary(_, _, fields) => fields.iter().map(|f| f.as_str()).collect(),
+        RemapExpr::ArithToString(_, fields) | RemapExpr::ArithUnary(_, _, fields) | RemapExpr::ArithCmp(_, _, _, fields) => fields.iter().map(|f| f.as_str()).collect(),
         RemapExpr::FieldSlice(f, _, _) => vec![f.as_str()],
         RemapExpr::FieldArray(ref exprs) => {
             let mut fields: Vec<&str> = Vec::new();
@@ -267,6 +267,7 @@ enum ResolvedRemap {
     BoolExpr(Box<ResolvedRemap>, jq_jit::ir::BinOp, Box<ResolvedRemap>),
     FieldType(usize),
     FieldNegate(usize),
+    ArithCmp(jq_jit::interpreter::ArithExpr, jq_jit::ir::BinOp, f64),
 }
 
 /// Pre-resolved conditional branch for remap values.
@@ -388,6 +389,9 @@ fn resolve_one_remap(
         RemapExpr::FieldNegate(f) => {
             ResolvedRemap::FieldNegate(field_idx[f.as_str()])
         }
+        RemapExpr::ArithCmp(arith, cmp_op, rhs_const, fields) => {
+            ResolvedRemap::ArithCmp(resolve_arith_expr(arith, fields, field_idx), *cmp_op, *rhs_const)
+        }
         RemapExpr::StringInterp(parts) => {
             let resolved = parts.iter().map(|p| match p {
                 jq_jit::interpreter::InterpPart::Literal(s) => {
@@ -428,6 +432,10 @@ fn resolve_arith_expr(
             *op,
             Box::new(resolve_arith_expr(lhs, local_fields, field_idx)),
             Box::new(resolve_arith_expr(rhs, local_fields, field_idx)),
+        ),
+        ArithExpr::Unary(op, inner) => ArithExpr::Unary(
+            *op,
+            Box::new(resolve_arith_expr(inner, local_fields, field_idx)),
         ),
     }
 }
@@ -801,7 +809,7 @@ fn emit_remap_value(
             }
             buf.push(b']');
         }
-        RemapExpr::BoolExpr(_, _, _) | RemapExpr::FieldType(_) | RemapExpr::FieldNegate(_) => {
+        RemapExpr::BoolExpr(_, _, _) | RemapExpr::FieldType(_) | RemapExpr::FieldNegate(_) | RemapExpr::ArithCmp(_, _, _, _) => {
             let resolved = resolve_one_remap(rexpr, field_idx);
             emit_resolved_value(buf, &resolved, raw, ranges);
         }
@@ -868,6 +876,10 @@ fn eval_arith_raw_unresolved(
                 BinOp::Mod => l % r,
                 _ => return None,
             })
+        }
+        ArithExpr::Unary(op, inner) => {
+            let v = eval_arith_raw_unresolved(inner, local_fields, raw, ranges, field_idx)?;
+            Some(apply_math_unary(*op, v))
         }
     }
 }
@@ -1249,6 +1261,22 @@ fn emit_resolved_value(
                 buf.extend_from_slice(b"null");
             }
         }
+        ResolvedRemap::ArithCmp(ref arith, cmp_op, rhs_const) => {
+            if let Some(lhs_val) = eval_arith_raw(arith, raw, ranges) {
+                let result = match cmp_op {
+                    jq_jit::ir::BinOp::Gt => lhs_val > rhs_const,
+                    jq_jit::ir::BinOp::Lt => lhs_val < rhs_const,
+                    jq_jit::ir::BinOp::Ge => lhs_val >= rhs_const,
+                    jq_jit::ir::BinOp::Le => lhs_val <= rhs_const,
+                    jq_jit::ir::BinOp::Eq => lhs_val == rhs_const,
+                    jq_jit::ir::BinOp::Ne => lhs_val != rhs_const,
+                    _ => false,
+                };
+                buf.extend_from_slice(if result { b"true" } else { b"false" });
+            } else {
+                buf.extend_from_slice(b"false");
+            }
+        }
         ResolvedRemap::FieldArray(ref elements) => {
             buf.push(b'[');
             for (i, elem) in elements.iter().enumerate() {
@@ -1371,6 +1399,10 @@ fn eval_arith_raw(
                 BinOp::Mod => l % r,
                 _ => return None,
             })
+        }
+        ArithExpr::Unary(op, inner) => {
+            let v = eval_arith_raw(inner, raw, ranges)?;
+            Some(apply_math_unary(*op, v))
         }
     }
 }

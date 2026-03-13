@@ -68,6 +68,8 @@ pub enum RemapExpr {
     FieldType(String),
     /// `-.field` — negation of a field
     FieldNegate(String),
+    /// `(arith) cmp N` — compare compound arithmetic result to constant, emit true/false
+    ArithCmp(ArithExpr, crate::ir::BinOp, f64, Vec<String>),
 }
 
 /// Math unary operation for ArithUnary.
@@ -106,6 +108,8 @@ pub enum ArithExpr {
     Const(f64),
     /// Binary operation
     BinOp(crate::ir::BinOp, Box<ArithExpr>, Box<ArithExpr>),
+    /// Unary math operation (floor, ceil, sqrt, fabs, round)
+    Unary(MathUnary, Box<ArithExpr>),
 }
 
 impl ArithExpr {
@@ -124,6 +128,16 @@ impl ArithExpr {
                     BinOp::Div => l / r,
                     BinOp::Mod => l % r,
                     _ => unreachable!(),
+                }
+            }
+            ArithExpr::Unary(op, operand) => {
+                let v = operand.eval(fields);
+                match op {
+                    MathUnary::Floor => v.floor(),
+                    MathUnary::Ceil => v.ceil(),
+                    MathUnary::Sqrt => v.sqrt(),
+                    MathUnary::Fabs => v.abs(),
+                    MathUnary::Round => v.round(),
                 }
             }
         }
@@ -1525,6 +1539,34 @@ impl Filter {
                     }
                 }
             }
+            // (compound_arith) cmp N — e.g. (.x % 2 == 0)
+            if is_cmp {
+                if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                    let mut fields = Vec::new();
+                    if let Some(arith) = Self::try_build_arith_expr(lhs, &mut fields) {
+                        if !fields.is_empty() {
+                            return Some(RemapExpr::ArithCmp(arith, *op, *n, fields));
+                        }
+                    }
+                }
+                // N cmp (compound_arith) — flip
+                if let Expr::Literal(Literal::Num(n, _)) = lhs.as_ref() {
+                    let mut fields = Vec::new();
+                    if let Some(arith) = Self::try_build_arith_expr(rhs, &mut fields) {
+                        if !fields.is_empty() {
+                            // Flip: N cmp arith → arith flipped_cmp N
+                            let flipped = match op {
+                                BinOp::Gt => BinOp::Lt,
+                                BinOp::Lt => BinOp::Gt,
+                                BinOp::Ge => BinOp::Le,
+                                BinOp::Le => BinOp::Ge,
+                                _ => *op, // Eq, Ne are symmetric
+                            };
+                            return Some(RemapExpr::ArithCmp(arith, flipped, *n, fields));
+                        }
+                    }
+                }
+            }
         }
         // .field | Pipe patterns
         if let Expr::Pipe { left, right } = v {
@@ -1832,7 +1874,7 @@ impl Filter {
     /// Try to build an ArithExpr from an expression tree.
     /// ArithExpr::Field(i) indexes into the `fields` vector.
     fn try_build_arith_expr(expr: &crate::ir::Expr, fields: &mut Vec<String>) -> Option<ArithExpr> {
-        use crate::ir::{Expr, BinOp, Literal};
+        use crate::ir::{Expr, BinOp, Literal, UnaryOp};
         match expr {
             Expr::Index { expr: base, key } if matches!(base.as_ref(), Expr::Input) => {
                 if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
@@ -1850,6 +1892,18 @@ impl Filter {
                 let l = Self::try_build_arith_expr(lhs, fields)?;
                 let r = Self::try_build_arith_expr(rhs, fields)?;
                 Some(ArithExpr::BinOp(*op, Box::new(l), Box::new(r)))
+            }
+            Expr::UnaryOp { op, operand } => {
+                let math_op = match op {
+                    UnaryOp::Floor => MathUnary::Floor,
+                    UnaryOp::Ceil => MathUnary::Ceil,
+                    UnaryOp::Sqrt => MathUnary::Sqrt,
+                    UnaryOp::Fabs => MathUnary::Fabs,
+                    UnaryOp::Round => MathUnary::Round,
+                    _ => return None,
+                };
+                let inner = Self::try_build_arith_expr(operand, fields)?;
+                Some(ArithExpr::Unary(math_op, Box::new(inner)))
             }
             _ => None,
         }
@@ -2635,12 +2689,25 @@ impl Filter {
         let expr = self.detect_expr()?;
         let mut fields: Vec<String> = Vec::new();
         fn build_arith(expr: &Expr, fields: &mut Vec<String>) -> Option<ArithExpr> {
+            use crate::ir::UnaryOp;
             match expr {
                 Expr::BinOp { op, lhs, rhs } => {
                     if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) { return None; }
                     let l = build_arith(lhs, fields)?;
                     let r = build_arith(rhs, fields)?;
                     Some(ArithExpr::BinOp(*op, Box::new(l), Box::new(r)))
+                }
+                Expr::UnaryOp { op, operand } => {
+                    let math_op = match op {
+                        UnaryOp::Floor => MathUnary::Floor,
+                        UnaryOp::Ceil => MathUnary::Ceil,
+                        UnaryOp::Sqrt => MathUnary::Sqrt,
+                        UnaryOp::Fabs => MathUnary::Fabs,
+                        UnaryOp::Round => MathUnary::Round,
+                        _ => return None,
+                    };
+                    let inner = build_arith(operand, fields)?;
+                    Some(ArithExpr::Unary(math_op, Box::new(inner)))
                 }
                 Expr::Index { expr: base, key } => {
                     if !matches!(base.as_ref(), Expr::Input) { return None; }
@@ -2669,6 +2736,7 @@ impl Filter {
                     ArithExpr::Field(_) => 1,
                     ArithExpr::Const(_) => 0,
                     ArithExpr::BinOp(_, l, r) => count_field_refs(l) + count_field_refs(r),
+                    ArithExpr::Unary(_, inner) => count_field_refs(inner),
                 }
             }
             if count_field_refs(&arith) < 2 { return None; }
