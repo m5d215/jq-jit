@@ -1976,7 +1976,10 @@ fn real_main() {
         filter.detect_obj_merge_computed()
     } else { None };
     let is_collect_each = (use_compact_buf || use_pretty_buf) && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() && del_field.is_none() && field_access.is_none() && filter.is_collect_each();
-    let is_each = (use_compact_buf || use_pretty_buf) && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() && del_field.is_none() && field_access.is_none() && !is_collect_each && filter.is_each();
+    let collect_each_arith = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_collect_each && field_access.is_none() {
+        filter.detect_collect_each_arith()
+    } else { None };
+    let is_each = (use_compact_buf || use_pretty_buf) && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() && del_field.is_none() && field_access.is_none() && !is_collect_each && collect_each_arith.is_none() && filter.is_each();
     let is_sort_keys = (use_compact_buf || use_pretty_buf) && !exit_status && !is_each && filter.is_sort_keys();
     let is_to_entries = (use_compact_buf || use_pretty_buf) && !exit_status && !is_each && !is_sort_keys && filter.is_to_entries();
     let remap_to_entries = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_to_entries && field_remap.is_none() {
@@ -2062,6 +2065,9 @@ fn real_main() {
     } else { None };
     let minmax_n = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && min_two_fields.is_none() && minmax_two.is_none() {
         filter.detect_minmax_n_fields()
+    } else { None };
+    let sort_two_fields = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && min_two_fields.is_none() && minmax_two.is_none() && minmax_n.is_none() {
+        filter.detect_sort_two_fields()
     } else { None };
     let field_alt = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
         filter.detect_field_alternative()
@@ -2189,7 +2195,7 @@ fn real_main() {
         || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_field_unary.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_dynkey.is_some() || select_cmp_dynkey_mixed.is_some() || select_cmp_array.is_some() || select_arith_cmp_array.is_some() || select_cmp_value.is_some() || select_cmp_str_chain.is_some() || select_ff_cmp_field.is_some() || select_ff_cmp.is_some() || select_ff_cmp_cremap.is_some() || select_ff_cmp_value.is_some() || select_ff_cmp_array.is_some() || select_compound_array.is_some() || select_str_field.is_some() || select_str_cremap.is_some() || select_str_array.is_some() || select_str_str_chain.is_some()
         || computed_array.is_some() || array_field.is_some() || multi_field.is_some() || is_length || is_keys
         || is_keys_unsorted || has_field.is_some() || has_multi.is_some() || select_has_multi.is_some() || is_type || del_field.is_some() || del_fields.is_some() || obj_merge_lit.is_some() || obj_merge_computed.is_some()
-        || is_collect_each || is_each || is_sort_keys || is_to_entries || remap_to_entries.is_some() || with_entries_select.is_some() || with_entries_type.is_some() || is_tojson || string_interp_fields.is_some() || string_add_chain.is_some() || array_join.is_some()
+        || is_collect_each || collect_each_arith.is_some() || sort_two_fields.is_some() || is_each || is_sort_keys || is_to_entries || remap_to_entries.is_some() || with_entries_select.is_some() || with_entries_type.is_some() || is_tojson || string_interp_fields.is_some() || string_add_chain.is_some() || array_join.is_some()
         || literal_output.is_some() || array_fields_format.is_some() || raw_csv_fields.is_some()
         || field_str_reverse.is_some() || field_split_rev_join.is_some() || field_split_join.is_some() || field_split_first.is_some() || field_split_last.is_some() || field_split_nth.is_some() || field_split_length.is_some() || field_strop_length.is_some() || field_length_cmp.is_some() || select_length_cmp.is_some() || select_length_cmp_field.is_some() || field_slice.is_some()
         || dynamic_key_obj.is_some() || dynamic_key_mixed.is_some() || field_update_num.is_some() || field_assign_const.is_some()
@@ -8040,6 +8046,77 @@ fn real_main() {
                         }
                         Ok(())
                     })
+                } else if let Some((ref arith_op, arith_n)) = collect_each_arith {
+                    // [.[] | . op N] — map each value with arithmetic
+                    use jq_jit::ir::BinOp;
+                    let op = *arith_op;
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        let save_len = compact_buf.len();
+                        compact_buf.push(b'[');
+                        let mut first_elem = true;
+                        let mut all_ok = true;
+                        let ok = json_each_value_cb(raw, 0, |vs, ve| {
+                            if let Some(v) = parse_json_num(&raw[vs..ve]) {
+                                let r = match op {
+                                    BinOp::Add => v + arith_n,
+                                    BinOp::Sub => v - arith_n,
+                                    BinOp::Mul => v * arith_n,
+                                    BinOp::Div => v / arith_n,
+                                    BinOp::Mod => { let r = v % arith_n; if r.is_finite() { r } else { all_ok = false; return; } },
+                                    _ => { all_ok = false; return; }
+                                };
+                                if !first_elem { compact_buf.push(b','); }
+                                first_elem = false;
+                                push_jq_number_bytes(&mut compact_buf, r);
+                            } else {
+                                all_ok = false;
+                            }
+                        });
+                        if ok && all_ok {
+                            compact_buf.extend_from_slice(b"]\n");
+                        } else {
+                            compact_buf.truncate(save_len);
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref sf1, ref sf2)) = sort_two_fields {
+                    // [.x, .y] | sort — raw byte fast path
+                    let fields: Vec<&str> = vec![sf1.as_str(), sf2.as_str()];
+                    let mut ranges_buf = vec![(0usize, 0usize); 2];
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if json_object_get_fields_raw_buf(raw, 0, &fields, &mut ranges_buf) {
+                            if let (Some(a), Some(b)) = (
+                                parse_json_num(&raw[ranges_buf[0].0..ranges_buf[0].1]),
+                                parse_json_num(&raw[ranges_buf[1].0..ranges_buf[1].1]),
+                            ) {
+                                compact_buf.push(b'[');
+                                let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+                                push_jq_number_bytes(&mut compact_buf, lo);
+                                compact_buf.push(b',');
+                                push_jq_number_bytes(&mut compact_buf, hi);
+                                compact_buf.extend_from_slice(b"]\n");
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
                 } else if is_each {
                     if use_pretty_buf {
                         json_stream_raw(&input_str, |start, end| {
@@ -13858,6 +13935,79 @@ fn real_main() {
                         compact_buf.extend_from_slice(b"]\n");
                     } else {
                         compact_buf.truncate(save_len);
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref arith_op, arith_n)) = collect_each_arith {
+                // [.[] | . op N] — map each value with arithmetic (stdin)
+                use jq_jit::ir::BinOp;
+                let op = *arith_op;
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    let save_len = compact_buf.len();
+                    compact_buf.push(b'[');
+                    let mut first_elem = true;
+                    let mut all_ok = true;
+                    let ok = json_each_value_cb(raw, 0, |vs, ve| {
+                        if let Some(v) = parse_json_num(&raw[vs..ve]) {
+                            let r = match op {
+                                BinOp::Add => v + arith_n,
+                                BinOp::Sub => v - arith_n,
+                                BinOp::Mul => v * arith_n,
+                                BinOp::Div => v / arith_n,
+                                BinOp::Mod => { let r = v % arith_n; if r.is_finite() { r } else { all_ok = false; return; } },
+                                _ => { all_ok = false; return; }
+                            };
+                            if !first_elem { compact_buf.push(b','); }
+                            first_elem = false;
+                            push_jq_number_bytes(&mut compact_buf, r);
+                        } else {
+                            all_ok = false;
+                        }
+                    });
+                    if ok && all_ok {
+                        compact_buf.extend_from_slice(b"]\n");
+                    } else {
+                        compact_buf.truncate(save_len);
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref sf1, ref sf2)) = sort_two_fields {
+                // [.x, .y] | sort — raw byte fast path (stdin)
+                let content_bytes = content.as_bytes();
+                let fields: Vec<&str> = vec![sf1.as_str(), sf2.as_str()];
+                let mut ranges_buf = vec![(0usize, 0usize); 2];
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if json_object_get_fields_raw_buf(raw, 0, &fields, &mut ranges_buf) {
+                        if let (Some(a), Some(b)) = (
+                            parse_json_num(&raw[ranges_buf[0].0..ranges_buf[0].1]),
+                            parse_json_num(&raw[ranges_buf[1].0..ranges_buf[1].1]),
+                        ) {
+                            compact_buf.push(b'[');
+                            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+                            push_jq_number_bytes(&mut compact_buf, lo);
+                            compact_buf.push(b',');
+                            push_jq_number_bytes(&mut compact_buf, hi);
+                            compact_buf.extend_from_slice(b"]\n");
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                    } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }

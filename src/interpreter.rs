@@ -4108,6 +4108,57 @@ impl Filter {
         matches!(expr, Expr::Collect { generator } if matches!(generator.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)))
     }
 
+    /// Detect `[.[] | . op N]` — map each value with arithmetic.
+    /// Returns (BinOp, f64) for the operation applied to each value.
+    pub fn detect_collect_each_arith(&self) -> Option<(crate::ir::BinOp, f64)> {
+        use crate::ir::{Expr, Literal, BinOp};
+        let expr = self.detect_expr()?;
+        if let Expr::Collect { generator } = expr {
+            if let Expr::Pipe { left, right } = generator.as_ref() {
+                if matches!(left.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)) {
+                    // . op N  (e.g., . * 2, . + 1)
+                    if let Expr::BinOp { op, lhs, rhs } = right.as_ref() {
+                        if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+                            if matches!(lhs.as_ref(), Expr::Input) {
+                                if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                    return Some((*op, *n));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `[.x, .y] | sort` — two-field sort into array.
+    /// Returns (field1, field2).
+    pub fn detect_sort_two_fields(&self) -> Option<(String, String)> {
+        use crate::ir::{Expr, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Collect { generator } = left.as_ref() {
+                if let Expr::Comma { left: f1, right: f2 } = generator.as_ref() {
+                    let field1 = if let Expr::Index { expr: base, key } = f1.as_ref() {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() }
+                        else { return None; }
+                    } else { return None; };
+                    let field2 = if let Expr::Index { expr: base, key } = f2.as_ref() {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() }
+                        else { return None; }
+                    } else { return None; };
+                    if matches!(right.as_ref(), Expr::UnaryOp { op: UnaryOp::Sort, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                        return Some((field1, field2));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect array-of-field-access `[.f1,.f2,...]` pattern.
     /// Returns the list of field names if this is Collect over comma field accesses.
     pub fn detect_array_field_access(&self) -> Option<Vec<String>> {

@@ -156,6 +156,7 @@ TESTS=(
     '.name|index:-c:.name | index("_")'
     '.name|rindex:-c:.name | rindex("_")'
     '.name|indices:-c:.name | indices("_")'
+    '[x,y]|sort:-c:[.x, .y] | sort'
 )
 
 for test in "${TESTS[@]}"; do
