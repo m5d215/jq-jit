@@ -3464,21 +3464,59 @@ fn real_main() {
                         Ok(())
                     })
                 } else if filter.is_identity() && use_compact_buf && !exit_status {
-                    json_stream_raw(&input_str, |start, end| {
-                        let raw = &input_bytes[start..end];
-                        if is_json_compact(raw) {
-                            compact_buf.extend_from_slice(raw);
-                            compact_buf.push(b'\n');
-                        } else {
-                            push_json_compact_raw(&mut compact_buf, raw);
-                            compact_buf.push(b'\n');
+                    // Fast path: if the entire file is compact NDJSON, write it in one shot
+                    let ib = input_bytes;
+                    let mut bom_skip = 0usize;
+                    if ib.len() >= 3 && ib[0] == 0xEF && ib[1] == 0xBB && ib[2] == 0xBF { bom_skip = 3; }
+                    let content = &ib[bom_skip..];
+                    let whole_file_compact = if content.len() > 1
+                        && matches!(content[0], b'{' | b'[' | b'"' | b'-' | b'0'..=b'9' | b't' | b'f' | b'n')
+                        && content[content.len() - 1] == b'\n'
+                    {
+                        // Sample first, last, and middle lines to verify compact
+                        let mut all_compact = true;
+                        let mut checked = 0;
+                        let check_positions = [0, content.len() / 4, content.len() / 2, content.len() * 3 / 4];
+                        for &check_pos in &check_positions {
+                            // Find line starting at or after check_pos
+                            let pos = if check_pos == 0 { 0 } else {
+                                match memchr::memchr(b'\n', &content[check_pos..]) {
+                                    Some(off) => check_pos + off + 1,
+                                    None => content.len(),
+                                }
+                            };
+                            if pos >= content.len() { continue; }
+                            if let Some(nl) = memchr::memchr(b'\n', &content[pos..]) {
+                                let line = &content[pos..pos + nl];
+                                if !line.is_empty() && !is_json_compact(line) {
+                                    all_compact = false;
+                                    break;
+                                }
+                                checked += 1;
+                            }
                         }
-                        if compact_buf.len() >= 1 << 17 {
-                            let _ = out.write_all(&compact_buf);
-                            compact_buf.clear();
-                        }
+                        all_compact && checked > 0
+                    } else { false };
+                    if whole_file_compact {
+                        let _ = out.write_all(content);
                         Ok(())
-                    })
+                    } else {
+                        json_stream_raw(&input_str, |start, end| {
+                            let raw = &input_bytes[start..end];
+                            if is_json_compact(raw) {
+                                compact_buf.extend_from_slice(raw);
+                                compact_buf.push(b'\n');
+                            } else {
+                                push_json_compact_raw(&mut compact_buf, raw);
+                                compact_buf.push(b'\n');
+                            }
+                            if compact_buf.len() >= 1 << 17 {
+                                let _ = out.write_all(&compact_buf);
+                                compact_buf.clear();
+                            }
+                            Ok(())
+                        })
+                    }
                 } else if filter.is_identity() && use_pretty_buf && !exit_status {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
@@ -14847,21 +14885,55 @@ fn real_main() {
                 // Identity fast path: skip JSON parsing entirely, just validate structure
                 // and copy raw bytes directly. Falls back to parse+serialize for non-compact input.
                 let content_bytes = content.as_bytes();
-                json_stream_raw(content, |start, end| {
-                    let raw = &content_bytes[start..end];
-                    if is_json_compact(raw) {
-                        compact_buf.extend_from_slice(raw);
-                        compact_buf.push(b'\n');
-                    } else {
-                        push_json_compact_raw(&mut compact_buf, raw);
-                        compact_buf.push(b'\n');
+                // Whole-file passthrough for compact NDJSON — sample multiple lines
+                let mut bom_skip2 = 0usize;
+                if content_bytes.len() >= 3 && content_bytes[0] == 0xEF && content_bytes[1] == 0xBB && content_bytes[2] == 0xBF { bom_skip2 = 3; }
+                let cbody = &content_bytes[bom_skip2..];
+                let whole_compact2 = if cbody.len() > 1
+                    && matches!(cbody[0], b'{' | b'[' | b'"' | b'-' | b'0'..=b'9' | b't' | b'f' | b'n')
+                    && cbody[cbody.len() - 1] == b'\n'
+                {
+                    let mut all_compact = true;
+                    let mut checked = 0;
+                    for &check_pos in &[0, cbody.len() / 4, cbody.len() / 2, cbody.len() * 3 / 4] {
+                        let p = if check_pos == 0 { 0 } else {
+                            match memchr::memchr(b'\n', &cbody[check_pos..]) {
+                                Some(off) => check_pos + off + 1,
+                                None => cbody.len(),
+                            }
+                        };
+                        if p >= cbody.len() { continue; }
+                        if let Some(nl) = memchr::memchr(b'\n', &cbody[p..]) {
+                            let line = &cbody[p..p + nl];
+                            if !line.is_empty() && !is_json_compact(line) {
+                                all_compact = false;
+                                break;
+                            }
+                            checked += 1;
+                        }
                     }
-                    if compact_buf.len() >= 1 << 17 {
-                        let _ = out.write_all(&compact_buf);
-                        compact_buf.clear();
-                    }
+                    all_compact && checked > 0
+                } else { false };
+                if whole_compact2 {
+                    let _ = out.write_all(cbody);
                     Ok(())
-                })
+                } else {
+                    json_stream_raw(content, |start, end| {
+                        let raw = &content_bytes[start..end];
+                        if is_json_compact(raw) {
+                            compact_buf.extend_from_slice(raw);
+                            compact_buf.push(b'\n');
+                        } else {
+                            push_json_compact_raw(&mut compact_buf, raw);
+                            compact_buf.push(b'\n');
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                }
             } else if filter.is_identity() && use_pretty_buf && !exit_status {
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
