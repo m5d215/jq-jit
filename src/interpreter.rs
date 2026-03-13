@@ -558,7 +558,15 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             }
         }
         Expr::UnaryOp { op, operand } => {
-            Expr::UnaryOp { op: *op, operand: Box::new(simplify_expr(operand)) }
+            let so = simplify_expr(operand);
+            // Normalize f|op → f | op(.) when f is not input
+            if !matches!(&so, Expr::Input) {
+                return simplify_expr(&Expr::Pipe {
+                    left: Box::new(so),
+                    right: Box::new(Expr::UnaryOp { op: *op, operand: Box::new(Expr::Input) }),
+                });
+            }
+            Expr::UnaryOp { op: *op, operand: Box::new(so) }
         }
         Expr::Collect { generator } => {
             Expr::Collect { generator: Box::new(simplify_expr(generator)) }
@@ -626,10 +634,24 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             Expr::Negate { operand: Box::new(simplify_expr(operand)) }
         }
         Expr::Slice { expr, from, to } => {
+            let se = simplify_expr(expr);
+            let sf = from.as_ref().map(|e| Box::new(simplify_expr(e)));
+            let st = to.as_ref().map(|e| Box::new(simplify_expr(e)));
+            // Normalize f[from:to] → f | .[from:to] when f is not input
+            // Only safe when from/to are literals (don't reference input)
+            if !matches!(&se, Expr::Input)
+                && sf.as_ref().map_or(true, |e| matches!(e.as_ref(), Expr::Literal(_)))
+                && st.as_ref().map_or(true, |e| matches!(e.as_ref(), Expr::Literal(_)))
+            {
+                return simplify_expr(&Expr::Pipe {
+                    left: Box::new(se),
+                    right: Box::new(Expr::Slice { expr: Box::new(Expr::Input), from: sf, to: st }),
+                });
+            }
             Expr::Slice {
-                expr: Box::new(simplify_expr(expr)),
-                from: from.as_ref().map(|e| Box::new(simplify_expr(e))),
-                to: to.as_ref().map(|e| Box::new(simplify_expr(e))),
+                expr: Box::new(se),
+                from: sf,
+                to: st,
             }
         }
         Expr::Update { path_expr, update_expr } => {
