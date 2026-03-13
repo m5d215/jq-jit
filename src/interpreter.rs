@@ -64,6 +64,8 @@ pub enum RemapExpr {
     FieldArray(Vec<RemapExpr>),
     /// `(cmp1) and/or (cmp2)` — boolean expression combining comparisons
     BoolExpr(Box<RemapExpr>, crate::ir::BinOp, Box<RemapExpr>), // lhs, And/Or, rhs
+    /// `.field | type` — JSON type string
+    FieldType(String),
 }
 
 /// Math unary operation for ArithUnary.
@@ -1385,6 +1387,16 @@ impl Filter {
                 if matches!(base.as_ref(), Expr::Input) {
                     if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
                         return Some(RemapExpr::FieldLength(f.clone()));
+                    }
+                }
+            }
+        }
+        // .field | type (beta-reduced: UnaryOp(Type, Index(Input, field)))
+        if let Expr::UnaryOp { op: UnaryOp::Type, operand } = v {
+            if let Expr::Index { expr: base, key } = operand.as_ref() {
+                if matches!(base.as_ref(), Expr::Input) {
+                    if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                        return Some(RemapExpr::FieldType(f.clone()));
                     }
                 }
             }

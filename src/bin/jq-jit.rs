@@ -170,6 +170,7 @@ fn remap_expr_fields(rexpr: &jq_jit::interpreter::RemapExpr) -> Vec<&str> {
             }
             fields
         }
+        RemapExpr::FieldType(f) => vec![f.as_str()],
         RemapExpr::CondChain(branches, else_out) => {
             let mut fields: Vec<&str> = Vec::new();
             for b in branches {
@@ -264,6 +265,7 @@ enum ResolvedRemap {
     FieldSlice(usize, Option<i64>, Option<i64>),
     FieldArray(Vec<ResolvedRemap>),
     BoolExpr(Box<ResolvedRemap>, jq_jit::ir::BinOp, Box<ResolvedRemap>),
+    FieldType(usize),
 }
 
 /// Pre-resolved conditional branch for remap values.
@@ -378,6 +380,9 @@ fn resolve_one_remap(
                 *op,
                 Box::new(resolve_one_remap(r, field_idx)),
             )
+        }
+        RemapExpr::FieldType(f) => {
+            ResolvedRemap::FieldType(field_idx[f.as_str()])
         }
         RemapExpr::StringInterp(parts) => {
             let resolved = parts.iter().map(|p| match p {
@@ -792,7 +797,7 @@ fn emit_remap_value(
             }
             buf.push(b']');
         }
-        RemapExpr::BoolExpr(_, _, _) => {
+        RemapExpr::BoolExpr(_, _, _) | RemapExpr::FieldType(_) => {
             let resolved = resolve_one_remap(rexpr, field_idx);
             emit_resolved_value(buf, &resolved, raw, ranges);
         }
@@ -1217,6 +1222,19 @@ fn emit_resolved_value(
                 let result = apply_math_unary(math_op, r);
                 push_jq_number_bytes(buf, result);
             } else { buf.extend_from_slice(b"null"); }
+        }
+        ResolvedRemap::FieldType(idx) => {
+            let (vs, ve) = ranges[idx];
+            let val = &raw[vs..ve];
+            let type_str = match val[0] {
+                b'"' => b"\"string\"" as &[u8],
+                b't' | b'f' => b"\"boolean\"",
+                b'n' => b"\"null\"",
+                b'[' => b"\"array\"",
+                b'{' => b"\"object\"",
+                _ => b"\"number\"", // digits or minus
+            };
+            buf.extend_from_slice(type_str);
         }
         ResolvedRemap::FieldArray(ref elements) => {
             buf.push(b'[');
