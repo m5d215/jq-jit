@@ -2902,6 +2902,27 @@ impl Filter {
         None
     }
 
+    /// Detect `[.f1, .f2, ...] | min` or `[.f1, .f2, ...] | max` with N >= 3 fields.
+    /// Returns (fields, is_max).
+    pub fn detect_minmax_n_fields(&self) -> Option<(Vec<String>, bool)> {
+        use crate::ir::{Expr, UnaryOp};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left, right } = expr {
+            let is_max = match right.as_ref() {
+                Expr::UnaryOp { op: UnaryOp::Max, operand } if matches!(operand.as_ref(), Expr::Input) => true,
+                Expr::UnaryOp { op: UnaryOp::Min, operand } if matches!(operand.as_ref(), Expr::Input) => false,
+                _ => return None,
+            };
+            if let Expr::Collect { generator } = left.as_ref() {
+                let mut fields = Vec::new();
+                if collect_comma_fields(generator, &mut fields) && fields.len() >= 3 {
+                    return Some((fields, is_max));
+                }
+            }
+        }
+        None
+    }
+
     /// Detect comma-separated field access `.f1,.f2,...` pattern.
     /// Returns the list of field names if all branches are direct field accesses on input.
     pub fn detect_multi_field_access(&self) -> Option<Vec<String>> {

@@ -824,6 +824,9 @@ fn real_main() {
     let minmax_two = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && min_two_fields.is_none() {
         filter.detect_minmax_two_fields()
     } else { None };
+    let minmax_n = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && min_two_fields.is_none() && minmax_two.is_none() {
+        filter.detect_minmax_n_fields()
+    } else { None };
     let field_alt = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
         filter.detect_field_alternative()
     } else { None };
@@ -897,7 +900,7 @@ fn real_main() {
         || literal_output.is_some() || array_fields_format.is_some() || raw_csv_fields.is_some()
         || field_split_join.is_some() || field_split_first.is_some() || field_split_length.is_some() || field_strop_length.is_some() || field_length_cmp.is_some() || select_length_cmp_field.is_some() || field_slice.is_some()
         || dynamic_key_obj.is_some() || field_update_num.is_some() || field_assign_const.is_some()
-        || min_two_fields.is_some() || minmax_two.is_some() || filter.is_empty();
+        || min_two_fields.is_some() || minmax_two.is_some() || minmax_n.is_some() || filter.is_empty();
     let projection_fields: Option<Vec<String>> = if !has_raw_fast_path && !slurp && !raw_input {
         filter.needed_input_fields()
     } else { None };
@@ -1524,6 +1527,45 @@ fn real_main() {
                                 let r = if mm_is_max { if a >= b { a } else { b } } else { if a <= b { a } else { b } };
                                 push_jq_number_bytes(&mut compact_buf, r);
                                 compact_buf.push(b'\n');
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref mm_fields, mm_is_max)) = minmax_n {
+                    // [.f1, .f2, .f3, ...] | min/max — N-field raw byte fast path
+                    let field_refs: Vec<&str> = mm_fields.iter().map(|s| s.as_str()).collect();
+                    let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                            let mut result: Option<f64> = None;
+                            let mut all_ok = true;
+                            for &(vs, ve) in ranges_buf.iter() {
+                                if let Some(v) = parse_json_num(&raw[vs..ve]) {
+                                    result = Some(match result {
+                                        None => v,
+                                        Some(cur) => if mm_is_max { if v > cur { v } else { cur } } else { if v < cur { v } else { cur } },
+                                    });
+                                } else {
+                                    all_ok = false;
+                                    break;
+                                }
+                            }
+                            if all_ok {
+                                if let Some(r) = result {
+                                    push_jq_number_bytes(&mut compact_buf, r);
+                                    compact_buf.push(b'\n');
+                                }
                             } else {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -5009,6 +5051,46 @@ fn real_main() {
                             let r = if mm_is_max { if a >= b { a } else { b } } else { if a <= b { a } else { b } };
                             push_jq_number_bytes(&mut compact_buf, r);
                             compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref mm_fields, mm_is_max)) = minmax_n {
+                // [.f1, .f2, .f3, ...] | min/max — stdin N-field path
+                let content_bytes = content.as_bytes();
+                let field_refs: Vec<&str> = mm_fields.iter().map(|s| s.as_str()).collect();
+                let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                        let mut result: Option<f64> = None;
+                        let mut all_ok = true;
+                        for &(vs, ve) in ranges_buf.iter() {
+                            if let Some(v) = parse_json_num(&raw[vs..ve]) {
+                                result = Some(match result {
+                                    None => v,
+                                    Some(cur) => if mm_is_max { if v > cur { v } else { cur } } else { if v < cur { v } else { cur } },
+                                });
+                            } else {
+                                all_ok = false;
+                                break;
+                            }
+                        }
+                        if all_ok {
+                            if let Some(r) = result {
+                                push_jq_number_bytes(&mut compact_buf, r);
+                                compact_buf.push(b'\n');
+                            }
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
