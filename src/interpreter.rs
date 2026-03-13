@@ -4680,6 +4680,59 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.field > N) | [remap_expr, ...]` — select with array output.
+    /// Returns (sel_field, cmp_op, threshold, array_elements).
+    pub fn detect_select_cmp_then_array(&self) -> Option<(String, crate::ir::BinOp, f64, Vec<RemapExpr>)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        let try_extract = |cond: &Expr, output: &Expr| -> Option<(String, BinOp, f64, Vec<RemapExpr>)> {
+            if let Expr::Collect { generator } = output {
+                fn collect_elems<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+                    match e {
+                        Expr::Comma { left, right } => { collect_elems(left, out); collect_elems(right, out); }
+                        _ => out.push(e),
+                    }
+                }
+                let mut elems = Vec::new();
+                collect_elems(generator, &mut elems);
+                if elems.len() < 2 { return None; }
+                let mut rexprs = Vec::with_capacity(elems.len());
+                for elem in &elems {
+                    rexprs.push(Self::classify_remap_value(elem)?);
+                }
+                if let Expr::BinOp { op, lhs, rhs } = cond {
+                    if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                        return None;
+                    }
+                    if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(sel_field)) = key.as_ref() {
+                            if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                return Some((sel_field.clone(), *op, *n, rexprs));
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        };
+        // Form 1: Pipe(select(.field > N), [arr])
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                    if let Some(r) = try_extract(cond, right) { return Some(r); }
+                }
+            }
+        }
+        // Form 2: if .field > N then [arr] else empty end
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if matches!(else_branch.as_ref(), Expr::Empty) {
+                if let Some(r) = try_extract(cond, then_branch) { return Some(r); }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.field == "str") | .output_field` or `select(.field | startswith("str")) | .output_field`.
     /// Returns (select_field, test_type, test_arg, output_field).
     /// test_type: "eq", "ne", "startswith", "endswith", "contains"
