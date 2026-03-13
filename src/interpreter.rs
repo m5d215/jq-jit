@@ -2669,6 +2669,39 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.f1 cmp .f2) | value` — field-field select then computed value.
+    /// Returns (field1, op, field2, value_rexpr).
+    pub fn detect_select_ff_cmp_then_value(&self) -> Option<(String, crate::ir::BinOp, String, RemapExpr)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        let try_extract = |cond: &Expr, output: &Expr| -> Option<(String, BinOp, String, RemapExpr)> {
+            let rexpr = Self::classify_remap_value(output)?;
+            if let Expr::BinOp { op, lhs, rhs } = cond {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                if let (Expr::Index { expr: b1, key: k1 }, Expr::Index { expr: b2, key: k2 }) = (lhs.as_ref(), rhs.as_ref()) {
+                    if !matches!(b1.as_ref(), Expr::Input) || !matches!(b2.as_ref(), Expr::Input) { return None; }
+                    if let (Expr::Literal(Literal::Str(f1)), Expr::Literal(Literal::Str(f2))) = (k1.as_ref(), k2.as_ref()) {
+                        return Some((f1.clone(), *op, f2.clone(), rexpr));
+                    }
+                }
+            }
+            None
+        };
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                    if let Some(r) = try_extract(cond, right) { return Some(r); }
+                }
+            }
+        }
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if matches!(else_branch.as_ref(), Expr::Empty) {
+                if let Some(r) = try_extract(cond, then_branch) { return Some(r); }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.field1 cmp .field2) | {computed_remap}` — select with field-field comparison + computed remap.
     /// Returns (field1, op, field2, remap_entries).
     pub fn detect_select_ff_cmp_then_computed_remap(&self) -> Option<(String, crate::ir::BinOp, String, Vec<(String, RemapExpr)>)> {
