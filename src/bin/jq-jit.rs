@@ -147,6 +147,8 @@ fn remap_expr_fields(rexpr: &jq_jit::interpreter::RemapExpr) -> Vec<&str> {
             fields
         }
         RemapExpr::FieldSplitJoin(f, _, _) => vec![f.as_str()],
+        RemapExpr::FieldStringCase(f, _) => vec![f.as_str()],
+        RemapExpr::FieldSplitLength(f, _) => vec![f.as_str()],
         RemapExpr::CondChain(branches, else_out) => {
             let mut fields: Vec<&str> = Vec::new();
             for b in branches {
@@ -230,6 +232,8 @@ enum ResolvedRemap {
     FieldLength(usize),
     StringInterp(Vec<ResolvedInterpPart>),
     FieldSplitJoin(usize, Vec<u8>, Vec<u8>), // field_idx, split_sep bytes, join_rep bytes
+    FieldStringCase(usize, bool), // field_idx, is_upper
+    FieldSplitLength(usize, Vec<u8>), // field_idx, separator bytes
     CondChain(Vec<ResolvedCondBranch>, Box<ResolvedBranchOutput>),
 }
 
@@ -295,6 +299,12 @@ fn resolve_one_remap(
         RemapExpr::FieldLength(f) => ResolvedRemap::FieldLength(field_idx[f.as_str()]),
         RemapExpr::FieldSplitJoin(f, sep, rep) => {
             ResolvedRemap::FieldSplitJoin(field_idx[f.as_str()], sep.as_bytes().to_vec(), rep.as_bytes().to_vec())
+        }
+        RemapExpr::FieldStringCase(f, is_upper) => {
+            ResolvedRemap::FieldStringCase(field_idx[f.as_str()], *is_upper)
+        }
+        RemapExpr::FieldSplitLength(f, sep) => {
+            ResolvedRemap::FieldSplitLength(field_idx[f.as_str()], sep.as_bytes().to_vec())
         }
         RemapExpr::CondChain(branches, else_out) => {
             let resolved_branches = branches.iter().map(|b| {
@@ -667,6 +677,16 @@ fn emit_remap_value(
             let (vs, ve) = ranges[idx];
             emit_split_join_raw(buf, &raw[vs..ve], sep.as_bytes(), rep.as_bytes());
         }
+        RemapExpr::FieldStringCase(f, is_upper) => {
+            let idx = field_idx[f.as_str()];
+            let resolved = ResolvedRemap::FieldStringCase(idx, *is_upper);
+            emit_resolved_value(buf, &resolved, raw, ranges);
+        }
+        RemapExpr::FieldSplitLength(f, sep) => {
+            let idx = field_idx[f.as_str()];
+            let resolved = ResolvedRemap::FieldSplitLength(idx, sep.as_bytes().to_vec());
+            emit_resolved_value(buf, &resolved, raw, ranges);
+        }
         RemapExpr::CondChain(_, _) => {
             // Resolve and emit (slow path, used for non-pre-resolved paths)
             let resolved = resolve_one_remap(rexpr, field_idx);
@@ -832,6 +852,51 @@ fn emit_resolved_value(
         ResolvedRemap::FieldSplitJoin(idx, ref sep, ref rep) => {
             let (vs, ve) = ranges[idx];
             emit_split_join_raw(buf, &raw[vs..ve], sep, rep);
+        }
+        ResolvedRemap::FieldStringCase(idx, is_upper) => {
+            let (vs, ve) = ranges[idx];
+            let val = &raw[vs..ve];
+            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"' {
+                buf.push(b'"');
+                for &b in &val[1..val.len()-1] {
+                    if is_upper {
+                        buf.push(b.to_ascii_uppercase());
+                    } else {
+                        buf.push(b.to_ascii_lowercase());
+                    }
+                }
+                buf.push(b'"');
+            } else {
+                buf.extend_from_slice(b"null");
+            }
+        }
+        ResolvedRemap::FieldSplitLength(idx, ref sep) => {
+            let (vs, ve) = ranges[idx];
+            let val = &raw[vs..ve];
+            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                && !sep.is_empty()
+            {
+                let inner = &val[1..val.len()-1];
+                let count = if sep.len() == 1 {
+                    memchr::memchr_iter(sep[0], inner).count() + 1
+                } else {
+                    inner.windows(sep.len()).filter(|w| *w == &sep[..]).count() + 1
+                };
+                let mut ibuf = itoa::Buffer::new();
+                buf.extend_from_slice(ibuf.format(count).as_bytes());
+            } else if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"' && sep.is_empty() {
+                // split("") → count codepoints
+                let inner = &val[1..val.len()-1];
+                if !inner.contains(&b'\\') {
+                    let cp_count = inner.iter().filter(|&&b| (b & 0xC0) != 0x80).count();
+                    let mut ibuf = itoa::Buffer::new();
+                    buf.extend_from_slice(ibuf.format(cp_count).as_bytes());
+                } else {
+                    buf.extend_from_slice(b"null");
+                }
+            } else {
+                buf.extend_from_slice(b"null");
+            }
         }
         ResolvedRemap::CondChain(ref branches, ref else_out) => {
             let mut matched = false;

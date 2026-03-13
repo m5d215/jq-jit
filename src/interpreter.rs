@@ -44,6 +44,10 @@ pub enum RemapExpr {
     FieldSplitJoin(String, String, String), // field, split_sep, join_rep
     /// `if .field cmp N then A elif ... else B end` — conditional chain
     CondChain(Vec<CondBranch>, Box<BranchOutput>),
+    /// `.field | ascii_upcase` or `.field | ascii_downcase`
+    FieldStringCase(String, bool), // field, is_upper
+    /// `.field | split(sep) | length` — count split segments
+    FieldSplitLength(String, String), // field, separator
 }
 
 /// Part of a string interpolation for raw byte remap emission.
@@ -1329,6 +1333,19 @@ impl Filter {
             }
             return None;
         }
+        // .field | ascii_upcase/downcase (beta-reduced: UnaryOp(AsciiUpcase/Downcase, Index(Input, field)))
+        if let Expr::UnaryOp { op, operand } = v {
+            let is_case = matches!(op, UnaryOp::AsciiUpcase | UnaryOp::AsciiDowncase);
+            if is_case {
+                if let Expr::Index { expr: base, key } = operand.as_ref() {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                            return Some(RemapExpr::FieldStringCase(f.clone(), matches!(op, UnaryOp::AsciiUpcase)));
+                        }
+                    }
+                }
+            }
+        }
         // .field | length (beta-reduced: UnaryOp(Length, Index(Input, field)))
         if let Expr::UnaryOp { op: UnaryOp::Length, operand } = v {
             if let Expr::Index { expr: base, key } = operand.as_ref() {
@@ -1401,6 +1418,26 @@ impl Filter {
                         if matches!(base.as_ref(), Expr::Input) {
                             if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
                                 return Some(RemapExpr::ConstOpField(*n, *op, f.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // .field | split(sep) | length
+        if let Expr::Pipe { left, right } = v {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if matches!(base.as_ref(), Expr::Input) {
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        if let Expr::Pipe { left: split_expr, right: len_expr } = right.as_ref() {
+                            if let Expr::CallBuiltin { name: sn, args: sa } = split_expr.as_ref() {
+                                if sn == "split" && sa.len() == 1 {
+                                    if let Expr::Literal(Literal::Str(sep)) = &sa[0] {
+                                        if matches!(len_expr.as_ref(), Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                                            return Some(RemapExpr::FieldSplitLength(field.clone(), sep.clone()));
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
