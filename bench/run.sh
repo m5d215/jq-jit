@@ -96,6 +96,7 @@ TESTS=(
     'select|remap:-c:select(.x > 1000000) | {n:.name, v:.y}'
     'computed remap:-c:{name: .name, double: (.x * 2), sum: (.x + .y)}'
     '[.x,.y]|add:-c:[.x, .y] | add'
+    '[.x,.y]|avg:-c:[.x, .y] | add / length'
     'keys|length:-c:keys | length'
     '.+{z=0}:-c:. + {z: 0}'
     'split|first:-c:.name | split("_") | .[0]'

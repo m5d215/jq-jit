@@ -436,6 +436,42 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                 }
             }
+            // Semantic: [.f1, .f2, ...] | add / length → (.f1 + .f2 + ... + .fN) / N
+            if let Expr::Collect { generator: ref lg } = sl {
+                if let Expr::BinOp { op: crate::ir::BinOp::Div, lhs: ref div_lhs, rhs: ref div_rhs } = sr {
+                    let is_add = matches!(div_lhs.as_ref(), Expr::UnaryOp { op: UnaryOp::Add, operand } if matches!(operand.as_ref(), Expr::Input));
+                    let is_length = matches!(div_rhs.as_ref(), Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input));
+                    if is_add && is_length {
+                        fn collect_comma_elems(e: &Expr, out: &mut Vec<Expr>) {
+                            match e {
+                                Expr::Comma { left, right } => {
+                                    collect_comma_elems(left, out);
+                                    collect_comma_elems(right, out);
+                                }
+                                other => out.push(other.clone()),
+                            }
+                        }
+                        let mut elems = Vec::new();
+                        collect_comma_elems(lg, &mut elems);
+                        let n = elems.len();
+                        if n >= 2 {
+                            let mut sum = elems.remove(0);
+                            for elem in elems {
+                                sum = Expr::BinOp {
+                                    op: crate::ir::BinOp::Add,
+                                    lhs: Box::new(sum),
+                                    rhs: Box::new(elem),
+                                };
+                            }
+                            return Expr::BinOp {
+                                op: crate::ir::BinOp::Div,
+                                lhs: Box::new(sum),
+                                rhs: Box::new(Expr::Literal(crate::ir::Literal::Num(n as f64, None))),
+                            };
+                        }
+                    }
+                }
+            }
             // Beta-reduction: .x | . + 1 → .x + 1
             if sl.is_simple_scalar() && sr.is_input_free() {
                 return sr.substitute_input(&sl);
