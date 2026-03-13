@@ -1395,6 +1395,63 @@ pub fn json_object_merge_literal(b: &[u8], pos: usize, merge_pairs: &[(String, V
     true
 }
 
+/// Sort an object's keys alphabetically and write the result to `buf`.
+/// Extracts (key_start, key_end, val_start, val_end) pairs, sorts by key bytes, reassembles.
+/// `pairs` is a reusable scratch buffer to avoid allocations.
+pub fn json_object_sort_keys(b: &[u8], pos: usize, buf: &mut Vec<u8>, pairs: &mut Vec<(usize, usize, usize, usize)>) -> bool {
+    pairs.clear();
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    let mut i = pos + 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < b.len() && b[i] == b'}' {
+        buf.extend_from_slice(b"{}");
+        return true;
+    }
+    loop {
+        if i >= b.len() || b[i] != b'"' { return false; }
+        let key_start = i;
+        i += 1;
+        while i < b.len() { match b[i] { b'"' => break, b'\\' => { i += 2; continue }, _ => i += 1 } }
+        if i >= b.len() { return false; }
+        let key_end = i + 1;
+        i = key_end;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        let val_start = i;
+        i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return false };
+        let val_end = i;
+        pairs.push((key_start, key_end, val_start, val_end));
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { return false; }
+        if b[i] == b'}' { break; }
+        if b[i] != b',' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
+    // Sort by key content (bytes between quotes)
+    pairs.sort_unstable_by(|a, c| b[a.0+1..a.1-1].cmp(&b[c.0+1..c.1-1]));
+    // Deduplicate: last occurrence wins (like jq)
+    let mut deduped: Vec<usize> = Vec::with_capacity(pairs.len());
+    for idx in 0..pairs.len() {
+        if idx + 1 < pairs.len() && b[pairs[idx].0+1..pairs[idx].1-1] == b[pairs[idx+1].0+1..pairs[idx+1].1-1] {
+            continue; // skip earlier duplicate
+        }
+        deduped.push(idx);
+    }
+    buf.push(b'{');
+    for (di, &pidx) in deduped.iter().enumerate() {
+        if di > 0 { buf.push(b','); }
+        let (ks, ke, vs, ve) = pairs[pidx];
+        buf.extend_from_slice(&b[ks..ke]);
+        buf.push(b':');
+        buf.extend_from_slice(&b[vs..ve]);
+    }
+    buf.push(b'}');
+    true
+}
+
 /// Iterate over values of a JSON object or elements of a JSON array,
 /// calling `cb` with (value_start, value_end) for each. Returns true on success.
 pub fn json_each_value_raw(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {

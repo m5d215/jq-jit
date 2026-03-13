@@ -2142,6 +2142,51 @@ impl Filter {
         matches!(expr, Expr::UnaryOp { op: UnaryOp::KeysUnsorted, operand } if matches!(operand.as_ref(), Expr::Input))
     }
 
+    /// Detect `to_entries | sort_by(.key) | from_entries` pattern — sort object keys.
+    pub fn is_sort_keys(&self) -> bool {
+        use crate::ir::{Expr, UnaryOp, ClosureOpKind, Literal};
+        let expr = match self.detect_expr() { Some(e) => e, None => return false };
+        // Pattern: Pipe(Pipe(to_entries, sort_by(.key)), from_entries)
+        // or: Pipe(to_entries, Pipe(sort_by(.key), from_entries))
+        // After simplify_expr normalization, it could be either form.
+        fn check(expr: &Expr) -> bool {
+            // Try: Pipe(Pipe(to_entries, sort_by(.key)), from_entries)
+            if let Expr::Pipe { left, right } = expr {
+                if matches!(right.as_ref(), Expr::UnaryOp { op: UnaryOp::FromEntries, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                    if let Expr::Pipe { left: l2, right: r2 } = left.as_ref() {
+                        if matches!(l2.as_ref(), Expr::UnaryOp { op: UnaryOp::ToEntries, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                            return is_sort_by_key(r2);
+                        }
+                    }
+                }
+                // Try: Pipe(to_entries, Pipe(sort_by(.key), from_entries))
+                if matches!(left.as_ref(), Expr::UnaryOp { op: UnaryOp::ToEntries, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                    if let Expr::Pipe { left: l2, right: r2 } = right.as_ref() {
+                        if matches!(r2.as_ref(), Expr::UnaryOp { op: UnaryOp::FromEntries, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                            return is_sort_by_key(l2);
+                        }
+                    }
+                }
+            }
+            false
+        }
+        fn is_sort_by_key(expr: &Expr) -> bool {
+            if let Expr::ClosureOp { op: ClosureOpKind::SortBy, input_expr, key_expr } = expr {
+                if !matches!(input_expr.as_ref(), Expr::Input) { return false; }
+                // key_expr should be .key (Index{Input, "key"})
+                if let Expr::Index { expr: base, key } = key_expr.as_ref() {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(s)) = key.as_ref() {
+                            return s == "key";
+                        }
+                    }
+                }
+            }
+            false
+        }
+        check(expr)
+    }
+
     /// Detect `to_entries` on input.
     pub fn is_to_entries(&self) -> bool {
         use crate::ir::{Expr, UnaryOp};
