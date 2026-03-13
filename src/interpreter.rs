@@ -70,6 +70,8 @@ pub enum RemapExpr {
     FieldNegate(String),
     /// `(arith) cmp N` — compare compound arithmetic result to constant, emit true/false
     ArithCmp(ArithExpr, crate::ir::BinOp, f64, Vec<String>),
+    /// `.name + ":" + (.x | tostring)` — string add chain
+    StringChain(Vec<StringAddPart>),
 }
 
 /// Math unary operation for ArithUnary.
@@ -2108,6 +2110,71 @@ impl Filter {
                         return Some(RemapExpr::FieldSlice(field.clone(), from_val, to_val));
                     }
                 }
+            }
+        }
+        // String add chain: .name + ":" + (.x | tostring) etc.
+        {
+            use crate::ir::UnaryOp;
+            fn remap_tostring_arith(operand: &Expr, parts: &mut Vec<StringAddPart>) -> bool {
+                if let Expr::Index { expr: base, key } = operand {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                            parts.push(StringAddPart::FieldToString(f.clone()));
+                            return true;
+                        }
+                    }
+                }
+                let mut arith_ops = Vec::new();
+                let mut cur = operand;
+                loop {
+                    if let Expr::BinOp { op: aop, lhs, rhs } = cur {
+                        if matches!(aop, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+                            if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                arith_ops.push((*aop, *n));
+                                cur = lhs.as_ref();
+                                continue;
+                            }
+                        }
+                    }
+                    break;
+                }
+                if !arith_ops.is_empty() {
+                    arith_ops.reverse();
+                    if let Expr::Index { expr: base, key } = cur {
+                        if matches!(base.as_ref(), Expr::Input) {
+                            if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                                parts.push(StringAddPart::FieldArithToString(f.clone(), arith_ops));
+                                return true;
+                            }
+                        }
+                    }
+                }
+                false
+            }
+            fn collect_chain_rv(expr: &Expr, parts: &mut Vec<StringAddPart>) -> bool {
+                match expr {
+                    Expr::BinOp { op: BinOp::Add, lhs, rhs } => {
+                        collect_chain_rv(lhs, parts) && collect_chain_rv(rhs, parts)
+                    }
+                    Expr::Index { expr: base, key } if matches!(base.as_ref(), Expr::Input) => {
+                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                            parts.push(StringAddPart::Field(f.clone())); true
+                        } else { false }
+                    }
+                    Expr::Literal(Literal::Str(s)) => {
+                        parts.push(StringAddPart::Literal(s.clone())); true
+                    }
+                    Expr::UnaryOp { op: UnaryOp::ToString, operand } => {
+                        remap_tostring_arith(operand, parts)
+                    }
+                    _ => false,
+                }
+            }
+            let mut parts = Vec::new();
+            if collect_chain_rv(v, &mut parts) && parts.len() >= 2
+                && parts.iter().any(|p| !matches!(p, StringAddPart::Literal(_)))
+            {
+                return Some(RemapExpr::StringChain(parts));
             }
         }
         // Fallback: compound arithmetic expression tree over fields and constants
@@ -4668,7 +4735,14 @@ impl Filter {
                     }
                     Some(BranchOutput::Remap(result))
                 }
-                _ => None,
+                _ => {
+                    // Fallback: try to classify as a computed RemapExpr
+                    if let Some(rexpr) = Self::classify_remap_value(e) {
+                        Some(BranchOutput::Computed(rexpr))
+                    } else {
+                        None
+                    }
+                }
             }
         };
 
