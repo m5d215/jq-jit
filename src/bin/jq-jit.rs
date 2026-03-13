@@ -133,6 +133,8 @@ fn remap_expr_fields(rexpr: &jq_jit::interpreter::RemapExpr) -> Vec<&str> {
         RemapExpr::ConstOpField(_, _, f) => vec![f.as_str()],
         RemapExpr::Arith(_, fields) => fields.iter().map(|f| f.as_str()).collect(),
         RemapExpr::FieldMinMax(f1, f2, _) => vec![f1.as_str(), f2.as_str()],
+        RemapExpr::LiteralJson(_) => vec![],
+        RemapExpr::FieldLength(f) => vec![f.as_str()],
     }
 }
 
@@ -176,6 +178,8 @@ enum ResolvedRemap {
     FieldOpConstToString(usize, jq_jit::ir::BinOp, f64),
     Arith(jq_jit::interpreter::ArithExpr),
     FieldMinMax(usize, usize, bool),
+    LiteralJson(Vec<u8>),
+    FieldLength(usize),
 }
 
 /// Pre-resolve RemapExpr → ResolvedRemap using a field→index map.
@@ -202,6 +206,8 @@ fn resolve_one_remap(
         RemapExpr::FieldOpConstToString(f, op, n) => ResolvedRemap::FieldOpConstToString(field_idx[f.as_str()], *op, *n),
         RemapExpr::Arith(arith, fields) => ResolvedRemap::Arith(resolve_arith_expr(arith, fields, field_idx)),
         RemapExpr::FieldMinMax(f1, f2, is_max) => ResolvedRemap::FieldMinMax(field_idx[f1.as_str()], field_idx[f2.as_str()], *is_max),
+        RemapExpr::LiteralJson(ref bytes) => ResolvedRemap::LiteralJson(bytes.clone()),
+        RemapExpr::FieldLength(f) => ResolvedRemap::FieldLength(field_idx[f.as_str()]),
     }
 }
 
@@ -373,6 +379,14 @@ fn emit_remap_value(
                 push_jq_number_bytes(buf, r);
             } else { buf.extend_from_slice(b"null"); }
         }
+        RemapExpr::LiteralJson(ref bytes) => {
+            buf.extend_from_slice(bytes);
+        }
+        RemapExpr::FieldLength(f) => {
+            let idx = field_idx[f.as_str()];
+            let resolved = ResolvedRemap::FieldLength(idx);
+            emit_resolved_value(buf, &resolved, raw, ranges);
+        }
     }
 }
 
@@ -485,6 +499,52 @@ fn emit_resolved_value(
                 let r = if is_max { if a >= b { a } else { b } } else { if a <= b { a } else { b } };
                 push_jq_number_bytes(buf, r);
             } else { buf.extend_from_slice(b"null"); }
+        }
+        ResolvedRemap::LiteralJson(ref bytes) => {
+            buf.extend_from_slice(bytes);
+        }
+        ResolvedRemap::FieldLength(idx) => {
+            let (vs, ve) = ranges[idx];
+            let val = &raw[vs..ve];
+            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                && !val[1..val.len()-1].contains(&b'\\')
+            {
+                // ASCII-only fast path: count UTF-8 start bytes
+                let content = &val[1..val.len()-1];
+                let count = content.iter().filter(|&&b| (b & 0xC0) != 0x80).count();
+                push_jq_number_bytes(buf, count as f64);
+            } else if let Some(len) = json_value_length(val, 0) {
+                push_jq_number_bytes(buf, len as f64);
+            } else if val[0] == b'"' {
+                // String with escapes: count by unescaping
+                let content = &val[1..val.len()-1];
+                let mut count = 0usize;
+                let mut i = 0;
+                while i < content.len() {
+                    if content[i] == b'\\' {
+                        i += 1;
+                        if i < content.len() {
+                            if content[i] == b'u' {
+                                // \uXXXX — possibly a surrogate pair
+                                i += 4;
+                                if i + 2 <= content.len() && content[i] == b'\\' && i + 1 < content.len() && content[i+1] == b'u' {
+                                    // Check for surrogate pair
+                                    i += 6; // skip \uXXXX
+                                }
+                            } else { i += 1; }
+                        }
+                        count += 1;
+                    } else {
+                        if (content[i] & 0xC0) != 0x80 { count += 1; }
+                        i += 1;
+                    }
+                }
+                push_jq_number_bytes(buf, count as f64);
+            } else if let Some(n) = parse_json_num(val) {
+                push_jq_number_bytes(buf, n.abs());
+            } else {
+                buf.extend_from_slice(b"null");
+            }
         }
     }
 }

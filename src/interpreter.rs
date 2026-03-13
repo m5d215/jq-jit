@@ -34,6 +34,10 @@ pub enum RemapExpr {
     Arith(ArithExpr, Vec<String>),
     /// `[.field1, .field2] | min` or `| max`
     FieldMinMax(String, String, bool), // true=max, false=min
+    /// Pre-serialized JSON literal bytes (e.g., `"str"`, `123`, `null`)
+    LiteralJson(Vec<u8>),
+    /// `.field | length` — string length or array length
+    FieldLength(String),
 }
 
 /// A pure numeric expression over fields and constants.
@@ -1280,6 +1284,10 @@ impl Filter {
     /// Classify a single remap value expression.
     fn classify_remap_value(v: &crate::ir::Expr) -> Option<RemapExpr> {
         use crate::ir::{Expr, BinOp, Literal, UnaryOp};
+        // Literal value (string, number, null, true, false)
+        if let Some(json_bytes) = const_expr_to_json(v) {
+            return Some(RemapExpr::LiteralJson(json_bytes));
+        }
         // .field
         if let Expr::Index { expr: base, key } = v {
             if matches!(base.as_ref(), Expr::Input) {
@@ -1288,6 +1296,16 @@ impl Filter {
                 }
             }
             return None;
+        }
+        // .field | length (beta-reduced: UnaryOp(Length, Index(Input, field)))
+        if let Expr::UnaryOp { op: UnaryOp::Length, operand } = v {
+            if let Expr::Index { expr: base, key } = operand.as_ref() {
+                if matches!(base.as_ref(), Expr::Input) {
+                    if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                        return Some(RemapExpr::FieldLength(f.clone()));
+                    }
+                }
+            }
         }
         // .field | tostring (beta-reduced: UnaryOp(ToString, Index(Input, field)))
         if let Expr::UnaryOp { op: UnaryOp::ToString, operand } = v {
