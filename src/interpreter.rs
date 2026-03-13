@@ -1885,6 +1885,39 @@ impl Filter {
         None
     }
 
+    /// Detect `[remap_exprs] | map(tostring) | join("sep")` pattern.
+    /// Returns (remap_exprs, separator) if detected.
+    pub fn detect_remap_tostring_join(&self) -> Option<(Vec<RemapExpr>, String)> {
+        use crate::ir::{Expr, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        // Structure: Pipe(Collect(gen), Pipe(map_tostring, join(sep)))
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Collect { generator } = left.as_ref() {
+                if let Expr::Pipe { left: map_expr, right: join_expr } = right.as_ref() {
+                    // Check join(sep)
+                    let sep = if let Expr::CallBuiltin { name, args } = join_expr.as_ref() {
+                        if name != "join" || args.len() != 1 { return None; }
+                        if let Expr::Literal(Literal::Str(s)) = &args[0] { s.clone() } else { return None; }
+                    } else { return None; };
+                    // Check map(tostring) = [.[] | tostring]
+                    let is_map_tostring = if let Expr::Collect { generator: mg } = map_expr.as_ref() {
+                        if let Expr::Pipe { left: ml, right: mr } = mg.as_ref() {
+                            matches!(ml.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input))
+                                && matches!(mr.as_ref(), Expr::UnaryOp { op: UnaryOp::ToString, operand } if matches!(operand.as_ref(), Expr::Input))
+                        } else { false }
+                    } else { false };
+                    if !is_map_tostring { return None; }
+                    // Collect remap expressions from the generator
+                    let mut exprs = Vec::new();
+                    if collect_comma_remap(generator, &mut exprs) && !exprs.is_empty() {
+                        return Some((exprs, sep));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field / N | floor` or `.field % N` pattern (field + binop + optional unary).
     /// Returns (field_name, binop, constant, optional unary op) if detected.
     /// Returns (field, op, const, unary_op, const_on_left).

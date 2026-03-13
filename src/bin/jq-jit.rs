@@ -1075,6 +1075,9 @@ fn real_main() {
     let field_string_chain = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() {
         filter.detect_field_string_chain()
     } else { None };
+    let remap_tostring_join = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && array_join.is_none() {
+        filter.detect_remap_tostring_join()
+    } else { None };
     let select_str_cremap = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_str_field.is_none() && field_access.is_none() {
         filter.detect_select_str_then_computed_remap()
     } else { None };
@@ -1097,7 +1100,7 @@ fn real_main() {
         || literal_output.is_some() || array_fields_format.is_some() || raw_csv_fields.is_some()
         || field_str_reverse.is_some() || field_split_join.is_some() || field_split_first.is_some() || field_split_length.is_some() || field_strop_length.is_some() || field_length_cmp.is_some() || select_length_cmp_field.is_some() || field_slice.is_some()
         || dynamic_key_obj.is_some() || field_update_num.is_some() || field_assign_const.is_some()
-        || min_two_fields.is_some() || minmax_two.is_some() || minmax_n.is_some() || field_string_chain.is_some() || filter.is_empty();
+        || min_two_fields.is_some() || minmax_two.is_some() || minmax_n.is_some() || field_string_chain.is_some() || remap_tostring_join.is_some() || filter.is_empty();
     let projection_fields: Option<Vec<String>> = if !has_raw_fast_path && !slurp && !raw_input {
         filter.needed_input_fields()
     } else { None };
@@ -3061,6 +3064,58 @@ fn real_main() {
                                     } else {
                                         compact_buf.extend_from_slice(val);
                                     }
+                                }
+                            }
+                            compact_buf.push(b'"');
+                            compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref remap_exprs, ref join_sep)) = remap_tostring_join {
+                    // [remap_exprs] | map(tostring) | join("sep")
+                    let mut all_fields: Vec<String> = Vec::new();
+                    for rexpr in remap_exprs {
+                        for f in remap_expr_fields(rexpr) {
+                            if !all_fields.iter().any(|x| x == f) {
+                                all_fields.push(f.to_string());
+                            }
+                        }
+                    }
+                    let field_strs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                    let mut field_idx = std::collections::HashMap::new();
+                    for (i, f) in all_fields.iter().enumerate() { field_idx.insert(f.clone(), i); }
+                    let resolved: Vec<ResolvedRemap> = remap_exprs.iter().map(|rexpr| resolve_one_remap(rexpr, &field_idx)).collect();
+                    let sep_bytes = join_sep.as_bytes();
+                    let escaped_sep = json_escape_bytes(sep_bytes);
+                    let mut ranges = vec![(0usize, 0usize); all_fields.len()];
+                    let mut num_buf = Vec::<u8>::new();
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if raw[0] != b'{' {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            return Ok(());
+                        }
+                        if json_object_get_fields_raw_buf(raw, 0, &field_strs, &mut ranges) {
+                            compact_buf.push(b'"');
+                            for (i, res) in resolved.iter().enumerate() {
+                                if i > 0 { compact_buf.extend_from_slice(&escaped_sep); }
+                                // Emit each element as a string (tostring semantics)
+                                num_buf.clear();
+                                emit_resolved_value(&mut num_buf, res, raw, &ranges);
+                                // If it's a JSON string, strip quotes; otherwise use as-is
+                                if num_buf.len() >= 2 && num_buf[0] == b'"' && num_buf[num_buf.len()-1] == b'"' {
+                                    compact_buf.extend_from_slice(&num_buf[1..num_buf.len()-1]);
+                                } else {
+                                    // Escape for embedding in JSON string
+                                    compact_buf.extend_from_slice(&json_escape_bytes(&num_buf));
                                 }
                             }
                             compact_buf.push(b'"');
@@ -8530,6 +8585,55 @@ fn real_main() {
                                 } else {
                                     compact_buf.extend_from_slice(val);
                                 }
+                            }
+                        }
+                        compact_buf.push(b'"');
+                        compact_buf.push(b'\n');
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref remap_exprs, ref join_sep)) = remap_tostring_join {
+                let content_bytes = content.as_bytes();
+                let mut all_fields: Vec<String> = Vec::new();
+                for rexpr in remap_exprs {
+                    for f in remap_expr_fields(rexpr) {
+                        if !all_fields.iter().any(|x| x == f) {
+                            all_fields.push(f.to_string());
+                        }
+                    }
+                }
+                let field_strs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                let mut field_idx = std::collections::HashMap::new();
+                for (i, f) in all_fields.iter().enumerate() { field_idx.insert(f.clone(), i); }
+                let resolved: Vec<ResolvedRemap> = remap_exprs.iter().map(|rexpr| resolve_one_remap(rexpr, &field_idx)).collect();
+                let sep_bytes = join_sep.as_bytes();
+                let escaped_sep = json_escape_bytes(sep_bytes);
+                let mut ranges = vec![(0usize, 0usize); all_fields.len()];
+                let mut num_buf = Vec::<u8>::new();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if raw[0] != b'{' {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        return Ok(());
+                    }
+                    if json_object_get_fields_raw_buf(raw, 0, &field_strs, &mut ranges) {
+                        compact_buf.push(b'"');
+                        for (i, res) in resolved.iter().enumerate() {
+                            if i > 0 { compact_buf.extend_from_slice(&escaped_sep); }
+                            num_buf.clear();
+                            emit_resolved_value(&mut num_buf, res, raw, &ranges);
+                            if num_buf.len() >= 2 && num_buf[0] == b'"' && num_buf[num_buf.len()-1] == b'"' {
+                                compact_buf.extend_from_slice(&num_buf[1..num_buf.len()-1]);
+                            } else {
+                                compact_buf.extend_from_slice(&json_escape_bytes(&num_buf));
                             }
                         }
                         compact_buf.push(b'"');
