@@ -177,6 +177,11 @@ fn collect_branch_output_fields<'a>(out: &'a jq_jit::interpreter::BranchOutput, 
                 }
             }
         }
+        BranchOutput::Computed(rexpr) => {
+            for name in remap_expr_fields(rexpr) {
+                if !fields.contains(&name) { fields.push(name); }
+            }
+        }
         _ => {}
     }
 }
@@ -225,7 +230,7 @@ enum ResolvedRemap {
     FieldLength(usize),
     StringInterp(Vec<ResolvedInterpPart>),
     FieldSplitJoin(usize, Vec<u8>, Vec<u8>), // field_idx, split_sep bytes, join_rep bytes
-    CondChain(Vec<ResolvedCondBranch>, ResolvedBranchOutput),
+    CondChain(Vec<ResolvedCondBranch>, Box<ResolvedBranchOutput>),
 }
 
 /// Pre-resolved conditional branch for remap values.
@@ -250,6 +255,7 @@ enum ResolvedBranchOutput {
     Field(usize),
     Empty,
     Remap(Vec<ResolvedRemap>),
+    Computed(Box<ResolvedRemap>),
 }
 
 /// Pre-resolved string interpolation part.
@@ -304,7 +310,7 @@ fn resolve_one_remap(
                 }
             }).collect();
             let resolved_else = resolve_branch_output(else_out, field_idx);
-            ResolvedRemap::CondChain(resolved_branches, resolved_else)
+            ResolvedRemap::CondChain(resolved_branches, Box::new(resolved_else))
         }
         RemapExpr::StringInterp(parts) => {
             let resolved = parts.iter().map(|p| match p {
@@ -363,6 +369,9 @@ fn resolve_branch_output(
         BranchOutput::Remap(entries) => {
             let resolved = entries.iter().map(|(_, rexpr)| resolve_one_remap(rexpr, field_idx)).collect();
             ResolvedBranchOutput::Remap(resolved)
+        }
+        BranchOutput::Computed(rexpr) => {
+            ResolvedBranchOutput::Computed(Box::new(resolve_one_remap(rexpr, field_idx)))
         }
     }
 }
@@ -449,11 +458,11 @@ fn emit_resolved_branch_output(
         }
         ResolvedBranchOutput::Empty => {}
         ResolvedBranchOutput::Remap(ref resolved_values) => {
-            // Emit object with pre-resolved values — but we don't have keys here
-            // This is only used for cond_chain standalone, which already handles it
-            // For remap values, this shouldn't be reached
             let _ = resolved_values;
             buf.extend_from_slice(b"null");
+        }
+        ResolvedBranchOutput::Computed(ref resolved) => {
+            emit_resolved_value(buf, resolved, raw, ranges);
         }
     }
 }
@@ -3908,7 +3917,7 @@ fn real_main() {
                     use jq_jit::ir::BinOp;
 
                     // Specialized path: single-branch with lazy output fetch (no remap outputs)
-                    if branches.len() == 1 && !matches!(branches[0].output, BranchOutput::Remap(_)) && !matches!(else_output, BranchOutput::Remap(_)) {
+                    if branches.len() == 1 && !matches!(branches[0].output, BranchOutput::Remap(_) | BranchOutput::Computed(_)) && !matches!(else_output, BranchOutput::Remap(_) | BranchOutput::Computed(_)) {
                         let br = &branches[0];
                         let cond_field = br.cond_field.as_str();
                         let cond_arith = &br.cond_arith_ops;
@@ -3973,7 +3982,7 @@ fn real_main() {
                                         }
                                     }
                                     BranchOutput::Empty => {}
-                                    BranchOutput::Remap(_) => unreachable!(),
+                                    BranchOutput::Remap(_) | BranchOutput::Computed(_) => unreachable!(),
                                 }
                             } else {
                                 // Fields not numeric — take else branch
@@ -3994,7 +4003,7 @@ fn real_main() {
                                         }
                                     }
                                     BranchOutput::Empty => {}
-                                    BranchOutput::Remap(_) => unreachable!(),
+                                    BranchOutput::Remap(_) | BranchOutput::Computed(_) => unreachable!(),
                                 }
                             }
                             if compact_buf.len() >= 1 << 17 {
@@ -4024,6 +4033,12 @@ fn real_main() {
                                     }
                                 }
                             }
+                            BranchOutput::Computed(ref rexpr) => {
+                                for name in remap_expr_fields(rexpr) {
+                                    let s = name.to_string();
+                                    ensure_field(&s, all, idx);
+                                }
+                            }
                             _ => {}
                         }
                     };
@@ -4036,6 +4051,15 @@ fn real_main() {
                     }
                     collect_output_fields(else_output, &mut all_fields, &mut field_idx);
                     // Pre-resolve remap exprs for each branch
+                    // Pre-resolve Computed outputs for each branch
+                    let branch_computed: Vec<Option<ResolvedRemap>> = branches.iter().map(|br| {
+                        if let BranchOutput::Computed(ref rexpr) = br.output {
+                            Some(resolve_one_remap(rexpr, &field_idx))
+                        } else { None }
+                    }).collect();
+                    let else_computed = if let BranchOutput::Computed(ref rexpr) = else_output {
+                        Some(resolve_one_remap(rexpr, &field_idx))
+                    } else { None };
                     let branch_resolved: Vec<Option<(Vec<Vec<u8>>, Vec<ResolvedRemap>, &[u8])>> = branches.iter().map(|br| {
                         if let BranchOutput::Remap(ref entries) = br.output {
                             let kp = if use_pretty_buf {
@@ -4121,6 +4145,17 @@ fn real_main() {
                                             emit_resolved_value(&mut compact_buf, rv, raw, &ranges_buf);
                                         }
                                         compact_buf.extend_from_slice(close);
+                                    }
+                                }
+                                BranchOutput::Computed(_) => {
+                                    let resolved_remap = if output.is_some() {
+                                        branch_computed[output_idx].as_ref()
+                                    } else {
+                                        else_computed.as_ref()
+                                    };
+                                    if let Some(rv) = resolved_remap {
+                                        emit_resolved_value(&mut compact_buf, rv, raw, &ranges_buf);
+                                        compact_buf.push(b'\n');
                                     }
                                 }
                                 BranchOutput::Empty => { /* produce no output */ }
@@ -6840,7 +6875,7 @@ fn real_main() {
                 let content_bytes = content.as_bytes();
 
                 // Specialized path: single-branch with lazy output fetch (no remap outputs)
-                if branches.len() == 1 && !matches!(branches[0].output, BranchOutput::Remap(_)) && !matches!(else_output, BranchOutput::Remap(_)) {
+                if branches.len() == 1 && !matches!(branches[0].output, BranchOutput::Remap(_) | BranchOutput::Computed(_)) && !matches!(else_output, BranchOutput::Remap(_) | BranchOutput::Computed(_)) {
                     let br = &branches[0];
                     let cond_field = br.cond_field.as_str();
                     let cond_arith = &br.cond_arith_ops;
@@ -6861,7 +6896,6 @@ fn real_main() {
                             } else { (0.0, 0.0, false) }
                         };
                         if got {
-                            // Apply arithmetic chain to LHS (keep original for field output)
                             let orig_lv = lv;
                             let mut cmp_lv = lv;
                             for (aop, n) in cond_arith {
@@ -6904,7 +6938,7 @@ fn real_main() {
                                     }
                                 }
                                 BranchOutput::Empty => {}
-                                BranchOutput::Remap(_) => unreachable!(),
+                                BranchOutput::Remap(_) | BranchOutput::Computed(_) => unreachable!(),
                             }
                         } else {
                             match else_output {
@@ -6924,7 +6958,7 @@ fn real_main() {
                                     }
                                 }
                                 BranchOutput::Empty => {}
-                                BranchOutput::Remap(_) => unreachable!(),
+                                BranchOutput::Remap(_) | BranchOutput::Computed(_) => unreachable!(),
                             }
                         }
                         if compact_buf.len() >= 1 << 17 {
@@ -6954,6 +6988,12 @@ fn real_main() {
                                 }
                             }
                         }
+                        BranchOutput::Computed(ref rexpr) => {
+                            for name in remap_expr_fields(rexpr) {
+                                let s = name.to_string();
+                                ensure_field(&s, all, idx);
+                            }
+                        }
                         _ => {}
                     }
                 };
@@ -6965,6 +7005,15 @@ fn real_main() {
                     collect_output_fields(&br.output, &mut all_fields, &mut field_idx);
                 }
                 collect_output_fields(else_output, &mut all_fields, &mut field_idx);
+                // Pre-resolve computed exprs
+                let branch_computed2: Vec<Option<ResolvedRemap>> = branches.iter().map(|br| {
+                    if let BranchOutput::Computed(ref rexpr) = br.output {
+                        Some(resolve_one_remap(rexpr, &field_idx))
+                    } else { None }
+                }).collect();
+                let else_computed2 = if let BranchOutput::Computed(ref rexpr) = else_output {
+                    Some(resolve_one_remap(rexpr, &field_idx))
+                } else { None };
                 // Pre-resolve remap exprs for each branch
                 let branch_resolved: Vec<Option<(Vec<Vec<u8>>, Vec<ResolvedRemap>, &[u8])>> = branches.iter().map(|br| {
                     if let BranchOutput::Remap(ref entries) = br.output {
@@ -7051,6 +7100,17 @@ fn real_main() {
                                         emit_resolved_value(&mut compact_buf, rv, raw, &ranges_buf);
                                     }
                                     compact_buf.extend_from_slice(close);
+                                }
+                            }
+                            BranchOutput::Computed(_) => {
+                                let resolved_remap = if output.is_some() {
+                                    branch_computed2[output_idx].as_ref()
+                                } else {
+                                    else_computed2.as_ref()
+                                };
+                                if let Some(rv) = resolved_remap {
+                                    emit_resolved_value(&mut compact_buf, rv, raw, &ranges_buf);
+                                    compact_buf.push(b'\n');
                                 }
                             }
                             BranchOutput::Empty => { /* produce no output */ }

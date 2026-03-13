@@ -43,7 +43,7 @@ pub enum RemapExpr {
     /// `.field | split(sep) | join(rep)` — string replacement
     FieldSplitJoin(String, String, String), // field, split_sep, join_rep
     /// `if .field cmp N then A elif ... else B end` — conditional chain
-    CondChain(Vec<CondBranch>, BranchOutput),
+    CondChain(Vec<CondBranch>, Box<BranchOutput>),
 }
 
 /// Part of a string interpolation for raw byte remap emission.
@@ -100,6 +100,8 @@ pub enum BranchOutput {
     Empty,
     /// `{key: value, ...}` — object construction with computed values
     Remap(Vec<(String, RemapExpr)>),
+    /// Computed value (e.g., `.x - .y`)
+    Computed(RemapExpr),
 }
 
 /// Right-hand side of a condition: either a constant or a field reference.
@@ -1464,7 +1466,7 @@ impl Filter {
         if let Expr::IfThenElse { .. } = v {
             if let Some((branches, else_out)) = Self::classify_remap_cond_chain(v) {
                 if !branches.is_empty() {
-                    return Some(RemapExpr::CondChain(branches, else_out));
+                    return Some(RemapExpr::CondChain(branches, Box::new(else_out)));
                 }
             }
         }
@@ -1533,6 +1535,10 @@ impl Filter {
                     }
                     return Some(BranchOutput::Remap(result));
                 }
+            }
+            // Fallback: try as computed value (e.g., .x - .y)
+            if let Some(rexpr) = Filter::classify_remap_value(e) {
+                return Some(BranchOutput::Computed(rexpr));
             }
             None
         }
