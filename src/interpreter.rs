@@ -4733,6 +4733,187 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.x > N and .y < M) | [array]` — compound select then array output.
+    pub fn detect_select_compound_cmp_then_array(&self) -> Option<(crate::ir::BinOp, Vec<(String, crate::ir::BinOp, f64)>, Vec<RemapExpr>)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        let extract_cmp = |e: &Expr| -> Option<(String, BinOp, f64)> {
+            if let Expr::BinOp { op, lhs, rhs } = e {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                            return Some((field.clone(), *op, *n));
+                        }
+                    }
+                }
+            }
+            None
+        };
+        fn collect_conds2<'a>(e: &'a Expr, conj: BinOp, out: &mut Vec<&'a Expr>) -> bool {
+            if let Expr::BinOp { op, lhs, rhs } = e {
+                if std::mem::discriminant(op) == std::mem::discriminant(&conj) {
+                    return collect_conds2(lhs, conj, out) && collect_conds2(rhs, conj, out);
+                }
+            }
+            out.push(e);
+            true
+        }
+        let try_extract = |cond: &Expr, output: &Expr| -> Option<(BinOp, Vec<(String, BinOp, f64)>, Vec<RemapExpr>)> {
+            if let Expr::Collect { generator } = output {
+                fn collect_elems2<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+                    match e {
+                        Expr::Comma { left, right } => { collect_elems2(left, out); collect_elems2(right, out); }
+                        _ => out.push(e),
+                    }
+                }
+                let mut elems = Vec::new();
+                collect_elems2(generator, &mut elems);
+                if elems.len() < 2 { return None; }
+                let mut rexprs = Vec::with_capacity(elems.len());
+                for elem in &elems { rexprs.push(Self::classify_remap_value(elem)?); }
+                for conj in [BinOp::And, BinOp::Or] {
+                    if let Expr::BinOp { op, .. } = cond {
+                        if std::mem::discriminant(op) == std::mem::discriminant(&conj) {
+                            let mut parts = Vec::new();
+                            if collect_conds2(cond, conj, &mut parts) && parts.len() >= 2 {
+                                let cmps: Vec<_> = parts.iter().filter_map(|e| extract_cmp(e)).collect();
+                                if cmps.len() == parts.len() {
+                                    return Some((conj, cmps, rexprs));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        };
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                    if let Some(r) = try_extract(cond, right) { return Some(r); }
+                }
+            }
+        }
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if matches!(else_branch.as_ref(), Expr::Empty) {
+                if let Some(r) = try_extract(cond, then_branch) { return Some(r); }
+            }
+        }
+        None
+    }
+
+    /// Detect `select(.x > .y) | [array]` — field-field compare select then array output.
+    pub fn detect_select_ff_cmp_then_array(&self) -> Option<(String, crate::ir::BinOp, String, Vec<RemapExpr>)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        let try_extract = |cond: &Expr, output: &Expr| -> Option<(String, BinOp, String, Vec<RemapExpr>)> {
+            if let Expr::Collect { generator } = output {
+                fn collect_elems3<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+                    match e {
+                        Expr::Comma { left, right } => { collect_elems3(left, out); collect_elems3(right, out); }
+                        _ => out.push(e),
+                    }
+                }
+                let mut elems = Vec::new();
+                collect_elems3(generator, &mut elems);
+                if elems.len() < 2 { return None; }
+                let mut rexprs = Vec::with_capacity(elems.len());
+                for elem in &elems { rexprs.push(Self::classify_remap_value(elem)?); }
+                if let Expr::BinOp { op, lhs, rhs } = cond {
+                    if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                    if let (Expr::Index { expr: base1, key: key1 }, Expr::Index { expr: base2, key: key2 }) = (lhs.as_ref(), rhs.as_ref()) {
+                        if !matches!(base1.as_ref(), Expr::Input) || !matches!(base2.as_ref(), Expr::Input) { return None; }
+                        if let (Expr::Literal(Literal::Str(f1)), Expr::Literal(Literal::Str(f2))) = (key1.as_ref(), key2.as_ref()) {
+                            return Some((f1.clone(), *op, f2.clone(), rexprs));
+                        }
+                    }
+                }
+            }
+            None
+        };
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                    if let Some(r) = try_extract(cond, right) { return Some(r); }
+                }
+            }
+        }
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if matches!(else_branch.as_ref(), Expr::Empty) {
+                if let Some(r) = try_extract(cond, then_branch) { return Some(r); }
+            }
+        }
+        None
+    }
+
+    /// Detect `select(.field == "str"|startswith/endswith/contains("str")) | [array]`.
+    pub fn detect_select_str_then_array(&self) -> Option<(String, String, String, Vec<RemapExpr>)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        let try_extract = |cond: &Expr, output: &Expr| -> Option<(String, String, String, Vec<RemapExpr>)> {
+            if let Expr::Collect { generator } = output {
+                fn collect_elems4<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+                    match e {
+                        Expr::Comma { left, right } => { collect_elems4(left, out); collect_elems4(right, out); }
+                        _ => out.push(e),
+                    }
+                }
+                let mut elems = Vec::new();
+                collect_elems4(generator, &mut elems);
+                if elems.len() < 2 { return None; }
+                let mut rexprs = Vec::with_capacity(elems.len());
+                for elem in &elems { rexprs.push(Self::classify_remap_value(elem)?); }
+                // Form A: .field == "str" / .field != "str"
+                if let Expr::BinOp { op, lhs, rhs } = cond {
+                    if matches!(op, BinOp::Eq | BinOp::Ne) {
+                        if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                            if matches!(base.as_ref(), Expr::Input) {
+                                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                    if let Expr::Literal(Literal::Str(val)) = rhs.as_ref() {
+                                        let test_type = if matches!(op, BinOp::Eq) { "eq" } else { "ne" };
+                                        return Some((field.clone(), test_type.to_string(), val.clone(), rexprs));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Form B: .field | startswith/endswith/contains("str")
+                if let Expr::Pipe { left: pl, right: pr } = cond {
+                    if let Expr::Index { expr: base, key } = pl.as_ref() {
+                        if matches!(base.as_ref(), Expr::Input) {
+                            if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                if let Expr::CallBuiltin { name, args } = pr.as_ref() {
+                                    if matches!(name.as_str(), "startswith" | "endswith" | "contains") && args.len() == 1 {
+                                        if let Expr::Literal(Literal::Str(arg)) = &args[0] {
+                                            return Some((field.clone(), name.clone(), arg.clone(), rexprs));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        };
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                    if let Some(r) = try_extract(cond, right) { return Some(r); }
+                }
+            }
+        }
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if matches!(else_branch.as_ref(), Expr::Empty) {
+                if let Some(r) = try_extract(cond, then_branch) { return Some(r); }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.field == "str") | .output_field` or `select(.field | startswith("str")) | .output_field`.
     /// Returns (select_field, test_type, test_arg, output_field).
     /// test_type: "eq", "ne", "startswith", "endswith", "contains"
