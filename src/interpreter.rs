@@ -602,10 +602,25 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             Expr::Alternative { primary: Box::new(simplify_expr(primary)), fallback: Box::new(simplify_expr(fallback)) }
         }
         Expr::Each { input_expr } => {
-            Expr::Each { input_expr: Box::new(simplify_expr(input_expr)) }
+            let se = simplify_expr(input_expr);
+            // Normalize f[] → f | .[] when f is not input
+            if !matches!(&se, Expr::Input) {
+                return simplify_expr(&Expr::Pipe {
+                    left: Box::new(se),
+                    right: Box::new(Expr::Each { input_expr: Box::new(Expr::Input) }),
+                });
+            }
+            Expr::Each { input_expr: Box::new(se) }
         }
         Expr::EachOpt { input_expr } => {
-            Expr::EachOpt { input_expr: Box::new(simplify_expr(input_expr)) }
+            let se = simplify_expr(input_expr);
+            if !matches!(&se, Expr::Input) {
+                return simplify_expr(&Expr::Pipe {
+                    left: Box::new(se),
+                    right: Box::new(Expr::EachOpt { input_expr: Box::new(Expr::Input) }),
+                });
+            }
+            Expr::EachOpt { input_expr: Box::new(se) }
         }
         Expr::Negate { operand } => {
             Expr::Negate { operand: Box::new(simplify_expr(operand)) }
