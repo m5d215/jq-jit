@@ -2539,6 +2539,33 @@ impl Filter {
         None
     }
 
+    /// Detect `(.field1 op1 .field2) op2 const` pattern — two-field binop then constant op.
+    /// Returns (field1, op1, field2, op2, const_val).
+    pub fn detect_two_field_binop_const(&self) -> Option<(String, crate::ir::BinOp, String, crate::ir::BinOp, f64)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::BinOp { op: op2, lhs, rhs } = expr {
+            if !matches!(op2, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) { return None; }
+            if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                if let Expr::BinOp { op: op1, lhs: inner_lhs, rhs: inner_rhs } = lhs.as_ref() {
+                    if !matches!(op1, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) { return None; }
+                    if let Expr::Index { expr: base1, key: key1 } = inner_lhs.as_ref() {
+                        if !matches!(base1.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f1)) = key1.as_ref() {
+                            if let Expr::Index { expr: base2, key: key2 } = inner_rhs.as_ref() {
+                                if !matches!(base2.as_ref(), Expr::Input) { return None; }
+                                if let Expr::Literal(Literal::Str(f2)) = key2.as_ref() {
+                                    return Some((f1.clone(), *op1, f2.clone(), *op2, *n));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field + "literal"` pattern (field access + string concatenation).
     /// Returns (field_name, suffix) if detected.
     pub fn detect_field_str_concat(&self) -> Option<(String, String)> {
@@ -5362,6 +5389,12 @@ impl Filter {
                 let has_arith_ops = branches.iter().any(|b| !b.cond_arith_ops.is_empty());
                 let has_str_func = branches.iter().any(|b| matches!(b.cond_rhs, CondRhs::Startswith(_) | CondRhs::Endswith(_) | CondRhs::Contains(_) | CondRhs::Test(_)));
                 if branches.len() < 2 && !has_field_output && !has_remap_output && !has_field_rhs && !has_arith_ops && !has_str_func { return None; }
+                // Single-branch arith with all-literal outputs → defer to detect_arith_cmp_branch_literals (faster handler)
+                let has_computed_output = branches.iter().any(|b| matches!(b.output, BranchOutput::Computed(_)))
+                    || matches!(else_output, BranchOutput::Computed(_));
+                if branches.len() == 1 && has_arith_ops && !has_field_output && !has_field_rhs && !has_remap_output && !has_computed_output && !has_str_func
+                    && matches!(branches[0].cond_rhs, CondRhs::Const(_))
+                { return None; }
                 return Some((branches, else_output));
             }
         }

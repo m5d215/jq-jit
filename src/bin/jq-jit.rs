@@ -1875,7 +1875,10 @@ fn real_main() {
     let field_binop_const_unary = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_binop.is_none() && field_unary_num.is_none() {
         filter.detect_field_binop_const_unary()
     } else { None };
-    let field_arith_chain = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_binop.is_none() && field_binop_const_unary.is_none() {
+    let two_field_binop_const = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_binop.is_none() && field_binop_const_unary.is_none() {
+        filter.detect_two_field_binop_const()
+    } else { None };
+    let field_arith_chain = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_binop.is_none() && field_binop_const_unary.is_none() && two_field_binop_const.is_none() {
         filter.detect_field_arith_chain()
     } else { None };
     let field_arith_tostring = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_arith_chain.is_none() {
@@ -2202,7 +2205,7 @@ fn real_main() {
     // Only activate when no raw byte fast path matched (those handle their own parsing).
     let has_raw_fast_path = field_access.is_some() || nested_field.is_some() || field_remap.is_some()
         || computed_remap.is_some() || standalone_array.is_some()
-        || field_binop.is_some() || field_binop_tostring.is_some() || field_unary_num.is_some() || field_binop_const_unary.is_some() || field_arith_chain.is_some() || field_arith_tostring.is_some() || numeric_expr.is_some() || numeric_expr_unary.is_some()
+        || field_binop.is_some() || field_binop_tostring.is_some() || field_unary_num.is_some() || field_binop_const_unary.is_some() || two_field_binop_const.is_some() || field_arith_chain.is_some() || field_arith_tostring.is_some() || numeric_expr.is_some() || numeric_expr_unary.is_some()
         || field_field_cmp.is_some() || field_const_cmp.is_some() || arith_chain_cmp.is_some() || compound_field_cmp.is_some()
         || field_str_builtin.is_some() || field_test.is_some() || field_gsub.is_some() || field_scan.is_some() || field_format.is_some() || field_ltrimstr_tonumber.is_some()
         || field_str_concat.is_some() || field_alt.is_some() || field_field_alt.is_some()
@@ -3819,6 +3822,40 @@ fn real_main() {
                                 compact_buf.push(b'\n');
                             } else {
                                 // Division by zero or mod edge case: fall back to normal path for error handling
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref f1, ref op1, ref f2, ref op2, const_val)) = two_field_binop_const {
+                    use jq_jit::ir::BinOp;
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some((a, b)) = json_object_get_two_nums(raw, 0, f1, f2) {
+                            let inner = match op1 {
+                                BinOp::Add => a + b, BinOp::Sub => a - b,
+                                BinOp::Mul => a * b, BinOp::Div => a / b,
+                                BinOp::Mod => { let r = a % b; if r.is_finite() { r } else { f64::NAN } },
+                                _ => unreachable!(),
+                            };
+                            let result = match op2 {
+                                BinOp::Add => inner + const_val, BinOp::Sub => inner - const_val,
+                                BinOp::Mul => inner * const_val, BinOp::Div => inner / const_val,
+                                BinOp::Mod => { let r = inner % const_val; if r.is_finite() { r } else { f64::NAN } },
+                                _ => unreachable!(),
+                            };
+                            if result.is_finite() {
+                                push_jq_number_bytes(&mut compact_buf, result);
+                                compact_buf.push(b'\n');
+                            } else {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             }
@@ -12923,6 +12960,40 @@ fn real_main() {
                         }
                     } else {
                         // Field missing or non-numeric: fall back to parse + JIT
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref f1, ref op1, ref f2, ref op2, const_val)) = two_field_binop_const {
+                use jq_jit::ir::BinOp;
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some((a, b)) = json_object_get_two_nums(raw, 0, f1, f2) {
+                        let inner = match op1 {
+                            BinOp::Add => a + b, BinOp::Sub => a - b,
+                            BinOp::Mul => a * b, BinOp::Div => a / b,
+                            BinOp::Mod => { let r = a % b; if r.is_finite() { r } else { f64::NAN } },
+                            _ => unreachable!(),
+                        };
+                        let result = match op2 {
+                            BinOp::Add => inner + const_val, BinOp::Sub => inner - const_val,
+                            BinOp::Mul => inner * const_val, BinOp::Div => inner / const_val,
+                            BinOp::Mod => { let r = inner % const_val; if r.is_finite() { r } else { f64::NAN } },
+                            _ => unreachable!(),
+                        };
+                        if result.is_finite() {
+                            push_jq_number_bytes(&mut compact_buf, result);
+                            compact_buf.push(b'\n');
+                        } else {
+                            compact_buf.extend_from_slice(b"null\n");
+                        }
+                    } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
