@@ -1000,6 +1000,81 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.field | length cmp N)` — select by string/array length.
+    /// Returns (field_name, cmp_op, threshold).
+    pub fn detect_select_field_length_cmp(&self) -> Option<(String, crate::ir::BinOp, f64)> {
+        use crate::ir::{Expr, BinOp, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        let try_extract = |cond: &Expr| -> Option<(String, BinOp, f64)> {
+            if let Expr::BinOp { op, lhs, rhs } = cond {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                // LHS: .field | length (beta-reduced to UnaryOp(Length, Index(Input, field)))
+                if let Expr::UnaryOp { op: UnaryOp::Length, operand } = lhs.as_ref() {
+                    if let Expr::Index { expr: base, key } = operand.as_ref() {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                            if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                return Some((f.clone(), *op, *n));
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        };
+        // select(cond) → if cond then . else empty end
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                return try_extract(cond);
+            }
+        }
+        None
+    }
+
+    /// Detect `select(.field | length cmp N) | .out_field`.
+    /// Returns (field_name, cmp_op, threshold, out_field).
+    pub fn detect_select_field_length_cmp_then_field(&self) -> Option<(String, crate::ir::BinOp, f64, String)> {
+        use crate::ir::{Expr, BinOp, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        let try_extract = |cond: &Expr, output: &Expr| -> Option<(String, BinOp, f64, String)> {
+            // Output must be .field
+            let out_field = if let Expr::Index { expr: base, key } = output {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() } else { return None; }
+            } else { return None; };
+            // Condition: (.field | length) cmp N
+            if let Expr::BinOp { op, lhs, rhs } = cond {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                if let Expr::UnaryOp { op: UnaryOp::Length, operand } = lhs.as_ref() {
+                    if let Expr::Index { expr: base, key } = operand.as_ref() {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                            if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                return Some((f.clone(), *op, *n, out_field));
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        };
+        // Form 1: Pipe(select(cond), .field)
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                    if let Some(r) = try_extract(cond, right) { return Some(r); }
+                }
+            }
+        }
+        // Form 2: if cond then .field else empty end
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if matches!(else_branch.as_ref(), Expr::Empty) {
+                if let Some(r) = try_extract(cond, then_branch) { return Some(r); }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.f1 > N and .f2 < M)` or `select(.f1 > N or .f2 < M)` pattern.
     /// Returns (conjunct, Vec<(field, op, threshold)>) where conjunct is And or Or.
     pub fn detect_select_compound_cmp(&self) -> Option<(crate::ir::BinOp, Vec<(String, crate::ir::BinOp, f64)>)> {
@@ -4380,64 +4455,6 @@ impl Filter {
                                 }
                             }
                         }
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    /// Detect `select(.field | length cmp N) | .output_field`.
-    /// Returns (cond_field, cmp_op, threshold, output_field).
-    pub fn detect_select_field_length_cmp_then_field(&self) -> Option<(String, crate::ir::BinOp, f64, String)> {
-        use crate::ir::{Expr, BinOp, Literal, UnaryOp};
-        let expr = self.detect_expr()?;
-        let extract_length_cmp = |cond: &Expr| -> Option<(String, BinOp, f64)> {
-            // BinOp(cmp, UnaryOp(Length, Index(Input, field)), Literal(N))
-            if let Expr::BinOp { op, lhs, rhs } = cond {
-                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
-                if let Expr::UnaryOp { op: UnaryOp::Length, operand } = lhs.as_ref() {
-                    if let Expr::Index { expr: base, key } = operand.as_ref() {
-                        if matches!(base.as_ref(), Expr::Input) {
-                            if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
-                                if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
-                                    return Some((field.clone(), *op, *n));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            None
-        };
-        let extract_output_field = |out: &Expr| -> Option<String> {
-            if let Expr::Index { expr: base, key } = out {
-                if matches!(base.as_ref(), Expr::Input) {
-                    if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
-                        return Some(f.clone());
-                    }
-                }
-            }
-            None
-        };
-        // Form 1: Pipe(IfThenElse{cond, then:Input, else:Empty}, Index(.output))
-        if let Expr::Pipe { left, right } = expr {
-            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
-                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
-                    if let Some((field, op, n)) = extract_length_cmp(cond) {
-                        if let Some(out_field) = extract_output_field(right) {
-                            return Some((field, op, n, out_field));
-                        }
-                    }
-                }
-            }
-        }
-        // Form 2: IfThenElse{cond, then:Index(.output), else:Empty}
-        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
-            if matches!(else_branch.as_ref(), Expr::Empty) {
-                if let Some((field, op, n)) = extract_length_cmp(cond) {
-                    if let Some(out_field) = extract_output_field(then_branch) {
-                        return Some((field, op, n, out_field));
                     }
                 }
             }
