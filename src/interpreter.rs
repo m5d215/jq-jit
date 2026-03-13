@@ -66,6 +66,8 @@ pub enum RemapExpr {
     BoolExpr(Box<RemapExpr>, crate::ir::BinOp, Box<RemapExpr>), // lhs, And/Or, rhs
     /// `.field | type` — JSON type string
     FieldType(String),
+    /// `-.field` — negation of a field
+    FieldNegate(String),
 }
 
 /// Math unary operation for ArithUnary.
@@ -1387,6 +1389,16 @@ impl Filter {
                 if matches!(base.as_ref(), Expr::Input) {
                     if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
                         return Some(RemapExpr::FieldLength(f.clone()));
+                    }
+                }
+            }
+        }
+        // -.field (Negate(Index(Input, field)))
+        if let Expr::Negate { operand } = v {
+            if let Expr::Index { expr: base, key } = operand.as_ref() {
+                if matches!(base.as_ref(), Expr::Input) {
+                    if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                        return Some(RemapExpr::FieldNegate(f.clone()));
                     }
                 }
             }
