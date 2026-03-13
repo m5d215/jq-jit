@@ -1970,6 +1970,9 @@ fn real_main() {
     let select_compound_cremap = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_compound.is_none() && select_compound_field.is_none() && select_compound_remap.is_none() && select_compound_computed.is_none() && field_access.is_none() {
         filter.detect_select_compound_cmp_then_cremap()
     } else { None };
+    let select_compound_str_chain = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_compound.is_none() && select_compound_field.is_none() && select_compound_remap.is_none() && select_compound_computed.is_none() && select_compound_cremap.is_none() && field_access.is_none() {
+        filter.detect_select_compound_cmp_then_str_chain()
+    } else { None };
     let select_has_multi = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() {
         filter.detect_select_has_multi()
     } else { None };
@@ -2046,7 +2049,7 @@ fn real_main() {
         || field_str_concat.is_some() || field_alt.is_some() || field_field_alt.is_some()
         || select_cmp.is_some() || select_arith_cmp.is_some()
         || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || field_field_cmp_branch.is_some() || if_cmp_arrays.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some() || select_compound_computed.is_some() || select_compound_cremap.is_some()
-        || select_str.is_some()
+        || select_str.is_some() || select_compound_str_chain.is_some()
         || select_str_test.is_some() || select_regex_test.is_some() || select_regex_value.is_some() || select_nested_cmp.is_some()
         || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_field_unary.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_array.is_some() || select_arith_cmp_array.is_some() || select_cmp_value.is_some() || select_cmp_str_chain.is_some() || select_ff_cmp_field.is_some() || select_ff_cmp.is_some() || select_ff_cmp_cremap.is_some() || select_ff_cmp_value.is_some() || select_ff_cmp_array.is_some() || select_compound_array.is_some() || select_str_field.is_some() || select_str_cremap.is_some() || select_str_array.is_some() || select_str_str_chain.is_some()
         || computed_array.is_some() || array_field.is_some() || multi_field.is_some() || is_length || is_keys
@@ -5592,6 +5595,129 @@ fn real_main() {
                                 emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
                             }
                             compact_buf.extend_from_slice(obj_close);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref conj, ref cmps, ref sac_parts)) = select_compound_str_chain {
+                    // select(.x > N and .y < M) | str_add_chain
+                    use jq_jit::interpreter::StringAddPart;
+                    use jq_jit::ir::BinOp;
+                    let mut field_names: Vec<&str> = Vec::new();
+                    let mut field_idx_map: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+                    // Add condition fields
+                    for (f, _, _) in cmps.iter() {
+                        if !field_idx_map.contains_key(f.as_str()) {
+                            field_idx_map.insert(f.as_str(), field_names.len());
+                            field_names.push(f.as_str());
+                        }
+                    }
+                    // Add chain fields
+                    for part in sac_parts.iter() {
+                        let name = match part {
+                            StringAddPart::Field(f) | StringAddPart::FieldToString(f) | StringAddPart::FieldArithToString(f, _) => f.as_str(),
+                            _ => continue,
+                        };
+                        if !field_idx_map.contains_key(name) {
+                            field_idx_map.insert(name, field_names.len());
+                            field_names.push(name);
+                        }
+                    }
+                    // Pre-resolve condition indices
+                    let resolved_cmps: Vec<(usize, &BinOp, f64)> = cmps.iter()
+                        .map(|(f, op, n)| (field_idx_map[f.as_str()], op, *n))
+                        .collect();
+                    let is_and = matches!(conj, BinOp::And);
+                    let mut actions: Vec<(usize, u8, usize)> = Vec::with_capacity(sac_parts.len());
+                    let mut lit_bufs: Vec<Vec<u8>> = Vec::new();
+                    let mut arith_ops_list: Vec<&[(BinOp, f64)]> = Vec::new();
+                    for part in sac_parts.iter() {
+                        match part {
+                            StringAddPart::Literal(s) => {
+                                let mut buf = Vec::new();
+                                for &b in s.as_bytes() {
+                                    match b {
+                                        b'"' => buf.extend_from_slice(b"\\\""),
+                                        b'\\' => buf.extend_from_slice(b"\\\\"),
+                                        b'\n' => buf.extend_from_slice(b"\\n"),
+                                        b'\r' => buf.extend_from_slice(b"\\r"),
+                                        b'\t' => buf.extend_from_slice(b"\\t"),
+                                        c if c < 0x20 => { let _ = write!(buf, "\\u{:04x}", c); }
+                                        _ => buf.push(b),
+                                    }
+                                }
+                                let li = lit_bufs.len();
+                                lit_bufs.push(buf);
+                                actions.push((li, 0, 0));
+                            }
+                            StringAddPart::Field(f) | StringAddPart::FieldToString(f) => {
+                                actions.push((field_idx_map[f.as_str()], 1, 0));
+                            }
+                            StringAddPart::FieldArithToString(f, ops) => {
+                                let ai = arith_ops_list.len();
+                                arith_ops_list.push(ops.as_slice());
+                                actions.push((field_idx_map[f.as_str()], 2, ai));
+                            }
+                        }
+                    }
+                    let mut ranges_buf = vec![(0usize, 0usize); field_names.len()];
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
+                            // Evaluate compound condition: get nums for condition fields
+                            let pass = if is_and {
+                                resolved_cmps.iter().all(|&(idx, op, threshold)| {
+                                    let (vs, ve) = ranges_buf[idx];
+                                    let s = unsafe { std::str::from_utf8_unchecked(&raw[vs..ve]) };
+                                    if let Ok(val) = s.trim().parse::<f64>() {
+                                        match op { BinOp::Gt => val > threshold, BinOp::Lt => val < threshold, BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold, BinOp::Eq => val == threshold, BinOp::Ne => val != threshold, _ => false }
+                                    } else { false }
+                                })
+                            } else {
+                                resolved_cmps.iter().any(|&(idx, op, threshold)| {
+                                    let (vs, ve) = ranges_buf[idx];
+                                    let s = unsafe { std::str::from_utf8_unchecked(&raw[vs..ve]) };
+                                    if let Ok(val) = s.trim().parse::<f64>() {
+                                        match op { BinOp::Gt => val > threshold, BinOp::Lt => val < threshold, BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold, BinOp::Eq => val == threshold, BinOp::Ne => val != threshold, _ => false }
+                                    } else { false }
+                                })
+                            };
+                            if pass {
+                                compact_buf.push(b'"');
+                                for &(idx, typ, ai) in &actions {
+                                    match typ {
+                                        0 => { compact_buf.extend_from_slice(&lit_bufs[idx]); }
+                                        1 => {
+                                            let (vs, ve) = ranges_buf[idx];
+                                            let val_bytes = &raw[vs..ve];
+                                            if val_bytes[0] == b'"' && val_bytes.len() >= 2 {
+                                                compact_buf.extend_from_slice(&val_bytes[1..val_bytes.len()-1]);
+                                            } else {
+                                                compact_buf.extend_from_slice(val_bytes);
+                                            }
+                                        }
+                                        _ => {
+                                            let (vs, ve) = ranges_buf[idx];
+                                            let s = unsafe { std::str::from_utf8_unchecked(&raw[vs..ve]) };
+                                            if let Ok(mut v) = s.trim().parse::<f64>() {
+                                                for &(ref op, n) in arith_ops_list[ai] {
+                                                    v = match op {
+                                                        BinOp::Add => v + n, BinOp::Sub => v - n,
+                                                        BinOp::Mul => v * n, BinOp::Div => v / n,
+                                                        BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
+                                                        _ => v,
+                                                    };
+                                                }
+                                                push_jq_number_bytes(&mut compact_buf, v);
+                                            }
+                                        }
+                                    }
+                                }
+                                compact_buf.extend_from_slice(b"\"\n");
+                            }
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -9552,6 +9678,126 @@ fn real_main() {
                             emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
                         }
                         compact_buf.extend_from_slice(obj_close);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref conj, ref cmps, ref sac_parts)) = select_compound_str_chain {
+                // select(.x > N and .y < M) | str_add_chain — stdin path
+                use jq_jit::interpreter::StringAddPart;
+                use jq_jit::ir::BinOp;
+                let content_bytes = content.as_bytes();
+                let mut field_names: Vec<&str> = Vec::new();
+                let mut field_idx_map: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+                for (f, _, _) in cmps.iter() {
+                    if !field_idx_map.contains_key(f.as_str()) {
+                        field_idx_map.insert(f.as_str(), field_names.len());
+                        field_names.push(f.as_str());
+                    }
+                }
+                for part in sac_parts.iter() {
+                    let name = match part {
+                        StringAddPart::Field(f) | StringAddPart::FieldToString(f) | StringAddPart::FieldArithToString(f, _) => f.as_str(),
+                        _ => continue,
+                    };
+                    if !field_idx_map.contains_key(name) {
+                        field_idx_map.insert(name, field_names.len());
+                        field_names.push(name);
+                    }
+                }
+                let resolved_cmps: Vec<(usize, &BinOp, f64)> = cmps.iter()
+                    .map(|(f, op, n)| (field_idx_map[f.as_str()], op, *n))
+                    .collect();
+                let is_and = matches!(conj, BinOp::And);
+                let mut actions: Vec<(usize, u8, usize)> = Vec::with_capacity(sac_parts.len());
+                let mut lit_bufs: Vec<Vec<u8>> = Vec::new();
+                let mut arith_ops_list: Vec<&[(BinOp, f64)]> = Vec::new();
+                for part in sac_parts.iter() {
+                    match part {
+                        StringAddPart::Literal(s) => {
+                            let mut buf = Vec::new();
+                            for &b in s.as_bytes() {
+                                match b {
+                                    b'"' => buf.extend_from_slice(b"\\\""),
+                                    b'\\' => buf.extend_from_slice(b"\\\\"),
+                                    b'\n' => buf.extend_from_slice(b"\\n"),
+                                    b'\r' => buf.extend_from_slice(b"\\r"),
+                                    b'\t' => buf.extend_from_slice(b"\\t"),
+                                    c if c < 0x20 => { let _ = write!(buf, "\\u{:04x}", c); }
+                                    _ => buf.push(b),
+                                }
+                            }
+                            let li = lit_bufs.len();
+                            lit_bufs.push(buf);
+                            actions.push((li, 0, 0));
+                        }
+                        StringAddPart::Field(f) | StringAddPart::FieldToString(f) => {
+                            actions.push((field_idx_map[f.as_str()], 1, 0));
+                        }
+                        StringAddPart::FieldArithToString(f, ops) => {
+                            let ai = arith_ops_list.len();
+                            arith_ops_list.push(ops.as_slice());
+                            actions.push((field_idx_map[f.as_str()], 2, ai));
+                        }
+                    }
+                }
+                let mut ranges_buf = vec![(0usize, 0usize); field_names.len()];
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
+                        let pass = if is_and {
+                            resolved_cmps.iter().all(|&(idx, op, threshold)| {
+                                let (vs, ve) = ranges_buf[idx];
+                                let s = unsafe { std::str::from_utf8_unchecked(&raw[vs..ve]) };
+                                if let Ok(val) = s.trim().parse::<f64>() {
+                                    match op { BinOp::Gt => val > threshold, BinOp::Lt => val < threshold, BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold, BinOp::Eq => val == threshold, BinOp::Ne => val != threshold, _ => false }
+                                } else { false }
+                            })
+                        } else {
+                            resolved_cmps.iter().any(|&(idx, op, threshold)| {
+                                let (vs, ve) = ranges_buf[idx];
+                                let s = unsafe { std::str::from_utf8_unchecked(&raw[vs..ve]) };
+                                if let Ok(val) = s.trim().parse::<f64>() {
+                                    match op { BinOp::Gt => val > threshold, BinOp::Lt => val < threshold, BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold, BinOp::Eq => val == threshold, BinOp::Ne => val != threshold, _ => false }
+                                } else { false }
+                            })
+                        };
+                        if pass {
+                            compact_buf.push(b'"');
+                            for &(idx, typ, ai) in &actions {
+                                match typ {
+                                    0 => { compact_buf.extend_from_slice(&lit_bufs[idx]); }
+                                    1 => {
+                                        let (vs, ve) = ranges_buf[idx];
+                                        let val_bytes = &raw[vs..ve];
+                                        if val_bytes[0] == b'"' && val_bytes.len() >= 2 {
+                                            compact_buf.extend_from_slice(&val_bytes[1..val_bytes.len()-1]);
+                                        } else {
+                                            compact_buf.extend_from_slice(val_bytes);
+                                        }
+                                    }
+                                    _ => {
+                                        let (vs, ve) = ranges_buf[idx];
+                                        let s = unsafe { std::str::from_utf8_unchecked(&raw[vs..ve]) };
+                                        if let Ok(mut v) = s.trim().parse::<f64>() {
+                                            for &(ref op, n) in arith_ops_list[ai] {
+                                                v = match op {
+                                                    BinOp::Add => v + n, BinOp::Sub => v - n,
+                                                    BinOp::Mul => v * n, BinOp::Div => v / n,
+                                                    BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
+                                                    _ => v,
+                                                };
+                                            }
+                                            push_jq_number_bytes(&mut compact_buf, v);
+                                        }
+                                    }
+                                }
+                            }
+                            compact_buf.extend_from_slice(b"\"\n");
+                        }
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);

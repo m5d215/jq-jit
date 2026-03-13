@@ -1330,6 +1330,122 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.x > N and .y < M) | str_add_chain` — compound select then string chain.
+    /// Returns (conjunction, conditions, string_add_parts).
+    pub fn detect_select_compound_cmp_then_str_chain(&self) -> Option<(crate::ir::BinOp, Vec<(String, crate::ir::BinOp, f64)>, Vec<StringAddPart>)> {
+        use crate::ir::{Expr, BinOp, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        let extract_cmp = |e: &Expr| -> Option<(String, BinOp, f64)> {
+            if let Expr::BinOp { op, lhs, rhs } = e {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                            return Some((field.clone(), *op, *n));
+                        }
+                    }
+                }
+            }
+            None
+        };
+        fn collect_conds_sc<'a>(e: &'a Expr, conj: BinOp, out: &mut Vec<&'a Expr>) -> bool {
+            if let Expr::BinOp { op, lhs, rhs } = e {
+                if std::mem::discriminant(op) == std::mem::discriminant(&conj) {
+                    return collect_conds_sc(lhs, conj, out) && collect_conds_sc(rhs, conj, out);
+                }
+            }
+            out.push(e); true
+        }
+        fn collect_chain_sc_ts(operand: &Expr, parts: &mut Vec<StringAddPart>) -> bool {
+            if let Expr::Index { expr: base, key } = operand {
+                if matches!(base.as_ref(), Expr::Input) {
+                    if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                        parts.push(StringAddPart::FieldToString(f.clone()));
+                        return true;
+                    }
+                }
+            }
+            let mut arith_ops = Vec::new();
+            let mut cur = operand;
+            loop {
+                if let Expr::BinOp { op: aop, lhs, rhs } = cur {
+                    if matches!(aop, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+                        if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                            arith_ops.push((*aop, *n));
+                            cur = lhs.as_ref();
+                            continue;
+                        }
+                    }
+                }
+                break;
+            }
+            if !arith_ops.is_empty() {
+                arith_ops.reverse();
+                if let Expr::Index { expr: base, key } = cur {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                            parts.push(StringAddPart::FieldArithToString(f.clone(), arith_ops));
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
+        fn collect_chain_sc(expr: &Expr, parts: &mut Vec<StringAddPart>) -> bool {
+            match expr {
+                Expr::BinOp { op: BinOp::Add, lhs, rhs } => {
+                    collect_chain_sc(lhs, parts) && collect_chain_sc(rhs, parts)
+                }
+                Expr::Index { expr: base, key } if matches!(base.as_ref(), Expr::Input) => {
+                    if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                        parts.push(StringAddPart::Field(f.clone())); true
+                    } else { false }
+                }
+                Expr::Literal(Literal::Str(s)) => {
+                    parts.push(StringAddPart::Literal(s.clone())); true
+                }
+                Expr::UnaryOp { op: UnaryOp::ToString, operand } => {
+                    collect_chain_sc_ts(operand, parts)
+                }
+                _ => false,
+            }
+        }
+        let try_extract = |cond: &Expr, output: &Expr| -> Option<(BinOp, Vec<(String, BinOp, f64)>, Vec<StringAddPart>)> {
+            let mut parts = Vec::new();
+            if !collect_chain_sc(output, &mut parts) || parts.len() < 2 { return None; }
+            if !parts.iter().any(|p| !matches!(p, StringAddPart::Literal(_))) { return None; }
+            for conj in [BinOp::And, BinOp::Or] {
+                if let Expr::BinOp { op, .. } = cond {
+                    if std::mem::discriminant(op) == std::mem::discriminant(&conj) {
+                        let mut cond_parts = Vec::new();
+                        if collect_conds_sc(cond, conj, &mut cond_parts) && cond_parts.len() >= 2 {
+                            let cmps: Vec<_> = cond_parts.iter().filter_map(|e| extract_cmp(e)).collect();
+                            if cmps.len() == cond_parts.len() {
+                                return Some((conj, cmps, parts));
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        };
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                    if let Some(r) = try_extract(cond, right) { return Some(r); }
+                }
+            }
+        }
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if matches!(else_branch.as_ref(), Expr::Empty) {
+                if let Some(r) = try_extract(cond, then_branch) { return Some(r); }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.a.b.c > N)` pattern for nested field numeric comparison.
     /// Returns (field_path, comparison_op, threshold) if detected.
     pub fn detect_select_nested_cmp(&self) -> Option<(Vec<String>, crate::ir::BinOp, f64)> {
