@@ -141,6 +141,9 @@ TESTS=(
     'sel|[arr]:-c:select(.x > 500) | [.name, .x]'
     'sel(and)|[arr]:-c:select(.x > 100 and .y < 500) | [.name, .x, .y]'
     'if>.y [arr]:-c:if .x > .y then [.name, .x] else [.name, .y] end'
+    'if sw then .f:-c:if .name | startswith("user_1") then .x else .y end'
+    'dynkey {(.n):.x*2}:-c:{(.name): (.x * 2)}'
+    'sel(and)|.x*.y:-c:select(.x > 500 and .y < 1000) | .x * .y'
 )
 
 for test in "${TESTS[@]}"; do
