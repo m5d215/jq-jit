@@ -436,39 +436,92 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                 }
             }
-            // Semantic: [.f1, .f2, ...] | add / length → (.f1 + .f2 + ... + .fN) / N
+            // Semantic: [.f1, .f2, ...] | add op X → (.f1 + .f2 + ... + .fN) op X
+            // Handles: add * N, add - N, add / N, add / length, add + N
             if let Expr::Collect { generator: ref lg } = sl {
-                if let Expr::BinOp { op: crate::ir::BinOp::Div, lhs: ref div_lhs, rhs: ref div_rhs } = sr {
-                    let is_add = matches!(div_lhs.as_ref(), Expr::UnaryOp { op: UnaryOp::Add, operand } if matches!(operand.as_ref(), Expr::Input));
-                    let is_length = matches!(div_rhs.as_ref(), Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input));
-                    if is_add && is_length {
-                        fn collect_comma_elems(e: &Expr, out: &mut Vec<Expr>) {
-                            match e {
-                                Expr::Comma { left, right } => {
-                                    collect_comma_elems(left, out);
-                                    collect_comma_elems(right, out);
-                                }
-                                other => out.push(other.clone()),
-                            }
+                // Check if rhs is BinOp(op, add, something) where add = UnaryOp(Add, Input)
+                let add_binop = if let Expr::BinOp { op: ref bop, lhs: ref blhs, rhs: ref brhs } = sr {
+                    let is_add = matches!(blhs.as_ref(), Expr::UnaryOp { op: UnaryOp::Add, operand } if matches!(operand.as_ref(), Expr::Input));
+                    if is_add && matches!(bop, crate::ir::BinOp::Add | crate::ir::BinOp::Sub | crate::ir::BinOp::Mul | crate::ir::BinOp::Div | crate::ir::BinOp::Mod) {
+                        // Determine the right operand: either a literal or length
+                        let rhs_expr = if let Expr::Literal(crate::ir::Literal::Num(n, _)) = brhs.as_ref() {
+                            Some((*bop, Expr::Literal(crate::ir::Literal::Num(*n, None))))
+                        } else if matches!(brhs.as_ref(), Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                            // add / length → sum / N (length is count of elements)
+                            None // handled specially below
+                        } else {
+                            None
+                        };
+                        if let Some((op, rhs_val)) = rhs_expr {
+                            Some((op, rhs_val, false))
+                        } else if matches!(bop, crate::ir::BinOp::Div) && matches!(brhs.as_ref(), Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                            Some((*bop, Expr::Literal(crate::ir::Literal::Num(0.0, None)), true)) // placeholder, will use N
+                        } else {
+                            None
                         }
-                        let mut elems = Vec::new();
-                        collect_comma_elems(lg, &mut elems);
-                        let n = elems.len();
-                        if n >= 2 {
-                            let mut sum = elems.remove(0);
-                            for elem in elems {
-                                sum = Expr::BinOp {
-                                    op: crate::ir::BinOp::Add,
-                                    lhs: Box::new(sum),
-                                    rhs: Box::new(elem),
-                                };
+                    } else { None }
+                } else { None };
+                if let Some((outer_op, rhs_val, use_length)) = add_binop {
+                    fn collect_comma_elems2(e: &Expr, out: &mut Vec<Expr>) {
+                        match e {
+                            Expr::Comma { left, right } => {
+                                collect_comma_elems2(left, out);
+                                collect_comma_elems2(right, out);
                             }
-                            return Expr::BinOp {
-                                op: crate::ir::BinOp::Div,
+                            other => out.push(other.clone()),
+                        }
+                    }
+                    let mut elems = Vec::new();
+                    collect_comma_elems2(lg, &mut elems);
+                    let n = elems.len();
+                    if n >= 2 {
+                        let mut sum = elems.remove(0);
+                        for elem in elems {
+                            sum = Expr::BinOp {
+                                op: crate::ir::BinOp::Add,
                                 lhs: Box::new(sum),
-                                rhs: Box::new(Expr::Literal(crate::ir::Literal::Num(n as f64, None))),
+                                rhs: Box::new(elem),
                             };
                         }
+                        let actual_rhs = if use_length {
+                            Expr::Literal(crate::ir::Literal::Num(n as f64, None))
+                        } else {
+                            rhs_val
+                        };
+                        return Expr::BinOp {
+                            op: outer_op,
+                            lhs: Box::new(sum),
+                            rhs: Box::new(actual_rhs),
+                        };
+                    }
+                }
+            }
+            // Semantic: [.f1, .f2, ...] | add → .f1 + .f2 + ... + .fN
+            // This catches cases where the parser's pipe-level optimization missed it
+            // (e.g., from simplify_expr creating new Collect | add patterns)
+            if let Expr::Collect { generator: ref lg } = sl {
+                if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Add, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                    fn collect_elems_for_add(e: &Expr, out: &mut Vec<Expr>) {
+                        match e {
+                            Expr::Comma { left, right } => {
+                                collect_elems_for_add(left, out);
+                                collect_elems_for_add(right, out);
+                            }
+                            other => out.push(other.clone()),
+                        }
+                    }
+                    let mut elems = Vec::new();
+                    collect_elems_for_add(lg, &mut elems);
+                    if elems.len() >= 2 {
+                        let mut result = elems.remove(0);
+                        for elem in elems {
+                            result = Expr::BinOp {
+                                op: crate::ir::BinOp::Add,
+                                lhs: Box::new(result),
+                                rhs: Box::new(elem),
+                            };
+                        }
+                        return result;
                     }
                 }
             }
@@ -477,32 +530,57 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                 return sr.substitute_input(&sl);
             }
             // [gen] | map(f) = [gen] | [.[] | f] → [gen | f]
-            // where gen is a comma of simple scalars and f is input-free
+            // Distributes f over each element of gen via beta-reduction.
+            // Each element gets piped through f and simplified (beta-reduced).
+            // [gen] | map(f) distribution helper
+            fn is_comma_of_simple_scalars(e: &Expr) -> bool {
+                match e {
+                    Expr::Comma { left, right } => {
+                        is_comma_of_simple_scalars(left) && is_comma_of_simple_scalars(right)
+                    }
+                    other => other.is_simple_scalar(),
+                }
+            }
+            fn distribute_map(gen: &Expr, f: &Expr) -> Expr {
+                match gen {
+                    Expr::Comma { left, right } => {
+                        Expr::Comma {
+                            left: Box::new(distribute_map(left, f)),
+                            right: Box::new(distribute_map(right, f)),
+                        }
+                    }
+                    other => {
+                        let piped = Expr::Pipe {
+                            left: Box::new(other.clone()),
+                            right: Box::new(f.clone()),
+                        };
+                        simplify_expr(&piped)
+                    }
+                }
+            }
+            fn try_extract_map_body(expr: &Expr) -> Option<&Expr> {
+                // [.[] | f] → Some(f)
+                if let Expr::Collect { generator } = expr {
+                    if let Expr::Pipe { left, right } = generator.as_ref() {
+                        if matches!(left.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)) {
+                            return Some(right);
+                        }
+                    }
+                }
+                None
+            }
             if let Expr::Collect { generator: ref lg } = sl {
-                if let Expr::Collect { generator: ref rg } = sr {
-                    if let Expr::Pipe { left: ref rl, right: ref rr } = rg.as_ref() {
-                        if matches!(rl.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)) {
-                            if rr.is_input_free() {
-                                // Distribute f over each element of gen
-                                fn distribute_map(gen: &Expr, f: &Expr) -> Expr {
-                                    match gen {
-                                        Expr::Comma { left, right } => {
-                                            Expr::Comma {
-                                                left: Box::new(distribute_map(left, f)),
-                                                right: Box::new(distribute_map(right, f)),
-                                            }
-                                        }
-                                        other => {
-                                            let piped = Expr::Pipe {
-                                                left: Box::new(other.clone()),
-                                                right: Box::new(f.clone()),
-                                            };
-                                            simplify_expr(&piped)
-                                        }
-                                    }
-                                }
-                                return Expr::Collect { generator: Box::new(distribute_map(lg, rr)) };
-                            }
+                if is_comma_of_simple_scalars(lg) {
+                    // [gen] | map(f) → [gen distributed with f]
+                    if let Some(f) = try_extract_map_body(&sr) {
+                        return Expr::Collect { generator: Box::new(distribute_map(lg, f)) };
+                    }
+                    // [gen] | Pipe(map(f), rest) → [gen distributed with f] | rest
+                    if let Expr::Pipe { left: ref pl, right: ref pr } = sr {
+                        if let Some(f) = try_extract_map_body(pl) {
+                            let distributed = Expr::Collect { generator: Box::new(distribute_map(lg, f)) };
+                            let result = Expr::Pipe { left: Box::new(distributed), right: pr.clone() };
+                            return simplify_expr(&result);
                         }
                     }
                 }
