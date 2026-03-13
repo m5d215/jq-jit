@@ -262,10 +262,32 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
         }
         // Recurse into IfThenElse conditions (select patterns)
         Expr::IfThenElse { cond, then_branch, else_branch } => {
+            let sc = simplify_expr(cond);
+            let st = simplify_expr(then_branch);
+            let se = simplify_expr(else_branch);
+            // if .field then .field else F end → .field // F
+            if let Expr::Index { expr: base_c, key: key_c } = &sc {
+                if matches!(base_c.as_ref(), Expr::Input) {
+                    if let Expr::Literal(crate::ir::Literal::Str(fc)) = key_c.as_ref() {
+                        if let Expr::Index { expr: base_t, key: key_t } = &st {
+                            if matches!(base_t.as_ref(), Expr::Input) {
+                                if let Expr::Literal(crate::ir::Literal::Str(ft)) = key_t.as_ref() {
+                                    if fc == ft {
+                                        return Expr::Alternative {
+                                            primary: Box::new(sc),
+                                            fallback: Box::new(se),
+                                        };
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             Expr::IfThenElse {
-                cond: Box::new(simplify_expr(cond)),
-                then_branch: Box::new(simplify_expr(then_branch)),
-                else_branch: Box::new(simplify_expr(else_branch)),
+                cond: Box::new(sc),
+                then_branch: Box::new(st),
+                else_branch: Box::new(se),
             }
         }
         // Inline LetBinding: (E as $x | F) → F[$x := E] when E is simple
