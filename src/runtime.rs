@@ -2012,10 +2012,26 @@ fn rt_scan(v: &Value, re: &Value) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
             with_regex(r, |regex| {
-                let results: Vec<Value> = regex.find_iter(s)
-                    .map(|m| Value::Arr(Rc::new(vec![Value::from_str(m.as_str())])))
-                    .collect();
-                Value::Arr(Rc::new(results))
+                let has_captures = regex.captures_len() > 1;
+                if has_captures {
+                    let results: Vec<Value> = regex.captures_iter(s)
+                        .map(|caps| {
+                            let groups: Vec<Value> = (1..caps.len())
+                                .map(|i| match caps.get(i) {
+                                    Some(m) => Value::from_str(m.as_str()),
+                                    None => Value::Null,
+                                })
+                                .collect();
+                            Value::Arr(Rc::new(groups))
+                        })
+                        .collect();
+                    Value::Arr(Rc::new(results))
+                } else {
+                    let results: Vec<Value> = regex.find_iter(s)
+                        .map(|m| Value::from_str(m.as_str()))
+                        .collect();
+                    Value::Arr(Rc::new(results))
+                }
             }).map(Ok)?
         }
         _ => bail!("scan requires string and regex"),
