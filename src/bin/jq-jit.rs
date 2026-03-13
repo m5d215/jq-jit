@@ -4521,6 +4521,13 @@ fn real_main() {
                         let rhs_field: Option<&str> = if let CondRhs::Field(ref f) = br.cond_rhs { Some(f.as_str()) } else { None };
                         let rhs_const: Option<f64> = if let CondRhs::Const(n) = br.cond_rhs { Some(n) } else { None };
                         let is_non_numeric_cmp = matches!(br.cond_rhs, CondRhs::Null | CondRhs::Str(_) | CondRhs::Bool(_));
+                        let rhs_str_json: Option<Vec<u8>> = if let CondRhs::Str(ref s) = br.cond_rhs {
+                            let mut buf = Vec::with_capacity(s.len() + 2);
+                            buf.push(b'"');
+                            buf.extend_from_slice(s.as_bytes());
+                            buf.push(b'"');
+                            Some(buf)
+                        } else { None };
                         json_stream_raw(&input_str, |start, end| {
                             let raw = &input_bytes[start..end];
                             // Non-numeric comparison (null/str/bool): compare raw bytes
@@ -4543,14 +4550,8 @@ fn real_main() {
                                                 _ => false,
                                             })
                                         }
-                                        CondRhs::Str(ref s) => {
-                                            let rhs_json = {
-                                                let mut buf = Vec::with_capacity(s.len() + 2);
-                                                buf.push(b'"');
-                                                buf.extend_from_slice(s.as_bytes());
-                                                buf.push(b'"');
-                                                buf
-                                            };
+                                        CondRhs::Str(_) => {
+                                            let rhs_json = rhs_str_json.as_ref().unwrap();
                                             match cond_op {
                                                 BinOp::Eq => field_bytes == rhs_json.as_slice(),
                                                 BinOp::Ne => field_bytes != rhs_json.as_slice(),
@@ -7581,6 +7582,13 @@ fn real_main() {
                     let rhs_field: Option<&str> = if let CondRhs::Field(ref f) = br.cond_rhs { Some(f.as_str()) } else { None };
                     let rhs_const: Option<f64> = if let CondRhs::Const(n) = br.cond_rhs { Some(n) } else { None };
                     let is_non_numeric_cmp = matches!(br.cond_rhs, CondRhs::Null | CondRhs::Str(_) | CondRhs::Bool(_));
+                    let rhs_str_json: Option<Vec<u8>> = if let CondRhs::Str(ref s) = br.cond_rhs {
+                        let mut buf = Vec::with_capacity(s.len() + 2);
+                        buf.push(b'"');
+                        buf.extend_from_slice(s.as_bytes());
+                        buf.push(b'"');
+                        Some(buf)
+                    } else { None };
                     json_stream_raw(content, |start, end| {
                         let raw = &content_bytes[start..end];
                         // Non-numeric comparison (null/str/bool)
@@ -7601,14 +7609,8 @@ fn real_main() {
                                             _ => false,
                                         })
                                     }
-                                    CondRhs::Str(ref s) => {
-                                        let rhs_json = {
-                                            let mut buf = Vec::with_capacity(s.len() + 2);
-                                            buf.push(b'"');
-                                            buf.extend_from_slice(s.as_bytes());
-                                            buf.push(b'"');
-                                            buf
-                                        };
+                                    CondRhs::Str(_) => {
+                                        let rhs_json = rhs_str_json.as_ref().unwrap();
                                         match cond_op {
                                             BinOp::Eq => field_bytes == rhs_json.as_slice(),
                                             BinOp::Ne => field_bytes != rhs_json.as_slice(),
