@@ -164,6 +164,9 @@ pub enum BranchOutput {
 pub enum CondRhs {
     Const(f64),
     Field(String),
+    Str(String),
+    Null,
+    Bool(bool),
 }
 
 /// One branch in a conditional chain: if .field [arith_ops...] cmp (N | .field2) then output.
@@ -4232,6 +4235,24 @@ impl Filter {
                         // .field [arith_ops...] cmp N
                         if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
                             return Some((field.clone(), arith_ops, *op, CondRhs::Const(*n)));
+                        }
+                        // .field [arith_ops...] cmp "str"
+                        if arith_ops.is_empty() {
+                            if let Expr::Literal(Literal::Str(s)) = rhs.as_ref() {
+                                return Some((field.clone(), arith_ops, *op, CondRhs::Str(s.clone())));
+                            }
+                        }
+                        // .field == null / .field != null
+                        if arith_ops.is_empty() && matches!(op, BinOp::Eq | BinOp::Ne) {
+                            if matches!(rhs.as_ref(), Expr::Literal(Literal::Null)) {
+                                return Some((field.clone(), arith_ops, *op, CondRhs::Null));
+                            }
+                            if matches!(rhs.as_ref(), Expr::Literal(Literal::True)) {
+                                return Some((field.clone(), arith_ops, *op, CondRhs::Bool(true)));
+                            }
+                            if matches!(rhs.as_ref(), Expr::Literal(Literal::False)) {
+                                return Some((field.clone(), arith_ops, *op, CondRhs::Bool(false)));
+                            }
                         }
                         // .field1 [arith_ops...] cmp .field2 (only without arith ops)
                         if arith_ops.is_empty() {

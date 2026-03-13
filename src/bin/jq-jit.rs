@@ -284,6 +284,9 @@ struct ResolvedCondBranch {
 enum ResolvedCondRhs {
     Const(f64),
     Field(usize),
+    Str(Vec<u8>), // raw bytes of the JSON string including quotes
+    Null,
+    Bool(bool),
 }
 
 #[derive(Clone)]
@@ -348,6 +351,15 @@ fn resolve_one_remap(
                     cond_rhs: match &b.cond_rhs {
                         jq_jit::interpreter::CondRhs::Const(n) => ResolvedCondRhs::Const(*n),
                         jq_jit::interpreter::CondRhs::Field(f) => ResolvedCondRhs::Field(field_idx[f.as_str()]),
+                        jq_jit::interpreter::CondRhs::Str(s) => {
+                            let mut buf = Vec::with_capacity(s.len() + 2);
+                            buf.push(b'"');
+                            buf.extend_from_slice(s.as_bytes());
+                            buf.push(b'"');
+                            ResolvedCondRhs::Str(buf)
+                        }
+                        jq_jit::interpreter::CondRhs::Null => ResolvedCondRhs::Null,
+                        jq_jit::interpreter::CondRhs::Bool(b) => ResolvedCondRhs::Bool(*b),
                     },
                     output: resolve_branch_output(&b.output, field_idx),
                 }
@@ -1032,40 +1044,87 @@ fn emit_resolved_value(
             let mut matched = false;
             for b in branches {
                 let (vs, ve) = ranges[b.cond_field_idx];
-                if let Some(mut val) = parse_json_num(&raw[vs..ve]) {
-                    for &(ref aop, n) in &b.cond_arith_ops {
-                        val = match aop {
-                            jq_jit::ir::BinOp::Add => val + n,
-                            jq_jit::ir::BinOp::Sub => val - n,
-                            jq_jit::ir::BinOp::Mul => val * n,
-                            jq_jit::ir::BinOp::Div => val / n,
-                            jq_jit::ir::BinOp::Mod => val % n,
-                            _ => val,
-                        };
-                    }
-                    let rhs_val = match &b.cond_rhs {
-                        ResolvedCondRhs::Const(n) => Some(*n),
-                        ResolvedCondRhs::Field(idx) => {
-                            let (rs, re) = ranges[*idx];
-                            parse_json_num(&raw[rs..re])
-                        }
-                    };
-                    if let Some(rhs) = rhs_val {
-                        let cond_result = match b.cond_op {
-                            jq_jit::ir::BinOp::Gt => val > rhs,
-                            jq_jit::ir::BinOp::Lt => val < rhs,
-                            jq_jit::ir::BinOp::Ge => val >= rhs,
-                            jq_jit::ir::BinOp::Le => val <= rhs,
-                            jq_jit::ir::BinOp::Eq => val == rhs,
-                            jq_jit::ir::BinOp::Ne => val != rhs,
+                let field_bytes = &raw[vs..ve];
+                let cond_result = match &b.cond_rhs {
+                    ResolvedCondRhs::Null => {
+                        let is_null = field_bytes.starts_with(b"null");
+                        match b.cond_op {
+                            jq_jit::ir::BinOp::Eq => is_null,
+                            jq_jit::ir::BinOp::Ne => !is_null,
                             _ => false,
-                        };
-                        if cond_result {
-                            emit_resolved_branch_output(buf, &b.output, raw, ranges);
-                            matched = true;
-                            break;
                         }
                     }
+                    ResolvedCondRhs::Bool(expected) => {
+                        let is_true = field_bytes.starts_with(b"true");
+                        let is_false = field_bytes.starts_with(b"false");
+                        let val_bool = if is_true { Some(true) } else if is_false { Some(false) } else { None };
+                        if let Some(val) = val_bool {
+                            match b.cond_op {
+                                jq_jit::ir::BinOp::Eq => val == *expected,
+                                jq_jit::ir::BinOp::Ne => val != *expected,
+                                _ => false,
+                            }
+                        } else { false }
+                    }
+                    ResolvedCondRhs::Str(ref rhs_bytes) => {
+                        // Compare raw JSON bytes (field value includes quotes)
+                        match b.cond_op {
+                            jq_jit::ir::BinOp::Eq => field_bytes == rhs_bytes.as_slice(),
+                            jq_jit::ir::BinOp::Ne => field_bytes != rhs_bytes.as_slice(),
+                            _ => {
+                                // String ordering: compare inner content
+                                if field_bytes.first() == Some(&b'"') && rhs_bytes.first() == Some(&b'"') {
+                                    let cmp = field_bytes.cmp(rhs_bytes);
+                                    match b.cond_op {
+                                        jq_jit::ir::BinOp::Gt => cmp == std::cmp::Ordering::Greater,
+                                        jq_jit::ir::BinOp::Lt => cmp == std::cmp::Ordering::Less,
+                                        jq_jit::ir::BinOp::Ge => cmp != std::cmp::Ordering::Less,
+                                        jq_jit::ir::BinOp::Le => cmp != std::cmp::Ordering::Greater,
+                                        _ => false,
+                                    }
+                                } else { false }
+                            }
+                        }
+                    }
+                    ResolvedCondRhs::Const(_) | ResolvedCondRhs::Field(_) => {
+                        // Numeric comparison (original path)
+                        if let Some(mut val) = parse_json_num(field_bytes) {
+                            for &(ref aop, n) in &b.cond_arith_ops {
+                                val = match aop {
+                                    jq_jit::ir::BinOp::Add => val + n,
+                                    jq_jit::ir::BinOp::Sub => val - n,
+                                    jq_jit::ir::BinOp::Mul => val * n,
+                                    jq_jit::ir::BinOp::Div => val / n,
+                                    jq_jit::ir::BinOp::Mod => val % n,
+                                    _ => val,
+                                };
+                            }
+                            let rhs_val = match &b.cond_rhs {
+                                ResolvedCondRhs::Const(n) => Some(*n),
+                                ResolvedCondRhs::Field(idx) => {
+                                    let (rs, re) = ranges[*idx];
+                                    parse_json_num(&raw[rs..re])
+                                }
+                                _ => unreachable!(),
+                            };
+                            if let Some(rhs) = rhs_val {
+                                match b.cond_op {
+                                    jq_jit::ir::BinOp::Gt => val > rhs,
+                                    jq_jit::ir::BinOp::Lt => val < rhs,
+                                    jq_jit::ir::BinOp::Ge => val >= rhs,
+                                    jq_jit::ir::BinOp::Le => val <= rhs,
+                                    jq_jit::ir::BinOp::Eq => val == rhs,
+                                    jq_jit::ir::BinOp::Ne => val != rhs,
+                                    _ => false,
+                                }
+                            } else { false }
+                        } else { false }
+                    }
+                };
+                if cond_result {
+                    emit_resolved_branch_output(buf, &b.output, raw, ranges);
+                    matched = true;
+                    break;
                 }
             }
             if !matched {
@@ -4461,8 +4520,77 @@ fn real_main() {
                         let then_out = &br.output;
                         let rhs_field: Option<&str> = if let CondRhs::Field(ref f) = br.cond_rhs { Some(f.as_str()) } else { None };
                         let rhs_const: Option<f64> = if let CondRhs::Const(n) = br.cond_rhs { Some(n) } else { None };
+                        let is_non_numeric_cmp = matches!(br.cond_rhs, CondRhs::Null | CondRhs::Str(_) | CondRhs::Bool(_));
                         json_stream_raw(&input_str, |start, end| {
                             let raw = &input_bytes[start..end];
+                            // Non-numeric comparison (null/str/bool): compare raw bytes
+                            if is_non_numeric_cmp {
+                                let pass = if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, cond_field) {
+                                    let field_bytes = &raw[vs..ve];
+                                    match &br.cond_rhs {
+                                        CondRhs::Null => match cond_op {
+                                            BinOp::Eq => field_bytes == b"null",
+                                            BinOp::Ne => field_bytes != b"null",
+                                            _ => false,
+                                        },
+                                        CondRhs::Bool(expected) => {
+                                            let is_true = field_bytes == b"true";
+                                            let is_false = field_bytes == b"false";
+                                            let val = if is_true { Some(true) } else if is_false { Some(false) } else { None };
+                                            val.map_or(false, |v| match cond_op {
+                                                BinOp::Eq => v == *expected,
+                                                BinOp::Ne => v != *expected,
+                                                _ => false,
+                                            })
+                                        }
+                                        CondRhs::Str(ref s) => {
+                                            let rhs_json = {
+                                                let mut buf = Vec::with_capacity(s.len() + 2);
+                                                buf.push(b'"');
+                                                buf.extend_from_slice(s.as_bytes());
+                                                buf.push(b'"');
+                                                buf
+                                            };
+                                            match cond_op {
+                                                BinOp::Eq => field_bytes == rhs_json.as_slice(),
+                                                BinOp::Ne => field_bytes != rhs_json.as_slice(),
+                                                _ => false,
+                                            }
+                                        }
+                                        _ => false,
+                                    }
+                                } else {
+                                    // Field missing (null)
+                                    matches!(br.cond_rhs, CondRhs::Null) && matches!(cond_op, BinOp::Eq)
+                                };
+                                let out_br = if pass { then_out } else { else_output };
+                                match out_br {
+                                    BranchOutput::Literal(ref bytes) => {
+                                        compact_buf.extend_from_slice(bytes);
+                                        compact_buf.push(b'\n');
+                                    }
+                                    BranchOutput::Field(ref f) => {
+                                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, f) {
+                                            let val = &raw[vs..ve];
+                                            if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
+                                                push_json_pretty_raw(&mut compact_buf, val, 2, false);
+                                            } else {
+                                                compact_buf.extend_from_slice(val);
+                                            }
+                                            compact_buf.push(b'\n');
+                                        } else {
+                                            compact_buf.extend_from_slice(b"null\n");
+                                        }
+                                    }
+                                    BranchOutput::Empty => {}
+                                    BranchOutput::Remap(_) | BranchOutput::Computed(_) => unreachable!(),
+                                }
+                                if compact_buf.len() >= 1 << 17 {
+                                    let _ = out.write_all(&compact_buf);
+                                    compact_buf.clear();
+                                }
+                                return Ok(());
+                            }
                             // Get comparison values
                             let (lv, rv, got) = if let Some(rf) = rhs_field {
                                 if let Some((l, r)) = json_object_get_two_nums(raw, 0, cond_field, rf) {
@@ -4626,31 +4754,64 @@ fn real_main() {
                             for (i, br) in branches.iter().enumerate() {
                                 let idx = field_idx[&br.cond_field];
                                 let (vs, ve) = ranges_buf[idx];
-                                if let Some(mut val) = parse_json_num(&raw[vs..ve]) {
-                                    // Apply arithmetic chain
-                                    for (aop, n) in &br.cond_arith_ops {
-                                        val = match aop {
-                                            BinOp::Add => val + n, BinOp::Sub => val - n,
-                                            BinOp::Mul => val * n, BinOp::Div => val / n,
-                                            BinOp::Mod => val % n, _ => val,
-                                        };
-                                    }
-                                    let rhs_val = match &br.cond_rhs {
-                                        CondRhs::Const(n) => *n,
-                                        CondRhs::Field(ref f) => {
-                                            let ri = field_idx[f];
-                                            let (rs, re) = ranges_buf[ri];
-                                            match parse_json_num(&raw[rs..re]) { Some(v) => v, None => { continue; } }
-                                        }
-                                    };
-                                    let pass = match br.cond_op {
-                                        BinOp::Gt => val > rhs_val, BinOp::Lt => val < rhs_val,
-                                        BinOp::Ge => val >= rhs_val, BinOp::Le => val <= rhs_val,
-                                        BinOp::Eq => val == rhs_val, BinOp::Ne => val != rhs_val,
+                                let field_bytes = &raw[vs..ve];
+                                let pass = match &br.cond_rhs {
+                                    CondRhs::Null => match br.cond_op {
+                                        BinOp::Eq => field_bytes == b"null",
+                                        BinOp::Ne => field_bytes != b"null",
                                         _ => false,
-                                    };
-                                    if pass { output = Some(&br.output); output_idx = i; break; }
-                                }
+                                    },
+                                    CondRhs::Bool(expected) => {
+                                        let val = if field_bytes == b"true" { Some(true) } else if field_bytes == b"false" { Some(false) } else { None };
+                                        val.map_or(false, |v| match br.cond_op {
+                                            BinOp::Eq => v == *expected,
+                                            BinOp::Ne => v != *expected,
+                                            _ => false,
+                                        })
+                                    }
+                                    CondRhs::Str(ref s) => {
+                                        let rhs_json = {
+                                            let mut buf = Vec::with_capacity(s.len() + 2);
+                                            buf.push(b'"');
+                                            buf.extend_from_slice(s.as_bytes());
+                                            buf.push(b'"');
+                                            buf
+                                        };
+                                        match br.cond_op {
+                                            BinOp::Eq => field_bytes == rhs_json.as_slice(),
+                                            BinOp::Ne => field_bytes != rhs_json.as_slice(),
+                                            _ => false,
+                                        }
+                                    }
+                                    _ => {
+                                        // Numeric comparison
+                                        if let Some(mut val) = parse_json_num(field_bytes) {
+                                            for (aop, n) in &br.cond_arith_ops {
+                                                val = match aop {
+                                                    BinOp::Add => val + n, BinOp::Sub => val - n,
+                                                    BinOp::Mul => val * n, BinOp::Div => val / n,
+                                                    BinOp::Mod => val % n, _ => val,
+                                                };
+                                            }
+                                            let rhs_val = match &br.cond_rhs {
+                                                CondRhs::Const(n) => *n,
+                                                CondRhs::Field(ref f) => {
+                                                    let ri = field_idx[f];
+                                                    let (rs, re) = ranges_buf[ri];
+                                                    match parse_json_num(&raw[rs..re]) { Some(v) => v, None => { continue; } }
+                                                }
+                                                _ => unreachable!(),
+                                            };
+                                            match br.cond_op {
+                                                BinOp::Gt => val > rhs_val, BinOp::Lt => val < rhs_val,
+                                                BinOp::Ge => val >= rhs_val, BinOp::Le => val <= rhs_val,
+                                                BinOp::Eq => val == rhs_val, BinOp::Ne => val != rhs_val,
+                                                _ => false,
+                                            }
+                                        } else { false }
+                                    }
+                                };
+                                if pass { output = Some(&br.output); output_idx = i; break; }
                             }
                             let out_branch = output.unwrap_or(else_output);
                             match out_branch {
@@ -7419,8 +7580,74 @@ fn real_main() {
                     let then_out = &br.output;
                     let rhs_field: Option<&str> = if let CondRhs::Field(ref f) = br.cond_rhs { Some(f.as_str()) } else { None };
                     let rhs_const: Option<f64> = if let CondRhs::Const(n) = br.cond_rhs { Some(n) } else { None };
+                    let is_non_numeric_cmp = matches!(br.cond_rhs, CondRhs::Null | CondRhs::Str(_) | CondRhs::Bool(_));
                     json_stream_raw(content, |start, end| {
                         let raw = &content_bytes[start..end];
+                        // Non-numeric comparison (null/str/bool)
+                        if is_non_numeric_cmp {
+                            let pass = if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, cond_field) {
+                                let field_bytes = &raw[vs..ve];
+                                match &br.cond_rhs {
+                                    CondRhs::Null => match cond_op {
+                                        BinOp::Eq => field_bytes == b"null",
+                                        BinOp::Ne => field_bytes != b"null",
+                                        _ => false,
+                                    },
+                                    CondRhs::Bool(expected) => {
+                                        let val = if field_bytes == b"true" { Some(true) } else if field_bytes == b"false" { Some(false) } else { None };
+                                        val.map_or(false, |v| match cond_op {
+                                            BinOp::Eq => v == *expected,
+                                            BinOp::Ne => v != *expected,
+                                            _ => false,
+                                        })
+                                    }
+                                    CondRhs::Str(ref s) => {
+                                        let rhs_json = {
+                                            let mut buf = Vec::with_capacity(s.len() + 2);
+                                            buf.push(b'"');
+                                            buf.extend_from_slice(s.as_bytes());
+                                            buf.push(b'"');
+                                            buf
+                                        };
+                                        match cond_op {
+                                            BinOp::Eq => field_bytes == rhs_json.as_slice(),
+                                            BinOp::Ne => field_bytes != rhs_json.as_slice(),
+                                            _ => false,
+                                        }
+                                    }
+                                    _ => false,
+                                }
+                            } else {
+                                matches!(br.cond_rhs, CondRhs::Null) && matches!(cond_op, BinOp::Eq)
+                            };
+                            let out_br = if pass { then_out } else { else_output };
+                            match out_br {
+                                BranchOutput::Literal(ref bytes) => {
+                                    compact_buf.extend_from_slice(bytes);
+                                    compact_buf.push(b'\n');
+                                }
+                                BranchOutput::Field(ref f) => {
+                                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, f) {
+                                        let val = &raw[vs..ve];
+                                        if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
+                                            push_json_pretty_raw(&mut compact_buf, val, 2, false);
+                                        } else {
+                                            compact_buf.extend_from_slice(val);
+                                        }
+                                        compact_buf.push(b'\n');
+                                    } else {
+                                        compact_buf.extend_from_slice(b"null\n");
+                                    }
+                                }
+                                BranchOutput::Empty => {}
+                                BranchOutput::Remap(_) | BranchOutput::Computed(_) => unreachable!(),
+                            }
+                            if compact_buf.len() >= 1 << 17 {
+                                let _ = out.write_all(&compact_buf);
+                                compact_buf.clear();
+                            }
+                            return Ok(());
+                        }
                         let (lv, rv, got) = if let Some(rf) = rhs_field {
                             if let Some((l, r)) = json_object_get_two_nums(raw, 0, cond_field, rf) {
                                 (l, r, true)
@@ -7581,31 +7808,63 @@ fn real_main() {
                         for (i, br) in branches.iter().enumerate() {
                             let idx = field_idx[&br.cond_field];
                             let (vs, ve) = ranges_buf[idx];
-                            if let Some(mut val) = parse_json_num(&raw[vs..ve]) {
-                                // Apply arithmetic chain
-                                for (aop, n) in &br.cond_arith_ops {
-                                    val = match aop {
-                                        BinOp::Add => val + n, BinOp::Sub => val - n,
-                                        BinOp::Mul => val * n, BinOp::Div => val / n,
-                                        BinOp::Mod => val % n, _ => val,
-                                    };
-                                }
-                                let rhs_val = match &br.cond_rhs {
-                                    CondRhs::Const(n) => *n,
-                                    CondRhs::Field(ref f) => {
-                                        let ri = field_idx[f];
-                                        let (rs, re) = ranges_buf[ri];
-                                        match parse_json_num(&raw[rs..re]) { Some(v) => v, None => { continue; } }
-                                    }
-                                };
-                                let pass = match br.cond_op {
-                                    BinOp::Gt => val > rhs_val, BinOp::Lt => val < rhs_val,
-                                    BinOp::Ge => val >= rhs_val, BinOp::Le => val <= rhs_val,
-                                    BinOp::Eq => val == rhs_val, BinOp::Ne => val != rhs_val,
+                            let field_bytes = &raw[vs..ve];
+                            let pass = match &br.cond_rhs {
+                                CondRhs::Null => match br.cond_op {
+                                    BinOp::Eq => field_bytes == b"null",
+                                    BinOp::Ne => field_bytes != b"null",
                                     _ => false,
-                                };
-                                if pass { output = Some(&br.output); output_idx = i; break; }
-                            }
+                                },
+                                CondRhs::Bool(expected) => {
+                                    let val = if field_bytes == b"true" { Some(true) } else if field_bytes == b"false" { Some(false) } else { None };
+                                    val.map_or(false, |v| match br.cond_op {
+                                        BinOp::Eq => v == *expected,
+                                        BinOp::Ne => v != *expected,
+                                        _ => false,
+                                    })
+                                }
+                                CondRhs::Str(ref s) => {
+                                    let rhs_json = {
+                                        let mut buf = Vec::with_capacity(s.len() + 2);
+                                        buf.push(b'"');
+                                        buf.extend_from_slice(s.as_bytes());
+                                        buf.push(b'"');
+                                        buf
+                                    };
+                                    match br.cond_op {
+                                        BinOp::Eq => field_bytes == rhs_json.as_slice(),
+                                        BinOp::Ne => field_bytes != rhs_json.as_slice(),
+                                        _ => false,
+                                    }
+                                }
+                                _ => {
+                                    if let Some(mut val) = parse_json_num(field_bytes) {
+                                        for (aop, n) in &br.cond_arith_ops {
+                                            val = match aop {
+                                                BinOp::Add => val + n, BinOp::Sub => val - n,
+                                                BinOp::Mul => val * n, BinOp::Div => val / n,
+                                                BinOp::Mod => val % n, _ => val,
+                                            };
+                                        }
+                                        let rhs_val = match &br.cond_rhs {
+                                            CondRhs::Const(n) => *n,
+                                            CondRhs::Field(ref f) => {
+                                                let ri = field_idx[f];
+                                                let (rs, re) = ranges_buf[ri];
+                                                match parse_json_num(&raw[rs..re]) { Some(v) => v, None => { continue; } }
+                                            }
+                                            _ => unreachable!(),
+                                        };
+                                        match br.cond_op {
+                                            BinOp::Gt => val > rhs_val, BinOp::Lt => val < rhs_val,
+                                            BinOp::Ge => val >= rhs_val, BinOp::Le => val <= rhs_val,
+                                            BinOp::Eq => val == rhs_val, BinOp::Ne => val != rhs_val,
+                                            _ => false,
+                                        }
+                                    } else { false }
+                                }
+                            };
+                            if pass { output = Some(&br.output); output_idx = i; break; }
                         }
                         let out_branch = output.unwrap_or(else_output);
                         match out_branch {
