@@ -3894,10 +3894,31 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
 }
 
 fn eval_recurse_paths(val: &Value, prefix: &Value, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
-    if !cb(prefix.clone())? { return Ok(false); }
+    // Use mutable path stack to avoid O(depth) clones per path
+    let mut path_stack: Vec<Value> = match prefix {
+        Value::Arr(a) => a.as_ref().clone(),
+        _ => vec![],
+    };
+    eval_recurse_paths_inner(val, &mut path_stack, cb)
+}
+
+fn eval_recurse_paths_inner(val: &Value, path: &mut Vec<Value>, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
+    if !cb(Value::Arr(Rc::new(path.clone())))? { return Ok(false); }
     match val {
-        Value::Arr(a) => { for (i, item) in a.iter().enumerate() { let mut p = match prefix { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::Num(i as f64, None)); if !eval_recurse_paths(item, &Value::Arr(Rc::new(p)), cb)? { return Ok(false); } } }
-        Value::Obj(o) => { for (k, v) in o.iter() { let mut p = match prefix { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::from_str(k)); if !eval_recurse_paths(v, &Value::Arr(Rc::new(p)), cb)? { return Ok(false); } } }
+        Value::Arr(a) => {
+            for (i, item) in a.iter().enumerate() {
+                path.push(Value::Num(i as f64, None));
+                if !eval_recurse_paths_inner(item, path, cb)? { return Ok(false); }
+                path.pop();
+            }
+        }
+        Value::Obj(o) => {
+            for (k, v) in o.iter() {
+                path.push(Value::from_str(k));
+                if !eval_recurse_paths_inner(v, path, cb)? { return Ok(false); }
+                path.pop();
+            }
+        }
         _ => {}
     }
     Ok(true)
