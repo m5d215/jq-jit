@@ -1256,6 +1256,78 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.x > N and .y < M) | {k: rexpr, ...}` — compound select then computed remap.
+    pub fn detect_select_compound_cmp_then_cremap(&self) -> Option<(crate::ir::BinOp, Vec<(String, crate::ir::BinOp, f64)>, Vec<(String, RemapExpr)>)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        let extract_cmps = |cond: &Expr| -> Option<(BinOp, Vec<(String, BinOp, f64)>)> {
+            let extract_cmp = |e: &Expr| -> Option<(String, BinOp, f64)> {
+                if let Expr::BinOp { op, lhs, rhs } = e {
+                    if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                    if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                            if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                return Some((f.clone(), *op, *n));
+                            }
+                        }
+                    }
+                }
+                None
+            };
+            fn collect_conds2<'a>(e: &'a Expr, conj: BinOp, out: &mut Vec<&'a Expr>) -> bool {
+                if let Expr::BinOp { op, lhs, rhs } = e {
+                    if std::mem::discriminant(op) == std::mem::discriminant(&conj) {
+                        return collect_conds2(lhs, conj, out) && collect_conds2(rhs, conj, out);
+                    }
+                }
+                out.push(e);
+                true
+            }
+            for conj in [BinOp::And, BinOp::Or] {
+                if let Expr::BinOp { op, .. } = cond {
+                    if std::mem::discriminant(op) == std::mem::discriminant(&conj) {
+                        let mut parts = Vec::new();
+                        if collect_conds2(cond, conj, &mut parts) && parts.len() >= 2 {
+                            let cmps: Vec<_> = parts.iter().filter_map(|e| extract_cmp(e)).collect();
+                            if cmps.len() == parts.len() { return Some((conj, cmps)); }
+                        }
+                    }
+                }
+            }
+            None
+        };
+        let try_extract = |cond: &Expr, output: &Expr| -> Option<(BinOp, Vec<(String, BinOp, f64)>, Vec<(String, RemapExpr)>)> {
+            let (conj, cmps) = extract_cmps(cond)?;
+            if let Expr::ObjectConstruct { pairs } = output {
+                if pairs.is_empty() { return None; }
+                let mut result = Vec::with_capacity(pairs.len());
+                for (k, v) in pairs {
+                    let key = if let Expr::Literal(Literal::Str(s)) = k { s.clone() } else { return None; };
+                    let rexpr = Self::classify_remap_value(v)?;
+                    result.push((key, rexpr));
+                }
+                return Some((conj, cmps, result));
+            }
+            None
+        };
+        // Form 1: Pipe(select(compound), {computed_remap})
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                    if let Some(r) = try_extract(cond, right) { return Some(r); }
+                }
+            }
+        }
+        // Form 2: IfThenElse{compound_cond, {computed_remap}, empty}
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if matches!(else_branch.as_ref(), Expr::Empty) {
+                if let Some(r) = try_extract(cond, then_branch) { return Some(r); }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.a.b.c > N)` pattern for nested field numeric comparison.
     /// Returns (field_path, comparison_op, threshold) if detected.
     pub fn detect_select_nested_cmp(&self) -> Option<(Vec<String>, crate::ir::BinOp, f64)> {
