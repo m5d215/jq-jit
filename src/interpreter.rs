@@ -2771,6 +2771,30 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | scan("regex")` pattern (generator, multiple outputs per input).
+    /// Returns (field_name, regex_pattern) if detected.
+    pub fn detect_field_scan(&self) -> Option<(String, String)> {
+        use crate::ir::{Expr, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::RegexScan { input_expr, re, flags } = right.as_ref() {
+                        if !matches!(input_expr.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(pattern)) = re.as_ref() {
+                            // Only support no-flags case for simplicity
+                            if matches!(flags.as_ref(), Expr::Literal(Literal::Null)) {
+                                return Some((field.clone(), pattern.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field | @base64` (or other simple format operations).
     /// Returns (field_name, format_name) if detected.
     pub fn detect_field_format(&self) -> Option<(String, String)> {
@@ -4244,6 +4268,37 @@ impl Filter {
                                             if let Expr::Literal(Literal::Str(t)) = rhs.as_ref() {
                                                 if matches!(t.as_str(), "number" | "string" | "object" | "array" | "boolean" | "null") {
                                                     return Some(t.clone());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `[.[] | select(. cmp N)] | length` — count values passing comparison.
+    /// Returns (BinOp, f64).
+    pub fn detect_count_each_select_cmp(&self) -> Option<(crate::ir::BinOp, f64)> {
+        use crate::ir::{Expr, Literal, BinOp, UnaryOp};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left, right } = expr {
+            if matches!(right.as_ref(), Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                if let Expr::Collect { generator } = left.as_ref() {
+                    if let Expr::Pipe { left: gen_left, right: gen_right } = generator.as_ref() {
+                        if matches!(gen_left.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)) {
+                            if let Expr::IfThenElse { cond, then_branch, else_branch } = gen_right.as_ref() {
+                                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                                    if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                                        if matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                                            if matches!(lhs.as_ref(), Expr::Input) {
+                                                if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                                    return Some((*op, *n));
                                                 }
                                             }
                                         }
