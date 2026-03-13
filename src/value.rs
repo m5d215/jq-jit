@@ -2056,6 +2056,123 @@ pub fn json_object_get_fields_raw_buf(b: &[u8], pos: usize, input_fields: &[&str
     }
 }
 
+/// Walk JSON bytes, applying a numeric transformation to all number values.
+/// Copies the JSON structure verbatim but replaces each number with op(number, operand).
+/// Returns true on success, false if the JSON is malformed.
+pub fn walk_json_transform_nums(buf: &mut Vec<u8>, b: &[u8], op: u8, operand: f64) -> bool {
+    walk_json_nums_inner(buf, b, &mut 0, op, operand)
+}
+
+fn walk_json_nums_inner(buf: &mut Vec<u8>, b: &[u8], pos: &mut usize, op: u8, operand: f64) -> bool {
+    // Skip whitespace
+    while *pos < b.len() && matches!(b[*pos], b' ' | b'\t' | b'\n' | b'\r') { *pos += 1; }
+    if *pos >= b.len() { return false; }
+    match b[*pos] {
+        b'"' => {
+            // String: copy verbatim
+            let start = *pos;
+            *pos += 1;
+            while *pos < b.len() {
+                match b[*pos] {
+                    b'"' => { *pos += 1; buf.extend_from_slice(&b[start..*pos]); return true; }
+                    b'\\' => { *pos += 2; }
+                    _ => { *pos += 1; }
+                }
+            }
+            false
+        }
+        b'{' => {
+            buf.push(b'{');
+            *pos += 1;
+            while *pos < b.len() && matches!(b[*pos], b' ' | b'\t' | b'\n' | b'\r') { *pos += 1; }
+            if *pos < b.len() && b[*pos] == b'}' { *pos += 1; buf.push(b'}'); return true; }
+            let mut first = true;
+            loop {
+                if !first { buf.push(b','); }
+                first = false;
+                // Key
+                if !walk_json_nums_inner(buf, b, pos, op, operand) { return false; }
+                while *pos < b.len() && matches!(b[*pos], b' ' | b'\t' | b'\n' | b'\r') { *pos += 1; }
+                if *pos >= b.len() || b[*pos] != b':' { return false; }
+                *pos += 1;
+                buf.push(b':');
+                // Value
+                if !walk_json_nums_inner(buf, b, pos, op, operand) { return false; }
+                while *pos < b.len() && matches!(b[*pos], b' ' | b'\t' | b'\n' | b'\r') { *pos += 1; }
+                if *pos >= b.len() { return false; }
+                if b[*pos] == b'}' { *pos += 1; buf.push(b'}'); return true; }
+                if b[*pos] != b',' { return false; }
+                *pos += 1;
+                while *pos < b.len() && matches!(b[*pos], b' ' | b'\t' | b'\n' | b'\r') { *pos += 1; }
+            }
+        }
+        b'[' => {
+            buf.push(b'[');
+            *pos += 1;
+            while *pos < b.len() && matches!(b[*pos], b' ' | b'\t' | b'\n' | b'\r') { *pos += 1; }
+            if *pos < b.len() && b[*pos] == b']' { *pos += 1; buf.push(b']'); return true; }
+            let mut first = true;
+            loop {
+                if !first { buf.push(b','); }
+                first = false;
+                if !walk_json_nums_inner(buf, b, pos, op, operand) { return false; }
+                while *pos < b.len() && matches!(b[*pos], b' ' | b'\t' | b'\n' | b'\r') { *pos += 1; }
+                if *pos >= b.len() { return false; }
+                if b[*pos] == b']' { *pos += 1; buf.push(b']'); return true; }
+                if b[*pos] != b',' { return false; }
+                *pos += 1;
+                while *pos < b.len() && matches!(b[*pos], b' ' | b'\t' | b'\n' | b'\r') { *pos += 1; }
+            }
+        }
+        b't' => {
+            if b.len() - *pos >= 4 && &b[*pos..*pos+4] == b"true" {
+                buf.extend_from_slice(b"true"); *pos += 4; true
+            } else { false }
+        }
+        b'f' => {
+            if b.len() - *pos >= 5 && &b[*pos..*pos+5] == b"false" {
+                buf.extend_from_slice(b"false"); *pos += 5; true
+            } else { false }
+        }
+        b'n' => {
+            if b.len() - *pos >= 4 && &b[*pos..*pos+4] == b"null" {
+                buf.extend_from_slice(b"null"); *pos += 4; true
+            } else { false }
+        }
+        b'-' | b'0'..=b'9' => {
+            // Number: parse, transform, format
+            let start = *pos;
+            if b[*pos] == b'-' { *pos += 1; }
+            while *pos < b.len() && b[*pos].is_ascii_digit() { *pos += 1; }
+            if *pos < b.len() && b[*pos] == b'.' {
+                *pos += 1;
+                while *pos < b.len() && b[*pos].is_ascii_digit() { *pos += 1; }
+            }
+            if *pos < b.len() && (b[*pos] == b'e' || b[*pos] == b'E') {
+                *pos += 1;
+                if *pos < b.len() && (b[*pos] == b'+' || b[*pos] == b'-') { *pos += 1; }
+                while *pos < b.len() && b[*pos].is_ascii_digit() { *pos += 1; }
+            }
+            let num_str = unsafe { std::str::from_utf8_unchecked(&b[start..*pos]) };
+            if let Ok(n) = fast_float::parse::<f64, _>(num_str) {
+                let result = match op {
+                    b'+' => n + operand,
+                    b'-' => n - operand,
+                    b'*' => n * operand,
+                    b'/' => n / operand,
+                    _ => n,
+                };
+                push_jq_number_bytes(buf, result);
+                true
+            } else {
+                buf.extend_from_slice(&b[start..*pos]);
+                true
+            }
+        }
+        _ => false,
+    }
+}
+
 /// Compact a JSON value by stripping whitespace outside strings.
 /// Copies to `buf` directly, avoiding Value construction.
 pub fn push_json_compact_raw(buf: &mut Vec<u8>, b: &[u8]) {

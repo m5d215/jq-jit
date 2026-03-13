@@ -6571,6 +6571,42 @@ impl Filter {
         None
     }
 
+    /// Detect `walk(if type == "number" then . op N else . end)` pattern.
+    /// Returns (op, N) for the numeric transformation.
+    pub fn detect_walk_num_op(&self) -> Option<(crate::ir::BinOp, f64)> {
+        use crate::ir::{Expr, BinOp, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        if let Expr::CallBuiltin { name, args } = expr {
+            if name != "walk" || args.len() != 1 { return None; }
+            // The body should be: if type == "number" then . op N else . end
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = &args[0] {
+                // else_branch must be identity (.)
+                if !matches!(else_branch.as_ref(), Expr::Input) { return None; }
+                // cond: type == "number" (which is BinOp(Eq, UnaryOp(Type, Input), Literal(Str("number"))))
+                if let Expr::BinOp { op: BinOp::Eq, lhs, rhs } = cond.as_ref() {
+                    let is_type_number = match (lhs.as_ref(), rhs.as_ref()) {
+                        (Expr::UnaryOp { op: UnaryOp::Type, operand }, Expr::Literal(Literal::Str(s)))
+                            if matches!(operand.as_ref(), Expr::Input) && s == "number" => true,
+                        (Expr::Literal(Literal::Str(s)), Expr::UnaryOp { op: UnaryOp::Type, operand })
+                            if matches!(operand.as_ref(), Expr::Input) && s == "number" => true,
+                        _ => false,
+                    };
+                    if !is_type_number { return None; }
+                    // then_branch: . op N
+                    if let Expr::BinOp { op, lhs: tl, rhs: tr } = then_branch.as_ref() {
+                        if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) { return None; }
+                        if matches!(tl.as_ref(), Expr::Input) {
+                            if let Expr::Literal(Literal::Num(n, _)) = tr.as_ref() {
+                                return Some((*op, *n));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect nested field access `.a.b` or `.a.b.c` pattern.
     /// Returns the chain of field names if this is chained field access on input.
     pub fn detect_nested_field_access(&self) -> Option<Vec<String>> {
