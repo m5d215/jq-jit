@@ -4068,6 +4068,13 @@ impl Filter {
         matches!(expr, Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input))
     }
 
+    /// Detect `[.[]]` — collect all values into array.
+    pub fn is_collect_each(&self) -> bool {
+        use crate::ir::Expr;
+        let expr = match self.detect_expr() { Some(e) => e, None => return false };
+        matches!(expr, Expr::Collect { generator } if matches!(generator.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)))
+    }
+
     /// Detect array-of-field-access `[.f1,.f2,...]` pattern.
     /// Returns the list of field names if this is Collect over comma field accesses.
     pub fn detect_array_field_access(&self) -> Option<Vec<String>> {
