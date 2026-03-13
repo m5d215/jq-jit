@@ -175,6 +175,8 @@ pub enum CondRhs {
     Endswith(String),
     /// `.field | contains("str")` — true if field contains str
     Contains(String),
+    /// `.field | test("regex")` — true if field matches regex
+    Test(String),
 }
 
 /// One branch in a conditional chain: if .field [arith_ops...] cmp (N | .field2) then output.
@@ -4972,6 +4974,7 @@ impl Filter {
                                             "startswith" => Some(CondRhs::Startswith(s.clone())),
                                             "endswith" => Some(CondRhs::Endswith(s.clone())),
                                             "contains" => Some(CondRhs::Contains(s.clone())),
+                                            "test" => Some(CondRhs::Test(s.clone())),
                                             _ => None,
                                         };
                                         if let Some(r) = rhs {
@@ -5006,7 +5009,7 @@ impl Filter {
                     || matches!(else_output, BranchOutput::Remap(_));
                 let has_field_rhs = branches.iter().any(|b| matches!(b.cond_rhs, CondRhs::Field(_)));
                 let has_arith_ops = branches.iter().any(|b| !b.cond_arith_ops.is_empty());
-                let has_str_func = branches.iter().any(|b| matches!(b.cond_rhs, CondRhs::Startswith(_) | CondRhs::Endswith(_) | CondRhs::Contains(_)));
+                let has_str_func = branches.iter().any(|b| matches!(b.cond_rhs, CondRhs::Startswith(_) | CondRhs::Endswith(_) | CondRhs::Contains(_) | CondRhs::Test(_)));
                 if branches.len() < 2 && !has_field_output && !has_remap_output && !has_field_rhs && !has_arith_ops && !has_str_func { return None; }
                 return Some((branches, else_output));
             }

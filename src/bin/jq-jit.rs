@@ -313,6 +313,7 @@ enum ResolvedCondRhs {
     Startswith(Vec<u8>), // raw pattern bytes (no quotes)
     Endswith(Vec<u8>),
     Contains(Vec<u8>),
+    Test(regex::Regex),
 }
 
 #[derive(Clone)]
@@ -389,6 +390,9 @@ fn resolve_one_remap(
                         jq_jit::interpreter::CondRhs::Startswith(s) => ResolvedCondRhs::Startswith(s.as_bytes().to_vec()),
                         jq_jit::interpreter::CondRhs::Endswith(s) => ResolvedCondRhs::Endswith(s.as_bytes().to_vec()),
                         jq_jit::interpreter::CondRhs::Contains(s) => ResolvedCondRhs::Contains(s.as_bytes().to_vec()),
+                        jq_jit::interpreter::CondRhs::Test(s) => {
+                            ResolvedCondRhs::Test(regex::Regex::new(s).unwrap_or_else(|_| regex::Regex::new("(?:)").unwrap()))
+                        }
                     },
                     output: resolve_branch_output(&b.output, field_idx),
                 }
@@ -1158,6 +1162,11 @@ fn emit_resolved_value(
                             let inner = &field_bytes[1..field_bytes.len()-1];
                             inner.windows(pat.len()).any(|w| w == pat.as_slice())
                         }
+                    }
+                    ResolvedCondRhs::Test(ref re) => {
+                        field_bytes.len() >= 2 && field_bytes[0] == b'"'
+                            && !field_bytes[1..field_bytes.len()-1].contains(&b'\\')
+                            && re.is_match(unsafe { std::str::from_utf8_unchecked(&field_bytes[1..field_bytes.len()-1]) })
                     }
                     ResolvedCondRhs::Const(_) | ResolvedCondRhs::Field(_) => {
                         // Numeric comparison (original path)
@@ -5142,13 +5151,16 @@ fn real_main() {
                         let then_out = &br.output;
                         let rhs_field: Option<&str> = if let CondRhs::Field(ref f) = br.cond_rhs { Some(f.as_str()) } else { None };
                         let rhs_const: Option<f64> = if let CondRhs::Const(n) = br.cond_rhs { Some(n) } else { None };
-                        let is_non_numeric_cmp = matches!(br.cond_rhs, CondRhs::Null | CondRhs::Str(_) | CondRhs::Bool(_) | CondRhs::Startswith(_) | CondRhs::Endswith(_) | CondRhs::Contains(_));
+                        let is_non_numeric_cmp = matches!(br.cond_rhs, CondRhs::Null | CondRhs::Str(_) | CondRhs::Bool(_) | CondRhs::Startswith(_) | CondRhs::Endswith(_) | CondRhs::Contains(_) | CondRhs::Test(_));
                         let rhs_str_json: Option<Vec<u8>> = if let CondRhs::Str(ref s) = br.cond_rhs {
                             let mut buf = Vec::with_capacity(s.len() + 2);
                             buf.push(b'"');
                             buf.extend_from_slice(s.as_bytes());
                             buf.push(b'"');
                             Some(buf)
+                        } else { None };
+                        let cond_re: Option<regex::Regex> = if let CondRhs::Test(ref s) = br.cond_rhs {
+                            regex::Regex::new(s).ok()
                         } else { None };
                         json_stream_raw(&input_str, |start, end| {
                             let raw = &input_bytes[start..end];
@@ -5195,6 +5207,13 @@ fn real_main() {
                                                 let sb = s.as_bytes();
                                                 inner.windows(sb.len()).any(|w| w == sb)
                                             }
+                                        }
+                                        CondRhs::Test(_) => {
+                                            if let Some(ref re) = cond_re {
+                                                field_bytes.len() >= 2 && field_bytes[0] == b'"'
+                                                    && !field_bytes[1..field_bytes.len()-1].contains(&b'\\')
+                                                    && re.is_match(unsafe { std::str::from_utf8_unchecked(&field_bytes[1..field_bytes.len()-1]) })
+                                            } else { false }
                                         }
                                         _ => false,
                                     }
@@ -5383,6 +5402,12 @@ fn real_main() {
                         let res = resolve_remap_exprs(entries, &field_idx);
                         Some((kp, res, if use_pretty_buf { &b"\n}\n"[..] } else { &b"}\n"[..] }))
                     } else { None };
+                    // Pre-compile regexes for Test conditions
+                    let branch_regexes: Vec<Option<regex::Regex>> = branches.iter().map(|br| {
+                        if let CondRhs::Test(ref pat) = br.cond_rhs {
+                            regex::Regex::new(pat).ok()
+                        } else { None }
+                    }).collect();
                     let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
                     let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                     json_stream_raw(&input_str, |start, end| {
@@ -5436,6 +5461,13 @@ fn real_main() {
                                             let sb = s.as_bytes();
                                             inner.windows(sb.len()).any(|w| w == sb)
                                         }
+                                    }
+                                    CondRhs::Test(_) => {
+                                        if let Some(ref re) = branch_regexes[i] {
+                                            field_bytes.len() >= 2 && field_bytes[0] == b'"'
+                                                && !field_bytes[1..field_bytes.len()-1].contains(&b'\\')
+                                                && re.is_match(unsafe { std::str::from_utf8_unchecked(&field_bytes[1..field_bytes.len()-1]) })
+                                        } else { false }
                                     }
                                     _ => {
                                         // Numeric comparison
@@ -9644,13 +9676,16 @@ fn real_main() {
                     let then_out = &br.output;
                     let rhs_field: Option<&str> = if let CondRhs::Field(ref f) = br.cond_rhs { Some(f.as_str()) } else { None };
                     let rhs_const: Option<f64> = if let CondRhs::Const(n) = br.cond_rhs { Some(n) } else { None };
-                    let is_non_numeric_cmp = matches!(br.cond_rhs, CondRhs::Null | CondRhs::Str(_) | CondRhs::Bool(_) | CondRhs::Startswith(_) | CondRhs::Endswith(_) | CondRhs::Contains(_));
+                    let is_non_numeric_cmp = matches!(br.cond_rhs, CondRhs::Null | CondRhs::Str(_) | CondRhs::Bool(_) | CondRhs::Startswith(_) | CondRhs::Endswith(_) | CondRhs::Contains(_) | CondRhs::Test(_));
                     let rhs_str_json: Option<Vec<u8>> = if let CondRhs::Str(ref s) = br.cond_rhs {
                         let mut buf = Vec::with_capacity(s.len() + 2);
                         buf.push(b'"');
                         buf.extend_from_slice(s.as_bytes());
                         buf.push(b'"');
                         Some(buf)
+                    } else { None };
+                    let cond_re: Option<regex::Regex> = if let CondRhs::Test(ref s) = br.cond_rhs {
+                        regex::Regex::new(s).ok()
                     } else { None };
                     json_stream_raw(content, |start, end| {
                         let raw = &content_bytes[start..end];
@@ -9694,6 +9729,13 @@ fn real_main() {
                                             let sb = s.as_bytes();
                                             inner.windows(sb.len()).any(|w| w == sb)
                                         }
+                                    }
+                                    CondRhs::Test(_) => {
+                                        if let Some(ref re) = cond_re {
+                                            field_bytes.len() >= 2 && field_bytes[0] == b'"'
+                                                && !field_bytes[1..field_bytes.len()-1].contains(&b'\\')
+                                                && re.is_match(unsafe { std::str::from_utf8_unchecked(&field_bytes[1..field_bytes.len()-1]) })
+                                        } else { false }
                                     }
                                     _ => false,
                                 }
@@ -9878,6 +9920,11 @@ fn real_main() {
                     let res = resolve_remap_exprs(entries, &field_idx);
                     Some((kp, res, if use_pretty_buf { &b"\n}\n"[..] } else { &b"}\n"[..] }))
                 } else { None };
+                let branch_regexes: Vec<Option<regex::Regex>> = branches.iter().map(|br| {
+                    if let CondRhs::Test(ref pat) = br.cond_rhs {
+                        regex::Regex::new(pat).ok()
+                    } else { None }
+                }).collect();
                 let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
                 let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                 json_stream_raw(content, |start, end| {
@@ -9931,6 +9978,13 @@ fn real_main() {
                                         let sb = s.as_bytes();
                                         inner.windows(sb.len()).any(|w| w == sb)
                                     }
+                                }
+                                CondRhs::Test(_) => {
+                                    if let Some(ref re) = branch_regexes[i] {
+                                        field_bytes.len() >= 2 && field_bytes[0] == b'"'
+                                            && !field_bytes[1..field_bytes.len()-1].contains(&b'\\')
+                                            && re.is_match(unsafe { std::str::from_utf8_unchecked(&field_bytes[1..field_bytes.len()-1]) })
+                                    } else { false }
                                 }
                                 _ => {
                                     if let Some(mut val) = parse_json_num(field_bytes) {
