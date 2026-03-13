@@ -121,6 +121,82 @@ pub struct Filter {
     cached_env: std::cell::RefCell<Option<crate::eval::EnvRef>>,
 }
 
+/// Serialize a constant expression to compact JSON bytes.
+/// Supports string, number, null, true, false, and constant ObjectConstruct/Collect.
+fn const_expr_to_json(expr: &crate::ir::Expr) -> Option<Vec<u8>> {
+    use crate::ir::{Expr, Literal};
+    match expr {
+        Expr::Literal(Literal::Str(s)) => {
+            let mut v = Vec::with_capacity(s.len() + 2);
+            v.push(b'"');
+            for &b in s.as_bytes() {
+                match b {
+                    b'"' => v.extend_from_slice(b"\\\""),
+                    b'\\' => v.extend_from_slice(b"\\\\"),
+                    b'\n' => v.extend_from_slice(b"\\n"),
+                    b'\r' => v.extend_from_slice(b"\\r"),
+                    b'\t' => v.extend_from_slice(b"\\t"),
+                    b if b < 0x20 => { v.extend_from_slice(format!("\\u{:04x}", b).as_bytes()); }
+                    _ => v.push(b),
+                }
+            }
+            v.push(b'"');
+            Some(v)
+        }
+        Expr::Literal(Literal::Num(n, repr)) => {
+            if let Some(r) = repr {
+                Some(r.as_bytes().to_vec())
+            } else {
+                let mut buf = Vec::new();
+                crate::value::push_jq_number_bytes(&mut buf, *n);
+                Some(buf)
+            }
+        }
+        Expr::Literal(Literal::Null) => Some(b"null".to_vec()),
+        Expr::Literal(Literal::True) => Some(b"true".to_vec()),
+        Expr::Literal(Literal::False) => Some(b"false".to_vec()),
+        Expr::ObjectConstruct { pairs } => {
+            let mut buf = Vec::new();
+            buf.push(b'{');
+            for (i, (k, v)) in pairs.iter().enumerate() {
+                if i > 0 { buf.push(b','); }
+                if let Expr::Literal(Literal::Str(key)) = k {
+                    buf.push(b'"');
+                    buf.extend_from_slice(key.as_bytes());
+                    buf.push(b'"');
+                    buf.push(b':');
+                    buf.extend(const_expr_to_json(v)?);
+                } else { return None; }
+            }
+            buf.push(b'}');
+            Some(buf)
+        }
+        Expr::Collect { generator } => {
+            // Constant array: [lit, lit, ...]
+            fn collect_comma_elems<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+                match e {
+                    Expr::Comma { left, right } => {
+                        collect_comma_elems(left, out);
+                        collect_comma_elems(right, out);
+                    }
+                    _ => out.push(e),
+                }
+            }
+            let mut elems = Vec::new();
+            collect_comma_elems(generator, &mut elems);
+            let mut buf = Vec::new();
+            buf.push(b'[');
+            for (i, elem) in elems.iter().enumerate() {
+                if i > 0 { buf.push(b','); }
+                buf.extend(const_expr_to_json(elem)?);
+            }
+            buf.push(b']');
+            Some(buf)
+        }
+        _ => None,
+    }
+}
+
 /// Recursively strip identity pipes and beta-reduce for fast path detection.
 /// Pipe(Input, X) → X, Pipe(X, Input) → X.
 /// Pipe(E, F) → F[E/.] when E is scalar and F has free Input.
@@ -2778,46 +2854,6 @@ impl Filter {
     pub fn detect_cmp_branch_literals(&self) -> Option<(String, crate::ir::BinOp, f64, Vec<u8>, Vec<u8>)> {
         use crate::ir::{Expr, BinOp, Literal};
         let expr = self.detect_expr()?;
-        let literal_to_json = |lit: &Expr| -> Option<Vec<u8>> {
-            match lit {
-                Expr::Literal(Literal::Str(s)) => {
-                    let mut v = Vec::with_capacity(s.len() + 2);
-                    v.push(b'"');
-                    // Simple escape for JSON
-                    for &b in s.as_bytes() {
-                        match b {
-                            b'"' => v.extend_from_slice(b"\\\""),
-                            b'\\' => v.extend_from_slice(b"\\\\"),
-                            b'\n' => v.extend_from_slice(b"\\n"),
-                            b'\r' => v.extend_from_slice(b"\\r"),
-                            b'\t' => v.extend_from_slice(b"\\t"),
-                            b if b < 0x20 => { v.extend_from_slice(format!("\\u{:04x}", b).as_bytes()); }
-                            _ => v.push(b),
-                        }
-                    }
-                    v.push(b'"');
-                    Some(v)
-                }
-                Expr::Literal(Literal::Num(n, repr)) => {
-                    if let Some(r) = repr {
-                        Some(r.as_bytes().to_vec())
-                    } else {
-                        let mut buf = Vec::new();
-                        let i = *n as i64;
-                        if i as f64 == *n {
-                            buf.extend_from_slice(itoa::Buffer::new().format(i).as_bytes());
-                        } else {
-                            buf.extend_from_slice(ryu::Buffer::new().format(*n).as_bytes());
-                        }
-                        Some(buf)
-                    }
-                }
-                Expr::Literal(Literal::Null) => Some(b"null".to_vec()),
-                Expr::Literal(Literal::True) => Some(b"true".to_vec()),
-                Expr::Literal(Literal::False) => Some(b"false".to_vec()),
-                _ => None,
-            }
-        };
         if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
             if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
                 if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
@@ -2827,8 +2863,37 @@ impl Filter {
                     if !matches!(base.as_ref(), Expr::Input) { return None; }
                     if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                         if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
-                            if let (Some(t_bytes), Some(f_bytes)) = (literal_to_json(then_branch), literal_to_json(else_branch)) {
+                            if let (Some(t_bytes), Some(f_bytes)) = (const_expr_to_json(then_branch), const_expr_to_json(else_branch)) {
                                 return Some((field.clone(), *op, *n, t_bytes, f_bytes));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `if .field1 cmp .field2 then const else const end` pattern.
+    /// Both branches must be constant (serializable to JSON).
+    /// Returns (field1, op, field2, true_output_bytes, false_output_bytes).
+    pub fn detect_field_field_cmp_branch(&self) -> Option<(String, crate::ir::BinOp, String, Vec<u8>, Vec<u8>)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                    return None;
+                }
+                if let Expr::Index { expr: base1, key: key1 } = lhs.as_ref() {
+                    if !matches!(base1.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(field1)) = key1.as_ref() {
+                        if let Expr::Index { expr: base2, key: key2 } = rhs.as_ref() {
+                            if !matches!(base2.as_ref(), Expr::Input) { return None; }
+                            if let Expr::Literal(Literal::Str(field2)) = key2.as_ref() {
+                                if let (Some(t_bytes), Some(f_bytes)) = (const_expr_to_json(then_branch), const_expr_to_json(else_branch)) {
+                                    return Some((field1.clone(), *op, field2.clone(), t_bytes, f_bytes));
+                                }
                             }
                         }
                     }
@@ -2844,45 +2909,6 @@ impl Filter {
     pub fn detect_arith_cmp_branch_literals(&self) -> Option<(String, Vec<(crate::ir::BinOp, f64)>, crate::ir::BinOp, f64, Vec<u8>, Vec<u8>)> {
         use crate::ir::{Expr, BinOp, Literal};
         let expr = self.detect_expr()?;
-        let literal_to_json = |lit: &Expr| -> Option<Vec<u8>> {
-            match lit {
-                Expr::Literal(Literal::Str(s)) => {
-                    let mut v = Vec::with_capacity(s.len() + 2);
-                    v.push(b'"');
-                    for &b in s.as_bytes() {
-                        match b {
-                            b'"' => v.extend_from_slice(b"\\\""),
-                            b'\\' => v.extend_from_slice(b"\\\\"),
-                            b'\n' => v.extend_from_slice(b"\\n"),
-                            b'\r' => v.extend_from_slice(b"\\r"),
-                            b'\t' => v.extend_from_slice(b"\\t"),
-                            c if c < 0x20 => { v.extend_from_slice(format!("\\u{:04x}", c).as_bytes()); }
-                            _ => v.push(b),
-                        }
-                    }
-                    v.push(b'"');
-                    Some(v)
-                }
-                Expr::Literal(Literal::Num(n, repr)) => {
-                    if let Some(r) = repr {
-                        Some(r.as_bytes().to_vec())
-                    } else {
-                        let mut buf = Vec::new();
-                        let i = *n as i64;
-                        if i as f64 == *n {
-                            buf.extend_from_slice(itoa::Buffer::new().format(i).as_bytes());
-                        } else {
-                            buf.extend_from_slice(ryu::Buffer::new().format(*n).as_bytes());
-                        }
-                        Some(buf)
-                    }
-                }
-                Expr::Literal(Literal::Null) => Some(b"null".to_vec()),
-                Expr::Literal(Literal::True) => Some(b"true".to_vec()),
-                Expr::Literal(Literal::False) => Some(b"false".to_vec()),
-                _ => None,
-            }
-        };
         if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
             if let Expr::BinOp { op: cmp_op, lhs, rhs } = cond.as_ref() {
                 if !matches!(cmp_op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
@@ -2910,7 +2936,7 @@ impl Filter {
                     if let Expr::Index { expr: base, key } = cur {
                         if !matches!(base.as_ref(), Expr::Input) { return None; }
                         if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
-                            if let (Some(t_bytes), Some(f_bytes)) = (literal_to_json(then_branch), literal_to_json(else_branch)) {
+                            if let (Some(t_bytes), Some(f_bytes)) = (const_expr_to_json(then_branch), const_expr_to_json(else_branch)) {
                                 return Some((field.clone(), ops, *cmp_op, *threshold, t_bytes, f_bytes));
                             }
                         }
