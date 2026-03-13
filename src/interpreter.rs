@@ -4793,6 +4793,69 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.field arith cmp N) | [array]` — arith select then array output.
+    /// Returns (field, arith_ops, cmp_op, threshold, array_elements).
+    pub fn detect_select_arith_cmp_then_array(&self) -> Option<(String, Vec<(crate::ir::BinOp, f64)>, crate::ir::BinOp, f64, Vec<RemapExpr>)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        let try_extract = |cond: &Expr, output: &Expr| -> Option<(String, Vec<(BinOp, f64)>, BinOp, f64, Vec<RemapExpr>)> {
+            if let Expr::Collect { generator } = output {
+                fn collect_elems_ac<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+                    match e {
+                        Expr::Comma { left, right } => { collect_elems_ac(left, out); collect_elems_ac(right, out); }
+                        _ => out.push(e),
+                    }
+                }
+                let mut elems = Vec::new();
+                collect_elems_ac(generator, &mut elems);
+                if elems.len() < 2 { return None; }
+                let mut rexprs = Vec::with_capacity(elems.len());
+                for elem in &elems { rexprs.push(Self::classify_remap_value(elem)?); }
+                if let Expr::BinOp { op, lhs, rhs } = cond {
+                    if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                    if let Expr::Literal(Literal::Num(threshold, _)) = rhs.as_ref() {
+                        let mut arith_ops = Vec::new();
+                        let mut cur = lhs.as_ref();
+                        loop {
+                            if let Expr::BinOp { op: aop, lhs: al, rhs: ar } = cur {
+                                if matches!(aop, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+                                    if let Expr::Literal(Literal::Num(n, _)) = ar.as_ref() {
+                                        arith_ops.push((*aop, *n));
+                                        cur = al.as_ref();
+                                        continue;
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        if arith_ops.is_empty() { return None; }
+                        arith_ops.reverse();
+                        if let Expr::Index { expr: base, key } = cur {
+                            if !matches!(base.as_ref(), Expr::Input) { return None; }
+                            if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                return Some((field.clone(), arith_ops, *op, *threshold, rexprs));
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        };
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                    if let Some(r) = try_extract(cond, right) { return Some(r); }
+                }
+            }
+        }
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if matches!(else_branch.as_ref(), Expr::Empty) {
+                if let Some(r) = try_extract(cond, then_branch) { return Some(r); }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.x > N and .y < M) | [array]` — compound select then array output.
     pub fn detect_select_compound_cmp_then_array(&self) -> Option<(crate::ir::BinOp, Vec<(String, crate::ir::BinOp, f64)>, Vec<RemapExpr>)> {
         use crate::ir::{Expr, BinOp, Literal};
