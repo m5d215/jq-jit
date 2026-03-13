@@ -151,6 +151,8 @@ TESTS=(
     'dynkey+static:-c:{(.name): .x, total: (.x + .y)}'
     'if>.y str chain:-c:if .x > .y then .name + ":big" else .name + ":small" end'
     'remap+str chain:-c:{a: (.name + "_" + (.x | tostring)), b: .y}'
+    'sel(len>8):-c:select(.name | length > 8)'
+    'up|split|join:-c:.name | ascii_upcase | split("_") | join("-")'
 )
 
 for test in "${TESTS[@]}"; do

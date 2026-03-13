@@ -1075,6 +1075,35 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.field == null)` or `select(.field != null)` — output whole object.
+    /// Returns (field_name, is_eq) where is_eq=true for ==null, false for !=null.
+    pub fn detect_select_field_null(&self) -> Option<(String, bool)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
+            if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+            if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                let is_eq = match op {
+                    BinOp::Eq => true,
+                    BinOp::Ne => false,
+                    _ => return None,
+                };
+                // .field == null or .field != null
+                if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                            if matches!(rhs.as_ref(), Expr::Literal(Literal::Null)) {
+                                return Some((f.clone(), is_eq));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.f1 > N and .f2 < M)` or `select(.f1 > N or .f2 < M)` pattern.
     /// Returns (conjunct, Vec<(field, op, threshold)>) where conjunct is And or Or.
     pub fn detect_select_compound_cmp(&self) -> Option<(crate::ir::BinOp, Vec<(String, crate::ir::BinOp, f64)>)> {

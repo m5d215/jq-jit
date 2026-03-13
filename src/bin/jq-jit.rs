@@ -1914,6 +1914,9 @@ fn real_main() {
     let select_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() && field_str_concat.is_none() {
         filter.detect_select_field_cmp()
     } else { None };
+    let select_field_null = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() {
+        filter.detect_select_field_null()
+    } else { None };
     let select_arith_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() {
         filter.detect_select_arith_cmp()
     } else { None };
@@ -2160,7 +2163,7 @@ fn real_main() {
         || field_field_cmp.is_some() || field_const_cmp.is_some() || arith_chain_cmp.is_some() || compound_field_cmp.is_some()
         || field_str_builtin.is_some() || field_test.is_some() || field_gsub.is_some() || field_format.is_some() || field_ltrimstr_tonumber.is_some()
         || field_str_concat.is_some() || field_alt.is_some() || field_field_alt.is_some()
-        || select_cmp.is_some() || select_arith_cmp.is_some()
+        || select_cmp.is_some() || select_field_null.is_some() || select_arith_cmp.is_some()
         || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || field_field_cmp_branch.is_some() || if_cmp_arrays.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some() || select_compound_computed.is_some() || select_compound_cremap.is_some()
         || select_str.is_some() || select_compound_str_chain.is_some()
         || select_str_test.is_some() || select_regex_test.is_some() || select_regex_value.is_some() || select_nested_cmp.is_some()
@@ -4776,6 +4779,25 @@ fn real_main() {
                                     let _ = out.write_all(&compact_buf);
                                     compact_buf.clear();
                                 }
+                            }
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref field, is_eq)) = select_field_null {
+                    // select(.field == null) or select(.field != null) — raw byte
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        let is_null = if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
+                            &raw[vs..ve] == b"null"
+                        } else {
+                            true // missing field is null
+                        };
+                        let pass = if is_eq { is_null } else { !is_null };
+                        if pass {
+                            emit_raw_ln!(&mut compact_buf, raw);
+                            if compact_buf.len() >= 1 << 17 {
+                                let _ = out.write_all(&compact_buf);
+                                compact_buf.clear();
                             }
                         }
                         Ok(())
@@ -9137,6 +9159,26 @@ fn real_main() {
                                 let _ = out.write_all(&compact_buf);
                                 compact_buf.clear();
                             }
+                        }
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref field, is_eq)) = select_field_null {
+                // select(.field == null) or select(.field != null) — stdin path
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    let is_null = if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
+                        &raw[vs..ve] == b"null"
+                    } else {
+                        true
+                    };
+                    let pass = if is_eq { is_null } else { !is_null };
+                    if pass {
+                        emit_raw_ln!(&mut compact_buf, raw);
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
                         }
                     }
                     Ok(())
