@@ -4596,8 +4596,8 @@ fn real_main() {
                         }
                         Ok(())
                     })
-                } else if let Some((ref chain_field, ref chain_ops)) = field_string_chain {
-                    use jq_jit::interpreter::StringChainOp;
+                } else if let Some((ref chain_field, ref chain_ops, ref chain_terminal)) = field_string_chain {
+                    use jq_jit::interpreter::{StringChainOp, StringChainTerminal};
                     let mut tmp_str = Vec::<u8>::new();
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
@@ -4635,9 +4635,43 @@ fn real_main() {
                                         }
                                     }
                                 }
-                                compact_buf.push(b'"');
-                                compact_buf.extend_from_slice(&tmp_str);
-                                compact_buf.extend_from_slice(b"\"\n");
+                                // Apply terminal
+                                match chain_terminal {
+                                    StringChainTerminal::None => {
+                                        compact_buf.push(b'"');
+                                        compact_buf.extend_from_slice(&tmp_str);
+                                        compact_buf.extend_from_slice(b"\"\n");
+                                    }
+                                    StringChainTerminal::Startswith(ref arg) => {
+                                        let ab = arg.as_bytes();
+                                        if tmp_str.len() >= ab.len() && &tmp_str[..ab.len()] == ab {
+                                            compact_buf.extend_from_slice(b"true\n");
+                                        } else {
+                                            compact_buf.extend_from_slice(b"false\n");
+                                        }
+                                    }
+                                    StringChainTerminal::Endswith(ref arg) => {
+                                        let ab = arg.as_bytes();
+                                        if tmp_str.len() >= ab.len() && &tmp_str[tmp_str.len()-ab.len()..] == ab {
+                                            compact_buf.extend_from_slice(b"true\n");
+                                        } else {
+                                            compact_buf.extend_from_slice(b"false\n");
+                                        }
+                                    }
+                                    StringChainTerminal::Contains(ref arg) => {
+                                        let ab = arg.as_bytes();
+                                        if bytes_contains(&tmp_str, ab) {
+                                            compact_buf.extend_from_slice(b"true\n");
+                                        } else {
+                                            compact_buf.extend_from_slice(b"false\n");
+                                        }
+                                    }
+                                    StringChainTerminal::Length => {
+                                        let count = tmp_str.iter().filter(|&&b| (b & 0xC0) != 0x80).count();
+                                        push_jq_number_bytes(&mut compact_buf, count as f64);
+                                        compact_buf.push(b'\n');
+                                    }
+                                }
                             } else {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -7421,8 +7455,8 @@ fn real_main() {
                     }
                     Ok(())
                 })
-            } else if let Some((ref chain_field, ref chain_ops)) = field_string_chain {
-                use jq_jit::interpreter::StringChainOp;
+            } else if let Some((ref chain_field, ref chain_ops, ref chain_terminal)) = field_string_chain {
+                use jq_jit::interpreter::{StringChainOp, StringChainTerminal};
                 let content_bytes = content.as_bytes();
                 let mut tmp_str = Vec::<u8>::new();
                 json_stream_raw(content, |start, end| {
@@ -7461,9 +7495,29 @@ fn real_main() {
                                     }
                                 }
                             }
-                            compact_buf.push(b'"');
-                            compact_buf.extend_from_slice(&tmp_str);
-                            compact_buf.extend_from_slice(b"\"\n");
+                            match chain_terminal {
+                                StringChainTerminal::None => {
+                                    compact_buf.push(b'"');
+                                    compact_buf.extend_from_slice(&tmp_str);
+                                    compact_buf.extend_from_slice(b"\"\n");
+                                }
+                                StringChainTerminal::Startswith(ref arg) => {
+                                    let ab = arg.as_bytes();
+                                    compact_buf.extend_from_slice(if tmp_str.len() >= ab.len() && &tmp_str[..ab.len()] == ab { b"true\n" } else { b"false\n" });
+                                }
+                                StringChainTerminal::Endswith(ref arg) => {
+                                    let ab = arg.as_bytes();
+                                    compact_buf.extend_from_slice(if tmp_str.len() >= ab.len() && &tmp_str[tmp_str.len()-ab.len()..] == ab { b"true\n" } else { b"false\n" });
+                                }
+                                StringChainTerminal::Contains(ref arg) => {
+                                    compact_buf.extend_from_slice(if bytes_contains(&tmp_str, arg.as_bytes()) { b"true\n" } else { b"false\n" });
+                                }
+                                StringChainTerminal::Length => {
+                                    let count = tmp_str.iter().filter(|&&b| (b & 0xC0) != 0x80).count();
+                                    push_jq_number_bytes(&mut compact_buf, count as f64);
+                                    compact_buf.push(b'\n');
+                                }
+                            }
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);

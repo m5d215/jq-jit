@@ -114,6 +114,21 @@ pub enum StringChainOp {
     Rtrimstr(String),
 }
 
+/// Terminal operation at the end of a string chain (returns bool or length, not string).
+#[derive(Debug, Clone)]
+pub enum StringChainTerminal {
+    /// No terminal — output is a string
+    None,
+    /// startswith("str")
+    Startswith(String),
+    /// endswith("str")
+    Endswith(String),
+    /// contains("str")
+    Contains(String),
+    /// length
+    Length,
+}
+
 /// Part of a string Add-chain: `.name + ": " + (.x | tostring)`.
 #[derive(Debug, Clone)]
 pub enum StringAddPart {
@@ -1550,8 +1565,9 @@ impl Filter {
     }
 
     /// Detect `.field | op1 | op2 | ...` chained string operations.
-    /// Returns (field_name, [ops]) with 2+ ops. Single ops are handled by other detectors.
-    pub fn detect_field_string_chain(&self) -> Option<(String, Vec<StringChainOp>)> {
+    /// Returns (field_name, [ops], terminal) with 1+ string ops + optional terminal,
+    /// where the total chain length is 2+ (either 2+ string ops, or 1+ string ops + terminal).
+    pub fn detect_field_string_chain(&self) -> Option<(String, Vec<StringChainOp>, StringChainTerminal)> {
         use crate::ir::{Expr, Literal};
         let expr = self.detect_expr()?;
         // Top level must be Pipe(.field, chain)
@@ -1561,26 +1577,56 @@ impl Filter {
                 if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() } else { return None; }
             } else { return None; };
             let mut ops = Vec::new();
-            Self::collect_string_chain_ops(right, &mut ops);
-            if ops.len() >= 2 {
-                return Some((field, ops));
+            let terminal = Self::collect_string_chain_ops_with_terminal(right, &mut ops);
+            let total = ops.len() + if matches!(terminal, StringChainTerminal::None) { 0 } else { 1 };
+            if total >= 2 {
+                return Some((field, ops, terminal));
             }
         }
         None
     }
 
     /// Recursively collect string ops from a right-associative pipe chain.
-    fn collect_string_chain_ops(expr: &crate::ir::Expr, ops: &mut Vec<StringChainOp>) {
+    /// Returns the terminal operation (if any) at the end of the chain.
+    fn collect_string_chain_ops_with_terminal(expr: &crate::ir::Expr, ops: &mut Vec<StringChainOp>) -> StringChainTerminal {
         use crate::ir::Expr;
         match expr {
             Expr::Pipe { left, right } => {
                 if Self::try_extract_string_op(left, ops) {
-                    Self::collect_string_chain_ops(right, ops);
+                    Self::collect_string_chain_ops_with_terminal(right, ops)
+                } else {
+                    StringChainTerminal::None
                 }
             }
             _ => {
-                Self::try_extract_string_op(expr, ops);
+                // Try string op first, then try terminal
+                if Self::try_extract_string_op(expr, ops) {
+                    StringChainTerminal::None
+                } else {
+                    Self::try_extract_terminal(expr)
+                }
             }
+        }
+    }
+
+    fn try_extract_terminal(expr: &crate::ir::Expr) -> StringChainTerminal {
+        use crate::ir::{Expr, Literal, UnaryOp};
+        match expr {
+            Expr::CallBuiltin { name, args } if args.len() == 1 => {
+                if let Expr::Literal(Literal::Str(arg)) = &args[0] {
+                    match name.as_str() {
+                        "startswith" => return StringChainTerminal::Startswith(arg.clone()),
+                        "endswith" => return StringChainTerminal::Endswith(arg.clone()),
+                        "contains" => return StringChainTerminal::Contains(arg.clone()),
+                        _ => {}
+                    }
+                }
+                StringChainTerminal::None
+            }
+            Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input) => {
+                StringChainTerminal::Length
+            }
+            _ => StringChainTerminal::None,
         }
     }
 
