@@ -1344,6 +1344,9 @@ fn real_main() {
     let field_split_first = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_split_join.is_none() {
         filter.detect_field_split_first()
     } else { None };
+    let field_split_last = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_split_join.is_none() && field_split_first.is_none() {
+        filter.detect_field_split_last()
+    } else { None };
     let field_slice = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
         filter.detect_field_slice()
     } else { None };
@@ -1463,7 +1466,7 @@ fn real_main() {
         || is_keys_unsorted || has_field.is_some() || has_multi.is_some() || select_has_multi.is_some() || is_type || del_field.is_some() || obj_merge_lit.is_some() || obj_merge_computed.is_some()
         || is_each || is_sort_keys || is_to_entries || remap_to_entries.is_some() || with_entries_select.is_some() || with_entries_type.is_some() || is_tojson || string_interp_fields.is_some() || string_add_chain.is_some() || array_join.is_some()
         || literal_output.is_some() || array_fields_format.is_some() || raw_csv_fields.is_some()
-        || field_str_reverse.is_some() || field_split_join.is_some() || field_split_first.is_some() || field_split_length.is_some() || field_strop_length.is_some() || field_length_cmp.is_some() || select_length_cmp_field.is_some() || field_slice.is_some()
+        || field_str_reverse.is_some() || field_split_join.is_some() || field_split_first.is_some() || field_split_last.is_some() || field_split_length.is_some() || field_strop_length.is_some() || field_length_cmp.is_some() || select_length_cmp_field.is_some() || field_slice.is_some()
         || dynamic_key_obj.is_some() || field_update_num.is_some() || field_assign_const.is_some()
         || min_two_fields.is_some() || minmax_two.is_some() || minmax_n.is_some() || field_string_chain.is_some() || remap_tostring_join.is_some() || filter.is_empty();
     let projection_fields: Option<Vec<String>> = if !has_raw_fast_path && !slurp && !raw_input {
@@ -1869,6 +1872,55 @@ fn real_main() {
                                 };
                                 if let Some(idx) = split_pos {
                                     compact_buf.extend_from_slice(&inner[..idx]);
+                                } else {
+                                    compact_buf.extend_from_slice(inner);
+                                }
+                                compact_buf.push(b'"');
+                                compact_buf.push(b'\n');
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref sl_field, ref sl_delim)) = field_split_last {
+                    // .field | split("s") | last — extract last split segment from raw bytes
+                    let delim_bytes = sl_delim.as_bytes();
+                    let single_delim = if delim_bytes.len() == 1 { Some(delim_bytes[0]) } else { None };
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sl_field) {
+                            let val = &raw[vs..ve];
+                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                                && memchr::memchr(b'\\', &val[1..val.len()-1]).is_none()
+                                && !delim_bytes.is_empty()
+                            {
+                                let inner = &val[1..val.len()-1];
+                                compact_buf.push(b'"');
+                                let split_pos = if let Some(d) = single_delim {
+                                    memchr::memrchr(d, inner)
+                                } else {
+                                    // Find last occurrence
+                                    let mut last_pos = None;
+                                    let mut pos = 0;
+                                    while pos + delim_bytes.len() <= inner.len() {
+                                        if &inner[pos..pos+delim_bytes.len()] == delim_bytes {
+                                            last_pos = Some(pos);
+                                        }
+                                        pos += 1;
+                                    }
+                                    last_pos
+                                };
+                                if let Some(idx) = split_pos {
+                                    compact_buf.extend_from_slice(&inner[idx + delim_bytes.len()..]);
                                 } else {
                                     compact_buf.extend_from_slice(inner);
                                 }
@@ -5939,6 +5991,54 @@ fn real_main() {
                             };
                             if let Some(idx) = split_pos {
                                 compact_buf.extend_from_slice(&inner[..idx]);
+                            } else {
+                                compact_buf.extend_from_slice(inner);
+                            }
+                            compact_buf.push(b'"');
+                            compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref sl_field, ref sl_delim)) = field_split_last {
+                let content_bytes = content.as_bytes();
+                let delim_bytes = sl_delim.as_bytes();
+                let single_delim = if delim_bytes.len() == 1 { Some(delim_bytes[0]) } else { None };
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sl_field) {
+                        let val = &raw[vs..ve];
+                        if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                            && memchr::memchr(b'\\', &val[1..val.len()-1]).is_none()
+                            && !delim_bytes.is_empty()
+                        {
+                            let inner = &val[1..val.len()-1];
+                            compact_buf.push(b'"');
+                            let split_pos = if let Some(d) = single_delim {
+                                memchr::memrchr(d, inner)
+                            } else {
+                                let mut last_pos = None;
+                                let mut pos = 0;
+                                while pos + delim_bytes.len() <= inner.len() {
+                                    if &inner[pos..pos+delim_bytes.len()] == delim_bytes {
+                                        last_pos = Some(pos);
+                                    }
+                                    pos += 1;
+                                }
+                                last_pos
+                            };
+                            if let Some(idx) = split_pos {
+                                compact_buf.extend_from_slice(&inner[idx + delim_bytes.len()..]);
                             } else {
                                 compact_buf.extend_from_slice(inner);
                             }

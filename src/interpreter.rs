@@ -3277,6 +3277,37 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | split("s") | last` or `.field | split("s") | .[-1]`.
+    /// Returns (field_name, split_delimiter).
+    pub fn detect_field_split_last(&self) -> Option<(String, String)> {
+        use crate::ir::{Expr, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::Pipe { left: split_expr, right: last_expr } = right.as_ref() {
+                        if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
+                            if name != "split" || args.len() != 1 { return None; }
+                            if let Expr::Literal(Literal::Str(delim)) = &args[0] {
+                                // Check for .[-1] (last is parsed as .[-1])
+                                let is_last = matches!(last_expr.as_ref(),
+                                    Expr::Index { expr: base, key }
+                                    if matches!(base.as_ref(), Expr::Input)
+                                    && matches!(key.as_ref(), Expr::Literal(Literal::Num(n, _)) if *n == -1.0)
+                                );
+                                if is_last {
+                                    return Some((field.clone(), delim.clone()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field | split("str") | length` — returns (field_name, delimiter).
     pub fn detect_field_split_length(&self) -> Option<(String, String)> {
         use crate::ir::{Expr, Literal, UnaryOp};
