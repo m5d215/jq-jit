@@ -992,13 +992,47 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                 }
             }
-            fn try_extract_map_body(expr: &Expr) -> Option<&Expr> {
+            fn try_extract_map_body(expr: &Expr) -> Option<Expr> {
                 // [.[] | f] → Some(f)
                 if let Expr::Collect { generator } = expr {
                     if let Expr::Pipe { left, right } = generator.as_ref() {
                         if matches!(left.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)) {
-                            return Some(right);
+                            return Some(right.as_ref().clone());
                         }
+                    }
+                    // Also: [f(.[])] where .[] appears inside f — e.g., [.[] * 2]
+                    // Replace Each(Input) with Input to get the body
+                    fn replace_each_with_input(e: &Expr) -> Option<Expr> {
+                        match e {
+                            Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input) => {
+                                Some(Expr::Input)
+                            }
+                            Expr::BinOp { op, lhs, rhs } => {
+                                let new_lhs = replace_each_with_input(lhs);
+                                let new_rhs = replace_each_with_input(rhs);
+                                if new_lhs.is_some() || new_rhs.is_some() {
+                                    Some(Expr::BinOp {
+                                        op: *op,
+                                        lhs: Box::new(new_lhs.unwrap_or_else(|| lhs.as_ref().clone())),
+                                        rhs: Box::new(new_rhs.unwrap_or_else(|| rhs.as_ref().clone())),
+                                    })
+                                } else {
+                                    None
+                                }
+                            }
+                            Expr::UnaryOp { op, operand } => {
+                                replace_each_with_input(operand).map(|o| Expr::UnaryOp {
+                                    op: *op, operand: Box::new(o),
+                                })
+                            }
+                            Expr::Negate { operand } => {
+                                replace_each_with_input(operand).map(|o| Expr::Negate { operand: Box::new(o) })
+                            }
+                            _ => None,
+                        }
+                    }
+                    if let Some(body) = replace_each_with_input(generator) {
+                        return Some(body);
                     }
                 }
                 None
@@ -1007,12 +1041,12 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                 if is_comma_of_simple_scalars(lg) {
                     // [gen] | map(f) → [gen distributed with f]
                     if let Some(f) = try_extract_map_body(&sr) {
-                        return Expr::Collect { generator: Box::new(distribute_map(lg, f)) };
+                        return Expr::Collect { generator: Box::new(distribute_map(lg, &f)) };
                     }
                     // [gen] | Pipe(map(f), rest) → [gen distributed with f] | rest
                     if let Expr::Pipe { left: ref pl, right: ref pr } = sr {
                         if let Some(f) = try_extract_map_body(pl) {
-                            let distributed = Expr::Collect { generator: Box::new(distribute_map(lg, f)) };
+                            let distributed = Expr::Collect { generator: Box::new(distribute_map(lg, &f)) };
                             let result = Expr::Pipe { left: Box::new(distributed), right: pr.clone() };
                             return simplify_expr(&result);
                         }
@@ -1078,7 +1112,7 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             // map(f) | map(g) → map(f | g) — eliminate intermediate array allocation
             if let Some(f) = try_extract_map_body(&sl) {
                 if let Some(g) = try_extract_map_body(&sr) {
-                    let fused = Expr::Pipe { left: Box::new(f.clone()), right: Box::new(g.clone()) };
+                    let fused = Expr::Pipe { left: Box::new(f), right: Box::new(g) };
                     return simplify_expr(&Expr::Collect {
                         generator: Box::new(Expr::Pipe {
                             left: Box::new(Expr::Each { input_expr: Box::new(Expr::Input) }),
@@ -1089,7 +1123,7 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                 // map(f) | Pipe(map(g), rest) → map(f | g) | rest
                 if let Expr::Pipe { left: ref pl, right: ref pr } = sr {
                     if let Some(g) = try_extract_map_body(pl) {
-                        let fused = Expr::Pipe { left: Box::new(f.clone()), right: Box::new(g.clone()) };
+                        let fused = Expr::Pipe { left: Box::new(f.clone()), right: Box::new(g) };
                         let fused_map = Expr::Collect {
                             generator: Box::new(Expr::Pipe {
                                 left: Box::new(Expr::Each { input_expr: Box::new(Expr::Input) }),
@@ -1107,7 +1141,7 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             if let Expr::ClosureOp { op: crate::ir::ClosureOpKind::GroupBy, input_expr, key_expr } = &sl {
                 if let Some(body) = try_extract_map_body(&sr) {
                     // Check if body is .[0]
-                    if let Expr::Index { expr: base, key } = body {
+                    if let Expr::Index { expr: base, key } = &body {
                         if matches!(base.as_ref(), Expr::Input) {
                             if let Expr::Literal(crate::ir::Literal::Num(n, _)) = key.as_ref() {
                                 if *n == 0.0 {
