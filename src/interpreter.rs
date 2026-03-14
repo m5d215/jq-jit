@@ -842,8 +842,17 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                 }
             }
             // Semantic: [e1, e2, ...] | add → e1 + e2 + ... (avoids array construction)
+            // Also: [e1, e2, ...] | add / length → (e1 + e2 + ...) / N
             if let Expr::Collect { generator: ref lg } = sl {
-                if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Add, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                // Check for add or add / length
+                let is_add = matches!(&sr, Expr::UnaryOp { op: UnaryOp::Add, operand } if matches!(operand.as_ref(), Expr::Input));
+                let is_add_div_length = if !is_add {
+                    if let Expr::BinOp { op: crate::ir::BinOp::Div, lhs, rhs } = &sr {
+                        matches!(lhs.as_ref(), Expr::UnaryOp { op: UnaryOp::Add, operand } if matches!(operand.as_ref(), Expr::Input))
+                        && matches!(rhs.as_ref(), Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input))
+                    } else { false }
+                } else { false };
+                if is_add || is_add_div_length {
                     fn collect_comma_elems(e: &Expr, out: &mut Vec<Expr>) {
                         match e {
                             Expr::Comma { left, right } => {
@@ -856,12 +865,20 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     let mut elems = Vec::new();
                     collect_comma_elems(lg, &mut elems);
                     if elems.len() >= 2 && elems.len() <= 16 {
+                        let n = elems.len();
                         let mut result = elems.remove(0);
                         for elem in elems {
                             result = Expr::BinOp {
                                 op: crate::ir::BinOp::Add,
                                 lhs: Box::new(result),
                                 rhs: Box::new(elem),
+                            };
+                        }
+                        if is_add_div_length {
+                            result = Expr::BinOp {
+                                op: crate::ir::BinOp::Div,
+                                lhs: Box::new(result),
+                                rhs: Box::new(Expr::Literal(Literal::Num(n as f64, None))),
                             };
                         }
                         return simplify_expr(&result);
