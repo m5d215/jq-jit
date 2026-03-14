@@ -969,6 +969,53 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                 }
             }
+            // map(f) | map(g) → map(f | g) — eliminate intermediate array allocation
+            if let Some(f) = try_extract_map_body(&sl) {
+                if let Some(g) = try_extract_map_body(&sr) {
+                    let fused = Expr::Pipe { left: Box::new(f.clone()), right: Box::new(g.clone()) };
+                    return simplify_expr(&Expr::Collect {
+                        generator: Box::new(Expr::Pipe {
+                            left: Box::new(Expr::Each { input_expr: Box::new(Expr::Input) }),
+                            right: Box::new(fused),
+                        }),
+                    });
+                }
+                // map(f) | Pipe(map(g), rest) → map(f | g) | rest
+                if let Expr::Pipe { left: ref pl, right: ref pr } = sr {
+                    if let Some(g) = try_extract_map_body(pl) {
+                        let fused = Expr::Pipe { left: Box::new(f.clone()), right: Box::new(g.clone()) };
+                        let fused_map = Expr::Collect {
+                            generator: Box::new(Expr::Pipe {
+                                left: Box::new(Expr::Each { input_expr: Box::new(Expr::Input) }),
+                                right: Box::new(fused),
+                            }),
+                        };
+                        return simplify_expr(&Expr::Pipe {
+                            left: Box::new(fused_map),
+                            right: pr.clone(),
+                        });
+                    }
+                }
+            }
+            // group_by(.f) | map(.[0]) → unique_by(.f)
+            if let Expr::ClosureOp { op: crate::ir::ClosureOpKind::GroupBy, input_expr, key_expr } = &sl {
+                if let Some(body) = try_extract_map_body(&sr) {
+                    // Check if body is .[0]
+                    if let Expr::Index { expr: base, key } = body {
+                        if matches!(base.as_ref(), Expr::Input) {
+                            if let Expr::Literal(crate::ir::Literal::Num(n, _)) = key.as_ref() {
+                                if *n == 0.0 {
+                                    return Expr::ClosureOp {
+                                        op: crate::ir::ClosureOpKind::UniqueBy,
+                                        input_expr: input_expr.clone(),
+                                        key_expr: key_expr.clone(),
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             Expr::Pipe { left: Box::new(sl), right: Box::new(sr) }
         }
         // Recurse into IfThenElse conditions (select patterns)

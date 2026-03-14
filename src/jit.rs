@@ -5530,6 +5530,35 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
         // Fast path: fromjson (op 18)
         if op == 18 {
             if let Value::Str(s) = &*input {
+                // Trivial value fast path — avoid libjq FFI for common literals and numbers
+                let trimmed = s.trim();
+                let result = if trimmed == "null" {
+                    Some(Value::Null)
+                } else if trimmed == "true" {
+                    Some(Value::True)
+                } else if trimmed == "false" {
+                    Some(Value::False)
+                } else if !trimmed.is_empty() {
+                    let b = trimmed.as_bytes()[0];
+                    if b == b'-' || b.is_ascii_digit() {
+                        trimmed.parse::<f64>().ok().map(|n| Value::Num(n, None))
+                    } else if b == b'"' {
+                        // Simple string: "..." without escapes
+                        if trimmed.len() >= 2 && trimmed.as_bytes()[trimmed.len()-1] == b'"' && !trimmed[1..trimmed.len()-1].contains('\\') {
+                            Some(Value::from_string(trimmed[1..trimmed.len()-1].to_string()))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some(v) = result {
+                    std::ptr::write(dst, v);
+                    return 0;
+                }
                 match crate::value::json_to_value_libjq(s) {
                     Ok(v) => { std::ptr::write(dst, v); return 0; }
                     Err(e) => {
