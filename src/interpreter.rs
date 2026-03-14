@@ -451,6 +451,22 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                 }
             }
+            // Semantic: reverse | .[0] → .[-1], reverse | .[-1] → .[0]
+            // reverse then index = access from the other end
+            if matches!(&sl, Expr::UnaryOp { op: UnaryOp::Reverse, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                if let Expr::Index { expr: base, key } = &sr {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(crate::ir::Literal::Num(n, _)) = key.as_ref() {
+                            let idx = *n as i64;
+                            let new_idx = if idx >= 0 { -(idx + 1) } else { -idx - 1 };
+                            return Expr::Index {
+                                expr: Box::new(Expr::Input),
+                                key: Box::new(Expr::Literal(crate::ir::Literal::Num(new_idx as f64, None))),
+                            };
+                        }
+                    }
+                }
+            }
             // Semantic: [.f1, .f2, ...] | add op X → (.f1 + .f2 + ... + .fN) op X
             // Handles: add * N, add - N, add / N, add / length, add + N
             if let Expr::Collect { generator: ref lg } = sl {
