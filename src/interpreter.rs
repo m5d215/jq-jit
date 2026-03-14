@@ -5095,6 +5095,68 @@ impl Filter {
         None
     }
 
+    /// Detect `.dest = (.src op N)` — cross-field numeric assignment.
+    /// Returns (dest_field, src_field, op, constant, is_const_on_left).
+    pub fn detect_field_assign_field_arith(&self) -> Option<(String, String, crate::ir::BinOp, f64)> {
+        use crate::ir::{Expr, Literal, BinOp};
+        let expr = self.detect_expr()?;
+        if let Expr::Assign { path_expr, value_expr } = expr {
+            let dest = if let Expr::Index { expr: base, key } = path_expr.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() }
+                else { return None; }
+            } else { return None; };
+            if let Expr::BinOp { op, lhs, rhs } = value_expr.as_ref() {
+                // .dest = (.src op N)
+                if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(src)) = key.as_ref() {
+                            if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                match op {
+                                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                                        return Some((dest, src.clone(), *op, *n));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+                // .dest = (N op .src)
+                if let Expr::Index { expr: base, key } = rhs.as_ref() {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(src)) = key.as_ref() {
+                            if let Expr::Literal(Literal::Num(n, _)) = lhs.as_ref() {
+                                match op {
+                                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                                        // Normalize: N op .src → .src op N for commutative, keep as-is for non-commutative
+                                        match op {
+                                            BinOp::Add | BinOp::Mul => return Some((dest, src.clone(), *op, *n)),
+                                            _ => {
+                                                // For sub/div/mod, we can't simply swap, need special handling
+                                                // Skip for now — less common
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // .dest = .src (direct field copy)
+            if let Expr::Index { expr: base, key } = value_expr.as_ref() {
+                if matches!(base.as_ref(), Expr::Input) {
+                    if let Expr::Literal(Literal::Str(src)) = key.as_ref() {
+                        return Some((dest, src.clone(), BinOp::Add, 0.0)); // identity: .src + 0
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `tojson` on input.
     pub fn is_tojson(&self) -> bool {
         use crate::ir::{Expr, UnaryOp};

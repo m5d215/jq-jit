@@ -1494,6 +1494,44 @@ pub fn json_object_update_field_test(
     false
 }
 
+/// Cross-field numeric assignment: `.dest = (.src op N)`.
+/// Reads src field's number, applies arithmetic, writes result to dest field.
+pub fn json_object_assign_field_arith(
+    b: &[u8], pos: usize, dest_field: &str, src_field: &str,
+    op: crate::ir::BinOp, n: f64, buf: &mut Vec<u8>,
+) -> bool {
+    use crate::ir::BinOp;
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    // 1. Read src field value
+    let src_val = if let Some((vs, ve)) = json_object_get_field_raw(b, pos, src_field) {
+        match parse_json_num(&b[vs..ve]) { Some(v) => v, None => return false }
+    } else { return false; };
+    // 2. Compute result
+    let r = match op {
+        BinOp::Add => src_val + n,
+        BinOp::Sub => src_val - n,
+        BinOp::Mul => src_val * n,
+        BinOp::Div => src_val / n,
+        BinOp::Mod => { if n == 0.0 || !src_val.is_finite() { return false; } src_val % n },
+        _ => src_val,
+    };
+    if !r.is_finite() { return false; }
+    // 3. Write result to dest field using 3-way copy (if dest exists)
+    if let Some((dv_start, dv_end)) = json_object_get_field_raw(b, pos, dest_field) {
+        let mut obj_end = b.len();
+        while obj_end > dv_end && b[obj_end - 1] != b'}' { obj_end -= 1; }
+        if obj_end <= dv_end { return false; }
+        buf.extend_from_slice(&b[pos..dv_start]);
+        push_jq_number_bytes(buf, r);
+        buf.extend_from_slice(&b[dv_end..obj_end]);
+        return true;
+    }
+    // dest field doesn't exist — use set_field_raw for add
+    let mut num_buf = Vec::with_capacity(32);
+    push_jq_number_bytes(&mut num_buf, r);
+    return json_object_set_field_raw(b, pos, dest_field, &num_buf, buf);
+}
+
 /// Update a field by taking the first element after splitting by a separator.
 /// `.field |= (split("sep")|.[0])` — extract string field, find first separator, write prefix.
 pub fn json_object_update_field_split_first(
