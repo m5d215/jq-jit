@@ -124,6 +124,7 @@ bench_ndjson "ascii_upcase"            "-c" ".name | ascii_upcase"
 bench_ndjson "ltrimstr"                "-c" '.name | ltrimstr("item_")'
 bench_ndjson "rtrimstr"                "-c" '.name | rtrimstr("0")'
 bench_ndjson "split"                   "-c" '.name | split("_")'
+bench_ndjson "case+split"              "-c" '.name | ascii_downcase | split("_")'
 bench_ndjson "join"                    "-c" '[.name, "x"] | join(",")'
 bench_ndjson "startswith"              "-c" '.name | startswith("item_1")'
 bench_ndjson "endswith"                "-c" '.name | endswith("0")'

@@ -3510,6 +3510,57 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | ascii_upcase/downcase | split(s)`.
+    /// Returns (field, is_upper, split_sep).
+    pub fn detect_field_case_split(&self) -> Option<(String, bool, String)> {
+        use crate::ir::{Expr, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::Pipe { left: case_expr, right: split_expr } = right.as_ref() {
+                        let is_upper = match case_expr.as_ref() {
+                            Expr::UnaryOp { op: UnaryOp::AsciiUpcase, operand } if matches!(operand.as_ref(), Expr::Input) => true,
+                            Expr::UnaryOp { op: UnaryOp::AsciiDowncase, operand } if matches!(operand.as_ref(), Expr::Input) => false,
+                            _ => return None,
+                        };
+                        if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
+                            if name == "split" && args.len() == 1 {
+                                if let Expr::Literal(Literal::Str(sep)) = &args[0] {
+                                    if !sep.is_empty() {
+                                        return Some((field.clone(), is_upper, sep.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Also handle beta-reduced form: CallBuiltin(split, [UnaryOp(case, .field)])
+                    if let Expr::CallBuiltin { name, args } = right.as_ref() {
+                        if name == "split" && args.len() == 1 {
+                            if let Expr::Literal(Literal::Str(_sep)) = &args[0] {
+                                // This form doesn't include the case op, skip
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Beta-reduced: CallBuiltin(split, [UnaryOp(case, Index(.field))])
+        if let Expr::CallBuiltin { name, args } = expr {
+            if name == "split" && args.len() == 1 {
+                if let Expr::Literal(Literal::Str(sep)) = &args[0] {
+                    if !sep.is_empty() {
+                        // The input to split would be the case-converted field — check operand
+                        // This form would be: split(sep) with input being case(.field)
+                        // Not typical, skip
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.f1 cmp .f2) | value` — field-field select then computed value.
     /// Returns (field1, op, field2, value_rexpr).
     pub fn detect_select_ff_cmp_then_value(&self) -> Option<(String, crate::ir::BinOp, String, RemapExpr)> {
