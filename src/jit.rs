@@ -2804,6 +2804,12 @@ impl Flattener {
                         return true;
                     }
                 }
+                // path(a, b, ...) — handle Comma by recursively emitting each branch as PathExpr
+                if let Expr::Comma { left, right } = path_expr.as_ref() {
+                    let l_ok = self.flatten_gen(&Expr::PathExpr { expr: left.clone() }, input_slot);
+                    if !l_ok { return false; }
+                    return self.flatten_gen(&Expr::PathExpr { expr: right.clone() }, input_slot);
+                }
                 // Native path(recurse) — bypass eval engine, generate paths directly
                 if let Expr::Recurse { input_expr } = path_expr.as_ref() {
                     if matches!(input_expr.as_ref(), Expr::Input) {
