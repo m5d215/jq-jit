@@ -165,6 +165,13 @@ TESTS=(
     'tojson:-c:tojson'
     '{name,x}:-c:{name,x}'
     '.z//.name:-c:.z // .name'
+    '.x|=test(re):-c:.name |= test("^item_[0-9]+")'
+    './sep|first:-c:.name |= (. / "_" | .[0])'
+    '.y=(.x*2):-c:.y = (.x * 2)'
+    '.y=(.x+.y):-c:.y = (.x + .y)'
+    'objects:-c:objects'
+    '.tag|=if..then N:-c:.tag |= if . == "abc" then 1 else 0 end'
+    '.x=(.x+1):-c:.x = (.x + 1)'
 )
 
 for test in "${TESTS[@]}"; do
