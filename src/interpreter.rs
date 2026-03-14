@@ -4318,6 +4318,77 @@ impl Filter {
         None
     }
 
+    /// Detect `with_entries(select(.key != "name"))` — equivalent to `del(.name)`.
+    /// Returns list of excluded key names.
+    pub fn detect_with_entries_del_keys(&self) -> Option<Vec<String>> {
+        use crate::ir::{BinOp, Expr, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left: l1, right: r1 } = expr {
+            if !matches!(l1.as_ref(), Expr::UnaryOp { op: UnaryOp::ToEntries, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                return None;
+            }
+            if let Expr::Pipe { left: l2, right: r2 } = r1.as_ref() {
+                if !matches!(r2.as_ref(), Expr::UnaryOp { op: UnaryOp::FromEntries, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                    return None;
+                }
+                if let Expr::Collect { generator } = l2.as_ref() {
+                    if let Expr::Pipe { left: l3, right: r3 } = generator.as_ref() {
+                        if !matches!(l3.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)) {
+                            return None;
+                        }
+                        if let Expr::IfThenElse { cond, then_branch, else_branch } = r3.as_ref() {
+                            if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
+                            if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+                            // Single: .key != "name"
+                            if let Expr::BinOp { op: BinOp::Ne, lhs, rhs } = cond.as_ref() {
+                                if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                                    if matches!(base.as_ref(), Expr::Input) {
+                                        if let Expr::Literal(Literal::Str(s)) = key.as_ref() {
+                                            if s == "key" {
+                                                if let Expr::Literal(Literal::Str(name)) = rhs.as_ref() {
+                                                    return Some(vec![name.clone()]);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            // Compound AND: .key != "a" and .key != "b"
+                            fn collect_key_ne(cond: &Expr, keys: &mut Vec<String>) -> bool {
+                                match cond {
+                                    Expr::BinOp { op: BinOp::And, lhs, rhs } => {
+                                        collect_key_ne(lhs, keys) && collect_key_ne(rhs, keys)
+                                    }
+                                    Expr::BinOp { op: BinOp::Ne, lhs, rhs } => {
+                                        if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                                            if matches!(base.as_ref(), Expr::Input) {
+                                                if let Expr::Literal(Literal::Str(s)) = key.as_ref() {
+                                                    if s == "key" {
+                                                        if let Expr::Literal(Literal::Str(name)) = rhs.as_ref() {
+                                                            keys.push(name.clone());
+                                                            return true;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        false
+                                    }
+                                    _ => false,
+                                }
+                            }
+                            let mut keys = Vec::new();
+                            if collect_key_ne(cond, &mut keys) && !keys.is_empty() {
+                                return Some(keys);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field = CONST` or `setpath(["field"]; CONST)` pattern.
     /// Returns (field_name, json_bytes_of_value) for raw byte replacement.
     pub fn detect_field_assign_const(&self) -> Option<(String, Vec<u8>)> {
