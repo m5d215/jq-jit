@@ -600,6 +600,32 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                 }
             }
+            // split("s") | length > 1 → contains("s")  (more efficient, enables raw byte path)
+            if let Expr::CallBuiltin { name, args } = &sl {
+                if name == "split" && args.len() == 1 {
+                    if let Expr::Literal(crate::ir::Literal::Str(delim)) = &args[0] {
+                        if let Expr::BinOp { op, lhs: cmp_lhs, rhs: cmp_rhs } = &sr {
+                            if let Expr::UnaryOp { op: crate::ir::UnaryOp::Length, operand } = cmp_lhs.as_ref() {
+                                if matches!(operand.as_ref(), Expr::Input) {
+                                    if let Expr::Literal(crate::ir::Literal::Num(n, _)) = cmp_rhs.as_ref() {
+                                        // split(S) | length > 1 means "contains S"
+                                        // split(S) | length > 0 is always true for any finite string
+                                        if !delim.is_empty() && *n == 1.0 && matches!(op, crate::ir::BinOp::Gt) {
+                                            return Expr::CallBuiltin {
+                                                name: "contains".to_string(),
+                                                args: vec![Expr::Literal(crate::ir::Literal::Str(delim.clone()))],
+                                            };
+                                        }
+                                        if !delim.is_empty() && *n == 0.0 && matches!(op, crate::ir::BinOp::Gt) {
+                                            return Expr::Literal(crate::ir::Literal::True);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             // select(A) | select(B) → select(A and B)
             if let Expr::IfThenElse { cond: cond_a, then_branch: then_a, else_branch: else_a } = &sl {
                 if matches!(then_a.as_ref(), Expr::Input) && matches!(else_a.as_ref(), Expr::Empty) {
