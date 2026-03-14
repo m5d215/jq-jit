@@ -828,12 +828,28 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                                 _ => None,
                             }
                         }
-                        // Only convert if value_expr actually references .field and is input-free after substitution
-                        if let Some(update) = replace_field_with_input(&sv, field) {
-                            return Expr::Update {
-                                path_expr: Box::new(sp),
-                                update_expr: Box::new(update),
-                            };
+                        // Only convert if value_expr ONLY references .field (no other fields or bare Input)
+                        fn only_uses_field(e: &Expr, field: &str) -> bool {
+                            match e {
+                                Expr::Input => false, // bare . reference = other field context
+                                Expr::Index { expr: base, key } if matches!(base.as_ref(), Expr::Input) => {
+                                    matches!(key.as_ref(), Expr::Literal(crate::ir::Literal::Str(f)) if f == field)
+                                }
+                                Expr::BinOp { lhs, rhs, .. } => only_uses_field(lhs, field) && only_uses_field(rhs, field),
+                                Expr::UnaryOp { operand, .. } => only_uses_field(operand, field),
+                                Expr::CallBuiltin { args, .. } => args.iter().all(|a| only_uses_field(a, field)),
+                                Expr::RegexTest { input_expr, re, flags } => only_uses_field(input_expr, field) && only_uses_field(re, field) && only_uses_field(flags, field),
+                                Expr::Literal(_) => true,
+                                _ => false, // unknown expr types = don't optimize
+                            }
+                        }
+                        if only_uses_field(&sv, field) {
+                            if let Some(update) = replace_field_with_input(&sv, field) {
+                                return Expr::Update {
+                                    path_expr: Box::new(sp),
+                                    update_expr: Box::new(update),
+                                };
+                            }
                         }
                     }
                 }
@@ -5150,6 +5166,41 @@ impl Filter {
                 if matches!(base.as_ref(), Expr::Input) {
                     if let Expr::Literal(Literal::Str(src)) = key.as_ref() {
                         return Some((dest, src.clone(), BinOp::Add, 0.0)); // identity: .src + 0
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `.dest = (.src1 op .src2)` — cross-field two-field arithmetic assignment.
+    /// Returns (dest_field, src1_field, src2_field, op).
+    pub fn detect_field_assign_two_fields(&self) -> Option<(String, String, String, crate::ir::BinOp)> {
+        use crate::ir::{Expr, Literal, BinOp};
+        let expr = self.detect_expr()?;
+        if let Expr::Assign { path_expr, value_expr } = expr {
+            let dest = if let Expr::Index { expr: base, key } = path_expr.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() }
+                else { return None; }
+            } else { return None; };
+            if let Expr::BinOp { op, lhs, rhs } = value_expr.as_ref() {
+                if let Expr::Index { expr: bl, key: kl } = lhs.as_ref() {
+                    if matches!(bl.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(src1)) = kl.as_ref() {
+                            if let Expr::Index { expr: br, key: kr } = rhs.as_ref() {
+                                if matches!(br.as_ref(), Expr::Input) {
+                                    if let Expr::Literal(Literal::Str(src2)) = kr.as_ref() {
+                                        match op {
+                                            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                                                return Some((dest, src1.clone(), src2.clone(), *op));
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
