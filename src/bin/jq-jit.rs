@@ -2222,6 +2222,9 @@ fn real_main() {
     let sort_two_fields = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && min_two_fields.is_none() && minmax_two.is_none() && minmax_n.is_none() {
         filter.detect_sort_two_fields()
     } else { None };
+    let field_tostring_length = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
+        filter.detect_field_tostring_length()
+    } else { None };
     let field_alt = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
         filter.detect_field_alternative()
     } else { None };
@@ -10105,6 +10108,64 @@ fn real_main() {
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some(ref ftl_field) = field_tostring_length {
+                    // .field | tostring | length — raw byte fast path
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, ftl_field) {
+                            let val = &raw[vs..ve];
+                            match val[0] {
+                                b'"' => {
+                                    // String: tostring is identity, length = char count
+                                    let inner = &val[1..ve-vs-1];
+                                    if !inner.contains(&b'\\') {
+                                        let cp = inner.iter().filter(|&&b| (b & 0xC0) != 0x80).count();
+                                        let mut ibuf = itoa::Buffer::new();
+                                        compact_buf.extend_from_slice(ibuf.format(cp).as_bytes());
+                                        compact_buf.push(b'\n');
+                                    } else {
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    }
+                                }
+                                b'n' => {
+                                    // null: tostring = "null", length = 4
+                                    compact_buf.extend_from_slice(b"4\n");
+                                }
+                                b't' => {
+                                    // true: tostring = "true", length = 4
+                                    compact_buf.extend_from_slice(b"4\n");
+                                }
+                                b'f' => {
+                                    // false: tostring = "false", length = 5
+                                    compact_buf.extend_from_slice(b"5\n");
+                                }
+                                _ => {
+                                    // Number: format with push_jq_number_bytes, count the bytes
+                                    if let Some(n) = parse_json_num(val) {
+                                        let start_len = compact_buf.len();
+                                        push_jq_number_bytes(&mut compact_buf, n);
+                                        let formatted_len = compact_buf.len() - start_len;
+                                        compact_buf.truncate(start_len);
+                                        let mut ibuf = itoa::Buffer::new();
+                                        compact_buf.extend_from_slice(ibuf.format(formatted_len).as_bytes());
+                                        compact_buf.push(b'\n');
+                                    } else {
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    }
+                                }
+                            }
+                        } else {
+                            // null field: tostring = "null", length = 4
+                            compact_buf.extend_from_slice(b"4\n");
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -18027,6 +18088,53 @@ fn real_main() {
                     } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some(ref ftl_field) = field_tostring_length {
+                // .field | tostring | length — file path
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, ftl_field) {
+                        let val = &raw[vs..ve];
+                        match val[0] {
+                            b'"' => {
+                                let inner = &val[1..ve-vs-1];
+                                if !inner.contains(&b'\\') {
+                                    let cp = inner.iter().filter(|&&b| (b & 0xC0) != 0x80).count();
+                                    let mut ibuf = itoa::Buffer::new();
+                                    compact_buf.extend_from_slice(ibuf.format(cp).as_bytes());
+                                    compact_buf.push(b'\n');
+                                } else {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                            }
+                            b'n' => { compact_buf.extend_from_slice(b"4\n"); }
+                            b't' => { compact_buf.extend_from_slice(b"4\n"); }
+                            b'f' => { compact_buf.extend_from_slice(b"5\n"); }
+                            _ => {
+                                if let Some(n) = parse_json_num(val) {
+                                    let start_len = compact_buf.len();
+                                    push_jq_number_bytes(&mut compact_buf, n);
+                                    let formatted_len = compact_buf.len() - start_len;
+                                    compact_buf.truncate(start_len);
+                                    let mut ibuf = itoa::Buffer::new();
+                                    compact_buf.extend_from_slice(ibuf.format(formatted_len).as_bytes());
+                                    compact_buf.push(b'\n');
+                                } else {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                            }
+                        }
+                    } else {
+                        compact_buf.extend_from_slice(b"4\n");
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);

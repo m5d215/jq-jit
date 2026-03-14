@@ -1600,6 +1600,48 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | tostring | length`.
+    /// Returns field_name.
+    pub fn detect_field_tostring_length(&self) -> Option<String> {
+        use crate::ir::{Expr, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        if let Expr::UnaryOp { op: UnaryOp::Length, operand } = expr {
+            if let Expr::UnaryOp { op: UnaryOp::ToString, operand: inner } = operand.as_ref() {
+                if let Expr::Index { expr: base, key } = inner.as_ref() {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                            return Some(f.clone());
+                        }
+                    }
+                }
+            }
+        }
+        // Pipe form: Pipe(.field, Pipe(tostring, length))
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if matches!(base.as_ref(), Expr::Input) {
+                    if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                        if let Expr::Pipe { left: pl, right: pr } = right.as_ref() {
+                            if matches!(pl.as_ref(), Expr::UnaryOp { op: UnaryOp::ToString, operand } if matches!(operand.as_ref(), Expr::Input))
+                                && matches!(pr.as_ref(), Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input))
+                            {
+                                return Some(f.clone());
+                            }
+                        }
+                        if let Expr::UnaryOp { op: UnaryOp::Length, operand } = right.as_ref() {
+                            if let Expr::UnaryOp { op: UnaryOp::ToString, operand: inner } = operand.as_ref() {
+                                if matches!(inner.as_ref(), Expr::Input) {
+                                    return Some(f.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.field == null)` or `select(.field != null)` — output whole object.
     /// Returns (field_name, is_eq) where is_eq=true for ==null, false for !=null.
     pub fn detect_select_field_null(&self) -> Option<(String, bool)> {
