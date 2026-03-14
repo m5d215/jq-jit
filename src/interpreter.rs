@@ -3268,7 +3268,7 @@ impl Filter {
     pub fn detect_field_unary_arith(&self) -> Option<(String, crate::ir::UnaryOp, Vec<(crate::ir::BinOp, f64)>)> {
         use crate::ir::{Expr, UnaryOp, BinOp, Literal};
         let expr = self.detect_expr()?;
-        let is_numeric_unary = |op: &UnaryOp| matches!(op, UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Sqrt | UnaryOp::Fabs | UnaryOp::Abs | UnaryOp::Round);
+        let is_numeric_unary = |op: &UnaryOp| matches!(op, UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Sqrt | UnaryOp::Fabs | UnaryOp::Abs | UnaryOp::Round | UnaryOp::Length);
         // Collect arith chain from the outermost pipe/binop
         fn collect_arith_tail(e: &Expr) -> Option<(Vec<(BinOp, f64)>, &Expr)> {
             // e is BinOp(inner, const) → arith step on top
