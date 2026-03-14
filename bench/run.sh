@@ -198,6 +198,9 @@ TESTS=(
     '.[]|strings:-c:.[] | strings'
     '.[]|numbers:-c:.[] | numbers'
     '[x,y]|any(>1M):-c:[.x, .y] | any(. > 1000000)'
+    'sel(dc|sw):-c:select(.name | ascii_downcase | startswith("user"))'
+    '[[x,y],[n]]|flat:-c:[[.x,.y],[.name]] | flatten'
+    '.x|floor|.*2:-c:.x | floor | . * 2'
 )
 
 for test in "${TESTS[@]}"; do
