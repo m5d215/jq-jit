@@ -3485,6 +3485,33 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | index/rindex(str) op N`.
+    /// Returns (field_name, search_str, is_rindex, arith_op, constant).
+    pub fn detect_field_index_arith(&self) -> Option<(String, String, bool, crate::ir::BinOp, f64)> {
+        use crate::ir::{Expr, Literal, BinOp};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::BinOp { op, lhs, rhs } = right.as_ref() {
+                        if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) { return None; }
+                        if let Expr::CallBuiltin { name, args } = lhs.as_ref() {
+                            if (name == "index" || name == "rindex") && args.len() == 1 {
+                                if let Expr::Literal(Literal::Str(search)) = &args[0] {
+                                    if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                        return Some((field.clone(), search.clone(), name == "rindex", *op, *n));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field | op1 | op2 | ...` chained string operations.
     /// Returns (field_name, [ops], terminal) with 1+ string ops + optional terminal,
     /// where the total chain length is 2+ (either 2+ string ops, or 1+ string ops + terminal).
@@ -3705,6 +3732,32 @@ impl Filter {
                             if matches!(flags.as_ref(), Expr::Literal(Literal::Null)) {
                                 return Some((field.clone(), pattern.clone()));
                             }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `.field | match("regex")` pattern.
+    /// Returns (field_name, regex_pattern, flags_opt) if detected.
+    pub fn detect_field_match(&self) -> Option<(String, String, Option<String>)> {
+        use crate::ir::{Expr, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::RegexMatch { input_expr, re, flags } = right.as_ref() {
+                        if !matches!(input_expr.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(pattern)) = re.as_ref() {
+                            let flags_str = match flags.as_ref() {
+                                Expr::Literal(Literal::Null) => None,
+                                Expr::Literal(Literal::Str(f)) => Some(f.clone()),
+                                _ => return None,
+                            };
+                            return Some((field.clone(), pattern.clone(), flags_str));
                         }
                     }
                 }

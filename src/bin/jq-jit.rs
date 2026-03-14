@@ -1929,6 +1929,9 @@ fn real_main() {
     let field_scan = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() && field_gsub.is_none() {
         filter.detect_field_scan()
     } else { None };
+    let field_match = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() && field_gsub.is_none() && field_scan.is_none() {
+        filter.detect_field_match()
+    } else { None };
     let field_format = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() && field_gsub.is_none() && field_scan.is_none() {
         filter.detect_field_format()
     } else { None };
@@ -2369,7 +2372,7 @@ fn real_main() {
         || computed_remap.is_some() || standalone_array.is_some() || type_filter.is_some()
         || field_binop.is_some() || field_binop_tostring.is_some() || field_unary_num.is_some() || field_unary_arith.is_some() || field_binop_const_unary.is_some() || two_field_binop_const.is_some() || field_arith_chain.is_some() || field_arith_tostring.is_some() || numeric_expr.is_some() || numeric_expr_unary.is_some()
         || field_field_cmp.is_some() || field_const_cmp.is_some() || arith_chain_cmp.is_some() || compound_field_cmp.is_some()
-        || field_str_builtin.is_some() || field_test.is_some() || field_gsub.is_some() || field_case_gsub.is_some() || field_case_test.is_some() || field_scan.is_some() || field_format.is_some() || field_ltrimstr_tonumber.is_some()
+        || field_str_builtin.is_some() || field_test.is_some() || field_gsub.is_some() || field_case_gsub.is_some() || field_case_test.is_some() || field_scan.is_some() || field_match.is_some() || field_format.is_some() || field_ltrimstr_tonumber.is_some()
         || field_str_concat.is_some() || field_alt.is_some() || field_field_alt.is_some()
         || select_cmp.is_some() || select_field_null.is_some() || select_arith_cmp.is_some()
         || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || null_branch_lit.is_some() || field_field_cmp_branch.is_some() || if_ff_cmp_fields.is_some() || if_ff_cmp_computed.is_some() || if_length_cmp_fields.is_some() || select_length_cmp_remap.is_some() || field_tostring_length.is_some() || if_cmp_arrays.is_some() || cmp_branch_interp.is_some() || select_num_str.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some() || select_compound_computed.is_some() || select_compound_cremap.is_some()
@@ -5981,6 +5984,113 @@ fn real_main() {
                                             compact_buf.extend_from_slice(b"\"\n");
                                         }
                                     }
+                                } else {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                            if compact_buf.len() >= 1 << 17 {
+                                let _ = out.write_all(&compact_buf);
+                                compact_buf.clear();
+                            }
+                            Ok(())
+                        })
+                    } else {
+                        json_stream_raw(&input_str, |start, end| {
+                            let raw = &input_bytes[start..end];
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            Ok(())
+                        })
+                    }
+                } else if let Some((ref fm_field, ref fm_pattern, ref fm_flags)) = field_match {
+                    // .field | match("regex") — raw byte regex match
+                    let re_pattern = if let Some(flags) = fm_flags {
+                        let mut prefix = String::from("(?");
+                        for c in flags.chars() {
+                            match c { 'i' | 'm' | 's' => prefix.push(c), _ => {} }
+                        }
+                        prefix.push(')');
+                        prefix.push_str(fm_pattern);
+                        prefix
+                    } else {
+                        fm_pattern.clone()
+                    };
+                    if let Ok(re) = regex::Regex::new(&re_pattern) {
+                        let capture_names: Vec<Option<String>> = re.capture_names().map(|n| n.map(|s| s.to_string())).collect();
+                        json_stream_raw(&input_str, |start, end| {
+                            let raw = &input_bytes[start..end];
+                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, fm_field) {
+                                let val = &raw[vs..ve];
+                                if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                                    && !val[1..val.len()-1].contains(&b'\\')
+                                {
+                                    let content = unsafe { std::str::from_utf8_unchecked(&val[1..val.len()-1]) };
+                                    if let Some(caps) = re.captures(content) {
+                                        let m = caps.get(0).unwrap();
+                                        let offset_cp = content[..m.start()].chars().count();
+                                        let length_cp = m.as_str().chars().count();
+                                        // {"offset":N,"length":N,"string":"...","captures":[...]}
+                                        compact_buf.extend_from_slice(b"{\"offset\":");
+                                        compact_buf.extend_from_slice(itoa::Buffer::new().format(offset_cp).as_bytes());
+                                        compact_buf.extend_from_slice(b",\"length\":");
+                                        compact_buf.extend_from_slice(itoa::Buffer::new().format(length_cp).as_bytes());
+                                        compact_buf.extend_from_slice(b",\"string\":\"");
+                                        for &b in m.as_str().as_bytes() {
+                                            match b {
+                                                b'"' => compact_buf.extend_from_slice(b"\\\""),
+                                                b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                                                _ => compact_buf.push(b),
+                                            }
+                                        }
+                                        compact_buf.extend_from_slice(b"\",\"captures\":[");
+                                        for i in 1..caps.len() {
+                                            if i > 1 { compact_buf.push(b','); }
+                                            match caps.get(i) {
+                                                Some(cm) => {
+                                                    let c_offset = content[..cm.start()].chars().count();
+                                                    let c_length = cm.as_str().chars().count();
+                                                    compact_buf.extend_from_slice(b"{\"offset\":");
+                                                    compact_buf.extend_from_slice(itoa::Buffer::new().format(c_offset).as_bytes());
+                                                    compact_buf.extend_from_slice(b",\"length\":");
+                                                    compact_buf.extend_from_slice(itoa::Buffer::new().format(c_length).as_bytes());
+                                                    compact_buf.extend_from_slice(b",\"string\":\"");
+                                                    for &b in cm.as_str().as_bytes() {
+                                                        match b {
+                                                            b'"' => compact_buf.extend_from_slice(b"\\\""),
+                                                            b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                                                            _ => compact_buf.push(b),
+                                                        }
+                                                    }
+                                                    compact_buf.extend_from_slice(b"\",\"name\":");
+                                                    if let Some(Some(ref name)) = capture_names.get(i) {
+                                                        compact_buf.push(b'"');
+                                                        compact_buf.extend_from_slice(name.as_bytes());
+                                                        compact_buf.push(b'"');
+                                                    } else {
+                                                        compact_buf.extend_from_slice(b"null");
+                                                    }
+                                                    compact_buf.push(b'}');
+                                                }
+                                                None => {
+                                                    compact_buf.extend_from_slice(b"{\"offset\":-1,\"length\":0,\"string\":null,\"name\":");
+                                                    if let Some(Some(ref name)) = capture_names.get(i) {
+                                                        compact_buf.push(b'"');
+                                                        compact_buf.extend_from_slice(name.as_bytes());
+                                                        compact_buf.push(b'"');
+                                                    } else {
+                                                        compact_buf.extend_from_slice(b"null");
+                                                    }
+                                                    compact_buf.push(b'}');
+                                                }
+                                            }
+                                        }
+                                        compact_buf.extend_from_slice(b"]}\n");
+                                    }
+                                    // no match → empty (no output), matching jq behavior
                                 } else {
                                     let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                     process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -17418,6 +17528,114 @@ fn real_main() {
                                         compact_buf.extend_from_slice(b"\"\n");
                                     }
                                 }
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else {
+                    let content_bytes = content.as_bytes();
+                    json_stream_raw(content, |start, end| {
+                        let raw = &content_bytes[start..end];
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        Ok(())
+                    })
+                }
+            } else if let Some((ref fm_field, ref fm_pattern, ref fm_flags)) = field_match {
+                // .field | match("regex") — raw byte regex match (file path)
+                let re_pattern = if let Some(flags) = fm_flags {
+                    let mut prefix = String::from("(?");
+                    for c in flags.chars() {
+                        match c { 'i' | 'm' | 's' => prefix.push(c), _ => {} }
+                    }
+                    prefix.push(')');
+                    prefix.push_str(fm_pattern);
+                    prefix
+                } else {
+                    fm_pattern.clone()
+                };
+                if let Ok(re) = regex::Regex::new(&re_pattern) {
+                    let capture_names: Vec<Option<String>> = re.capture_names().map(|n| n.map(|s| s.to_string())).collect();
+                    let content_bytes = content.as_bytes();
+                    json_stream_raw(content, |start, end| {
+                        let raw = &content_bytes[start..end];
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, fm_field) {
+                            let val = &raw[vs..ve];
+                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                                && !val[1..val.len()-1].contains(&b'\\')
+                            {
+                                let content_str = unsafe { std::str::from_utf8_unchecked(&val[1..val.len()-1]) };
+                                if let Some(caps) = re.captures(content_str) {
+                                    let m = caps.get(0).unwrap();
+                                    let offset_cp = content_str[..m.start()].chars().count();
+                                    let length_cp = m.as_str().chars().count();
+                                    compact_buf.extend_from_slice(b"{\"offset\":");
+                                    compact_buf.extend_from_slice(itoa::Buffer::new().format(offset_cp).as_bytes());
+                                    compact_buf.extend_from_slice(b",\"length\":");
+                                    compact_buf.extend_from_slice(itoa::Buffer::new().format(length_cp).as_bytes());
+                                    compact_buf.extend_from_slice(b",\"string\":\"");
+                                    for &b in m.as_str().as_bytes() {
+                                        match b {
+                                            b'"' => compact_buf.extend_from_slice(b"\\\""),
+                                            b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                                            _ => compact_buf.push(b),
+                                        }
+                                    }
+                                    compact_buf.extend_from_slice(b"\",\"captures\":[");
+                                    for i in 1..caps.len() {
+                                        if i > 1 { compact_buf.push(b','); }
+                                        match caps.get(i) {
+                                            Some(cm) => {
+                                                let c_offset = content_str[..cm.start()].chars().count();
+                                                let c_length = cm.as_str().chars().count();
+                                                compact_buf.extend_from_slice(b"{\"offset\":");
+                                                compact_buf.extend_from_slice(itoa::Buffer::new().format(c_offset).as_bytes());
+                                                compact_buf.extend_from_slice(b",\"length\":");
+                                                compact_buf.extend_from_slice(itoa::Buffer::new().format(c_length).as_bytes());
+                                                compact_buf.extend_from_slice(b",\"string\":\"");
+                                                for &b in cm.as_str().as_bytes() {
+                                                    match b {
+                                                        b'"' => compact_buf.extend_from_slice(b"\\\""),
+                                                        b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                                                        _ => compact_buf.push(b),
+                                                    }
+                                                }
+                                                compact_buf.extend_from_slice(b"\",\"name\":");
+                                                if let Some(Some(ref name)) = capture_names.get(i) {
+                                                    compact_buf.push(b'"');
+                                                    compact_buf.extend_from_slice(name.as_bytes());
+                                                    compact_buf.push(b'"');
+                                                } else {
+                                                    compact_buf.extend_from_slice(b"null");
+                                                }
+                                                compact_buf.push(b'}');
+                                            }
+                                            None => {
+                                                compact_buf.extend_from_slice(b"{\"offset\":-1,\"length\":0,\"string\":null,\"name\":");
+                                                if let Some(Some(ref name)) = capture_names.get(i) {
+                                                    compact_buf.push(b'"');
+                                                    compact_buf.extend_from_slice(name.as_bytes());
+                                                    compact_buf.push(b'"');
+                                                } else {
+                                                    compact_buf.extend_from_slice(b"null");
+                                                }
+                                                compact_buf.push(b'}');
+                                            }
+                                        }
+                                    }
+                                    compact_buf.extend_from_slice(b"]}\n");
+                                }
+                                // no match → empty (no output), matching jq behavior
                             } else {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
