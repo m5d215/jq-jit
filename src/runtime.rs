@@ -929,6 +929,21 @@ fn rt_add_all(v: &Value) -> Result<Value> {
         Value::Arr(a) => {
             // Fast path: detect homogeneous types for O(n) pre-allocated merge
             match &a[0] {
+                Value::Num(_, _) => {
+                    // Check if all elements are numbers
+                    let mut sum = 0.0f64;
+                    let mut all_num = true;
+                    for item in a.iter() {
+                        match item {
+                            Value::Num(n, _) => sum += n,
+                            Value::Null => {}
+                            _ => { all_num = false; break; }
+                        }
+                    }
+                    if all_num {
+                        return Ok(Value::Num(sum, None));
+                    }
+                }
                 Value::Arr(_) => {
                     // Check if all elements are arrays (or null)
                     let mut total = 0usize;

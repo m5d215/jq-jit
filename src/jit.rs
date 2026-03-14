@@ -5811,6 +5811,90 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 return 0;
             }
         }
+        // Fast path: reverse (op 9)
+        if op == 9 {
+            match &*input {
+                Value::Arr(a) => {
+                    let mut r = a.as_ref().clone();
+                    r.reverse();
+                    std::ptr::write(dst, Value::Arr(Rc::new(r)));
+                    return 0;
+                }
+                Value::Str(s) => {
+                    std::ptr::write(dst, Value::from_string(s.chars().rev().collect()));
+                    return 0;
+                }
+                Value::Null => {
+                    std::ptr::write(dst, Value::Arr(Rc::new(vec![])));
+                    return 0;
+                }
+                _ => {}
+            }
+        }
+        // Fast path: add (op 14)
+        if op == 14 {
+            match &*input {
+                Value::Arr(a) if a.is_empty() => {
+                    std::ptr::write(dst, Value::Null);
+                    return 0;
+                }
+                Value::Arr(a) => {
+                    // Numeric sum fast path
+                    if let Value::Num(_, _) = &a[0] {
+                        let mut sum = 0.0f64;
+                        let mut all_num = true;
+                        for item in a.iter() {
+                            match item {
+                                Value::Num(n, _) => sum += n,
+                                Value::Null => {}
+                                _ => { all_num = false; break; }
+                            }
+                        }
+                        if all_num {
+                            std::ptr::write(dst, Value::Num(sum, None));
+                            return 0;
+                        }
+                    }
+                    // Fall through to eval_unaryop for strings/arrays/objects
+                }
+                _ => {}
+            }
+        }
+        // Fast path: transpose (op 26)
+        if op == 26 {
+            if let Value::Arr(a) = &*input {
+                let max_len = a.iter().filter_map(|v| if let Value::Arr(sub) = v { Some(sub.len()) } else { None }).max().unwrap_or(0);
+                let mut result = Vec::with_capacity(max_len);
+                for i in 0..max_len {
+                    let mut row = Vec::with_capacity(a.len());
+                    for item in a.iter() {
+                        if let Value::Arr(sub) = item {
+                            row.push(sub.get(i).cloned().unwrap_or(Value::Null));
+                        } else {
+                            row.push(Value::Null);
+                        }
+                    }
+                    result.push(Value::Arr(Rc::new(row)));
+                }
+                std::ptr::write(dst, Value::Arr(Rc::new(result)));
+                return 0;
+            }
+        }
+        // Fast path: infinite (op 34), nan (op 35)
+        if op == 34 {
+            std::ptr::write(dst, Value::Num(f64::INFINITY, None));
+            return 0;
+        }
+        if op == 35 {
+            std::ptr::write(dst, Value::Num(f64::NAN, None));
+            return 0;
+        }
+        // Fast path: now (op 67)
+        if op == 67 {
+            std::ptr::write(dst, Value::Num(std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64(), None));
+            return 0;
+        }
         // Fast path: ltrimstr/rtrimstr/trim (op 40/41/42) — null-arg form trims whitespace
         if op >= 40 && op <= 42 {
             if let Value::Str(s) = &*input {

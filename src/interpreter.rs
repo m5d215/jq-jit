@@ -486,6 +486,30 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     return Expr::UnaryOp { op: UnaryOp::Keys, operand: Box::new(Expr::Input) };
                 }
             }
+            // Semantic: sort | reverse → sort | reverse (fused at runtime via SortReverse)
+            // sort | reverse | .[0] → max, sort | reverse | .[-1] → min
+            if matches!(&sl, Expr::UnaryOp { op: UnaryOp::Sort, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Reverse, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                    // Keep as sort|reverse — JIT/eval can fuse sort+reverse into sort_unstable_by(|a,b| b.cmp(a))
+                    // But optimize sort|reverse|.[0] → max and sort|reverse|.[-1] → min
+                }
+                // sort | reverse | .[0] → max (largest element)
+                if let Expr::Pipe { left: ref pl, right: ref pr } = sr {
+                    if matches!(pl.as_ref(), Expr::UnaryOp { op: UnaryOp::Reverse, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                        if let Expr::Index { expr: base, key } = pr.as_ref() {
+                            if matches!(base.as_ref(), Expr::Input) {
+                                if let Expr::Literal(Literal::Num(n, _)) = key.as_ref() {
+                                    if *n == 0.0 {
+                                        return Expr::UnaryOp { op: UnaryOp::Max, operand: Box::new(Expr::Input) };
+                                    } else if *n == -1.0 {
+                                        return Expr::UnaryOp { op: UnaryOp::Min, operand: Box::new(Expr::Input) };
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             // Semantic: sort | .[0] → min, sort | .[-1] → max
             if matches!(&sl, Expr::UnaryOp { op: UnaryOp::Sort, operand } if matches!(operand.as_ref(), Expr::Input)) {
                 if let Expr::Index { expr: base, key } = &sr {
@@ -495,6 +519,26 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                                 return Expr::UnaryOp { op: UnaryOp::Min, operand: Box::new(Expr::Input) };
                             } else if *n == -1.0 {
                                 return Expr::UnaryOp { op: UnaryOp::Max, operand: Box::new(Expr::Input) };
+                            }
+                        }
+                    }
+                }
+            }
+            // Semantic: reverse | .[0] → .[-1], reverse | .[-1] → .[0]
+            if matches!(&sl, Expr::UnaryOp { op: UnaryOp::Reverse, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                if let Expr::Index { expr: base, key } = &sr {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Num(n, _)) = key.as_ref() {
+                            if *n == 0.0 {
+                                return Expr::Index {
+                                    expr: Box::new(Expr::Input),
+                                    key: Box::new(Expr::Literal(Literal::Num(-1.0, None))),
+                                };
+                            } else if *n == -1.0 {
+                                return Expr::Index {
+                                    expr: Box::new(Expr::Input),
+                                    key: Box::new(Expr::Literal(Literal::Num(0.0, None))),
+                                };
                             }
                         }
                     }
