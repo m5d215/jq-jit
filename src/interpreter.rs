@@ -428,6 +428,20 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     return Expr::UnaryOp { op: UnaryOp::Keys, operand: Box::new(Expr::Input) };
                 }
             }
+            // Semantic: sort | .[0] → min, sort | .[-1] → max
+            if matches!(&sl, Expr::UnaryOp { op: UnaryOp::Sort, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                if let Expr::Index { expr: base, key } = &sr {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Num(n, _)) = key.as_ref() {
+                            if *n == 0.0 {
+                                return Expr::UnaryOp { op: UnaryOp::Min, operand: Box::new(Expr::Input) };
+                            } else if *n == -1.0 {
+                                return Expr::UnaryOp { op: UnaryOp::Max, operand: Box::new(Expr::Input) };
+                            }
+                        }
+                    }
+                }
+            }
             // Semantic: cmp_expr | not → inverted cmp_expr
             if matches!(&sr, Expr::Not) {
                 if let Expr::BinOp { op, lhs, rhs } = &sl {
