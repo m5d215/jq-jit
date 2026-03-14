@@ -728,6 +728,34 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                 }
             }
+            // Semantic: [e0, e1, ...] | .[N] → eN (extract Nth element at compile time)
+            // Also handles .[−1] → last element
+            if let Expr::Collect { generator: ref lg } = sl {
+                if let Expr::Index { expr: base, key } = &sr {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Num(n, _)) = key.as_ref() {
+                            let idx = *n as i64;
+                            fn collect_comma_for_idx(e: &Expr, out: &mut Vec<Expr>) {
+                                match e {
+                                    Expr::Comma { left, right } => {
+                                        collect_comma_for_idx(left, out);
+                                        collect_comma_for_idx(right, out);
+                                    }
+                                    other => out.push(other.clone()),
+                                }
+                            }
+                            let mut elems = Vec::new();
+                            collect_comma_for_idx(lg, &mut elems);
+                            let actual = if idx >= 0 { idx as usize } else {
+                                (elems.len() as i64 + idx).max(0) as usize
+                            };
+                            if actual < elems.len() {
+                                return elems.swap_remove(actual);
+                            }
+                        }
+                    }
+                }
+            }
             // Semantic: [e1, e2, ...] | any(f) → (e1|f) or (e2|f) or ...
             // Semantic: [e1, e2, ...] | all(f) → (e1|f) and (e2|f) and ...
             if let Expr::Collect { generator: ref lg } = sl {
