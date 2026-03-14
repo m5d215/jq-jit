@@ -1947,15 +1947,31 @@ fn rt_match(v: &Value, re: &Value) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
             with_regex(r, |regex| {
-                match regex.find(s) {
-                    Some(m) => {
-                        let mut result = new_objmap();
-                        result.insert("offset".into(), Value::Num(m.start() as f64, None));
-                        result.insert("length".into(), Value::Num(m.len() as f64, None));
-                        result.insert("string".into(), Value::from_str(m.as_str()));
-                        let mut captures = Vec::new();
-                        if let Some(caps) = regex.captures(s) {
-                            for i in 1..caps.len() {
+                // Use captures() once instead of find() + captures() separately
+                let num_groups = regex.captures_len();
+                if num_groups <= 1 {
+                    // No capture groups — just use find() which is faster
+                    match regex.find(s) {
+                        Some(m) => {
+                            let mut result = new_objmap();
+                            result.insert("offset".into(), Value::Num(m.start() as f64, None));
+                            result.insert("length".into(), Value::Num(m.len() as f64, None));
+                            result.insert("string".into(), Value::from_str(m.as_str()));
+                            result.insert("captures".into(), Value::Arr(Rc::new(Vec::new())));
+                            Ok(Value::Obj(Rc::new(result)))
+                        }
+                        None => bail!("match failed"),
+                    }
+                } else {
+                    match regex.captures(s) {
+                        Some(caps) => {
+                            let m = caps.get(0).unwrap();
+                            let mut result = new_objmap();
+                            result.insert("offset".into(), Value::Num(m.start() as f64, None));
+                            result.insert("length".into(), Value::Num(m.len() as f64, None));
+                            result.insert("string".into(), Value::from_str(m.as_str()));
+                            let mut captures = Vec::with_capacity(num_groups - 1);
+                            for i in 1..num_groups {
                                 if let Some(cap) = caps.get(i) {
                                     let mut c = new_objmap();
                                     c.insert("offset".into(), Value::Num(cap.start() as f64, None));
@@ -1972,11 +1988,11 @@ fn rt_match(v: &Value, re: &Value) -> Result<Value> {
                                     captures.push(Value::Obj(Rc::new(c)));
                                 }
                             }
+                            result.insert("captures".into(), Value::Arr(Rc::new(captures)));
+                            Ok(Value::Obj(Rc::new(result)))
                         }
-                        result.insert("captures".into(), Value::Arr(Rc::new(captures)));
-                        Ok(Value::Obj(Rc::new(result)))
+                        None => bail!("match failed"),
                     }
-                    None => bail!("match failed"),
                 }
             })?
         }

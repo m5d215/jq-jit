@@ -181,6 +181,10 @@ fn can_scalar_collect(expr: &Expr) -> bool {
             can_scalar_collect(try_expr) && can_scalar_collect(catch_expr)
         }
         Expr::Error { msg } => msg.as_ref().is_none_or(|m| is_scalar(m)),
+        // match/capture are 0-or-1 generators: non-match throws error → empty
+        Expr::RegexMatch { input_expr, re, flags } | Expr::RegexCapture { input_expr, re, flags } => {
+            is_scalar(input_expr) && is_scalar(re) && is_scalar(flags)
+        }
         _ => false,
     }
 }
@@ -2277,6 +2281,42 @@ impl Flattener {
 
             Expr::TryCatch { try_expr, catch_expr } => {
                 self.flatten_gen_try_catch(try_expr, catch_expr, input_slot)
+            }
+
+            // RegexMatch/RegexCapture: 0-or-1 output generator
+            // match("re") yields one object or empty (non-match throws error → empty)
+            Expr::RegexMatch { input_expr, re, flags } | Expr::RegexCapture { input_expr, re, flags } => {
+                let is_capture = matches!(expr, Expr::RegexCapture { .. });
+                if !is_scalar(input_expr) || !is_scalar(re) || !is_scalar(flags) { return false; }
+                let inp = self.flatten_scalar(input_expr, input_slot);
+                let re_val = self.flatten_scalar(re, input_slot);
+                let flags_val = self.flatten_scalar(flags, input_slot);
+                let out = self.alloc_slot();
+                let builtin_name = if is_capture { "capture" } else { "match" };
+                // Wrap in try-catch: non-match throws error → skip yield
+                let catch_label = self.alloc_label();
+                let done_label = self.alloc_label();
+                let error_slot = self.alloc_slot();
+                let old_target = self.try_catch_target;
+                self.try_catch_target = Some((catch_label, error_slot));
+                self.try_depth += 1;
+                self.emit(JitOp::TryCatchBegin);
+                self.emit(JitOp::CallBuiltin { dst: out, name: builtin_name.to_string(), args: vec![inp, re_val] });
+                self.emit(JitOp::Drop { slot: flags_val });
+                self.emit_yield(out);
+                self.emit(JitOp::Drop { slot: out });
+                self.emit(JitOp::TryCatchEnd);
+                self.try_depth -= 1;
+                self.try_catch_target = old_target;
+                self.emit(JitOp::Jump { label: done_label });
+                // Catch: non-match → empty (just drop error)
+                self.emit(JitOp::Label { id: catch_label });
+                self.emit(JitOp::TryCatchEnd);
+                self.emit(JitOp::Drop { slot: error_slot });
+                self.emit(JitOp::Label { id: done_label });
+                self.emit(JitOp::Drop { slot: inp });
+                self.emit(JitOp::Drop { slot: re_val });
+                true
             }
 
             // BinOp with generator operands: iterate generators and compute BinOp for each combination
