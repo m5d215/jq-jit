@@ -459,14 +459,27 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                 }
             }
             // Semantic: [elements] | length → N (number of elements, if known at compile time)
+            // Only when each element is known to produce exactly one output.
             if let Expr::Collect { generator } = &sl {
                 if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                    fn is_single_output(e: &Expr) -> bool {
+                        match e {
+                            Expr::Input | Expr::Literal(_) | Expr::Negate { .. } => true,
+                            Expr::Index { expr: base, .. } => matches!(base.as_ref(), Expr::Input),
+                            Expr::BinOp { lhs, rhs, .. } => is_single_output(lhs) && is_single_output(rhs),
+                            Expr::UnaryOp { operand, .. } => is_single_output(operand),
+                            Expr::ObjectConstruct { .. } => true,
+                            Expr::Pipe { left, right } => is_single_output(left) && is_single_output(right),
+                            _ => false, // generators, conditionals, etc. may produce 0 or many
+                        }
+                    }
                     fn count_comma_elements(e: &Expr) -> Option<usize> {
                         match e {
                             Expr::Comma { left, right } => {
                                 Some(count_comma_elements(left)? + count_comma_elements(right)?)
                             }
-                            _ => Some(1),
+                            _ if is_single_output(e) => Some(1),
+                            _ => None,
                         }
                     }
                     if let Some(n) = count_comma_elements(generator) {
@@ -498,6 +511,20 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     return Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) };
                 }
             }
+            // Semantic: reverse | length → length (reverse doesn't change length)
+            if matches!(&sl, Expr::UnaryOp { op: UnaryOp::Reverse, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                    return Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) };
+                }
+            }
+            // Semantic: sort | length → length (sort doesn't change length)
+            if matches!(&sl, Expr::UnaryOp { op: UnaryOp::Sort, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                    return Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) };
+                }
+            }
+            // Semantic: unique | length → unique | length (can't simplify, unique changes length)
+            // Semantic: flatten | length — can't simplify, changes length
             // Semantic: keys_unsorted | sort → keys
             if matches!(&sl, Expr::UnaryOp { op: UnaryOp::KeysUnsorted, operand } if matches!(operand.as_ref(), Expr::Input)) {
                 if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Sort, operand } if matches!(operand.as_ref(), Expr::Input)) {
