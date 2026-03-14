@@ -1702,6 +1702,81 @@ pub fn json_object_update_field_slice(
     false
 }
 
+/// Convert all values in a JSON object to strings.
+/// `with_entries(.value |= tostring)` — strings stay, numbers/bools/null get wrapped in quotes.
+pub fn json_object_values_tostring(
+    b: &[u8], pos: usize, buf: &mut Vec<u8>,
+) -> bool {
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    buf.push(b'{');
+    let mut i = pos + 1;
+    let mut first = true;
+    loop {
+        // Skip whitespace
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { return false; }
+        if b[i] == b'}' { break; }
+        if !first { buf.push(b','); }
+        first = false;
+        // Key (must be string)
+        if b[i] != b'"' { return false; }
+        let key_start = i;
+        i += 1;
+        while i < b.len() {
+            if b[i] == b'\\' { i += 2; continue; }
+            if b[i] == b'"' { i += 1; break; }
+            i += 1;
+        }
+        buf.extend_from_slice(&b[key_start..i]);
+        // Colon
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { return false; }
+        i += 1;
+        buf.push(b':');
+        // Skip whitespace before value
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { return false; }
+        // Value
+        let val_start = i;
+        if b[i] == b'"' {
+            // Already a string — copy as-is
+            i += 1;
+            while i < b.len() {
+                if b[i] == b'\\' { i += 2; continue; }
+                if b[i] == b'"' { i += 1; break; }
+                i += 1;
+            }
+            buf.extend_from_slice(&b[val_start..i]);
+        } else {
+            // Number, bool, null — find end, wrap in quotes
+            let end = match skip_json_value(b, val_start) {
+                Ok(e) => e,
+                Err(_) => return false,
+            };
+            let val_bytes = &b[val_start..end];
+            buf.push(b'"');
+            // For numbers, use push_jq_number_bytes for jq-compatible formatting
+            if b[val_start] == b'-' || b[val_start].is_ascii_digit() {
+                if let Ok(n) = unsafe { std::str::from_utf8_unchecked(val_bytes) }.parse::<f64>() {
+                    push_jq_number_bytes(buf, n);
+                } else {
+                    buf.extend_from_slice(val_bytes);
+                }
+            } else {
+                // true, false, null
+                buf.extend_from_slice(val_bytes);
+            }
+            buf.push(b'"');
+            i = end;
+        }
+        // Comma or end
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i < b.len() && b[i] == b',' { i += 1; }
+    }
+    buf.push(b'}');
+    true
+}
+
 /// Update a field by replacing its string value with its length.
 /// `.field |= length` — replace string with character count.
 pub fn json_object_update_field_length(

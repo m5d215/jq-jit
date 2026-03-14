@@ -4955,6 +4955,66 @@ impl Filter {
         None
     }
 
+    /// Detect `with_entries(.value |= tostring)`.
+    /// Returns true if matched.
+    pub fn is_with_entries_tostring(&self) -> bool {
+        use crate::ir::{Expr, Literal, UnaryOp};
+        let expr = match self.detect_expr() { Some(e) => e, None => return false };
+        // Pattern: Pipe(to_entries, Pipe(map(.value |= tostring), from_entries))
+        if let Expr::Pipe { left: l1, right: r1 } = expr {
+            if !matches!(l1.as_ref(), Expr::UnaryOp { op: UnaryOp::ToEntries, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                return false;
+            }
+            if let Expr::Pipe { left: l2, right: r2 } = r1.as_ref() {
+                if !matches!(r2.as_ref(), Expr::UnaryOp { op: UnaryOp::FromEntries, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                    return false;
+                }
+                if let Expr::Collect { generator } = l2.as_ref() {
+                    if let Expr::Pipe { left: l3, right: r3 } = generator.as_ref() {
+                        if !matches!(l3.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)) {
+                            return false;
+                        }
+                        // Body: Update { .value, tostring(.) }
+                        if let Expr::Update { path_expr, update_expr } = r3.as_ref() {
+                            if let Expr::Index { expr: base, key } = path_expr.as_ref() {
+                                if matches!(base.as_ref(), Expr::Input) {
+                                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                        if field == "value" {
+                                            if let Expr::UnaryOp { op: UnaryOp::ToString, operand } = update_expr.as_ref() {
+                                                if matches!(operand.as_ref(), Expr::Input) {
+                                                    return true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Also handle LetBinding wrapper
+                        if let Expr::LetBinding { body, .. } = r3.as_ref() {
+                            if let Expr::Update { path_expr, update_expr } = body.as_ref() {
+                                if let Expr::Index { expr: base, key } = path_expr.as_ref() {
+                                    if matches!(base.as_ref(), Expr::Input) {
+                                        if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                            if field == "value" {
+                                                if let Expr::UnaryOp { op: UnaryOp::ToString, operand } = update_expr.as_ref() {
+                                                    if matches!(operand.as_ref(), Expr::Input) {
+                                                        return true;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Detect `.field = CONST` or `setpath(["field"]; CONST)` pattern.
     /// Returns (field_name, json_bytes_of_value) for raw byte replacement.
     pub fn detect_field_assign_const(&self) -> Option<(String, Vec<u8>)> {
