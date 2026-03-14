@@ -1400,6 +1400,61 @@ pub fn json_object_update_field_num_chain(
     false
 }
 
+/// Update a string field by applying regex gsub replacement.
+/// Extracts the field value, applies regex replacement, and writes back.
+/// For strings without JSON escapes, operates directly on raw bytes.
+pub fn json_object_update_field_gsub(
+    b: &[u8], pos: usize, field: &str, re: &regex::Regex, replacement: &str, buf: &mut Vec<u8>,
+) -> bool {
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
+        if val_start >= val_end || b[val_start] != b'"' { return false; }
+        let inner = &b[val_start + 1..val_end - 1];
+        // Check for JSON escapes — if none, we can operate on raw bytes directly
+        let has_escapes = memchr::memchr(b'\\', inner).is_some();
+        let result_str;
+        let result_bytes: &[u8];
+        if has_escapes {
+            // Must unescape, apply, re-escape
+            let s: String = match serde_json::from_slice(&b[val_start..val_end]) {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+            result_str = re.replace_all(&s, replacement).into_owned();
+            result_bytes = result_str.as_bytes();
+        } else {
+            // Fast: no escapes, work directly on raw bytes
+            let s = unsafe { std::str::from_utf8_unchecked(inner) };
+            result_str = re.replace_all(s, replacement).into_owned();
+            result_bytes = result_str.as_bytes();
+        }
+        // Find object end
+        let mut obj_end = b.len();
+        while obj_end > val_end && b[obj_end - 1] != b'}' { obj_end -= 1; }
+        if obj_end <= val_end { return false; }
+        // 3-way copy: prefix + new string value + suffix
+        buf.extend_from_slice(&b[pos..val_start]);
+        buf.push(b'"');
+        for &ch in result_bytes {
+            match ch {
+                b'"' => buf.extend_from_slice(b"\\\""),
+                b'\\' => buf.extend_from_slice(b"\\\\"),
+                b'\n' => buf.extend_from_slice(b"\\n"),
+                b'\r' => buf.extend_from_slice(b"\\r"),
+                b'\t' => buf.extend_from_slice(b"\\t"),
+                c if c < 0x20 => {
+                    buf.extend_from_slice(format!("\\u{:04x}", c).as_bytes());
+                }
+                _ => buf.push(ch),
+            }
+        }
+        buf.push(b'"');
+        buf.extend_from_slice(&b[val_end..obj_end]);
+        return true;
+    }
+    false
+}
+
 /// Merge literal key-value pairs into a raw JSON object.
 /// `pairs` is a list of (key_name, json_value_bytes).
 /// Existing keys are replaced (last-write-wins), new keys are appended.

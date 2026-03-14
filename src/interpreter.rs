@@ -5510,6 +5510,30 @@ impl Filter {
         None
     }
 
+    /// Detect `.field |= gsub("re"; "replacement")`.
+    /// Returns (field_name, regex_pattern, replacement).
+    pub fn detect_field_update_gsub(&self) -> Option<(String, String, String)> {
+        use crate::ir::{Expr, Literal};
+        let expr = self.detect_expr()?;
+        let update_expr_outer = if let Expr::LetBinding { body, .. } = expr { body.as_ref() } else { expr };
+        if let Expr::Update { path_expr, update_expr } = update_expr_outer {
+            if let Expr::Index { expr: base, key } = path_expr.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::RegexGsub { input_expr, re, tostr, .. } = update_expr.as_ref() {
+                        if !matches!(input_expr.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(pattern)) = re.as_ref() {
+                            if let Expr::Literal(Literal::Str(replacement)) = tostr.as_ref() {
+                                return Some((field.clone(), pattern.clone(), replacement.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field |= ascii_downcase/ascii_upcase`.
     /// Returns (field_name, is_upcase).
     pub fn detect_field_update_case(&self) -> Option<(String, bool)> {
