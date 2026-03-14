@@ -5578,6 +5578,49 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 return 0;
             }
         }
+        // Fast path: explode (op 20) — string → array of codepoints
+        if op == 20 {
+            if let Value::Str(s) = &*input {
+                let str = s.as_str();
+                if str.is_ascii() {
+                    let mut codepoints = Vec::with_capacity(str.len());
+                    for &b in str.as_bytes() {
+                        codepoints.push(Value::Num(b as f64, None));
+                    }
+                    std::ptr::write(dst, Value::Arr(Rc::new(codepoints)));
+                } else {
+                    let codepoints: Vec<Value> = str.chars()
+                        .map(|c| Value::Num(c as u32 as f64, None))
+                        .collect();
+                    std::ptr::write(dst, Value::Arr(Rc::new(codepoints)));
+                }
+                return 0;
+            }
+        }
+        // Fast path: implode (op 21) — array of codepoints → string
+        if op == 21 {
+            if let Value::Arr(a) = &*input {
+                let mut s = String::with_capacity(a.len());
+                let mut ok = true;
+                for item in a.iter() {
+                    if let Value::Num(n, _) = item {
+                        let cp = *n as u32;
+                        if let Some(c) = char::from_u32(cp) {
+                            s.push(c);
+                        } else {
+                            s.push('\u{FFFD}');
+                        }
+                    } else {
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok {
+                    std::ptr::write(dst, Value::from_string(s));
+                    return 0;
+                }
+            }
+        }
         // Fast path: not (op 32)
         if op == 32 {
             let truthy = match &*input {

@@ -610,6 +610,43 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                 }
             }
+            // Semantic: [A, [B, C], D] | flatten → [A, B, C, D]
+            // Unwrap inner Collect elements one level
+            if let Expr::Collect { generator: ref lg } = sl {
+                if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Flatten, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                    fn collect_for_flatten(e: &Expr, out: &mut Vec<Expr>) {
+                        match e {
+                            Expr::Comma { left, right } => {
+                                collect_for_flatten(left, out);
+                                collect_for_flatten(right, out);
+                            }
+                            other => out.push(other.clone()),
+                        }
+                    }
+                    let mut top_elems = Vec::new();
+                    collect_for_flatten(lg, &mut top_elems);
+                    // Check if all elements are Collect (inner arrays) or simple exprs
+                    let has_inner_collect = top_elems.iter().any(|e| matches!(e, Expr::Collect { .. }));
+                    if has_inner_collect {
+                        let mut flat_elems = Vec::new();
+                        for elem in &top_elems {
+                            match elem {
+                                Expr::Collect { generator } => {
+                                    collect_for_flatten(generator, &mut flat_elems);
+                                }
+                                other => flat_elems.push(other.clone()),
+                            }
+                        }
+                        if flat_elems.len() >= 2 {
+                            let mut gen = flat_elems.remove(0);
+                            for e in flat_elems {
+                                gen = Expr::Comma { left: Box::new(gen), right: Box::new(e) };
+                            }
+                            return Expr::Collect { generator: Box::new(gen) };
+                        }
+                    }
+                }
+            }
             // Semantic: [e1, e2, ...] | any(f) → (e1|f) or (e2|f) or ...
             // Semantic: [e1, e2, ...] | all(f) → (e1|f) and (e2|f) and ...
             if let Expr::Collect { generator: ref lg } = sl {
