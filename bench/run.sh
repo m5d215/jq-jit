@@ -172,6 +172,7 @@ TESTS=(
     'objects:-c:objects'
     '.tag|=if..then N:-c:.tag |= if . == "abc" then 1 else 0 end'
     '.x=(.x+1):-c:.x = (.x + 1)'
+    'sel>N|.y+=1:-c:select(.x > 1000000) | .y += 1'
 )
 
 for test in "${TESTS[@]}"; do
