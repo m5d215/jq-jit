@@ -2088,6 +2088,71 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.f | startswith("a") and/or .f | endswith("b"))` — compound string test select.
+    /// Returns (logic_op, Vec<(field, test_name, test_arg)>) where logic_op is And/Or.
+    pub fn detect_select_compound_str_test(&self) -> Option<(crate::ir::BinOp, Vec<(String, String, String)>)> {
+        use crate::ir::{BinOp, Expr, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
+            if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+            fn extract_str_test(e: &Expr) -> Option<(String, String, String)> {
+                if let Expr::Pipe { left, right } = e {
+                    if let Expr::Index { expr: base, key } = left.as_ref() {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                            if let Expr::CallBuiltin { name, args } = right.as_ref() {
+                                if matches!(name.as_str(), "startswith" | "endswith" | "contains") && args.len() == 1 {
+                                    if let Expr::Literal(Literal::Str(arg)) = &args[0] {
+                                        return Some((field.clone(), name.clone(), arg.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Also handle beta-reduced form: CallBuiltin("startswith", [Index(Input, "field"), Literal("str")])
+                if let Expr::CallBuiltin { name, args } = e {
+                    if matches!(name.as_str(), "startswith" | "endswith" | "contains") && args.len() == 2 {
+                        if let Expr::Index { expr: base, key } = &args[0] {
+                            if matches!(base.as_ref(), Expr::Input) {
+                                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                    if let Expr::Literal(Literal::Str(arg)) = &args[1] {
+                                        return Some((field.clone(), name.clone(), arg.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            // Collect And/Or chain of string tests
+            fn collect_str_conds(e: &Expr, logic: &BinOp, out: &mut Vec<(String, String, String)>) -> bool {
+                if let Expr::BinOp { op, lhs, rhs } = e {
+                    if std::mem::discriminant(op) == std::mem::discriminant(logic) {
+                        return collect_str_conds(lhs, logic, out) && collect_str_conds(rhs, logic, out);
+                    }
+                }
+                if let Some(t) = extract_str_test(e) {
+                    out.push(t);
+                    true
+                } else {
+                    false
+                }
+            }
+            if let Expr::BinOp { op, .. } = cond.as_ref() {
+                if matches!(op, BinOp::And | BinOp::Or) {
+                    let mut conds = Vec::new();
+                    if collect_str_conds(cond, op, &mut conds) && conds.len() >= 2 {
+                        return Some((*op, conds));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.field | test("regex"))` pattern.
     /// Returns (field_name, regex_pattern, flags_str) if detected.
     pub fn detect_select_field_regex_test(&self) -> Option<(String, String, Option<String>)> {

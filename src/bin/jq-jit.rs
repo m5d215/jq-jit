@@ -1950,6 +1950,9 @@ fn real_main() {
     let select_str_test = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_str.is_none() && field_access.is_none() {
         filter.detect_select_field_str_test()
     } else { None };
+    let select_compound_str_test = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() && field_access.is_none() {
+        filter.detect_select_compound_str_test()
+    } else { None };
     let select_regex_test = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() && field_access.is_none() {
         filter.detect_select_field_regex_test()
     } else { None };
@@ -2338,7 +2341,7 @@ fn real_main() {
         || select_cmp.is_some() || select_field_null.is_some() || select_arith_cmp.is_some()
         || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || null_branch_lit.is_some() || field_field_cmp_branch.is_some() || if_cmp_arrays.is_some() || cmp_branch_interp.is_some() || select_num_str.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some() || select_compound_computed.is_some() || select_compound_cremap.is_some()
         || select_str.is_some() || select_compound_str_chain.is_some()
-        || select_str_test.is_some() || select_regex_test.is_some() || select_regex_value.is_some() || select_nested_cmp.is_some()
+        || select_str_test.is_some() || select_compound_str_test.is_some() || select_regex_test.is_some() || select_regex_value.is_some() || select_nested_cmp.is_some()
         || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_field_unary.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_dynkey.is_some() || select_cmp_dynkey_mixed.is_some() || select_cmp_array.is_some() || select_arith_cmp_array.is_some() || select_cmp_value.is_some() || select_cmp_str_chain.is_some() || select_ff_cmp_field.is_some() || select_ff_cmp.is_some() || select_ff_cmp_cremap.is_some() || select_ff_cmp_value.is_some() || select_ff_cmp_array.is_some() || select_compound_array.is_some() || select_str_field.is_some() || select_str_cremap.is_some() || select_str_array.is_some() || select_str_str_chain.is_some()
         || computed_array.is_some() || array_field.is_some() || multi_field.is_some() || is_length || is_keys
         || is_keys_unsorted || keys_join.is_some() || has_field.is_some() || has_multi.is_some() || select_has_multi.is_some() || is_type || del_field.is_some() || select_cmp_del.is_some() || select_str_del.is_some() || select_cmp_merge.is_some() || select_str_merge.is_some() || del_fields.is_some() || obj_merge_lit.is_some() || obj_merge_computed.is_some()
@@ -6129,6 +6132,41 @@ fn real_main() {
                                     emit_raw_ln!(&mut compact_buf, raw);
                                 }
                             }
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref logic_op, ref str_conds)) = select_compound_str_test {
+                    use jq_jit::ir::BinOp;
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        let is_and = matches!(logic_op, BinOp::And);
+                        let mut result = is_and; // true for AND (all must pass), false for OR (any must pass)
+                        for (field, test_name, test_arg) in str_conds {
+                            let pass = if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
+                                let val = &raw[vs..ve];
+                                if val.len() >= 2 && val[0] == b'"' && val[ve-vs-1] == b'"' && !val[1..ve-vs-1].contains(&b'\\') {
+                                    let inner = &val[1..ve-vs-1];
+                                    let arg_bytes = test_arg.as_bytes();
+                                    match test_name.as_str() {
+                                        "startswith" => inner.starts_with(arg_bytes),
+                                        "endswith" => inner.ends_with(arg_bytes),
+                                        "contains" => bytes_contains(inner, arg_bytes),
+                                        _ => false,
+                                    }
+                                } else { false }
+                            } else { false };
+                            if is_and {
+                                if !pass { result = false; break; }
+                            } else {
+                                if pass { result = true; break; }
+                            }
+                        }
+                        if result {
+                            emit_raw_ln!(&mut compact_buf, raw);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -12252,6 +12290,42 @@ fn real_main() {
                                 emit_raw_ln!(&mut compact_buf, raw);
                             }
                         }
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref logic_op, ref str_conds)) = select_compound_str_test {
+                use jq_jit::ir::BinOp;
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    let is_and = matches!(logic_op, BinOp::And);
+                    let mut result = is_and;
+                    for (field, test_name, test_arg) in str_conds {
+                        let pass = if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
+                            let val = &raw[vs..ve];
+                            if val.len() >= 2 && val[0] == b'"' && val[ve-vs-1] == b'"' && !val[1..ve-vs-1].contains(&b'\\') {
+                                let inner = &val[1..ve-vs-1];
+                                let arg_bytes = test_arg.as_bytes();
+                                match test_name.as_str() {
+                                    "startswith" => inner.starts_with(arg_bytes),
+                                    "endswith" => inner.ends_with(arg_bytes),
+                                    "contains" => bytes_contains(inner, arg_bytes),
+                                    _ => false,
+                                }
+                            } else { false }
+                        } else { false };
+                        if is_and {
+                            if !pass { result = false; break; }
+                        } else {
+                            if pass { result = true; break; }
+                        }
+                    }
+                    if result {
+                        emit_raw_ln!(&mut compact_buf, raw);
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
