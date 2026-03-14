@@ -9476,16 +9476,21 @@ fn real_main() {
                     use jq_jit::ir::BinOp;
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if let Some((v1, v2)) = json_object_get_two_nums(raw, 0, sff_f1, sff_f2) {
-                            let pass = match sff_op {
+                        let pass = if let Some((v1, v2)) = json_object_get_two_nums(raw, 0, sff_f1, sff_f2) {
+                            match sff_op {
                                 BinOp::Gt => v1 > v2, BinOp::Lt => v1 < v2,
                                 BinOp::Ge => v1 >= v2, BinOp::Le => v1 <= v2,
                                 BinOp::Eq => v1 == v2, BinOp::Ne => v1 != v2,
                                 _ => false,
-                            };
-                            if pass {
-                                emit_raw_ln!(&mut compact_buf, raw);
                             }
+                        } else if let (Some(r1), Some(r2)) = (
+                            json_object_get_field_raw(raw, 0, sff_f1),
+                            json_object_get_field_raw(raw, 0, sff_f2),
+                        ) {
+                            compare_raw_fields(raw, r1, r2, &sff_op)
+                        } else { false };
+                        if pass {
+                            emit_raw_ln!(&mut compact_buf, raw);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -16342,21 +16347,26 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some((ref sff_f1, sff_op, ref sff_f2)) = select_ff_cmp {
-                // select(.f1 cmp .f2) — stdin path, output whole object
+                // select(.f1 cmp .f2) — file path, output whole object
                 use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if let Some((v1, v2)) = json_object_get_two_nums(raw, 0, sff_f1, sff_f2) {
-                        let pass = match sff_op {
+                    let pass = if let Some((v1, v2)) = json_object_get_two_nums(raw, 0, sff_f1, sff_f2) {
+                        match sff_op {
                             BinOp::Gt => v1 > v2, BinOp::Lt => v1 < v2,
                             BinOp::Ge => v1 >= v2, BinOp::Le => v1 <= v2,
                             BinOp::Eq => v1 == v2, BinOp::Ne => v1 != v2,
                             _ => false,
-                        };
-                        if pass {
-                            emit_raw_ln!(&mut compact_buf, raw);
                         }
+                    } else if let (Some(r1), Some(r2)) = (
+                        json_object_get_field_raw(raw, 0, sff_f1),
+                        json_object_get_field_raw(raw, 0, sff_f2),
+                    ) {
+                        compare_raw_fields(raw, r1, r2, &sff_op)
+                    } else { false };
+                    if pass {
+                        emit_raw_ln!(&mut compact_buf, raw);
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
