@@ -2204,6 +2204,12 @@ fn real_main() {
     let select_length_cmp_field = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_length_cmp.is_none() && select_length_cmp.is_none() {
         filter.detect_select_field_length_cmp_then_field()
     } else { None };
+    let if_length_cmp_fields = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && select_length_cmp.is_none() && select_length_cmp_field.is_none() {
+        filter.detect_if_field_length_cmp_then_fields()
+    } else { None };
+    let select_length_cmp_remap = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && select_length_cmp.is_none() && select_length_cmp_field.is_none() && if_length_cmp_fields.is_none() {
+        filter.detect_select_field_length_cmp_then_remap()
+    } else { None };
     let min_two_fields = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
         filter.detect_min_two_fields()
     } else { None };
@@ -3466,6 +3472,127 @@ fn real_main() {
                                         compact_buf.extend_from_slice(out_val);
                                     }
                                     compact_buf.push(b'\n');
+                                }
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref ilcf_cond, ilcf_op, ilcf_n, ref ilcf_then, ref ilcf_else)) = if_length_cmp_fields {
+                    // if .field|length cmp N then .f1 else .f2 end
+                    use jq_jit::ir::BinOp;
+                    let threshold_f = ilcf_n;
+                    let mut all_fields: Vec<&str> = vec![ilcf_cond.as_str()];
+                    if !all_fields.contains(&ilcf_then.as_str()) { all_fields.push(ilcf_then.as_str()); }
+                    if !all_fields.contains(&ilcf_else.as_str()) { all_fields.push(ilcf_else.as_str()); }
+                    let then_idx = all_fields.iter().position(|f| *f == ilcf_then.as_str()).unwrap();
+                    let else_idx = all_fields.iter().position(|f| *f == ilcf_else.as_str()).unwrap();
+                    let mut ranges_buf = vec![(0usize, 0usize); all_fields.len()];
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if json_object_get_fields_raw_buf(raw, 0, &all_fields, &mut ranges_buf) {
+                            let cond_range = ranges_buf[0];
+                            let cond_val = &raw[cond_range.0..cond_range.1];
+                            if cond_val.len() >= 2 && cond_val[0] == b'"' && cond_val[cond_val.len()-1] == b'"'
+                                && !cond_val[1..cond_val.len()-1].contains(&b'\\')
+                            {
+                                let inner = &cond_val[1..cond_val.len()-1];
+                                let cp_count = inner.iter().filter(|&&b| (b & 0xC0) != 0x80).count() as f64;
+                                let pass = match ilcf_op {
+                                    BinOp::Gt => cp_count > threshold_f,
+                                    BinOp::Lt => cp_count < threshold_f,
+                                    BinOp::Ge => cp_count >= threshold_f,
+                                    BinOp::Le => cp_count <= threshold_f,
+                                    BinOp::Eq => cp_count == threshold_f,
+                                    BinOp::Ne => cp_count != threshold_f,
+                                    _ => false,
+                                };
+                                let idx = if pass { then_idx } else { else_idx };
+                                let out_val = &raw[ranges_buf[idx].0..ranges_buf[idx].1];
+                                if use_pretty_buf && (out_val[0] == b'{' || out_val[0] == b'[') {
+                                    push_json_pretty_raw(&mut compact_buf, out_val, 2, false);
+                                } else {
+                                    compact_buf.extend_from_slice(out_val);
+                                }
+                                compact_buf.push(b'\n');
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref slcr_cond, slcr_op, slcr_n, ref slcr_remap)) = select_length_cmp_remap {
+                    // select(.field|length cmp N) | {remap}
+                    use jq_jit::ir::BinOp;
+                    use jq_jit::interpreter::RemapExpr;
+                    let threshold_f = slcr_n;
+                    let mut all_fields: Vec<String> = vec![slcr_cond.clone()];
+                    for (_, re) in slcr_remap {
+                        if let RemapExpr::Field(f) = re {
+                            if !all_fields.contains(f) { all_fields.push(f.clone()); }
+                        }
+                    }
+                    let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                    let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                            let cond_range = ranges_buf[0];
+                            let cond_val = &raw[cond_range.0..cond_range.1];
+                            if cond_val.len() >= 2 && cond_val[0] == b'"' && cond_val[cond_val.len()-1] == b'"'
+                                && !cond_val[1..cond_val.len()-1].contains(&b'\\')
+                            {
+                                let inner = &cond_val[1..cond_val.len()-1];
+                                let cp_count = inner.iter().filter(|&&b| (b & 0xC0) != 0x80).count() as f64;
+                                let pass = match slcr_op {
+                                    BinOp::Gt => cp_count > threshold_f,
+                                    BinOp::Lt => cp_count < threshold_f,
+                                    BinOp::Ge => cp_count >= threshold_f,
+                                    BinOp::Le => cp_count <= threshold_f,
+                                    BinOp::Eq => cp_count == threshold_f,
+                                    BinOp::Ne => cp_count != threshold_f,
+                                    _ => false,
+                                };
+                                if pass {
+                                    compact_buf.push(b'{');
+                                    for (i, (key, re)) in slcr_remap.iter().enumerate() {
+                                        if i > 0 { compact_buf.push(b','); }
+                                        compact_buf.push(b'"');
+                                        compact_buf.extend_from_slice(key.as_bytes());
+                                        compact_buf.extend_from_slice(b"\":");
+                                        match re {
+                                            RemapExpr::Field(f) => {
+                                                let fi = field_refs.iter().position(|x| *x == f.as_str()).unwrap();
+                                                compact_buf.extend_from_slice(&raw[ranges_buf[fi].0..ranges_buf[fi].1]);
+                                            }
+                                            RemapExpr::LiteralJson(lit) => {
+                                                compact_buf.extend_from_slice(lit);
+                                            }
+                                            _ => {
+                                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                                return Ok(());
+                                            }
+                                        }
+                                    }
+                                    compact_buf.extend_from_slice(b"}\n");
                                 }
                             } else {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
@@ -11421,6 +11548,129 @@ fn real_main() {
                                     compact_buf.extend_from_slice(out_val);
                                 }
                                 compact_buf.push(b'\n');
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref ilcf_cond, ilcf_op, ilcf_n, ref ilcf_then, ref ilcf_else)) = if_length_cmp_fields {
+                // if .field|length cmp N then .f1 else .f2 end — file path
+                use jq_jit::ir::BinOp;
+                let content_bytes = content.as_bytes();
+                let threshold_f = ilcf_n;
+                let mut all_fields: Vec<&str> = vec![ilcf_cond.as_str()];
+                if !all_fields.contains(&ilcf_then.as_str()) { all_fields.push(ilcf_then.as_str()); }
+                if !all_fields.contains(&ilcf_else.as_str()) { all_fields.push(ilcf_else.as_str()); }
+                let then_idx = all_fields.iter().position(|f| *f == ilcf_then.as_str()).unwrap();
+                let else_idx = all_fields.iter().position(|f| *f == ilcf_else.as_str()).unwrap();
+                let mut ranges_buf = vec![(0usize, 0usize); all_fields.len()];
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if json_object_get_fields_raw_buf(raw, 0, &all_fields, &mut ranges_buf) {
+                        let cond_range = ranges_buf[0];
+                        let cond_val = &raw[cond_range.0..cond_range.1];
+                        if cond_val.len() >= 2 && cond_val[0] == b'"' && cond_val[cond_val.len()-1] == b'"'
+                            && !cond_val[1..cond_val.len()-1].contains(&b'\\')
+                        {
+                            let inner = &cond_val[1..cond_val.len()-1];
+                            let cp_count = inner.iter().filter(|&&b| (b & 0xC0) != 0x80).count() as f64;
+                            let pass = match ilcf_op {
+                                BinOp::Gt => cp_count > threshold_f,
+                                BinOp::Lt => cp_count < threshold_f,
+                                BinOp::Ge => cp_count >= threshold_f,
+                                BinOp::Le => cp_count <= threshold_f,
+                                BinOp::Eq => cp_count == threshold_f,
+                                BinOp::Ne => cp_count != threshold_f,
+                                _ => false,
+                            };
+                            let idx = if pass { then_idx } else { else_idx };
+                            let out_val = &raw[ranges_buf[idx].0..ranges_buf[idx].1];
+                            if use_pretty_buf && (out_val[0] == b'{' || out_val[0] == b'[') {
+                                push_json_pretty_raw(&mut compact_buf, out_val, 2, false);
+                            } else {
+                                compact_buf.extend_from_slice(out_val);
+                            }
+                            compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref slcr_cond, slcr_op, slcr_n, ref slcr_remap)) = select_length_cmp_remap {
+                // select(.field|length cmp N) | {remap} — file path
+                use jq_jit::ir::BinOp;
+                use jq_jit::interpreter::RemapExpr;
+                let content_bytes = content.as_bytes();
+                let threshold_f = slcr_n;
+                let mut all_fields: Vec<String> = vec![slcr_cond.clone()];
+                for (_, re) in slcr_remap {
+                    if let RemapExpr::Field(f) = re {
+                        if !all_fields.contains(f) { all_fields.push(f.clone()); }
+                    }
+                }
+                let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                        let cond_range = ranges_buf[0];
+                        let cond_val = &raw[cond_range.0..cond_range.1];
+                        if cond_val.len() >= 2 && cond_val[0] == b'"' && cond_val[cond_val.len()-1] == b'"'
+                            && !cond_val[1..cond_val.len()-1].contains(&b'\\')
+                        {
+                            let inner = &cond_val[1..cond_val.len()-1];
+                            let cp_count = inner.iter().filter(|&&b| (b & 0xC0) != 0x80).count() as f64;
+                            let pass = match slcr_op {
+                                BinOp::Gt => cp_count > threshold_f,
+                                BinOp::Lt => cp_count < threshold_f,
+                                BinOp::Ge => cp_count >= threshold_f,
+                                BinOp::Le => cp_count <= threshold_f,
+                                BinOp::Eq => cp_count == threshold_f,
+                                BinOp::Ne => cp_count != threshold_f,
+                                _ => false,
+                            };
+                            if pass {
+                                compact_buf.push(b'{');
+                                for (i, (key, re)) in slcr_remap.iter().enumerate() {
+                                    if i > 0 { compact_buf.push(b','); }
+                                    compact_buf.push(b'"');
+                                    compact_buf.extend_from_slice(key.as_bytes());
+                                    compact_buf.extend_from_slice(b"\":");
+                                    match re {
+                                        RemapExpr::Field(f) => {
+                                            let fi = field_refs.iter().position(|x| *x == f.as_str()).unwrap();
+                                            compact_buf.extend_from_slice(&raw[ranges_buf[fi].0..ranges_buf[fi].1]);
+                                        }
+                                        RemapExpr::LiteralJson(lit) => {
+                                            compact_buf.extend_from_slice(lit);
+                                        }
+                                        _ => {
+                                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                            return Ok(());
+                                        }
+                                    }
+                                }
+                                compact_buf.extend_from_slice(b"}\n");
                             }
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;

@@ -1510,6 +1510,96 @@ impl Filter {
         None
     }
 
+    /// Detect `if .field|length cmp N then .f1 else .f2 end`.
+    /// Returns (cond_field, cmp_op, threshold, then_field, else_field).
+    pub fn detect_if_field_length_cmp_then_fields(&self) -> Option<(String, crate::ir::BinOp, f64, String, String)> {
+        use crate::ir::{Expr, BinOp, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                if let Expr::UnaryOp { op: UnaryOp::Length, operand } = lhs.as_ref() {
+                    if let Expr::Index { expr: base, key } = operand.as_ref() {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(cond_field)) = key.as_ref() {
+                            if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                // Then branch: .field
+                                let then_f = if let Expr::Index { expr: tb, key: tk } = then_branch.as_ref() {
+                                    if !matches!(tb.as_ref(), Expr::Input) { return None; }
+                                    if let Expr::Literal(Literal::Str(f)) = tk.as_ref() { f.clone() } else { return None; }
+                                } else { return None; };
+                                // Else branch: .field
+                                let else_f = if let Expr::Index { expr: eb, key: ek } = else_branch.as_ref() {
+                                    if !matches!(eb.as_ref(), Expr::Input) { return None; }
+                                    if let Expr::Literal(Literal::Str(f)) = ek.as_ref() { f.clone() } else { return None; }
+                                } else { return None; };
+                                return Some((cond_field.clone(), *op, *n, then_f, else_f));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `select(.field|length cmp N) | {remap}`.
+    /// Returns (cond_field, cmp_op, threshold, remap_fields).
+    pub fn detect_select_field_length_cmp_then_remap(&self) -> Option<(String, crate::ir::BinOp, f64, Vec<(String, RemapExpr)>)> {
+        use crate::ir::{Expr, BinOp, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        let try_extract_cond = |cond: &Expr| -> Option<(String, BinOp, f64)> {
+            if let Expr::BinOp { op, lhs, rhs } = cond {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                if let Expr::UnaryOp { op: UnaryOp::Length, operand } = lhs.as_ref() {
+                    if let Expr::Index { expr: base, key } = operand.as_ref() {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                            if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                return Some((f.clone(), *op, *n));
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        };
+        let try_extract_remap = |output: &Expr| -> Option<Vec<(String, RemapExpr)>> {
+            if let Expr::ObjectConstruct { pairs } = output {
+                if pairs.is_empty() { return None; }
+                let mut result = Vec::with_capacity(pairs.len());
+                for (k, v) in pairs {
+                    let key = if let Expr::Literal(Literal::Str(s)) = k { s.clone() } else { return None; };
+                    result.push((key, Self::classify_remap_value(v)?));
+                }
+                Some(result)
+            } else { None }
+        };
+        // Form 1: Pipe(select(cond), {remap})
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                    if let Some((cf, op, n)) = try_extract_cond(cond) {
+                        if let Some(remap) = try_extract_remap(right) {
+                            return Some((cf, op, n, remap));
+                        }
+                    }
+                }
+            }
+        }
+        // Form 2: if cond then {remap} else empty end
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if matches!(else_branch.as_ref(), Expr::Empty) {
+                if let Some((cf, op, n)) = try_extract_cond(cond) {
+                    if let Some(remap) = try_extract_remap(then_branch) {
+                        return Some((cf, op, n, remap));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.field == null)` or `select(.field != null)` — output whole object.
     /// Returns (field_name, is_eq) where is_eq=true for ==null, false for !=null.
     pub fn detect_select_field_null(&self) -> Option<(String, bool)> {
