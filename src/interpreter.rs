@@ -473,6 +473,60 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                 }
             }
+            // Semantic: explode | map(. + N) | implode → __shift_codepoints__(N)
+            // Also: explode | map(. - N) | implode
+            // Helper: check if expr is map(. + N) pattern, return shift amount
+            fn is_map_shift(expr: &Expr) -> Option<f64> {
+                if let Expr::Collect { generator } = expr {
+                    if let Expr::Pipe { left: gl, right: gr } = generator.as_ref() {
+                        if matches!(gl.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)) {
+                            if let Expr::BinOp { op, lhs, rhs } = gr.as_ref() {
+                                if matches!(lhs.as_ref(), Expr::Input) {
+                                    if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                        return match op {
+                                            crate::ir::BinOp::Add => Some(*n),
+                                            crate::ir::BinOp::Sub => Some(-*n),
+                                            _ => None,
+                                        };
+                                    }
+                                }
+                                if matches!(op, crate::ir::BinOp::Add) && matches!(rhs.as_ref(), Expr::Input) {
+                                    if let Expr::Literal(Literal::Num(n, _)) = lhs.as_ref() {
+                                        return Some(*n);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            // Case 1: Pipe(Pipe(explode, map(.+N)), implode) — left-associative
+            if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Implode, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                if let Expr::Pipe { left: el, right: er } = &sl {
+                    if matches!(el.as_ref(), Expr::UnaryOp { op: UnaryOp::Explode, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                        if let Some(shift) = is_map_shift(er) {
+                            return Expr::CallBuiltin {
+                                name: "__shift_codepoints__".to_string(),
+                                args: vec![Expr::Literal(Literal::Num(shift, None))],
+                            };
+                        }
+                    }
+                }
+            }
+            // Case 2: Pipe(explode, Pipe(map(.+N), implode)) — right-associative
+            if matches!(&sl, Expr::UnaryOp { op: UnaryOp::Explode, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                if let Expr::Pipe { left: mr, right: ir } = &sr {
+                    if matches!(ir.as_ref(), Expr::UnaryOp { op: UnaryOp::Implode, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                        if let Some(shift) = is_map_shift(mr) {
+                            return Expr::CallBuiltin {
+                                name: "__shift_codepoints__".to_string(),
+                                args: vec![Expr::Literal(Literal::Num(shift, None))],
+                            };
+                        }
+                    }
+                }
+            }
             // Semantic: cmp_expr | not → inverted cmp_expr
             if matches!(&sr, Expr::Not) {
                 if let Expr::BinOp { op, lhs, rhs } = &sl {

@@ -6817,6 +6817,30 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             }
         }
 
+        // __shift_codepoints__(shift): explode | map(. + shift) | implode fused
+        if name == "__shift_codepoints__" && args.len() == 2 {
+            let input = &args[0];
+            let shift = &args[1];
+            if let (Value::Str(s), Value::Num(n, _)) = (input, shift) {
+                let shift_i32 = *n as i32;
+                let mut result = String::with_capacity(s.len());
+                for c in s.chars() {
+                    let cp = (c as i32).wrapping_add(shift_i32);
+                    if cp >= 0 {
+                        if let Some(ch) = char::from_u32(cp as u32) {
+                            result.push(ch);
+                        } else {
+                            result.push('\u{FFFD}');
+                        }
+                    } else {
+                        result.push('\u{FFFD}');
+                    }
+                }
+                std::ptr::write(dst, Value::from_string(result));
+                return 0;
+            }
+        }
+
         match crate::runtime::call_builtin(name, args) {
             Ok(v) => { std::ptr::write(dst, v); 0 }
             Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); GEN_ERROR }

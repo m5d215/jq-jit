@@ -342,6 +342,29 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             if args.len() < 2 { bail!("strflocaltime requires 2 arguments"); }
             rt_strflocaltime_impl(&args[0], &args[1])
         }
+        // Fused: explode | map(. + N) | implode
+        "__shift_codepoints__" => {
+            if args.len() >= 2 {
+                if let (Value::Str(s), Value::Num(n, _)) = (&args[0], &args[1]) {
+                    let shift = *n as i32;
+                    let mut result = String::with_capacity(s.len());
+                    for c in s.chars() {
+                        let cp = (c as i32).wrapping_add(shift);
+                        if cp >= 0 {
+                            if let Some(ch) = char::from_u32(cp as u32) {
+                                result.push(ch);
+                            } else {
+                                result.push('\u{FFFD}');
+                            }
+                        } else {
+                            result.push('\u{FFFD}');
+                        }
+                    }
+                    return Ok(Value::from_string(result));
+                }
+            }
+            bail!("__shift_codepoints__ requires string input and numeric shift");
+        }
         _ => {
             // Unknown builtin - try to handle common patterns
             bail!("unknown builtin: {} (nargs={})", name, args.len());
