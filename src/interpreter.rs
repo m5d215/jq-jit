@@ -225,6 +225,8 @@ pub enum StringChainTerminal {
     Contains(String),
     /// length
     Length,
+    /// index("str") — first occurrence position (UTF-8 codepoints), or null
+    Index(String),
 }
 
 /// Part of a string Add-chain: `.name + ": " + (.x | tostring)`.
@@ -3703,6 +3705,7 @@ impl Filter {
                         "startswith" => return StringChainTerminal::Startswith(arg.clone()),
                         "endswith" => return StringChainTerminal::Endswith(arg.clone()),
                         "contains" => return StringChainTerminal::Contains(arg.clone()),
+                        "index" => return StringChainTerminal::Index(arg.clone()),
                         _ => {}
                     }
                 }

@@ -9695,6 +9695,17 @@ fn real_main() {
                                         push_jq_number_bytes(&mut compact_buf, count as f64);
                                         compact_buf.push(b'\n');
                                     }
+                                    StringChainTerminal::Index(ref needle) => {
+                                        let nb = needle.as_bytes();
+                                        if let Some(byte_pos) = tmp_str.windows(nb.len()).position(|w| w == nb) {
+                                            // Convert byte position to UTF-8 codepoint position
+                                            let cp_pos = tmp_str[..byte_pos].iter().filter(|&&b| (b & 0xC0) != 0x80).count();
+                                            push_jq_number_bytes(&mut compact_buf, cp_pos as f64);
+                                            compact_buf.push(b'\n');
+                                        } else {
+                                            compact_buf.extend_from_slice(b"null\n");
+                                        }
+                                    }
                                 }
                             } else {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
@@ -16443,6 +16454,16 @@ fn real_main() {
                                     let count = tmp_str.iter().filter(|&&b| (b & 0xC0) != 0x80).count();
                                     push_jq_number_bytes(&mut compact_buf, count as f64);
                                     compact_buf.push(b'\n');
+                                }
+                                StringChainTerminal::Index(ref needle) => {
+                                    let nb = needle.as_bytes();
+                                    if let Some(byte_pos) = tmp_str.windows(nb.len()).position(|w| w == nb) {
+                                        let cp_pos = tmp_str[..byte_pos].iter().filter(|&&b| (b & 0xC0) != 0x80).count();
+                                        push_jq_number_bytes(&mut compact_buf, cp_pos as f64);
+                                        compact_buf.push(b'\n');
+                                    } else {
+                                        compact_buf.extend_from_slice(b"null\n");
+                                    }
                                 }
                             }
                         } else {
