@@ -176,6 +176,11 @@ TESTS=(
     'sel(and)|.x+=1:-c:select(.x > 500 and .y < 1000) | .x += 1'
     'sel(sw)|.x+=1:-c:select(.name | startswith("item_1")) | .x += 1'
     'match(re):-c:.name | match("([a-z]+)_([0-9]+)")'
+    'first(.name,.x):-c:first(.name, .x)'
+    'if .x==null:-c:if .x == null then "none" else "some" end'
+    'we(sw(.key)):-c:with_entries(select(.key | startswith("n")))'
+    'sel(sw or ew):-c:select((.name | startswith("item_1")) or (.name | endswith("_0")))'
+    'path(.name,.x):-c:path(.name, .x)'
 )
 
 for test in "${TESTS[@]}"; do

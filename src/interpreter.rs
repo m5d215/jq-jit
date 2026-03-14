@@ -592,6 +592,36 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                 }
             }
+            // select(A) | select(B) → select(A and B)
+            if let Expr::IfThenElse { cond: cond_a, then_branch: then_a, else_branch: else_a } = &sl {
+                if matches!(then_a.as_ref(), Expr::Input) && matches!(else_a.as_ref(), Expr::Empty) {
+                    if let Expr::IfThenElse { cond: cond_b, then_branch: then_b, else_branch: else_b } = &sr {
+                        if matches!(then_b.as_ref(), Expr::Input) && matches!(else_b.as_ref(), Expr::Empty) {
+                            return simplify_expr(&Expr::IfThenElse {
+                                cond: Box::new(Expr::BinOp { op: crate::ir::BinOp::And, lhs: cond_a.clone(), rhs: cond_b.clone() }),
+                                then_branch: Box::new(Expr::Input),
+                                else_branch: Box::new(Expr::Empty),
+                            });
+                        }
+                    }
+                    // select(A) | Pipe(select(B), rest) → select(A and B) | rest
+                    if let Expr::Pipe { left: pl, right: pr } = &sr {
+                        if let Expr::IfThenElse { cond: cond_b, then_branch: then_b, else_branch: else_b } = pl.as_ref() {
+                            if matches!(then_b.as_ref(), Expr::Input) && matches!(else_b.as_ref(), Expr::Empty) {
+                                let merged_select = Expr::IfThenElse {
+                                    cond: Box::new(Expr::BinOp { op: crate::ir::BinOp::And, lhs: cond_a.clone(), rhs: cond_b.clone() }),
+                                    then_branch: Box::new(Expr::Input),
+                                    else_branch: Box::new(Expr::Empty),
+                                };
+                                return simplify_expr(&Expr::Pipe {
+                                    left: Box::new(merged_select),
+                                    right: pr.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
             Expr::Pipe { left: Box::new(sl), right: Box::new(sr) }
         }
         // Recurse into IfThenElse conditions (select patterns)
