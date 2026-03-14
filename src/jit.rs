@@ -5675,6 +5675,23 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
             std::ptr::write(dst, if truthy { Value::False } else { Value::True });
             return 0;
         }
+        // Fast path: isnan/isinfinite/isnormal/isfinite (ops 36-39)
+        if op >= 36 && op <= 39 {
+            let result = if let Value::Num(n, _) = &*input {
+                match op {
+                    36 => n.is_infinite(),
+                    37 => n.is_nan(),
+                    38 => n.is_normal(),
+                    39 => n.is_finite(),
+                    _ => unreachable!(),
+                }
+            } else {
+                // Non-numeric: isnan/isinfinite/isnormal→false, isfinite→false per jq semantics
+                false
+            };
+            std::ptr::write(dst, if result { Value::True } else { Value::False });
+            return 0;
+        }
         // Fast path: inline math ops on numbers — avoids eval_unaryop → call_builtin chain
         if let Value::Num(n, repr) = &*input {
             let n = *n;
