@@ -480,6 +480,24 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     return Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) };
                 }
             }
+            // Semantic: keys | length → length, keys_unsorted | length → length
+            if matches!(&sl, Expr::UnaryOp { op: UnaryOp::Keys | UnaryOp::KeysUnsorted, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                    return Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) };
+                }
+            }
+            // Semantic: values | length → length (|values| == |keys| for objects and arrays)
+            if matches!(&sl, Expr::UnaryOp { op: UnaryOp::Values, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                    return Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) };
+                }
+            }
+            // Semantic: to_entries | length → length (|entries| == number of keys)
+            if matches!(&sl, Expr::UnaryOp { op: UnaryOp::ToEntries, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                    return Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) };
+                }
+            }
             // Semantic: keys_unsorted | sort → keys
             if matches!(&sl, Expr::UnaryOp { op: UnaryOp::KeysUnsorted, operand } if matches!(operand.as_ref(), Expr::Input)) {
                 if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Sort, operand } if matches!(operand.as_ref(), Expr::Input)) {
