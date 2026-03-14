@@ -1702,6 +1702,38 @@ pub fn json_object_update_field_slice(
     false
 }
 
+/// Update a field by replacing its string value with its length.
+/// `.field |= length` — replace string with character count.
+pub fn json_object_update_field_length(
+    b: &[u8], pos: usize, field: &str, buf: &mut Vec<u8>,
+) -> bool {
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
+        if val_start >= val_end || b[val_start] != b'"' { return false; }
+        let inner = &b[val_start + 1..val_end - 1];
+        let has_escapes = memchr::memchr(b'\\', inner).is_some();
+        // Count characters (codepoints), not bytes
+        let char_len = if has_escapes {
+            let s: String = match serde_json::from_slice(&b[val_start..val_end]) {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+            s.chars().count()
+        } else {
+            // Count UTF-8 codepoints: count bytes that are NOT continuation bytes (10xxxxxx)
+            inner.iter().filter(|&&b| b & 0xC0 != 0x80).count()
+        };
+        let mut obj_end = b.len();
+        while obj_end > val_end && b[obj_end - 1] != b'}' { obj_end -= 1; }
+        if obj_end <= val_end { return false; }
+        buf.extend_from_slice(&b[pos..val_start]);
+        push_jq_number_bytes(buf, char_len as f64);
+        buf.extend_from_slice(&b[val_end..obj_end]);
+        return true;
+    }
+    false
+}
+
 /// Update a field by concatenating prefix/suffix strings.
 /// `.field |= (. + "suffix")` or `.field |= ("prefix" + .)`.
 pub fn json_object_update_field_str_concat(
