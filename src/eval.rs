@@ -3402,16 +3402,44 @@ fn eval_closure_op_f64(op: ClosureOpKind, a: &[Value], keys: &[f64], cb: &mut dy
 }
 
 /// Specialized closure ops with pre-extracted Value references — avoids eval and clone overhead.
+/// Choose a specialized comparator based on the first key's type.
+fn sort_indexed_by_key(indexed: &mut [(usize, &Value)]) {
+    if indexed.is_empty() { return; }
+    match indexed[0].1 {
+        Value::Str(_) => {
+            indexed.sort_by(|(_, ka), (_, kb)| {
+                if let (Value::Str(a), Value::Str(b)) = (ka, kb) {
+                    a.cmp(b)
+                } else {
+                    crate::runtime::compare_values(ka, kb)
+                }
+            });
+        }
+        Value::Num(..) => {
+            indexed.sort_by(|(_, ka), (_, kb)| {
+                if let (Value::Num(a, _), Value::Num(b, _)) = (ka, kb) {
+                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                } else {
+                    crate::runtime::compare_values(ka, kb)
+                }
+            });
+        }
+        _ => {
+            indexed.sort_by(|(_, ka), (_, kb)| crate::runtime::compare_values(ka, kb));
+        }
+    }
+}
+
 fn eval_closure_op_value_ref(op: ClosureOpKind, a: &[Value], keyed: Vec<(&Value, &Value)>, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
     match op {
         ClosureOpKind::SortBy => {
             let mut indexed: Vec<(usize, &Value)> = keyed.iter().enumerate().map(|(i, (k, _))| (i, *k)).collect();
-            indexed.sort_by(|(_, ka), (_, kb)| crate::runtime::compare_values(ka, kb));
+            sort_indexed_by_key(&mut indexed);
             cb(Value::Arr(Rc::new(indexed.iter().map(|&(i, _)| a[i].clone()).collect())))
         }
         ClosureOpKind::GroupBy => {
             let mut indexed: Vec<(usize, &Value)> = keyed.iter().enumerate().map(|(i, (k, _))| (i, *k)).collect();
-            indexed.sort_by(|(_, ka), (_, kb)| crate::runtime::compare_values(ka, kb));
+            sort_indexed_by_key(&mut indexed);
             let mut groups: Vec<Value> = Vec::new();
             let mut cg: Vec<Value> = Vec::new();
             let mut cur_key: Option<&Value> = None;
@@ -3433,12 +3461,63 @@ fn eval_closure_op_value_ref(op: ClosureOpKind, a: &[Value], keyed: Vec<(&Value,
             cb(Value::Arr(Rc::new(groups)))
         }
         ClosureOpKind::UniqueBy => {
-            let mut seen = std::collections::HashSet::with_capacity(keyed.len().min(4096));
             let mut result: Vec<Value> = Vec::new();
-            for (key, item) in &keyed {
-                let hash_key = crate::value::value_to_json(key);
-                if seen.insert(hash_key) {
-                    result.push((*item).clone());
+            // Specialized path based on key type to avoid JSON serialization
+            if !keyed.is_empty() {
+                match keyed[0].0 {
+                    Value::Str(_) => {
+                        let mut seen = std::collections::HashSet::<&str>::with_capacity(keyed.len().min(4096));
+                        for (key, item) in &keyed {
+                            if let Value::Str(s) = key {
+                                if seen.insert(s.as_str()) {
+                                    result.push((*item).clone());
+                                }
+                            } else {
+                                // Mixed types — fall back to JSON
+                                let hash_key = crate::value::value_to_json(key);
+                                let mut seen2 = std::collections::HashSet::new();
+                                for s in &seen { seen2.insert(format!("\"{}\"", s)); }
+                                seen2.insert(hash_key);
+                                result.push((*item).clone());
+                                for (key2, item2) in keyed.iter().skip(result.len()) {
+                                    let h = crate::value::value_to_json(key2);
+                                    if seen2.insert(h) { result.push((*item2).clone()); }
+                                }
+                                return cb(Value::Arr(Rc::new(result)));
+                            }
+                        }
+                    }
+                    Value::Num(..) => {
+                        let mut seen = std::collections::HashSet::<u64>::with_capacity(keyed.len().min(4096));
+                        for (key, item) in &keyed {
+                            if let Value::Num(n, _) = key {
+                                if seen.insert(n.to_bits()) {
+                                    result.push((*item).clone());
+                                }
+                            } else {
+                                // Mixed — fall back
+                                let mut seen2 = std::collections::HashSet::new();
+                                for b in &seen { seen2.insert(format!("{}", f64::from_bits(*b))); }
+                                let hash_key = crate::value::value_to_json(key);
+                                seen2.insert(hash_key);
+                                result.push((*item).clone());
+                                for (key2, item2) in keyed.iter().skip(result.len()) {
+                                    let h = crate::value::value_to_json(key2);
+                                    if seen2.insert(h) { result.push((*item2).clone()); }
+                                }
+                                return cb(Value::Arr(Rc::new(result)));
+                            }
+                        }
+                    }
+                    _ => {
+                        let mut seen = std::collections::HashSet::with_capacity(keyed.len().min(4096));
+                        for (key, item) in &keyed {
+                            let hash_key = crate::value::value_to_json(key);
+                            if seen.insert(hash_key) {
+                                result.push((*item).clone());
+                            }
+                        }
+                    }
                 }
             }
             cb(Value::Arr(Rc::new(result)))
