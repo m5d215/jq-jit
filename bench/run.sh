@@ -193,6 +193,11 @@ TESTS=(
     '.x|tostr|len:-c:.x | tostring | length'
     'if .x>.y .x .y:-c:if .x > .y then .x else .y end'
     'split|last|tonum:-c:.name | split("_") | last | tonumber'
+    'split|rev|.[0]:-c:.name | split("_") | reverse | .[0]'
+    'split|.[0]+.[1]:-c:.name | split("_") | .[0] + "-" + .[1]'
+    '.[]|strings:-c:.[] | strings'
+    '.[]|numbers:-c:.[] | numbers'
+    '[x,y]|any(>1M):-c:[.x, .y] | any(. > 1000000)'
 )
 
 for test in "${TESTS[@]}"; do
