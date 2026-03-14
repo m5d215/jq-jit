@@ -3209,6 +3209,72 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | floor/ceil/round | arith_chain` pattern.
+    /// Returns (field_name, unary_op, arith_steps) where arith_steps is [(op, const)].
+    pub fn detect_field_unary_arith(&self) -> Option<(String, crate::ir::UnaryOp, Vec<(crate::ir::BinOp, f64)>)> {
+        use crate::ir::{Expr, UnaryOp, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        let is_numeric_unary = |op: &UnaryOp| matches!(op, UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Sqrt | UnaryOp::Fabs | UnaryOp::Abs | UnaryOp::Round);
+        // Collect arith chain from the outermost pipe/binop
+        fn collect_arith_tail(e: &Expr) -> Option<(Vec<(BinOp, f64)>, &Expr)> {
+            // e is BinOp(inner, const) → arith step on top
+            if let Expr::BinOp { op, lhs, rhs } = e {
+                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+                    if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                        let (mut steps, inner) = collect_arith_tail(lhs)?;
+                        steps.push((*op, *n));
+                        return Some((steps, inner));
+                    }
+                }
+            }
+            // e is Pipe(inner, BinOp(Input, const))
+            if let Expr::Pipe { left, right } = e {
+                if let Expr::BinOp { op, lhs, rhs } = right.as_ref() {
+                    if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+                        if matches!(lhs.as_ref(), Expr::Input) {
+                            if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                let (mut steps, inner) = collect_arith_tail(left)?;
+                                steps.push((*op, *n));
+                                return Some((steps, inner));
+                            }
+                        }
+                    }
+                }
+            }
+            Some((Vec::new(), e))
+        }
+        let (arith_steps, inner) = collect_arith_tail(expr)?;
+        if arith_steps.is_empty() { return None; }
+        // inner should be .field | unary
+        // Pipe form: Pipe(.field, UnaryOp)
+        if let Expr::Pipe { left, right } = inner {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if matches!(base.as_ref(), Expr::Input) {
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        if let Expr::UnaryOp { op, operand } = right.as_ref() {
+                            if matches!(operand.as_ref(), Expr::Input) && is_numeric_unary(op) {
+                                return Some((field.clone(), *op, arith_steps));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Beta-reduced form: UnaryOp(.field)
+        if let Expr::UnaryOp { op, operand } = inner {
+            if is_numeric_unary(op) {
+                if let Expr::Index { expr: base, key } = operand.as_ref() {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                            return Some((field.clone(), *op, arith_steps));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field | startswith/endswith/ltrimstr/rtrimstr("str")` pattern.
     /// Returns (field_name, builtin_name, string_arg) if detected.
     pub fn detect_field_str_builtin(&self) -> Option<(String, String, String)> {
