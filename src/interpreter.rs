@@ -3154,6 +3154,34 @@ impl Filter {
     pub fn detect_two_field_binop_const(&self) -> Option<(String, crate::ir::BinOp, String, crate::ir::BinOp, f64)> {
         use crate::ir::{Expr, BinOp, Literal};
         let expr = self.detect_expr()?;
+        // Form 2: Pipe(BinOp(.f1 op1 .f2), BinOp(op2, Input, Literal(N)))
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::BinOp { op: op1, lhs: inner_lhs, rhs: inner_rhs } = left.as_ref() {
+                if matches!(op1, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+                    if let Expr::Index { expr: base1, key: key1 } = inner_lhs.as_ref() {
+                        if matches!(base1.as_ref(), Expr::Input) {
+                            if let Expr::Literal(Literal::Str(f1)) = key1.as_ref() {
+                                if let Expr::Index { expr: base2, key: key2 } = inner_rhs.as_ref() {
+                                    if matches!(base2.as_ref(), Expr::Input) {
+                                        if let Expr::Literal(Literal::Str(f2)) = key2.as_ref() {
+                                            if let Expr::BinOp { op: op2, lhs: binop_lhs, rhs: binop_rhs } = right.as_ref() {
+                                                if matches!(op2, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+                                                    if matches!(binop_lhs.as_ref(), Expr::Input) {
+                                                        if let Expr::Literal(Literal::Num(n, _)) = binop_rhs.as_ref() {
+                                                            return Some((f1.clone(), *op1, f2.clone(), *op2, *n));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if let Expr::BinOp { op: op2, lhs, rhs } = expr {
             if !matches!(op2, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) { return None; }
             if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
