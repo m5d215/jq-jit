@@ -1191,6 +1191,39 @@ impl Filter {
         }
     }
 
+    /// Detect `objects`, `arrays`, `strings`, `numbers`, `nulls`, `booleans` type filter.
+    /// Returns the first bytes that match the type.
+    pub fn detect_type_filter(&self) -> Option<Vec<u8>> {
+        use crate::ir::{Expr, Literal, BinOp, UnaryOp};
+        let expr = self.detect_expr()?;
+        // select(type == "object") compiles to: IfThenElse { cond: BinOp(Eq, UnaryOp(Type,.), Literal(Str)), then: ., else: Empty }
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
+            if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+            if let Expr::BinOp { op: BinOp::Eq, lhs, rhs } = cond.as_ref() {
+                let type_check = |operand: &Expr, type_str: &Expr| -> Option<Vec<u8>> {
+                    if matches!(operand, Expr::UnaryOp { op: UnaryOp::Type, operand: inner } if matches!(inner.as_ref(), Expr::Input)) {
+                        if let Expr::Literal(Literal::Str(t)) = type_str {
+                            return match t.as_str() {
+                                "object" => Some(vec![b'{']),
+                                "array" => Some(vec![b'[']),
+                                "string" => Some(vec![b'"']),
+                                "number" => Some(vec![b'-', b'0', b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9']),
+                                "boolean" => Some(vec![b't', b'f']),
+                                "null" => Some(vec![b'n']),
+                                _ => None,
+                            };
+                        }
+                    }
+                    None
+                };
+                if let Some(r) = type_check(lhs.as_ref(), rhs.as_ref()) { return Some(r); }
+                if let Some(r) = type_check(rhs.as_ref(), lhs.as_ref()) { return Some(r); }
+            }
+        }
+        None
+    }
+
     /// Detect a literal filter that doesn't reference input.
     /// Returns the compact JSON bytes for the literal, or None.
     pub fn detect_literal_output(&self) -> Option<Vec<u8>> {

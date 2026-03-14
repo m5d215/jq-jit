@@ -1932,6 +1932,9 @@ fn real_main() {
     let field_str_concat = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() {
         filter.detect_field_str_concat()
     } else { None };
+    let type_filter = if (use_compact_buf || use_pretty_buf) && !exit_status {
+        filter.detect_type_filter()
+    } else { None };
     let select_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() && field_str_concat.is_none() {
         filter.detect_select_field_cmp()
     } else { None };
@@ -2309,7 +2312,7 @@ fn real_main() {
     // Field projection: if filter only accesses specific fields, skip parsing the rest.
     // Only activate when no raw byte fast path matched (those handle their own parsing).
     let has_raw_fast_path = field_access.is_some() || nested_field.is_some() || field_remap.is_some()
-        || computed_remap.is_some() || standalone_array.is_some()
+        || computed_remap.is_some() || standalone_array.is_some() || type_filter.is_some()
         || field_binop.is_some() || field_binop_tostring.is_some() || field_unary_num.is_some() || field_binop_const_unary.is_some() || two_field_binop_const.is_some() || field_arith_chain.is_some() || field_arith_tostring.is_some() || numeric_expr.is_some() || numeric_expr_unary.is_some()
         || field_field_cmp.is_some() || field_const_cmp.is_some() || arith_chain_cmp.is_some() || compound_field_cmp.is_some()
         || field_str_builtin.is_some() || field_test.is_some() || field_gsub.is_some() || field_case_gsub.is_some() || field_case_test.is_some() || field_scan.is_some() || field_format.is_some() || field_ltrimstr_tonumber.is_some()
@@ -4073,6 +4076,30 @@ fn real_main() {
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         } else {
                             compact_buf.push(b'\n');
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some(ref tf_bytes) = type_filter {
+                    // Type filter: objects, arrays, strings, etc.
+                    // Pass through raw input if first byte matches the type
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if !raw.is_empty() && tf_bytes.contains(&raw[0]) {
+                            if use_pretty_buf {
+                                push_json_pretty_raw(&mut compact_buf, raw, 2, false);
+                                compact_buf.push(b'\n');
+                            } else {
+                                if !is_json_compact(raw) {
+                                    push_json_compact_raw(&mut compact_buf, raw);
+                                } else {
+                                    compact_buf.extend_from_slice(raw);
+                                }
+                                compact_buf.push(b'\n');
+                            }
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -17410,6 +17437,29 @@ fn real_main() {
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
                     compact_buf.push(b'\n');
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some(ref tf_bytes) = type_filter {
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if !raw.is_empty() && tf_bytes.contains(&raw[0]) {
+                        if use_pretty_buf {
+                            push_json_pretty_raw(&mut compact_buf, raw, 2, false);
+                            compact_buf.push(b'\n');
+                        } else {
+                            if !is_json_compact(raw) {
+                                push_json_compact_raw(&mut compact_buf, raw);
+                            } else {
+                                compact_buf.extend_from_slice(raw);
+                            }
+                            compact_buf.push(b'\n');
+                        }
+                    }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
                         compact_buf.clear();
