@@ -1702,6 +1702,30 @@ pub fn json_object_update_field_slice(
     false
 }
 
+/// Update a field by concatenating prefix/suffix strings.
+/// `.field |= (. + "suffix")` or `.field |= ("prefix" + .)`.
+pub fn json_object_update_field_str_concat(
+    b: &[u8], pos: usize, field: &str, prefix: &[u8], suffix: &[u8], buf: &mut Vec<u8>,
+) -> bool {
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
+        if val_start >= val_end || b[val_start] != b'"' { return false; }
+        let inner = &b[val_start + 1..val_end - 1];
+        let mut obj_end = b.len();
+        while obj_end > val_end && b[obj_end - 1] != b'}' { obj_end -= 1; }
+        if obj_end <= val_end { return false; }
+        buf.extend_from_slice(&b[pos..val_start]);
+        buf.push(b'"');
+        buf.extend_from_slice(prefix);
+        buf.extend_from_slice(inner);
+        buf.extend_from_slice(suffix);
+        buf.push(b'"');
+        buf.extend_from_slice(&b[val_end..obj_end]);
+        return true;
+    }
+    false
+}
+
 /// Update a field by mapping string equality: `.field |= if . == "a" then "b" else "c" end`.
 pub fn json_object_update_field_str_map(
     b: &[u8], pos: usize, field: &str, cond_str: &[u8], then_json: &[u8], else_json: &[u8], buf: &mut Vec<u8>,

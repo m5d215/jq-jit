@@ -5767,6 +5767,48 @@ impl Filter {
         None
     }
 
+    /// Detect `.field |= (. + "literal")` or `.field |= ("literal" + .)`.
+    /// Returns (field_name, prefix, suffix) — one of prefix/suffix may be empty.
+    pub fn detect_field_update_str_concat(&self) -> Option<(String, String, String)> {
+        use crate::ir::{Expr, Literal, BinOp};
+        let expr = self.detect_expr()?;
+        let update_expr = if let Expr::LetBinding { body, .. } = expr { body.as_ref() } else { expr };
+        if let Expr::Update { path_expr, update_expr: upd } = update_expr {
+            if let Expr::Index { expr: base, key } = path_expr.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::BinOp { op: BinOp::Add, lhs, rhs } = upd.as_ref() {
+                        // . + "suffix"
+                        if matches!(lhs.as_ref(), Expr::Input) {
+                            if let Expr::Literal(Literal::Str(s)) = rhs.as_ref() {
+                                return Some((field.clone(), String::new(), s.clone()));
+                            }
+                        }
+                        // "prefix" + .
+                        if matches!(rhs.as_ref(), Expr::Input) {
+                            if let Expr::Literal(Literal::Str(s)) = lhs.as_ref() {
+                                return Some((field.clone(), s.clone(), String::new()));
+                            }
+                        }
+                    }
+                    // "prefix" + . + "suffix" — BinOp(Add, BinOp(Add, "prefix", .), "suffix")
+                    if let Expr::BinOp { op: BinOp::Add, lhs: outer_lhs, rhs: outer_rhs } = upd.as_ref() {
+                        if let Expr::Literal(Literal::Str(suffix)) = outer_rhs.as_ref() {
+                            if let Expr::BinOp { op: BinOp::Add, lhs: inner_lhs, rhs: inner_rhs } = outer_lhs.as_ref() {
+                                if matches!(inner_rhs.as_ref(), Expr::Input) {
+                                    if let Expr::Literal(Literal::Str(prefix)) = inner_lhs.as_ref() {
+                                        return Some((field.clone(), prefix.clone(), suffix.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field[from:to]` with literal numeric bounds.
     /// Returns (field_name, from_opt, to_opt).
     pub fn detect_field_slice(&self) -> Option<(String, Option<i64>, Option<i64>)> {
