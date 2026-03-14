@@ -725,9 +725,17 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             let sl = simplify_expr(lhs);
             let sr = simplify_expr(rhs);
             // {a:.x} + {b:.y} → {a:.x, b:.y} (merge object constructions)
-            // {a:.x} * {b:.y} → {a:.x, b:.y} (object multiply = merge for non-nested)
-            // Only when all keys are distinct string literals (no dedup needed)
-            if matches!(op, crate::ir::BinOp::Add | crate::ir::BinOp::Mul) {
+            // For `+`: right-side keys win on collision = same as last-key-wins in single construct.
+            // So {A} + {B} → {A, B} is always valid for `+`.
+            // For `*`: only safe when all keys are distinct literal strings (no nested merge).
+            if matches!(op, crate::ir::BinOp::Add) {
+                if let (Expr::ObjectConstruct { pairs: p1 }, Expr::ObjectConstruct { pairs: p2 }) = (&sl, &sr) {
+                    let mut merged = p1.clone();
+                    merged.extend(p2.iter().cloned());
+                    return Expr::ObjectConstruct { pairs: merged };
+                }
+            }
+            if matches!(op, crate::ir::BinOp::Mul) {
                 if let (Expr::ObjectConstruct { pairs: p1 }, Expr::ObjectConstruct { pairs: p2 }) = (&sl, &sr) {
                     let all_literal_keys = p1.iter().chain(p2.iter()).all(|(k, _)| {
                         matches!(k, Expr::Literal(crate::ir::Literal::Str(_)))
