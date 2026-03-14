@@ -185,6 +185,12 @@ TESTS=(
     'nested if|field:-c:if .x > 100 then if .y < 500 then .name else empty end else empty end'
     '.f|floor|.*2:-c:.x | floor | . * 2'
     'split|len>1:-c:.name | split("_") | length > 1'
+    '.name|len|.*2:-c:.name | length | . * 2'
+    'if len>5 .x .y:-c:if .name | length > 5 then .x else .y end'
+    'sel(len>5)|remap:-c:select(.name | length > 5) | {n:.name, v:.x}'
+    '.x|tostr|len:-c:.x | tostring | length'
+    'if .x>.y .x .y:-c:if .x > .y then .x else .y end'
+    'split|last|tonum:-c:.name | split("_") | last | tonumber'
 )
 
 for test in "${TESTS[@]}"; do
