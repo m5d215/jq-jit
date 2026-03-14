@@ -6733,6 +6733,82 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | split("sep") | length cmp N` — returns (field, delim, cmp_op, threshold).
+    /// Counts split occurrences in raw bytes without constructing the array.
+    pub fn detect_field_split_length_cmp(&self) -> Option<(String, String, crate::ir::BinOp, f64)> {
+        use crate::ir::{Expr, BinOp, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        // Form 1: BinOp(cmp, Pipe(.field, Pipe(split, length)), Literal(N))
+        if let Expr::BinOp { op, lhs, rhs } = expr {
+            if matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                    if let Expr::Pipe { left, right } = lhs.as_ref() {
+                        if let Expr::Index { expr: base, key } = left.as_ref() {
+                            if matches!(base.as_ref(), Expr::Input) {
+                                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                    if let Expr::Pipe { left: split_expr, right: len_expr } = right.as_ref() {
+                                        if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
+                                            if name == "split" && args.len() == 1 {
+                                                if let Expr::Literal(Literal::Str(delim)) = &args[0] {
+                                                    if matches!(len_expr.as_ref(), Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                                                        return Some((field.clone(), delim.clone(), *op, *n));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Beta-reduced: lhs might be Length(Split(.field, "sep"))
+                    if let Expr::UnaryOp { op: UnaryOp::Length, operand: inner } = lhs.as_ref() {
+                        if let Expr::CallBuiltin { name, args } = inner.as_ref() {
+                            if name == "split" && args.len() == 2 {
+                                if let Expr::Index { expr: base, key } = &args[0] {
+                                    if matches!(base.as_ref(), Expr::Input) {
+                                        if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                            if let Expr::Literal(Literal::Str(delim)) = &args[1] {
+                                                return Some((field.clone(), delim.clone(), *op, *n));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Form 2: Pipe(.field, Pipe(split("sep"), BinOp(cmp, Length(Input), N)))
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if matches!(base.as_ref(), Expr::Input) {
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        if let Expr::Pipe { left: split_expr, right: cmp_expr } = right.as_ref() {
+                            if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
+                                if name == "split" && args.len() == 1 {
+                                    if let Expr::Literal(Literal::Str(delim)) = &args[0] {
+                                        if let Expr::BinOp { op, lhs: cmp_lhs, rhs: cmp_rhs } = cmp_expr.as_ref() {
+                                            if matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                                                if matches!(cmp_lhs.as_ref(), Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                                                    if let Expr::Literal(Literal::Num(n, _)) = cmp_rhs.as_ref() {
+                                                        return Some((field.clone(), delim.clone(), *op, *n));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field | str_op | length` chains — returns (field, op_name, op_arg).
     /// Handles ltrimstr, rtrimstr, ascii_downcase, ascii_upcase, explode.
     pub fn detect_field_strop_length(&self) -> Option<(String, String, Option<String>)> {
