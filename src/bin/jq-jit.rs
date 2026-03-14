@@ -2088,7 +2088,10 @@ fn real_main() {
     let field_case_split_join = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_reverse.is_none() && field_split_rev_join.is_none() {
         filter.detect_field_case_split_join()
     } else { None };
-    let field_case_split = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_case_split_join.is_none() {
+    let field_case_split_nth = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_case_split_join.is_none() {
+        filter.detect_field_case_split_nth()
+    } else { None };
+    let field_case_split = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_case_split_join.is_none() && field_case_split_nth.is_none() {
         filter.detect_field_case_split()
     } else { None };
     let field_split_join = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_reverse.is_none() && field_split_rev_join.is_none() && field_case_split_join.is_none() && field_case_split.is_none() {
@@ -2383,7 +2386,7 @@ fn real_main() {
         || is_keys_unsorted || keys_join.is_some() || has_field.is_some() || has_multi.is_some() || select_has_multi.is_some() || is_type || del_field.is_some() || select_cmp_del.is_some() || select_str_del.is_some() || select_cmp_merge.is_some() || select_str_merge.is_some() || del_fields.is_some() || obj_merge_lit.is_some() || obj_merge_computed.is_some()
         || is_collect_each || collect_each_arith.is_some() || collect_each_select_type.is_some() || collect_each_select_cmp.is_some() || first_each_select_type.is_some() || count_each_select_cmp.is_some() || sort_two_fields.is_some() || is_each || is_sort_keys || is_to_entries || to_entries_each_interp.is_some() || remap_to_entries.is_some() || with_entries_select.is_some() || with_entries_del.is_some() || with_entries_type.is_some() || with_entries_key_str.is_some() || is_with_entries_tostring || is_tojson || remap_tojson.is_some() || string_interp_fields.is_some() || string_add_chain.is_some() || array_join.is_some()
         || literal_output.is_some() || array_fields_format.is_some() || raw_csv_fields.is_some()
-        || field_str_reverse.is_some() || field_split_rev_join.is_some() || field_case_split_join.is_some() || field_case_split.is_some() || field_split_join.is_some() || field_split_slice_join.is_some() || field_split_first.is_some() || field_split_last.is_some() || field_split_last_tonum.is_some() || field_split_nth_tonum.is_some() || field_split_nth.is_some() || field_split_length.is_some() || field_split_length_cmp.is_some() || field_strop_length.is_some() || field_length_cmp.is_some() || select_length_cmp.is_some() || select_length_cmp_field.is_some() || if_length_cmp_fields.is_some() || select_length_cmp_remap.is_some() || field_tostring_length.is_some() || if_ff_cmp_fields.is_some() || if_ff_cmp_computed.is_some() || field_index_arith.is_some() || field_slice.is_some()
+        || field_str_reverse.is_some() || field_split_rev_join.is_some() || field_case_split_join.is_some() || field_case_split_nth.is_some() || field_case_split.is_some() || field_split_join.is_some() || field_split_slice_join.is_some() || field_split_first.is_some() || field_split_last.is_some() || field_split_last_tonum.is_some() || field_split_nth_tonum.is_some() || field_split_nth.is_some() || field_split_length.is_some() || field_split_length_cmp.is_some() || field_strop_length.is_some() || field_length_cmp.is_some() || select_length_cmp.is_some() || select_length_cmp_field.is_some() || if_length_cmp_fields.is_some() || select_length_cmp_remap.is_some() || field_tostring_length.is_some() || if_ff_cmp_fields.is_some() || if_ff_cmp_computed.is_some() || field_index_arith.is_some() || field_slice.is_some()
         || dynamic_key_obj.is_some() || dynamic_key_mixed.is_some() || field_update_num.is_some() || field_update_num_chain.is_some() || field_update_gsub.is_some() || field_update_split_first.is_some() || field_update_split_last.is_some() || field_assign_const.is_some() || field_update_case.is_some() || field_update_trim.is_some() || field_update_slice.is_some() || field_update_str_map.is_some() || field_update_str_concat.is_some() || field_update_length.is_some() || field_update_tostring.is_some() || field_update_test.is_some() || field_assign_field_arith.is_some() || field_assign_two_fields.is_some() || select_cmp_then_update_num.is_some() || select_cmp_then_update_str.is_some() || select_compound_then_update_num.is_some() || select_str_then_update_num.is_some()
         || min_two_fields.is_some() || minmax_two.is_some() || minmax_n.is_some() || field_string_chain.is_some() || remap_tostring_join.is_some() || walk_num_op.is_some() || filter.is_empty();
     let projection_fields: Option<Vec<String>> = if !has_raw_fast_path && !slurp && !raw_input {
@@ -2847,6 +2850,69 @@ fn real_main() {
                                 } else {
                                     let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                     process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref csn_field, csn_upper, ref csn_sep, csn_idx)) = field_case_split_nth {
+                    // .field | ascii_upcase/downcase | split(s) | .[N] — case + split + index
+                    let split_bytes = csn_sep.as_bytes();
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, csn_field) {
+                            let val = &raw[vs..ve];
+                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                                && !val[1..val.len()-1].contains(&b'\\')
+                            {
+                                let inner = &val[1..val.len()-1];
+                                // Case convert
+                                let converted: Vec<u8> = inner.iter().map(|&b| {
+                                    if csn_upper {
+                                        if b >= b'a' && b <= b'z' { b - 32 } else { b }
+                                    } else {
+                                        if b >= b'A' && b <= b'Z' { b + 32 } else { b }
+                                    }
+                                }).collect();
+                                // Split and get nth
+                                let parts: Vec<&[u8]> = if split_bytes.len() == 1 {
+                                    converted.split(|&b| b == split_bytes[0]).collect()
+                                } else {
+                                    let mut parts = Vec::new();
+                                    let mut last = 0;
+                                    let sl = split_bytes.len();
+                                    while last + sl <= converted.len() {
+                                        if let Some(pos) = converted[last..].windows(sl).position(|w| w == split_bytes) {
+                                            parts.push(&converted[last..last+pos]);
+                                            last = last + pos + sl;
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                    parts.push(&converted[last..]);
+                                    parts
+                                };
+                                let actual_idx = if csn_idx < 0 {
+                                    (parts.len() as i64 + csn_idx) as usize
+                                } else {
+                                    csn_idx as usize
+                                };
+                                if actual_idx < parts.len() {
+                                    compact_buf.push(b'"');
+                                    compact_buf.extend_from_slice(parts[actual_idx]);
+                                    compact_buf.extend_from_slice(b"\"\n");
+                                } else {
+                                    compact_buf.extend_from_slice(b"null\n");
                                 }
                             } else {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
@@ -11348,6 +11414,68 @@ fn real_main() {
                             } else {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                    } else {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref csn_field, csn_upper, ref csn_sep, csn_idx)) = field_case_split_nth {
+                // .field | ascii_upcase/downcase | split(s) | .[N] — file path
+                let split_bytes = csn_sep.as_bytes();
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, csn_field) {
+                        let val = &raw[vs..ve];
+                        if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                            && !val[1..val.len()-1].contains(&b'\\')
+                        {
+                            let inner = &val[1..val.len()-1];
+                            let converted: Vec<u8> = inner.iter().map(|&b| {
+                                if csn_upper {
+                                    if b >= b'a' && b <= b'z' { b - 32 } else { b }
+                                } else {
+                                    if b >= b'A' && b <= b'Z' { b + 32 } else { b }
+                                }
+                            }).collect();
+                            let parts: Vec<&[u8]> = if split_bytes.len() == 1 {
+                                converted.split(|&b| b == split_bytes[0]).collect()
+                            } else {
+                                let mut parts = Vec::new();
+                                let mut last = 0;
+                                let sl = split_bytes.len();
+                                while last + sl <= converted.len() {
+                                    if let Some(pos) = converted[last..].windows(sl).position(|w| w == split_bytes) {
+                                        parts.push(&converted[last..last+pos]);
+                                        last = last + pos + sl;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                parts.push(&converted[last..]);
+                                parts
+                            };
+                            let actual_idx = if csn_idx < 0 {
+                                (parts.len() as i64 + csn_idx) as usize
+                            } else {
+                                csn_idx as usize
+                            };
+                            if actual_idx < parts.len() {
+                                compact_buf.push(b'"');
+                                compact_buf.extend_from_slice(parts[actual_idx]);
+                                compact_buf.extend_from_slice(b"\"\n");
+                            } else {
+                                compact_buf.extend_from_slice(b"null\n");
                             }
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;

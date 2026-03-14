@@ -4462,6 +4462,57 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | ascii_upcase/downcase | split("s") | .[N]` pattern.
+    /// Returns (field_name, is_upper, separator, index) if detected.
+    pub fn detect_field_case_split_nth(&self) -> Option<(String, bool, String, i64)> {
+        use crate::ir::{Expr, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        // Pattern: Pipe(Index(.field), Pipe(case, Pipe(split, .[N])))
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::Pipe { left: case_expr, right: rest } = right.as_ref() {
+                        let is_upper = match case_expr.as_ref() {
+                            Expr::UnaryOp { op: UnaryOp::AsciiUpcase, operand } if matches!(operand.as_ref(), Expr::Input) => true,
+                            Expr::UnaryOp { op: UnaryOp::AsciiDowncase, operand } if matches!(operand.as_ref(), Expr::Input) => false,
+                            _ => return None,
+                        };
+                        if let Expr::Pipe { left: split_expr, right: idx_expr } = rest.as_ref() {
+                            if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
+                                if name == "split" && args.len() == 1 {
+                                    if let Expr::Literal(Literal::Str(sep)) = &args[0] {
+                                        if !sep.is_empty() {
+                                            if let Expr::Index { expr: ibase, key: ikey } = idx_expr.as_ref() {
+                                                if matches!(ibase.as_ref(), Expr::Input) {
+                                                    if let Expr::Literal(Literal::Num(n, _)) = ikey.as_ref() {
+                                                        let idx = *n as i64;
+                                                        return Some((field.clone(), is_upper, sep.clone(), idx));
+                                                    }
+                                                }
+                                            }
+                                            // Check for first/last
+                                            if let Expr::CallBuiltin { name: fn_name, args: fn_args } = idx_expr.as_ref() {
+                                                if fn_args.is_empty() || (fn_args.len() == 1 && matches!(fn_args[0], Expr::Input)) {
+                                                    if fn_name == "first" {
+                                                        return Some((field.clone(), is_upper, sep.clone(), 0));
+                                                    } else if fn_name == "last" {
+                                                        return Some((field.clone(), is_upper, sep.clone(), -1));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.f1 cmp .f2) | value` — field-field select then computed value.
     /// Returns (field1, op, field2, value_rexpr).
     pub fn detect_select_ff_cmp_then_value(&self) -> Option<(String, crate::ir::BinOp, String, RemapExpr)> {
