@@ -417,6 +417,8 @@ enum JitOp {
     RangeCheck { dst_var: u32, cur_var: u32, to_var: u32, step_var: u32 },
     /// Set a Cranelift variable to f64 constant (stored as i64 bits)
     F64Const { dst_var: u32, val: f64 },
+    /// Copy f64 variable value: dst = src (no arithmetic)
+    F64Move { dst_var: u32, src_var: u32 },
 
     // String interpolation
     StrBufNew,
@@ -1226,9 +1228,7 @@ impl Flattener {
                     self.emit(JitOp::Label { id: body });
                     let new_acc = self.compile_f64_expr_multi(update, acc, &var_map);
                     if new_acc != acc {
-                        let zero_tmp = self.alloc_var();
-                        self.emit(JitOp::F64Const { dst_var: zero_tmp, val: 0.0 });
-                        self.emit(JitOp::F64Add { dst_var: acc, a_var: new_acc, b_var: zero_tmp });
+                        self.emit(JitOp::F64Move { dst_var: acc, src_var: new_acc });
                     }
                     self.emit(JitOp::Jump { label: head });
                     self.emit(JitOp::Label { id: done });
@@ -1650,9 +1650,7 @@ impl Flattener {
                         let new_acc = self.compile_f64_expr(update, *var_index, acc_f64, cur);
                         // Copy result to accumulator var (may be same if update = . + $x)
                         if new_acc != acc_f64 {
-                            let zero_tmp = self.alloc_var();
-                            self.emit(JitOp::F64Const { dst_var: zero_tmp, val: 0.0 });
-                            self.emit(JitOp::F64Add { dst_var: acc_f64, a_var: new_acc, b_var: zero_tmp });
+                            self.emit(JitOp::F64Move { dst_var: acc_f64, src_var: new_acc });
                         }
                         self.emit(JitOp::F64Add { dst_var: cur, a_var: cur, b_var: step_v });
                         self.emit(JitOp::Jump { label: head });
@@ -4108,11 +4106,8 @@ impl Flattener {
                         let b_val = self.alloc_var();
                         self.emit(JitOp::F64Cmp { dst_var: b_val, a_var: b, b_var: zero, cc: 5 }); // b != 0 → 1, else 0
                         self.emit(JitOp::F64Const { dst_var: dst, val: 0.0 }); // placeholder, will be overwritten
-                        // Actually, in jq, `and`/`or` produce true/false. In f64 context, true=1.0, false=0.0.
-                        // `a and b` = if a then b else false end
-                        // But we need the result as f64. Let's use b_val (0 or 1).
-                        // Copy b_val to dst via add with 0
-                        self.emit(JitOp::F64Add { dst_var: dst, a_var: b_val, b_var: zero });
+                        // `a and b` = if a then b else false end → b_val (0 or 1)
+                        self.emit(JitOp::F64Move { dst_var: dst, src_var: b_val });
                         self.emit(JitOp::Label { id: done_l });
                     }
                     BinOp::Or => {
@@ -4132,7 +4127,7 @@ impl Flattener {
                         // a is falsy → result is b's truthiness
                         let b_nz = self.alloc_var();
                         self.emit(JitOp::F64Cmp { dst_var: b_nz, a_var: b, b_var: zero, cc: 5 });
-                        self.emit(JitOp::F64Add { dst_var: dst, a_var: b_nz, b_var: zero });
+                        self.emit(JitOp::F64Move { dst_var: dst, src_var: b_nz });
                         self.emit(JitOp::Label { id: done_l });
                     }
                 };
@@ -4147,15 +4142,11 @@ impl Flattener {
                 self.emit(JitOp::BranchOnVar { var: c, nonzero_label: then_l, zero_label: else_l });
                 self.emit(JitOp::Label { id: then_l });
                 let t = self.compile_f64_expr_multi(then_branch, acc_var, var_map);
-                let zero = self.alloc_var();
-                self.emit(JitOp::F64Const { dst_var: zero, val: 0.0 });
-                self.emit(JitOp::F64Add { dst_var: dst, a_var: t, b_var: zero });
+                self.emit(JitOp::F64Move { dst_var: dst, src_var: t });
                 self.emit(JitOp::Jump { label: done_l });
                 self.emit(JitOp::Label { id: else_l });
                 let e = self.compile_f64_expr_multi(else_branch, acc_var, var_map);
-                let zero2 = self.alloc_var();
-                self.emit(JitOp::F64Const { dst_var: zero2, val: 0.0 });
-                self.emit(JitOp::F64Add { dst_var: dst, a_var: e, b_var: zero2 });
+                self.emit(JitOp::F64Move { dst_var: dst, src_var: e });
                 self.emit(JitOp::Label { id: done_l });
                 dst
             }
@@ -4367,9 +4358,7 @@ impl Flattener {
                     // Compile update as f64
                     let new_acc = self.compile_f64_expr(update, var_index, acc_f64, cur);
                     if new_acc != acc_f64 {
-                        let zero_tmp = self.alloc_var();
-                        self.emit(JitOp::F64Const { dst_var: zero_tmp, val: 0.0 });
-                        self.emit(JitOp::F64Add { dst_var: acc_f64, a_var: new_acc, b_var: zero_tmp });
+                        self.emit(JitOp::F64Move { dst_var: acc_f64, src_var: new_acc });
                     }
                     // Yield extract result(s)
                     match extract {
@@ -8498,20 +8487,37 @@ impl JitCompiler {
                         b.def_var(vars[*dst_var as usize], result);
                     }
                     JitOp::RangeCheck { dst_var, cur_var, to_var, step_var } => {
+                        // Inline range check: step>0 → cur<to, step<0 → cur>to, else 0
+                        use cranelift_codegen::ir::condcodes::FloatCC;
                         let cur_bits = b.use_var(vars[*cur_var as usize]);
                         let to_bits = b.use_var(vars[*to_var as usize]);
                         let step_bits = b.use_var(vars[*step_var as usize]);
                         let cur_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), cur_bits);
                         let to_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), to_bits);
                         let step_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), step_bits);
-                        let call = b.ins().call(rt["range_check"], &[cur_f, to_f, step_f]);
-                        let result = b.inst_results(call)[0];
-                        b.def_var(vars[*dst_var as usize], result);
+                        let zero_f = b.ins().f64const(0.0);
+                        // Check step > 0
+                        let step_pos = b.ins().fcmp(FloatCC::GreaterThan, step_f, zero_f);
+                        // cur < to (for positive step)
+                        let lt = b.ins().fcmp(FloatCC::LessThan, cur_f, to_f);
+                        // cur > to (for negative step)
+                        let gt = b.ins().fcmp(FloatCC::GreaterThan, cur_f, to_f);
+                        // Select: step > 0 ? (cur < to) : (cur > to)
+                        let selected = b.ins().select(step_pos, lt, gt);
+                        // If step == 0, force false (0)
+                        let step_nz = b.ins().fcmp(FloatCC::NotEqual, step_f, zero_f);
+                        let result = b.ins().band(selected, step_nz);
+                        let ext = b.ins().uextend(ptr_ty, result);
+                        b.def_var(vars[*dst_var as usize], ext);
                     }
                     JitOp::F64Const { dst_var, val } => {
                         let bits = val.to_bits() as i64;
                         let c = b.ins().iconst(ptr_ty, bits);
                         b.def_var(vars[*dst_var as usize], c);
+                    }
+                    JitOp::F64Move { dst_var, src_var } => {
+                        let v = b.use_var(vars[*src_var as usize]);
+                        b.def_var(vars[*dst_var as usize], v);
                     }
                     JitOp::F64Num { dst, src_var } => {
                         let d = slot_addr(&mut b, *dst);
