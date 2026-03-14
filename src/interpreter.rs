@@ -734,6 +734,8 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                 if let Expr::Index { expr: base, key } = &sr {
                     if matches!(base.as_ref(), Expr::Input) {
                         if let Expr::Literal(Literal::Num(n, _)) = key.as_ref() {
+                            if n.is_nan() || !n.is_finite() { /* skip NaN/Inf indices */ }
+                            else {
                             let idx = *n as i64;
                             fn collect_comma_for_idx(e: &Expr, out: &mut Vec<Expr>) {
                                 match e {
@@ -751,6 +753,7 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                             };
                             if actual < elems.len() {
                                 return elems.swap_remove(actual);
+                            }
                             }
                         }
                     }
@@ -1321,6 +1324,58 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
     }
 }
 
+/// Returns true if the expression contains any Expr::Input node (i.e., references `.`).
+fn contains_input(expr: &crate::ir::Expr) -> bool {
+    use crate::ir::{Expr, StringPart};
+    match expr {
+        Expr::Input => true,
+        Expr::Literal(_) | Expr::Empty | Expr::Env | Expr::Builtins
+        | Expr::ReadInput | Expr::ReadInputs | Expr::ModuleMeta
+        | Expr::GenLabel | Expr::Loc { .. } | Expr::Break { .. } => false,
+        // `not` negates the truthiness of current input
+        Expr::Not => true,
+        Expr::LoadVar { .. } => false,
+        Expr::BinOp { lhs, rhs, .. } => contains_input(lhs) || contains_input(rhs),
+        Expr::UnaryOp { operand, .. } | Expr::Negate { operand } => contains_input(operand),
+        Expr::Index { expr: e, key } | Expr::IndexOpt { expr: e, key } => contains_input(e) || contains_input(key),
+        Expr::Collect { generator } => contains_input(generator),
+        Expr::Comma { left, right } => contains_input(left) || contains_input(right),
+        Expr::Each { input_expr } | Expr::EachOpt { input_expr } => contains_input(input_expr),
+        Expr::Pipe { left, right } => contains_input(left) || contains_input(right),
+        Expr::IfThenElse { cond, then_branch, else_branch } => contains_input(cond) || contains_input(then_branch) || contains_input(else_branch),
+        Expr::ObjectConstruct { pairs } => pairs.iter().any(|(k, v)| contains_input(k) || contains_input(v)),
+        Expr::Alternative { primary, fallback } => contains_input(primary) || contains_input(fallback),
+        Expr::Format { expr: e, .. } => contains_input(e),
+        Expr::Slice { expr: e, from, to } => contains_input(e) || from.as_ref().map_or(false, |f| contains_input(f)) || to.as_ref().map_or(false, |t| contains_input(t)),
+        Expr::StringInterpolation { parts } => parts.iter().any(|p| matches!(p, StringPart::Expr(e) if contains_input(e))),
+        Expr::LetBinding { value, body, .. } => contains_input(value) || contains_input(body),
+        Expr::Reduce { source, init, update, .. } => contains_input(source) || contains_input(init) || contains_input(update),
+        Expr::Foreach { source, init, update, extract, .. } => contains_input(source) || contains_input(init) || contains_input(update) || extract.as_ref().map_or(false, |e| contains_input(e)),
+        Expr::While { cond, update } | Expr::Until { cond, update } => contains_input(cond) || contains_input(update),
+        Expr::Repeat { update } => contains_input(update),
+        Expr::TryCatch { try_expr, catch_expr } => contains_input(try_expr) || contains_input(catch_expr),
+        // CallBuiltin implicitly operates on the current input (passed as first arg)
+        Expr::CallBuiltin { .. } => true,
+        Expr::Range { from, to, step } => contains_input(from) || contains_input(to) || step.as_ref().map_or(false, |s| contains_input(s)),
+        Expr::Limit { count, generator } => contains_input(count) || contains_input(generator),
+        Expr::Error { msg } => msg.as_ref().map_or(false, |m| contains_input(m)),
+        Expr::Update { path_expr, update_expr } | Expr::Assign { path_expr, value_expr: update_expr } => contains_input(path_expr) || contains_input(update_expr),
+        // GetPath/SetPath/DelPaths/PathExpr implicitly operate on the current input
+        Expr::GetPath { .. } | Expr::SetPath { .. } | Expr::DelPaths { .. } | Expr::PathExpr { .. } => true,
+        Expr::Recurse { input_expr: e } => contains_input(e),
+        // debug/stderr pass through the current input
+        Expr::Debug { .. } | Expr::Stderr { .. } => true,
+        Expr::Label { body, .. } => contains_input(body),
+        // Conservative: assume these reference input
+        Expr::RegexTest { input_expr, .. } | Expr::RegexMatch { input_expr, .. }
+        | Expr::RegexCapture { input_expr, .. } | Expr::RegexScan { input_expr, .. }
+        | Expr::RegexSub { input_expr, .. } | Expr::RegexGsub { input_expr, .. } => contains_input(input_expr),
+        Expr::FuncCall { args, .. } => args.iter().any(contains_input),
+        Expr::ClosureOp { .. } | Expr::AnyShort { .. } | Expr::AllShort { .. }
+        | Expr::AlternativeDestructure { .. } => true, // conservative
+    }
+}
+
 /// Serialize a constant expression to JSON bytes. Returns false if expression is not fully constant.
 fn push_const_json(expr: &crate::ir::Expr, buf: &mut Vec<u8>) -> bool {
     use crate::ir::{Expr, Literal};
@@ -1671,6 +1726,32 @@ impl Filter {
         let mut buf = Vec::new();
         if push_const_json(expr, &mut buf) {
             Some(buf)
+        } else {
+            None
+        }
+    }
+
+    /// Like detect_literal_output but also handles input-free expressions
+    /// (evaluated once with null input). Returns None if expression depends on input.
+    /// The result is a list of JSON output lines (one per output value).
+    pub fn detect_input_free_output(&self) -> Option<Vec<Vec<u8>>> {
+        let expr = self.detect_expr()?;
+        if contains_input(expr) { return None; }
+        // Already handled by literal_output?
+        let mut buf = Vec::new();
+        if push_const_json(expr, &mut buf) {
+            return Some(vec![buf]);
+        }
+        // Evaluate with null input using eval
+        let mut outputs = Vec::new();
+        let env: crate::eval::EnvRef = std::rc::Rc::new(std::cell::RefCell::new(crate::eval::Env::new(vec![])));
+        let result = crate::eval::eval(expr, crate::value::Value::Null, &env, &mut |v| {
+            let json = crate::value::value_to_json_precise(&v);
+            outputs.push(json.into_bytes());
+            Ok(true)
+        });
+        if result.is_ok() && !outputs.is_empty() {
+            Some(outputs)
         } else {
             None
         }

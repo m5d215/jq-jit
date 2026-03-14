@@ -2081,6 +2081,9 @@ fn real_main() {
         filter.detect_array_join()
     } else { None };
     let literal_output = if (use_compact_buf || use_pretty_buf) && !exit_status { filter.detect_literal_output() } else { None };
+    let input_free_output = if (use_compact_buf || use_pretty_buf) && !exit_status && literal_output.is_none() {
+        filter.detect_input_free_output()
+    } else { None };
     let array_fields_format = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
         filter.detect_array_fields_format()
     } else { None };
@@ -2397,7 +2400,7 @@ fn real_main() {
         || computed_array.is_some() || array_field.is_some() || multi_field.is_some() || is_length || is_keys
         || is_keys_unsorted || keys_join.is_some() || has_field.is_some() || has_multi.is_some() || select_has_multi.is_some() || is_type || del_field.is_some() || select_cmp_del.is_some() || select_str_del.is_some() || select_cmp_merge.is_some() || select_str_merge.is_some() || del_fields.is_some() || obj_merge_lit.is_some() || obj_merge_computed.is_some()
         || is_collect_each || collect_each_arith.is_some() || collect_each_select_type.is_some() || collect_each_select_cmp.is_some() || first_each_select_type.is_some() || count_each_select_cmp.is_some() || sort_two_fields.is_some() || is_each || each_type_filter.is_some() || is_sort_keys || is_to_entries || to_entries_each_interp.is_some() || remap_to_entries.is_some() || with_entries_select.is_some() || with_entries_del.is_some() || with_entries_type.is_some() || with_entries_key_str.is_some() || is_with_entries_tostring || is_tojson || remap_tojson.is_some() || string_interp_fields.is_some() || string_add_chain.is_some() || array_join.is_some()
-        || literal_output.is_some() || array_fields_format.is_some() || raw_csv_fields.is_some()
+        || literal_output.is_some() || input_free_output.is_some() || array_fields_format.is_some() || raw_csv_fields.is_some()
         || field_str_reverse.is_some() || field_split_rev_join.is_some() || field_case_split_join.is_some() || field_case_split_nth.is_some() || field_case_split.is_some() || field_split_join.is_some() || field_split_slice_join.is_some() || field_split_first.is_some() || field_split_last.is_some() || field_split_last_tonum.is_some() || field_split_nth_tonum.is_some() || field_split_nth.is_some() || field_split_concat.is_some() || field_split_length.is_some() || field_split_length_cmp.is_some() || field_strop_length.is_some() || field_length_cmp.is_some() || select_length_cmp.is_some() || select_length_cmp_field.is_some() || if_length_cmp_fields.is_some() || select_length_cmp_remap.is_some() || field_tostring_length.is_some() || if_ff_cmp_fields.is_some() || if_ff_cmp_computed.is_some() || field_index_arith.is_some() || field_slice.is_some()
         || dynamic_key_obj.is_some() || dynamic_key_mixed.is_some() || field_update_num.is_some() || field_update_num_chain.is_some() || field_update_gsub.is_some() || field_update_split_first.is_some() || field_update_split_last.is_some() || field_assign_const.is_some() || field_update_case.is_some() || field_update_trim.is_some() || field_update_slice.is_some() || field_update_str_map.is_some() || field_update_str_concat.is_some() || field_update_length.is_some() || field_update_tostring.is_some() || field_update_test.is_some() || field_assign_field_arith.is_some() || field_assign_two_fields.is_some() || select_cmp_then_update_num.is_some() || select_cmp_then_update_str.is_some() || select_compound_then_update_num.is_some() || select_str_then_update_num.is_some()
         || min_two_fields.is_some() || minmax_two.is_some() || minmax_n.is_some() || field_string_chain.is_some() || remap_tostring_join.is_some() || walk_num_op.is_some() || filter.is_empty();
@@ -2559,6 +2562,18 @@ fn real_main() {
                     json_stream_raw(&input_str, |_, _| {
                         compact_buf.extend_from_slice(lit);
                         compact_buf.push(b'\n');
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some(ref ifo) = input_free_output {
+                    json_stream_raw(&input_str, |_, _| {
+                        for line in ifo {
+                            compact_buf.extend_from_slice(line);
+                            compact_buf.push(b'\n');
+                        }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
                             compact_buf.clear();
@@ -11423,6 +11438,18 @@ fn real_main() {
                 json_stream_raw(content, |_, _| {
                     compact_buf.extend_from_slice(lit);
                     compact_buf.push(b'\n');
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some(ref ifo) = input_free_output {
+                json_stream_raw(content, |_, _| {
+                    for line in ifo {
+                        compact_buf.extend_from_slice(line);
+                        compact_buf.push(b'\n');
+                    }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
                         compact_buf.clear();
