@@ -2121,6 +2121,49 @@ pub fn json_object_select_compound_then_update_num(
     }
 }
 
+/// Combined string-test select + numeric field update.
+/// test_type: "eq", "startswith", "endswith", "contains"
+/// Returns Some(true) = matched & updated, Some(false) = matched but update failed, None = not matched.
+pub fn json_object_select_str_then_update_num(
+    b: &[u8], pos: usize,
+    cond_field: &str, test_type: &str, test_arg: &str,
+    upd_field: &str, arith_op: crate::ir::BinOp, arith_val: f64,
+    buf: &mut Vec<u8>,
+) -> Option<bool> {
+    if pos >= b.len() || b[pos] != b'{' { return None; }
+    // 1. Check string condition
+    let (vs, ve) = json_object_get_field_raw(b, pos, cond_field)?;
+    let val = &b[vs..ve];
+    if val.len() < 2 || val[0] != b'"' || val[ve - vs - 1] != b'"' { return None; }
+    let inner = &val[1..ve - vs - 1];
+    // Handle escaped strings via serde fallback
+    let unescaped: Option<String>;
+    let check_bytes: &[u8] = if memchr::memchr(b'\\', inner).is_some() {
+        let s: String = match serde_json::from_slice(val) { Ok(s) => s, Err(_) => return None };
+        unescaped = Some(s);
+        unescaped.as_ref().unwrap().as_bytes()
+    } else {
+        inner
+    };
+    let pass = match test_type {
+        "eq" => check_bytes == test_arg.as_bytes(),
+        "startswith" => check_bytes.starts_with(test_arg.as_bytes()),
+        "endswith" => check_bytes.ends_with(test_arg.as_bytes()),
+        "contains" => {
+            let needle = test_arg.as_bytes();
+            check_bytes.windows(needle.len()).any(|w| w == needle)
+        }
+        _ => return None,
+    };
+    if !pass { return None; }
+    // 2. Apply numeric update
+    if json_object_update_field_num(b, pos, upd_field, arith_op, arith_val, buf) {
+        Some(true)
+    } else {
+        Some(false)
+    }
+}
+
 /// Merge literal key-value pairs into a raw JSON object.
 /// `pairs` is a list of (key_name, json_value_bytes).
 /// Existing keys are replaced (last-write-wins), new keys are appended.

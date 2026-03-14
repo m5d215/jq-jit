@@ -8003,6 +8003,71 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.field == "str"|startswith|endswith|contains("str")) | .upd_field |= (. arith N)`.
+    /// Returns (cond_field, test_type, test_arg, upd_field, arith_op, arith_val).
+    pub fn detect_select_str_then_update_num(&self) -> Option<(String, String, String, String, crate::ir::BinOp, f64)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left, right } = expr {
+            // Right side: Update { path: .field, update: BinOp(arith, Input, Num) }
+            let (upd_field, arith_op, arith_val) = if let Expr::Update { path_expr, update_expr } = right.as_ref() {
+                if let Expr::Index { expr: base, key } = path_expr.as_ref() {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(uf)) = key.as_ref() {
+                        if let Expr::BinOp { op, lhs, rhs } = update_expr.as_ref() {
+                            if matches!(lhs.as_ref(), Expr::Input) {
+                                if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                    match op {
+                                        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                                            (uf.clone(), *op, *n)
+                                        }
+                                        _ => return None,
+                                    }
+                                } else { return None; }
+                            } else { return None; }
+                        } else { return None; }
+                    } else { return None; }
+                } else { return None; }
+            } else { return None; };
+            // Left side: select(cond) = IfThenElse { cond, then: Input, else: Empty }
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
+                if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+                // Form A: select(.field == "str")
+                if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                    if matches!(op, BinOp::Eq) {
+                        if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                            if matches!(base.as_ref(), Expr::Input) {
+                                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                    if let Expr::Literal(Literal::Str(val)) = rhs.as_ref() {
+                                        return Some((field.clone(), "eq".to_string(), val.clone(), upd_field, arith_op, arith_val));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Form B: select(.field | startswith/endswith/contains("str"))
+                if let Expr::Pipe { left: pipe_left, right: pipe_right } = cond.as_ref() {
+                    if let Expr::Index { expr: base, key } = pipe_left.as_ref() {
+                        if matches!(base.as_ref(), Expr::Input) {
+                            if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                if let Expr::CallBuiltin { name, args } = pipe_right.as_ref() {
+                                    if matches!(name.as_str(), "startswith" | "endswith" | "contains") && args.len() == 1 {
+                                        if let Expr::Literal(Literal::Str(arg)) = &args[0] {
+                                            return Some((field.clone(), name.clone(), arg.clone(), upd_field, arith_op, arith_val));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.field == "str"|startswith|endswith|contains("str")) | str_add_chain`.
     /// Returns (cond_field, test_type, test_arg, string_add_parts).
     pub fn detect_select_str_then_str_chain(&self) -> Option<(String, String, String, Vec<StringAddPart>)> {
