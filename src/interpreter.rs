@@ -565,6 +565,62 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                 }
             }
+            // Semantic: [e1, e2, ...] | any(f) → (e1|f) or (e2|f) or ...
+            // Semantic: [e1, e2, ...] | all(f) → (e1|f) and (e2|f) and ...
+            if let Expr::Collect { generator: ref lg } = sl {
+                let (is_any_all, predicate) = match &sr {
+                    Expr::AnyShort { generator: gen, predicate } => {
+                        if matches!(gen.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)) {
+                            (Some(true), Some(predicate.as_ref()))
+                        } else { (None, None) }
+                    }
+                    Expr::AllShort { generator: gen, predicate } => {
+                        if matches!(gen.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)) {
+                            (Some(false), Some(predicate.as_ref()))
+                        } else { (None, None) }
+                    }
+                    // Also: any without explicit predicate = any(.)
+                    Expr::UnaryOp { op: UnaryOp::Any, operand } if matches!(operand.as_ref(), Expr::Input) => {
+                        (Some(true), Some(&Expr::Input as &Expr))
+                    }
+                    Expr::UnaryOp { op: UnaryOp::All, operand } if matches!(operand.as_ref(), Expr::Input) => {
+                        (Some(false), Some(&Expr::Input as &Expr))
+                    }
+                    _ => (None, None),
+                };
+                if let (Some(is_any), Some(pred)) = (is_any_all, predicate) {
+                    fn collect_comma_for_any(e: &Expr, out: &mut Vec<Expr>) {
+                        match e {
+                            Expr::Comma { left, right } => {
+                                collect_comma_for_any(left, out);
+                                collect_comma_for_any(right, out);
+                            }
+                            other => out.push(other.clone()),
+                        }
+                    }
+                    let mut elems = Vec::new();
+                    collect_comma_for_any(lg, &mut elems);
+                    if elems.len() >= 2 && elems.len() <= 8 {
+                        let combiner = if is_any { crate::ir::BinOp::Or } else { crate::ir::BinOp::And };
+                        let mut result = simplify_expr(&Expr::Pipe {
+                            left: Box::new(elems.remove(0)),
+                            right: Box::new(pred.clone()),
+                        });
+                        for elem in elems {
+                            let applied = simplify_expr(&Expr::Pipe {
+                                left: Box::new(elem),
+                                right: Box::new(pred.clone()),
+                            });
+                            result = Expr::BinOp {
+                                op: combiner,
+                                lhs: Box::new(result),
+                                rhs: Box::new(applied),
+                            };
+                        }
+                        return result;
+                    }
+                }
+            }
             // Beta-reduction: .x | . + 1 → .x + 1
             if sl.is_simple_scalar() && sr.is_input_free() {
                 return sr.substitute_input(&sl);
