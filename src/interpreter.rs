@@ -4152,6 +4152,49 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.field cmp N) | .+{key: literal, ...}`.
+    /// Returns (cmp_field, op, threshold, merge_pairs: Vec<(key, json_value_bytes)>).
+    pub fn detect_select_cmp_merge(&self) -> Option<(String, crate::ir::BinOp, f64, Vec<(String, Vec<u8>)>)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        let (cond, merge_expr) = if let Expr::Pipe { left, right } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                    (cond.as_ref(), right.as_ref())
+                } else { return None; }
+            } else { return None; }
+        } else { return None; };
+        // Parse condition: .field cmp N
+        let (field, op, threshold) = if let Expr::BinOp { op, lhs, rhs } = cond {
+            if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+            if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                    if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                        (f.clone(), *op, *n)
+                    } else { return None; }
+                } else { return None; }
+            } else { return None; }
+        } else { return None; };
+        // Parse merge: .+{key: literal, ...}
+        if let Expr::BinOp { op: BinOp::Add | BinOp::Mul, lhs, rhs } = merge_expr {
+            if !matches!(lhs.as_ref(), Expr::Input) { return None; }
+            if let Expr::ObjectConstruct { pairs } = rhs.as_ref() {
+                let mut merge_pairs = Vec::new();
+                for (k, v) in pairs {
+                    let key = if let Expr::Literal(Literal::Str(s)) = k { s.clone() } else { return None; };
+                    if let Some(json_bytes) = const_expr_to_json(v) {
+                        merge_pairs.push((key, json_bytes));
+                    } else { return None; }
+                }
+                if !merge_pairs.is_empty() {
+                    return Some((field, op, threshold, merge_pairs));
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `del(.field1, .field2, ...)` — multi-field deletion.
     /// Returns list of field names to delete.
     pub fn detect_del_fields(&self) -> Option<Vec<String>> {
