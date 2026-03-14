@@ -1932,6 +1932,9 @@ fn real_main() {
     let field_match = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() && field_gsub.is_none() && field_scan.is_none() {
         filter.detect_field_match()
     } else { None };
+    let field_capture = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() && field_gsub.is_none() && field_scan.is_none() && field_match.is_none() {
+        filter.detect_field_capture()
+    } else { None };
     let field_format = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() && field_gsub.is_none() && field_scan.is_none() {
         filter.detect_field_format()
     } else { None };
@@ -2375,7 +2378,7 @@ fn real_main() {
         || computed_remap.is_some() || standalone_array.is_some() || type_filter.is_some()
         || field_binop.is_some() || field_binop_tostring.is_some() || field_unary_num.is_some() || field_unary_arith.is_some() || field_binop_const_unary.is_some() || two_field_binop_const.is_some() || field_arith_chain.is_some() || field_arith_tostring.is_some() || numeric_expr.is_some() || numeric_expr_unary.is_some()
         || field_field_cmp.is_some() || field_const_cmp.is_some() || arith_chain_cmp.is_some() || compound_field_cmp.is_some()
-        || field_str_builtin.is_some() || field_test.is_some() || field_gsub.is_some() || field_case_gsub.is_some() || field_case_test.is_some() || field_scan.is_some() || field_match.is_some() || field_format.is_some() || field_ltrimstr_tonumber.is_some()
+        || field_str_builtin.is_some() || field_test.is_some() || field_gsub.is_some() || field_case_gsub.is_some() || field_case_test.is_some() || field_scan.is_some() || field_match.is_some() || field_capture.is_some() || field_format.is_some() || field_ltrimstr_tonumber.is_some()
         || field_str_concat.is_some() || field_alt.is_some() || field_field_alt.is_some()
         || select_cmp.is_some() || select_field_null.is_some() || select_arith_cmp.is_some()
         || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || null_branch_lit.is_some() || field_field_cmp_branch.is_some() || if_ff_cmp_fields.is_some() || if_ff_cmp_computed.is_some() || if_length_cmp_fields.is_some() || select_length_cmp_remap.is_some() || field_tostring_length.is_some() || if_cmp_arrays.is_some() || cmp_branch_interp.is_some() || select_num_str.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some() || select_compound_computed.is_some() || select_compound_cremap.is_some()
@@ -6157,6 +6160,82 @@ fn real_main() {
                                         compact_buf.extend_from_slice(b"]}\n");
                                     }
                                     // no match → empty (no output), matching jq behavior
+                                } else {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                            if compact_buf.len() >= 1 << 17 {
+                                let _ = out.write_all(&compact_buf);
+                                compact_buf.clear();
+                            }
+                            Ok(())
+                        })
+                    } else {
+                        json_stream_raw(&input_str, |start, end| {
+                            let raw = &input_bytes[start..end];
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            Ok(())
+                        })
+                    }
+                } else if let Some((ref fc_field, ref fc_pattern, ref fc_flags)) = field_capture {
+                    // .field | capture("regex") — raw byte regex capture
+                    let re_pattern = if let Some(flags) = fc_flags {
+                        let mut prefix = String::from("(?");
+                        for c in flags.chars() {
+                            match c { 'i' | 'm' | 's' => prefix.push(c), _ => {} }
+                        }
+                        prefix.push(')');
+                        prefix.push_str(fc_pattern);
+                        prefix
+                    } else {
+                        fc_pattern.clone()
+                    };
+                    if let Ok(re) = regex::Regex::new(&re_pattern) {
+                        let capture_names: Vec<Option<&str>> = re.capture_names().collect();
+                        // Pre-serialize key prefixes: ,"name":"
+                        let mut key_prefixes: Vec<Vec<u8>> = Vec::new();
+                        for (i, name) in capture_names.iter().enumerate() {
+                            if i == 0 { key_prefixes.push(Vec::new()); continue; } // skip group 0
+                            let mut buf = Vec::new();
+                            if i > 1 { buf.push(b','); }
+                            buf.push(b'"');
+                            if let Some(n) = name {
+                                buf.extend_from_slice(n.as_bytes());
+                            }
+                            buf.extend_from_slice(b"\":\"");
+                            key_prefixes.push(buf);
+                        }
+                        json_stream_raw(&input_str, |start, end| {
+                            let raw = &input_bytes[start..end];
+                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, fc_field) {
+                                let val = &raw[vs..ve];
+                                if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                                    && !val[1..val.len()-1].contains(&b'\\')
+                                {
+                                    let content = unsafe { std::str::from_utf8_unchecked(&val[1..val.len()-1]) };
+                                    if let Some(caps) = re.captures(content) {
+                                        compact_buf.push(b'{');
+                                        for i in 1..caps.len() {
+                                            compact_buf.extend_from_slice(&key_prefixes[i]);
+                                            if let Some(m) = caps.get(i) {
+                                                for &b in m.as_str().as_bytes() {
+                                                    match b {
+                                                        b'"' => compact_buf.extend_from_slice(b"\\\""),
+                                                        b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                                                        _ => compact_buf.push(b),
+                                                    }
+                                                }
+                                            }
+                                            compact_buf.push(b'"');
+                                        }
+                                        compact_buf.extend_from_slice(b"}\n");
+                                    }
+                                    // no match → empty (no output)
                                 } else {
                                     let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                     process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -17764,6 +17843,82 @@ fn real_main() {
                                     compact_buf.extend_from_slice(b"]}\n");
                                 }
                                 // no match → empty (no output), matching jq behavior
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else {
+                    let content_bytes = content.as_bytes();
+                    json_stream_raw(content, |start, end| {
+                        let raw = &content_bytes[start..end];
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        Ok(())
+                    })
+                }
+            } else if let Some((ref fc_field, ref fc_pattern, ref fc_flags)) = field_capture {
+                // .field | capture("regex") — raw byte regex capture (file path)
+                let re_pattern = if let Some(flags) = fc_flags {
+                    let mut prefix = String::from("(?");
+                    for c in flags.chars() {
+                        match c { 'i' | 'm' | 's' => prefix.push(c), _ => {} }
+                    }
+                    prefix.push(')');
+                    prefix.push_str(fc_pattern);
+                    prefix
+                } else {
+                    fc_pattern.clone()
+                };
+                if let Ok(re) = regex::Regex::new(&re_pattern) {
+                    let capture_names: Vec<Option<&str>> = re.capture_names().collect();
+                    let mut key_prefixes: Vec<Vec<u8>> = Vec::new();
+                    for (i, name) in capture_names.iter().enumerate() {
+                        if i == 0 { key_prefixes.push(Vec::new()); continue; }
+                        let mut buf = Vec::new();
+                        if i > 1 { buf.push(b','); }
+                        buf.push(b'"');
+                        if let Some(n) = name {
+                            buf.extend_from_slice(n.as_bytes());
+                        }
+                        buf.extend_from_slice(b"\":\"");
+                        key_prefixes.push(buf);
+                    }
+                    let content_bytes = content.as_bytes();
+                    json_stream_raw(content, |start, end| {
+                        let raw = &content_bytes[start..end];
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, fc_field) {
+                            let val = &raw[vs..ve];
+                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                                && !val[1..val.len()-1].contains(&b'\\')
+                            {
+                                let content_str = unsafe { std::str::from_utf8_unchecked(&val[1..val.len()-1]) };
+                                if let Some(caps) = re.captures(content_str) {
+                                    compact_buf.push(b'{');
+                                    for i in 1..caps.len() {
+                                        compact_buf.extend_from_slice(&key_prefixes[i]);
+                                        if let Some(m) = caps.get(i) {
+                                            for &b in m.as_str().as_bytes() {
+                                                match b {
+                                                    b'"' => compact_buf.extend_from_slice(b"\\\""),
+                                                    b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                                                    _ => compact_buf.push(b),
+                                                }
+                                            }
+                                        }
+                                        compact_buf.push(b'"');
+                                    }
+                                    compact_buf.extend_from_slice(b"}\n");
+                                }
                             } else {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);

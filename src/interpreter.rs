@@ -3774,6 +3774,32 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | capture("regex")` pattern.
+    /// Returns (field_name, regex_pattern, flags_opt) if detected.
+    pub fn detect_field_capture(&self) -> Option<(String, String, Option<String>)> {
+        use crate::ir::{Expr, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::RegexCapture { input_expr, re, flags } = right.as_ref() {
+                        if !matches!(input_expr.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(pattern)) = re.as_ref() {
+                            let flags_str = match flags.as_ref() {
+                                Expr::Literal(Literal::Null) => None,
+                                Expr::Literal(Literal::Str(f)) => Some(f.clone()),
+                                _ => return None,
+                            };
+                            return Some((field.clone(), pattern.clone(), flags_str));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field | @base64` (or other simple format operations).
     /// Returns (field_name, format_name) if detected.
     pub fn detect_field_format(&self) -> Option<(String, String)> {
