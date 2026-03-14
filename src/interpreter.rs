@@ -2435,6 +2435,33 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.field | string_ops... | terminal)` where terminal is boolean.
+    /// E.g., `select(.name | ascii_downcase | startswith("user"))`.
+    /// Returns (field, ops, terminal) — same as field_string_chain but in select context.
+    pub fn detect_select_string_chain(&self) -> Option<(String, Vec<StringChainOp>, StringChainTerminal)> {
+        use crate::ir::{Expr, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
+            if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+            // cond must be: .field | ops... | terminal
+            if let Expr::Pipe { left, right } = cond.as_ref() {
+                if let Expr::Index { expr: base, key } = left.as_ref() {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        let mut ops = Vec::new();
+                        let terminal = Self::collect_string_chain_ops_with_terminal(right, &mut ops);
+                        // Must have at least one op + boolean terminal
+                        if !ops.is_empty() && matches!(terminal, StringChainTerminal::Startswith(_) | StringChainTerminal::Endswith(_) | StringChainTerminal::Contains(_)) {
+                            return Some((field.clone(), ops, terminal));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.f | startswith("a") and/or .f | endswith("b"))` — compound string test select.
     /// Returns (logic_op, Vec<(field, test_name, test_arg)>) where logic_op is And/Or.
     pub fn detect_select_compound_str_test(&self) -> Option<(crate::ir::BinOp, Vec<(String, String, String)>)> {

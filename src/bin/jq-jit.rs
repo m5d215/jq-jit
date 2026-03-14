@@ -1962,7 +1962,10 @@ fn real_main() {
     let select_str_test = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_str.is_none() && field_access.is_none() {
         filter.detect_select_field_str_test()
     } else { None };
-    let select_compound_str_test = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() && field_access.is_none() {
+    let select_string_chain = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() && field_access.is_none() {
+        filter.detect_select_string_chain()
+    } else { None };
+    let select_compound_str_test = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() && select_string_chain.is_none() && field_access.is_none() {
         filter.detect_select_compound_str_test()
     } else { None };
     let select_mixed_compound = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() && select_compound_str_test.is_none() && field_access.is_none() {
@@ -2389,7 +2392,7 @@ fn real_main() {
         || select_cmp.is_some() || select_field_null.is_some() || select_arith_cmp.is_some()
         || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || null_branch_lit.is_some() || field_field_cmp_branch.is_some() || if_ff_cmp_fields.is_some() || if_ff_cmp_computed.is_some() || if_length_cmp_fields.is_some() || select_length_cmp_remap.is_some() || field_tostring_length.is_some() || if_cmp_arrays.is_some() || cmp_branch_interp.is_some() || select_num_str.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some() || select_compound_computed.is_some() || select_compound_cremap.is_some()
         || select_str.is_some() || select_compound_str_chain.is_some()
-        || select_str_test.is_some() || select_compound_str_test.is_some() || select_mixed_compound.is_some() || select_regex_test.is_some() || select_regex_value.is_some() || select_nested_cmp.is_some()
+        || select_str_test.is_some() || select_string_chain.is_some() || select_compound_str_test.is_some() || select_mixed_compound.is_some() || select_regex_test.is_some() || select_regex_value.is_some() || select_nested_cmp.is_some()
         || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_field_unary.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_dynkey.is_some() || select_cmp_dynkey_mixed.is_some() || select_cmp_array.is_some() || select_arith_cmp_array.is_some() || select_cmp_value.is_some() || select_cmp_str_chain.is_some() || select_ff_cmp_field.is_some() || select_ff_cmp.is_some() || select_ff_cmp_cremap.is_some() || select_ff_cmp_value.is_some() || select_ff_cmp_array.is_some() || select_compound_array.is_some() || select_str_field.is_some() || select_str_cremap.is_some() || select_str_array.is_some() || select_str_str_chain.is_some()
         || computed_array.is_some() || array_field.is_some() || multi_field.is_some() || is_length || is_keys
         || is_keys_unsorted || keys_join.is_some() || has_field.is_some() || has_multi.is_some() || select_has_multi.is_some() || is_type || del_field.is_some() || select_cmp_del.is_some() || select_str_del.is_some() || select_cmp_merge.is_some() || select_str_merge.is_some() || del_fields.is_some() || obj_merge_lit.is_some() || obj_merge_computed.is_some()
@@ -6865,6 +6868,106 @@ fn real_main() {
                                     "startswith" => inner.starts_with(arg.as_bytes()),
                                     "endswith" => inner.ends_with(arg.as_bytes()),
                                     "contains" => bytes_contains(inner, arg.as_bytes()),
+                                    _ => false,
+                                };
+                                if pass {
+                                    emit_raw_ln!(&mut compact_buf, raw);
+                                }
+                            }
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref sc_field, ref sc_ops, ref sc_terminal)) = select_string_chain {
+                    // select(.field | ascii_downcase | startswith("str")) etc.
+                    use jq_jit::interpreter::{StringChainOp, StringChainTerminal};
+                    let mut tmp_str: Vec<u8> = Vec::new();
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sc_field) {
+                            let val = &raw[vs..ve];
+                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                                && memchr::memchr(b'\\', &val[1..val.len()-1]).is_none()
+                            {
+                                tmp_str.clear();
+                                tmp_str.extend_from_slice(&val[1..val.len()-1]);
+                                // Apply string ops
+                                for op in sc_ops.iter() {
+                                    match op {
+                                        StringChainOp::AsciiDowncase => {
+                                            tmp_str.make_ascii_lowercase();
+                                        }
+                                        StringChainOp::AsciiUpcase => {
+                                            tmp_str.make_ascii_uppercase();
+                                        }
+                                        StringChainOp::Ltrimstr(ref s) => {
+                                            let sb = s.as_bytes();
+                                            if tmp_str.starts_with(sb) {
+                                                tmp_str.drain(..sb.len());
+                                            }
+                                        }
+                                        StringChainOp::Rtrimstr(ref s) => {
+                                            let sb = s.as_bytes();
+                                            if tmp_str.ends_with(sb) {
+                                                let new_len = tmp_str.len() - sb.len();
+                                                tmp_str.truncate(new_len);
+                                            }
+                                        }
+                                        StringChainOp::SplitJoin(ref sep, ref rep) => {
+                                            let sb = sep.as_bytes();
+                                            let rb = rep.as_bytes();
+                                            let mut result = Vec::new();
+                                            let mut pos = 0;
+                                            let mut first = true;
+                                            while pos <= tmp_str.len() {
+                                                let end_pos = if sb.is_empty() { pos + 1 } else {
+                                                    tmp_str[pos..].windows(sb.len()).position(|w| w == sb)
+                                                        .map(|p| pos + p).unwrap_or(tmp_str.len())
+                                                };
+                                                if !first { result.extend_from_slice(rb); }
+                                                result.extend_from_slice(&tmp_str[pos..end_pos]);
+                                                first = false;
+                                                if end_pos >= tmp_str.len() { break; }
+                                                pos = end_pos + sb.len();
+                                            }
+                                            tmp_str = result;
+                                        }
+                                        StringChainOp::SplitReverseJoin(ref sep, ref rep) => {
+                                            let sb = sep.as_bytes();
+                                            let rb = rep.as_bytes();
+                                            let mut segments: Vec<&[u8]> = Vec::new();
+                                            let mut pos = 0;
+                                            while pos <= tmp_str.len() {
+                                                let end_pos = tmp_str[pos..].windows(sb.len()).position(|w| w == sb)
+                                                    .map(|p| pos + p).unwrap_or(tmp_str.len());
+                                                segments.push(&tmp_str[pos..end_pos]);
+                                                if end_pos >= tmp_str.len() { break; }
+                                                pos = end_pos + sb.len();
+                                            }
+                                            segments.reverse();
+                                            let mut result = Vec::new();
+                                            for (i, seg) in segments.iter().enumerate() {
+                                                if i > 0 { result.extend_from_slice(rb); }
+                                                result.extend_from_slice(seg);
+                                            }
+                                            tmp_str = result;
+                                        }
+                                    }
+                                }
+                                // Apply terminal
+                                let pass = match sc_terminal {
+                                    StringChainTerminal::Startswith(ref arg) => {
+                                        tmp_str.starts_with(arg.as_bytes())
+                                    }
+                                    StringChainTerminal::Endswith(ref arg) => {
+                                        tmp_str.ends_with(arg.as_bytes())
+                                    }
+                                    StringChainTerminal::Contains(ref arg) => {
+                                        bytes_contains(&tmp_str, arg.as_bytes())
+                                    }
                                     _ => false,
                                 };
                                 if pass {
@@ -13681,6 +13784,50 @@ fn real_main() {
                             if pass {
                                 emit_raw_ln!(&mut compact_buf, raw);
                             }
+                        }
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref sc_field, ref sc_ops, ref sc_terminal)) = select_string_chain {
+                // select(.field | string_chain | terminal) — file path
+                use jq_jit::interpreter::{StringChainOp, StringChainTerminal};
+                let content_bytes = content.as_bytes();
+                let mut tmp_str: Vec<u8> = Vec::new();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sc_field) {
+                        let val = &raw[vs..ve];
+                        if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                            && memchr::memchr(b'\\', &val[1..val.len()-1]).is_none()
+                        {
+                            tmp_str.clear();
+                            tmp_str.extend_from_slice(&val[1..val.len()-1]);
+                            for op in sc_ops.iter() {
+                                match op {
+                                    StringChainOp::AsciiDowncase => tmp_str.make_ascii_lowercase(),
+                                    StringChainOp::AsciiUpcase => tmp_str.make_ascii_uppercase(),
+                                    StringChainOp::Ltrimstr(ref s) => {
+                                        let sb = s.as_bytes();
+                                        if tmp_str.starts_with(sb) { tmp_str.drain(..sb.len()); }
+                                    }
+                                    StringChainOp::Rtrimstr(ref s) => {
+                                        let sb = s.as_bytes();
+                                        if tmp_str.ends_with(sb) { let l = tmp_str.len() - sb.len(); tmp_str.truncate(l); }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            let pass = match sc_terminal {
+                                StringChainTerminal::Startswith(ref arg) => tmp_str.starts_with(arg.as_bytes()),
+                                StringChainTerminal::Endswith(ref arg) => tmp_str.ends_with(arg.as_bytes()),
+                                StringChainTerminal::Contains(ref arg) => bytes_contains(&tmp_str, arg.as_bytes()),
+                                _ => false,
+                            };
+                            if pass { emit_raw_ln!(&mut compact_buf, raw); }
                         }
                     }
                     if compact_buf.len() >= 1 << 17 {
