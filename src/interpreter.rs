@@ -841,6 +841,33 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                 }
             }
+            // Semantic: [e1, e2, ...] | add → e1 + e2 + ... (avoids array construction)
+            if let Expr::Collect { generator: ref lg } = sl {
+                if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Add, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                    fn collect_comma_elems(e: &Expr, out: &mut Vec<Expr>) {
+                        match e {
+                            Expr::Comma { left, right } => {
+                                collect_comma_elems(left, out);
+                                collect_comma_elems(right, out);
+                            }
+                            other => out.push(other.clone()),
+                        }
+                    }
+                    let mut elems = Vec::new();
+                    collect_comma_elems(lg, &mut elems);
+                    if elems.len() >= 2 && elems.len() <= 16 {
+                        let mut result = elems.remove(0);
+                        for elem in elems {
+                            result = Expr::BinOp {
+                                op: crate::ir::BinOp::Add,
+                                lhs: Box::new(result),
+                                rhs: Box::new(elem),
+                            };
+                        }
+                        return simplify_expr(&result);
+                    }
+                }
+            }
             // Semantic: [e1, e2, ...] | any(f) → (e1|f) or (e2|f) or ...
             // Semantic: [e1, e2, ...] | all(f) → (e1|f) and (e2|f) and ...
             if let Expr::Collect { generator: ref lg } = sl {
