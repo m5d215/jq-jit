@@ -2153,6 +2153,9 @@ fn real_main() {
     let cmp_branch_interp = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() && field_field_cmp_branch.is_none() {
         filter.detect_cmp_branch_string_interp()
     } else { None };
+    let select_num_str = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() {
+        filter.detect_select_num_and_str()
+    } else { None };
     let select_compound = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() && cond_chain.is_none() {
         filter.detect_select_compound_cmp()
     } else { None };
@@ -2255,7 +2258,7 @@ fn real_main() {
         || field_str_builtin.is_some() || field_test.is_some() || field_gsub.is_some() || field_case_gsub.is_some() || field_case_test.is_some() || field_scan.is_some() || field_format.is_some() || field_ltrimstr_tonumber.is_some()
         || field_str_concat.is_some() || field_alt.is_some() || field_field_alt.is_some()
         || select_cmp.is_some() || select_field_null.is_some() || select_arith_cmp.is_some()
-        || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || field_field_cmp_branch.is_some() || if_cmp_arrays.is_some() || cmp_branch_interp.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some() || select_compound_computed.is_some() || select_compound_cremap.is_some()
+        || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || field_field_cmp_branch.is_some() || if_cmp_arrays.is_some() || cmp_branch_interp.is_some() || select_num_str.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some() || select_compound_computed.is_some() || select_compound_cremap.is_some()
         || select_str.is_some() || select_compound_str_chain.is_some()
         || select_str_test.is_some() || select_regex_test.is_some() || select_regex_value.is_some() || select_nested_cmp.is_some()
         || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_field_unary.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_dynkey.is_some() || select_cmp_dynkey_mixed.is_some() || select_cmp_array.is_some() || select_arith_cmp_array.is_some() || select_cmp_value.is_some() || select_cmp_str_chain.is_some() || select_ff_cmp_field.is_some() || select_ff_cmp.is_some() || select_ff_cmp_cremap.is_some() || select_ff_cmp_value.is_some() || select_ff_cmp_array.is_some() || select_compound_array.is_some() || select_str_field.is_some() || select_str_cremap.is_some() || select_str_array.is_some() || select_str_str_chain.is_some()
@@ -6375,6 +6378,54 @@ fn real_main() {
                                 }
                             }
                             compact_buf.extend_from_slice(b"\"\n");
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref nf, ref nop, nth, ref sf, ref sop, ref sarg)) = select_num_str {
+                    use jq_jit::ir::BinOp;
+                    let re = if sop == "test" { Some(regex::Regex::new(sarg).ok()).flatten() } else { None };
+                    let sarg_bytes = sarg.as_bytes();
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        let num_pass = if let Some(val) = json_object_get_num(raw, 0, nf) {
+                            match nop {
+                                BinOp::Gt => val > nth, BinOp::Lt => val < nth,
+                                BinOp::Ge => val >= nth, BinOp::Le => val <= nth,
+                                BinOp::Eq => val == nth, BinOp::Ne => val != nth,
+                                _ => false,
+                            }
+                        } else { false };
+                        if num_pass {
+                            let str_pass = if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sf) {
+                                let fval = &raw[vs..ve];
+                                if fval.len() >= 2 && fval[0] == b'"' {
+                                    let inner = &fval[1..fval.len()-1];
+                                    match sop.as_str() {
+                                        "startswith" => inner.starts_with(sarg_bytes),
+                                        "endswith" => inner.ends_with(sarg_bytes),
+                                        "contains" => {
+                                            if sarg_bytes.len() <= inner.len() {
+                                                memchr::memmem::find(inner, sarg_bytes).is_some()
+                                            } else { false }
+                                        }
+                                        "test" => {
+                                            if let Some(ref r) = re {
+                                                let s = unsafe { std::str::from_utf8_unchecked(inner) };
+                                                r.is_match(s)
+                                            } else { false }
+                                        }
+                                        "eq" => inner == sarg_bytes,
+                                        _ => false,
+                                    }
+                                } else { false }
+                            } else { false };
+                            if str_pass {
+                                emit_raw_ln!(&mut compact_buf, raw);
+                            }
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -11900,6 +11951,51 @@ fn real_main() {
                             }
                         }
                         compact_buf.extend_from_slice(b"\"\n");
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref nf, ref nop, nth, ref sf, ref sop, ref sarg)) = select_num_str {
+                use jq_jit::ir::BinOp;
+                let content_bytes = content.as_bytes();
+                let re = if sop == "test" { Some(regex::Regex::new(sarg).ok()).flatten() } else { None };
+                let sarg_bytes = sarg.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    let num_pass = if let Some(val) = json_object_get_num(raw, 0, nf) {
+                        match nop {
+                            BinOp::Gt => val > nth, BinOp::Lt => val < nth,
+                            BinOp::Ge => val >= nth, BinOp::Le => val <= nth,
+                            BinOp::Eq => val == nth, BinOp::Ne => val != nth,
+                            _ => false,
+                        }
+                    } else { false };
+                    if num_pass {
+                        let str_pass = if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sf) {
+                            let fval = &raw[vs..ve];
+                            if fval.len() >= 2 && fval[0] == b'"' {
+                                let inner = &fval[1..fval.len()-1];
+                                match sop.as_str() {
+                                    "startswith" => inner.starts_with(sarg_bytes),
+                                    "endswith" => inner.ends_with(sarg_bytes),
+                                    "contains" => memchr::memmem::find(inner, sarg_bytes).is_some(),
+                                    "test" => {
+                                        if let Some(ref r) = re {
+                                            let s = unsafe { std::str::from_utf8_unchecked(inner) };
+                                            r.is_match(s)
+                                        } else { false }
+                                    }
+                                    "eq" => inner == sarg_bytes,
+                                    _ => false,
+                                }
+                            } else { false }
+                        } else { false };
+                        if str_pass {
+                            emit_raw_ln!(&mut compact_buf, raw);
+                        }
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);

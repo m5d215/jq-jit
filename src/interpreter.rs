@@ -1352,6 +1352,91 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.field1 cmp N and (.field2 | str_op("str")))` — mixed numeric + string compound select.
+    /// Returns (num_field, cmp_op, threshold, str_field, str_op_name, str_arg).
+    /// str_op_name is one of: "startswith", "endswith", "contains", "test", "eq".
+    pub fn detect_select_num_and_str(&self) -> Option<(String, crate::ir::BinOp, f64, String, String, String)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
+            if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+            if let Expr::BinOp { op: BinOp::And, lhs, rhs } = cond.as_ref() {
+                let extract_num_cmp = |e: &Expr| -> Option<(String, BinOp, f64)> {
+                    if let Expr::BinOp { op, lhs, rhs } = e {
+                        if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                        if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                            if !matches!(base.as_ref(), Expr::Input) { return None; }
+                            if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                                if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                    return Some((f.clone(), *op, *n));
+                                }
+                            }
+                        }
+                    }
+                    None
+                };
+                let extract_str_cond = |e: &Expr| -> Option<(String, String, String)> {
+                    // Form: .field | str_op("arg") — as Pipe(Index, CallBuiltin)
+                    if let Expr::Pipe { left, right } = e {
+                        if let Expr::Index { expr: base, key } = left.as_ref() {
+                            if !matches!(base.as_ref(), Expr::Input) { return None; }
+                            if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                // CallBuiltin(startswith/endswith/contains, [Literal(Str)])
+                                if let Expr::CallBuiltin { name, args } = right.as_ref() {
+                                    if args.len() == 1 {
+                                        if let Expr::Literal(Literal::Str(arg)) = &args[0] {
+                                            if matches!(name.as_str(), "startswith" | "endswith" | "contains") {
+                                                return Some((field.clone(), name.clone(), arg.clone()));
+                                            }
+                                        }
+                                    }
+                                }
+                                // RegexTest
+                                if let Expr::RegexTest { input_expr, re, .. } = right.as_ref() {
+                                    if matches!(input_expr.as_ref(), Expr::Input) {
+                                        if let Expr::Literal(Literal::Str(pat)) = re.as_ref() {
+                                            return Some((field.clone(), "test".to_string(), pat.clone()));
+                                        }
+                                    }
+                                }
+                                // CallBuiltin("test", [Literal(Str)])
+                                if let Expr::CallBuiltin { name, args } = right.as_ref() {
+                                    if name == "test" && args.len() == 1 {
+                                        if let Expr::Literal(Literal::Str(arg)) = &args[0] {
+                                            return Some((field.clone(), "test".to_string(), arg.clone()));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Form: .field == "str"
+                    if let Expr::BinOp { op: BinOp::Eq, lhs: l, rhs: r } = e {
+                        if let Expr::Index { expr: base, key } = l.as_ref() {
+                            if matches!(base.as_ref(), Expr::Input) {
+                                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                    if let Expr::Literal(Literal::Str(val)) = r.as_ref() {
+                                        return Some((field.clone(), "eq".to_string(), val.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    None
+                };
+                // Try both orderings: (num, str) and (str, num)
+                if let (Some((nf, nop, nth)), Some((sf, sop, sarg))) = (extract_num_cmp(lhs), extract_str_cond(rhs)) {
+                    return Some((nf, nop, nth, sf, sop, sarg));
+                }
+                if let (Some((sf, sop, sarg)), Some((nf, nop, nth))) = (extract_str_cond(lhs), extract_num_cmp(rhs)) {
+                    return Some((nf, nop, nth, sf, sop, sarg));
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.x > N and .y < M) | .output` — compound select then field access.
     /// Returns (conjunction, comparisons, output_field).
     pub fn detect_select_compound_cmp_then_field(&self) -> Option<(crate::ir::BinOp, Vec<(String, crate::ir::BinOp, f64)>, String)> {
