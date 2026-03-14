@@ -240,6 +240,15 @@ pub enum StringAddPart {
     FieldArithToString(String, Vec<(crate::ir::BinOp, f64)>),
 }
 
+/// Part of a split-then-concat pattern: `.field | split(sep) | .[i] + "lit" + .[j]`
+#[derive(Debug, Clone)]
+pub enum SplitConcatPart {
+    /// `.[N]` — index into split result
+    Index(i32),
+    /// `"literal"` — literal string
+    Lit(String),
+}
+
 /// Step in a numeric chain update: `.field |= (. * 100 | floor | . / 100)`.
 #[derive(Debug, Clone)]
 pub enum NumChainStep {
@@ -352,7 +361,7 @@ fn const_expr_to_json(expr: &crate::ir::Expr) -> Option<Vec<u8>> {
 /// Pipe(E, F) → F[E/.] when E is scalar and F has free Input.
 /// Also applies semantic rewrites (to_entries|from_entries → identity).
 fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
-    use crate::ir::{Expr, UnaryOp};
+    use crate::ir::{Expr, Literal, UnaryOp};
     match expr {
         Expr::Pipe { left, right } => {
             let sl = simplify_expr(left);
@@ -858,7 +867,12 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             Expr::EachOpt { input_expr: Box::new(se) }
         }
         Expr::Negate { operand } => {
-            Expr::Negate { operand: Box::new(simplify_expr(operand)) }
+            let s = simplify_expr(operand);
+            if let Expr::Literal(Literal::Num(n, _)) = &s {
+                Expr::Literal(Literal::Num(-n, None))
+            } else {
+                Expr::Negate { operand: Box::new(s) }
+            }
         }
         Expr::Slice { expr, from, to } => {
             let se = simplify_expr(expr);
@@ -7248,6 +7262,60 @@ impl Filter {
             }
         }
         None
+    }
+
+    /// Detect `.field | split(sep) | .[i] + "lit" + .[j]` — split then concatenate indexed parts.
+    /// Returns (field_name, delimiter, parts) where parts are SplitConcatPart.
+    pub fn detect_field_split_concat(&self) -> Option<(String, String, Vec<SplitConcatPart>)> {
+        use crate::ir::{Expr, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::Pipe { left: split_expr, right: concat_expr } = right.as_ref() {
+                        if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
+                            if name != "split" || args.len() != 1 { return None; }
+                            if let Expr::Literal(Literal::Str(delim)) = &args[0] {
+                                let mut parts = Vec::new();
+                                if Self::collect_split_concat_parts(concat_expr, &mut parts) && parts.len() >= 2 {
+                                    return Some((field.clone(), delim.clone(), parts));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Recursively collect parts from a string add chain: .[i] + "lit" + .[j]
+    fn collect_split_concat_parts(expr: &crate::ir::Expr, parts: &mut Vec<SplitConcatPart>) -> bool {
+        use crate::ir::{Expr, BinOp, Literal};
+        match expr {
+            Expr::BinOp { op: BinOp::Add, lhs, rhs } => {
+                if !Self::collect_split_concat_parts(lhs, parts) { return false; }
+                Self::collect_split_concat_parts(rhs, parts)
+            }
+            Expr::Index { expr: base, key } if matches!(base.as_ref(), Expr::Input) => {
+                if let Expr::Literal(Literal::Num(n, _)) = key.as_ref() {
+                    parts.push(SplitConcatPart::Index(*n as i32));
+                    true
+                } else if let Expr::Negate { operand } = key.as_ref() {
+                    // .[-N] → Negate(Num(N))
+                    if let Expr::Literal(Literal::Num(n, _)) = operand.as_ref() {
+                        parts.push(SplitConcatPart::Index(-(*n as i32)));
+                        true
+                    } else { false }
+                } else { false }
+            }
+            Expr::Literal(Literal::Str(s)) => {
+                parts.push(SplitConcatPart::Lit(s.clone()));
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Detect `.field | str_op | length` chains — returns (field, op_name, op_arg).
