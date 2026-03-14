@@ -247,6 +247,14 @@ pub enum NumChainStep {
     Unary(crate::ir::UnaryOp),
 }
 
+/// A single condition in a mixed compound select.
+pub enum MixedCond {
+    /// .field cmp N (numeric comparison)
+    NumCmp(String, crate::ir::BinOp, f64),
+    /// .field | str_op("arg") (startswith/endswith/contains/test/eq)
+    StrTest(String, String, String),
+}
+
 /// A compiled jq filter, ready to execute.
 pub struct Filter {
     program: String,
@@ -634,6 +642,18 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                 Expr::Literal(crate::ir::Literal::Null) | Expr::Literal(crate::ir::Literal::False) => return se,
                 Expr::Literal(crate::ir::Literal::True) | Expr::Literal(crate::ir::Literal::Num(_, _)) | Expr::Literal(crate::ir::Literal::Str(_)) => return st,
                 _ => {}
+            }
+            // if A then (if B then X else empty end) else empty end → if (A and B) then X else empty end
+            if matches!(se, Expr::Empty) {
+                if let Expr::IfThenElse { cond: cond_inner, then_branch: then_inner, else_branch: else_inner } = &st {
+                    if matches!(else_inner.as_ref(), Expr::Empty) {
+                        return Expr::IfThenElse {
+                            cond: Box::new(Expr::BinOp { op: crate::ir::BinOp::And, lhs: Box::new(sc), rhs: cond_inner.clone() }),
+                            then_branch: then_inner.clone(),
+                            else_branch: Box::new(Expr::Empty),
+                        };
+                    }
+                }
             }
             // if .field then .field else F end → .field // F
             if let Expr::Index { expr: base_c, key: key_c } = &sc {
@@ -2176,6 +2196,113 @@ impl Filter {
                     let mut conds = Vec::new();
                     if collect_str_conds(cond, op, &mut conds) && conds.len() >= 2 {
                         return Some((*op, conds));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect mixed compound select: `select(A and B and ...)` where each condition is either
+    /// a numeric comparison (.field cmp N) or a string test (.field | str_op("arg")).
+    /// Returns (logic_op, conditions) where conditions is a Vec<MixedCond>.
+    /// Only fires when both numeric and string conditions are present (otherwise use homogeneous detectors).
+    pub fn detect_select_mixed_compound(&self) -> Option<(crate::ir::BinOp, Vec<MixedCond>)> {
+        use crate::ir::{BinOp, Expr, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
+            if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+            fn extract_mixed_cond(e: &Expr) -> Option<MixedCond> {
+                // Numeric: .field cmp N
+                if let Expr::BinOp { op, lhs, rhs } = e {
+                    if matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                        if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                            if matches!(base.as_ref(), Expr::Input) {
+                                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                    if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                        return Some(MixedCond::NumCmp(field.clone(), *op, *n));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // String test: .field | str_op("arg")
+                if let Expr::Pipe { left, right } = e {
+                    if let Expr::Index { expr: base, key } = left.as_ref() {
+                        if matches!(base.as_ref(), Expr::Input) {
+                            if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                if let Expr::CallBuiltin { name, args } = right.as_ref() {
+                                    if matches!(name.as_str(), "startswith" | "endswith" | "contains") && args.len() == 1 {
+                                        if let Expr::Literal(Literal::Str(arg)) = &args[0] {
+                                            return Some(MixedCond::StrTest(field.clone(), name.clone(), arg.clone()));
+                                        }
+                                    }
+                                }
+                                // RegexTest
+                                if let Expr::RegexTest { input_expr, re, .. } = right.as_ref() {
+                                    if matches!(input_expr.as_ref(), Expr::Input) {
+                                        if let Expr::Literal(Literal::Str(pat)) = re.as_ref() {
+                                            return Some(MixedCond::StrTest(field.clone(), "test".to_string(), pat.clone()));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Beta-reduced: CallBuiltin("startswith", [Index, Literal])
+                if let Expr::CallBuiltin { name, args } = e {
+                    if matches!(name.as_str(), "startswith" | "endswith" | "contains") && args.len() == 2 {
+                        if let Expr::Index { expr: base, key } = &args[0] {
+                            if matches!(base.as_ref(), Expr::Input) {
+                                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                    if let Expr::Literal(Literal::Str(arg)) = &args[1] {
+                                        return Some(MixedCond::StrTest(field.clone(), name.clone(), arg.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // .field == "str"
+                if let Expr::BinOp { op: BinOp::Eq, lhs, rhs } = e {
+                    if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                        if matches!(base.as_ref(), Expr::Input) {
+                            if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                if let Expr::Literal(Literal::Str(val)) = rhs.as_ref() {
+                                    return Some(MixedCond::StrTest(field.clone(), "eq".to_string(), val.clone()));
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            fn collect_mixed(e: &Expr, logic: &BinOp, out: &mut Vec<MixedCond>) -> bool {
+                if let Expr::BinOp { op, lhs, rhs } = e {
+                    if std::mem::discriminant(op) == std::mem::discriminant(logic) {
+                        return collect_mixed(lhs, logic, out) && collect_mixed(rhs, logic, out);
+                    }
+                }
+                if let Some(c) = extract_mixed_cond(e) {
+                    out.push(c);
+                    true
+                } else {
+                    false
+                }
+            }
+            if let Expr::BinOp { op, .. } = cond.as_ref() {
+                if matches!(op, BinOp::And | BinOp::Or) {
+                    let mut conds = Vec::new();
+                    if collect_mixed(cond, op, &mut conds) && conds.len() >= 2 {
+                        // Only fire when mixed (has both numeric and string)
+                        let has_num = conds.iter().any(|c| matches!(c, MixedCond::NumCmp(..)));
+                        let has_str = conds.iter().any(|c| matches!(c, MixedCond::StrTest(..)));
+                        if has_num && has_str {
+                            return Some((*op, conds));
+                        }
                     }
                 }
             }

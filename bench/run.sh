@@ -181,6 +181,8 @@ TESTS=(
     'we(sw(.key)):-c:with_entries(select(.key | startswith("n")))'
     'sel(sw or ew):-c:select((.name | startswith("item_1")) or (.name | endswith("_0")))'
     'path(.name,.x):-c:path(.name, .x)'
+    'sel(str+num+num):-c:select((.name | contains("_1")) and .x > 500 and .y < 1000)'
+    'nested if|field:-c:if .x > 100 then if .y < 500 then .name else empty end else empty end'
 )
 
 for test in "${TESTS[@]}"; do
