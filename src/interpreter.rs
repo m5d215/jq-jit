@@ -5936,7 +5936,7 @@ impl Filter {
 
     /// Detect `.field |= if . == "str" then "a" else "b" end`.
     /// Returns (field_name, cond_str, then_str, else_str).
-    pub fn detect_field_update_str_map(&self) -> Option<(String, String, String, String)> {
+    pub fn detect_field_update_str_map(&self) -> Option<(String, String, Vec<u8>, Vec<u8>)> {
         use crate::ir::{Expr, Literal, BinOp};
         let expr = self.detect_expr()?;
         let update_expr = if let Expr::LetBinding { body, .. } = expr { body.as_ref() } else { expr };
@@ -5949,11 +5949,9 @@ impl Filter {
                         if let Expr::BinOp { op: BinOp::Eq, lhs, rhs } = cond.as_ref() {
                             if matches!(lhs.as_ref(), Expr::Input) {
                                 if let Expr::Literal(Literal::Str(cond_str)) = rhs.as_ref() {
-                                    if let Expr::Literal(Literal::Str(then_str)) = then_branch.as_ref() {
-                                        if let Expr::Literal(Literal::Str(else_str)) = else_branch.as_ref() {
-                                            return Some((field.clone(), cond_str.clone(), then_str.clone(), else_str.clone()));
-                                        }
-                                    }
+                                    let then_json = literal_to_json_bytes(then_branch)?;
+                                    let else_json = literal_to_json_bytes(else_branch)?;
+                                    return Some((field.clone(), cond_str.clone(), then_json, else_json));
                                 }
                             }
                         }

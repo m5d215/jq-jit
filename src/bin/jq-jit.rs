@@ -3841,12 +3841,10 @@ fn real_main() {
                         }
                         Ok(())
                     })
-                } else if let Some((ref sm_field, ref sm_cond, ref sm_then, ref sm_else)) = field_update_str_map {
+                } else if let Some((ref sm_field, ref sm_cond, ref sm_then_bytes, ref sm_else_bytes)) = field_update_str_map {
                     let cond_json = sm_cond.as_bytes();
-                    let then_json = format!("\"{}\"", sm_then);
-                    let else_json = format!("\"{}\"", sm_else);
-                    let then_bytes = then_json.as_bytes();
-                    let else_bytes = else_json.as_bytes();
+                    let then_bytes = sm_then_bytes.as_slice();
+                    let else_bytes = sm_else_bytes.as_slice();
                     let mut tmp = Vec::with_capacity(256);
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
@@ -11377,13 +11375,11 @@ fn real_main() {
                     }
                     Ok(())
                 })
-            } else if let Some((ref sm_field, ref sm_cond, ref sm_then, ref sm_else)) = field_update_str_map {
+            } else if let Some((ref sm_field, ref sm_cond, ref sm_then_bytes, ref sm_else_bytes)) = field_update_str_map {
                 let content_bytes = content.as_bytes();
                 let cond_json = sm_cond.as_bytes();
-                let then_json = format!("\"{}\"", sm_then);
-                let else_json = format!("\"{}\"", sm_else);
-                let then_bytes = then_json.as_bytes();
-                let else_bytes = else_json.as_bytes();
+                let then_bytes = sm_then_bytes.as_slice();
+                let else_bytes = sm_else_bytes.as_slice();
                 let mut tmp = Vec::with_capacity(256);
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
