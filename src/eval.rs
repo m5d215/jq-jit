@@ -2776,7 +2776,10 @@ pub fn eval(
             eval(input_expr, input.clone(), env, &mut |s| {
                 eval(re, input.clone(), env, &mut |re_val| {
                     eval(flags, input.clone(), env, &mut |_fv| {
-                        cb(crate::runtime::call_builtin("match_", &[s.clone(), re_val.clone()])?)
+                        match crate::runtime::call_builtin("match", &[s.clone(), re_val.clone()]) {
+                            Ok(v) => cb(v),
+                            Err(_) => Ok(true), // non-match → empty (like jq)
+                        }
                     })
                 })
             })
@@ -2786,7 +2789,10 @@ pub fn eval(
             eval(input_expr, input.clone(), env, &mut |s| {
                 eval(re, input.clone(), env, &mut |re_val| {
                     eval(flags, input.clone(), env, &mut |_fv| {
-                        cb(crate::runtime::call_builtin("capture", &[s.clone(), re_val.clone()])?)
+                        match crate::runtime::call_builtin("capture", &[s.clone(), re_val.clone()]) {
+                            Ok(v) => cb(v),
+                            Err(_) => Ok(true), // non-match → empty (like jq)
+                        }
                     })
                 })
             })

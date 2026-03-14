@@ -247,8 +247,9 @@ fn is_scalar(expr: &Expr) -> bool {
         }
         // Regex operations produce exactly one value
         Expr::RegexTest { input_expr, re, flags } => is_scalar(input_expr) && is_scalar(re) && is_scalar(flags),
-        Expr::RegexMatch { input_expr, re, flags } => is_scalar(input_expr) && is_scalar(re) && is_scalar(flags),
-        Expr::RegexCapture { input_expr, re, flags } => is_scalar(input_expr) && is_scalar(re) && is_scalar(flags),
+        // match/capture are generators (0 or 1 outputs) — non-match produces empty
+        Expr::RegexMatch { .. } => false,
+        Expr::RegexCapture { .. } => false,
         Expr::RegexSub { input_expr, re, tostr, flags } => is_scalar(input_expr) && is_scalar(re) && is_scalar(tostr) && is_scalar(flags),
         Expr::RegexGsub { input_expr, re, tostr, flags } => is_scalar(input_expr) && is_scalar(re) && is_scalar(tostr) && is_scalar(flags),
         _ => false,
@@ -1394,27 +1395,10 @@ impl Flattener {
                 self.emit(JitOp::Drop { slot: flags_val });
                 out
             }
-            Expr::RegexMatch { input_expr, re, flags } => {
-                let inp = self.flatten_scalar(input_expr, input_slot);
-                let re_val = self.flatten_scalar(re, input_slot);
-                let flags_val = self.flatten_scalar(flags, input_slot);
-                let out = self.alloc_slot();
-                self.emit(JitOp::CallBuiltin { dst: out, name: "match".to_string(), args: vec![inp, re_val, flags_val] });
-                self.emit(JitOp::Drop { slot: inp });
-                self.emit(JitOp::Drop { slot: re_val });
-                self.emit(JitOp::Drop { slot: flags_val });
-                out
-            }
-            Expr::RegexCapture { input_expr, re, flags } => {
-                let inp = self.flatten_scalar(input_expr, input_slot);
-                let re_val = self.flatten_scalar(re, input_slot);
-                let flags_val = self.flatten_scalar(flags, input_slot);
-                let out = self.alloc_slot();
-                self.emit(JitOp::CallBuiltin { dst: out, name: "capture".to_string(), args: vec![inp, re_val, flags_val] });
-                self.emit(JitOp::Drop { slot: inp });
-                self.emit(JitOp::Drop { slot: re_val });
-                self.emit(JitOp::Drop { slot: flags_val });
-                out
+            // RegexMatch/RegexCapture are handled as generators (via eval fallback)
+            // since they can produce 0 or 1 outputs (non-match → empty)
+            Expr::RegexMatch { .. } | Expr::RegexCapture { .. } => {
+                unreachable!("RegexMatch/RegexCapture should not reach flatten_scalar")
             }
             Expr::RegexSub { input_expr, re, tostr, flags } => {
                 let inp = self.flatten_scalar(input_expr, input_slot);
