@@ -860,6 +860,44 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             Expr::TryCatch { try_expr: Box::new(simplify_expr(try_expr)), catch_expr: Box::new(simplify_expr(catch_expr)) }
         }
         // delpaths([["field"]]) → del(.field)
+        Expr::Limit { count, generator } => {
+            let sc = simplify_expr(count);
+            let sg = simplify_expr(generator);
+            // first(scalar_expr) → scalar_expr: if count >= 1 and generator produces exactly 1 output
+            if let Expr::Literal(crate::ir::Literal::Num(n, _)) = &sc {
+                if *n >= 1.0 {
+                    fn is_single_output(e: &Expr) -> bool {
+                        match e {
+                            Expr::Input | Expr::Literal(_) | Expr::Not => true,
+                            Expr::Index { expr, key } => is_single_output(expr) && is_single_output(key),
+                            Expr::BinOp { lhs, rhs, .. } => is_single_output(lhs) && is_single_output(rhs),
+                            Expr::UnaryOp { operand, .. } => is_single_output(operand),
+                            Expr::Negate { operand } => is_single_output(operand),
+                            Expr::Pipe { left, right } => is_single_output(left) && is_single_output(right),
+                            Expr::IfThenElse { cond, then_branch, else_branch } => {
+                                is_single_output(cond) && is_single_output(then_branch) && is_single_output(else_branch)
+                            }
+                            Expr::LoadVar { .. } => true,
+                            Expr::LetBinding { value, body, .. } => is_single_output(value) && is_single_output(body),
+                            Expr::CallBuiltin { args, .. } => args.iter().all(|a| is_single_output(a)),
+                            Expr::ObjectConstruct { pairs } => pairs.iter().all(|(k, v)| is_single_output(k) && is_single_output(v)),
+                            Expr::RegexTest { input_expr, re, flags } => is_single_output(input_expr) && is_single_output(re) && is_single_output(flags),
+                            Expr::RegexSub { input_expr, re, tostr, flags } | Expr::RegexGsub { input_expr, re, tostr, flags } => {
+                                is_single_output(input_expr) && is_single_output(re) && is_single_output(tostr) && is_single_output(flags)
+                            }
+                            Expr::Update { path_expr, update_expr } => is_single_output(path_expr) && is_single_output(update_expr),
+                            Expr::Assign { path_expr, value_expr } => is_single_output(path_expr) && is_single_output(value_expr),
+                            Expr::Alternative { primary, fallback } => is_single_output(primary) && is_single_output(fallback),
+                            _ => false,
+                        }
+                    }
+                    if is_single_output(&sg) {
+                        return sg;
+                    }
+                }
+            }
+            Expr::Limit { count: Box::new(sc), generator: Box::new(sg) }
+        }
         Expr::DelPaths { paths } => {
             use crate::ir::Literal;
             if let Expr::Collect { generator } = paths.as_ref() {

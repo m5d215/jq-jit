@@ -173,6 +173,9 @@ TESTS=(
     '.tag|=if..then N:-c:.tag |= if . == "abc" then 1 else 0 end'
     '.x=(.x+1):-c:.x = (.x + 1)'
     'sel>N|.y+=1:-c:select(.x > 1000000) | .y += 1'
+    'sel(and)|.x+=1:-c:select(.x > 500 and .y < 1000) | .x += 1'
+    'sel(sw)|.x+=1:-c:select(.name | startswith("item_1")) | .x += 1'
+    'match(re):-c:.name | match("([a-z]+)_([0-9]+)")'
 )
 
 for test in "${TESTS[@]}"; do
