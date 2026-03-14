@@ -4686,6 +4686,61 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | split(sep) | .[from:to] | join(sep2)` pattern.
+    /// Returns (field_name, split_sep, from, to, join_sep).
+    /// from/to are Option<i64> (None = unbounded).
+    pub fn detect_field_split_slice_join(&self) -> Option<(String, String, Option<i64>, Option<i64>, String)> {
+        use crate::ir::{Expr, Literal};
+        let expr = self.detect_expr()?;
+        // Pipe(.field, Pipe(split, Pipe(slice, join)))
+        if let Expr::Pipe { left, right } = expr {
+            let field = if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() }
+                else { return None; }
+            } else { return None; };
+            if let Expr::Pipe { left: l2, right: r2 } = right.as_ref() {
+                let split_sep = if let Expr::CallBuiltin { name, args } = l2.as_ref() {
+                    if name != "split" || args.len() != 1 { return None; }
+                    if let Expr::Literal(Literal::Str(s)) = &args[0] { s.clone() }
+                    else { return None; }
+                } else { return None; };
+                if let Expr::Pipe { left: l3, right: r3 } = r2.as_ref() {
+                    let (from, to) = if let Expr::Slice { expr: base, from: f, to: t } = l3.as_ref() {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        fn extract_slice_idx(e: &Expr) -> Option<i64> {
+                            match e {
+                                Expr::Literal(Literal::Num(n, _)) => Some(*n as i64),
+                                Expr::Negate { operand } => {
+                                    if let Expr::Literal(Literal::Num(n, _)) = operand.as_ref() {
+                                        Some(-(*n as i64))
+                                    } else { None }
+                                }
+                                _ => None,
+                            }
+                        }
+                        let from_val = match f {
+                            Some(e) => Some(extract_slice_idx(e)?),
+                            None => None,
+                        };
+                        let to_val = match t {
+                            Some(e) => Some(extract_slice_idx(e)?),
+                            None => None,
+                        };
+                        (from_val, to_val)
+                    } else { return None; };
+                    let join_sep = if let Expr::CallBuiltin { name, args } = r3.as_ref() {
+                        if name != "join" || args.len() != 1 { return None; }
+                        if let Expr::Literal(Literal::Str(s)) = &args[0] { s.clone() }
+                        else { return None; }
+                    } else { return None; };
+                    return Some((field, split_sep, from, to, join_sep));
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `keys_unsorted | join(sep)` or `keys | join(sep)`.
     /// Returns (separator, is_sorted).
     pub fn detect_keys_join(&self) -> Option<(String, bool)> {
