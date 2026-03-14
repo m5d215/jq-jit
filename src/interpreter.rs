@@ -7387,6 +7387,63 @@ impl Filter {
         None
     }
 
+    /// Detect `if .f1 cmp .f2 then .f3 else .f4 end` where branches are field accesses.
+    /// Returns (cmp_f1, op, cmp_f2, then_field, else_field).
+    pub fn detect_if_ff_cmp_then_fields(&self) -> Option<(String, crate::ir::BinOp, String, String, String)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                let f1 = if let Expr::Index { expr: b, key: k } = lhs.as_ref() {
+                    if !matches!(b.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(s)) = k.as_ref() { s.clone() } else { return None; }
+                } else { return None; };
+                let f2 = if let Expr::Index { expr: b, key: k } = rhs.as_ref() {
+                    if !matches!(b.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(s)) = k.as_ref() { s.clone() } else { return None; }
+                } else { return None; };
+                let then_f = if let Expr::Index { expr: b, key: k } = then_branch.as_ref() {
+                    if !matches!(b.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(s)) = k.as_ref() { s.clone() } else { return None; }
+                } else { return None; };
+                let else_f = if let Expr::Index { expr: b, key: k } = else_branch.as_ref() {
+                    if !matches!(b.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(s)) = k.as_ref() { s.clone() } else { return None; }
+                } else { return None; };
+                return Some((f1, *op, f2, then_f, else_f));
+            }
+        }
+        None
+    }
+
+    /// Detect `if .f1 cmp .f2 then .f3 else .f4 end` where branches have arithmetic.
+    /// E.g. `if .x > .y then .x - .y else .y - .x end`
+    /// Returns (cmp_f1, op, cmp_f2, then_expr, else_expr) where exprs are RemapExpr.
+    pub fn detect_if_ff_cmp_then_computed(&self) -> Option<(String, crate::ir::BinOp, String, RemapExpr, RemapExpr)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                let f1 = if let Expr::Index { expr: b, key: k } = lhs.as_ref() {
+                    if !matches!(b.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(s)) = k.as_ref() { s.clone() } else { return None; }
+                } else { return None; };
+                let f2 = if let Expr::Index { expr: b, key: k } = rhs.as_ref() {
+                    if !matches!(b.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(s)) = k.as_ref() { s.clone() } else { return None; }
+                } else { return None; };
+                let then_r = Self::classify_remap_value(then_branch)?;
+                let else_r = Self::classify_remap_value(else_branch)?;
+                // At least one branch must not be a simple field (otherwise detect_if_ff_cmp_then_fields handles it)
+                if matches!(then_r, RemapExpr::Field(_)) && matches!(else_r, RemapExpr::Field(_)) { return None; }
+                return Some((f1, *op, f2, then_r, else_r));
+            }
+        }
+        None
+    }
+
     /// Detect `if .field cmp N then "\(.f1) lit" else "\(.f2) lit" end`
     /// Both branches are string interpolations referencing input fields.
     /// Returns (cmp_field, op, threshold, then_parts, else_parts).
