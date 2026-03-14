@@ -4615,6 +4615,29 @@ impl Filter {
         None
     }
 
+    /// Detect `keys_unsorted | join(sep)` or `keys | join(sep)`.
+    /// Returns (separator, is_sorted).
+    pub fn detect_keys_join(&self) -> Option<(String, bool)> {
+        use crate::ir::{Expr, UnaryOp};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left, right } = expr {
+            let (is_sorted, operand) = match left.as_ref() {
+                Expr::UnaryOp { op: UnaryOp::KeysUnsorted, operand } => (false, operand),
+                Expr::UnaryOp { op: UnaryOp::Keys, operand } => (true, operand),
+                _ => return None,
+            };
+            if !matches!(operand.as_ref(), Expr::Input) { return None; }
+            if let Expr::CallBuiltin { name, args } = right.as_ref() {
+                if name == "join" && args.len() == 1 {
+                    if let Expr::Literal(crate::ir::Literal::Str(sep)) = &args[0] {
+                        return Some((sep.clone(), is_sorted));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `{(.field_key): .field_val}` — single dynamic-key object construction.
     /// Returns (key_field, value_field).
     pub fn detect_dynamic_key_obj(&self) -> Option<(String, RemapExpr)> {

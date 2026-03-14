@@ -935,6 +935,58 @@ pub fn json_object_extract_keys_only(b: &[u8], pos: usize, keys: &mut Vec<(usize
     Some(keys.len())
 }
 
+/// Join keys of a JSON object with a separator, outputting a JSON string.
+/// For keys_unsorted|join(sep): outputs `"key1<sep>key2<sep>..."\n`.
+/// For keys|join(sep): sorts keys before joining.
+/// Key content between quotes is extracted directly (handles escapes).
+/// Returns false on non-object.
+pub fn json_object_keys_join_to_buf(b: &[u8], pos: usize, sep: &[u8], sorted: bool, buf: &mut Vec<u8>, keys_buf: &mut Vec<(usize, usize)>) -> bool {
+    let count = match json_object_extract_keys_only(b, pos, keys_buf) {
+        Some(c) => c,
+        None => return false,
+    };
+    if count == 0 {
+        buf.extend_from_slice(b"\"\"\n");
+        return true;
+    }
+    if sorted {
+        keys_buf.sort_by(|a, b_range| {
+            // Compare key content (between quotes, may have escapes)
+            let ak = &b[a.0+1..a.1-1];
+            let bk = &b[b_range.0+1..b_range.1-1];
+            ak.cmp(bk)
+        });
+    }
+    buf.push(b'"');
+    // Check if separator needs JSON escaping
+    let sep_needs_escape = sep.iter().any(|&c| c == b'"' || c == b'\\' || c < 0x20);
+    for (idx, &(ks, ke)) in keys_buf.iter().enumerate() {
+        if idx > 0 {
+            if sep_needs_escape {
+                for &c in sep {
+                    match c {
+                        b'"' => buf.extend_from_slice(b"\\\""),
+                        b'\\' => buf.extend_from_slice(b"\\\\"),
+                        c if c < 0x20 => {
+                            buf.extend_from_slice(b"\\u00");
+                            buf.push(b"0123456789abcdef"[(c >> 4) as usize]);
+                            buf.push(b"0123456789abcdef"[(c & 0xf) as usize]);
+                        }
+                        _ => buf.push(c),
+                    }
+                }
+            } else {
+                buf.extend_from_slice(sep);
+            }
+        }
+        // Key content is between quotes: b[ks+1..ke-1]
+        // Already valid JSON string content (escapes preserved)
+        buf.extend_from_slice(&b[ks+1..ke-1]);
+    }
+    buf.extend_from_slice(b"\"\n");
+    true
+}
+
 /// Extract unsorted keys from a JSON object without full parsing.
 /// Writes `["key1","key2",...]\n` to buf. Returns false on non-object.
 pub fn json_object_keys_unsorted_to_buf(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {
