@@ -4892,6 +4892,37 @@ impl Filter {
             || matches!(expr, Expr::Format { name, expr: inner } if (name == "json" || name == "text") && matches!(inner.as_ref(), Expr::Input))
     }
 
+    /// Detect `{a:.x, b:.y} | tojson` — remap then serialize to JSON string.
+    /// Returns Vec of (output_key, input_field) pairs if detected.
+    pub fn detect_remap_tojson(&self) -> Option<Vec<(String, String)>> {
+        use crate::ir::{Expr, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        let (remap_expr, tojson_check) = if let Expr::Pipe { left, right } = expr {
+            (left.as_ref(), right.as_ref())
+        } else { return None; };
+        // Check right is tojson
+        let is_tojson = matches!(tojson_check,
+            Expr::UnaryOp { op: UnaryOp::ToJson, operand } if matches!(operand.as_ref(), Expr::Input))
+            || matches!(tojson_check,
+            Expr::Format { name, expr: inner } if (name == "json" || name == "text") && matches!(inner.as_ref(), Expr::Input));
+        if !is_tojson { return None; }
+        // Check left is {key: .field, ...}
+        if let Expr::ObjectConstruct { pairs } = remap_expr {
+            let mut result = Vec::with_capacity(pairs.len());
+            for (k, v) in pairs {
+                let key = if let Expr::Literal(Literal::Str(s)) = k { s.clone() } else { return None; };
+                if let Expr::Index { expr: base, key: field_key } = v {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(f)) = field_key.as_ref() {
+                        result.push((key, f.clone()));
+                    } else { return None; }
+                } else { return None; }
+            }
+            if !result.is_empty() { return Some(result); }
+        }
+        None
+    }
+
     /// Detect `.[]` — each/iteration on input.
     pub fn is_each(&self) -> bool {
         use crate::ir::Expr;
@@ -5834,6 +5865,51 @@ impl Filter {
                                 if let (Some(t_bytes), Some(f_bytes)) = (const_expr_to_json(then_branch), const_expr_to_json(else_branch)) {
                                     return Some((field1.clone(), *op, field2.clone(), t_bytes, f_bytes));
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `if .field cmp N then "\(.f1) lit" else "\(.f2) lit" end`
+    /// Both branches are string interpolations referencing input fields.
+    /// Returns (cmp_field, op, threshold, then_parts, else_parts).
+    pub fn detect_cmp_branch_string_interp(&self) -> Option<(String, crate::ir::BinOp, f64, Vec<(bool, String)>, Vec<(bool, String)>)> {
+        use crate::ir::{Expr, BinOp, Literal, StringPart};
+        let expr = self.detect_expr()?;
+        fn extract_interp_parts(e: &Expr) -> Option<Vec<(bool, String)>> {
+            if let Expr::StringInterpolation { parts } = e {
+                let mut result = Vec::new();
+                for part in parts {
+                    match part {
+                        StringPart::Literal(s) => result.push((true, s.clone())),
+                        StringPart::Expr(Expr::Index { expr: base, key }) => {
+                            if !matches!(base.as_ref(), Expr::Input) { return None; }
+                            if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                                result.push((false, f.clone()));
+                            } else { return None; }
+                        }
+                        _ => return None,
+                    }
+                }
+                if result.iter().any(|(is_lit, _)| !is_lit) { return Some(result); }
+            }
+            None
+        }
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                    return None;
+                }
+                if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                            if let (Some(t_parts), Some(f_parts)) = (extract_interp_parts(then_branch), extract_interp_parts(else_branch)) {
+                                return Some((field.clone(), *op, *n, t_parts, f_parts));
                             }
                         }
                     }
