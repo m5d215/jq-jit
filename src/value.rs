@@ -2429,7 +2429,7 @@ fn skip_ws(b: &[u8], mut pos: usize) -> usize {
 const MAX_JSON_DEPTH: usize = 10000;
 
 /// Skip past a JSON value without constructing it. Returns the position after the value.
-fn skip_json_value(b: &[u8], pos: usize) -> Result<usize> {
+pub fn skip_json_value(b: &[u8], pos: usize) -> Result<usize> {
     if pos >= b.len() { bail!("Unexpected end of JSON"); }
     match b[pos] {
         b'n' => { if b.get(pos..pos+4) == Some(b"null") { Ok(pos + 4) } else { bail!("Invalid JSON at position {}", pos) } }

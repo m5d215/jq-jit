@@ -4572,6 +4572,55 @@ impl Filter {
         matches!(expr, Expr::UnaryOp { op: UnaryOp::ToEntries, operand } if matches!(operand.as_ref(), Expr::Input))
     }
 
+    /// Detect `to_entries[] | "\(.key)SEP\(.value)"` pattern.
+    /// Returns Vec<(is_literal, content)> where content is "key"/"value" for interpolated parts
+    /// and literal text for literal parts.
+    pub fn detect_to_entries_each_interp(&self) -> Option<Vec<(bool, String)>> {
+        use crate::ir::{Expr, Literal, UnaryOp, StringPart};
+        let expr = self.detect_expr()?;
+        // Match: Pipe(to_entries_each, string_interp)
+        // Forms:
+        //   Pipe(Each(UnaryOp(ToEntries,Input)), StringInterp)
+        //   Pipe(Pipe(UnaryOp(ToEntries,Input), Each(Input)), StringInterp)
+        let (te_each, interp) = if let Expr::Pipe { left, right } = expr {
+            (left.as_ref(), right.as_ref())
+        } else { return None; };
+        // Verify left is to_entries[]
+        let is_te_each = match te_each {
+            Expr::Each { input_expr } => {
+                matches!(input_expr.as_ref(), Expr::UnaryOp { op: UnaryOp::ToEntries, operand } if matches!(operand.as_ref(), Expr::Input))
+            }
+            Expr::Pipe { left, right } => {
+                matches!(left.as_ref(), Expr::UnaryOp { op: UnaryOp::ToEntries, operand } if matches!(operand.as_ref(), Expr::Input))
+                && matches!(right.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input))
+            }
+            _ => false,
+        };
+        if !is_te_each { return None; }
+        // Parse string interpolation with .key and .value references
+        if let Expr::StringInterpolation { parts } = interp {
+            let mut result = Vec::new();
+            for part in parts {
+                match part {
+                    StringPart::Literal(s) => result.push((true, s.clone())),
+                    StringPart::Expr(Expr::Index { expr: base, key }) => {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                            if field == "key" || field == "value" {
+                                result.push((false, field.clone()));
+                            } else { return None; }
+                        } else { return None; }
+                    }
+                    _ => return None,
+                }
+            }
+            if result.iter().any(|(is_lit, _)| !is_lit) {
+                return Some(result);
+            }
+        }
+        None
+    }
+
     /// Detect `{k1:.f1, k2:.f2, ...} | to_entries` pattern.
     /// Returns Vec of (output_key, source_field) pairs.
     pub fn detect_remap_to_entries(&self) -> Option<Vec<(String, String)>> {

@@ -8,7 +8,7 @@ use std::process;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, json_object_get_nested_field_raw, parse_json_num, json_value_length, json_object_keys_to_buf_reuse, json_object_extract_keys_only, json_object_keys_unsorted_to_buf, json_object_keys_join_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_type_byte, json_object_del_field, json_object_del_fields, json_object_merge_literal, json_object_sort_keys, json_object_filter_by_value_type, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_with_entries_select_value_cmp, json_object_set_field_raw, json_object_update_field_num, is_json_compact, push_json_compact_raw, push_tojson_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, walk_json_transform_nums, pool_value};
+use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, json_object_get_nested_field_raw, parse_json_num, json_value_length, json_object_keys_to_buf_reuse, json_object_extract_keys_only, json_object_keys_unsorted_to_buf, json_object_keys_join_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_type_byte, json_object_del_field, json_object_del_fields, json_object_merge_literal, json_object_sort_keys, json_object_filter_by_value_type, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_with_entries_select_value_cmp, json_object_set_field_raw, json_object_update_field_num, is_json_compact, push_json_compact_raw, push_tojson_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, walk_json_transform_nums, pool_value, skip_json_value};
 use jq_jit::interpreter::Filter;
 
 fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -2021,7 +2021,10 @@ fn real_main() {
     let is_each = (use_compact_buf || use_pretty_buf) && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() && del_field.is_none() && field_access.is_none() && !is_collect_each && collect_each_arith.is_none() && collect_each_select_type.is_none() && filter.is_each();
     let is_sort_keys = (use_compact_buf || use_pretty_buf) && !exit_status && !is_each && filter.is_sort_keys();
     let is_to_entries = (use_compact_buf || use_pretty_buf) && !exit_status && !is_each && !is_sort_keys && filter.is_to_entries();
-    let remap_to_entries = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_to_entries && field_remap.is_none() {
+    let to_entries_each_interp = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_to_entries {
+        filter.detect_to_entries_each_interp()
+    } else { None };
+    let remap_to_entries = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_to_entries && to_entries_each_interp.is_none() && field_remap.is_none() {
         filter.detect_remap_to_entries()
     } else { None };
     let with_entries_select = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_to_entries && remap_to_entries.is_none() {
@@ -2249,7 +2252,7 @@ fn real_main() {
         || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_field_unary.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_dynkey.is_some() || select_cmp_dynkey_mixed.is_some() || select_cmp_array.is_some() || select_arith_cmp_array.is_some() || select_cmp_value.is_some() || select_cmp_str_chain.is_some() || select_ff_cmp_field.is_some() || select_ff_cmp.is_some() || select_ff_cmp_cremap.is_some() || select_ff_cmp_value.is_some() || select_ff_cmp_array.is_some() || select_compound_array.is_some() || select_str_field.is_some() || select_str_cremap.is_some() || select_str_array.is_some() || select_str_str_chain.is_some()
         || computed_array.is_some() || array_field.is_some() || multi_field.is_some() || is_length || is_keys
         || is_keys_unsorted || keys_join.is_some() || has_field.is_some() || has_multi.is_some() || select_has_multi.is_some() || is_type || del_field.is_some() || select_cmp_del.is_some() || select_str_del.is_some() || select_cmp_merge.is_some() || select_str_merge.is_some() || del_fields.is_some() || obj_merge_lit.is_some() || obj_merge_computed.is_some()
-        || is_collect_each || collect_each_arith.is_some() || collect_each_select_type.is_some() || collect_each_select_cmp.is_some() || first_each_select_type.is_some() || count_each_select_cmp.is_some() || sort_two_fields.is_some() || is_each || is_sort_keys || is_to_entries || remap_to_entries.is_some() || with_entries_select.is_some() || with_entries_del.is_some() || with_entries_type.is_some() || is_tojson || string_interp_fields.is_some() || string_add_chain.is_some() || array_join.is_some()
+        || is_collect_each || collect_each_arith.is_some() || collect_each_select_type.is_some() || collect_each_select_cmp.is_some() || first_each_select_type.is_some() || count_each_select_cmp.is_some() || sort_two_fields.is_some() || is_each || is_sort_keys || is_to_entries || to_entries_each_interp.is_some() || remap_to_entries.is_some() || with_entries_select.is_some() || with_entries_del.is_some() || with_entries_type.is_some() || is_tojson || string_interp_fields.is_some() || string_add_chain.is_some() || array_join.is_some()
         || literal_output.is_some() || array_fields_format.is_some() || raw_csv_fields.is_some()
         || field_str_reverse.is_some() || field_split_rev_join.is_some() || field_case_split_join.is_some() || field_case_split.is_some() || field_split_join.is_some() || field_split_slice_join.is_some() || field_split_first.is_some() || field_split_last.is_some() || field_split_nth.is_some() || field_split_length.is_some() || field_strop_length.is_some() || field_length_cmp.is_some() || select_length_cmp.is_some() || select_length_cmp_field.is_some() || field_slice.is_some()
         || dynamic_key_obj.is_some() || dynamic_key_mixed.is_some() || field_update_num.is_some() || field_assign_const.is_some()
@@ -9138,6 +9141,101 @@ fn real_main() {
                         }
                         Ok(())
                     })
+                } else if let Some(ref te_interp_parts) = to_entries_each_interp {
+                    // to_entries[] | "\(.key)=\(.value)" — iterate kv pairs with string interpolation
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if raw.is_empty() || raw[0] != b'{' {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            return Ok(());
+                        }
+                        let mut i = 1usize;
+                        while i < raw.len() && matches!(raw[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+                        if i < raw.len() && raw[i] == b'}' {
+                            // Empty object — no entries to emit
+                            if compact_buf.len() >= 1 << 17 {
+                                let _ = out.write_all(&compact_buf);
+                                compact_buf.clear();
+                            }
+                            return Ok(());
+                        }
+                        loop {
+                            if i >= raw.len() || raw[i] != b'"' { break; }
+                            // Read key
+                            let ks = i + 1;
+                            i += 1;
+                            while i < raw.len() { match raw[i] { b'"' => break, b'\\' => { i += 2; continue }, _ => i += 1 } }
+                            if i >= raw.len() { break; }
+                            let ke = i;
+                            i += 1;
+                            while i < raw.len() && matches!(raw[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+                            if i >= raw.len() || raw[i] != b':' { break; }
+                            i += 1;
+                            while i < raw.len() && matches!(raw[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+                            let vs = i;
+                            i = match skip_json_value(raw, i) { Ok(e) => e, Err(_) => break };
+                            let ve = i;
+                            // Emit interpolated string for this entry
+                            compact_buf.push(b'"');
+                            for (is_lit, content) in te_interp_parts {
+                                if *is_lit {
+                                    for &b in content.as_bytes() {
+                                        match b {
+                                            b'"' => compact_buf.extend_from_slice(b"\\\""),
+                                            b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                                            _ => compact_buf.push(b),
+                                        }
+                                    }
+                                } else if content == "key" {
+                                    // Key: unescaped string content from JSON key
+                                    let key_bytes = &raw[ks..ke];
+                                    if !key_bytes.contains(&b'\\') {
+                                        // Simple key — re-escape for output string
+                                        for &b in key_bytes {
+                                            match b {
+                                                b'"' => compact_buf.extend_from_slice(b"\\\""),
+                                                b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                                                _ => compact_buf.push(b),
+                                            }
+                                        }
+                                    } else {
+                                        // Key has escapes — copy as-is (already JSON-escaped)
+                                        compact_buf.extend_from_slice(key_bytes);
+                                    }
+                                } else {
+                                    // "value": string repr of value
+                                    let val_bytes = &raw[vs..ve];
+                                    if val_bytes.len() >= 2 && val_bytes[0] == b'"' && val_bytes[val_bytes.len()-1] == b'"' {
+                                        // String value — output inner content (may have JSON escapes)
+                                        compact_buf.extend_from_slice(&val_bytes[1..val_bytes.len()-1]);
+                                    } else {
+                                        // Number/bool/null/array/object — output as JSON text
+                                        for &b in val_bytes {
+                                            match b {
+                                                b'"' => compact_buf.extend_from_slice(b"\\\""),
+                                                b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                                                _ => compact_buf.push(b),
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            compact_buf.extend_from_slice(b"\"\n");
+                            // Skip to next entry
+                            while i < raw.len() && matches!(raw[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+                            if i >= raw.len() { break; }
+                            if raw[i] == b'}' { break; }
+                            if raw[i] != b',' { break; }
+                            i += 1;
+                            while i < raw.len() && matches!(raw[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
                 } else if let Some(ref rte_pairs) = remap_to_entries {
                     // {k1:.f1, k2:.f2} | to_entries → emit entries array from raw fields
                     let rte_src: Vec<&str> = rte_pairs.iter().map(|(_, src)| src.as_str()).collect();
@@ -15912,6 +16010,92 @@ fn real_main() {
                     } else if !json_to_entries_raw(raw, 0, &mut compact_buf) {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some(ref te_interp_parts) = to_entries_each_interp {
+                // to_entries[] | "\(.key)=\(.value)" — iterate kv pairs (stdin)
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if raw.is_empty() || raw[0] != b'{' {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        return Ok(());
+                    }
+                    let mut i = 1usize;
+                    while i < raw.len() && matches!(raw[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+                    if i < raw.len() && raw[i] == b'}' {
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        return Ok(());
+                    }
+                    loop {
+                        if i >= raw.len() || raw[i] != b'"' { break; }
+                        let ks = i + 1;
+                        i += 1;
+                        while i < raw.len() { match raw[i] { b'"' => break, b'\\' => { i += 2; continue }, _ => i += 1 } }
+                        if i >= raw.len() { break; }
+                        let ke = i;
+                        i += 1;
+                        while i < raw.len() && matches!(raw[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+                        if i >= raw.len() || raw[i] != b':' { break; }
+                        i += 1;
+                        while i < raw.len() && matches!(raw[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+                        let vs = i;
+                        i = match skip_json_value(raw, i) { Ok(e) => e, Err(_) => break };
+                        let ve = i;
+                        compact_buf.push(b'"');
+                        for (is_lit, ref_content) in te_interp_parts {
+                            if *is_lit {
+                                for &b in ref_content.as_bytes() {
+                                    match b {
+                                        b'"' => compact_buf.extend_from_slice(b"\\\""),
+                                        b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                                        _ => compact_buf.push(b),
+                                    }
+                                }
+                            } else if ref_content == "key" {
+                                let key_bytes = &raw[ks..ke];
+                                if !key_bytes.contains(&b'\\') {
+                                    for &b in key_bytes {
+                                        match b {
+                                            b'"' => compact_buf.extend_from_slice(b"\\\""),
+                                            b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                                            _ => compact_buf.push(b),
+                                        }
+                                    }
+                                } else {
+                                    compact_buf.extend_from_slice(key_bytes);
+                                }
+                            } else {
+                                let val_bytes = &raw[vs..ve];
+                                if val_bytes.len() >= 2 && val_bytes[0] == b'"' && val_bytes[val_bytes.len()-1] == b'"' {
+                                    compact_buf.extend_from_slice(&val_bytes[1..val_bytes.len()-1]);
+                                } else {
+                                    for &b in val_bytes {
+                                        match b {
+                                            b'"' => compact_buf.extend_from_slice(b"\\\""),
+                                            b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                                            _ => compact_buf.push(b),
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        compact_buf.extend_from_slice(b"\"\n");
+                        while i < raw.len() && matches!(raw[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+                        if i >= raw.len() { break; }
+                        if raw[i] == b'}' { break; }
+                        if raw[i] != b',' { break; }
+                        i += 1;
+                        while i < raw.len() && matches!(raw[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
