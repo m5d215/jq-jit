@@ -5559,9 +5559,9 @@ impl Filter {
         None
     }
 
-    /// Detect `.field |= gsub("re"; "replacement")`.
-    /// Returns (field_name, regex_pattern, replacement).
-    pub fn detect_field_update_gsub(&self) -> Option<(String, String, String)> {
+    /// Detect `.field |= (split("sep") | last)`.
+    /// Returns (field_name, separator).
+    pub fn detect_field_update_split_last(&self) -> Option<(String, String)> {
         use crate::ir::{Expr, Literal};
         let expr = self.detect_expr()?;
         let update_expr_outer = if let Expr::LetBinding { body, .. } = expr { body.as_ref() } else { expr };
@@ -5569,12 +5569,79 @@ impl Filter {
             if let Expr::Index { expr: base, key } = path_expr.as_ref() {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
                 if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
-                    if let Expr::RegexGsub { input_expr, re, tostr, .. } = update_expr.as_ref() {
-                        if !matches!(input_expr.as_ref(), Expr::Input) { return None; }
-                        if let Expr::Literal(Literal::Str(pattern)) = re.as_ref() {
-                            if let Expr::Literal(Literal::Str(replacement)) = tostr.as_ref() {
-                                return Some((field.clone(), pattern.clone(), replacement.clone()));
+                    fn check_split_last(e: &Expr) -> Option<String> {
+                        // Form 1: Pipe(split, last)
+                        if let Expr::Pipe { left, right } = e {
+                            if let Some(sep) = extract_split(left) {
+                                if is_last(right) { return Some(sep); }
                             }
+                        }
+                        // Form 2 (simplified): Index { expr: split(.,"_"), key: Literal(Num(-1)) }
+                        if let Expr::Index { expr: inner, key } = e {
+                            if matches!(key.as_ref(), Expr::Literal(Literal::Num(n, _)) if *n == -1.0) {
+                                if let Some(sep) = extract_split(inner) { return Some(sep); }
+                            }
+                        }
+                        // Form 3: CallBuiltin("last", [split])
+                        if let Expr::CallBuiltin { name, args } = e {
+                            if name == "last" && args.len() == 1 {
+                                if let Some(sep) = extract_split(&args[0]) { return Some(sep); }
+                            }
+                        }
+                        None
+                    }
+                    fn extract_split(e: &Expr) -> Option<String> {
+                        if let Expr::CallBuiltin { name, args } = e {
+                            if name == "split" && args.len() == 1 {
+                                if let Expr::Literal(Literal::Str(sep)) = &args[0] {
+                                    return Some(sep.clone());
+                                }
+                            }
+                        }
+                        None
+                    }
+                    fn is_last(e: &Expr) -> bool {
+                        // last is .[-1] or CallBuiltin("last", [Input])
+                        if let Expr::Index { expr: inner, key } = e {
+                            if matches!(inner.as_ref(), Expr::Input) && matches!(key.as_ref(), Expr::Literal(Literal::Num(n, _)) if *n == -1.0) {
+                                return true;
+                            }
+                        }
+                        if let Expr::CallBuiltin { name, args } = e {
+                            if name == "last" && args.len() == 1 && matches!(args[0], Expr::Input) {
+                                return true;
+                            }
+                        }
+                        false
+                    }
+                    if let Some(sep) = check_split_last(update_expr) {
+                        return Some((field.clone(), sep));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `.field |= gsub("re"; "replacement")` or `.field |= sub("re"; "replacement")`.
+    /// Returns (field_name, regex_pattern, replacement, is_global).
+    pub fn detect_field_update_gsub(&self) -> Option<(String, String, String, bool)> {
+        use crate::ir::{Expr, Literal};
+        let expr = self.detect_expr()?;
+        let update_expr_outer = if let Expr::LetBinding { body, .. } = expr { body.as_ref() } else { expr };
+        if let Expr::Update { path_expr, update_expr } = update_expr_outer {
+            if let Expr::Index { expr: base, key } = path_expr.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    let (is_global, input_expr, re, tostr) = match update_expr.as_ref() {
+                        Expr::RegexGsub { input_expr, re, tostr, .. } => (true, input_expr, re, tostr),
+                        Expr::RegexSub { input_expr, re, tostr, .. } => (false, input_expr, re, tostr),
+                        _ => return None,
+                    };
+                    if !matches!(input_expr.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(pattern)) = re.as_ref() {
+                        if let Expr::Literal(Literal::Str(replacement)) = tostr.as_ref() {
+                            return Some((field.clone(), pattern.clone(), replacement.clone(), is_global));
                         }
                     }
                 }

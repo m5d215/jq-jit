@@ -1403,8 +1403,9 @@ pub fn json_object_update_field_num_chain(
 /// Update a string field by applying regex gsub replacement.
 /// Extracts the field value, applies regex replacement, and writes back.
 /// For strings without JSON escapes, operates directly on raw bytes.
+/// `is_global`: true for gsub (replace all), false for sub (replace first).
 pub fn json_object_update_field_gsub(
-    b: &[u8], pos: usize, field: &str, re: &regex::Regex, replacement: &str, buf: &mut Vec<u8>,
+    b: &[u8], pos: usize, field: &str, re: &regex::Regex, replacement: &str, is_global: bool, buf: &mut Vec<u8>,
 ) -> bool {
     if pos >= b.len() || b[pos] != b'{' { return false; }
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
@@ -1420,12 +1421,20 @@ pub fn json_object_update_field_gsub(
                 Ok(s) => s,
                 Err(_) => return false,
             };
-            result_str = re.replace_all(&s, replacement).into_owned();
+            result_str = if is_global {
+                re.replace_all(&s, replacement).into_owned()
+            } else {
+                re.replace(&s, replacement).into_owned()
+            };
             result_bytes = result_str.as_bytes();
         } else {
             // Fast: no escapes, work directly on raw bytes
             let s = unsafe { std::str::from_utf8_unchecked(inner) };
-            result_str = re.replace_all(s, replacement).into_owned();
+            result_str = if is_global {
+                re.replace_all(s, replacement).into_owned()
+            } else {
+                re.replace(s, replacement).into_owned()
+            };
             result_bytes = result_str.as_bytes();
         }
         // Find object end
@@ -1506,6 +1515,67 @@ pub fn json_object_update_field_split_first(
                 }
             } else if let Some(idx) = inner.windows(sep_bytes.len()).position(|w| w == sep_bytes) {
                 buf.extend_from_slice(&inner[..idx]);
+            } else {
+                // No separator found — result is unchanged (whole string)
+                buf.extend_from_slice(inner);
+            }
+        }
+        buf.push(b'"');
+        buf.extend_from_slice(&b[val_end..obj_end]);
+        return true;
+    }
+    false
+}
+
+/// Update a field by taking the last element after splitting by a separator.
+/// `.field |= (split("sep")|last)` — extract string field, find last separator, write suffix.
+pub fn json_object_update_field_split_last(
+    b: &[u8], pos: usize, field: &str, sep: &str, buf: &mut Vec<u8>,
+) -> bool {
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
+        if val_start >= val_end || b[val_start] != b'"' { return false; }
+        let inner = &b[val_start + 1..val_end - 1];
+        let has_escapes = memchr::memchr(b'\\', inner).is_some();
+        // Find object end
+        let mut obj_end = b.len();
+        while obj_end > val_end && b[obj_end - 1] != b'}' { obj_end -= 1; }
+        if obj_end <= val_end { return false; }
+        buf.extend_from_slice(&b[pos..val_start]);
+        buf.push(b'"');
+        if has_escapes {
+            let s: String = match serde_json::from_slice(&b[val_start..val_end]) {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+            let last = s.rsplit(sep).next().unwrap_or("");
+            for &ch in last.as_bytes() {
+                match ch {
+                    b'"' => buf.extend_from_slice(b"\\\""),
+                    b'\\' => buf.extend_from_slice(b"\\\\"),
+                    b'\n' => buf.extend_from_slice(b"\\n"),
+                    b'\r' => buf.extend_from_slice(b"\\r"),
+                    b'\t' => buf.extend_from_slice(b"\\t"),
+                    c if c < 0x20 => {
+                        buf.extend_from_slice(format!("\\u{:04x}", c).as_bytes());
+                    }
+                    _ => buf.push(ch),
+                }
+            }
+        } else {
+            let sep_bytes = sep.as_bytes();
+            if sep_bytes.is_empty() {
+                // split("") | last → last character
+                if !inner.is_empty() {
+                    // Find last UTF-8 character
+                    let mut start = inner.len() - 1;
+                    while start > 0 && inner[start] >= 0x80 && inner[start] < 0xC0 {
+                        start -= 1;
+                    }
+                    buf.extend_from_slice(&inner[start..]);
+                }
+            } else if let Some(idx) = inner.windows(sep_bytes.len()).rposition(|w| w == sep_bytes) {
+                buf.extend_from_slice(&inner[idx + sep_bytes.len()..]);
             } else {
                 // No separator found — result is unchanged (whole string)
                 buf.extend_from_slice(inner);
