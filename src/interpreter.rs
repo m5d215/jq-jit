@@ -370,6 +370,33 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             let sr = simplify_expr(right);
             if matches!(&sl, Expr::Input) { return sr; }
             if matches!(&sr, Expr::Input) { return sl; }
+            // Beta-reduce: X | UnaryOp(op, .) → UnaryOp(op, X)
+            // Only for numeric unary ops that don't have specialized detectors
+            // in Pipe(.field, UnaryOp) form
+            // NOTE: Disabled — too aggressive, breaks other detectors that match
+            // Pipe(.field, UnaryOp(op, Input)). Instead, extend specific detectors.
+            // Beta-reduce: X | (. binop N) → (X binop N) when N is input-free
+            // This flattens pipes like `.x | floor | . > N` into `floor(.x) > N`
+            // enabling existing arith_chain_cmp and field_cmp detectors
+            if let Expr::BinOp { op, lhs, rhs } = &sr {
+                if matches!(lhs.as_ref(), Expr::Input) && rhs.is_input_free() {
+                    return simplify_expr(&Expr::BinOp {
+                        op: *op,
+                        lhs: Box::new(sl),
+                        rhs: rhs.clone(),
+                    });
+                }
+            }
+            // Beta-reduce: X | (N binop .) → (N binop X) when N is input-free
+            if let Expr::BinOp { op, lhs, rhs } = &sr {
+                if matches!(rhs.as_ref(), Expr::Input) && lhs.is_input_free() {
+                    return simplify_expr(&Expr::BinOp {
+                        op: *op,
+                        lhs: lhs.clone(),
+                        rhs: Box::new(sl),
+                    });
+                }
+            }
             // Semantic: to_entries | from_entries → identity
             if matches!(&sl, Expr::UnaryOp { op: UnaryOp::ToEntries, .. })
                 && matches!(&sr, Expr::UnaryOp { op: UnaryOp::FromEntries, operand } if matches!(operand.as_ref(), Expr::Input))
@@ -5031,12 +5058,15 @@ impl Filter {
                         break;
                     }
                 }
-                if ops.len() < 1 { return None; }
                 ops.reverse();
+                // Leaf: plain .field
                 if let Expr::Index { expr: base, key } = cur {
-                    if !matches!(base.as_ref(), Expr::Input) { return None; }
-                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
-                        return Some((field.clone(), ops, *op, *threshold));
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                            if !ops.is_empty() {
+                                return Some((field.clone(), ops, *op, *threshold));
+                            }
+                        }
                     }
                 }
             }
