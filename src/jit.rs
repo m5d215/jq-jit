@@ -5717,6 +5717,84 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 return 0;
             }
         }
+        // Fast path: any (op 24) — array any truthy
+        if op == 24 {
+            if let Value::Arr(a) = &*input {
+                let r = a.iter().any(|v| !matches!(v, Value::Null | Value::False));
+                std::ptr::write(dst, if r { Value::True } else { Value::False });
+                return 0;
+            }
+        }
+        // Fast path: all (op 25) — array all truthy
+        if op == 25 {
+            if let Value::Arr(a) = &*input {
+                let r = a.iter().all(|v| !matches!(v, Value::Null | Value::False));
+                std::ptr::write(dst, if r { Value::True } else { Value::False });
+                return 0;
+            }
+        }
+        // Fast path: min (op 12)
+        if op == 12 {
+            if let Value::Arr(a) = &*input {
+                if a.is_empty() {
+                    std::ptr::write(dst, Value::Null);
+                    return 0;
+                }
+                let mut m = &a[0];
+                for v in &a[1..] {
+                    if crate::runtime::compare_values(v, m) == std::cmp::Ordering::Less { m = v; }
+                }
+                std::ptr::write(dst, m.clone());
+                return 0;
+            }
+        }
+        // Fast path: max (op 13)
+        if op == 13 {
+            if let Value::Arr(a) = &*input {
+                if a.is_empty() {
+                    std::ptr::write(dst, Value::Null);
+                    return 0;
+                }
+                let mut m = &a[0];
+                for v in &a[1..] {
+                    if crate::runtime::compare_values(v, m) == std::cmp::Ordering::Greater { m = v; }
+                }
+                std::ptr::write(dst, m.clone());
+                return 0;
+            }
+        }
+        // Fast path: sort (op 8)
+        if op == 8 {
+            if let Value::Arr(a) = &*input {
+                let mut sorted = a.as_ref().clone();
+                sorted.sort_by(crate::runtime::compare_values);
+                std::ptr::write(dst, Value::Arr(Rc::new(sorted)));
+                return 0;
+            }
+        }
+        // Fast path: unique (op 10)
+        if op == 10 {
+            if let Value::Arr(a) = &*input {
+                let mut sorted = a.as_ref().clone();
+                sorted.sort_by(crate::runtime::compare_values);
+                sorted.dedup_by(|a, b| crate::runtime::compare_values(a, b) == std::cmp::Ordering::Equal);
+                std::ptr::write(dst, Value::Arr(Rc::new(sorted)));
+                return 0;
+            }
+        }
+        // Fast path: ltrimstr/rtrimstr/trim (op 40/41/42) — null-arg form trims whitespace
+        if op >= 40 && op <= 42 {
+            if let Value::Str(s) = &*input {
+                let r = match op {
+                    40 => s.trim_start(),
+                    41 => s.trim_end(),
+                    42 => s.trim(),
+                    _ => unreachable!(),
+                };
+                std::ptr::write(dst, Value::from_str(r));
+                return 0;
+            }
+        }
         match unaryop_from_i32(op) {
             Some(u) => match crate::eval::eval_unaryop(u, &*input) {
                 Ok(v) => { std::ptr::write(dst, v); 0 }

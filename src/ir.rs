@@ -512,6 +512,9 @@ impl Expr {
             Expr::BinOp { lhs, rhs, .. } => lhs.is_simple_scalar() && rhs.is_simple_scalar(),
             Expr::UnaryOp { operand, .. } => operand.is_simple_scalar(),
             Expr::Negate { operand } => operand.is_simple_scalar(),
+            Expr::Alternative { primary, fallback } => primary.is_simple_scalar() && fallback.is_simple_scalar(),
+            Expr::IfThenElse { cond, then_branch, else_branch } =>
+                cond.is_simple_scalar() && then_branch.is_simple_scalar() && else_branch.is_simple_scalar(),
             _ => false,
         }
     }
