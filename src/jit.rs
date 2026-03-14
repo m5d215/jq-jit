@@ -330,6 +330,9 @@ enum JitOp {
     FieldIsTruthy { base: SlotId, field: String, then_label: LabelId, else_label: LabelId },
     /// Combined field access + numeric comparison + branch: avoids creating intermediate Values.
     FieldCmpNum { base: SlotId, field: String, value: f64, op: i32, then_label: LabelId, else_label: LabelId },
+    /// Branch on type tag comparison: loads tag byte from src and compares against expected.
+    /// tags is a bitmask of matching tag values (bit 0 = Null, 1 = False, 2 = True, 3 = Num, etc.)
+    TypeCmpBranch { src: SlotId, tags: u8, then_label: LabelId, else_label: LabelId },
     Jump { label: LabelId },
     Label { id: LabelId },
 
@@ -2078,6 +2081,30 @@ impl Flattener {
                         if matches!(base.as_ref(), Expr::Input) {
                             if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                                 self.emit(JitOp::FieldIsTruthy { base: input_slot, field: field.clone(), then_label: then_lbl, else_label: else_lbl });
+                                true
+                            } else { false }
+                        } else { false }
+                    } else { false };
+                    // Optimization: type == "TYPE" → direct tag comparison
+                    let used_fused = used_fused || if let Expr::BinOp { op: bop @ (BinOp::Eq | BinOp::Ne), lhs, rhs } = cond.as_ref() {
+                        let type_name = extract_type_cmp(lhs, rhs).or_else(|| extract_type_cmp(rhs, lhs));
+                        if let Some(tname) = type_name {
+                            let tags = match tname {
+                                "null" => Some(1u8 << 0),
+                                "boolean" => Some((1u8 << 1) | (1u8 << 2)), // False | True
+                                "number" => Some(1u8 << 3),
+                                "string" => Some(1u8 << 4),
+                                "array" => Some(1u8 << 5),
+                                "object" => Some(1u8 << 6),
+                                _ => None,
+                            };
+                            if let Some(tags) = tags {
+                                let (tl, el) = if matches!(bop, BinOp::Ne) {
+                                    (else_lbl, then_lbl) // swap for !=
+                                } else {
+                                    (then_lbl, else_lbl)
+                                };
+                                self.emit(JitOp::TypeCmpBranch { src: input_slot, tags, then_label: tl, else_label: el });
                                 true
                             } else { false }
                         } else { false }
@@ -7074,7 +7101,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 *use_count.entry(*src).or_insert(0) += 1;
             }
             JitOp::IfTruthy { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
-            JitOp::FieldIsTruthy { base, .. } | JitOp::FieldCmpNum { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
+            JitOp::FieldIsTruthy { base, .. } | JitOp::FieldCmpNum { base, .. } | JitOp::TypeCmpBranch { src: base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
             JitOp::IsNullOrFalse { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
             JitOp::Alternative { primary, .. } => { *use_count.entry(*primary).or_insert(0) += 1; }
             JitOp::SetVar { src, .. } | JitOp::MoveToVar { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
@@ -7161,7 +7188,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                     *use_count.entry(*src).or_insert(0) += 1;
                 }
                 JitOp::IfTruthy { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
-                JitOp::FieldIsTruthy { base, .. } | JitOp::FieldCmpNum { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
+                JitOp::FieldIsTruthy { base, .. } | JitOp::FieldCmpNum { base, .. } | JitOp::TypeCmpBranch { src: base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
                 JitOp::IsNullOrFalse { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
                 JitOp::Alternative { primary, .. } => { *use_count.entry(*primary).or_insert(0) += 1; }
                 JitOp::SetVar { src, .. } | JitOp::MoveToVar { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
@@ -8091,6 +8118,21 @@ impl JitCompiler {
                         let zero = b.ins().iconst(ptr_ty, 0);
                         let is_t = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, result, zero);
                         b.ins().brif(is_t, label_blocks[*then_label as usize], &[], label_blocks[*else_label as usize], &[]);
+                        terminated = true;
+                    }
+                    JitOp::TypeCmpBranch { src, tags, then_label, else_label } => {
+                        // Load tag byte (offset 0) from Value at slot
+                        let sa = slot_addr(&mut b, *src);
+                        let tag_val = b.ins().load(types::I8, cranelift_codegen::ir::MemFlags::new(), sa, 0);
+                        let tag_i64 = b.ins().uextend(ptr_ty, tag_val);
+                        // Build bitmask check: (1 << tag) & tags != 0
+                        let one = b.ins().iconst(ptr_ty, 1);
+                        let bit = b.ins().ishl(one, tag_i64);
+                        let mask = b.ins().iconst(ptr_ty, *tags as i64);
+                        let result = b.ins().band(bit, mask);
+                        let zero = b.ins().iconst(ptr_ty, 0);
+                        let is_match = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, result, zero);
+                        b.ins().brif(is_match, label_blocks[*then_label as usize], &[], label_blocks[*else_label as usize], &[]);
                         terminated = true;
                     }
                     JitOp::Jump { label } => {
