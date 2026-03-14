@@ -4094,6 +4094,64 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.field cmp N) | del(.field1, ...)`.
+    /// Returns (cmp_field, op, threshold, del_fields).
+    pub fn detect_select_cmp_del(&self) -> Option<(String, crate::ir::BinOp, f64, Vec<String>)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        // select is desugared to if-then-else: IfThenElse { cond, then: del(...), else: empty }
+        // or Pipe { left: IfThenElse { cond, then: ., else: empty }, right: del(...) }
+        let (cond, del_expr) = if let Expr::Pipe { left, right } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                    (cond.as_ref(), right.as_ref())
+                } else { return None; }
+            } else { return None; }
+        } else if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if matches!(else_branch.as_ref(), Expr::Empty) {
+                (cond.as_ref(), then_branch.as_ref())
+            } else { return None; }
+        } else { return None; };
+        // Parse condition: .field cmp N
+        let (field, op, threshold) = if let Expr::BinOp { op, lhs, rhs } = cond {
+            if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+            if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                    if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                        (f.clone(), *op, *n)
+                    } else { return None; }
+                } else { return None; }
+            } else { return None; }
+        } else { return None; };
+        // Parse del expression
+        if let Expr::CallBuiltin { name, args } = del_expr {
+            if name != "del" || args.len() != 1 { return None; }
+            let mut del_fields = Vec::new();
+            fn collect_del_fields(expr: &Expr, fields: &mut Vec<String>) -> bool {
+                match expr {
+                    Expr::Comma { left, right } => {
+                        collect_del_fields(left, fields) && collect_del_fields(right, fields)
+                    }
+                    Expr::Index { expr: base, key } => {
+                        if matches!(base.as_ref(), Expr::Input) {
+                            if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                fields.push(field.clone());
+                                return true;
+                            }
+                        }
+                        false
+                    }
+                    _ => false,
+                }
+            }
+            if collect_del_fields(&args[0], &mut del_fields) && !del_fields.is_empty() {
+                return Some((field, op, threshold, del_fields));
+            }
+        }
+        None
+    }
+
     /// Detect `del(.field1, .field2, ...)` — multi-field deletion.
     /// Returns list of field names to delete.
     pub fn detect_del_fields(&self) -> Option<Vec<String>> {

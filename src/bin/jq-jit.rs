@@ -1978,7 +1978,10 @@ fn real_main() {
     let del_field = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() {
         filter.detect_del_field()
     } else { None };
-    let del_fields = if (use_compact_buf || use_pretty_buf) && !exit_status && del_field.is_none() {
+    let select_cmp_del = if (use_compact_buf || use_pretty_buf) && !exit_status && del_field.is_none() && select_cmp.is_none() {
+        filter.detect_select_cmp_del()
+    } else { None };
+    let del_fields = if (use_compact_buf || use_pretty_buf) && !exit_status && del_field.is_none() && select_cmp_del.is_none() {
         filter.detect_del_fields()
     } else { None };
     let obj_merge_lit = if (use_compact_buf || use_pretty_buf) && !exit_status && del_field.is_none() && del_fields.is_none() {
@@ -2233,7 +2236,7 @@ fn real_main() {
         || select_str_test.is_some() || select_regex_test.is_some() || select_regex_value.is_some() || select_nested_cmp.is_some()
         || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_field_unary.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_dynkey.is_some() || select_cmp_dynkey_mixed.is_some() || select_cmp_array.is_some() || select_arith_cmp_array.is_some() || select_cmp_value.is_some() || select_cmp_str_chain.is_some() || select_ff_cmp_field.is_some() || select_ff_cmp.is_some() || select_ff_cmp_cremap.is_some() || select_ff_cmp_value.is_some() || select_ff_cmp_array.is_some() || select_compound_array.is_some() || select_str_field.is_some() || select_str_cremap.is_some() || select_str_array.is_some() || select_str_str_chain.is_some()
         || computed_array.is_some() || array_field.is_some() || multi_field.is_some() || is_length || is_keys
-        || is_keys_unsorted || keys_join.is_some() || has_field.is_some() || has_multi.is_some() || select_has_multi.is_some() || is_type || del_field.is_some() || del_fields.is_some() || obj_merge_lit.is_some() || obj_merge_computed.is_some()
+        || is_keys_unsorted || keys_join.is_some() || has_field.is_some() || has_multi.is_some() || select_has_multi.is_some() || is_type || del_field.is_some() || select_cmp_del.is_some() || del_fields.is_some() || obj_merge_lit.is_some() || obj_merge_computed.is_some()
         || is_collect_each || collect_each_arith.is_some() || collect_each_select_type.is_some() || collect_each_select_cmp.is_some() || first_each_select_type.is_some() || count_each_select_cmp.is_some() || sort_two_fields.is_some() || is_each || is_sort_keys || is_to_entries || remap_to_entries.is_some() || with_entries_select.is_some() || with_entries_del.is_some() || with_entries_type.is_some() || is_tojson || string_interp_fields.is_some() || string_add_chain.is_some() || array_join.is_some()
         || literal_output.is_some() || array_fields_format.is_some() || raw_csv_fields.is_some()
         || field_str_reverse.is_some() || field_split_rev_join.is_some() || field_case_split_join.is_some() || field_case_split.is_some() || field_split_join.is_some() || field_split_slice_join.is_some() || field_split_first.is_some() || field_split_last.is_some() || field_split_nth.is_some() || field_split_length.is_some() || field_strop_length.is_some() || field_length_cmp.is_some() || select_length_cmp.is_some() || select_length_cmp_field.is_some() || field_slice.is_some()
@@ -8398,6 +8401,58 @@ fn real_main() {
                         let raw = &input_bytes[start..end];
                         compact_buf.extend_from_slice(json_type_byte(raw[0]));
                         compact_buf.push(b'\n');
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref sd_field, sd_op, sd_thr, ref sd_del_fields)) = select_cmp_del {
+                    // select(.field cmp N) | del(.f1, .f2, ...) — filter then delete
+                    let df_refs: Vec<&str> = sd_del_fields.iter().map(|s| s.as_str()).collect();
+                    let single_del = sd_del_fields.len() == 1;
+                    let mut tmp = Vec::new();
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some(val) = json_object_get_num(raw, 0, sd_field) {
+                            let pass = match sd_op {
+                                jq_jit::ir::BinOp::Gt => val > sd_thr, jq_jit::ir::BinOp::Lt => val < sd_thr,
+                                jq_jit::ir::BinOp::Ge => val >= sd_thr, jq_jit::ir::BinOp::Le => val <= sd_thr,
+                                jq_jit::ir::BinOp::Eq => val == sd_thr, jq_jit::ir::BinOp::Ne => val != sd_thr,
+                                _ => false,
+                            };
+                            if pass {
+                                if use_pretty_buf {
+                                    tmp.clear();
+                                    let ok = if single_del {
+                                        json_object_del_field(raw, 0, &df_refs[0], &mut tmp)
+                                    } else {
+                                        json_object_del_fields(raw, 0, &df_refs, &mut tmp)
+                                    };
+                                    if ok {
+                                        push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                                        compact_buf.push(b'\n');
+                                    } else {
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    }
+                                } else {
+                                    let ok = if single_del {
+                                        json_object_del_field(raw, 0, &df_refs[0], &mut compact_buf)
+                                    } else {
+                                        json_object_del_fields(raw, 0, &df_refs, &mut compact_buf)
+                                    };
+                                    if ok {
+                                        compact_buf.push(b'\n');
+                                    } else {
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    }
+                                }
+                            }
+                            // else: filtered out (select fails), no output
+                        }
+                        // else: field missing/non-numeric → filtered out
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
                             compact_buf.clear();
@@ -14937,6 +14992,56 @@ fn real_main() {
                     let raw = &content_bytes[start..end];
                     compact_buf.extend_from_slice(json_type_byte(raw[0]));
                     compact_buf.push(b'\n');
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref sd_field, sd_op, sd_thr, ref sd_del_fields)) = select_cmp_del {
+                let df_refs: Vec<&str> = sd_del_fields.iter().map(|s| s.as_str()).collect();
+                let single_del = sd_del_fields.len() == 1;
+                let content_bytes = content.as_bytes();
+                let mut tmp = Vec::new();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some(val) = json_object_get_num(raw, 0, sd_field) {
+                        let pass = match sd_op {
+                            jq_jit::ir::BinOp::Gt => val > sd_thr, jq_jit::ir::BinOp::Lt => val < sd_thr,
+                            jq_jit::ir::BinOp::Ge => val >= sd_thr, jq_jit::ir::BinOp::Le => val <= sd_thr,
+                            jq_jit::ir::BinOp::Eq => val == sd_thr, jq_jit::ir::BinOp::Ne => val != sd_thr,
+                            _ => false,
+                        };
+                        if pass {
+                            if use_pretty_buf {
+                                tmp.clear();
+                                let ok = if single_del {
+                                    json_object_del_field(raw, 0, &df_refs[0], &mut tmp)
+                                } else {
+                                    json_object_del_fields(raw, 0, &df_refs, &mut tmp)
+                                };
+                                if ok {
+                                    push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                                    compact_buf.push(b'\n');
+                                } else {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                            } else {
+                                let ok = if single_del {
+                                    json_object_del_field(raw, 0, &df_refs[0], &mut compact_buf)
+                                } else {
+                                    json_object_del_fields(raw, 0, &df_refs, &mut compact_buf)
+                                };
+                                if ok {
+                                    compact_buf.push(b'\n');
+                                } else {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                            }
+                        }
+                    }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
                         compact_buf.clear();
