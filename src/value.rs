@@ -1464,6 +1464,36 @@ pub fn json_object_update_field_gsub(
     false
 }
 
+/// Update a field by replacing its value with the boolean result of a regex test.
+/// `.field |= test("regex")` — extract string field, run regex, write true/false.
+pub fn json_object_update_field_test(
+    b: &[u8], pos: usize, field: &str, re: &regex::Regex, buf: &mut Vec<u8>,
+) -> bool {
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
+        if val_start >= val_end || b[val_start] != b'"' { return false; }
+        let inner = &b[val_start + 1..val_end - 1];
+        let matched = if memchr::memchr(b'\\', inner).is_some() {
+            let s: String = match serde_json::from_slice(&b[val_start..val_end]) {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+            re.is_match(&s)
+        } else {
+            let s = unsafe { std::str::from_utf8_unchecked(inner) };
+            re.is_match(s)
+        };
+        let mut obj_end = b.len();
+        while obj_end > val_end && b[obj_end - 1] != b'}' { obj_end -= 1; }
+        if obj_end <= val_end { return false; }
+        buf.extend_from_slice(&b[pos..val_start]);
+        buf.extend_from_slice(if matched { b"true" } else { b"false" });
+        buf.extend_from_slice(&b[val_end..obj_end]);
+        return true;
+    }
+    false
+}
+
 /// Update a field by taking the first element after splitting by a separator.
 /// `.field |= (split("sep")|.[0])` — extract string field, find first separator, write prefix.
 pub fn json_object_update_field_split_first(

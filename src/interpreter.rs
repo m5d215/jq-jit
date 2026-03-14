@@ -785,7 +785,60 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             Expr::Update { path_expr: Box::new(simplify_expr(path_expr)), update_expr: Box::new(simplify_expr(update_expr)) }
         }
         Expr::Assign { path_expr, value_expr } => {
-            Expr::Assign { path_expr: Box::new(simplify_expr(path_expr)), value_expr: Box::new(simplify_expr(value_expr)) }
+            let sp = simplify_expr(path_expr);
+            let sv = simplify_expr(value_expr);
+            // .field = f(.field) → .field |= f(.) when value only references .field
+            if let Expr::Index { expr: base, key } = &sp {
+                if matches!(base.as_ref(), Expr::Input) {
+                    if let Expr::Literal(crate::ir::Literal::Str(field)) = key.as_ref() {
+                        fn replace_field_with_input(e: &Expr, field: &str) -> Option<Expr> {
+                            match e {
+                                Expr::Index { expr: base, key } if matches!(base.as_ref(), Expr::Input)
+                                    && matches!(key.as_ref(), Expr::Literal(crate::ir::Literal::Str(f)) if f == field) => {
+                                    Some(Expr::Input)
+                                }
+                                Expr::BinOp { op, lhs, rhs } => {
+                                    let nl = replace_field_with_input(lhs, field);
+                                    let nr = replace_field_with_input(rhs, field);
+                                    if nl.is_some() || nr.is_some() {
+                                        Some(Expr::BinOp {
+                                            op: *op,
+                                            lhs: Box::new(nl.unwrap_or_else(|| lhs.as_ref().clone())),
+                                            rhs: Box::new(nr.unwrap_or_else(|| rhs.as_ref().clone())),
+                                        })
+                                    } else { None }
+                                }
+                                Expr::UnaryOp { op, operand } => {
+                                    replace_field_with_input(operand, field).map(|o| Expr::UnaryOp { op: *op, operand: Box::new(o) })
+                                }
+                                Expr::CallBuiltin { name, args } => {
+                                    let mut any_replaced = false;
+                                    let new_args: Vec<_> = args.iter().map(|a| {
+                                        if let Some(r) = replace_field_with_input(a, field) { any_replaced = true; r }
+                                        else { a.clone() }
+                                    }).collect();
+                                    if any_replaced { Some(Expr::CallBuiltin { name: name.clone(), args: new_args }) }
+                                    else { None }
+                                }
+                                Expr::RegexTest { input_expr, re, flags } => {
+                                    replace_field_with_input(input_expr, field).map(|ie| Expr::RegexTest {
+                                        input_expr: Box::new(ie), re: re.clone(), flags: flags.clone()
+                                    })
+                                }
+                                _ => None,
+                            }
+                        }
+                        // Only convert if value_expr actually references .field and is input-free after substitution
+                        if let Some(update) = replace_field_with_input(&sv, field) {
+                            return Expr::Update {
+                                path_expr: Box::new(sp),
+                                update_expr: Box::new(update),
+                            };
+                        }
+                    }
+                }
+            }
+            Expr::Assign { path_expr: Box::new(sp), value_expr: Box::new(sv) }
         }
         Expr::TryCatch { try_expr, catch_expr } => {
             Expr::TryCatch { try_expr: Box::new(simplify_expr(try_expr)), catch_expr: Box::new(simplify_expr(catch_expr)) }
@@ -5609,6 +5662,14 @@ impl Filter {
                                 }
                             }
                         }
+                        // . / "sep" is string division = split
+                        if let Expr::BinOp { op: crate::ir::BinOp::Div, lhs, rhs } = e {
+                            if matches!(lhs.as_ref(), Expr::Input) {
+                                if let Expr::Literal(Literal::Str(sep)) = rhs.as_ref() {
+                                    return Some(sep.clone());
+                                }
+                            }
+                        }
                         None
                     }
                     fn is_first_index(e: &Expr) -> bool {
@@ -5660,6 +5721,14 @@ impl Filter {
                         if let Expr::CallBuiltin { name, args } = e {
                             if name == "split" && args.len() == 1 {
                                 if let Expr::Literal(Literal::Str(sep)) = &args[0] {
+                                    return Some(sep.clone());
+                                }
+                            }
+                        }
+                        // . / "sep" is string division = split
+                        if let Expr::BinOp { op: crate::ir::BinOp::Div, lhs, rhs } = e {
+                            if matches!(lhs.as_ref(), Expr::Input) {
+                                if let Expr::Literal(Literal::Str(sep)) = rhs.as_ref() {
                                     return Some(sep.clone());
                                 }
                             }
@@ -5909,6 +5978,33 @@ impl Filter {
                     if let Expr::UnaryOp { op: UnaryOp::ToString, operand } = upd.as_ref() {
                         if matches!(operand.as_ref(), Expr::Input) {
                             return Some(field.clone());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `.field |= test("regex")`.
+    /// Returns (field_name, regex_pattern, flags_str).
+    pub fn detect_field_update_test(&self) -> Option<(String, String, String)> {
+        use crate::ir::{Expr, Literal};
+        let expr = self.detect_expr()?;
+        let update_expr = if let Expr::LetBinding { body, .. } = expr { body.as_ref() } else { expr };
+        if let Expr::Update { path_expr, update_expr: upd } = update_expr {
+            if let Expr::Index { expr: base, key } = path_expr.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::RegexTest { input_expr, re, flags } = upd.as_ref() {
+                        if !matches!(input_expr.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(pattern)) = re.as_ref() {
+                            let flags_str = match flags.as_ref() {
+                                Expr::Literal(Literal::Null) => String::new(),
+                                Expr::Literal(Literal::Str(f)) => f.clone(),
+                                _ => return None,
+                            };
+                            return Some((field.clone(), pattern.clone(), flags_str));
                         }
                     }
                 }
