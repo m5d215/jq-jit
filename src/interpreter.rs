@@ -3057,6 +3057,44 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | ascii_case | gsub/sub(re; rep)` pattern.
+    /// Returns (field, is_upper, is_global, pattern, replacement, flags).
+    pub fn detect_field_case_gsub(&self) -> Option<(String, bool, bool, String, String, Option<String>)> {
+        use crate::ir::{Expr, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::Pipe { left: case_expr, right: gsub_expr } = right.as_ref() {
+                        let is_upper = match case_expr.as_ref() {
+                            Expr::UnaryOp { op: UnaryOp::AsciiUpcase, operand } if matches!(operand.as_ref(), Expr::Input) => true,
+                            Expr::UnaryOp { op: UnaryOp::AsciiDowncase, operand } if matches!(operand.as_ref(), Expr::Input) => false,
+                            _ => return None,
+                        };
+                        let (is_global, input_expr, re, tostr, flags) = match gsub_expr.as_ref() {
+                            Expr::RegexGsub { input_expr, re, tostr, flags } => (true, input_expr, re, tostr, flags),
+                            Expr::RegexSub { input_expr, re, tostr, flags } => (false, input_expr, re, tostr, flags),
+                            _ => return None,
+                        };
+                        if !matches!(input_expr.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(pattern)) = re.as_ref() {
+                            if let Expr::Literal(Literal::Str(replacement)) = tostr.as_ref() {
+                                let flags_str = match flags.as_ref() {
+                                    Expr::Literal(Literal::Null) => None,
+                                    Expr::Literal(Literal::Str(f)) => Some(f.clone()),
+                                    _ => return None,
+                                };
+                                return Some((field.clone(), is_upper, is_global, pattern.clone(), replacement.clone(), flags_str));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field | ltrimstr("prefix") | tonumber` pattern.
     /// Returns (field_name, prefix) if detected.
     /// Returns (field, prefix, arith_ops).

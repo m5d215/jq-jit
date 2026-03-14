@@ -1914,6 +1914,9 @@ fn real_main() {
     let field_gsub = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() {
         filter.detect_field_gsub()
     } else { None };
+    let field_case_gsub = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_gsub.is_none() {
+        filter.detect_field_case_gsub()
+    } else { None };
     let field_scan = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() && field_gsub.is_none() {
         filter.detect_field_scan()
     } else { None };
@@ -2222,7 +2225,7 @@ fn real_main() {
         || computed_remap.is_some() || standalone_array.is_some()
         || field_binop.is_some() || field_binop_tostring.is_some() || field_unary_num.is_some() || field_binop_const_unary.is_some() || two_field_binop_const.is_some() || field_arith_chain.is_some() || field_arith_tostring.is_some() || numeric_expr.is_some() || numeric_expr_unary.is_some()
         || field_field_cmp.is_some() || field_const_cmp.is_some() || arith_chain_cmp.is_some() || compound_field_cmp.is_some()
-        || field_str_builtin.is_some() || field_test.is_some() || field_gsub.is_some() || field_scan.is_some() || field_format.is_some() || field_ltrimstr_tonumber.is_some()
+        || field_str_builtin.is_some() || field_test.is_some() || field_gsub.is_some() || field_case_gsub.is_some() || field_scan.is_some() || field_format.is_some() || field_ltrimstr_tonumber.is_some()
         || field_str_concat.is_some() || field_alt.is_some() || field_field_alt.is_some()
         || select_cmp.is_some() || select_field_null.is_some() || select_arith_cmp.is_some()
         || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || field_field_cmp_branch.is_some() || if_cmp_arrays.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some() || select_compound_computed.is_some() || select_compound_cremap.is_some()
@@ -4750,6 +4753,78 @@ fn real_main() {
                                     };
                                     compact_buf.push(b'"');
                                     // Escape the result for JSON
+                                    for &b in result.as_bytes() {
+                                        match b {
+                                            b'"' => compact_buf.extend_from_slice(b"\\\""),
+                                            b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                                            b'\n' => compact_buf.extend_from_slice(b"\\n"),
+                                            b'\r' => compact_buf.extend_from_slice(b"\\r"),
+                                            b'\t' => compact_buf.extend_from_slice(b"\\t"),
+                                            c if c < 0x20 => { use std::io::Write; let _ = write!(compact_buf, "\\u{:04x}", c); }
+                                            _ => compact_buf.push(b),
+                                        }
+                                    }
+                                    compact_buf.extend_from_slice(b"\"\n");
+                                } else {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                            if compact_buf.len() >= 1 << 17 {
+                                let _ = out.write_all(&compact_buf);
+                                compact_buf.clear();
+                            }
+                            Ok(())
+                        })
+                    } else {
+                        json_stream_raw(&input_str, |start, end| {
+                            let raw = &input_bytes[start..end];
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            Ok(())
+                        })
+                    }
+                } else if let Some((ref cg_field, cg_upper, cg_global, ref cg_pattern, ref cg_replacement, ref cg_flags)) = field_case_gsub {
+                    // .field | ascii_case | gsub/sub("pattern"; "replacement") — case + regex replacement
+                    let re_pattern = if let Some(flags) = cg_flags {
+                        let mut prefix = String::from("(?");
+                        for c in flags.chars() {
+                            match c { 'i' | 'm' | 's' => prefix.push(c), _ => {} }
+                        }
+                        prefix.push(')');
+                        prefix.push_str(cg_pattern);
+                        prefix
+                    } else {
+                        cg_pattern.clone()
+                    };
+                    if let Ok(re) = regex::Regex::new(&re_pattern) {
+                        let repl = cg_replacement.as_str();
+                        json_stream_raw(&input_str, |start, end| {
+                            let raw = &input_bytes[start..end];
+                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, cg_field) {
+                                let val = &raw[vs..ve];
+                                if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                                    && !val[1..val.len()-1].contains(&b'\\')
+                                {
+                                    let inner = &val[1..val.len()-1];
+                                    // Case-convert
+                                    let converted: Vec<u8> = inner.iter().map(|&b| {
+                                        if cg_upper {
+                                            if b >= b'a' && b <= b'z' { b - 32 } else { b }
+                                        } else {
+                                            if b >= b'A' && b <= b'Z' { b + 32 } else { b }
+                                        }
+                                    }).collect();
+                                    let content = unsafe { std::str::from_utf8_unchecked(&converted) };
+                                    let result = if cg_global {
+                                        re.replace_all(content, repl)
+                                    } else {
+                                        re.replace(content, repl)
+                                    };
+                                    compact_buf.push(b'"');
                                     for &b in result.as_bytes() {
                                         match b {
                                             b'"' => compact_buf.extend_from_slice(b"\\\""),
@@ -14084,6 +14159,79 @@ fn real_main() {
                             {
                                 let content_str = unsafe { std::str::from_utf8_unchecked(&val[1..val.len()-1]) };
                                 let result = if gs_global {
+                                    re.replace_all(content_str, repl)
+                                } else {
+                                    re.replace(content_str, repl)
+                                };
+                                compact_buf.push(b'"');
+                                for &b in result.as_bytes() {
+                                    match b {
+                                        b'"' => compact_buf.extend_from_slice(b"\\\""),
+                                        b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                                        b'\n' => compact_buf.extend_from_slice(b"\\n"),
+                                        b'\r' => compact_buf.extend_from_slice(b"\\r"),
+                                        b'\t' => compact_buf.extend_from_slice(b"\\t"),
+                                        c if c < 0x20 => { use std::io::Write; let _ = write!(compact_buf, "\\u{:04x}", c); }
+                                        _ => compact_buf.push(b),
+                                    }
+                                }
+                                compact_buf.extend_from_slice(b"\"\n");
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else {
+                    let content_bytes = content.as_bytes();
+                    json_stream_raw(content, |start, end| {
+                        let raw = &content_bytes[start..end];
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        Ok(())
+                    })
+                }
+            } else if let Some((ref cg_field, cg_upper, cg_global, ref cg_pattern, ref cg_replacement, ref cg_flags)) = field_case_gsub {
+                // .field | ascii_case | gsub/sub("pattern"; "replacement") — case + regex (stdin)
+                let re_pattern = if let Some(flags) = cg_flags {
+                    let mut prefix = String::from("(?");
+                    for c in flags.chars() {
+                        match c { 'i' | 'm' | 's' => prefix.push(c), _ => {} }
+                    }
+                    prefix.push(')');
+                    prefix.push_str(cg_pattern);
+                    prefix
+                } else {
+                    cg_pattern.clone()
+                };
+                if let Ok(re) = regex::Regex::new(&re_pattern) {
+                    let repl = cg_replacement.as_str();
+                    let content_bytes = content.as_bytes();
+                    json_stream_raw(content, |start, end| {
+                        let raw = &content_bytes[start..end];
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, cg_field) {
+                            let val = &raw[vs..ve];
+                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                                && !val[1..val.len()-1].contains(&b'\\')
+                            {
+                                let inner = &val[1..val.len()-1];
+                                let converted: Vec<u8> = inner.iter().map(|&b| {
+                                    if cg_upper {
+                                        if b >= b'a' && b <= b'z' { b - 32 } else { b }
+                                    } else {
+                                        if b >= b'A' && b <= b'Z' { b + 32 } else { b }
+                                    }
+                                }).collect();
+                                let content_str = unsafe { std::str::from_utf8_unchecked(&converted) };
+                                let result = if cg_global {
                                     re.replace_all(content_str, repl)
                                 } else {
                                     re.replace(content_str, repl)
