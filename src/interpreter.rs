@@ -1032,6 +1032,39 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                 }
             }
+            // Constant fold: Num op Num → Num
+            if let (Expr::Literal(Literal::Num(a, _)), Expr::Literal(Literal::Num(b, _))) = (&sl, &sr) {
+                let result = match op {
+                    crate::ir::BinOp::Add => Some(a + b),
+                    crate::ir::BinOp::Sub => Some(a - b),
+                    crate::ir::BinOp::Mul => Some(a * b),
+                    crate::ir::BinOp::Div if *b != 0.0 => Some(a / b),
+                    crate::ir::BinOp::Mod if *b != 0.0 && b.is_finite() => Some(a % b),
+                    _ => None,
+                };
+                if let Some(r) = result {
+                    return Expr::Literal(Literal::Num(r, None));
+                }
+                // Comparison ops
+                let cmp_result = match op {
+                    crate::ir::BinOp::Eq => Some(*a == *b),
+                    crate::ir::BinOp::Ne => Some(*a != *b),
+                    crate::ir::BinOp::Lt => Some(*a < *b),
+                    crate::ir::BinOp::Gt => Some(*a > *b),
+                    crate::ir::BinOp::Le => Some(*a <= *b),
+                    crate::ir::BinOp::Ge => Some(*a >= *b),
+                    _ => None,
+                };
+                if let Some(r) = cmp_result {
+                    return if r { Expr::Literal(Literal::True) } else { Expr::Literal(Literal::False) };
+                }
+            }
+            // Constant fold: Str + Str → Str
+            if matches!(op, crate::ir::BinOp::Add) {
+                if let (Expr::Literal(Literal::Str(a)), Expr::Literal(Literal::Str(b))) = (&sl, &sr) {
+                    return Expr::Literal(Literal::Str(format!("{}{}", a, b)));
+                }
+            }
             Expr::BinOp { op: *op, lhs: Box::new(sl), rhs: Box::new(sr) }
         }
         Expr::StringInterpolation { parts } => {
