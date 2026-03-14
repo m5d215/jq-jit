@@ -759,6 +759,27 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                 }
             }
+            // Semantic: [a, b] | min → if a <= b then a else b end
+            // Semantic: [a, b] | max → if a > b then a else b end
+            if let Expr::Collect { generator: ref lg } = sl {
+                let is_min = matches!(&sr, Expr::UnaryOp { op: UnaryOp::Min, operand } if matches!(operand.as_ref(), Expr::Input));
+                let is_max = matches!(&sr, Expr::UnaryOp { op: UnaryOp::Max, operand } if matches!(operand.as_ref(), Expr::Input));
+                if is_min || is_max {
+                    if let Expr::Comma { left, right } = lg.as_ref() {
+                        if !matches!(left.as_ref(), Expr::Comma { .. }) && !matches!(right.as_ref(), Expr::Comma { .. }) {
+                            // Exactly 2 elements
+                            let a = left.as_ref().clone();
+                            let b = right.as_ref().clone();
+                            let cmp_op = if is_min { crate::ir::BinOp::Le } else { crate::ir::BinOp::Gt };
+                            return simplify_expr(&Expr::IfThenElse {
+                                cond: Box::new(Expr::BinOp { op: cmp_op, lhs: Box::new(a.clone()), rhs: Box::new(b.clone()) }),
+                                then_branch: Box::new(a),
+                                else_branch: Box::new(b),
+                            });
+                        }
+                    }
+                }
+            }
             // Semantic: [e1, e2, ...] | any(f) → (e1|f) or (e2|f) or ...
             // Semantic: [e1, e2, ...] | all(f) → (e1|f) and (e2|f) and ...
             if let Expr::Collect { generator: ref lg } = sl {
