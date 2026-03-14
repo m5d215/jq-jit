@@ -5364,6 +5364,32 @@ impl Filter {
         None
     }
 
+    /// Detect `.field |= ascii_downcase/ascii_upcase`.
+    /// Returns (field_name, is_upcase).
+    pub fn detect_field_update_case(&self) -> Option<(String, bool)> {
+        use crate::ir::{Expr, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        // May be wrapped in LetBinding for the desugared form
+        let update_expr = if let Expr::LetBinding { body, .. } = expr { body.as_ref() } else { expr };
+        if let Expr::Update { path_expr, update_expr: upd } = update_expr {
+            if let Expr::Index { expr: base, key } = path_expr.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::UnaryOp { op, operand } = upd.as_ref() {
+                        if matches!(operand.as_ref(), Expr::Input) {
+                            match op {
+                                UnaryOp::AsciiDowncase => return Some((field.clone(), false)),
+                                UnaryOp::AsciiUpcase => return Some((field.clone(), true)),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field[from:to]` with literal numeric bounds.
     /// Returns (field_name, from_opt, to_opt).
     pub fn detect_field_slice(&self) -> Option<(String, Option<i64>, Option<i64>)> {

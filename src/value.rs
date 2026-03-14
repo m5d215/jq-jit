@@ -1915,6 +1915,77 @@ pub fn json_object_set_field_raw(
     true
 }
 
+/// Update a string field in a JSON object with ascii case conversion.
+/// Scans the object, copies all key-value pairs, and applies case conversion
+/// to the target field's string value. Returns false if field not found or not a string.
+pub fn json_object_update_field_case(
+    b: &[u8], pos: usize, field: &str, is_upcase: bool, buf: &mut Vec<u8>,
+) -> bool {
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    let field_bytes = field.as_bytes();
+    let mut i = pos + 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < b.len() && b[i] == b'}' { return false; } // empty object, field not found
+    buf.push(b'{');
+    let mut first = true;
+    let mut found = false;
+    loop {
+        if i >= b.len() || b[i] != b'"' { return false; }
+        let key_start = i + 1;
+        i += 1;
+        while i < b.len() { match b[i] { b'"' => break, b'\\' => { i += 2; continue }, _ => i += 1 } }
+        if i >= b.len() { return false; }
+        let key_matches = (i - key_start) == field_bytes.len()
+            && b[key_start..i] == *field_bytes;
+        let key_q_start = key_start - 1;
+        let key_q_end = i + 1;
+        i = i + 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        let vs = i;
+        i = match skip_json_value(b, i) { Ok(e) => e, Err(_) => return false };
+        if !first { buf.push(b','); }
+        first = false;
+        buf.extend_from_slice(&b[key_q_start..key_q_end]);
+        buf.push(b':');
+        if key_matches && vs < b.len() && b[vs] == b'"' {
+            // Apply case conversion to string value
+            buf.push(b'"');
+            let mut j = vs + 1;
+            while j < i {
+                if b[j] == b'"' { break; }
+                if b[j] == b'\\' {
+                    buf.push(b'\\');
+                    j += 1;
+                    if j < i { buf.push(b[j]); j += 1; }
+                    continue;
+                }
+                if is_upcase {
+                    buf.push(if b[j] >= b'a' && b[j] <= b'z' { b[j] - 32 } else { b[j] });
+                } else {
+                    buf.push(if b[j] >= b'A' && b[j] <= b'Z' { b[j] + 32 } else { b[j] });
+                }
+                j += 1;
+            }
+            buf.push(b'"');
+            found = true;
+        } else {
+            buf.extend_from_slice(&b[vs..i]);
+        }
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { return false; }
+        if b[i] == b'}' { break; }
+        if b[i] != b',' { return false; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
+    if !found { return false; }
+    buf.extend_from_slice(b"}\n");
+    true
+}
+
 /// Extract two numeric field values from a JSON object without full parsing.
 /// More efficient than calling json_object_get_num twice (single scan).
 pub fn json_object_get_two_nums(b: &[u8], pos: usize, field1: &str, field2: &str) -> Option<(f64, f64)> {
