@@ -144,6 +144,7 @@ bench_ndjson "@csv (array)"            "-c" '[.name, .x, .y] | @csv' "$NDJSON_20
 bench_ndjson "@tsv (array)"            "-c" '[.name, .x, .y] | @tsv' "$NDJSON_200K"
 bench_ndjson "gsub"                    "-c" '.name | gsub("_"; "-")' "$NDJSON_200K"
 bench_ndjson "case+gsub"               "-c" '.name | ascii_downcase | gsub("_"; " ")'
+bench_ndjson "case+test"               "-c" '.name | ascii_downcase | test("user")'
 bench_ndjson "ltrim+tonum+arith"       "-c" '.name | ltrimstr("user_") | tonumber | . * 2'
 
 echo ""
@@ -155,6 +156,7 @@ bench_ndjson "modulo"                  "-c" ".x % 7"
 bench_ndjson "if-elif-else"            "-c" "if .x > 1000000 then .x elif .x > 500000 then .y else 0 end"
 bench_ndjson "select|del"              "-c" 'select(.x > 1000000) | del(.name)'
 bench_ndjson "select|merge"            "-c" 'select(.x > 1000000) | .+{status:"high"}'
+bench_ndjson "select(test)|merge"      "-c" 'select(.name | test("_[12]")) | .+{tag:"match"}' "$NDJSON_200K"
 
 echo ""
 echo "--- Array generators ---"
