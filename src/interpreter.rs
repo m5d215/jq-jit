@@ -894,6 +894,16 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     if is_single_output(&sg) {
                         return sg;
                     }
+                    // first(a, b, ...) where a is single-output → a
+                    if *n >= 1.0 {
+                        let mut g = &sg;
+                        while let Expr::Comma { left, .. } = g {
+                            if is_single_output(left) {
+                                return simplify_expr(left);
+                            }
+                            g = left;
+                        }
+                    }
                 }
             }
             Expr::Limit { count: Box::new(sc), generator: Box::new(sg) }
@@ -6667,6 +6677,41 @@ impl Filter {
                         if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
                             if let (Some(t_bytes), Some(f_bytes)) = (const_expr_to_json(then_branch), const_expr_to_json(else_branch)) {
                                 return Some((field.clone(), *op, *n, t_bytes, f_bytes));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `if .field == null then literal_a else literal_b end` (or `!= null`).
+    /// Returns (field, is_eq_null, true_output_bytes, false_output_bytes).
+    pub fn detect_field_null_branch_literals(&self) -> Option<(String, bool, Vec<u8>, Vec<u8>)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                if !matches!(op, BinOp::Eq | BinOp::Ne) { return None; }
+                // .field == null or .field != null
+                if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        if matches!(rhs.as_ref(), Expr::Literal(Literal::Null)) {
+                            if let (Some(t_bytes), Some(f_bytes)) = (const_expr_to_json(then_branch), const_expr_to_json(else_branch)) {
+                                return Some((field.clone(), matches!(op, BinOp::Eq), t_bytes, f_bytes));
+                            }
+                        }
+                    }
+                }
+                // null == .field or null != .field (reversed)
+                if let Expr::Index { expr: base, key } = rhs.as_ref() {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        if matches!(lhs.as_ref(), Expr::Literal(Literal::Null)) {
+                            if let (Some(t_bytes), Some(f_bytes)) = (const_expr_to_json(then_branch), const_expr_to_json(else_branch)) {
+                                return Some((field.clone(), matches!(op, BinOp::Eq), t_bytes, f_bytes));
                             }
                         }
                     }
