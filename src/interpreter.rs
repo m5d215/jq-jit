@@ -5034,6 +5034,93 @@ impl Filter {
         None
     }
 
+    /// Detect `with_entries(select(.key | startswith/endswith/contains("str")))` or `with_entries(select(.key == "str"))`.
+    /// Returns (test_op, test_string) where test_op is "startswith"/"endswith"/"contains"/"eq".
+    pub fn detect_with_entries_select_key_str(&self) -> Option<(String, String)> {
+        use crate::ir::{BinOp, Expr, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left: l1, right: r1 } = expr {
+            if !matches!(l1.as_ref(), Expr::UnaryOp { op: UnaryOp::ToEntries, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                return None;
+            }
+            if let Expr::Pipe { left: l2, right: r2 } = r1.as_ref() {
+                if !matches!(r2.as_ref(), Expr::UnaryOp { op: UnaryOp::FromEntries, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                    return None;
+                }
+                if let Expr::Collect { generator } = l2.as_ref() {
+                    if let Expr::Pipe { left: l3, right: r3 } = generator.as_ref() {
+                        if !matches!(l3.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)) {
+                            return None;
+                        }
+                        if let Expr::IfThenElse { cond, then_branch, else_branch } = r3.as_ref() {
+                            if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
+                            if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+                            // .key | startswith("str") — beta-reduced form
+                            if let Expr::CallBuiltin { name, args } = cond.as_ref() {
+                                if matches!(name.as_str(), "startswith" | "endswith" | "contains") && args.len() == 2 {
+                                    if let Expr::Index { expr: base, key } = &args[0] {
+                                        if matches!(base.as_ref(), Expr::Input) {
+                                            if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                                                if f == "key" {
+                                                    if let Expr::Literal(Literal::Str(s)) = &args[1] {
+                                                        return Some((name.clone(), s.clone()));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            // .key | startswith("str") — piped form: Pipe(Index(Input, "key"), CallBuiltin("startswith", [Literal("str")]))
+                            // Note: Input is implicit in piped form (1 arg), or explicit (2 args)
+                            if let Expr::Pipe { left: pl, right: pr } = cond.as_ref() {
+                                if let Expr::Index { expr: base, key } = pl.as_ref() {
+                                    if matches!(base.as_ref(), Expr::Input) {
+                                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                                            if f == "key" {
+                                                if let Expr::CallBuiltin { name, args } = pr.as_ref() {
+                                                    if matches!(name.as_str(), "startswith" | "endswith" | "contains") {
+                                                        // 1-arg form: CallBuiltin("startswith", [Literal("str")])
+                                                        if args.len() == 1 {
+                                                            if let Expr::Literal(Literal::Str(s)) = &args[0] {
+                                                                return Some((name.clone(), s.clone()));
+                                                            }
+                                                        }
+                                                        // 2-arg form: CallBuiltin("startswith", [Input, Literal("str")])
+                                                        if args.len() == 2 && matches!(args[0], Expr::Input) {
+                                                            if let Expr::Literal(Literal::Str(s)) = &args[1] {
+                                                                return Some((name.clone(), s.clone()));
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            // .key == "str" → BinOp(Eq, Index(Input, "key"), Literal(Str(s)))
+                            if let Expr::BinOp { op: BinOp::Eq, lhs, rhs } = cond.as_ref() {
+                                if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                                    if matches!(base.as_ref(), Expr::Input) {
+                                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                                            if f == "key" {
+                                                if let Expr::Literal(Literal::Str(s)) = rhs.as_ref() {
+                                                    return Some(("eq".to_string(), s.clone()));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `with_entries(select(.key != "name"))` — equivalent to `del(.name)`.
     /// Returns list of excluded key names.
     pub fn detect_with_entries_del_keys(&self) -> Option<Vec<String>> {

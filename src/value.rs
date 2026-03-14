@@ -1275,6 +1275,64 @@ pub fn json_object_del_fields(b: &[u8], pos: usize, fields: &[&str], buf: &mut V
     true
 }
 
+/// Filter object entries by key string test, writing compact output.
+/// test_op: "startswith", "endswith", "contains", "eq".
+/// Includes entries where key passes the test.
+pub fn json_object_filter_by_key_str(b: &[u8], pos: usize, test_op: &str, test_arg: &str, buf: &mut Vec<u8>) -> bool {
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    let arg_bytes = test_arg.as_bytes();
+    buf.push(b'{');
+    let mut i = pos + 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < b.len() && b[i] == b'}' { buf.push(b'}'); return true; }
+    let mut first_out = true;
+    loop {
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b'"' { break; }
+        let key_start = i;
+        i += 1;
+        let mut j = i;
+        while j < b.len() {
+            match b[j] { b'"' => break, b'\\' => { j += 2; continue }, _ => j += 1 }
+        }
+        let key_content = &b[i..j];
+        let key_matches = match test_op {
+            "startswith" => key_content.len() >= arg_bytes.len() && &key_content[..arg_bytes.len()] == arg_bytes,
+            "endswith" => key_content.len() >= arg_bytes.len() && &key_content[key_content.len()-arg_bytes.len()..] == arg_bytes,
+            "contains" => {
+                if arg_bytes.is_empty() { true }
+                else {
+                    key_content.windows(arg_bytes.len()).any(|w| w == arg_bytes)
+                }
+            }
+            "eq" => key_content == arg_bytes,
+            _ => false,
+        };
+        let key_end = j + 1;
+        i = key_end;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { break; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        let val_end = match skip_json_value(b, i) { Ok(e) => e, Err(_) => break };
+        if key_matches {
+            if !first_out { buf.push(b','); }
+            first_out = false;
+            buf.extend_from_slice(&b[key_start..key_end]);
+            buf.push(b':');
+            buf.extend_from_slice(&b[i..val_end]);
+        }
+        i = val_end;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { break; }
+        if b[i] == b'}' { break; }
+        if b[i] != b',' { break; }
+        i += 1;
+    }
+    buf.push(b'}');
+    true
+}
+
 /// Replace a single field's value in a JSON object, writing compact output.
 /// Copies the object structure, substituting only the target field's value with `new_val`.
 /// If the field is not found, writes the object unchanged (compact).
