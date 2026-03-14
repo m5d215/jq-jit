@@ -240,6 +240,13 @@ pub enum StringAddPart {
     FieldArithToString(String, Vec<(crate::ir::BinOp, f64)>),
 }
 
+/// Step in a numeric chain update: `.field |= (. * 100 | floor | . / 100)`.
+#[derive(Debug, Clone)]
+pub enum NumChainStep {
+    Arith(crate::ir::BinOp, f64),
+    Unary(crate::ir::UnaryOp),
+}
+
 /// A compiled jq filter, ready to execute.
 pub struct Filter {
     program: String,
@@ -5444,6 +5451,60 @@ impl Filter {
                         }
                     }
                 }
+            }
+        }
+        None
+    }
+
+    /// Detect `.field |= (. op1 N1 | op2 | . op3 N3 | ...)` — numeric chain update.
+    /// Each step is either BinOp(op, Input, Num) or UnaryOp(floor/ceil/round/abs, Input).
+    /// Returns (field_name, steps) where steps are (Option<(BinOp, f64)>, Option<UnaryOp>).
+    pub fn detect_field_update_num_chain(&self) -> Option<(String, Vec<NumChainStep>)> {
+        use crate::ir::{Expr, BinOp, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        let update_expr_outer = if let Expr::LetBinding { body, .. } = expr { body.as_ref() } else { expr };
+        if let Expr::Update { path_expr, update_expr } = update_expr_outer {
+            let field = if let Expr::Index { expr: base, key } = path_expr.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(f)) = key.as_ref() { f.clone() }
+                else { return None; }
+            } else { return None; };
+            // Unwrap nested composition: BinOp(Div, UnaryOp(Floor, BinOp(Mul, Input, 100)), 100)
+            // Each step wraps the previous result. We recurse into the inner expression
+            // and push steps AFTER recursion so they end up in execution order.
+            fn collect_steps(e: &Expr, steps: &mut Vec<NumChainStep>) -> bool {
+                // Also handle Pipe chains (in case simplification didn't compose them)
+                if let Expr::Pipe { left, right } = e {
+                    if !collect_steps(left, steps) { return false; }
+                    return collect_steps(right, steps);
+                }
+                if let Expr::BinOp { op, lhs, rhs } = e {
+                    if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+                        if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                            // lhs is the previous stage's output
+                            let ok = collect_steps(lhs, steps);
+                            steps.push(NumChainStep::Arith(*op, *n));
+                            return ok;
+                        }
+                    }
+                }
+                if let Expr::UnaryOp { op, operand } = e {
+                    match op {
+                        UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Round |
+                        UnaryOp::Fabs | UnaryOp::Sqrt | UnaryOp::Trunc => {
+                            let ok = collect_steps(operand, steps);
+                            steps.push(NumChainStep::Unary(*op));
+                            return ok;
+                        }
+                        _ => {}
+                    }
+                }
+                // Base case: Input means we've reached the start of the chain
+                matches!(e, Expr::Input)
+            }
+            let mut steps = Vec::new();
+            if collect_steps(update_expr, &mut steps) && steps.len() >= 2 {
+                return Some((field, steps));
             }
         }
         None

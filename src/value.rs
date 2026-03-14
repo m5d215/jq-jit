@@ -1352,6 +1352,54 @@ pub fn json_object_update_field_num(b: &[u8], pos: usize, field: &str, op: crate
     false
 }
 
+/// Update a numeric field using a chain of operations.
+/// Each step is either an arithmetic operation (. op N) or a unary op (floor/ceil/etc).
+pub fn json_object_update_field_num_chain(
+    b: &[u8], pos: usize, field: &str,
+    steps: &[crate::interpreter::NumChainStep], buf: &mut Vec<u8>,
+) -> bool {
+    use crate::ir::BinOp;
+    use crate::ir::UnaryOp;
+    use crate::interpreter::NumChainStep;
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
+        if let Some(mut v) = parse_json_num(&b[val_start..val_end]) {
+            for step in steps {
+                match step {
+                    NumChainStep::Arith(op, n) => {
+                        v = match op {
+                            BinOp::Add => v + n, BinOp::Sub => v - n,
+                            BinOp::Mul => v * n, BinOp::Div => v / n,
+                            BinOp::Mod => { if *n == 0.0 || !v.is_finite() { return false; } v % n },
+                            _ => v,
+                        };
+                    }
+                    NumChainStep::Unary(op) => {
+                        v = match op {
+                            UnaryOp::Floor => v.floor(),
+                            UnaryOp::Ceil => v.ceil(),
+                            UnaryOp::Round => v.round(),
+                            UnaryOp::Fabs => v.abs(),
+                            UnaryOp::Sqrt => v.sqrt(),
+                            UnaryOp::Trunc => v.trunc(),
+                            _ => v,
+                        };
+                    }
+                }
+            }
+            if !v.is_finite() { return false; }
+            let mut obj_end = b.len();
+            while obj_end > val_end && b[obj_end - 1] != b'}' { obj_end -= 1; }
+            if obj_end <= val_end { return false; }
+            buf.extend_from_slice(&b[pos..val_start]);
+            push_jq_number_bytes(buf, v);
+            buf.extend_from_slice(&b[val_end..obj_end]);
+            return true;
+        }
+    }
+    false
+}
+
 /// Merge literal key-value pairs into a raw JSON object.
 /// `pairs` is a list of (key_name, json_value_bytes).
 /// Existing keys are replaced (last-write-wins), new keys are appended.
