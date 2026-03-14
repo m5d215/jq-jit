@@ -6064,6 +6064,30 @@ impl Filter {
         matches!(expr, Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input))
     }
 
+    /// Detect `.[] | strings/numbers/booleans/nulls/arrays/objects` — each with type filter.
+    /// Returns the type name ("string", "number", etc.).
+    pub fn detect_each_type_filter(&self) -> Option<String> {
+        use crate::ir::{Expr, Literal, BinOp, UnaryOp};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left, right } = expr {
+            if matches!(left.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)) {
+                // select(type == "T") = IfThenElse { cond: type == "T", then: ., else: empty }
+                if let Expr::IfThenElse { cond, then_branch, else_branch } = right.as_ref() {
+                    if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                        if let Expr::BinOp { op: BinOp::Eq, lhs, rhs } = cond.as_ref() {
+                            if matches!(lhs.as_ref(), Expr::UnaryOp { op: UnaryOp::Type, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                                if let Expr::Literal(Literal::Str(ty)) = rhs.as_ref() {
+                                    return Some(ty.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `[.[]]` — collect all values into array.
     pub fn is_collect_each(&self) -> bool {
         use crate::ir::Expr;
