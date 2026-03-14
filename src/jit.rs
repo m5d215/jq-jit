@@ -135,6 +135,24 @@ fn const_eval_gen(expr: &Expr, out: &mut Vec<Value>) -> Option<()> {
             const_eval_gen(right, out)?;
             Some(())
         }
+        Expr::Range { from, to, step } => {
+            let f = if let Value::Num(n, _) = try_const_eval(from)? { n } else { return None; };
+            let t = if let Value::Num(n, _) = try_const_eval(to)? { n } else { return None; };
+            let s = if let Some(step_expr) = step {
+                if let Value::Num(n, _) = try_const_eval(step_expr)? { n } else { return None; }
+            } else { 1.0 };
+            if s == 0.0 || !s.is_finite() || !f.is_finite() || !t.is_finite() { return None; }
+            // Limit constant range to avoid huge arrays
+            let count = ((t - f) / s).ceil() as i64;
+            if count < 0 || count > 10000 { return None; }
+            let mut i = f;
+            if s > 0.0 {
+                while i < t { out.push(Value::Num(i, None)); i += s; }
+            } else {
+                while i > t { out.push(Value::Num(i, None)); i += s; }
+            }
+            Some(())
+        }
         _ => {
             out.push(try_const_eval(expr)?);
             Some(())
