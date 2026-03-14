@@ -1241,6 +1241,37 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             }
             Expr::Limit { count: Box::new(sc), generator: Box::new(sg) }
         }
+        Expr::PathExpr { expr: pe } => {
+            let sp = simplify_expr(pe);
+            // path(.field) → ["field"]
+            if let Expr::Index { expr: base, key } = &sp {
+                if matches!(base.as_ref(), Expr::Input) {
+                    if let Expr::Literal(lit) = key.as_ref() {
+                        return Expr::Collect { generator: Box::new(Expr::Literal(lit.clone())) };
+                    }
+                }
+            }
+            // path(.a, .b) → (["a"], ["b"])
+            if let Expr::Comma { left, right } = &sp {
+                let lp = simplify_expr(&Expr::PathExpr { expr: left.clone() });
+                let rp = simplify_expr(&Expr::PathExpr { expr: right.clone() });
+                return Expr::Comma { left: Box::new(lp), right: Box::new(rp) };
+            }
+            Expr::PathExpr { expr: Box::new(sp) }
+        }
+        Expr::GetPath { path } => {
+            let sp = simplify_expr(path);
+            // getpath(["field"]) → .field
+            if let Expr::Collect { generator } = &sp {
+                if let Expr::Literal(Literal::Str(field)) = generator.as_ref() {
+                    return Expr::Index {
+                        expr: Box::new(Expr::Input),
+                        key: Box::new(Expr::Literal(Literal::Str(field.clone()))),
+                    };
+                }
+            }
+            Expr::GetPath { path: Box::new(sp) }
+        }
         Expr::DelPaths { paths } => {
             use crate::ir::Literal;
             if let Expr::Collect { generator } = paths.as_ref() {
