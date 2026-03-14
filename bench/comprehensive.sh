@@ -143,6 +143,8 @@ bench_ndjson "@html"                   "-c" ".name | @html" "$NDJSON_200K"
 bench_ndjson "@csv (array)"            "-c" '[.name, .x, .y] | @csv' "$NDJSON_200K"
 bench_ndjson "@tsv (array)"            "-c" '[.name, .x, .y] | @tsv' "$NDJSON_200K"
 bench_ndjson "gsub"                    "-c" '.name | gsub("_"; "-")' "$NDJSON_200K"
+bench_ndjson "case+gsub"               "-c" '.name | ascii_downcase | gsub("_"; " ")'
+bench_ndjson "ltrim+tonum+arith"       "-c" '.name | ltrimstr("user_") | tonumber | . * 2'
 
 echo ""
 echo "--- Numeric & math (2M objects) ---"
@@ -151,6 +153,8 @@ bench_ndjson "floor"                   "-c" ".x / 3 | floor"
 bench_ndjson "sqrt"                    "-c" ".x | sqrt"
 bench_ndjson "modulo"                  "-c" ".x % 7"
 bench_ndjson "if-elif-else"            "-c" "if .x > 1000000 then .x elif .x > 500000 then .y else 0 end"
+bench_ndjson "select|del"              "-c" 'select(.x > 1000000) | del(.name)'
+bench_ndjson "select|merge"            "-c" 'select(.x > 1000000) | .+{status:"high"}'
 
 echo ""
 echo "--- Array generators ---"
