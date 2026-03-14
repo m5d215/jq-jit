@@ -422,6 +422,35 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                 }
             }
+            // Semantic: {pairs} | length → N (number of keys)
+            // Also: {pairs} | to_entries | ... gets simplified via to_entries | length → constant
+            if let Expr::ObjectConstruct { pairs } = &sl {
+                if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                    return Expr::Literal(Literal::Num(pairs.len() as f64, None));
+                }
+            }
+            // Semantic: [elements] | length → N (number of elements, if known at compile time)
+            if let Expr::Collect { generator } = &sl {
+                if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                    fn count_comma_elements(e: &Expr) -> Option<usize> {
+                        match e {
+                            Expr::Comma { left, right } => {
+                                Some(count_comma_elements(left)? + count_comma_elements(right)?)
+                            }
+                            _ => Some(1),
+                        }
+                    }
+                    if let Some(n) = count_comma_elements(generator) {
+                        return Expr::Literal(Literal::Num(n as f64, None));
+                    }
+                }
+            }
+            // Semantic: to_entries | length → length (same count)
+            if matches!(&sl, Expr::UnaryOp { op: UnaryOp::ToEntries, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                    return Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) };
+                }
+            }
             // Semantic: keys_unsorted | sort → keys
             if matches!(&sl, Expr::UnaryOp { op: UnaryOp::KeysUnsorted, operand } if matches!(operand.as_ref(), Expr::Input)) {
                 if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Sort, operand } if matches!(operand.as_ref(), Expr::Input)) {
