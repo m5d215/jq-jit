@@ -599,6 +599,12 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             let sc = simplify_expr(cond);
             let st = simplify_expr(then_branch);
             let se = simplify_expr(else_branch);
+            // Constant condition folding: if true then A else B end → A
+            match &sc {
+                Expr::Literal(crate::ir::Literal::Null) | Expr::Literal(crate::ir::Literal::False) => return se,
+                Expr::Literal(crate::ir::Literal::True) | Expr::Literal(crate::ir::Literal::Num(_, _)) | Expr::Literal(crate::ir::Literal::Str(_)) => return st,
+                _ => {}
+            }
             // if .field then .field else F end → .field // F
             if let Expr::Index { expr: base_c, key: key_c } = &sc {
                 if matches!(base_c.as_ref(), Expr::Input) {
@@ -5820,6 +5826,27 @@ impl Filter {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
                 if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                     if let Expr::UnaryOp { op: UnaryOp::Length, operand } = upd.as_ref() {
+                        if matches!(operand.as_ref(), Expr::Input) {
+                            return Some(field.clone());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `.field |= tostring`.
+    /// Returns field_name.
+    pub fn detect_field_update_tostring(&self) -> Option<String> {
+        use crate::ir::{Expr, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        let update_expr = if let Expr::LetBinding { body, .. } = expr { body.as_ref() } else { expr };
+        if let Expr::Update { path_expr, update_expr: upd } = update_expr {
+            if let Expr::Index { expr: base, key } = path_expr.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::UnaryOp { op: UnaryOp::ToString, operand } = upd.as_ref() {
                         if matches!(operand.as_ref(), Expr::Input) {
                             return Some(field.clone());
                         }

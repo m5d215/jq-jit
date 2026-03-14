@@ -8,7 +8,7 @@ use std::process;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, json_object_get_nested_field_raw, parse_json_num, json_value_length, json_object_keys_to_buf_reuse, json_object_extract_keys_only, json_object_keys_unsorted_to_buf, json_object_keys_join_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_type_byte, json_object_del_field, json_object_del_fields, json_object_merge_literal, json_object_sort_keys, json_object_filter_by_value_type, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_with_entries_select_value_cmp, json_object_set_field_raw, json_object_update_field_num, json_object_update_field_num_chain, json_object_update_field_case, json_object_update_field_gsub, json_object_update_field_split_first, json_object_update_field_split_last, json_object_update_field_trim, json_object_update_field_slice, json_object_update_field_str_map, json_object_update_field_str_concat, json_object_update_field_length, is_json_compact, push_json_compact_raw, push_tojson_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, walk_json_transform_nums, pool_value, skip_json_value};
+use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, json_object_get_nested_field_raw, parse_json_num, json_value_length, json_object_keys_to_buf_reuse, json_object_extract_keys_only, json_object_keys_unsorted_to_buf, json_object_keys_join_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_type_byte, json_object_del_field, json_object_del_fields, json_object_merge_literal, json_object_sort_keys, json_object_filter_by_value_type, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_with_entries_select_value_cmp, json_object_set_field_raw, json_object_update_field_num, json_object_update_field_num_chain, json_object_update_field_case, json_object_update_field_gsub, json_object_update_field_split_first, json_object_update_field_split_last, json_object_update_field_trim, json_object_update_field_slice, json_object_update_field_str_map, json_object_update_field_str_concat, json_object_update_field_length, json_object_update_field_tostring, is_json_compact, push_json_compact_raw, push_tojson_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line, walk_json_transform_nums, pool_value, skip_json_value};
 use jq_jit::interpreter::Filter;
 
 fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -2129,6 +2129,9 @@ fn real_main() {
     let field_update_length = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_update_str_concat.is_none() {
         filter.detect_field_update_length()
     } else { None };
+    let field_update_tostring = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_update_length.is_none() {
+        filter.detect_field_update_tostring()
+    } else { None };
     let field_split_length = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
         filter.detect_field_split_length()
     } else { None };
@@ -2294,7 +2297,7 @@ fn real_main() {
         || is_collect_each || collect_each_arith.is_some() || collect_each_select_type.is_some() || collect_each_select_cmp.is_some() || first_each_select_type.is_some() || count_each_select_cmp.is_some() || sort_two_fields.is_some() || is_each || is_sort_keys || is_to_entries || to_entries_each_interp.is_some() || remap_to_entries.is_some() || with_entries_select.is_some() || with_entries_del.is_some() || with_entries_type.is_some() || is_tojson || remap_tojson.is_some() || string_interp_fields.is_some() || string_add_chain.is_some() || array_join.is_some()
         || literal_output.is_some() || array_fields_format.is_some() || raw_csv_fields.is_some()
         || field_str_reverse.is_some() || field_split_rev_join.is_some() || field_case_split_join.is_some() || field_case_split.is_some() || field_split_join.is_some() || field_split_slice_join.is_some() || field_split_first.is_some() || field_split_last.is_some() || field_split_nth.is_some() || field_split_length.is_some() || field_strop_length.is_some() || field_length_cmp.is_some() || select_length_cmp.is_some() || select_length_cmp_field.is_some() || field_slice.is_some()
-        || dynamic_key_obj.is_some() || dynamic_key_mixed.is_some() || field_update_num.is_some() || field_update_num_chain.is_some() || field_update_gsub.is_some() || field_update_split_first.is_some() || field_update_split_last.is_some() || field_assign_const.is_some() || field_update_case.is_some() || field_update_trim.is_some() || field_update_slice.is_some() || field_update_str_map.is_some() || field_update_str_concat.is_some() || field_update_length.is_some()
+        || dynamic_key_obj.is_some() || dynamic_key_mixed.is_some() || field_update_num.is_some() || field_update_num_chain.is_some() || field_update_gsub.is_some() || field_update_split_first.is_some() || field_update_split_last.is_some() || field_assign_const.is_some() || field_update_case.is_some() || field_update_trim.is_some() || field_update_slice.is_some() || field_update_str_map.is_some() || field_update_str_concat.is_some() || field_update_length.is_some() || field_update_tostring.is_some()
         || min_two_fields.is_some() || minmax_two.is_some() || minmax_n.is_some() || field_string_chain.is_some() || remap_tostring_join.is_some() || walk_num_op.is_some() || filter.is_empty();
     let projection_fields: Option<Vec<String>> = if !has_raw_fast_path && !slurp && !raw_input {
         filter.needed_input_fields()
@@ -3885,6 +3888,31 @@ fn real_main() {
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             }
                         } else if !json_object_update_field_length(raw, 0, ul_field, &mut compact_buf) {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        } else {
+                            compact_buf.push(b'\n');
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some(ref ts_field) = field_update_tostring {
+                    let mut tmp = Vec::with_capacity(256);
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if use_pretty_buf {
+                            tmp.clear();
+                            if json_object_update_field_tostring(raw, 0, ts_field, &mut tmp) {
+                                push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                                compact_buf.push(b'\n');
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        } else if !json_object_update_field_tostring(raw, 0, ts_field, &mut compact_buf) {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         } else {
@@ -11322,6 +11350,32 @@ fn real_main() {
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                     } else if !json_object_update_field_length(raw, 0, ul_field, &mut compact_buf) {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    } else {
+                        compact_buf.push(b'\n');
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some(ref ts_field) = field_update_tostring {
+                let content_bytes = content.as_bytes();
+                let mut tmp = Vec::with_capacity(256);
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if use_pretty_buf {
+                        tmp.clear();
+                        if json_object_update_field_tostring(raw, 0, ts_field, &mut tmp) {
+                            push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                            compact_buf.push(b'\n');
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                    } else if !json_object_update_field_tostring(raw, 0, ts_field, &mut compact_buf) {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     } else {

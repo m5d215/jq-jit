@@ -1734,6 +1734,45 @@ pub fn json_object_update_field_length(
     false
 }
 
+/// Update a field by applying tostring.
+/// For strings: identity. For numbers: wrap in quotes. For booleans/null: wrap in quotes.
+pub fn json_object_update_field_tostring(
+    b: &[u8], pos: usize, field: &str, buf: &mut Vec<u8>,
+) -> bool {
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
+        if val_start >= val_end { return false; }
+        let first = b[val_start];
+        let mut obj_end = b.len();
+        while obj_end > val_end && b[obj_end - 1] != b'}' { obj_end -= 1; }
+        if obj_end <= val_end { return false; }
+        if first == b'"' {
+            // Already a string — tostring is identity
+            buf.extend_from_slice(&b[pos..obj_end]);
+            return true;
+        }
+        // Number, boolean, or null — wrap the raw value in quotes
+        let val_bytes = &b[val_start..val_end];
+        buf.extend_from_slice(&b[pos..val_start]);
+        buf.push(b'"');
+        // For numbers, use push_jq_number_bytes for correct formatting
+        if first == b'-' || first.is_ascii_digit() {
+            if let Ok(n) = unsafe { std::str::from_utf8_unchecked(val_bytes) }.parse::<f64>() {
+                push_jq_number_bytes(buf, n);
+            } else {
+                buf.extend_from_slice(val_bytes);
+            }
+        } else {
+            // true, false, null → "true", "false", "null"
+            buf.extend_from_slice(val_bytes);
+        }
+        buf.push(b'"');
+        buf.extend_from_slice(&b[val_end..obj_end]);
+        return true;
+    }
+    false
+}
+
 /// Update a field by concatenating prefix/suffix strings.
 /// `.field |= (. + "suffix")` or `.field |= ("prefix" + .)`.
 pub fn json_object_update_field_str_concat(
