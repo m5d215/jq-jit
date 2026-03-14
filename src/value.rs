@@ -1455,6 +1455,69 @@ pub fn json_object_update_field_gsub(
     false
 }
 
+/// Update a field by taking the first element after splitting by a separator.
+/// `.field |= (split("sep")|.[0])` — extract string field, find first separator, write prefix.
+pub fn json_object_update_field_split_first(
+    b: &[u8], pos: usize, field: &str, sep: &str, buf: &mut Vec<u8>,
+) -> bool {
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
+        if val_start >= val_end || b[val_start] != b'"' { return false; }
+        let inner = &b[val_start + 1..val_end - 1];
+        let has_escapes = memchr::memchr(b'\\', inner).is_some();
+        // Find object end
+        let mut obj_end = b.len();
+        while obj_end > val_end && b[obj_end - 1] != b'}' { obj_end -= 1; }
+        if obj_end <= val_end { return false; }
+        buf.extend_from_slice(&b[pos..val_start]);
+        buf.push(b'"');
+        if has_escapes {
+            // Must unescape, split, re-escape
+            let s: String = match serde_json::from_slice(&b[val_start..val_end]) {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+            let first = s.split(sep).next().unwrap_or("");
+            for &ch in first.as_bytes() {
+                match ch {
+                    b'"' => buf.extend_from_slice(b"\\\""),
+                    b'\\' => buf.extend_from_slice(b"\\\\"),
+                    b'\n' => buf.extend_from_slice(b"\\n"),
+                    b'\r' => buf.extend_from_slice(b"\\r"),
+                    b'\t' => buf.extend_from_slice(b"\\t"),
+                    c if c < 0x20 => {
+                        buf.extend_from_slice(format!("\\u{:04x}", c).as_bytes());
+                    }
+                    _ => buf.push(ch),
+                }
+            }
+        } else {
+            // Fast: no escapes, find separator directly in raw bytes
+            let sep_bytes = sep.as_bytes();
+            if sep_bytes.is_empty() {
+                // split("") produces individual characters — first is first char
+                if !inner.is_empty() {
+                    let ch_len = if inner[0] < 0x80 { 1 }
+                        else if inner[0] < 0xE0 { 2 }
+                        else if inner[0] < 0xF0 { 3 }
+                        else { 4 };
+                    let end = ch_len.min(inner.len());
+                    buf.extend_from_slice(&inner[..end]);
+                }
+            } else if let Some(idx) = inner.windows(sep_bytes.len()).position(|w| w == sep_bytes) {
+                buf.extend_from_slice(&inner[..idx]);
+            } else {
+                // No separator found — result is unchanged (whole string)
+                buf.extend_from_slice(inner);
+            }
+        }
+        buf.push(b'"');
+        buf.extend_from_slice(&b[val_end..obj_end]);
+        return true;
+    }
+    false
+}
+
 /// Merge literal key-value pairs into a raw JSON object.
 /// `pairs` is a list of (key_name, json_value_bytes).
 /// Existing keys are replaced (last-write-wins), new keys are appended.

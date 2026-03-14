@@ -5510,6 +5510,55 @@ impl Filter {
         None
     }
 
+    /// Detect `.field |= (split("sep") | .[0])` — update field to first split component.
+    /// Returns (field_name, separator).
+    pub fn detect_field_update_split_first(&self) -> Option<(String, String)> {
+        use crate::ir::{Expr, Literal};
+        let expr = self.detect_expr()?;
+        let update_expr_outer = if let Expr::LetBinding { body, .. } = expr { body.as_ref() } else { expr };
+        if let Expr::Update { path_expr, update_expr } = update_expr_outer {
+            if let Expr::Index { expr: base, key } = path_expr.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    fn check_split_first(e: &Expr) -> Option<String> {
+                        // Form 1: Pipe(split, .[0])
+                        if let Expr::Pipe { left, right } = e {
+                            if let Some(sep) = extract_split(left) {
+                                if is_first_index(right) { return Some(sep); }
+                            }
+                        }
+                        // Form 2 (simplified): Index { expr: split(.,"_"), key: Literal(Num(0)) }
+                        if let Expr::Index { expr: inner, key } = e {
+                            if matches!(key.as_ref(), Expr::Literal(Literal::Num(n, _)) if *n == 0.0) {
+                                if let Some(sep) = extract_split(inner) { return Some(sep); }
+                            }
+                        }
+                        None
+                    }
+                    fn extract_split(e: &Expr) -> Option<String> {
+                        if let Expr::CallBuiltin { name, args } = e {
+                            if name == "split" && args.len() == 1 {
+                                if let Expr::Literal(Literal::Str(sep)) = &args[0] {
+                                    return Some(sep.clone());
+                                }
+                            }
+                        }
+                        None
+                    }
+                    fn is_first_index(e: &Expr) -> bool {
+                        if let Expr::Index { expr: inner, key } = e {
+                            matches!(inner.as_ref(), Expr::Input) && matches!(key.as_ref(), Expr::Literal(Literal::Num(n, _)) if *n == 0.0)
+                        } else { false }
+                    }
+                    if let Some(sep) = check_split_first(update_expr) {
+                        return Some((field.clone(), sep));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field |= gsub("re"; "replacement")`.
     /// Returns (field_name, regex_pattern, replacement).
     pub fn detect_field_update_gsub(&self) -> Option<(String, String, String)> {
