@@ -780,6 +780,23 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                 }
             }
+            // Semantic: [a, b] | sort → if a <= b then [a,b] else [b,a] end
+            if let Expr::Collect { generator: ref lg } = sl {
+                let is_sort = matches!(&sr, Expr::UnaryOp { op: UnaryOp::Sort, operand } if matches!(operand.as_ref(), Expr::Input));
+                if is_sort {
+                    if let Expr::Comma { left, right } = lg.as_ref() {
+                        if !matches!(left.as_ref(), Expr::Comma { .. }) && !matches!(right.as_ref(), Expr::Comma { .. }) {
+                            let a = left.as_ref().clone();
+                            let b = right.as_ref().clone();
+                            return simplify_expr(&Expr::IfThenElse {
+                                cond: Box::new(Expr::BinOp { op: crate::ir::BinOp::Le, lhs: Box::new(a.clone()), rhs: Box::new(b.clone()) }),
+                                then_branch: Box::new(Expr::Collect { generator: Box::new(Expr::Comma { left: Box::new(a.clone()), right: Box::new(b.clone()) }) }),
+                                else_branch: Box::new(Expr::Collect { generator: Box::new(Expr::Comma { left: Box::new(b), right: Box::new(a) }) }),
+                            });
+                        }
+                    }
+                }
+            }
             // Semantic: [e1, e2, ...] | any(f) → (e1|f) or (e2|f) or ...
             // Semantic: [e1, e2, ...] | all(f) → (e1|f) and (e2|f) and ...
             if let Expr::Collect { generator: ref lg } = sl {

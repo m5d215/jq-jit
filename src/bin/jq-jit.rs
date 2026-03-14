@@ -750,6 +750,12 @@ fn emit_remap_value(
             if let (Some(a), Some(b)) = (parse_json_num(&raw[vs1..ve1]), parse_json_num(&raw[vs2..ve2])) {
                 let r = match op { BinOp::Add => a + b, BinOp::Sub => a - b, BinOp::Mul => a * b, BinOp::Div => a / b, BinOp::Mod => a % b, _ => unreachable!() };
                 push_jq_number_bytes(buf, r);
+            } else if matches!(op, BinOp::Add) && raw[vs1] == b'"' && raw[vs2] == b'"' {
+                // String concatenation: "hello" + "world" → "helloworld"
+                buf.push(b'"');
+                buf.extend_from_slice(&raw[vs1+1..ve1-1]);
+                buf.extend_from_slice(&raw[vs2+1..ve2-1]);
+                buf.push(b'"');
             } else { buf.extend_from_slice(b"null"); }
         }
         RemapExpr::ConstOpField(n, op, f) => {
@@ -775,6 +781,17 @@ fn emit_remap_value(
             let (vs2, ve2) = ranges[idx2];
             if let (Some(a), Some(b)) = (parse_json_num(&raw[vs1..ve1]), parse_json_num(&raw[vs2..ve2])) {
                 let r = match op { BinOp::Gt => a > b, BinOp::Lt => a < b, BinOp::Ge => a >= b, BinOp::Le => a <= b, BinOp::Eq => a == b, BinOp::Ne => a != b, _ => unreachable!() };
+                buf.extend_from_slice(if r { b"true" } else { b"false" });
+            } else if raw[vs1] == b'"' && raw[vs2] == b'"' {
+                // String comparison: compare raw bytes (correct for simple ASCII strings)
+                let s1 = &raw[vs1+1..ve1-1];
+                let s2 = &raw[vs2+1..ve2-1];
+                let r = match op { BinOp::Gt => s1 > s2, BinOp::Lt => s1 < s2, BinOp::Ge => s1 >= s2, BinOp::Le => s1 <= s2, BinOp::Eq => s1 == s2, BinOp::Ne => s1 != s2, _ => unreachable!() };
+                buf.extend_from_slice(if r { b"true" } else { b"false" });
+            } else if raw[vs1] == b'"' || raw[vs2] == b'"' {
+                // Mixed type comparison: numbers < strings in jq type ordering
+                let left_is_str = raw[vs1] == b'"';
+                let r = match op { BinOp::Gt => left_is_str, BinOp::Lt => !left_is_str, BinOp::Ge => left_is_str, BinOp::Le => !left_is_str, BinOp::Eq => false, BinOp::Ne => true, _ => unreachable!() };
                 buf.extend_from_slice(if r { b"true" } else { b"false" });
             } else { buf.extend_from_slice(b"null"); }
         }
@@ -959,6 +976,24 @@ fn eval_arith_raw_unresolved(
     }
 }
 
+/// Compare two raw JSON field values using jq type ordering.
+/// Handles: both numeric, both string, mixed (number < string).
+#[inline]
+fn compare_raw_fields(raw: &[u8], r1: (usize, usize), r2: (usize, usize), op: &jq_jit::ir::BinOp) -> bool {
+    use jq_jit::ir::BinOp;
+    if let (Some(v1), Some(v2)) = (parse_json_num(&raw[r1.0..r1.1]), parse_json_num(&raw[r2.0..r2.1])) {
+        match op { BinOp::Gt => v1 > v2, BinOp::Lt => v1 < v2, BinOp::Ge => v1 >= v2, BinOp::Le => v1 <= v2, BinOp::Eq => v1 == v2, BinOp::Ne => v1 != v2, _ => false }
+    } else if raw[r1.0] == b'"' && raw[r2.0] == b'"' {
+        let s1 = &raw[r1.0+1..r1.1-1];
+        let s2 = &raw[r2.0+1..r2.1-1];
+        match op { BinOp::Gt => s1 > s2, BinOp::Lt => s1 < s2, BinOp::Ge => s1 >= s2, BinOp::Le => s1 <= s2, BinOp::Eq => s1 == s2, BinOp::Ne => s1 != s2, _ => false }
+    } else if raw[r1.0] == b'"' || raw[r2.0] == b'"' {
+        // Mixed type: number < string in jq ordering
+        let left_is_str = raw[r1.0] == b'"';
+        match op { BinOp::Gt => left_is_str, BinOp::Lt => !left_is_str, BinOp::Ge => left_is_str, BinOp::Le => !left_is_str, BinOp::Eq => false, BinOp::Ne => true, _ => false }
+    } else { false }
+}
+
 /// Emit a pre-resolved remap value — no HashMap lookups, just direct index access.
 #[inline]
 fn emit_resolved_value(
@@ -986,6 +1021,11 @@ fn emit_resolved_value(
             if let (Some(a), Some(b)) = (parse_json_num(&raw[vs1..ve1]), parse_json_num(&raw[vs2..ve2])) {
                 let r = match op { BinOp::Add => a + b, BinOp::Sub => a - b, BinOp::Mul => a * b, BinOp::Div => a / b, BinOp::Mod => a % b, _ => unreachable!() };
                 push_jq_number_bytes(buf, r);
+            } else if matches!(op, BinOp::Add) && raw[vs1] == b'"' && raw[vs2] == b'"' {
+                buf.push(b'"');
+                buf.extend_from_slice(&raw[vs1+1..ve1-1]);
+                buf.extend_from_slice(&raw[vs2+1..ve2-1]);
+                buf.push(b'"');
             } else { buf.extend_from_slice(b"null"); }
         }
         ResolvedRemap::ConstOpField(n, ref op, idx) => {
@@ -1007,6 +1047,15 @@ fn emit_resolved_value(
             let (vs2, ve2) = ranges[idx2];
             if let (Some(a), Some(b)) = (parse_json_num(&raw[vs1..ve1]), parse_json_num(&raw[vs2..ve2])) {
                 let r = match op { BinOp::Gt => a > b, BinOp::Lt => a < b, BinOp::Ge => a >= b, BinOp::Le => a <= b, BinOp::Eq => a == b, BinOp::Ne => a != b, _ => unreachable!() };
+                buf.extend_from_slice(if r { b"true" } else { b"false" });
+            } else if raw[vs1] == b'"' && raw[vs2] == b'"' {
+                let s1 = &raw[vs1+1..ve1-1];
+                let s2 = &raw[vs2+1..ve2-1];
+                let r = match op { BinOp::Gt => s1 > s2, BinOp::Lt => s1 < s2, BinOp::Ge => s1 >= s2, BinOp::Le => s1 <= s2, BinOp::Eq => s1 == s2, BinOp::Ne => s1 != s2, _ => unreachable!() };
+                buf.extend_from_slice(if r { b"true" } else { b"false" });
+            } else if raw[vs1] == b'"' || raw[vs2] == b'"' {
+                let left_is_str = raw[vs1] == b'"';
+                let r = match op { BinOp::Gt => left_is_str, BinOp::Lt => !left_is_str, BinOp::Ge => left_is_str, BinOp::Le => !left_is_str, BinOp::Eq => false, BinOp::Ne => true, _ => unreachable!() };
                 buf.extend_from_slice(if r { b"true" } else { b"false" });
             } else { buf.extend_from_slice(b"null"); }
         }
@@ -1168,8 +1217,8 @@ fn emit_resolved_value(
                             && !field_bytes[1..field_bytes.len()-1].contains(&b'\\')
                             && re.is_match(unsafe { std::str::from_utf8_unchecked(&field_bytes[1..field_bytes.len()-1]) })
                     }
-                    ResolvedCondRhs::Const(_) | ResolvedCondRhs::Field(_) => {
-                        // Numeric comparison (original path)
+                    ResolvedCondRhs::Const(_) => {
+                        // Numeric comparison with constant
                         if let Some(mut val) = parse_json_num(field_bytes) {
                             for &(ref aop, n) in &b.cond_arith_ops {
                                 val = match aop {
@@ -1181,26 +1230,54 @@ fn emit_resolved_value(
                                     _ => val,
                                 };
                             }
-                            let rhs_val = match &b.cond_rhs {
-                                ResolvedCondRhs::Const(n) => Some(*n),
-                                ResolvedCondRhs::Field(idx) => {
-                                    let (rs, re) = ranges[*idx];
-                                    parse_json_num(&raw[rs..re])
-                                }
+                            let rhs = match &b.cond_rhs {
+                                ResolvedCondRhs::Const(n) => *n,
                                 _ => unreachable!(),
                             };
-                            if let Some(rhs) = rhs_val {
-                                match b.cond_op {
-                                    jq_jit::ir::BinOp::Gt => val > rhs,
-                                    jq_jit::ir::BinOp::Lt => val < rhs,
-                                    jq_jit::ir::BinOp::Ge => val >= rhs,
-                                    jq_jit::ir::BinOp::Le => val <= rhs,
-                                    jq_jit::ir::BinOp::Eq => val == rhs,
-                                    jq_jit::ir::BinOp::Ne => val != rhs,
-                                    _ => false,
-                                }
-                            } else { false }
+                            match b.cond_op {
+                                jq_jit::ir::BinOp::Gt => val > rhs,
+                                jq_jit::ir::BinOp::Lt => val < rhs,
+                                jq_jit::ir::BinOp::Ge => val >= rhs,
+                                jq_jit::ir::BinOp::Le => val <= rhs,
+                                jq_jit::ir::BinOp::Eq => val == rhs,
+                                jq_jit::ir::BinOp::Ne => val != rhs,
+                                _ => false,
+                            }
                         } else { false }
+                    }
+                    ResolvedCondRhs::Field(idx) => {
+                        let r2 = ranges[*idx];
+                        if b.cond_arith_ops.is_empty() {
+                            // No arith ops: full type-aware comparison
+                            if r2.0 < r2.1 && vs < ve {
+                                compare_raw_fields(raw, (vs, ve), r2, &b.cond_op)
+                            } else { false }
+                        } else {
+                            // With arith ops: must be numeric
+                            if let Some(mut val) = parse_json_num(field_bytes) {
+                                for &(ref aop, n) in &b.cond_arith_ops {
+                                    val = match aop {
+                                        jq_jit::ir::BinOp::Add => val + n,
+                                        jq_jit::ir::BinOp::Sub => val - n,
+                                        jq_jit::ir::BinOp::Mul => val * n,
+                                        jq_jit::ir::BinOp::Div => val / n,
+                                        jq_jit::ir::BinOp::Mod => val % n,
+                                        _ => val,
+                                    };
+                                }
+                                if let Some(rhs) = parse_json_num(&raw[r2.0..r2.1]) {
+                                    match b.cond_op {
+                                        jq_jit::ir::BinOp::Gt => val > rhs,
+                                        jq_jit::ir::BinOp::Lt => val < rhs,
+                                        jq_jit::ir::BinOp::Ge => val >= rhs,
+                                        jq_jit::ir::BinOp::Le => val <= rhs,
+                                        jq_jit::ir::BinOp::Eq => val == rhs,
+                                        jq_jit::ir::BinOp::Ne => val != rhs,
+                                        _ => false,
+                                    }
+                                } else { false }
+                            } else { false }
+                        }
                     }
                 };
                 if cond_result {
@@ -1533,10 +1610,11 @@ fn eval_resolved_bool(resolved: &ResolvedRemap, raw: &[u8], ranges: &[(usize, us
             Some(match op { BinOp::Gt => a > *n, BinOp::Lt => a < *n, BinOp::Ge => a >= *n, BinOp::Le => a <= *n, BinOp::Eq => a == *n, BinOp::Ne => a != *n, _ => return None })
         }
         ResolvedRemap::FieldCmpField(idx1, ref op, idx2) => {
-            let (vs1, ve1) = ranges[*idx1];
-            let (vs2, ve2) = ranges[*idx2];
-            let (a, b) = (parse_json_num(&raw[vs1..ve1])?, parse_json_num(&raw[vs2..ve2])?);
-            Some(match op { BinOp::Gt => a > b, BinOp::Lt => a < b, BinOp::Ge => a >= b, BinOp::Le => a <= b, BinOp::Eq => a == b, BinOp::Ne => a != b, _ => return None })
+            let r1 = ranges[*idx1];
+            let r2 = ranges[*idx2];
+            if r1.0 < r1.1 && r2.0 < r2.1 {
+                Some(compare_raw_fields(raw, r1, r2, op))
+            } else { None }
         }
         ResolvedRemap::BoolExpr(ref l, ref bool_op, ref r) => {
             let lv = eval_resolved_bool(l, raw, ranges)?;
@@ -7434,8 +7512,39 @@ fn real_main() {
                                     BranchOutput::Empty => {}
                                     BranchOutput::Remap(_) | BranchOutput::Computed(_) => unreachable!(),
                                 }
+                            } else if rhs_field.is_some() {
+                                // Fields not both numeric — try type-aware comparison
+                                let rf = rhs_field.unwrap();
+                                let pass = if let (Some(r1), Some(r2)) = (
+                                    json_object_get_field_raw(raw, 0, cond_field),
+                                    json_object_get_field_raw(raw, 0, rf),
+                                ) {
+                                    compare_raw_fields(raw, r1, r2, cond_op)
+                                } else { false };
+                                let out_br = if pass { then_out } else { else_output };
+                                match out_br {
+                                    BranchOutput::Literal(ref bytes) => {
+                                        compact_buf.extend_from_slice(bytes);
+                                        compact_buf.push(b'\n');
+                                    }
+                                    BranchOutput::Field(ref f) => {
+                                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, f) {
+                                            let val = &raw[vs..ve];
+                                            if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
+                                                push_json_pretty_raw(&mut compact_buf, val, 2, false);
+                                            } else {
+                                                compact_buf.extend_from_slice(val);
+                                            }
+                                            compact_buf.push(b'\n');
+                                        } else {
+                                            compact_buf.extend_from_slice(b"null\n");
+                                        }
+                                    }
+                                    BranchOutput::Empty => {}
+                                    BranchOutput::Remap(_) | BranchOutput::Computed(_) => unreachable!(),
+                                }
                             } else {
-                                // Fields not numeric — take else branch
+                                // Const RHS, field not numeric — take else branch
                                 match else_output {
                                     BranchOutput::Literal(ref bytes) => {
                                         compact_buf.extend_from_slice(bytes);
@@ -7597,8 +7706,8 @@ fn real_main() {
                                                 && re.is_match(unsafe { std::str::from_utf8_unchecked(&field_bytes[1..field_bytes.len()-1]) })
                                         } else { false }
                                     }
-                                    _ => {
-                                        // Numeric comparison
+                                    CondRhs::Const(_) => {
+                                        // Numeric comparison with constant
                                         if let Some(mut val) = parse_json_num(field_bytes) {
                                             for (aop, n) in &br.cond_arith_ops {
                                                 val = match aop {
@@ -7607,20 +7716,35 @@ fn real_main() {
                                                     BinOp::Mod => val % n, _ => val,
                                                 };
                                             }
-                                            let rhs_val = match &br.cond_rhs {
-                                                CondRhs::Const(n) => *n,
-                                                CondRhs::Field(ref f) => {
-                                                    let ri = field_idx[f];
-                                                    let (rs, re) = ranges_buf[ri];
-                                                    match parse_json_num(&raw[rs..re]) { Some(v) => v, None => { continue; } }
-                                                }
-                                                _ => unreachable!(),
-                                            };
+                                            let rhs = match &br.cond_rhs { CondRhs::Const(n) => *n, _ => unreachable!() };
                                             match br.cond_op {
-                                                BinOp::Gt => val > rhs_val, BinOp::Lt => val < rhs_val,
-                                                BinOp::Ge => val >= rhs_val, BinOp::Le => val <= rhs_val,
-                                                BinOp::Eq => val == rhs_val, BinOp::Ne => val != rhs_val,
+                                                BinOp::Gt => val > rhs, BinOp::Lt => val < rhs,
+                                                BinOp::Ge => val >= rhs, BinOp::Le => val <= rhs,
+                                                BinOp::Eq => val == rhs, BinOp::Ne => val != rhs,
                                                 _ => false,
+                                            }
+                                        } else { false }
+                                    }
+                                    CondRhs::Field(ref f) => {
+                                        let r2 = ranges_buf[field_idx[f]];
+                                        if br.cond_arith_ops.is_empty() && vs < ve && r2.0 < r2.1 {
+                                            compare_raw_fields(raw, (vs, ve), r2, &br.cond_op)
+                                        } else if let Some(mut val) = parse_json_num(field_bytes) {
+                                            for (aop, n) in &br.cond_arith_ops {
+                                                val = match aop {
+                                                    BinOp::Add => val + n, BinOp::Sub => val - n,
+                                                    BinOp::Mul => val * n, BinOp::Div => val / n,
+                                                    BinOp::Mod => val % n, _ => val,
+                                                };
+                                            }
+                                            match parse_json_num(&raw[r2.0..r2.1]) {
+                                                Some(rhs) => match br.cond_op {
+                                                    BinOp::Gt => val > rhs, BinOp::Lt => val < rhs,
+                                                    BinOp::Ge => val >= rhs, BinOp::Le => val <= rhs,
+                                                    BinOp::Eq => val == rhs, BinOp::Ne => val != rhs,
+                                                    _ => false,
+                                                },
+                                                None => { continue; }
                                             }
                                         } else { false }
                                     }
@@ -7747,6 +7871,7 @@ fn real_main() {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         if let Some((v1, v2)) = json_object_get_two_nums(raw, 0, f1, f2) {
+                            eprintln!("DEBUG: two_nums returned Some({}, {})", v1, v2);
                             let pass = match cmp_op {
                                 BinOp::Gt => v1 > v2, BinOp::Lt => v1 < v2,
                                 BinOp::Ge => v1 >= v2, BinOp::Le => v1 <= v2,
@@ -7756,6 +7881,7 @@ fn real_main() {
                             compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
                             compact_buf.push(b'\n');
                         } else {
+                            eprintln!("DEBUG: two_nums returned None, falling to process_input");
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -7913,20 +8039,10 @@ fn real_main() {
                                 IfArrayCond::FieldField(f1, op, f2) => {
                                     let i1 = field_idx[f1];
                                     let i2 = field_idx[f2];
-                                    let r1 = &ranges_buf[i1];
-                                    let r2 = &ranges_buf[i2];
+                                    let r1 = ranges_buf[i1];
+                                    let r2 = ranges_buf[i2];
                                     if r1.0 < r1.1 && r2.0 < r2.1 {
-                                        if let (Some(v1), Some(v2)) = (
-                                            parse_json_num(&raw[r1.0..r1.1]),
-                                            parse_json_num(&raw[r2.0..r2.1]),
-                                        ) {
-                                            match op {
-                                                BinOp::Gt => v1 > v2, BinOp::Lt => v1 < v2,
-                                                BinOp::Ge => v1 >= v2, BinOp::Le => v1 <= v2,
-                                                BinOp::Eq => v1 == v2, BinOp::Ne => v1 != v2,
-                                                _ => false,
-                                            }
-                                        } else { false }
+                                        compare_raw_fields(raw, r1, r2, op)
                                     } else { false }
                                 }
                             };
@@ -14299,7 +14415,39 @@ fn real_main() {
                                 BranchOutput::Empty => {}
                                 BranchOutput::Remap(_) | BranchOutput::Computed(_) => unreachable!(),
                             }
+                        } else if rhs_field.is_some() {
+                            // Fields not both numeric — try type-aware comparison
+                            let rf = rhs_field.unwrap();
+                            let pass = if let (Some(r1), Some(r2)) = (
+                                json_object_get_field_raw(raw, 0, cond_field),
+                                json_object_get_field_raw(raw, 0, rf),
+                            ) {
+                                compare_raw_fields(raw, r1, r2, cond_op)
+                            } else { false };
+                            let out_br = if pass { then_out } else { else_output };
+                            match out_br {
+                                BranchOutput::Literal(ref bytes) => {
+                                    compact_buf.extend_from_slice(bytes);
+                                    compact_buf.push(b'\n');
+                                }
+                                BranchOutput::Field(ref f) => {
+                                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, f) {
+                                        let val = &raw[vs..ve];
+                                        if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
+                                            push_json_pretty_raw(&mut compact_buf, val, 2, false);
+                                        } else {
+                                            compact_buf.extend_from_slice(val);
+                                        }
+                                        compact_buf.push(b'\n');
+                                    } else {
+                                        compact_buf.extend_from_slice(b"null\n");
+                                    }
+                                }
+                                BranchOutput::Empty => {}
+                                BranchOutput::Remap(_) | BranchOutput::Computed(_) => unreachable!(),
+                            }
                         } else {
+                            // Const RHS, field not numeric — take else branch
                             match else_output {
                                 BranchOutput::Literal(ref bytes) => {
                                     compact_buf.extend_from_slice(bytes);
@@ -14460,7 +14608,7 @@ fn real_main() {
                                             && re.is_match(unsafe { std::str::from_utf8_unchecked(&field_bytes[1..field_bytes.len()-1]) })
                                     } else { false }
                                 }
-                                _ => {
+                                CondRhs::Const(_) => {
                                     if let Some(mut val) = parse_json_num(field_bytes) {
                                         for (aop, n) in &br.cond_arith_ops {
                                             val = match aop {
@@ -14469,20 +14617,35 @@ fn real_main() {
                                                 BinOp::Mod => val % n, _ => val,
                                             };
                                         }
-                                        let rhs_val = match &br.cond_rhs {
-                                            CondRhs::Const(n) => *n,
-                                            CondRhs::Field(ref f) => {
-                                                let ri = field_idx[f];
-                                                let (rs, re) = ranges_buf[ri];
-                                                match parse_json_num(&raw[rs..re]) { Some(v) => v, None => { continue; } }
-                                            }
-                                            _ => unreachable!(),
-                                        };
+                                        let rhs = match &br.cond_rhs { CondRhs::Const(n) => *n, _ => unreachable!() };
                                         match br.cond_op {
-                                            BinOp::Gt => val > rhs_val, BinOp::Lt => val < rhs_val,
-                                            BinOp::Ge => val >= rhs_val, BinOp::Le => val <= rhs_val,
-                                            BinOp::Eq => val == rhs_val, BinOp::Ne => val != rhs_val,
+                                            BinOp::Gt => val > rhs, BinOp::Lt => val < rhs,
+                                            BinOp::Ge => val >= rhs, BinOp::Le => val <= rhs,
+                                            BinOp::Eq => val == rhs, BinOp::Ne => val != rhs,
                                             _ => false,
+                                        }
+                                    } else { false }
+                                }
+                                CondRhs::Field(ref f) => {
+                                    let r2 = ranges_buf[field_idx[f]];
+                                    if br.cond_arith_ops.is_empty() && vs < ve && r2.0 < r2.1 {
+                                        compare_raw_fields(raw, (vs, ve), r2, &br.cond_op)
+                                    } else if let Some(mut val) = parse_json_num(field_bytes) {
+                                        for (aop, n) in &br.cond_arith_ops {
+                                            val = match aop {
+                                                BinOp::Add => val + n, BinOp::Sub => val - n,
+                                                BinOp::Mul => val * n, BinOp::Div => val / n,
+                                                BinOp::Mod => val % n, _ => val,
+                                            };
+                                        }
+                                        match parse_json_num(&raw[r2.0..r2.1]) {
+                                            Some(rhs) => match br.cond_op {
+                                                BinOp::Gt => val > rhs, BinOp::Lt => val < rhs,
+                                                BinOp::Ge => val >= rhs, BinOp::Le => val <= rhs,
+                                                BinOp::Eq => val == rhs, BinOp::Ne => val != rhs,
+                                                _ => false,
+                                            },
+                                            None => { continue; }
                                         }
                                     } else { false }
                                 }
@@ -14781,20 +14944,10 @@ fn real_main() {
                             IfArrayCond::FieldField(f1, op, f2) => {
                                 let i1 = field_idx[f1];
                                 let i2 = field_idx[f2];
-                                let r1 = &ranges_buf[i1];
-                                let r2 = &ranges_buf[i2];
+                                let r1 = ranges_buf[i1];
+                                let r2 = ranges_buf[i2];
                                 if r1.0 < r1.1 && r2.0 < r2.1 {
-                                    if let (Some(v1), Some(v2)) = (
-                                        parse_json_num(&raw[r1.0..r1.1]),
-                                        parse_json_num(&raw[r2.0..r2.1]),
-                                    ) {
-                                        match op {
-                                            BinOp::Gt => v1 > v2, BinOp::Lt => v1 < v2,
-                                            BinOp::Ge => v1 >= v2, BinOp::Le => v1 <= v2,
-                                            BinOp::Eq => v1 == v2, BinOp::Ne => v1 != v2,
-                                            _ => false,
-                                        }
-                                    } else { false }
+                                    compare_raw_fields(raw, r1, r2, op)
                                 } else { false }
                             }
                         };
