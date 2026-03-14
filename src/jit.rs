@@ -559,6 +559,33 @@ impl Flattener {
                         }
                     }
                 }
+                // Composed: to_entries | Pipe(map(.key/.value), tail) → rewrite | tail
+                if let Expr::UnaryOp { op: UnaryOp::ToEntries, .. } = new_left.as_ref() {
+                    if let Expr::Pipe { left: pl, right: pr } = new_right.as_ref() {
+                        if let Expr::Collect { generator } = pl.as_ref() {
+                            if let Expr::Pipe { left: map_l, right: map_r } = generator.as_ref() {
+                                if matches!(map_l.as_ref(), Expr::Each { input_expr } if matches!(input_expr.as_ref(), Expr::Input)) {
+                                    if let Expr::Index { expr: idx_e, key } = map_r.as_ref() {
+                                        if matches!(idx_e.as_ref(), Expr::Input) {
+                                            if let Expr::Literal(Literal::Str(s)) = key.as_ref() {
+                                                if s == "key" {
+                                                    let rewritten = Box::new(Expr::UnaryOp { op: UnaryOp::KeysUnsorted, operand: Box::new(Expr::Input) });
+                                                    return self.inline_func_calls(&Expr::Pipe { left: rewritten, right: pr.clone() });
+                                                }
+                                                if s == "value" {
+                                                    let rewritten = Box::new(Expr::Collect {
+                                                        generator: Box::new(Expr::Each { input_expr: Box::new(Expr::Input) }),
+                                                    });
+                                                    return self.inline_func_calls(&Expr::Pipe { left: rewritten, right: pr.clone() });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 // Beta-reduction: Pipe(E, F) → F[E/Input] when E is scalar and F has free Input
                 if new_left.is_simple_scalar() && new_right.is_input_free() {
                     return new_right.substitute_input(&new_left);

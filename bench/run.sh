@@ -97,6 +97,7 @@ TESTS=(
     'computed remap:-c:{name: .name, double: (.x * 2), sum: (.x + .y)}'
     '[.x,.y]|add:-c:[.x, .y] | add'
     '[.x,.y]|avg:-c:[.x, .y] | add / length'
+    'map(*2)|add:-c:[.x, .y] | map(. * 2) | add'
     'keys|length:-c:keys | length'
     '.+{z=0}:-c:. + {z: 0}'
     'split|first:-c:.name | split("_") | .[0]'
