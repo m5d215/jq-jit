@@ -3095,6 +3095,45 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | ascii_downcase/upcase | test("regex")`.
+    /// Returns (field, is_upper, regex_pattern).
+    pub fn detect_field_case_test(&self) -> Option<(String, bool, String)> {
+        use crate::ir::{Expr, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::Pipe { left: case_expr, right: test_expr } = right.as_ref() {
+                        let is_upper = match case_expr.as_ref() {
+                            Expr::UnaryOp { op: UnaryOp::AsciiUpcase, operand } if matches!(operand.as_ref(), Expr::Input) => true,
+                            Expr::UnaryOp { op: UnaryOp::AsciiDowncase, operand } if matches!(operand.as_ref(), Expr::Input) => false,
+                            _ => return None,
+                        };
+                        // Match test(regex) in both RegexTest and CallBuiltin forms
+                        match test_expr.as_ref() {
+                            Expr::RegexTest { input_expr, re, flags } => {
+                                if !matches!(input_expr.as_ref(), Expr::Input) { return None; }
+                                if let Expr::Literal(Literal::Str(pattern)) = re.as_ref() {
+                                    if matches!(flags.as_ref(), Expr::Literal(Literal::Null) | Expr::Literal(Literal::Str(_))) {
+                                        return Some((field.clone(), is_upper, pattern.clone()));
+                                    }
+                                }
+                            }
+                            Expr::CallBuiltin { name, args } if name == "test" && args.len() == 1 => {
+                                if let Expr::Literal(Literal::Str(pattern)) = &args[0] {
+                                    return Some((field.clone(), is_upper, pattern.clone()));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field | ltrimstr("prefix") | tonumber` pattern.
     /// Returns (field_name, prefix) if detected.
     /// Returns (field, prefix, arith_ops).
@@ -4262,6 +4301,74 @@ impl Filter {
                 }
                 if !merge_pairs.is_empty() {
                     return Some((field, op, threshold, merge_pairs));
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `select(.field | startswith/endswith/test("str")) | .+{key: literal, ...}`.
+    /// Returns (field, str_op, str_arg, merge_pairs).
+    pub fn detect_select_str_merge(&self) -> Option<(String, String, String, Vec<(String, Vec<u8>)>)> {
+        use crate::ir::{Expr, Literal, BinOp};
+        let expr = self.detect_expr()?;
+        let (cond, merge_expr) = if let Expr::Pipe { left, right } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
+                    (cond.as_ref(), right.as_ref())
+                } else { return None; }
+            } else { return None; }
+        } else { return None; };
+        // Parse condition: .field | startswith/endswith/test("str") or .field == "str"
+        let (field, str_op, str_arg) = if let Expr::Pipe { left, right } = cond {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                    if let Expr::CallBuiltin { name, args } = right.as_ref() {
+                        if args.len() == 1 {
+                            if let Expr::Literal(Literal::Str(s)) = &args[0] {
+                                match name.as_str() {
+                                    "startswith" | "endswith" | "test" | "contains" => {
+                                        (f.clone(), name.clone(), s.clone())
+                                    }
+                                    _ => return None,
+                                }
+                            } else { return None; }
+                        } else { return None; }
+                    } else if let Expr::RegexTest { input_expr, re, flags } = right.as_ref() {
+                        if !matches!(input_expr.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(pattern)) = re.as_ref() {
+                            if matches!(flags.as_ref(), Expr::Literal(Literal::Null) | Expr::Literal(Literal::Str(_))) {
+                                (f.clone(), "test".to_string(), pattern.clone())
+                            } else { return None; }
+                        } else { return None; }
+                    } else { return None; }
+                } else { return None; }
+            } else { return None; }
+        } else if let Expr::BinOp { op: BinOp::Eq, lhs, rhs } = cond {
+            if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                if matches!(base.as_ref(), Expr::Input) {
+                    if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                        if let Expr::Literal(Literal::Str(s)) = rhs.as_ref() {
+                            (f.clone(), "eq".to_string(), s.clone())
+                        } else { return None; }
+                    } else { return None; }
+                } else { return None; }
+            } else { return None; }
+        } else { return None; };
+        // Parse merge: .+{key: literal, ...}
+        if let Expr::BinOp { op: BinOp::Add | BinOp::Mul, lhs, rhs } = merge_expr {
+            if !matches!(lhs.as_ref(), Expr::Input) { return None; }
+            if let Expr::ObjectConstruct { pairs } = rhs.as_ref() {
+                let mut merge_pairs = Vec::new();
+                for (k, v) in pairs {
+                    let key = if let Expr::Literal(Literal::Str(s)) = k { s.clone() } else { return None; };
+                    if let Some(json_bytes) = const_expr_to_json(v) {
+                        merge_pairs.push((key, json_bytes));
+                    } else { return None; }
+                }
+                if !merge_pairs.is_empty() {
+                    return Some((field, str_op, str_arg, merge_pairs));
                 }
             }
         }
