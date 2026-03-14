@@ -7173,6 +7173,171 @@ impl Filter {
         None
     }
 
+    /// Detect `select(.sel_field cmp N) | .upd_field |= (. arith M)` — select then field update.
+    /// Returns (sel_field, cmp_op, threshold, upd_field, arith_op, arith_val).
+    pub fn detect_select_cmp_then_update_num(&self) -> Option<(String, crate::ir::BinOp, f64, String, crate::ir::BinOp, f64)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left, right } = expr {
+            // Left: select = IfThenElse { cond, then: Input, else: Empty }
+            let (sel_field, cmp_op, threshold) = if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
+                if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+                if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                    if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                    if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                            if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                (f.clone(), *op, *n)
+                            } else { return None; }
+                        } else { return None; }
+                    } else { return None; }
+                } else { return None; }
+            } else { return None; };
+            // Right: Update { path: .field, update: BinOp(op, Input, Num) }
+            if let Expr::Update { path_expr, update_expr } = right.as_ref() {
+                if let Expr::Index { expr: base, key } = path_expr.as_ref() {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(uf)) = key.as_ref() {
+                        if let Expr::BinOp { op, lhs, rhs } = update_expr.as_ref() {
+                            if matches!(lhs.as_ref(), Expr::Input) {
+                                if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                    match op {
+                                        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                                            return Some((sel_field, cmp_op, threshold, uf.clone(), *op, *n));
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `select(.sel_field cmp N) | .upd_field |= . + "str"` — select then string concat update.
+    /// Returns (sel_field, cmp_op, threshold, upd_field, prefix, suffix).
+    pub fn detect_select_cmp_then_update_str_concat(&self) -> Option<(String, crate::ir::BinOp, f64, String, String, String)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left, right } = expr {
+            let (sel_field, cmp_op, threshold) = if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
+                if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+                if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                    if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                    if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                            if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                (f.clone(), *op, *n)
+                            } else { return None; }
+                        } else { return None; }
+                    } else { return None; }
+                } else { return None; }
+            } else { return None; };
+            if let Expr::Update { path_expr, update_expr } = right.as_ref() {
+                if let Expr::Index { expr: base, key } = path_expr.as_ref() {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(uf)) = key.as_ref() {
+                        // . + "suffix"
+                        if let Expr::BinOp { op: BinOp::Add, lhs, rhs } = update_expr.as_ref() {
+                            if matches!(lhs.as_ref(), Expr::Input) {
+                                if let Expr::Literal(Literal::Str(s)) = rhs.as_ref() {
+                                    return Some((sel_field, cmp_op, threshold, uf.clone(), String::new(), s.clone()));
+                                }
+                            }
+                            if matches!(rhs.as_ref(), Expr::Input) {
+                                if let Expr::Literal(Literal::Str(s)) = lhs.as_ref() {
+                                    return Some((sel_field, cmp_op, threshold, uf.clone(), s.clone(), String::new()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `select(.f1 cmp N and .f2 cmp M) | .upd_field |= (. arith V)` — compound select then numeric update.
+    /// Returns (logic_op, conds, upd_field, arith_op, arith_val).
+    pub fn detect_select_compound_then_update_num(&self) -> Option<(crate::ir::BinOp, Vec<(String, crate::ir::BinOp, f64)>, String, crate::ir::BinOp, f64)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left, right } = expr {
+            // Left: compound select
+            let (logic_op, conds) = if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
+                if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
+                if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+                let extract_cmp = |e: &Expr| -> Option<(String, BinOp, f64)> {
+                    if let Expr::BinOp { op, lhs, rhs } = e {
+                        if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                        if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                            if !matches!(base.as_ref(), Expr::Input) { return None; }
+                            if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                                if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                    return Some((f.clone(), *op, *n));
+                                }
+                            }
+                        }
+                    }
+                    None
+                };
+                fn collect_conds_u<'a>(e: &'a Expr, conj: BinOp, out: &mut Vec<&'a Expr>) -> bool {
+                    if let Expr::BinOp { op, lhs, rhs } = e {
+                        if std::mem::discriminant(op) == std::mem::discriminant(&conj) {
+                            return collect_conds_u(lhs, conj, out) && collect_conds_u(rhs, conj, out);
+                        }
+                    }
+                    out.push(e);
+                    true
+                }
+                let mut found = None;
+                for conj in [BinOp::And, BinOp::Or] {
+                    if let Expr::BinOp { op, .. } = cond.as_ref() {
+                        if std::mem::discriminant(op) == std::mem::discriminant(&conj) {
+                            let mut parts = Vec::new();
+                            if collect_conds_u(cond, conj, &mut parts) && parts.len() >= 2 {
+                                let cmps: Vec<_> = parts.iter().filter_map(|e| extract_cmp(e)).collect();
+                                if cmps.len() == parts.len() {
+                                    found = Some((conj, cmps));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                found?
+            } else { return None; };
+            // Right: Update { path: .field, update: BinOp(arith, Input, Num) }
+            if let Expr::Update { path_expr, update_expr } = right.as_ref() {
+                if let Expr::Index { expr: base, key } = path_expr.as_ref() {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(uf)) = key.as_ref() {
+                        if let Expr::BinOp { op, lhs, rhs } = update_expr.as_ref() {
+                            if matches!(lhs.as_ref(), Expr::Input) {
+                                if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                    match op {
+                                        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                                            return Some((logic_op, conds, uf.clone(), *op, *n));
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `select(.f1 cmp .f2) | .output_field` — field-field comparison select then field.
     /// Returns (cmp_field1, op, cmp_field2, output_field).
     pub fn detect_select_field_cmp_field_then_field(&self) -> Option<(String, crate::ir::BinOp, String, String)> {

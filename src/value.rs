@@ -1464,6 +1464,39 @@ pub fn json_object_update_field_gsub(
     false
 }
 
+/// Combined select + field update: select(.sel_field cmp threshold) | .upd_field |= (. arith val).
+/// Returns true and writes to buf if select matches and update succeeds; false otherwise (skip).
+pub fn json_object_select_then_update_num(
+    b: &[u8], pos: usize,
+    sel_field: &str, cmp_op: crate::ir::BinOp, threshold: f64,
+    upd_field: &str, arith_op: crate::ir::BinOp, arith_val: f64,
+    buf: &mut Vec<u8>,
+) -> Option<bool> {
+    // Returns Some(true) = matched & updated, Some(false) = matched but update failed, None = not matched
+    use crate::ir::BinOp;
+    if pos >= b.len() || b[pos] != b'{' { return None; }
+    // 1. Check select condition
+    let sel_val = if let Some((vs, ve)) = json_object_get_field_raw(b, pos, sel_field) {
+        match parse_json_num(&b[vs..ve]) { Some(v) => v, None => return None }
+    } else { return None; };
+    let cond = match cmp_op {
+        BinOp::Gt => sel_val > threshold,
+        BinOp::Lt => sel_val < threshold,
+        BinOp::Ge => sel_val >= threshold,
+        BinOp::Le => sel_val <= threshold,
+        BinOp::Eq => sel_val == threshold,
+        BinOp::Ne => sel_val != threshold,
+        _ => return None,
+    };
+    if !cond { return None; } // select didn't match
+    // 2. Apply update
+    if json_object_update_field_num(b, pos, upd_field, arith_op, arith_val, buf) {
+        Some(true)
+    } else {
+        Some(false)
+    }
+}
+
 /// Update a field by replacing its value with the boolean result of a regex test.
 /// `.field |= test("regex")` — extract string field, run regex, write true/false.
 pub fn json_object_update_field_test(
@@ -1998,6 +2031,94 @@ pub fn json_object_update_field_str_map(
         return true;
     }
     false
+}
+
+/// Combined select (numeric cmp) + string concat update.
+/// Returns Some(true) = matched & updated, Some(false) = matched but update failed, None = not matched.
+pub fn json_object_select_then_update_str_concat(
+    b: &[u8], pos: usize,
+    sel_field: &str, cmp_op: crate::ir::BinOp, threshold: f64,
+    upd_field: &str, prefix: &[u8], suffix: &[u8],
+    buf: &mut Vec<u8>,
+) -> Option<bool> {
+    use crate::ir::BinOp;
+    if pos >= b.len() || b[pos] != b'{' { return None; }
+    let sel_val = if let Some((vs, ve)) = json_object_get_field_raw(b, pos, sel_field) {
+        match parse_json_num(&b[vs..ve]) { Some(v) => v, None => return None }
+    } else { return None; };
+    let cond = match cmp_op {
+        BinOp::Gt => sel_val > threshold,
+        BinOp::Lt => sel_val < threshold,
+        BinOp::Ge => sel_val >= threshold,
+        BinOp::Le => sel_val <= threshold,
+        BinOp::Eq => sel_val == threshold,
+        BinOp::Ne => sel_val != threshold,
+        _ => return None,
+    };
+    if !cond { return None; }
+    if json_object_update_field_str_concat(b, pos, upd_field, prefix, suffix, buf) {
+        Some(true)
+    } else {
+        Some(false)
+    }
+}
+
+/// Combined compound select (AND/OR of numeric cmps) + numeric field update.
+/// Returns Some(true) = matched & updated, Some(false) = matched but update failed, None = not matched.
+pub fn json_object_select_compound_then_update_num(
+    b: &[u8], pos: usize,
+    logic_op: crate::ir::BinOp, conds: &[(String, crate::ir::BinOp, f64)],
+    upd_field: &str, arith_op: crate::ir::BinOp, arith_val: f64,
+    buf: &mut Vec<u8>,
+) -> Option<bool> {
+    use crate::ir::BinOp;
+    if pos >= b.len() || b[pos] != b'{' { return None; }
+    // Evaluate all conditions
+    let eval_cmp = |field: &str, cmp_op: BinOp, threshold: f64| -> Option<bool> {
+        let val = if let Some((vs, ve)) = json_object_get_field_raw(b, pos, field) {
+            parse_json_num(&b[vs..ve])?
+        } else { return None; };
+        Some(match cmp_op {
+            BinOp::Gt => val > threshold,
+            BinOp::Lt => val < threshold,
+            BinOp::Ge => val >= threshold,
+            BinOp::Le => val <= threshold,
+            BinOp::Eq => val == threshold,
+            BinOp::Ne => val != threshold,
+            _ => return None,
+        })
+    };
+    let result = match logic_op {
+        BinOp::And => {
+            let mut all = true;
+            for (f, op, thr) in conds {
+                match eval_cmp(f, *op, *thr) {
+                    Some(true) => {}
+                    Some(false) => { all = false; break; }
+                    None => return None,
+                }
+            }
+            all
+        }
+        BinOp::Or => {
+            let mut any = false;
+            for (f, op, thr) in conds {
+                match eval_cmp(f, *op, *thr) {
+                    Some(true) => { any = true; break; }
+                    Some(false) => {}
+                    None => return None,
+                }
+            }
+            any
+        }
+        _ => return None,
+    };
+    if !result { return None; }
+    if json_object_update_field_num(b, pos, upd_field, arith_op, arith_val, buf) {
+        Some(true)
+    } else {
+        Some(false)
+    }
 }
 
 /// Merge literal key-value pairs into a raw JSON object.
