@@ -6943,6 +6943,58 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | split("s") | .[N] | tonumber` — returns (field_name, delimiter, index).
+    pub fn detect_field_split_nth_tonumber(&self) -> Option<(String, String, i32)> {
+        use crate::ir::{Expr, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::Pipe { left: split_expr, right: rest } = right.as_ref() {
+                        if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
+                            if name != "split" || args.len() != 1 { return None; }
+                            if let Expr::Literal(Literal::Str(delim)) = &args[0] {
+                                // rest: Pipe(.[N], tonumber) or UnaryOp(ToNumber, .[N])
+                                if let Expr::Pipe { left: idx_expr, right: tonum_expr } = rest.as_ref() {
+                                    if let Expr::Index { expr: ib, key: ik } = idx_expr.as_ref() {
+                                        if matches!(ib.as_ref(), Expr::Input) {
+                                            if let Expr::Literal(Literal::Num(n, _)) = ik.as_ref() {
+                                                let idx = *n as i32;
+                                                if idx >= 0 {
+                                                    let is_tonum = matches!(tonum_expr.as_ref(),
+                                                        Expr::UnaryOp { op: UnaryOp::ToNumber, operand }
+                                                        if matches!(operand.as_ref(), Expr::Input)
+                                                    );
+                                                    if is_tonum {
+                                                        return Some((field.clone(), delim.clone(), idx));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if let Expr::UnaryOp { op: UnaryOp::ToNumber, operand } = rest.as_ref() {
+                                    if let Expr::Index { expr: ib, key: ik } = operand.as_ref() {
+                                        if matches!(ib.as_ref(), Expr::Input) {
+                                            if let Expr::Literal(Literal::Num(n, _)) = ik.as_ref() {
+                                                let idx = *n as i32;
+                                                if idx >= 0 {
+                                                    return Some((field.clone(), delim.clone(), idx));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field | split("str") | length` — returns (field_name, delimiter).
     pub fn detect_field_split_length(&self) -> Option<(String, String)> {
         use crate::ir::{Expr, Literal, UnaryOp};
