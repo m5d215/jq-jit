@@ -1588,6 +1588,143 @@ pub fn json_object_update_field_split_last(
     false
 }
 
+/// Update a field by trimming a prefix or suffix.
+/// `.field |= ltrimstr("prefix")` or `.field |= rtrimstr("suffix")`.
+pub fn json_object_update_field_trim(
+    b: &[u8], pos: usize, field: &str, trim_str: &str, is_rtrim: bool, buf: &mut Vec<u8>,
+) -> bool {
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
+        if val_start >= val_end || b[val_start] != b'"' { return false; }
+        let inner = &b[val_start + 1..val_end - 1];
+        let has_escapes = memchr::memchr(b'\\', inner).is_some();
+        let mut obj_end = b.len();
+        while obj_end > val_end && b[obj_end - 1] != b'}' { obj_end -= 1; }
+        if obj_end <= val_end { return false; }
+        if has_escapes {
+            let s: String = match serde_json::from_slice(&b[val_start..val_end]) {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+            let result = if is_rtrim {
+                s.strip_suffix(trim_str).unwrap_or(&s)
+            } else {
+                s.strip_prefix(trim_str).unwrap_or(&s)
+            };
+            buf.extend_from_slice(&b[pos..val_start]);
+            buf.push(b'"');
+            for &ch in result.as_bytes() {
+                match ch {
+                    b'"' => buf.extend_from_slice(b"\\\""),
+                    b'\\' => buf.extend_from_slice(b"\\\\"),
+                    b'\n' => buf.extend_from_slice(b"\\n"),
+                    b'\r' => buf.extend_from_slice(b"\\r"),
+                    b'\t' => buf.extend_from_slice(b"\\t"),
+                    c if c < 0x20 => buf.extend_from_slice(format!("\\u{:04x}", c).as_bytes()),
+                    _ => buf.push(ch),
+                }
+            }
+            buf.push(b'"');
+        } else {
+            let trim_bytes = trim_str.as_bytes();
+            buf.extend_from_slice(&b[pos..val_start]);
+            buf.push(b'"');
+            if is_rtrim {
+                if inner.ends_with(trim_bytes) {
+                    buf.extend_from_slice(&inner[..inner.len() - trim_bytes.len()]);
+                } else {
+                    buf.extend_from_slice(inner);
+                }
+            } else {
+                if inner.starts_with(trim_bytes) {
+                    buf.extend_from_slice(&inner[trim_bytes.len()..]);
+                } else {
+                    buf.extend_from_slice(inner);
+                }
+            }
+            buf.push(b'"');
+        }
+        buf.extend_from_slice(&b[val_end..obj_end]);
+        return true;
+    }
+    false
+}
+
+/// Update a field by slicing a string: `.field |= .[from:to]`.
+pub fn json_object_update_field_slice(
+    b: &[u8], pos: usize, field: &str, from: Option<i64>, to: Option<i64>, buf: &mut Vec<u8>,
+) -> bool {
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
+        if val_start >= val_end || b[val_start] != b'"' { return false; }
+        let inner = &b[val_start + 1..val_end - 1];
+        let has_escapes = memchr::memchr(b'\\', inner).is_some();
+        let mut obj_end = b.len();
+        while obj_end > val_end && b[obj_end - 1] != b'}' { obj_end -= 1; }
+        if obj_end <= val_end { return false; }
+        // jq string slicing works on codepoints, so we need to decode
+        let s: String = if has_escapes {
+            match serde_json::from_slice(&b[val_start..val_end]) {
+                Ok(s) => s,
+                Err(_) => return false,
+            }
+        } else {
+            unsafe { std::str::from_utf8_unchecked(inner) }.to_string()
+        };
+        let chars: Vec<char> = s.chars().collect();
+        let len = chars.len() as i64;
+        let f = match from {
+            Some(v) => if v < 0 { (len + v).max(0) as usize } else { (v as usize).min(len as usize) },
+            None => 0,
+        };
+        let t = match to {
+            Some(v) => if v < 0 { (len + v).max(0) as usize } else { (v as usize).min(len as usize) },
+            None => len as usize,
+        };
+        let result: String = if f < t { chars[f..t].iter().collect() } else { String::new() };
+        buf.extend_from_slice(&b[pos..val_start]);
+        buf.push(b'"');
+        for &ch in result.as_bytes() {
+            match ch {
+                b'"' => buf.extend_from_slice(b"\\\""),
+                b'\\' => buf.extend_from_slice(b"\\\\"),
+                b'\n' => buf.extend_from_slice(b"\\n"),
+                b'\r' => buf.extend_from_slice(b"\\r"),
+                b'\t' => buf.extend_from_slice(b"\\t"),
+                c if c < 0x20 => buf.extend_from_slice(format!("\\u{:04x}", c).as_bytes()),
+                _ => buf.push(ch),
+            }
+        }
+        buf.push(b'"');
+        buf.extend_from_slice(&b[val_end..obj_end]);
+        return true;
+    }
+    false
+}
+
+/// Update a field by mapping string equality: `.field |= if . == "a" then "b" else "c" end`.
+pub fn json_object_update_field_str_map(
+    b: &[u8], pos: usize, field: &str, cond_str: &[u8], then_json: &[u8], else_json: &[u8], buf: &mut Vec<u8>,
+) -> bool {
+    if pos >= b.len() || b[pos] != b'{' { return false; }
+    if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
+        if val_start >= val_end || b[val_start] != b'"' { return false; }
+        let inner = &b[val_start + 1..val_end - 1];
+        let mut obj_end = b.len();
+        while obj_end > val_end && b[obj_end - 1] != b'}' { obj_end -= 1; }
+        if obj_end <= val_end { return false; }
+        buf.extend_from_slice(&b[pos..val_start]);
+        if inner == cond_str {
+            buf.extend_from_slice(then_json);
+        } else {
+            buf.extend_from_slice(else_json);
+        }
+        buf.extend_from_slice(&b[val_end..obj_end]);
+        return true;
+    }
+    false
+}
+
 /// Merge literal key-value pairs into a raw JSON object.
 /// `pairs` is a list of (key_name, json_value_bytes).
 /// Existing keys are replaced (last-write-wins), new keys are appended.

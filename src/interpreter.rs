@@ -5676,6 +5676,97 @@ impl Filter {
         None
     }
 
+    /// Detect `.field |= ltrimstr("prefix")` or `.field |= rtrimstr("suffix")`.
+    /// Returns (field_name, string_arg, is_rtrim).
+    pub fn detect_field_update_trim(&self) -> Option<(String, String, bool)> {
+        use crate::ir::{Expr, Literal};
+        let expr = self.detect_expr()?;
+        let update_expr = if let Expr::LetBinding { body, .. } = expr { body.as_ref() } else { expr };
+        if let Expr::Update { path_expr, update_expr: upd } = update_expr {
+            if let Expr::Index { expr: base, key } = path_expr.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::CallBuiltin { name, args } = upd.as_ref() {
+                        if args.len() == 1 {
+                            if let Expr::Literal(Literal::Str(arg)) = &args[0] {
+                                match name.as_str() {
+                                    "ltrimstr" => return Some((field.clone(), arg.clone(), false)),
+                                    "rtrimstr" => return Some((field.clone(), arg.clone(), true)),
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `.field |= .[from:to]` (string slice update).
+    /// Returns (field_name, from_opt, to_opt).
+    pub fn detect_field_update_slice(&self) -> Option<(String, Option<i64>, Option<i64>)> {
+        use crate::ir::{Expr, Literal};
+        let expr = self.detect_expr()?;
+        let update_expr = if let Expr::LetBinding { body, .. } = expr { body.as_ref() } else { expr };
+        if let Expr::Update { path_expr, update_expr: upd } = update_expr {
+            if let Expr::Index { expr: base, key } = path_expr.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::Slice { expr: slice_base, from, to } = upd.as_ref() {
+                        if !matches!(slice_base.as_ref(), Expr::Input) { return None; }
+                        let from_val = match from {
+                            Some(e) => match e.as_ref() {
+                                Expr::Literal(Literal::Num(n, _)) => Some(*n as i64),
+                                _ => return None,
+                            },
+                            None => None,
+                        };
+                        let to_val = match to {
+                            Some(e) => match e.as_ref() {
+                                Expr::Literal(Literal::Num(n, _)) => Some(*n as i64),
+                                _ => return None,
+                            },
+                            None => None,
+                        };
+                        return Some((field.clone(), from_val, to_val));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `.field |= if . == "str" then "a" else "b" end`.
+    /// Returns (field_name, cond_str, then_str, else_str).
+    pub fn detect_field_update_str_map(&self) -> Option<(String, String, String, String)> {
+        use crate::ir::{Expr, Literal, BinOp};
+        let expr = self.detect_expr()?;
+        let update_expr = if let Expr::LetBinding { body, .. } = expr { body.as_ref() } else { expr };
+        if let Expr::Update { path_expr, update_expr: upd } = update_expr {
+            if let Expr::Index { expr: base, key } = path_expr.as_ref() {
+                if !matches!(base.as_ref(), Expr::Input) { return None; }
+                if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                    if let Expr::IfThenElse { cond, then_branch, else_branch } = upd.as_ref() {
+                        // cond: . == "str"
+                        if let Expr::BinOp { op: BinOp::Eq, lhs, rhs } = cond.as_ref() {
+                            if matches!(lhs.as_ref(), Expr::Input) {
+                                if let Expr::Literal(Literal::Str(cond_str)) = rhs.as_ref() {
+                                    if let Expr::Literal(Literal::Str(then_str)) = then_branch.as_ref() {
+                                        if let Expr::Literal(Literal::Str(else_str)) = else_branch.as_ref() {
+                                            return Some((field.clone(), cond_str.clone(), then_str.clone(), else_str.clone()));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field[from:to]` with literal numeric bounds.
     /// Returns (field_name, from_opt, to_opt).
     pub fn detect_field_slice(&self) -> Option<(String, Option<i64>, Option<i64>)> {
