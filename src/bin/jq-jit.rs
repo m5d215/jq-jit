@@ -4910,7 +4910,7 @@ fn real_main() {
                         }
                         Ok(())
                     })
-                } else if let Some((ref lt_field, ref lt_prefix)) = field_ltrimstr_tonumber {
+                } else if let Some((ref lt_field, ref lt_prefix, ref lt_arith_ops)) = field_ltrimstr_tonumber {
                     let prefix_bytes = lt_prefix.as_bytes();
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
@@ -4926,7 +4926,22 @@ fn real_main() {
                                     content
                                 };
                                 // Parse the remaining string as a number
-                                if let Ok(n) = fast_float::parse::<f64, _>(num_str) {
+                                if let Ok(mut n) = fast_float::parse::<f64, _>(num_str) {
+                                    for (op, c) in lt_arith_ops {
+                                        n = match op {
+                                            jq_jit::ir::BinOp::Add => n + c,
+                                            jq_jit::ir::BinOp::Sub => n - c,
+                                            jq_jit::ir::BinOp::Mul => n * c,
+                                            jq_jit::ir::BinOp::Div => n / c,
+                                            jq_jit::ir::BinOp::Mod => {
+                                                if n.fract() == 0.0 && c.fract() == 0.0 && *c != 0.0 {
+                                                    let a = n as i64; let b = *c as i64;
+                                                    if a == i64::MIN && b == -1 { 0.0 } else { (a % b) as f64 }
+                                                } else { n % c }
+                                            }
+                                            _ => n,
+                                        };
+                                    }
                                     push_jq_number_bytes(&mut compact_buf, n);
                                     compact_buf.push(b'\n');
                                 } else {
@@ -14234,7 +14249,7 @@ fn real_main() {
                     }
                     Ok(())
                 })
-            } else if let Some((ref lt_field, ref lt_prefix)) = field_ltrimstr_tonumber {
+            } else if let Some((ref lt_field, ref lt_prefix, ref lt_arith_ops)) = field_ltrimstr_tonumber {
                 let prefix_bytes = lt_prefix.as_bytes();
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
@@ -14250,7 +14265,22 @@ fn real_main() {
                             } else {
                                 content
                             };
-                            if let Ok(n) = fast_float::parse::<f64, _>(num_str) {
+                            if let Ok(mut n) = fast_float::parse::<f64, _>(num_str) {
+                                for (op, c) in lt_arith_ops {
+                                    n = match op {
+                                        jq_jit::ir::BinOp::Add => n + c,
+                                        jq_jit::ir::BinOp::Sub => n - c,
+                                        jq_jit::ir::BinOp::Mul => n * c,
+                                        jq_jit::ir::BinOp::Div => n / c,
+                                        jq_jit::ir::BinOp::Mod => {
+                                            if n.fract() == 0.0 && c.fract() == 0.0 && *c != 0.0 {
+                                                let a = n as i64; let b = *c as i64;
+                                                if a == i64::MIN && b == -1 { 0.0 } else { (a % b) as f64 }
+                                            } else { n % c }
+                                        }
+                                        _ => n,
+                                    };
+                                }
                                 push_jq_number_bytes(&mut compact_buf, n);
                                 compact_buf.push(b'\n');
                             } else {

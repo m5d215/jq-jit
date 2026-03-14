@@ -3059,8 +3059,10 @@ impl Filter {
 
     /// Detect `.field | ltrimstr("prefix") | tonumber` pattern.
     /// Returns (field_name, prefix) if detected.
-    pub fn detect_field_ltrimstr_tonumber(&self) -> Option<(String, String)> {
-        use crate::ir::{Expr, Literal, UnaryOp};
+    /// Returns (field, prefix, arith_ops).
+    /// arith_ops is a list of (op, const) to apply after tonumber.
+    pub fn detect_field_ltrimstr_tonumber(&self) -> Option<(String, String, Vec<(crate::ir::BinOp, f64)>)> {
+        use crate::ir::{Expr, Literal, UnaryOp, BinOp};
         let expr = self.detect_expr()?;
         if let Expr::Pipe { left, right } = expr {
             if let Expr::Index { expr: base, key } = left.as_ref() {
@@ -3070,9 +3072,56 @@ impl Filter {
                         if let Expr::CallBuiltin { name, args } = mid.as_ref() {
                             if name == "ltrimstr" && args.len() == 1 {
                                 if let Expr::Literal(Literal::Str(prefix)) = &args[0] {
+                                    // tonumber with no further ops
                                     if let Expr::UnaryOp { op: UnaryOp::ToNumber, operand } = rr.as_ref() {
                                         if matches!(operand.as_ref(), Expr::Input) {
-                                            return Some((field.clone(), prefix.clone()));
+                                            return Some((field.clone(), prefix.clone(), Vec::new()));
+                                        }
+                                    }
+                                    // tonumber | arith chain (e.g., tonumber | . * 2 | . + 1)
+                                    // Beta-reduced: BinOp(op, UnaryOp(ToNumber, Input), Num)
+                                    // or Pipe(tonumber, arith_chain)
+                                    let mut arith_ops = Vec::new();
+                                    let mut cur: &Expr = rr.as_ref();
+                                    // Peel off piped arithmetic: Pipe(lhs, BinOp(op, Input, N))
+                                    loop {
+                                        if let Expr::Pipe { left: pl, right: pr } = cur {
+                                            cur = pl.as_ref();
+                                            // pr should be BinOp(op, Input, N)
+                                            if let Expr::BinOp { op, lhs, rhs } = pr.as_ref() {
+                                                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+                                                    if matches!(lhs.as_ref(), Expr::Input) {
+                                                        if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                                            arith_ops.push((*op, *n));
+                                                            continue;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            return None;
+                                        }
+                                        break;
+                                    }
+                                    // Beta-reduced: BinOp(op, BinOp(...(UnaryOp(ToNumber, Input))...), N)
+                                    let mut bcur: &Expr = cur;
+                                    let mut b_ops = Vec::new();
+                                    loop {
+                                        if let Expr::BinOp { op, lhs, rhs } = bcur {
+                                            if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+                                                if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                                    b_ops.push((*op, *n));
+                                                    bcur = lhs.as_ref();
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                        break;
+                                    }
+                                    if let Expr::UnaryOp { op: UnaryOp::ToNumber, operand } = bcur {
+                                        if matches!(operand.as_ref(), Expr::Input) {
+                                            b_ops.reverse();
+                                            b_ops.extend(arith_ops);
+                                            return Some((field.clone(), prefix.clone(), b_ops));
                                         }
                                     }
                                 }
