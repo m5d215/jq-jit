@@ -3572,11 +3572,14 @@ fn real_main() {
                         }
                         Ok(())
                     })
-                } else if let Some((ref spl_field, ref spl_delim)) = field_split_length {
-                    // .field | split("s") | length — count delimiter occurrences + 1
+                } else if let Some((ref spl_field, ref spl_delim, ref spl_arith_ops)) = field_split_length {
+                    // .field | split("s") | length [| arith] — count delimiter occurrences + 1
+                    use jq_jit::ir::BinOp;
                     let delim_bytes = spl_delim.as_bytes();
                     let single_delim = if delim_bytes.len() == 1 { Some(delim_bytes[0]) } else { None };
                     let mut ibuf = itoa::Buffer::new();
+                    let use_float = !spl_arith_ops.is_empty();
+                    let mut ryu_buf = ryu::Buffer::new();
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, spl_field) {
@@ -3591,7 +3594,25 @@ fn real_main() {
                                 } else {
                                     inner.windows(delim_bytes.len()).filter(|w| *w == delim_bytes).count() + 1
                                 };
-                                compact_buf.extend_from_slice(ibuf.format(count).as_bytes());
+                                if use_float {
+                                    let mut v = count as f64;
+                                    for (aop, n) in spl_arith_ops {
+                                        v = match aop {
+                                            BinOp::Add => v + n, BinOp::Sub => v - n,
+                                            BinOp::Mul => v * n, BinOp::Div => v / n,
+                                            BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { v } },
+                                            _ => v,
+                                        };
+                                    }
+                                    let vi = v as i64;
+                                    if vi as f64 == v && v.is_finite() {
+                                        compact_buf.extend_from_slice(ibuf.format(vi).as_bytes());
+                                    } else {
+                                        compact_buf.extend_from_slice(ryu_buf.format_finite(v).as_bytes());
+                                    }
+                                } else {
+                                    compact_buf.extend_from_slice(ibuf.format(count).as_bytes());
+                                }
                                 compact_buf.push(b'\n');
                             } else if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"' && delim_bytes.is_empty() {
                                 // split("") gives array of single chars — length = char count
@@ -13009,11 +13030,14 @@ fn real_main() {
                     }
                     Ok(())
                 })
-            } else if let Some((ref spl_field, ref spl_delim)) = field_split_length {
+            } else if let Some((ref spl_field, ref spl_delim, ref spl_arith_ops)) = field_split_length {
+                use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
                 let delim_bytes = spl_delim.as_bytes();
                 let single_delim = if delim_bytes.len() == 1 { Some(delim_bytes[0]) } else { None };
                 let mut ibuf = itoa::Buffer::new();
+                let use_float = !spl_arith_ops.is_empty();
+                let mut ryu_buf = ryu::Buffer::new();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
                     if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, spl_field) {
@@ -13028,7 +13052,25 @@ fn real_main() {
                             } else {
                                 inner.windows(delim_bytes.len()).filter(|w| *w == delim_bytes).count() + 1
                             };
-                            compact_buf.extend_from_slice(ibuf.format(count).as_bytes());
+                            if use_float {
+                                let mut v = count as f64;
+                                for (aop, n) in spl_arith_ops {
+                                    v = match aop {
+                                        BinOp::Add => v + n, BinOp::Sub => v - n,
+                                        BinOp::Mul => v * n, BinOp::Div => v / n,
+                                        BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { v } },
+                                        _ => v,
+                                    };
+                                }
+                                let vi = v as i64;
+                                if vi as f64 == v && v.is_finite() {
+                                    compact_buf.extend_from_slice(ibuf.format(vi).as_bytes());
+                                } else {
+                                    compact_buf.extend_from_slice(ryu_buf.format_finite(v).as_bytes());
+                                }
+                            } else {
+                                compact_buf.extend_from_slice(ibuf.format(count).as_bytes());
+                            }
                             compact_buf.push(b'\n');
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;

@@ -7989,10 +7989,11 @@ impl Filter {
     }
 
     /// Detect `.field | split("str") | length` — returns (field_name, delimiter).
-    pub fn detect_field_split_length(&self) -> Option<(String, String)> {
-        use crate::ir::{Expr, Literal, UnaryOp};
+    pub fn detect_field_split_length(&self) -> Option<(String, String, Vec<(crate::ir::BinOp, f64)>)> {
+        use crate::ir::{Expr, BinOp, Literal, UnaryOp};
         let expr = self.detect_expr()?;
-        // Pipe(.field, Pipe(split("s"), length))
+        // Pipe(.field, Pipe(split("s"), length_expr))
+        // where length_expr is either Length(Input) or BinOp(op, Length(Input), N) chain
         if let Expr::Pipe { left, right } = expr {
             if let Expr::Index { expr: base, key } = left.as_ref() {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
@@ -8001,8 +8002,27 @@ impl Filter {
                         if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
                             if name != "split" || args.len() != 1 { return None; }
                             if let Expr::Literal(Literal::Str(delim)) = &args[0] {
+                                // Plain length
                                 if matches!(len_expr.as_ref(), Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
-                                    return Some((field.clone(), delim.clone()));
+                                    return Some((field.clone(), delim.clone(), vec![]));
+                                }
+                                // length with arith chain: BinOp(op, ..., N)
+                                let mut ops = Vec::new();
+                                let mut cur = len_expr.as_ref();
+                                loop {
+                                    if let Expr::BinOp { op, lhs, rhs } = cur {
+                                        if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) { return None; }
+                                        if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                            ops.push((*op, *n));
+                                            cur = lhs.as_ref();
+                                        } else { return None; }
+                                    } else { break; }
+                                }
+                                if !ops.is_empty() {
+                                    if matches!(cur, Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
+                                        ops.reverse();
+                                        return Some((field.clone(), delim.clone(), ops));
+                                    }
                                 }
                             }
                         }

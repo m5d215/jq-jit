@@ -208,6 +208,12 @@ TESTS=(
     'if .n=="s" .+{o}:-c:if .name == "user_1" then . + {found:true} else . end'
     'sel(.n>"s"):-c:select(.name > "user_5")'
     '[x,y,z]|min:-c:[.x, .y, .x] | min'
+    'if .n|len>5 l s:-c:if .name | length > 5 then "long" else "short" end'
+    'if .x|flr>N b s:-c:if .x | floor > 1000000 then "big" else "small" end'
+    'if .n|test l e:-c:if .name | test("^user") then "yes" else "no" end'
+    'if .n|sw l e:-c:if .name | startswith("user") then "yes" else "no" end'
+    'if .n|ew l e:-c:if .name | endswith("_0") then "yes" else "no" end'
+    '.n|len|tostr:-c:.name | length | tostring'
 )
 
 for test in "${TESTS[@]}"; do
