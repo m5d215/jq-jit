@@ -8467,9 +8467,10 @@ impl Filter {
         None
     }
 
-    /// Detect `if (.field | length) cmp N then LIT else LIT end`
-    /// Returns (field, cmp_op, threshold, then_bytes, else_bytes).
-    pub fn detect_field_length_cmp_branch_literals(&self) -> Option<(String, crate::ir::BinOp, f64, Vec<u8>, Vec<u8>)> {
+    /// Detect `if (.field | unary_op) cmp N then LIT else LIT end`
+    /// where unary_op is length, floor, ceil, round, fabs.
+    /// Returns (field, unary_op, cmp_op, threshold, then_bytes, else_bytes).
+    pub fn detect_field_unary_cmp_branch_literals(&self) -> Option<(String, crate::ir::UnaryOp, crate::ir::BinOp, f64, Vec<u8>, Vec<u8>)> {
         use crate::ir::{Expr, BinOp, UnaryOp, Literal};
         let expr = self.detect_expr()?;
         if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
@@ -8477,14 +8478,16 @@ impl Filter {
                 if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
                     return None;
                 }
-                // Match UnaryOp(Length, Index(Input, field)) — beta-reduced from .field | length
-                if let Expr::UnaryOp { op: UnaryOp::Length, operand } = lhs.as_ref() {
+                if let Expr::UnaryOp { op: uop, operand } = lhs.as_ref() {
+                    if !matches!(uop, UnaryOp::Length | UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Round | UnaryOp::Fabs | UnaryOp::Abs) {
+                        return None;
+                    }
                     if let Expr::Index { expr: base, key } = operand.as_ref() {
                         if !matches!(base.as_ref(), Expr::Input) { return None; }
                         if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                             if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
                                 if let (Some(t_bytes), Some(f_bytes)) = (const_expr_to_json(then_branch), const_expr_to_json(else_branch)) {
-                                    return Some((field.clone(), *op, *n, t_bytes, f_bytes));
+                                    return Some((field.clone(), *uop, *op, *n, t_bytes, f_bytes));
                                 }
                             }
                         }
