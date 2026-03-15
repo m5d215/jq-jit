@@ -5834,10 +5834,25 @@ impl Filter {
     pub fn detect_select_cmp_merge(&self) -> Option<(String, crate::ir::BinOp, f64, Vec<(String, Vec<u8>)>)> {
         use crate::ir::{Expr, BinOp, Literal};
         let expr = self.detect_expr()?;
-        let (cond, merge_expr) = if let Expr::Pipe { left, right } = expr {
+        // Extract (cond, merge_expr) from either:
+        //   Pipe(IfThenElse{cond,.,empty}, BinOp(Add, ., {..}))  — unsimplified
+        //   BinOp(Add, IfThenElse{cond,.,empty}, {..})           — simplified (Input substituted)
+        let (cond, obj_pairs) = if let Expr::Pipe { left, right } = expr {
             if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
-                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
-                    (cond.as_ref(), right.as_ref())
+                if !matches!(then_branch.as_ref(), Expr::Input) || !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+                if let Expr::BinOp { op: BinOp::Add | BinOp::Mul, lhs, rhs } = right.as_ref() {
+                    if !matches!(lhs.as_ref(), Expr::Input) { return None; }
+                    if let Expr::ObjectConstruct { pairs } = rhs.as_ref() {
+                        (cond.as_ref(), pairs)
+                    } else { return None; }
+                } else { return None; }
+            } else { return None; }
+        } else if let Expr::BinOp { op: BinOp::Add | BinOp::Mul, lhs, rhs } = expr {
+            // Simplified form: Add(IfThenElse{cond, Input, Empty}, ObjectConstruct)
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = lhs.as_ref() {
+                if !matches!(then_branch.as_ref(), Expr::Input) || !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+                if let Expr::ObjectConstruct { pairs } = rhs.as_ref() {
+                    (cond.as_ref(), pairs)
                 } else { return None; }
             } else { return None; }
         } else { return None; };
@@ -5853,21 +5868,16 @@ impl Filter {
                 } else { return None; }
             } else { return None; }
         } else { return None; };
-        // Parse merge: .+{key: literal, ...}
-        if let Expr::BinOp { op: BinOp::Add | BinOp::Mul, lhs, rhs } = merge_expr {
-            if !matches!(lhs.as_ref(), Expr::Input) { return None; }
-            if let Expr::ObjectConstruct { pairs } = rhs.as_ref() {
-                let mut merge_pairs = Vec::new();
-                for (k, v) in pairs {
-                    let key = if let Expr::Literal(Literal::Str(s)) = k { s.clone() } else { return None; };
-                    if let Some(json_bytes) = const_expr_to_json(v) {
-                        merge_pairs.push((key, json_bytes));
-                    } else { return None; }
-                }
-                if !merge_pairs.is_empty() {
-                    return Some((field, op, threshold, merge_pairs));
-                }
-            }
+        // Parse merge pairs: {key: literal, ...}
+        let mut merge_pairs = Vec::new();
+        for (k, v) in obj_pairs {
+            let key = if let Expr::Literal(Literal::Str(s)) = k { s.clone() } else { return None; };
+            if let Some(json_bytes) = const_expr_to_json(v) {
+                merge_pairs.push((key, json_bytes));
+            } else { return None; }
+        }
+        if !merge_pairs.is_empty() {
+            return Some((field, op, threshold, merge_pairs));
         }
         None
     }
@@ -5877,10 +5887,24 @@ impl Filter {
     pub fn detect_select_str_merge(&self) -> Option<(String, String, String, Vec<(String, Vec<u8>)>)> {
         use crate::ir::{Expr, Literal, BinOp};
         let expr = self.detect_expr()?;
-        let (cond, merge_expr) = if let Expr::Pipe { left, right } = expr {
+        // Extract (cond, obj_pairs) from either:
+        //   Pipe(IfThenElse{cond,.,empty}, BinOp(Add, ., {..}))  — unsimplified
+        //   BinOp(Add, IfThenElse{cond,.,empty}, {..})           — simplified
+        let (cond, obj_pairs) = if let Expr::Pipe { left, right } = expr {
             if let Expr::IfThenElse { cond, then_branch, else_branch } = left.as_ref() {
-                if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
-                    (cond.as_ref(), right.as_ref())
+                if !matches!(then_branch.as_ref(), Expr::Input) || !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+                if let Expr::BinOp { op: BinOp::Add | BinOp::Mul, lhs, rhs } = right.as_ref() {
+                    if !matches!(lhs.as_ref(), Expr::Input) { return None; }
+                    if let Expr::ObjectConstruct { pairs } = rhs.as_ref() {
+                        (cond.as_ref(), pairs)
+                    } else { return None; }
+                } else { return None; }
+            } else { return None; }
+        } else if let Expr::BinOp { op: BinOp::Add | BinOp::Mul, lhs, rhs } = expr {
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = lhs.as_ref() {
+                if !matches!(then_branch.as_ref(), Expr::Input) || !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
+                if let Expr::ObjectConstruct { pairs } = rhs.as_ref() {
+                    (cond.as_ref(), pairs)
                 } else { return None; }
             } else { return None; }
         } else { return None; };
@@ -5921,21 +5945,16 @@ impl Filter {
                 } else { return None; }
             } else { return None; }
         } else { return None; };
-        // Parse merge: .+{key: literal, ...}
-        if let Expr::BinOp { op: BinOp::Add | BinOp::Mul, lhs, rhs } = merge_expr {
-            if !matches!(lhs.as_ref(), Expr::Input) { return None; }
-            if let Expr::ObjectConstruct { pairs } = rhs.as_ref() {
-                let mut merge_pairs = Vec::new();
-                for (k, v) in pairs {
-                    let key = if let Expr::Literal(Literal::Str(s)) = k { s.clone() } else { return None; };
-                    if let Some(json_bytes) = const_expr_to_json(v) {
-                        merge_pairs.push((key, json_bytes));
-                    } else { return None; }
-                }
-                if !merge_pairs.is_empty() {
-                    return Some((field, str_op, str_arg, merge_pairs));
-                }
-            }
+        // Parse merge pairs
+        let mut merge_pairs = Vec::new();
+        for (k, v) in obj_pairs {
+            let key = if let Expr::Literal(Literal::Str(s)) = k { s.clone() } else { return None; };
+            if let Some(json_bytes) = const_expr_to_json(v) {
+                merge_pairs.push((key, json_bytes));
+            } else { return None; }
+        }
+        if !merge_pairs.is_empty() {
+            return Some((field, str_op, str_arg, merge_pairs));
         }
         None
     }

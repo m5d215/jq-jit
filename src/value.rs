@@ -2244,18 +2244,15 @@ pub fn json_object_merge_literal(b: &[u8], pos: usize, merge_pairs: &[(String, V
         buf.push(b'}');
         return true;
     }
-    // Fast path for compact input: if no merge key appears in the raw bytes,
+    // Fast path: if no merge key appears in the raw bytes,
     // skip key-by-key scanning and just copy-and-append.
-    if is_json_compact(&b[pos..]) {
+    {
         // Check if any merge key pattern ("key":) appears in the object bytes
         let obj_end = b.len();
         let mut any_key_found = false;
         for (mk, _) in merge_pairs.iter() {
-            // Build search pattern "key":
             let kb = mk.as_bytes();
-            // Quick length check: need at least "k": = 4+key_len bytes
             if kb.len() + 3 <= obj_end {
-                // Search for "key": in the raw bytes
                 let mut search_pos = pos + 1;
                 while search_pos + kb.len() + 2 < obj_end {
                     if let Some(p) = memchr::memchr(b'"', &b[search_pos..obj_end]) {
@@ -2276,21 +2273,42 @@ pub fn json_object_merge_literal(b: &[u8], pos: usize, merge_pairs: &[(String, V
             if any_key_found { break; }
         }
         if !any_key_found {
-            // No merge key exists in input — copy object, append merge pairs
-            // Find the closing } (last byte for compact NDJSON)
-            let mut close = obj_end - 1;
-            while close > pos && b[close] != b'}' { close -= 1; }
-            if b[close] == b'}' {
-                buf.extend_from_slice(&b[pos..close]);
-                for (mk, mv) in merge_pairs.iter() {
-                    buf.push(b',');
-                    buf.push(b'"');
-                    buf.extend_from_slice(mk.as_bytes());
-                    buf.extend_from_slice(b"\":");
-                    buf.extend_from_slice(mv);
+            // No merge key exists — copy object, append merge pairs before closing }
+            let compact = is_json_compact(&b[pos..]);
+            if compact {
+                // Compact input: just find } and copy up to it
+                let mut close = obj_end - 1;
+                while close > pos && b[close] != b'}' { close -= 1; }
+                if b[close] == b'}' {
+                    buf.extend_from_slice(&b[pos..close]);
+                    for (mk, mv) in merge_pairs.iter() {
+                        buf.push(b',');
+                        buf.push(b'"');
+                        buf.extend_from_slice(mk.as_bytes());
+                        buf.extend_from_slice(b"\":");
+                        buf.extend_from_slice(mv);
+                    }
+                    buf.push(b'}');
+                    return true;
                 }
-                buf.push(b'}');
-                return true;
+            } else {
+                // Non-compact input: compact the whole object, then splice in merge pairs
+                let start = buf.len();
+                push_json_compact_raw(buf, &b[pos..]);
+                // Find the closing } in the compacted output and insert merge pairs before it
+                let end = buf.len();
+                if end > start && buf[end - 1] == b'}' {
+                    buf.pop(); // remove }
+                    for (mk, mv) in merge_pairs.iter() {
+                        buf.push(b',');
+                        buf.push(b'"');
+                        buf.extend_from_slice(mk.as_bytes());
+                        buf.extend_from_slice(b"\":");
+                        buf.extend_from_slice(mv);
+                    }
+                    buf.push(b'}');
+                    return true;
+                }
             }
         }
     }
