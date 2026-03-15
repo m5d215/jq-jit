@@ -404,6 +404,16 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     });
                 }
             }
+            // Beta-reduce: X | (. binop .) → (X binop X) when both sides are input
+            if let Expr::BinOp { op, lhs, rhs } = &sr {
+                if matches!(lhs.as_ref(), Expr::Input) && matches!(rhs.as_ref(), Expr::Input) {
+                    return simplify_expr(&Expr::BinOp {
+                        op: *op,
+                        lhs: Box::new(sl.clone()),
+                        rhs: Box::new(sl),
+                    });
+                }
+            }
             // Semantic: to_entries | from_entries → identity
             if matches!(&sl, Expr::UnaryOp { op: UnaryOp::ToEntries, .. })
                 && matches!(&sr, Expr::UnaryOp { op: UnaryOp::FromEntries, operand } if matches!(operand.as_ref(), Expr::Input))
