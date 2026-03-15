@@ -598,6 +598,7 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                 }
             }
+            // NOTE: explode | implode is NOT identity — explode errors on non-strings
             // Semantic: explode | map(. + N) | implode → __shift_codepoints__(N)
             // Also: explode | map(. - N) | implode
             // Helper: check if expr is map(. + N) pattern, return shift amount
@@ -8407,6 +8408,49 @@ impl Filter {
         None
     }
 
+    /// Detect `if .field cmp N then {remap} else {remap} end` where both branches
+    /// are objects with all-field-access values. Condition compares field to constant.
+    /// Returns (cmp_field, op, cmp_val, then_pairs, else_pairs).
+    pub fn detect_cmp_branch_remaps(&self) -> Option<(String, crate::ir::BinOp, CmpVal, Vec<(String, String)>, Vec<(String, String)>)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        fn extract_remap(e: &Expr) -> Option<Vec<(String, String)>> {
+            if let Expr::ObjectConstruct { pairs } = e {
+                let mut result = Vec::with_capacity(pairs.len());
+                for (k, v) in pairs {
+                    let key = if let Expr::Literal(Literal::Str(s)) = k { s.clone() } else { return None; };
+                    if let Expr::Index { expr: base, key: fk } = v {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f)) = fk.as_ref() {
+                            result.push((key, f.clone()));
+                        } else { return None; }
+                    } else { return None; }
+                }
+                if result.is_empty() { return None; }
+                Some(result)
+            } else { None }
+        }
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        let cmp_val = match rhs.as_ref() {
+                            Expr::Literal(Literal::Num(n, _)) => CmpVal::Num(*n),
+                            Expr::Literal(Literal::Str(s)) => CmpVal::Str(s.clone()),
+                            _ => return None,
+                        };
+                        let then_pairs = extract_remap(then_branch)?;
+                        let else_pairs = extract_remap(else_branch)?;
+                        return Some((field.clone(), *op, cmp_val, then_pairs, else_pairs));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `if .field op val then merge else . end` (conditional merge).
     /// Handles both prepend ({literal} + .) and append (. + {literal}), and both
     /// numeric (.field > N) and string (.field == "str") conditions.
@@ -8572,6 +8616,47 @@ impl Filter {
                 // At least one branch must not be a simple field (otherwise detect_if_ff_cmp_then_fields handles it)
                 if matches!(then_r, RemapExpr::Field(_)) && matches!(else_r, RemapExpr::Field(_)) { return None; }
                 return Some((f1, *op, f2, then_r, else_r));
+            }
+        }
+        None
+    }
+
+    /// Detect `if .f1 cmp .f2 then {remap} else {remap} end` where both branches
+    /// are objects with all-field-access values.
+    /// Returns (cmp_f1, op, cmp_f2, then_pairs, else_pairs).
+    pub fn detect_if_ff_cmp_then_remaps(&self) -> Option<(String, crate::ir::BinOp, String, Vec<(String, String)>, Vec<(String, String)>)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        fn extract_remap(e: &Expr) -> Option<Vec<(String, String)>> {
+            if let Expr::ObjectConstruct { pairs } = e {
+                let mut result = Vec::with_capacity(pairs.len());
+                for (k, v) in pairs {
+                    let key = if let Expr::Literal(Literal::Str(s)) = k { s.clone() } else { return None; };
+                    if let Expr::Index { expr: base, key: fk } = v {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(f)) = fk.as_ref() {
+                            result.push((key, f.clone()));
+                        } else { return None; }
+                    } else { return None; }
+                }
+                if result.is_empty() { return None; }
+                Some(result)
+            } else { None }
+        }
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) { return None; }
+                let f1 = if let Expr::Index { expr: b, key: k } = lhs.as_ref() {
+                    if !matches!(b.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(s)) = k.as_ref() { s.clone() } else { return None; }
+                } else { return None; };
+                let f2 = if let Expr::Index { expr: b, key: k } = rhs.as_ref() {
+                    if !matches!(b.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(s)) = k.as_ref() { s.clone() } else { return None; }
+                } else { return None; };
+                let then_pairs = extract_remap(then_branch)?;
+                let else_pairs = extract_remap(else_branch)?;
+                return Some((f1, *op, f2, then_pairs, else_pairs));
             }
         }
         None
@@ -10306,6 +10391,53 @@ impl Filter {
                 let arith = build_arith(val_expr, &mut fields)?;
                 if fields.is_empty() { return None; } // All constants → detect_obj_merge_literal handles
                 return Some((key, fields, arith));
+            }
+        }
+        None
+    }
+
+    /// Detect `. + {k1: arith1, k2: arith2, ...}` — multi-field object enrichment with computed values.
+    /// Returns Vec<(output_key, arith_expr)> and the shared list of input fields.
+    pub fn detect_obj_merge_multi_computed(&self) -> Option<(Vec<(String, ArithExpr)>, Vec<String>)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::BinOp { op: BinOp::Add | BinOp::Mul, lhs, rhs } = expr {
+            if !matches!(lhs.as_ref(), Expr::Input) { return None; }
+            if let Expr::ObjectConstruct { pairs } = rhs.as_ref() {
+                if pairs.len() < 2 { return None; } // single field → detect_obj_merge_computed handles
+                let mut fields: Vec<String> = Vec::new();
+                let mut result = Vec::with_capacity(pairs.len());
+                fn build_arith(expr: &Expr, fields: &mut Vec<String>) -> Option<ArithExpr> {
+                    match expr {
+                        Expr::BinOp { op, lhs, rhs } => {
+                            if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) { return None; }
+                            let l = build_arith(lhs, fields)?;
+                            let r = build_arith(rhs, fields)?;
+                            Some(ArithExpr::BinOp(*op, Box::new(l), Box::new(r)))
+                        }
+                        Expr::Index { expr: base, key } => {
+                            if !matches!(base.as_ref(), Expr::Input) { return None; }
+                            if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                let idx = if let Some(pos) = fields.iter().position(|f| f == field) {
+                                    pos
+                                } else {
+                                    fields.push(field.clone());
+                                    fields.len() - 1
+                                };
+                                Some(ArithExpr::Field(idx))
+                            } else { None }
+                        }
+                        Expr::Literal(Literal::Num(n, _)) => Some(ArithExpr::Const(*n)),
+                        _ => None,
+                    }
+                }
+                for (key_expr, val_expr) in pairs {
+                    let key = if let Expr::Literal(Literal::Str(k)) = key_expr { k.clone() } else { return None; };
+                    let arith = build_arith(val_expr, &mut fields)?;
+                    result.push((key, arith));
+                }
+                if fields.is_empty() { return None; }
+                return Some((result, fields));
             }
         }
         None
