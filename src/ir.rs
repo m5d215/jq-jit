@@ -581,6 +581,28 @@ impl Expr {
         }
     }
 
+    /// Conservative check: returns true if this expression is guaranteed to produce
+    /// exactly one output value (not a generator). Used to guard beta-reductions
+    /// that would be unsound with generators (e.g., range, each, comma).
+    pub fn is_single_output(&self) -> bool {
+        match self {
+            Expr::Input | Expr::Literal(_) | Expr::LoadVar { .. }
+            | Expr::Env | Expr::Builtins | Expr::Not | Expr::Loc { .. } => true,
+            Expr::Index { expr, key } => expr.is_single_output() && key.is_single_output(),
+            Expr::UnaryOp { operand, .. } => operand.is_single_output(),
+            Expr::BinOp { lhs, rhs, .. } => lhs.is_single_output() && rhs.is_single_output(),
+            Expr::Negate { operand } => operand.is_single_output(),
+            Expr::Format { expr, .. } => expr.is_single_output(),
+            Expr::Slice { expr, from, to } => {
+                expr.is_single_output()
+                    && from.as_ref().map_or(true, |e| e.is_single_output())
+                    && to.as_ref().map_or(true, |e| e.is_single_output())
+            }
+            // Conservative: everything else might be a generator
+            _ => false,
+        }
+    }
+
     /// Substitute all Input nodes with `replacement`.
     /// Only valid when `is_input_free()` is true.
     pub fn substitute_input(&self, replacement: &Expr) -> Expr {

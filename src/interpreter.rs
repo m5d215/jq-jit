@@ -414,6 +414,19 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     });
                 }
             }
+            // Beta-reduce: X | if (cond_with_.) then A else B end → if (cond_with_X) then A else B end
+            // when A and B are constants (no Input refs), cond is substitutable,
+            // and X is a single-output expression (not a generator like range/each/comma)
+            if let Expr::IfThenElse { cond, then_branch, else_branch } = &sr {
+                let branch_no_input = |b: &Expr| matches!(b, Expr::Literal(_) | Expr::Empty);
+                if branch_no_input(then_branch) && branch_no_input(else_branch) && cond.is_input_free() && sl.is_single_output() {
+                    return simplify_expr(&Expr::IfThenElse {
+                        cond: Box::new(cond.substitute_input(&sl)),
+                        then_branch: then_branch.clone(),
+                        else_branch: else_branch.clone(),
+                    });
+                }
+            }
             // Semantic: to_entries | from_entries → identity
             if matches!(&sl, Expr::UnaryOp { op: UnaryOp::ToEntries, .. })
                 && matches!(&sr, Expr::UnaryOp { op: UnaryOp::FromEntries, operand } if matches!(operand.as_ref(), Expr::Input))
@@ -8445,6 +8458,34 @@ impl Filter {
                         if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
                             if let (Some(t_bytes), Some(f_bytes)) = (const_expr_to_json(then_branch), const_expr_to_json(else_branch)) {
                                 return Some((field.clone(), *op, *n, t_bytes, f_bytes));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `if (.field | length) cmp N then LIT else LIT end`
+    /// Returns (field, cmp_op, threshold, then_bytes, else_bytes).
+    pub fn detect_field_length_cmp_branch_literals(&self) -> Option<(String, crate::ir::BinOp, f64, Vec<u8>, Vec<u8>)> {
+        use crate::ir::{Expr, BinOp, UnaryOp, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                    return None;
+                }
+                // Match UnaryOp(Length, Index(Input, field)) — beta-reduced from .field | length
+                if let Expr::UnaryOp { op: UnaryOp::Length, operand } = lhs.as_ref() {
+                    if let Expr::Index { expr: base, key } = operand.as_ref() {
+                        if !matches!(base.as_ref(), Expr::Input) { return None; }
+                        if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                            if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                if let (Some(t_bytes), Some(f_bytes)) = (const_expr_to_json(then_branch), const_expr_to_json(else_branch)) {
+                                    return Some((field.clone(), *op, *n, t_bytes, f_bytes));
+                                }
                             }
                         }
                     }
