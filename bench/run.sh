@@ -201,6 +201,13 @@ TESTS=(
     'sel(dc|sw):-c:select(.name | ascii_downcase | startswith("user"))'
     '[[x,y],[n]]|flat:-c:[[.x,.y],[.name]] | flatten'
     '.x|floor|.*2:-c:.x | floor | . * 2'
+    'tojson|fromjson:-c:tojson | fromjson'
+    '[.x]|add:-c:[.x] | add'
+    'if>N {o}+.:-c:if .x > 1000000 then {status:"high"} + . else . end'
+    'if>N .+{o}:-c:if .x > 1000000 then . + {status:"high"} else . end'
+    'if .n=="s" .+{o}:-c:if .name == "user_1" then . + {found:true} else . end'
+    'sel(.n>"s"):-c:select(.name > "user_5")'
+    '[x,y,z]|min:-c:[.x, .y, .x] | min'
 )
 
 for test in "${TESTS[@]}"; do
