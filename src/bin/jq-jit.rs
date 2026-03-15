@@ -2352,10 +2352,10 @@ fn real_main() {
     let null_branch_lit = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() {
         filter.detect_field_null_branch_literals()
     } else { None };
-    let cmp_branch_prepend = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() && null_branch_lit.is_none() {
-        filter.detect_cmp_branch_prepend_merge()
+    let cmp_branch_merge = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() && null_branch_lit.is_none() {
+        filter.detect_cmp_branch_merge()
     } else { None };
-    let field_field_cmp_branch = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() && null_branch_lit.is_none() && cmp_branch_prepend.is_none() {
+    let field_field_cmp_branch = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() && null_branch_lit.is_none() && cmp_branch_merge.is_none() {
         filter.detect_field_field_cmp_branch()
     } else { None };
     let if_ff_cmp_fields = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && field_field_cmp_branch.is_none() {
@@ -2475,7 +2475,7 @@ fn real_main() {
         || field_str_builtin.is_some() || field_test.is_some() || field_gsub.is_some() || field_case_gsub.is_some() || field_case_test.is_some() || field_scan.is_some() || field_match.is_some() || field_capture.is_some() || field_format.is_some() || field_ltrimstr_tonumber.is_some()
         || field_str_concat.is_some() || field_alt.is_some() || field_field_alt.is_some()
         || select_cmp.is_some() || select_field_null.is_some() || select_arith_cmp.is_some()
-        || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || null_branch_lit.is_some() || cmp_branch_prepend.is_some() || field_field_cmp_branch.is_some() || if_ff_cmp_fields.is_some() || if_ff_cmp_computed.is_some() || if_length_cmp_fields.is_some() || select_length_cmp_remap.is_some() || field_tostring_length.is_some() || if_cmp_arrays.is_some() || cmp_branch_interp.is_some() || select_num_str.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some() || select_compound_computed.is_some() || select_compound_cremap.is_some()
+        || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || null_branch_lit.is_some() || cmp_branch_merge.is_some() || field_field_cmp_branch.is_some() || if_ff_cmp_fields.is_some() || if_ff_cmp_computed.is_some() || if_length_cmp_fields.is_some() || select_length_cmp_remap.is_some() || field_tostring_length.is_some() || if_cmp_arrays.is_some() || cmp_branch_interp.is_some() || select_num_str.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some() || select_compound_computed.is_some() || select_compound_cremap.is_some()
         || select_str.is_some() || select_compound_str_chain.is_some()
         || select_str_test.is_some() || select_string_chain.is_some() || select_compound_str_test.is_some() || select_mixed_compound.is_some() || select_regex_test.is_some() || select_regex_value.is_some() || select_nested_cmp.is_some()
         || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_field_unary.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_dynkey.is_some() || select_cmp_dynkey_mixed.is_some() || select_cmp_array.is_some() || select_arith_cmp_array.is_some() || select_cmp_value.is_some() || select_cmp_str_chain.is_some() || select_ff_cmp_field.is_some() || select_ff_cmp.is_some() || select_ff_cmp_cremap.is_some() || select_ff_cmp_value.is_some() || select_ff_cmp_array.is_some() || select_compound_array.is_some() || select_str_field.is_some() || select_str_cremap.is_some() || select_str_array.is_some() || select_str_str_chain.is_some()
@@ -7888,42 +7888,84 @@ fn real_main() {
                         }
                         Ok(())
                     })
-                } else if let Some((ref field, ref op, threshold, ref merge_pairs)) = cmp_branch_prepend {
-                    // if .field op N then {literal} + . else . end
-                    // Build prefix bytes: {"key1":val1,"key2":val2,
-                    let mut prefix = Vec::with_capacity(64);
-                    prefix.push(b'{');
-                    for (i, (k, v)) in merge_pairs.iter().enumerate() {
-                        if i > 0 { prefix.push(b','); }
-                        prefix.push(b'"');
-                        prefix.extend_from_slice(k.as_bytes());
-                        prefix.extend_from_slice(b"\":");
-                        prefix.extend_from_slice(v);
-                    }
-                    prefix.push(b',');
+                } else if let Some((ref field, ref op, ref cmp_val, ref merge_pairs, is_prepend)) = cmp_branch_merge {
+                    // if .field op val then {literal} +/. . else . end
                     use jq_jit::ir::BinOp;
+                    use jq_jit::interpreter::CmpVal;
+                    // Build merge suffix/prefix: ,"key1":val1,"key2":val2}  or  {"key1":val1,"key2":val2,
+                    let mut merge_bytes = Vec::with_capacity(64);
+                    if is_prepend {
+                        merge_bytes.push(b'{');
+                        for (i, (k, v)) in merge_pairs.iter().enumerate() {
+                            if i > 0 { merge_bytes.push(b','); }
+                            merge_bytes.push(b'"');
+                            merge_bytes.extend_from_slice(k.as_bytes());
+                            merge_bytes.extend_from_slice(b"\":");
+                            merge_bytes.extend_from_slice(v);
+                        }
+                        merge_bytes.push(b',');
+                    } else {
+                        merge_bytes.push(b',');
+                        for (i, (k, v)) in merge_pairs.iter().enumerate() {
+                            if i > 0 { merge_bytes.push(b','); }
+                            merge_bytes.push(b'"');
+                            merge_bytes.extend_from_slice(k.as_bytes());
+                            merge_bytes.extend_from_slice(b"\":");
+                            merge_bytes.extend_from_slice(v);
+                        }
+                        merge_bytes.push(b'}');
+                    }
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if let Some(val) = json_object_get_num(raw, 0, field) {
-                            let pass = match op {
-                                BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
-                                BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
-                                BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
-                                _ => false,
-                            };
+                        let pass = match cmp_val {
+                            CmpVal::Num(threshold) => {
+                                json_object_get_num(raw, 0, field).map(|val| match op {
+                                    BinOp::Gt => val > *threshold, BinOp::Lt => val < *threshold,
+                                    BinOp::Ge => val >= *threshold, BinOp::Le => val <= *threshold,
+                                    BinOp::Eq => val == *threshold, BinOp::Ne => val != *threshold,
+                                    _ => false,
+                                })
+                            }
+                            CmpVal::Str(ref s) => {
+                                json_object_get_field_raw(raw, 0, field).map(|(vs, ve)| {
+                                    let vb = &raw[vs..ve];
+                                    if vb.len() >= 2 && vb[0] == b'"' && vb[vb.len()-1] == b'"' && !vb[1..vb.len()-1].contains(&b'\\') {
+                                        let inner = &vb[1..vb.len()-1];
+                                        match op {
+                                            BinOp::Eq => inner == s.as_bytes(),
+                                            BinOp::Ne => inner != s.as_bytes(),
+                                            BinOp::Gt => inner > s.as_bytes(),
+                                            BinOp::Lt => inner < s.as_bytes(),
+                                            BinOp::Ge => inner >= s.as_bytes(),
+                                            BinOp::Le => inner <= s.as_bytes(),
+                                            _ => false,
+                                        }
+                                    } else { false }
+                                })
+                            }
+                        };
+                        if let Some(pass) = pass {
                             if pass {
-                                // Prepend merge: prefix + compacted object content
+                                let save = compact_buf.len();
                                 if is_json_compact(raw) {
-                                    compact_buf.extend_from_slice(&prefix);
-                                    compact_buf.extend_from_slice(&raw[1..]); // skip '{'
+                                    if is_prepend {
+                                        compact_buf.extend_from_slice(&merge_bytes);
+                                        compact_buf.extend_from_slice(&raw[1..]); // skip '{'
+                                    } else {
+                                        compact_buf.extend_from_slice(&raw[..raw.len()-1]); // skip '}'
+                                        compact_buf.extend_from_slice(&merge_bytes);
+                                    }
                                 } else {
-                                    let save = compact_buf.len();
                                     push_json_compact_raw(&mut compact_buf, raw);
-                                    // Replace leading '{' with prefix in-place
-                                    let compacted = compact_buf[save + 1..].to_vec();
+                                    let compacted = compact_buf[save..].to_vec();
                                     compact_buf.truncate(save);
-                                    compact_buf.extend_from_slice(&prefix);
-                                    compact_buf.extend_from_slice(&compacted);
+                                    if is_prepend {
+                                        compact_buf.extend_from_slice(&merge_bytes);
+                                        compact_buf.extend_from_slice(&compacted[1..]); // skip '{'
+                                    } else {
+                                        compact_buf.extend_from_slice(&compacted[..compacted.len()-1]); // skip '}'
+                                        compact_buf.extend_from_slice(&merge_bytes);
+                                    }
                                 }
                             } else {
                                 if is_json_compact(raw) {
@@ -14865,40 +14907,83 @@ fn real_main() {
                     }
                     Ok(())
                 })
-            } else if let Some((ref field, ref op, threshold, ref merge_pairs)) = cmp_branch_prepend {
-                // if .field op N then {literal} + . else . end — conditional prepend merge
-                let mut prefix = Vec::with_capacity(64);
-                prefix.push(b'{');
-                for (i, (k, v)) in merge_pairs.iter().enumerate() {
-                    if i > 0 { prefix.push(b','); }
-                    prefix.push(b'"');
-                    prefix.extend_from_slice(k.as_bytes());
-                    prefix.extend_from_slice(b"\":");
-                    prefix.extend_from_slice(v);
-                }
-                prefix.push(b',');
+            } else if let Some((ref field, ref op, ref cmp_val, ref merge_pairs, is_prepend)) = cmp_branch_merge {
                 use jq_jit::ir::BinOp;
+                use jq_jit::interpreter::CmpVal;
+                let mut merge_bytes = Vec::with_capacity(64);
+                if is_prepend {
+                    merge_bytes.push(b'{');
+                    for (i, (k, v)) in merge_pairs.iter().enumerate() {
+                        if i > 0 { merge_bytes.push(b','); }
+                        merge_bytes.push(b'"');
+                        merge_bytes.extend_from_slice(k.as_bytes());
+                        merge_bytes.extend_from_slice(b"\":");
+                        merge_bytes.extend_from_slice(v);
+                    }
+                    merge_bytes.push(b',');
+                } else {
+                    merge_bytes.push(b',');
+                    for (i, (k, v)) in merge_pairs.iter().enumerate() {
+                        if i > 0 { merge_bytes.push(b','); }
+                        merge_bytes.push(b'"');
+                        merge_bytes.extend_from_slice(k.as_bytes());
+                        merge_bytes.extend_from_slice(b"\":");
+                        merge_bytes.extend_from_slice(v);
+                    }
+                    merge_bytes.push(b'}');
+                }
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if let Some(val) = json_object_get_num(raw, 0, field) {
-                        let pass = match op {
-                            BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
-                            BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
-                            BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
-                            _ => false,
-                        };
+                    let pass = match cmp_val {
+                        CmpVal::Num(threshold) => {
+                            json_object_get_num(raw, 0, field).map(|val| match op {
+                                BinOp::Gt => val > *threshold, BinOp::Lt => val < *threshold,
+                                BinOp::Ge => val >= *threshold, BinOp::Le => val <= *threshold,
+                                BinOp::Eq => val == *threshold, BinOp::Ne => val != *threshold,
+                                _ => false,
+                            })
+                        }
+                        CmpVal::Str(ref s) => {
+                            json_object_get_field_raw(raw, 0, field).map(|(vs, ve)| {
+                                let vb = &raw[vs..ve];
+                                if vb.len() >= 2 && vb[0] == b'"' && vb[vb.len()-1] == b'"' && !vb[1..vb.len()-1].contains(&b'\\') {
+                                    let inner = &vb[1..vb.len()-1];
+                                    match op {
+                                        BinOp::Eq => inner == s.as_bytes(),
+                                        BinOp::Ne => inner != s.as_bytes(),
+                                        BinOp::Gt => inner > s.as_bytes(),
+                                        BinOp::Lt => inner < s.as_bytes(),
+                                        BinOp::Ge => inner >= s.as_bytes(),
+                                        BinOp::Le => inner <= s.as_bytes(),
+                                        _ => false,
+                                    }
+                                } else { false }
+                            })
+                        }
+                    };
+                    if let Some(pass) = pass {
                         if pass {
+                            let save = compact_buf.len();
                             if is_json_compact(raw) {
-                                compact_buf.extend_from_slice(&prefix);
-                                compact_buf.extend_from_slice(&raw[1..]);
+                                if is_prepend {
+                                    compact_buf.extend_from_slice(&merge_bytes);
+                                    compact_buf.extend_from_slice(&raw[1..]);
+                                } else {
+                                    compact_buf.extend_from_slice(&raw[..raw.len()-1]);
+                                    compact_buf.extend_from_slice(&merge_bytes);
+                                }
                             } else {
-                                let save = compact_buf.len();
                                 push_json_compact_raw(&mut compact_buf, raw);
-                                let compacted = compact_buf[save + 1..].to_vec();
+                                let compacted = compact_buf[save..].to_vec();
                                 compact_buf.truncate(save);
-                                compact_buf.extend_from_slice(&prefix);
-                                compact_buf.extend_from_slice(&compacted);
+                                if is_prepend {
+                                    compact_buf.extend_from_slice(&merge_bytes);
+                                    compact_buf.extend_from_slice(&compacted[1..]);
+                                } else {
+                                    compact_buf.extend_from_slice(&compacted[..compacted.len()-1]);
+                                    compact_buf.extend_from_slice(&merge_bytes);
+                                }
                             }
                         } else {
                             if is_json_compact(raw) {

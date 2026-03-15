@@ -10,6 +10,13 @@ use anyhow::{Result, bail};
 use crate::ir::CompiledFunc;
 use crate::value::Value;
 
+/// Comparison value: either numeric or string.
+#[derive(Debug, Clone)]
+pub enum CmpVal {
+    Num(f64),
+    Str(String),
+}
+
 /// Describes how to compute one value in a computed remap fast path.
 #[derive(Debug, Clone)]
 pub enum RemapExpr {
@@ -8400,16 +8407,16 @@ impl Filter {
         None
     }
 
-    /// Detect `if .field op N then {literal} + . else . end` (conditional prepend merge).
-    /// Returns (field, op, threshold, merge_pairs_bytes) where merge_pairs_bytes is the
-    /// pre-serialized prefix like `{"status":"high",`.
-    pub fn detect_cmp_branch_prepend_merge(&self) -> Option<(String, crate::ir::BinOp, f64, Vec<(String, Vec<u8>)>)> {
+    /// Detect `if .field op val then merge else . end` (conditional merge).
+    /// Handles both prepend ({literal} + .) and append (. + {literal}), and both
+    /// numeric (.field > N) and string (.field == "str") conditions.
+    /// Returns (field, op, cmp_val, merge_pairs, is_prepend) where cmp_val is either
+    /// CmpVal::Num(f64) or CmpVal::Str(String).
+    pub fn detect_cmp_branch_merge(&self) -> Option<(String, crate::ir::BinOp, CmpVal, Vec<(String, Vec<u8>)>, bool)> {
         use crate::ir::{Expr, BinOp, Literal};
         let expr = self.detect_expr()?;
         if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
-            // else branch must be identity (.)
             if !matches!(else_branch.as_ref(), Expr::Input) { return None; }
-            // cond: .field op N
             if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
                 if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
                     return None;
@@ -8417,22 +8424,29 @@ impl Filter {
                 if let Expr::Index { expr: base, key } = lhs.as_ref() {
                     if !matches!(base.as_ref(), Expr::Input) { return None; }
                     if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
-                        if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
-                            // then branch: {literal_obj} + . (prepend)
-                            if let Expr::BinOp { op: BinOp::Add | BinOp::Mul, lhs: obj_expr, rhs: input_ref } = then_branch.as_ref() {
-                                if !matches!(input_ref.as_ref(), Expr::Input) { return None; }
-                                if let Expr::ObjectConstruct { pairs } = obj_expr.as_ref() {
-                                    let mut merge_pairs = Vec::new();
-                                    for (k, v) in pairs {
-                                        let key_str = if let Expr::Literal(Literal::Str(s)) = k {
-                                            s.clone()
-                                        } else { return None; };
-                                        let val_bytes = const_expr_to_json(v)?;
-                                        merge_pairs.push((key_str, val_bytes));
-                                    }
-                                    if merge_pairs.is_empty() { return None; }
-                                    return Some((field.clone(), *op, *n, merge_pairs));
+                        let cmp_val = match rhs.as_ref() {
+                            Expr::Literal(Literal::Num(n, _)) => CmpVal::Num(*n),
+                            Expr::Literal(Literal::Str(s)) => CmpVal::Str(s.clone()),
+                            _ => return None,
+                        };
+                        // Check then branch: {literal} + . (prepend) or . + {literal} (append)
+                        if let Expr::BinOp { op: BinOp::Add | BinOp::Mul, lhs: add_lhs, rhs: add_rhs } = then_branch.as_ref() {
+                            let (obj_expr, is_prepend) = if matches!(add_rhs.as_ref(), Expr::Input) {
+                                (add_lhs.as_ref(), true)
+                            } else if matches!(add_lhs.as_ref(), Expr::Input) {
+                                (add_rhs.as_ref(), false)
+                            } else { return None; };
+                            if let Expr::ObjectConstruct { pairs } = obj_expr {
+                                let mut merge_pairs = Vec::new();
+                                for (k, v) in pairs {
+                                    let key_str = if let Expr::Literal(Literal::Str(s)) = k {
+                                        s.clone()
+                                    } else { return None; };
+                                    let val_bytes = const_expr_to_json(v)?;
+                                    merge_pairs.push((key_str, val_bytes));
                                 }
+                                if merge_pairs.is_empty() { return None; }
+                                return Some((field.clone(), *op, cmp_val, merge_pairs, is_prepend));
                             }
                         }
                     }
