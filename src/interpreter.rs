@@ -859,18 +859,30 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                 let is_min = matches!(&sr, Expr::UnaryOp { op: UnaryOp::Min, operand } if matches!(operand.as_ref(), Expr::Input));
                 let is_max = matches!(&sr, Expr::UnaryOp { op: UnaryOp::Max, operand } if matches!(operand.as_ref(), Expr::Input));
                 if is_min || is_max {
-                    if let Expr::Comma { left, right } = lg.as_ref() {
-                        if !matches!(left.as_ref(), Expr::Comma { .. }) && !matches!(right.as_ref(), Expr::Comma { .. }) {
-                            // Exactly 2 elements
-                            let a = left.as_ref().clone();
-                            let b = right.as_ref().clone();
-                            let cmp_op = if is_min { crate::ir::BinOp::Le } else { crate::ir::BinOp::Gt };
-                            return simplify_expr(&Expr::IfThenElse {
-                                cond: Box::new(Expr::BinOp { op: cmp_op, lhs: Box::new(a.clone()), rhs: Box::new(b.clone()) }),
-                                then_branch: Box::new(a),
-                                else_branch: Box::new(b),
-                            });
+                    // Collect all elements from comma-chain
+                    fn collect_elems(e: &Expr, out: &mut Vec<Expr>) {
+                        match e {
+                            Expr::Comma { left, right } => {
+                                collect_elems(left, out);
+                                collect_elems(right, out);
+                            }
+                            other => out.push(other.clone()),
                         }
+                    }
+                    let mut elems = Vec::new();
+                    collect_elems(lg, &mut elems);
+                    if elems.len() >= 2 {
+                        // Fold: min(a,b,c) = min(min(a,b), c)
+                        let cmp_op = if is_min { crate::ir::BinOp::Le } else { crate::ir::BinOp::Gt };
+                        let mut result = elems.remove(0);
+                        for elem in elems {
+                            result = Expr::IfThenElse {
+                                cond: Box::new(Expr::BinOp { op: cmp_op, lhs: Box::new(result.clone()), rhs: Box::new(elem.clone()) }),
+                                then_branch: Box::new(result),
+                                else_branch: Box::new(elem),
+                            };
+                        }
+                        return simplify_expr(&result);
                     }
                 }
             }
