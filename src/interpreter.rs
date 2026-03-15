@@ -403,6 +403,8 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             {
                 return Expr::Input;
             }
+            // NOTE: tojson | fromjson is NOT identity — tojson normalizes nan/inf to null.
+            // E.g., {a:nan} | tojson | fromjson → {a:null}. Do not simplify.
             // Semantic: to_entries | map(.key) → keys_unsorted
             // to_entries | map(.value) → [.[]]
             // Semantic: to_entries | map(.key) → keys_unsorted, to_entries | map(.value) → [.[]]
@@ -6718,6 +6720,25 @@ impl Filter {
         let expr = match self.detect_expr() { Some(e) => e, None => return false };
         matches!(expr, Expr::UnaryOp { op: UnaryOp::ToJson, operand } if matches!(operand.as_ref(), Expr::Input))
             || matches!(expr, Expr::Format { name, expr: inner } if (name == "json" || name == "text") && matches!(inner.as_ref(), Expr::Input))
+    }
+
+    /// Detect `tojson | fromjson` — identity for valid JSON input (from files).
+    /// NaN/inf values are only produced by arithmetic, never present in parsed JSON,
+    /// so this is safe as identity when processing file input.
+    pub fn is_tojson_fromjson(&self) -> bool {
+        use crate::ir::{Expr, UnaryOp};
+        let expr = match self.detect_expr() { Some(e) => e, None => return false };
+        // Unsimplified: Pipe(UnaryOp(ToJson, Input), UnaryOp(FromJson, Input))
+        if let Expr::Pipe { left, right } = expr {
+            matches!(left.as_ref(), Expr::UnaryOp { op: UnaryOp::ToJson, operand } if matches!(operand.as_ref(), Expr::Input))
+                && matches!(right.as_ref(), Expr::UnaryOp { op: UnaryOp::FromJson, operand } if matches!(operand.as_ref(), Expr::Input))
+        }
+        // Simplified (beta-reduced): UnaryOp(FromJson, UnaryOp(ToJson, Input))
+        else if let Expr::UnaryOp { op: UnaryOp::FromJson, operand } = expr {
+            matches!(operand.as_ref(), Expr::UnaryOp { op: UnaryOp::ToJson, operand: inner } if matches!(inner.as_ref(), Expr::Input))
+        } else {
+            false
+        }
     }
 
     /// Detect `{a:.x, b:.y} | tojson` — remap then serialize to JSON string.
