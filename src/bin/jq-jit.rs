@@ -6940,8 +6940,26 @@ fn real_main() {
                         let raw = &input_bytes[start..end];
                         if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
                             let val_bytes = &raw[vs..ve];
-                            let matches = val_bytes == expected.as_slice();
-                            let pass = match op { BinOp::Eq => matches, BinOp::Ne => !matches, _ => false };
+                            let pass = match op {
+                                BinOp::Eq => val_bytes == expected.as_slice(),
+                                BinOp::Ne => val_bytes != expected.as_slice(),
+                                BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le => {
+                                    // String comparison: extract inner string (without quotes)
+                                    if val_bytes.len() >= 2 && val_bytes[0] == b'"' && val_bytes[val_bytes.len()-1] == b'"'
+                                        && !val_bytes[1..val_bytes.len()-1].contains(&b'\\') {
+                                        let inner = &val_bytes[1..val_bytes.len()-1];
+                                        let cmp = inner.cmp(val.as_bytes());
+                                        match op {
+                                            BinOp::Gt => cmp == std::cmp::Ordering::Greater,
+                                            BinOp::Lt => cmp == std::cmp::Ordering::Less,
+                                            BinOp::Ge => cmp != std::cmp::Ordering::Less,
+                                            BinOp::Le => cmp != std::cmp::Ordering::Greater,
+                                            _ => false,
+                                        }
+                                    } else { false }
+                                }
+                                _ => false,
+                            };
                             if pass {
                                 emit_raw_ln!(&mut compact_buf, raw);
                                 if compact_buf.len() >= 1 << 17 {
@@ -13958,8 +13976,25 @@ fn real_main() {
                     let raw = &content_bytes[start..end];
                     if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
                         let val_bytes = &raw[vs..ve];
-                        let matches = val_bytes == expected.as_slice();
-                        let pass = match op { BinOp::Eq => matches, BinOp::Ne => !matches, _ => false };
+                        let pass = match op {
+                            BinOp::Eq => val_bytes == expected.as_slice(),
+                            BinOp::Ne => val_bytes != expected.as_slice(),
+                            BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le => {
+                                if val_bytes.len() >= 2 && val_bytes[0] == b'"' && val_bytes[val_bytes.len()-1] == b'"'
+                                    && !val_bytes[1..val_bytes.len()-1].contains(&b'\\') {
+                                    let inner = &val_bytes[1..val_bytes.len()-1];
+                                    let cmp = inner.cmp(val.as_bytes());
+                                    match op {
+                                        BinOp::Gt => cmp == std::cmp::Ordering::Greater,
+                                        BinOp::Lt => cmp == std::cmp::Ordering::Less,
+                                        BinOp::Ge => cmp != std::cmp::Ordering::Less,
+                                        BinOp::Le => cmp != std::cmp::Ordering::Greater,
+                                        _ => false,
+                                    }
+                                } else { false }
+                            }
+                            _ => false,
+                        };
                         if pass {
                             emit_raw_ln!(&mut compact_buf, raw);
                             if compact_buf.len() >= 1 << 17 {

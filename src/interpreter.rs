@@ -2952,7 +2952,7 @@ impl Filter {
             if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
             if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
             if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
-                if !matches!(op, BinOp::Eq | BinOp::Ne) { return None; }
+                if !matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le) { return None; }
                 if let Expr::Index { expr: base, key } = lhs.as_ref() {
                     if !matches!(base.as_ref(), Expr::Input) { return None; }
                     if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
