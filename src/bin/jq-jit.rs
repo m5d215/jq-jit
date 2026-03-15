@@ -1681,7 +1681,10 @@ fn main() {
     // Run on a thread with a large stack to handle deep recursion.
     // macOS lazily pages the stack, so the physical memory usage is proportional to actual depth.
     let builder = std::thread::Builder::new().stack_size(2048 * 1024 * 1024);
-    let handler = builder.spawn(real_main).unwrap();
+    let handler = builder.spawn(real_main).unwrap_or_else(|e| {
+        eprintln!("jq-jit: failed to spawn thread: {}", e);
+        std::process::exit(2);
+    });
     let result = handler.join();
     if result.is_err() {
         std::process::exit(134); // SIGABRT-like
@@ -1706,6 +1709,7 @@ fn real_main() {
     let mut arg_vars: Vec<(String, Value)> = Vec::new();
     let mut argjson_vars: Vec<(String, Value)> = Vec::new();
     let mut lib_dirs: Vec<String> = Vec::new();
+    let mut positional_args: Vec<Value> = Vec::new();
 
     // Expand args: split combined short flags like -ncr into ["-n", "-c", "-r"]
     let mut expanded_args: Vec<String> = Vec::new();
@@ -1786,16 +1790,76 @@ fn real_main() {
                     lib_dirs.push(expanded_args[i].clone());
                 }
             }
-            "--args" => break,
+            "--args" => {
+                // Remaining arguments are positional string args
+                i += 1;
+                while i < expanded_args.len() {
+                    positional_args.push(Value::from_str(&expanded_args[i]));
+                    i += 1;
+                }
+                break;
+            }
+            "--jsonargs" => {
+                // Remaining arguments are positional JSON args
+                i += 1;
+                while i < expanded_args.len() {
+                    match json_to_value(&expanded_args[i]) {
+                        Ok(val) => positional_args.push(val),
+                        Err(e) => {
+                            eprintln!("jq: Invalid JSON text passed to --jsonargs: {}", e);
+                            process::exit(2);
+                        }
+                    }
+                    i += 1;
+                }
+                break;
+            }
+            "--slurpfile" => {
+                if i + 2 < expanded_args.len() {
+                    let name = expanded_args[i + 1].clone();
+                    let path = &expanded_args[i + 2];
+                    match std::fs::read_to_string(path) {
+                        Ok(content) => {
+                            let mut values = Vec::new();
+                            if let Err(e) = json_stream(&content, |val| { values.push(val); Ok(()) }) {
+                                eprintln!("jq: Could not parse file {}: {}", path, e);
+                                process::exit(2);
+                            }
+                            argjson_vars.push((name, Value::Arr(std::rc::Rc::new(values))));
+                        }
+                        Err(e) => {
+                            eprintln!("jq: Could not open file {}: {}", path, e);
+                            process::exit(2);
+                        }
+                    }
+                    i += 2;
+                }
+            }
+            "--rawfile" => {
+                if i + 2 < expanded_args.len() {
+                    let name = expanded_args[i + 1].clone();
+                    let path = &expanded_args[i + 2];
+                    match std::fs::read_to_string(path) {
+                        Ok(content) => {
+                            arg_vars.push((name, Value::from_str(&content)));
+                        }
+                        Err(e) => {
+                            eprintln!("jq: Could not open file {}: {}", path, e);
+                            process::exit(2);
+                        }
+                    }
+                    i += 2;
+                }
+            }
             "--version" => {
-                println!("jq-jit-0.1.0");
+                println!("jq-jit-{}", env!("CARGO_PKG_VERSION"));
                 process::exit(0);
             }
             "-h" | "--help" => {
                 print_usage();
                 process::exit(0);
             }
-            s if s.starts_with('-') && filter_str.is_some() => {
+            s if s.starts_with('-') && s != "-" && filter_str.is_some() => {
                 eprintln!("jq: Unknown option: {}", s);
                 process::exit(2);
             }
@@ -1819,7 +1883,7 @@ fn real_main() {
         }
     };
 
-    // Prepend --arg / --argjson bindings to the filter expression
+    // Prepend --arg / --argjson / $ARGS bindings to the filter expression
     let filter_str = {
         let mut prefix = String::new();
         for (name, val) in &arg_vars {
@@ -1834,12 +1898,37 @@ fn real_main() {
             prefix.push_str(name);
             prefix.push_str(" | ");
         }
-        if prefix.is_empty() {
-            filter_str
-        } else {
-            prefix.push_str(&filter_str);
-            prefix
+        // Build $ARGS only when the filter references it
+        if filter_str.contains("$ARGS") || filter_str.contains("$ENV") {
+            let mut args_json = String::from("{\"positional\":[");
+            for (j, v) in positional_args.iter().enumerate() {
+                if j > 0 { args_json.push(','); }
+                args_json.push_str(&value_to_json_precise(v));
+            }
+            args_json.push_str("],\"named\":{");
+            let mut first = true;
+            for (name, val) in &arg_vars {
+                if !first { args_json.push(','); }
+                first = false;
+                args_json.push('"');
+                args_json.push_str(name);
+                args_json.push_str("\":");
+                args_json.push_str(&value_to_json_precise(val));
+            }
+            for (name, val) in &argjson_vars {
+                if !first { args_json.push(','); }
+                first = false;
+                args_json.push('"');
+                args_json.push_str(name);
+                args_json.push_str("\":");
+                args_json.push_str(&value_to_json_precise(val));
+            }
+            args_json.push_str("}}");
+            prefix.push_str(&args_json);
+            prefix.push_str(" as $ARGS | ");
         }
+        prefix.push_str(&filter_str);
+        prefix
     };
 
     // Create filter without JIT initially — JIT is compiled lazily when input is large enough.
@@ -12089,6 +12178,37 @@ fn real_main() {
         // Process files
         let mut slurp_values: Vec<Value> = Vec::new();
         for file in &files {
+            // Handle "-" as stdin
+            if file == "-" {
+                let mut s = String::new();
+                io::stdin().lock().read_to_string(&mut s).unwrap_or(0);
+                if slurp {
+                    if raw_input {
+                        for line in s.lines() {
+                            slurp_values.push(Value::from_str(line));
+                        }
+                    } else {
+                        if let Err(e) = json_stream(&s, |val| { slurp_values.push(val); Ok(()) }) {
+                            eprintln!("jq: error (at <stdin>:0): {}", e);
+                            had_error = true;
+                        }
+                    }
+                } else if raw_input {
+                    for line in s.lines() {
+                        let val = Value::from_str(line);
+                        process_input(&val, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                } else {
+                    if let Err(e) = json_stream(&s, |val| {
+                        process_input(&val, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        Ok(())
+                    }) {
+                        eprintln!("jq: error (at <stdin>:0): {}", e);
+                        had_error = true;
+                    }
+                }
+                continue;
+            }
             let f = match std::fs::File::open(file) {
                 Ok(f) => f,
                 Err(e) => {
@@ -12096,7 +12216,13 @@ fn real_main() {
                     process::exit(2);
                 }
             };
-            let meta = f.metadata().unwrap();
+            let meta = match f.metadata() {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("jq: error: Could not read file metadata {}: {}", file, e);
+                    process::exit(2);
+                }
+            };
             // Memory-map files to avoid heap allocation for file content
             let (mmap, content);
             if meta.len() > 0 {
@@ -21399,18 +21525,23 @@ fn print_usage() {
     eprintln!("Usage: jq-jit [OPTIONS] <FILTER> [FILE...]");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  -c, --compact-output   Compact output");
-    eprintln!("  -r, --raw-output       Raw output (strings without quotes)");
-    eprintln!("  -R, --raw-input        Raw input (each line is a string)");
-    eprintln!("  -n, --null-input        Use null as input");
-    eprintln!("  -s, --slurp            Slurp all inputs into array");
-    eprintln!("  -S, --sort-keys        Sort object keys");
-    eprintln!("  -e, --exit-status      Exit with non-zero if last output is false/null");
-    eprintln!("  -f, --from-file FILE   Read filter from file");
-    eprintln!("  --tab                  Use tabs for indentation");
-    eprintln!("  --indent N             Use N spaces for indentation");
-    eprintln!("  --arg NAME VALUE       Set variable $NAME to VALUE (string)");
-    eprintln!("  --argjson NAME VALUE   Set variable $NAME to VALUE (JSON)");
-    eprintln!("  --version              Show version");
-    eprintln!("  -h, --help             Show this help");
+    eprintln!("  -c, --compact-output     Compact output");
+    eprintln!("  -r, --raw-output         Raw output (strings without quotes)");
+    eprintln!("  -j, --join-output        No newline after each output");
+    eprintln!("  -R, --raw-input          Raw input (each line is a string)");
+    eprintln!("  -n, --null-input         Use null as input");
+    eprintln!("  -s, --slurp              Slurp all inputs into array");
+    eprintln!("  -S, --sort-keys          Sort object keys");
+    eprintln!("  -e, --exit-status        Exit with non-zero if last output is false/null");
+    eprintln!("  -f, --from-file FILE     Read filter from file");
+    eprintln!("  --tab                    Use tabs for indentation");
+    eprintln!("  --indent N               Use N spaces for indentation");
+    eprintln!("  --arg NAME VALUE         Set variable $NAME to VALUE (string)");
+    eprintln!("  --argjson NAME VALUE     Set variable $NAME to VALUE (JSON)");
+    eprintln!("  --slurpfile NAME FILE    Set $NAME to array of JSON values from FILE");
+    eprintln!("  --rawfile NAME FILE      Set $NAME to string contents of FILE");
+    eprintln!("  --args                   Remaining args are string $ARGS.positional");
+    eprintln!("  --jsonargs               Remaining args are JSON $ARGS.positional");
+    eprintln!("  --version                Show version");
+    eprintln!("  -h, --help               Show this help");
 }
