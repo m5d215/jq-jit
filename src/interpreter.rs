@@ -769,7 +769,10 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                     let mut elems = Vec::new();
                     collect_elems_for_add(lg, &mut elems);
-                    if elems.len() >= 2 {
+                    if elems.len() == 1 {
+                        // [expr] | add → expr (single element, add is identity)
+                        return elems.remove(0);
+                    } else if elems.len() >= 2 {
                         let mut result = elems.remove(0);
                         for elem in elems {
                             result = Expr::BinOp {
@@ -8376,6 +8379,48 @@ impl Filter {
                         if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
                             if let (Some(t_bytes), Some(f_bytes)) = (const_expr_to_json(then_branch), const_expr_to_json(else_branch)) {
                                 return Some((field.clone(), *op, *n, t_bytes, f_bytes));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect `if .field op N then {literal} + . else . end` (conditional prepend merge).
+    /// Returns (field, op, threshold, merge_pairs_bytes) where merge_pairs_bytes is the
+    /// pre-serialized prefix like `{"status":"high",`.
+    pub fn detect_cmp_branch_prepend_merge(&self) -> Option<(String, crate::ir::BinOp, f64, Vec<(String, Vec<u8>)>)> {
+        use crate::ir::{Expr, BinOp, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            // else branch must be identity (.)
+            if !matches!(else_branch.as_ref(), Expr::Input) { return None; }
+            // cond: .field op N
+            if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
+                if !matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
+                    return None;
+                }
+                if let Expr::Index { expr: base, key } = lhs.as_ref() {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                            // then branch: {literal_obj} + . (prepend)
+                            if let Expr::BinOp { op: BinOp::Add | BinOp::Mul, lhs: obj_expr, rhs: input_ref } = then_branch.as_ref() {
+                                if !matches!(input_ref.as_ref(), Expr::Input) { return None; }
+                                if let Expr::ObjectConstruct { pairs } = obj_expr.as_ref() {
+                                    let mut merge_pairs = Vec::new();
+                                    for (k, v) in pairs {
+                                        let key_str = if let Expr::Literal(Literal::Str(s)) = k {
+                                            s.clone()
+                                        } else { return None; };
+                                        let val_bytes = const_expr_to_json(v)?;
+                                        merge_pairs.push((key_str, val_bytes));
+                                    }
+                                    if merge_pairs.is_empty() { return None; }
+                                    return Some((field.clone(), *op, *n, merge_pairs));
+                                }
                             }
                         }
                     }
