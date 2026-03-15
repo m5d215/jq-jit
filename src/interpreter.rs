@@ -8161,6 +8161,42 @@ impl Filter {
         None
     }
 
+    /// Detect `.field | length | tostring` pattern.
+    /// Returns field name if detected.
+    pub fn detect_field_length_tostring(&self) -> Option<String> {
+        use crate::ir::{Expr, Literal, UnaryOp};
+        let expr = self.detect_expr()?;
+        // Beta-reduced: UnaryOp(ToString, UnaryOp(Length, Index(Input, field)))
+        if let Expr::UnaryOp { op: UnaryOp::ToString, operand } = expr {
+            if let Expr::UnaryOp { op: UnaryOp::Length, operand: inner } = operand.as_ref() {
+                if let Expr::Index { expr: base, key } = inner.as_ref() {
+                    if matches!(base.as_ref(), Expr::Input) {
+                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                            return Some(f.clone());
+                        }
+                    }
+                }
+            }
+        }
+        // Non-reduced: Pipe(.field, Pipe(Length(Input), ToString(Input)))
+        if let Expr::Pipe { left, right } = expr {
+            if let Expr::Index { expr: base, key } = left.as_ref() {
+                if matches!(base.as_ref(), Expr::Input) {
+                    if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
+                        if let Expr::Pipe { left: rl, right: rr } = right.as_ref() {
+                            if matches!(rl.as_ref(), Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input))
+                                && matches!(rr.as_ref(), Expr::UnaryOp { op: UnaryOp::ToString, operand } if matches!(operand.as_ref(), Expr::Input))
+                            {
+                                return Some(f.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Detect `.field | length cmp N` — string length comparison.
     /// Returns (field, cmp_op, threshold).
     pub fn detect_field_length_cmp(&self) -> Option<(String, crate::ir::BinOp, f64)> {

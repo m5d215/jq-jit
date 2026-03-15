@@ -2337,6 +2337,9 @@ fn real_main() {
     let field_tostring_length = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
         filter.detect_field_tostring_length()
     } else { None };
+    let field_length_tostring = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_tostring_length.is_none() {
+        filter.detect_field_length_tostring()
+    } else { None };
     let field_alt = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
         filter.detect_field_alternative()
     } else { None };
@@ -2484,7 +2487,7 @@ fn real_main() {
         || field_str_builtin.is_some() || field_test.is_some() || field_gsub.is_some() || field_case_gsub.is_some() || field_case_test.is_some() || field_scan.is_some() || field_match.is_some() || field_capture.is_some() || field_format.is_some() || field_ltrimstr_tonumber.is_some()
         || field_str_concat.is_some() || field_alt.is_some() || field_field_alt.is_some()
         || select_cmp.is_some() || select_field_null.is_some() || select_arith_cmp.is_some()
-        || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || null_branch_lit.is_some() || cmp_branch_merge.is_some() || field_field_cmp_branch.is_some() || if_ff_cmp_fields.is_some() || if_ff_cmp_computed.is_some() || if_ff_cmp_remaps.is_some() || cmp_branch_remaps.is_some() || if_length_cmp_fields.is_some() || select_length_cmp_remap.is_some() || field_tostring_length.is_some() || if_cmp_arrays.is_some() || cmp_branch_interp.is_some() || select_num_str.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some() || select_compound_computed.is_some() || select_compound_cremap.is_some()
+        || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || null_branch_lit.is_some() || cmp_branch_merge.is_some() || field_field_cmp_branch.is_some() || if_ff_cmp_fields.is_some() || if_ff_cmp_computed.is_some() || if_ff_cmp_remaps.is_some() || cmp_branch_remaps.is_some() || if_length_cmp_fields.is_some() || select_length_cmp_remap.is_some() || field_tostring_length.is_some() || field_length_tostring.is_some() || if_cmp_arrays.is_some() || cmp_branch_interp.is_some() || select_num_str.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some() || select_compound_computed.is_some() || select_compound_cremap.is_some()
         || select_str.is_some() || select_compound_str_chain.is_some()
         || select_str_test.is_some() || select_string_chain.is_some() || select_compound_str_test.is_some() || select_mixed_compound.is_some() || select_regex_test.is_some() || select_regex_value.is_some() || select_nested_cmp.is_some()
         || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_field_unary.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_dynkey.is_some() || select_cmp_dynkey_mixed.is_some() || select_cmp_array.is_some() || select_arith_cmp_array.is_some() || select_cmp_value.is_some() || select_cmp_str_chain.is_some() || select_ff_cmp_field.is_some() || select_ff_cmp.is_some() || select_ff_cmp_cremap.is_some() || select_ff_cmp_value.is_some() || select_ff_cmp_array.is_some() || select_compound_array.is_some() || select_str_field.is_some() || select_str_cremap.is_some() || select_str_array.is_some() || select_str_str_chain.is_some()
@@ -11317,6 +11320,69 @@ fn real_main() {
                         } else {
                             // null field: tostring = "null", length = 4
                             compact_buf.extend_from_slice(b"4\n");
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some(ref flt_field) = field_length_tostring {
+                    // .field | length | tostring — raw byte fast path
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, flt_field) {
+                            let val = &raw[vs..ve];
+                            match val[0] {
+                                b'"' => {
+                                    // String: length = char count, tostring outputs that as string
+                                    let inner = &val[1..ve-vs-1];
+                                    let cp = if !inner.contains(&b'\\') {
+                                        inner.iter().filter(|&&b| (b & 0xC0) != 0x80).count()
+                                    } else {
+                                        // Has escapes — need to decode to count codepoints
+                                        let s = serde_json::from_slice::<String>(val);
+                                        match s {
+                                            Ok(decoded) => decoded.chars().count(),
+                                            Err(_) => {
+                                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                                if compact_buf.len() >= 1 << 17 {
+                                                    let _ = out.write_all(&compact_buf);
+                                                    compact_buf.clear();
+                                                }
+                                                return Ok(());
+                                            }
+                                        }
+                                    };
+                                    compact_buf.push(b'"');
+                                    let mut ibuf = itoa::Buffer::new();
+                                    compact_buf.extend_from_slice(ibuf.format(cp).as_bytes());
+                                    compact_buf.extend_from_slice(b"\"\n");
+                                }
+                                b'[' | b'{' => {
+                                    // Array/Object: length = element count. Need to parse.
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                                _ => {
+                                    // Number: length is the number itself, tostring outputs that
+                                    // null: length is 0 → "0"
+                                    if val == b"null" {
+                                        compact_buf.extend_from_slice(b"\"0\"\n");
+                                    } else if let Some(n) = parse_json_num(val) {
+                                        compact_buf.push(b'"');
+                                        push_jq_number_bytes(&mut compact_buf, n);
+                                        compact_buf.extend_from_slice(b"\"\n");
+                                    } else {
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    }
+                                }
+                            }
+                        } else {
+                            // null field: length = 0, tostring = "0"
+                            compact_buf.extend_from_slice(b"\"0\"\n");
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -20284,6 +20350,64 @@ fn real_main() {
                         }
                     } else {
                         compact_buf.extend_from_slice(b"4\n");
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some(ref flt_field) = field_length_tostring {
+                // .field | length | tostring — file path
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, flt_field) {
+                        let val = &raw[vs..ve];
+                        match val[0] {
+                            b'"' => {
+                                let inner = &val[1..ve-vs-1];
+                                let cp = if !inner.contains(&b'\\') {
+                                    inner.iter().filter(|&&b| (b & 0xC0) != 0x80).count()
+                                } else {
+                                    let s = serde_json::from_slice::<String>(val);
+                                    match s {
+                                        Ok(decoded) => decoded.chars().count(),
+                                        Err(_) => {
+                                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                            if compact_buf.len() >= 1 << 17 {
+                                                let _ = out.write_all(&compact_buf);
+                                                compact_buf.clear();
+                                            }
+                                            return Ok(());
+                                        }
+                                    }
+                                };
+                                compact_buf.push(b'"');
+                                let mut ibuf = itoa::Buffer::new();
+                                compact_buf.extend_from_slice(ibuf.format(cp).as_bytes());
+                                compact_buf.extend_from_slice(b"\"\n");
+                            }
+                            b'[' | b'{' => {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                            _ => {
+                                if val == b"null" {
+                                    compact_buf.extend_from_slice(b"\"0\"\n");
+                                } else if let Some(n) = parse_json_num(val) {
+                                    compact_buf.push(b'"');
+                                    push_jq_number_bytes(&mut compact_buf, n);
+                                    compact_buf.extend_from_slice(b"\"\n");
+                                } else {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                            }
+                        }
+                    } else {
+                        compact_buf.extend_from_slice(b"\"0\"\n");
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
