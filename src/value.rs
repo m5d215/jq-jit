@@ -3547,7 +3547,7 @@ where F: FnMut(Value) -> Result<()> {
 
 fn parse_json_value(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)> {
     if pos >= b.len() { bail!("Unexpected end of JSON input"); }
-    if depth > MAX_JSON_DEPTH { bail!("Exceeds depth limit for parsing"); }
+    if depth >= MAX_JSON_DEPTH { bail!("Exceeds depth limit for parsing"); }
     match b[pos] {
         b'n' => {
             if b.get(pos..pos+4) == Some(b"null") { Ok((Value::Null, pos + 4)) }

@@ -5559,12 +5559,18 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                     std::ptr::write(dst, v);
                     return 0;
                 }
-                match crate::value::json_to_value_libjq(s) {
+                match crate::value::json_to_value(trimmed) {
                     Ok(v) => { std::ptr::write(dst, v); return 0; }
-                    Err(e) => {
-                        set_jit_error(format!("{}", e));
-                        std::ptr::write(dst, Value::Null);
-                        return GEN_ERROR;
+                    Err(_) => {
+                        // Fall back to libjq for accurate error messages
+                        match crate::value::json_to_value_libjq(s) {
+                            Ok(v) => { std::ptr::write(dst, v); return 0; }
+                            Err(e) => {
+                                set_jit_error(format!("{}", e));
+                                std::ptr::write(dst, Value::Null);
+                                return GEN_ERROR;
+                            }
+                        }
                     }
                 }
             }

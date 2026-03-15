@@ -1242,7 +1242,13 @@ fn rt_tojson(v: &Value) -> Result<Value> {
 
 fn rt_fromjson(v: &Value) -> Result<Value> {
     match v {
-        Value::Str(s) => crate::value::json_to_value_libjq(s),
+        Value::Str(s) => {
+            // Try native parser first (faster), fall back to libjq for error messages
+            match crate::value::json_to_value(s.trim()) {
+                Ok(v) => Ok(v),
+                Err(_) => crate::value::json_to_value_libjq(s),
+            }
+        }
         _ => bail!("{} cannot be parsed as JSON", v.type_name()),
     }
 }
