@@ -2364,6 +2364,9 @@ fn real_main() {
     let cmp_branch_merge = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() && null_branch_lit.is_none() {
         filter.detect_cmp_branch_merge()
     } else { None };
+    let strfunc_cmp_branch_lit = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() && field_unary_cmp_branch_lit.is_none() {
+        filter.detect_field_strfunc_cmp_branch_literals()
+    } else { None };
     let field_field_cmp_branch = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() && null_branch_lit.is_none() && cmp_branch_merge.is_none() {
         filter.detect_field_field_cmp_branch()
     } else { None };
@@ -2490,7 +2493,7 @@ fn real_main() {
         || field_str_builtin.is_some() || field_test.is_some() || field_gsub.is_some() || field_case_gsub.is_some() || field_case_test.is_some() || field_scan.is_some() || field_match.is_some() || field_capture.is_some() || field_format.is_some() || field_ltrimstr_tonumber.is_some()
         || field_str_concat.is_some() || field_alt.is_some() || field_field_alt.is_some()
         || select_cmp.is_some() || select_field_null.is_some() || select_arith_cmp.is_some()
-        || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || field_unary_cmp_branch_lit.is_some() || null_branch_lit.is_some() || cmp_branch_merge.is_some() || field_field_cmp_branch.is_some() || if_ff_cmp_fields.is_some() || if_ff_cmp_computed.is_some() || if_ff_cmp_remaps.is_some() || cmp_branch_remaps.is_some() || if_length_cmp_fields.is_some() || select_length_cmp_remap.is_some() || field_tostring_length.is_some() || field_length_tostring.is_some() || if_cmp_arrays.is_some() || cmp_branch_interp.is_some() || select_num_str.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some() || select_compound_computed.is_some() || select_compound_cremap.is_some()
+        || cond_chain.is_some() || cmp_branch_lit.is_some() || arith_cmp_branch_lit.is_some() || field_unary_cmp_branch_lit.is_some() || strfunc_cmp_branch_lit.is_some() || null_branch_lit.is_some() || cmp_branch_merge.is_some() || field_field_cmp_branch.is_some() || if_ff_cmp_fields.is_some() || if_ff_cmp_computed.is_some() || if_ff_cmp_remaps.is_some() || cmp_branch_remaps.is_some() || if_length_cmp_fields.is_some() || select_length_cmp_remap.is_some() || field_tostring_length.is_some() || field_length_tostring.is_some() || if_cmp_arrays.is_some() || cmp_branch_interp.is_some() || select_num_str.is_some() || select_compound.is_some() || select_compound_field.is_some() || select_compound_remap.is_some() || select_compound_computed.is_some() || select_compound_cremap.is_some()
         || select_str.is_some() || select_compound_str_chain.is_some()
         || select_str_test.is_some() || select_string_chain.is_some() || select_compound_str_test.is_some() || select_mixed_compound.is_some() || select_regex_test.is_some() || select_regex_value.is_some() || select_nested_cmp.is_some()
         || select_cmp_field.is_some() || select_arith_cmp_field.is_some() || select_cmp_field_unary.is_some() || select_cmp_remap.is_some() || select_cmp_cremap.is_some() || select_cmp_dynkey.is_some() || select_cmp_dynkey_mixed.is_some() || select_cmp_array.is_some() || select_arith_cmp_array.is_some() || select_cmp_value.is_some() || select_cmp_str_chain.is_some() || select_ff_cmp_field.is_some() || select_ff_cmp.is_some() || select_ff_cmp_cremap.is_some() || select_ff_cmp_value.is_some() || select_ff_cmp_array.is_some() || select_compound_array.is_some() || select_str_field.is_some() || select_str_cremap.is_some() || select_str_array.is_some() || select_str_str_chain.is_some()
@@ -7972,6 +7975,86 @@ fn real_main() {
                         };
                         compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
                         compact_buf.push(b'\n');
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        Ok(())
+                    })
+                } else if let Some((ref field, ref strfunc, ref t_bytes, ref f_bytes)) = strfunc_cmp_branch_lit {
+                    use jq_jit::interpreter::StrFuncCond;
+                    // Pre-compile regex if needed
+                    let re_compiled = match strfunc {
+                        StrFuncCond::Test(pattern, flags) => {
+                            let mut pat = pattern.clone();
+                            if let Some(f) = flags {
+                                if f.contains('x') {
+                                    pat = pat.replace(" ", "").replace("\t", "").replace("\n", "");
+                                }
+                                if f.contains('i') {
+                                    pat = format!("(?i){}", pat);
+                                }
+                            }
+                            Some(regex::Regex::new(&pat).ok())
+                        }
+                        _ => None,
+                    };
+                    json_stream_raw(&input_str, |start, end| {
+                        let raw = &input_bytes[start..end];
+                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
+                            let val = &raw[vs..ve];
+                            if val[0] != b'"' { return Ok(()); }
+                            let inner = &val[1..ve-vs-1];
+                            let pass = match strfunc {
+                                StrFuncCond::Test(_, _) => {
+                                    if let Some(Some(ref re)) = re_compiled {
+                                        if !inner.contains(&b'\\') {
+                                            // ASCII fast path — search raw bytes
+                                            if let Ok(s) = std::str::from_utf8(inner) {
+                                                re.is_match(s)
+                                            } else { false }
+                                        } else {
+                                            match serde_json::from_slice::<String>(val) {
+                                                Ok(s) => re.is_match(&s),
+                                                Err(_) => false,
+                                            }
+                                        }
+                                    } else { false }
+                                }
+                                StrFuncCond::Startswith(prefix) => {
+                                    if !inner.contains(&b'\\') {
+                                        inner.starts_with(prefix.as_bytes())
+                                    } else {
+                                        match serde_json::from_slice::<String>(val) {
+                                            Ok(s) => s.starts_with(prefix.as_str()),
+                                            Err(_) => false,
+                                        }
+                                    }
+                                }
+                                StrFuncCond::Endswith(suffix) => {
+                                    if !inner.contains(&b'\\') {
+                                        inner.ends_with(suffix.as_bytes())
+                                    } else {
+                                        match serde_json::from_slice::<String>(val) {
+                                            Ok(s) => s.ends_with(suffix.as_str()),
+                                            Err(_) => false,
+                                        }
+                                    }
+                                }
+                                StrFuncCond::Contains(needle) => {
+                                    if !inner.contains(&b'\\') {
+                                        inner.windows(needle.len()).any(|w| w == needle.as_bytes())
+                                    } else {
+                                        match serde_json::from_slice::<String>(val) {
+                                            Ok(s) => s.contains(needle.as_str()),
+                                            Err(_) => false,
+                                        }
+                                    }
+                                }
+                            };
+                            compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
+                            compact_buf.push(b'\n');
+                        }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
                             compact_buf.clear();
@@ -15337,6 +15420,58 @@ fn real_main() {
                     };
                     compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
                     compact_buf.push(b'\n');
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    Ok(())
+                })
+            } else if let Some((ref field, ref strfunc, ref t_bytes, ref f_bytes)) = strfunc_cmp_branch_lit {
+                use jq_jit::interpreter::StrFuncCond;
+                let re_compiled = match strfunc {
+                    StrFuncCond::Test(pattern, flags) => {
+                        let mut pat = pattern.clone();
+                        if let Some(f) = flags {
+                            if f.contains('x') { pat = pat.replace(" ", "").replace("\t", "").replace("\n", ""); }
+                            if f.contains('i') { pat = format!("(?i){}", pat); }
+                        }
+                        Some(regex::Regex::new(&pat).ok())
+                    }
+                    _ => None,
+                };
+                let content_bytes = content.as_bytes();
+                json_stream_raw(content, |start, end| {
+                    let raw = &content_bytes[start..end];
+                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
+                        let val = &raw[vs..ve];
+                        if val[0] != b'"' { return Ok(()); }
+                        let inner = &val[1..ve-vs-1];
+                        let pass = match strfunc {
+                            StrFuncCond::Test(_, _) => {
+                                if let Some(Some(ref re)) = re_compiled {
+                                    if !inner.contains(&b'\\') {
+                                        if let Ok(s) = std::str::from_utf8(inner) { re.is_match(s) } else { false }
+                                    } else {
+                                        match serde_json::from_slice::<String>(val) { Ok(s) => re.is_match(&s), Err(_) => false }
+                                    }
+                                } else { false }
+                            }
+                            StrFuncCond::Startswith(prefix) => {
+                                if !inner.contains(&b'\\') { inner.starts_with(prefix.as_bytes()) }
+                                else { match serde_json::from_slice::<String>(val) { Ok(s) => s.starts_with(prefix.as_str()), Err(_) => false } }
+                            }
+                            StrFuncCond::Endswith(suffix) => {
+                                if !inner.contains(&b'\\') { inner.ends_with(suffix.as_bytes()) }
+                                else { match serde_json::from_slice::<String>(val) { Ok(s) => s.ends_with(suffix.as_str()), Err(_) => false } }
+                            }
+                            StrFuncCond::Contains(needle) => {
+                                if !inner.contains(&b'\\') { inner.windows(needle.len()).any(|w| w == needle.as_bytes()) }
+                                else { match serde_json::from_slice::<String>(val) { Ok(s) => s.contains(needle.as_str()), Err(_) => false } }
+                            }
+                        };
+                        compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
+                        compact_buf.push(b'\n');
+                    }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
                         compact_buf.clear();

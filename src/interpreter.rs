@@ -17,6 +17,14 @@ pub enum CmpVal {
     Str(String),
 }
 
+/// String function condition for if-then-else patterns.
+pub enum StrFuncCond {
+    Test(String, Option<String>), // regex pattern, optional flags
+    Startswith(String),
+    Endswith(String),
+    Contains(String),
+}
+
 /// Describes how to compute one value in a computed remap fast path.
 #[derive(Debug, Clone)]
 pub enum RemapExpr {
@@ -287,6 +295,38 @@ pub struct Filter {
     lib_dirs: Vec<String>,
     /// Cached eval environment to avoid re-allocating per call.
     cached_env: std::cell::RefCell<Option<crate::eval::EnvRef>>,
+}
+
+/// Extract string function condition from an expression (test/startswith/endswith/contains on Input).
+fn extract_strfunc_cond(expr: &crate::ir::Expr) -> Option<StrFuncCond> {
+    use crate::ir::{Expr, Literal};
+    match expr {
+        Expr::RegexTest { input_expr, re, flags } => {
+            if !matches!(input_expr.as_ref(), Expr::Input) { return None; }
+            if let Expr::Literal(Literal::Str(pattern)) = re.as_ref() {
+                let flags_str = match flags.as_ref() {
+                    Expr::Literal(Literal::Null) => None,
+                    Expr::Literal(Literal::Str(f)) => Some(f.clone()),
+                    _ => return None,
+                };
+                return Some(StrFuncCond::Test(pattern.clone(), flags_str));
+            }
+        }
+        Expr::CallBuiltin { name, args } => {
+            if args.len() == 2 && matches!(args[0], Expr::Input) {
+                if let Expr::Literal(Literal::Str(s)) = &args[1] {
+                    match name.as_str() {
+                        "startswith" => return Some(StrFuncCond::Startswith(s.clone())),
+                        "endswith" => return Some(StrFuncCond::Endswith(s.clone())),
+                        "contains" => return Some(StrFuncCond::Contains(s.clone())),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    None
 }
 
 /// Serialize a constant expression to compact JSON bytes.
@@ -8493,6 +8533,52 @@ impl Filter {
                         }
                     }
                 }
+            }
+        }
+        None
+    }
+
+    /// Detect `if (.field | test("re")) then LIT else LIT end`
+    /// Also handles startswith/endswith/contains as the condition.
+    /// Returns (field, pattern, flags, then_bytes, else_bytes).
+    pub fn detect_field_strfunc_cmp_branch_literals(&self) -> Option<(String, StrFuncCond, Vec<u8>, Vec<u8>)> {
+        use crate::ir::{Expr, Literal};
+        let expr = self.detect_expr()?;
+        if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+            let (t_bytes, f_bytes) = match (const_expr_to_json(then_branch), const_expr_to_json(else_branch)) {
+                (Some(t), Some(f)) => (t, f),
+                _ => return None,
+            };
+            // Match Pipe(.field, test/startswith/endswith/contains)
+            if let Expr::Pipe { left, right } = cond.as_ref() {
+                if let Expr::Index { expr: base, key } = left.as_ref() {
+                    if !matches!(base.as_ref(), Expr::Input) { return None; }
+                    if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                        if let Some(sf) = extract_strfunc_cond(right) {
+                            return Some((field.clone(), sf, t_bytes, f_bytes));
+                        }
+                    }
+                }
+            }
+            // Also match beta-reduced forms directly
+            match cond.as_ref() {
+                Expr::RegexTest { input_expr, re, flags } => {
+                    if let Expr::Index { expr: base, key } = input_expr.as_ref() {
+                        if matches!(base.as_ref(), Expr::Input) {
+                            if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
+                                if let Expr::Literal(Literal::Str(pattern)) = re.as_ref() {
+                                    let flags_str = match flags.as_ref() {
+                                        Expr::Literal(Literal::Null) => None,
+                                        Expr::Literal(Literal::Str(f)) => Some(f.clone()),
+                                        _ => return None,
+                                    };
+                                    return Some((field.clone(), StrFuncCond::Test(pattern.clone(), flags_str), t_bytes, f_bytes));
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         None
