@@ -4115,9 +4115,26 @@ pub fn value_to_json_pretty(v: &Value, indent: usize) -> String {
 /// - `sort_keys`: sort object keys alphabetically
 pub fn value_to_json_pretty_ext(v: &Value, depth: usize, step: usize, use_tab: bool, sort_keys: bool) -> String {
     let mut out = String::with_capacity(128);
-    write_pretty_to_string(&mut out, v, depth, step, use_tab, sort_keys);
+    write_pretty_to_string(&mut out, v, depth, step, use_tab, sort_keys, false);
     out
 }
+
+pub fn value_to_json_pretty_color(v: &Value, depth: usize, step: usize, use_tab: bool, sort_keys: bool) -> String {
+    let mut out = String::with_capacity(128);
+    write_pretty_to_string(&mut out, v, depth, step, use_tab, sort_keys, true);
+    out
+}
+
+// ANSI color constants (matches jq defaults: JQ_COLORS="0;90:0;39:0;39:0;39:0;32:1;39:1;39:1;34")
+const COLOR_RESET: &[u8] = b"\x1b[0m";
+const COLOR_NULL: &[u8] = b"\x1b[0;90m";     // bright black (gray)
+const COLOR_FALSE: &[u8] = b"\x1b[0;39m";    // default
+const COLOR_TRUE: &[u8] = b"\x1b[0;39m";     // default
+const COLOR_NUMBER: &[u8] = b"\x1b[0;39m";   // default
+const COLOR_STRING: &[u8] = b"\x1b[0;32m";   // green
+const COLOR_ARRAY: &[u8] = b"\x1b[1;39m";    // bold default
+const COLOR_OBJECT: &[u8] = b"\x1b[1;39m";   // bold default
+const COLOR_KEY: &[u8] = b"\x1b[1;34m";      // bold blue
 
 // Pre-computed indent buffers (avoid per-call allocation from repeat())
 const SPACES_256: &str = "                                                                                                                                                                                                                                                                ";
@@ -4185,59 +4202,65 @@ fn push_jq_number(out: &mut String, n: f64) {
     out.push_str(&format_jq_number(n));
 }
 
-fn write_pretty_to_string(out: &mut String, v: &Value, depth: usize, step: usize, use_tab: bool, sort_keys: bool) {
+fn write_pretty_to_string(out: &mut String, v: &Value, depth: usize, step: usize, use_tab: bool, sort_keys: bool, color: bool) {
+    // SAFETY: ANSI color bytes are valid UTF-8
+    macro_rules! c {
+        ($code:expr) => { if color { out.push_str(unsafe { std::str::from_utf8_unchecked($code) }); } };
+    }
     match v {
-        Value::Null => out.push_str("null"),
-        Value::False => out.push_str("false"),
-        Value::True => out.push_str("true"),
+        Value::Null => { c!(COLOR_NULL); out.push_str("null"); c!(COLOR_RESET); }
+        Value::False => { c!(COLOR_FALSE); out.push_str("false"); c!(COLOR_RESET); }
+        Value::True => { c!(COLOR_TRUE); out.push_str("true"); c!(COLOR_RESET); }
         Value::Num(n, repr) => {
+            c!(COLOR_NUMBER);
             if let Some(r) = repr {
                 out.push_str(r);
             } else {
                 push_jq_number(out, *n);
             }
+            c!(COLOR_RESET);
         }
-        Value::Str(s) => push_json_string(out, s),
+        Value::Str(s) => { c!(COLOR_STRING); push_json_string(out, s); c!(COLOR_RESET); }
         Value::Error(e) => push_json_string(out, e),
-        Value::Arr(a) if a.is_empty() => out.push_str("[]"),
-        Value::Obj(o) if o.is_empty() => out.push_str("{}"),
+        Value::Arr(a) if a.is_empty() => { c!(COLOR_ARRAY); out.push_str("[]"); c!(COLOR_RESET); }
+        Value::Obj(o) if o.is_empty() => { c!(COLOR_OBJECT); out.push_str("{}"); c!(COLOR_RESET); }
         Value::Arr(a) => {
             let inner_depth = depth + step;
-            out.push_str("[\n");
+            c!(COLOR_ARRAY); out.push_str("[\n");
             for (i, item) in a.iter().enumerate() {
                 if i > 0 { out.push_str(",\n"); }
                 push_indent(out, inner_depth, use_tab);
-                write_pretty_to_string(out, item, inner_depth, step, use_tab, sort_keys);
+                write_pretty_to_string(out, item, inner_depth, step, use_tab, sort_keys, color);
             }
             out.push('\n');
             push_indent(out, depth, use_tab);
-            out.push(']');
+            out.push(']'); c!(COLOR_RESET);
         }
         Value::Obj(o) => {
             let inner_depth = depth + step;
-            out.push_str("{\n");
+            c!(COLOR_OBJECT); out.push_str("{\n");
             if sort_keys {
                 let mut entries: Vec<_> = o.iter().collect();
                 entries.sort_by(|a, b| a.0.cmp(&b.0));
                 for (i, (k, val)) in entries.iter().enumerate() {
                     if i > 0 { out.push_str(",\n"); }
                     push_indent(out, inner_depth, use_tab);
-                    push_json_string(out, k);
-                    out.push_str(": ");
-                    write_pretty_to_string(out, val, inner_depth, step, use_tab, sort_keys);
+                    c!(COLOR_RESET); c!(COLOR_KEY); push_json_string(out, k); c!(COLOR_RESET);
+                    c!(COLOR_OBJECT); out.push_str(": "); c!(COLOR_RESET);
+                    write_pretty_to_string(out, val, inner_depth, step, use_tab, sort_keys, color);
                 }
             } else {
                 for (i, (k, val)) in o.iter().enumerate() {
                     if i > 0 { out.push_str(",\n"); }
                     push_indent(out, inner_depth, use_tab);
-                    push_json_string(out, k);
-                    out.push_str(": ");
-                    write_pretty_to_string(out, val, inner_depth, step, use_tab, sort_keys);
+                    c!(COLOR_RESET); c!(COLOR_KEY); push_json_string(out, k); c!(COLOR_RESET);
+                    c!(COLOR_OBJECT); out.push_str(": "); c!(COLOR_RESET);
+                    write_pretty_to_string(out, val, inner_depth, step, use_tab, sort_keys, color);
                 }
             }
             out.push('\n');
             push_indent(out, depth, use_tab);
-            out.push('}');
+            out.push('}'); c!(COLOR_RESET);
         }
     }
 }
@@ -4331,29 +4354,34 @@ static PRETTY_BUF: PrettyBuf = PrettyBuf(std::cell::UnsafeCell::new(String::new(
 /// Write a Value as pretty JSON + newline, directly to writer.
 /// For scalar values and small containers, uses stack buffer to avoid String allocation.
 pub fn write_value_pretty_line(w: &mut dyn io::Write, v: &Value, indent: usize, use_tab: bool, sort_keys: bool) -> io::Result<()> {
-    match v {
-        Value::Null | Value::True | Value::False | Value::Num(..) | Value::Str(_) | Value::Error(_) => {
-            // Scalar values: pretty == compact
-            let mut buf = [0u8; 512];
-            if let Some(n) = write_compact_to_buf(v, &mut buf) {
-                buf[n] = b'\n';
-                return w.write_all(&buf[..n + 1]);
+    write_value_pretty_line_color(w, v, indent, use_tab, sort_keys, false)
+}
+
+pub fn write_value_pretty_line_color(w: &mut dyn io::Write, v: &Value, indent: usize, use_tab: bool, sort_keys: bool, color: bool) -> io::Result<()> {
+    if !color {
+        match v {
+            Value::Null | Value::True | Value::False | Value::Num(..) | Value::Str(_) | Value::Error(_) => {
+                // Scalar values: pretty == compact
+                let mut buf = [0u8; 512];
+                if let Some(n) = write_compact_to_buf(v, &mut buf) {
+                    buf[n] = b'\n';
+                    return w.write_all(&buf[..n + 1]);
+                }
+                // Fallback for long strings needing escapes
+                write_value_compact_ext_inner(w, v, false)?;
+                return w.write_all(b"\n");
             }
-            // Fallback for long strings needing escapes
-            write_value_compact_ext_inner(w, v, false)?;
-            w.write_all(b"\n")
-        }
-        Value::Arr(a) if a.is_empty() => w.write_all(b"[]\n"),
-        Value::Obj(o) if o.is_empty() => w.write_all(b"{}\n"),
-        _ => {
-            // Reuse a global String buffer to avoid per-value allocation
-            let out = unsafe { &mut *PRETTY_BUF.0.get() };
-            out.clear();
-            write_pretty_to_string(out, v, 0, indent, use_tab, sort_keys);
-            w.write_all(out.as_bytes())?;
-            w.write_all(b"\n")
+            Value::Arr(a) if a.is_empty() => return w.write_all(b"[]\n"),
+            Value::Obj(o) if o.is_empty() => return w.write_all(b"{}\n"),
+            _ => {}
         }
     }
+    // Reuse a global String buffer to avoid per-value allocation
+    let out = unsafe { &mut *PRETTY_BUF.0.get() };
+    out.clear();
+    write_pretty_to_string(out, v, 0, indent, use_tab, sort_keys, color);
+    w.write_all(out.as_bytes())?;
+    w.write_all(b"\n")
 }
 
 /// Write a Value as compact JSON directly to an io::Write, using precise repr when available.
@@ -4398,51 +4426,61 @@ pub fn push_compact_line(buf: &mut Vec<u8>, v: &Value) {
 /// Push pretty-printed JSON + newline directly into a Vec<u8> buffer.
 /// Mirrors push_compact_line but with indentation. Avoids per-value write_all overhead.
 pub fn push_pretty_line(buf: &mut Vec<u8>, v: &Value, indent: usize, use_tab: bool) {
-    push_pretty_value(buf, v, 0, indent, use_tab);
+    push_pretty_value(buf, v, 0, indent, use_tab, false);
     buf.push(b'\n');
 }
 
-fn push_pretty_value(buf: &mut Vec<u8>, v: &Value, depth: usize, step: usize, use_tab: bool) {
+pub fn push_pretty_line_color(buf: &mut Vec<u8>, v: &Value, indent: usize, use_tab: bool) {
+    push_pretty_value(buf, v, 0, indent, use_tab, true);
+    buf.push(b'\n');
+}
+
+fn push_pretty_value(buf: &mut Vec<u8>, v: &Value, depth: usize, step: usize, use_tab: bool, color: bool) {
+    macro_rules! c {
+        ($code:expr) => { if color { buf.extend_from_slice($code); } };
+    }
     match v {
-        Value::Null => buf.extend_from_slice(b"null"),
-        Value::False => buf.extend_from_slice(b"false"),
-        Value::True => buf.extend_from_slice(b"true"),
+        Value::Null => { c!(COLOR_NULL); buf.extend_from_slice(b"null"); c!(COLOR_RESET); }
+        Value::False => { c!(COLOR_FALSE); buf.extend_from_slice(b"false"); c!(COLOR_RESET); }
+        Value::True => { c!(COLOR_TRUE); buf.extend_from_slice(b"true"); c!(COLOR_RESET); }
         Value::Num(n, repr) => {
+            c!(COLOR_NUMBER);
             if let Some(r) = repr {
                 buf.extend_from_slice(r.as_bytes());
             } else {
                 push_jq_number_bytes(buf, *n);
             }
+            c!(COLOR_RESET);
         }
-        Value::Str(s) => push_json_string_to_vec(buf, s.as_str()),
+        Value::Str(s) => { c!(COLOR_STRING); push_json_string_to_vec(buf, s.as_str()); c!(COLOR_RESET); }
         Value::Error(e) => push_json_string_to_vec(buf, e.as_str()),
-        Value::Arr(a) if a.is_empty() => buf.extend_from_slice(b"[]"),
-        Value::Obj(o) if o.is_empty() => buf.extend_from_slice(b"{}"),
+        Value::Arr(a) if a.is_empty() => { c!(COLOR_ARRAY); buf.extend_from_slice(b"[]"); c!(COLOR_RESET); }
+        Value::Obj(o) if o.is_empty() => { c!(COLOR_OBJECT); buf.extend_from_slice(b"{}"); c!(COLOR_RESET); }
         Value::Arr(a) => {
             let inner = depth + step;
-            buf.extend_from_slice(b"[\n");
+            c!(COLOR_ARRAY); buf.extend_from_slice(b"[\n");
             for (i, item) in a.iter().enumerate() {
                 if i > 0 { buf.extend_from_slice(b",\n"); }
                 push_indent_bytes(buf, inner, use_tab);
-                push_pretty_value(buf, item, inner, step, use_tab);
+                push_pretty_value(buf, item, inner, step, use_tab, color);
             }
             buf.push(b'\n');
             push_indent_bytes(buf, depth, use_tab);
-            buf.push(b']');
+            buf.push(b']'); c!(COLOR_RESET);
         }
         Value::Obj(o) => {
             let inner = depth + step;
-            buf.extend_from_slice(b"{\n");
+            c!(COLOR_OBJECT); buf.extend_from_slice(b"{\n");
             for (i, (k, val)) in o.iter().enumerate() {
                 if i > 0 { buf.extend_from_slice(b",\n"); }
                 push_indent_bytes(buf, inner, use_tab);
-                push_json_string_to_vec(buf, k.as_str());
-                buf.extend_from_slice(b": ");
-                push_pretty_value(buf, val, inner, step, use_tab);
+                c!(COLOR_RESET); c!(COLOR_KEY); push_json_string_to_vec(buf, k.as_str()); c!(COLOR_RESET);
+                c!(COLOR_OBJECT); buf.extend_from_slice(b": "); c!(COLOR_RESET);
+                push_pretty_value(buf, val, inner, step, use_tab, color);
             }
             buf.push(b'\n');
             push_indent_bytes(buf, depth, use_tab);
-            buf.push(b'}');
+            buf.push(b'}'); c!(COLOR_RESET);
         }
     }
 }
