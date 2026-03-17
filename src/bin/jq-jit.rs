@@ -8,7 +8,7 @@ use std::process;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, json_object_get_nested_field_raw, parse_json_num, json_value_length, json_object_keys_to_buf_reuse, json_object_extract_keys_only, json_object_keys_unsorted_to_buf, json_object_keys_join_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_type_byte, json_object_del_field, json_object_del_fields, json_object_filter_by_key_str, json_object_merge_literal, json_object_sort_keys, json_object_filter_by_value_type, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_with_entries_select_value_cmp, json_object_set_field_raw, json_object_update_field_num, json_object_update_field_num_chain, json_object_update_field_case, json_object_update_field_gsub, json_object_update_field_split_first, json_object_update_field_split_last, json_object_update_field_trim, json_object_update_field_slice, json_object_update_field_str_map, json_object_update_field_str_concat, json_object_update_field_length, json_object_update_field_tostring, json_object_update_field_test, json_object_assign_field_arith, json_object_assign_two_fields_arith, json_object_select_then_update_num, json_object_select_then_update_str_concat, json_object_select_compound_then_update_num, json_object_select_str_then_update_num, json_object_values_tostring, is_json_compact, push_json_compact_raw, push_tojson_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_pretty_line, push_pretty_line_color, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line_color, value_to_json_pretty_color, walk_json_transform_nums, pool_value, skip_json_value};
+use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, json_object_get_nested_field_raw, parse_json_num, json_value_length, json_object_keys_to_buf_reuse, json_object_extract_keys_only, json_object_keys_unsorted_to_buf, json_object_keys_join_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_type_byte, json_object_del_field, json_object_del_fields, json_object_filter_by_key_str, json_object_merge_literal, json_object_sort_keys, json_object_filter_by_value_type, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_with_entries_select_value_cmp, json_object_set_field_raw, json_object_update_field_num, json_object_update_field_num_chain, json_object_update_field_case, json_object_update_field_gsub, json_object_update_field_split_first, json_object_update_field_split_last, json_object_update_field_trim, json_object_update_field_slice, json_object_update_field_str_map, json_object_update_field_str_concat, json_object_update_field_length, json_object_update_field_tostring, json_object_update_field_test, json_object_assign_field_arith, json_object_assign_two_fields_arith, json_object_select_then_update_num, json_object_select_then_update_str_concat, json_object_select_compound_then_update_num, json_object_select_str_then_update_num, json_object_values_tostring, is_json_compact, push_json_compact_raw, push_tojson_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_compact_line_color, push_pretty_line, push_pretty_line_color, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line_color, value_to_json_pretty_color, walk_json_transform_nums, pool_value, skip_json_value};
 use jq_jit::interpreter::Filter;
 
 fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -2009,8 +2009,8 @@ fn real_main() {
     }
 
     // Use Vec-based buffering for compact output to avoid per-value write_all overhead
-    let use_compact_buf = compact && !raw_output && !sort_keys && !join_output && !color_output;
-    let use_pretty_buf = !compact && !raw_output && !sort_keys && !join_output && !tab && !color_output;
+    let use_compact_buf = compact && !raw_output && !sort_keys && !join_output;
+    let use_pretty_buf = !compact && !raw_output && !sort_keys && !join_output && !tab;
     // Helper macro: emit raw JSON bytes to buffer with trailing newline,
     // handling compact vs pretty output.
     macro_rules! emit_raw_ln {
@@ -2027,356 +2027,359 @@ fn real_main() {
             }
         };
     }
-    let field_access = if (use_compact_buf || use_pretty_buf) && !exit_status {
+    // Raw byte fast paths bypass Value construction and cannot inject color codes.
+    // Disable them when color output is requested.
+    let use_raw_fast_paths = (use_compact_buf || use_pretty_buf) && !color_output;
+    let field_access = if use_raw_fast_paths && !exit_status {
         filter.detect_field_access()
     } else { None };
-    let nested_field = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
+    let nested_field = if use_raw_fast_paths && !exit_status && field_access.is_none() {
         filter.detect_nested_field_access()
     } else { None };
-    let field_remap = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && nested_field.is_none() {
+    let field_remap = if use_raw_fast_paths && !exit_status && field_access.is_none() && nested_field.is_none() {
         filter.detect_field_remap()
     } else { None };
-    let computed_remap = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && nested_field.is_none() && field_remap.is_none() {
+    let computed_remap = if use_raw_fast_paths && !exit_status && field_access.is_none() && nested_field.is_none() && field_remap.is_none() {
         filter.detect_computed_remap()
     } else { None };
-    let standalone_array = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && computed_remap.is_none() {
+    let standalone_array = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_remap.is_none() && computed_remap.is_none() {
         filter.detect_standalone_array()
     } else { None };
-    let field_binop = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && computed_remap.is_none() {
+    let field_binop = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_remap.is_none() && computed_remap.is_none() {
         filter.detect_field_binop()
     } else { None };
-    let field_unary_num = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_binop.is_none() {
+    let field_unary_num = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_binop.is_none() {
         filter.detect_field_unary_num()
     } else { None };
-    let field_unary_arith = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_binop.is_none() && field_unary_num.is_none() {
+    let field_unary_arith = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_binop.is_none() && field_unary_num.is_none() {
         filter.detect_field_unary_arith()
     } else { None };
-    let field_binop_const_unary = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_binop.is_none() && field_unary_num.is_none() && field_unary_arith.is_none() {
+    let field_binop_const_unary = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_binop.is_none() && field_unary_num.is_none() && field_unary_arith.is_none() {
         filter.detect_field_binop_const_unary()
     } else { None };
-    let two_field_binop_const = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_binop.is_none() && field_binop_const_unary.is_none() {
+    let two_field_binop_const = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_binop.is_none() && field_binop_const_unary.is_none() {
         filter.detect_two_field_binop_const()
     } else { None };
-    let field_arith_chain = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_binop.is_none() && field_binop_const_unary.is_none() && two_field_binop_const.is_none() {
+    let field_arith_chain = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_binop.is_none() && field_binop_const_unary.is_none() && two_field_binop_const.is_none() {
         filter.detect_field_arith_chain()
     } else { None };
-    let field_arith_tostring = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_arith_chain.is_none() {
+    let field_arith_tostring = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_arith_chain.is_none() {
         filter.detect_field_arith_chain_tostring()
     } else { None };
-    let field_binop_tostring = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_binop.is_none() && field_arith_tostring.is_none() {
+    let field_binop_tostring = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_binop.is_none() && field_arith_tostring.is_none() {
         filter.detect_field_binop_tostring()
     } else { None };
-    let numeric_expr = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_binop.is_none() && field_binop_const_unary.is_none() && field_arith_chain.is_none() {
+    let numeric_expr = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_binop.is_none() && field_binop_const_unary.is_none() && field_arith_chain.is_none() {
         filter.detect_numeric_expr()
     } else { None };
-    let numeric_expr_unary = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && numeric_expr.is_none() && field_binop.is_none() && field_arith_chain.is_none() {
+    let numeric_expr_unary = if use_raw_fast_paths && !exit_status && field_access.is_none() && numeric_expr.is_none() && field_binop.is_none() && field_arith_chain.is_none() {
         filter.detect_numeric_expr_unary()
     } else { None };
-    let field_field_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_binop.is_none() {
+    let field_field_cmp = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_binop.is_none() {
         filter.detect_field_field_cmp()
     } else { None };
-    let field_const_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_binop.is_none() && field_field_cmp.is_none() {
+    let field_const_cmp = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_binop.is_none() && field_field_cmp.is_none() {
         filter.detect_field_const_cmp()
     } else { None };
-    let arith_chain_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_const_cmp.is_none() && field_field_cmp.is_none() {
+    let arith_chain_cmp = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_const_cmp.is_none() && field_field_cmp.is_none() {
         filter.detect_arith_chain_cmp()
     } else { None };
-    let compound_field_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_const_cmp.is_none() && field_field_cmp.is_none() && arith_chain_cmp.is_none() {
+    let compound_field_cmp = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_const_cmp.is_none() && field_field_cmp.is_none() && arith_chain_cmp.is_none() {
         filter.detect_compound_field_cmp()
     } else { None };
-    let field_str_builtin = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_unary_num.is_none() {
+    let field_str_builtin = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_unary_num.is_none() {
         filter.detect_field_str_builtin()
     } else { None };
-    let field_index_arith = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() {
+    let field_index_arith = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_str_builtin.is_none() {
         filter.detect_field_index_arith()
     } else { None };
-    let field_test = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() {
+    let field_test = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_str_builtin.is_none() {
         filter.detect_field_test()
     } else { None };
-    let field_gsub = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() {
+    let field_gsub = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() {
         filter.detect_field_gsub()
     } else { None };
-    let field_case_gsub = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_gsub.is_none() {
+    let field_case_gsub = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_gsub.is_none() {
         filter.detect_field_case_gsub()
     } else { None };
-    let field_case_test = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_test.is_none() && field_case_gsub.is_none() {
+    let field_case_test = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_test.is_none() && field_case_gsub.is_none() {
         filter.detect_field_case_test()
     } else { None };
-    let field_scan = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() && field_gsub.is_none() {
+    let field_scan = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() && field_gsub.is_none() {
         filter.detect_field_scan()
     } else { None };
-    let field_match = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() && field_gsub.is_none() && field_scan.is_none() {
+    let field_match = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() && field_gsub.is_none() && field_scan.is_none() {
         filter.detect_field_match()
     } else { None };
-    let field_capture = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() && field_gsub.is_none() && field_scan.is_none() && field_match.is_none() {
+    let field_capture = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() && field_gsub.is_none() && field_scan.is_none() && field_match.is_none() {
         filter.detect_field_capture()
     } else { None };
-    let field_format = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() && field_gsub.is_none() && field_scan.is_none() {
+    let field_format = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() && field_gsub.is_none() && field_scan.is_none() {
         filter.detect_field_format()
     } else { None };
-    let field_ltrimstr_tonumber = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() {
+    let field_ltrimstr_tonumber = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() {
         filter.detect_field_ltrimstr_tonumber()
     } else { None };
-    let field_str_concat = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() {
+    let field_str_concat = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() {
         filter.detect_field_str_concat()
     } else { None };
-    let type_filter = if (use_compact_buf || use_pretty_buf) && !exit_status {
+    let type_filter = if use_raw_fast_paths && !exit_status {
         filter.detect_type_filter()
     } else { None };
-    let select_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() && field_str_concat.is_none() {
+    let select_cmp = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() && field_str_concat.is_none() {
         filter.detect_select_field_cmp()
     } else { None };
-    let select_field_null = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() {
+    let select_field_null = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() {
         filter.detect_select_field_null()
     } else { None };
-    let select_arith_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() {
+    let select_arith_cmp = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() {
         filter.detect_select_arith_cmp()
     } else { None };
-    let select_str = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() {
+    let select_str = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() {
         filter.detect_select_field_str()
     } else { None };
-    let select_str_test = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_str.is_none() && field_access.is_none() {
+    let select_str_test = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_str.is_none() && field_access.is_none() {
         filter.detect_select_field_str_test()
     } else { None };
-    let select_string_chain = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() && field_access.is_none() {
+    let select_string_chain = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() && field_access.is_none() {
         filter.detect_select_string_chain()
     } else { None };
-    let select_compound_str_test = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() && select_string_chain.is_none() && field_access.is_none() {
+    let select_compound_str_test = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() && select_string_chain.is_none() && field_access.is_none() {
         filter.detect_select_compound_str_test()
     } else { None };
-    let select_mixed_compound = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() && select_compound_str_test.is_none() && field_access.is_none() {
+    let select_mixed_compound = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() && select_compound_str_test.is_none() && field_access.is_none() {
         filter.detect_select_mixed_compound()
     } else { None };
-    let select_regex_test = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() && field_access.is_none() {
+    let select_regex_test = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() && field_access.is_none() {
         filter.detect_select_field_regex_test()
     } else { None };
-    let select_regex_value = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_regex_test.is_none() && field_access.is_none() {
+    let select_regex_value = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_regex_test.is_none() && field_access.is_none() {
         filter.detect_select_regex_then_value()
     } else { None };
-    let select_nested_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() {
+    let select_nested_cmp = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() {
         filter.detect_select_nested_cmp()
     } else { None };
-    let computed_array = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && computed_remap.is_none() {
+    let computed_array = if use_raw_fast_paths && !exit_status && field_access.is_none() && computed_remap.is_none() {
         filter.detect_computed_array()
     } else { None };
-    let array_field = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && computed_array.is_none() {
+    let array_field = if use_raw_fast_paths && !exit_status && field_access.is_none() && computed_array.is_none() {
         filter.detect_array_field_access()
     } else { None };
-    let multi_field = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && array_field.is_none() {
+    let multi_field = if use_raw_fast_paths && !exit_status && field_access.is_none() && array_field.is_none() {
         filter.detect_multi_field_access()
     } else { None };
-    let is_length = (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && multi_field.is_none() && select_cmp.is_none() && filter.is_length();
-    let is_keys = (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && select_cmp.is_none() && !is_length && filter.is_keys();
-    let is_keys_unsorted = (use_compact_buf || use_pretty_buf) && !exit_status && !is_keys && !is_length && filter.is_keys_unsorted();
-    let keys_join = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_keys && !is_keys_unsorted && !is_length && field_access.is_none() {
+    let is_length = use_raw_fast_paths && !exit_status && field_access.is_none() && multi_field.is_none() && select_cmp.is_none() && filter.is_length();
+    let is_keys = use_raw_fast_paths && !exit_status && field_access.is_none() && select_cmp.is_none() && !is_length && filter.is_keys();
+    let is_keys_unsorted = use_raw_fast_paths && !exit_status && !is_keys && !is_length && filter.is_keys_unsorted();
+    let keys_join = if use_raw_fast_paths && !exit_status && !is_keys && !is_keys_unsorted && !is_length && field_access.is_none() {
         filter.detect_keys_join()
     } else { None };
-    let has_field = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_length && !is_keys {
+    let has_field = if use_raw_fast_paths && !exit_status && !is_length && !is_keys {
         filter.detect_has_field()
     } else { None };
-    let has_multi = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_length && !is_keys && has_field.is_none() {
+    let has_multi = if use_raw_fast_paths && !exit_status && !is_length && !is_keys && has_field.is_none() {
         filter.detect_has_multi_field()
     } else { None };
-    let is_type = (use_compact_buf || use_pretty_buf) && !exit_status && !is_length && !is_keys && has_field.is_none() && has_multi.is_none() && filter.is_type();
-    let del_field = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() {
+    let is_type = use_raw_fast_paths && !exit_status && !is_length && !is_keys && has_field.is_none() && has_multi.is_none() && filter.is_type();
+    let del_field = if use_raw_fast_paths && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() {
         filter.detect_del_field()
     } else { None };
-    let select_cmp_del = if (use_compact_buf || use_pretty_buf) && !exit_status && del_field.is_none() && select_cmp.is_none() {
+    let select_cmp_del = if use_raw_fast_paths && !exit_status && del_field.is_none() && select_cmp.is_none() {
         filter.detect_select_cmp_del()
     } else { None };
-    let select_str_del = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_del.is_none() {
+    let select_str_del = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_del.is_none() {
         filter.detect_select_str_del()
     } else { None };
-    let select_cmp_merge = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_del.is_none() {
+    let select_cmp_merge = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_del.is_none() {
         filter.detect_select_cmp_merge()
     } else { None };
-    let select_str_merge = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_del.is_none() && select_str_del.is_none() && select_cmp_merge.is_none() {
+    let select_str_merge = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_del.is_none() && select_str_del.is_none() && select_cmp_merge.is_none() {
         filter.detect_select_str_merge()
     } else { None };
-    let del_fields = if (use_compact_buf || use_pretty_buf) && !exit_status && del_field.is_none() && select_cmp_del.is_none() {
+    let del_fields = if use_raw_fast_paths && !exit_status && del_field.is_none() && select_cmp_del.is_none() {
         filter.detect_del_fields()
     } else { None };
-    let obj_merge_lit = if (use_compact_buf || use_pretty_buf) && !exit_status && del_field.is_none() && del_fields.is_none() {
+    let obj_merge_lit = if use_raw_fast_paths && !exit_status && del_field.is_none() && del_fields.is_none() {
         filter.detect_obj_merge_literal()
     } else { None };
-    let obj_merge_computed = if (use_compact_buf || use_pretty_buf) && !exit_status && obj_merge_lit.is_none() && del_field.is_none() {
+    let obj_merge_computed = if use_raw_fast_paths && !exit_status && obj_merge_lit.is_none() && del_field.is_none() {
         filter.detect_obj_merge_computed()
     } else { None };
-    let obj_merge_multi = if (use_compact_buf || use_pretty_buf) && !exit_status && obj_merge_lit.is_none() && obj_merge_computed.is_none() && del_field.is_none() {
+    let obj_merge_multi = if use_raw_fast_paths && !exit_status && obj_merge_lit.is_none() && obj_merge_computed.is_none() && del_field.is_none() {
         filter.detect_obj_merge_multi_computed()
     } else { None };
-    let is_collect_each = (use_compact_buf || use_pretty_buf) && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() && del_field.is_none() && field_access.is_none() && filter.is_collect_each();
-    let collect_each_arith = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_collect_each && field_access.is_none() {
+    let is_collect_each = use_raw_fast_paths && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() && del_field.is_none() && field_access.is_none() && filter.is_collect_each();
+    let collect_each_arith = if use_raw_fast_paths && !exit_status && !is_collect_each && field_access.is_none() {
         filter.detect_collect_each_arith()
     } else { None };
-    let collect_each_select_type = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_collect_each && collect_each_arith.is_none() && field_access.is_none() {
+    let collect_each_select_type = if use_raw_fast_paths && !exit_status && !is_collect_each && collect_each_arith.is_none() && field_access.is_none() {
         filter.detect_collect_each_select_type()
     } else { None };
-    let collect_each_select_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_collect_each && collect_each_arith.is_none() && collect_each_select_type.is_none() && field_access.is_none() {
+    let collect_each_select_cmp = if use_raw_fast_paths && !exit_status && !is_collect_each && collect_each_arith.is_none() && collect_each_select_type.is_none() && field_access.is_none() {
         filter.detect_collect_each_select_cmp()
     } else { None };
-    let first_each_select_type = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_collect_each && field_access.is_none() {
+    let first_each_select_type = if use_raw_fast_paths && !exit_status && !is_collect_each && field_access.is_none() {
         filter.detect_first_each_select_type()
     } else { None };
-    let count_each_select_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_collect_each && collect_each_select_cmp.is_none() && field_access.is_none() {
+    let count_each_select_cmp = if use_raw_fast_paths && !exit_status && !is_collect_each && collect_each_select_cmp.is_none() && field_access.is_none() {
         filter.detect_count_each_select_cmp()
     } else { None };
-    let is_each = (use_compact_buf || use_pretty_buf) && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() && del_field.is_none() && field_access.is_none() && !is_collect_each && collect_each_arith.is_none() && collect_each_select_type.is_none() && filter.is_each();
-    let each_type_filter = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_each {
+    let is_each = use_raw_fast_paths && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() && del_field.is_none() && field_access.is_none() && !is_collect_each && collect_each_arith.is_none() && collect_each_select_type.is_none() && filter.is_each();
+    let each_type_filter = if use_raw_fast_paths && !exit_status && !is_each {
         filter.detect_each_type_filter()
     } else { None };
-    let is_sort_keys = (use_compact_buf || use_pretty_buf) && !exit_status && !is_each && filter.is_sort_keys();
-    let is_to_entries = (use_compact_buf || use_pretty_buf) && !exit_status && !is_each && !is_sort_keys && filter.is_to_entries();
-    let to_entries_each_interp = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_to_entries {
+    let is_sort_keys = use_raw_fast_paths && !exit_status && !is_each && filter.is_sort_keys();
+    let is_to_entries = use_raw_fast_paths && !exit_status && !is_each && !is_sort_keys && filter.is_to_entries();
+    let to_entries_each_interp = if use_raw_fast_paths && !exit_status && !is_to_entries {
         filter.detect_to_entries_each_interp()
     } else { None };
-    let remap_to_entries = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_to_entries && to_entries_each_interp.is_none() && field_remap.is_none() {
+    let remap_to_entries = if use_raw_fast_paths && !exit_status && !is_to_entries && to_entries_each_interp.is_none() && field_remap.is_none() {
         filter.detect_remap_to_entries()
     } else { None };
-    let with_entries_select = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_to_entries && remap_to_entries.is_none() {
+    let with_entries_select = if use_raw_fast_paths && !exit_status && !is_to_entries && remap_to_entries.is_none() {
         filter.detect_with_entries_select_value_cmp()
     } else { None };
-    let with_entries_del = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_to_entries && remap_to_entries.is_none() && with_entries_select.is_none() && del_field.is_none() && del_fields.is_none() {
+    let with_entries_del = if use_raw_fast_paths && !exit_status && !is_to_entries && remap_to_entries.is_none() && with_entries_select.is_none() && del_field.is_none() && del_fields.is_none() {
         filter.detect_with_entries_del_keys()
     } else { None };
-    let with_entries_type = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_to_entries && remap_to_entries.is_none() && with_entries_select.is_none() && with_entries_del.is_none() {
+    let with_entries_type = if use_raw_fast_paths && !exit_status && !is_to_entries && remap_to_entries.is_none() && with_entries_select.is_none() && with_entries_del.is_none() {
         filter.detect_with_entries_select_value_type()
     } else { None };
-    let with_entries_key_str = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_to_entries && remap_to_entries.is_none() && with_entries_select.is_none() && with_entries_del.is_none() && with_entries_type.is_none() {
+    let with_entries_key_str = if use_raw_fast_paths && !exit_status && !is_to_entries && remap_to_entries.is_none() && with_entries_select.is_none() && with_entries_del.is_none() && with_entries_type.is_none() {
         filter.detect_with_entries_select_key_str()
     } else { None };
-    let is_with_entries_tostring = (use_compact_buf || use_pretty_buf) && !exit_status && !is_to_entries && with_entries_type.is_none() && filter.is_with_entries_tostring();
-    let is_tojson_fromjson = (use_compact_buf || use_pretty_buf) && !exit_status && filter.is_tojson_fromjson();
-    let is_tojson = !is_tojson_fromjson && (use_compact_buf || use_pretty_buf) && !exit_status && !is_each && !is_to_entries && remap_to_entries.is_none() && with_entries_select.is_none() && with_entries_type.is_none() && filter.is_tojson();
-    let remap_tojson = if (use_compact_buf || use_pretty_buf) && !exit_status && !is_tojson && field_remap.is_none() {
+    let is_with_entries_tostring = use_raw_fast_paths && !exit_status && !is_to_entries && with_entries_type.is_none() && filter.is_with_entries_tostring();
+    let is_tojson_fromjson = use_raw_fast_paths && !exit_status && filter.is_tojson_fromjson();
+    let is_tojson = !is_tojson_fromjson && use_raw_fast_paths && !exit_status && !is_each && !is_to_entries && remap_to_entries.is_none() && with_entries_select.is_none() && with_entries_type.is_none() && filter.is_tojson();
+    let remap_tojson = if use_raw_fast_paths && !exit_status && !is_tojson && field_remap.is_none() {
         filter.detect_remap_tojson()
     } else { None };
-    let string_interp_fields = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() && field_str_concat.is_none() {
+    let string_interp_fields = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() && field_str_concat.is_none() {
         filter.detect_string_interp_fields()
     } else { None };
-    let string_add_chain = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && string_interp_fields.is_none() && field_str_concat.is_none() {
+    let string_add_chain = if use_raw_fast_paths && !exit_status && field_access.is_none() && string_interp_fields.is_none() && field_str_concat.is_none() {
         filter.detect_string_add_chain()
     } else { None };
-    let array_join = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
+    let array_join = if use_raw_fast_paths && !exit_status && field_access.is_none() {
         filter.detect_array_join()
     } else { None };
-    let literal_output = if (use_compact_buf || use_pretty_buf) && !exit_status { filter.detect_literal_output() } else { None };
-    let input_free_output = if (use_compact_buf || use_pretty_buf) && !exit_status && literal_output.is_none() {
+    let literal_output = if use_raw_fast_paths && !exit_status { filter.detect_literal_output() } else { None };
+    let input_free_output = if use_raw_fast_paths && !exit_status && literal_output.is_none() {
         filter.detect_input_free_output()
     } else { None };
-    let array_fields_format = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
+    let array_fields_format = if use_raw_fast_paths && !exit_status && field_access.is_none() {
         filter.detect_array_fields_format()
     } else { None };
     // For -r mode: raw CSV/TSV output bypasses JSON encoding entirely
     let raw_csv_fields = if raw_output && !exit_status && !slurp && !join_output && array_fields_format.is_none() {
         filter.detect_array_fields_format()
     } else { None };
-    let field_str_reverse = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
+    let field_str_reverse = if use_raw_fast_paths && !exit_status && field_access.is_none() {
         filter.detect_field_str_reverse()
     } else { None };
-    let field_split_rev_join = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_reverse.is_none() {
+    let field_split_rev_join = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_str_reverse.is_none() {
         filter.detect_field_split_reverse_join()
     } else { None };
-    let field_case_split_join = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_reverse.is_none() && field_split_rev_join.is_none() {
+    let field_case_split_join = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_str_reverse.is_none() && field_split_rev_join.is_none() {
         filter.detect_field_case_split_join()
     } else { None };
-    let field_case_split_nth = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_case_split_join.is_none() {
+    let field_case_split_nth = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_case_split_join.is_none() {
         filter.detect_field_case_split_nth()
     } else { None };
-    let field_case_split = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_case_split_join.is_none() && field_case_split_nth.is_none() {
+    let field_case_split = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_case_split_join.is_none() && field_case_split_nth.is_none() {
         filter.detect_field_case_split()
     } else { None };
-    let field_split_join = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_reverse.is_none() && field_split_rev_join.is_none() && field_case_split_join.is_none() && field_case_split.is_none() {
+    let field_split_join = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_str_reverse.is_none() && field_split_rev_join.is_none() && field_case_split_join.is_none() && field_case_split.is_none() {
         filter.detect_field_split_join()
     } else { None };
-    let field_split_slice_join = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_split_join.is_none() {
+    let field_split_slice_join = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_split_join.is_none() {
         filter.detect_field_split_slice_join()
     } else { None };
-    let field_split_first = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_split_join.is_none() && field_split_slice_join.is_none() {
+    let field_split_first = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_split_join.is_none() && field_split_slice_join.is_none() {
         filter.detect_field_split_first()
     } else { None };
-    let field_split_last = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_split_join.is_none() && field_split_first.is_none() {
+    let field_split_last = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_split_join.is_none() && field_split_first.is_none() {
         filter.detect_field_split_last()
     } else { None };
-    let field_split_last_tonum = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_split_join.is_none() && field_split_first.is_none() && field_split_last.is_none() {
+    let field_split_last_tonum = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_split_join.is_none() && field_split_first.is_none() && field_split_last.is_none() {
         filter.detect_field_split_last_tonumber()
     } else { None };
-    let field_split_nth_tonum = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_split_join.is_none() && field_split_first.is_none() && field_split_last.is_none() && field_split_last_tonum.is_none() {
+    let field_split_nth_tonum = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_split_join.is_none() && field_split_first.is_none() && field_split_last.is_none() && field_split_last_tonum.is_none() {
         filter.detect_field_split_nth_tonumber()
     } else { None };
-    let field_split_nth = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_split_join.is_none() && field_split_first.is_none() && field_split_last.is_none() && field_split_last_tonum.is_none() && field_split_nth_tonum.is_none() {
+    let field_split_nth = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_split_join.is_none() && field_split_first.is_none() && field_split_last.is_none() && field_split_last_tonum.is_none() && field_split_nth_tonum.is_none() {
         filter.detect_field_split_index()
     } else { None };
-    let field_split_concat = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_split_join.is_none() && field_split_first.is_none() && field_split_last.is_none() && field_split_nth.is_none() {
+    let field_split_concat = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_split_join.is_none() && field_split_first.is_none() && field_split_last.is_none() && field_split_nth.is_none() {
         filter.detect_field_split_concat()
     } else { None };
-    let field_slice = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
+    let field_slice = if use_raw_fast_paths && !exit_status && field_access.is_none() {
         filter.detect_field_slice()
     } else { None };
-    let dynamic_key_obj = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && computed_remap.is_none() {
+    let dynamic_key_obj = if use_raw_fast_paths && !exit_status && field_access.is_none() && computed_remap.is_none() {
         filter.detect_dynamic_key_obj()
     } else { None };
-    let dynamic_key_mixed = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && computed_remap.is_none() && dynamic_key_obj.is_none() {
+    let dynamic_key_mixed = if use_raw_fast_paths && !exit_status && field_access.is_none() && computed_remap.is_none() && dynamic_key_obj.is_none() {
         filter.detect_dynamic_key_mixed_obj()
     } else { None };
-    let field_update_num = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && computed_remap.is_none() && dynamic_key_obj.is_none() {
+    let field_update_num = if use_raw_fast_paths && !exit_status && field_access.is_none() && computed_remap.is_none() && dynamic_key_obj.is_none() {
         filter.detect_field_update_num()
     } else { None };
-    let field_assign_const = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_update_num.is_none() {
+    let field_assign_const = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_num.is_none() {
         filter.detect_field_assign_const()
     } else { None };
-    let field_assign_field_arith = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_assign_const.is_none() && field_update_num.is_none() {
+    let field_assign_field_arith = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_assign_const.is_none() && field_update_num.is_none() {
         filter.detect_field_assign_field_arith()
     } else { None };
-    let field_assign_two_fields = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_assign_const.is_none() && field_assign_field_arith.is_none() {
+    let field_assign_two_fields = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_assign_const.is_none() && field_assign_field_arith.is_none() {
         filter.detect_field_assign_two_fields()
     } else { None };
-    let select_cmp_then_update_num = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_update_num.is_none() {
+    let select_cmp_then_update_num = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_num.is_none() {
         filter.detect_select_cmp_then_update_num()
     } else { None };
-    let select_cmp_then_update_str = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && select_cmp_then_update_num.is_none() {
+    let select_cmp_then_update_str = if use_raw_fast_paths && !exit_status && field_access.is_none() && select_cmp_then_update_num.is_none() {
         filter.detect_select_cmp_then_update_str_concat()
     } else { None };
-    let select_compound_then_update_num = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && select_cmp_then_update_num.is_none() && select_cmp_then_update_str.is_none() {
+    let select_compound_then_update_num = if use_raw_fast_paths && !exit_status && field_access.is_none() && select_cmp_then_update_num.is_none() && select_cmp_then_update_str.is_none() {
         filter.detect_select_compound_then_update_num()
     } else { None };
-    let select_str_then_update_num = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && select_cmp_then_update_num.is_none() {
+    let select_str_then_update_num = if use_raw_fast_paths && !exit_status && field_access.is_none() && select_cmp_then_update_num.is_none() {
         filter.detect_select_str_then_update_num()
     } else { None };
-    let field_update_num_chain = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_update_num.is_none() {
+    let field_update_num_chain = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_num.is_none() {
         filter.detect_field_update_num_chain()
     } else { None };
-    let field_update_gsub = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_update_num.is_none() && field_update_num_chain.is_none() {
+    let field_update_gsub = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_num.is_none() && field_update_num_chain.is_none() {
         filter.detect_field_update_gsub()
     } else { None };
-    let field_update_split_first = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_update_num.is_none() && field_update_num_chain.is_none() && field_update_gsub.is_none() {
+    let field_update_split_first = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_num.is_none() && field_update_num_chain.is_none() && field_update_gsub.is_none() {
         filter.detect_field_update_split_first()
     } else { None };
-    let field_update_split_last = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_update_split_first.is_none() && field_update_gsub.is_none() {
+    let field_update_split_last = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_split_first.is_none() && field_update_gsub.is_none() {
         filter.detect_field_update_split_last()
     } else { None };
-    let field_update_case = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_update_num.is_none() && field_assign_const.is_none() {
+    let field_update_case = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_num.is_none() && field_assign_const.is_none() {
         filter.detect_field_update_case()
     } else { None };
-    let field_update_trim = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_update_case.is_none() {
+    let field_update_trim = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_case.is_none() {
         filter.detect_field_update_trim()
     } else { None };
-    let field_update_slice = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_update_trim.is_none() {
+    let field_update_slice = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_trim.is_none() {
         filter.detect_field_update_slice()
     } else { None };
-    let field_update_str_map = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_update_trim.is_none() && field_update_slice.is_none() {
+    let field_update_str_map = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_trim.is_none() && field_update_slice.is_none() {
         filter.detect_field_update_str_map()
     } else { None };
-    let field_update_str_concat = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_update_str_map.is_none() {
+    let field_update_str_concat = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_str_map.is_none() {
         filter.detect_field_update_str_concat()
     } else { None };
-    let field_update_length = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_update_str_concat.is_none() {
+    let field_update_length = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_str_concat.is_none() {
         filter.detect_field_update_length()
     } else { None };
-    let field_update_tostring = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_update_length.is_none() {
+    let field_update_tostring = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_length.is_none() {
         filter.detect_field_update_tostring()
     } else { None };
-    let field_update_test = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_update_tostring.is_none() {
+    let field_update_test = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_tostring.is_none() {
         filter.detect_field_update_test().and_then(|(field, pattern, flags)| {
             let mut re_pattern = String::new();
             if flags.contains('x') {
@@ -2396,190 +2399,190 @@ fn real_main() {
             Some((field, re))
         })
     } else { None };
-    let field_split_length = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
+    let field_split_length = if use_raw_fast_paths && !exit_status && field_access.is_none() {
         filter.detect_field_split_length()
     } else { None };
-    let field_split_length_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_split_length.is_none() {
+    let field_split_length_cmp = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_split_length.is_none() {
         filter.detect_field_split_length_cmp()
     } else { None };
-    let field_strop_length = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_split_length.is_none() && field_split_length_cmp.is_none() {
+    let field_strop_length = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_split_length.is_none() && field_split_length_cmp.is_none() {
         filter.detect_field_strop_length()
     } else { None };
-    let field_length_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_strop_length.is_none() {
+    let field_length_cmp = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_strop_length.is_none() {
         filter.detect_field_length_cmp()
     } else { None };
-    let select_length_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_length_cmp.is_none() && select_cmp.is_none() {
+    let select_length_cmp = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_length_cmp.is_none() && select_cmp.is_none() {
         filter.detect_select_field_length_cmp()
     } else { None };
-    let select_length_cmp_field = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_length_cmp.is_none() && select_length_cmp.is_none() {
+    let select_length_cmp_field = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_length_cmp.is_none() && select_length_cmp.is_none() {
         filter.detect_select_field_length_cmp_then_field()
     } else { None };
-    let if_length_cmp_fields = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && select_length_cmp.is_none() && select_length_cmp_field.is_none() {
+    let if_length_cmp_fields = if use_raw_fast_paths && !exit_status && field_access.is_none() && select_length_cmp.is_none() && select_length_cmp_field.is_none() {
         filter.detect_if_field_length_cmp_then_fields()
     } else { None };
-    let select_length_cmp_remap = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && select_length_cmp.is_none() && select_length_cmp_field.is_none() && if_length_cmp_fields.is_none() {
+    let select_length_cmp_remap = if use_raw_fast_paths && !exit_status && field_access.is_none() && select_length_cmp.is_none() && select_length_cmp_field.is_none() && if_length_cmp_fields.is_none() {
         filter.detect_select_field_length_cmp_then_remap()
     } else { None };
-    let min_two_fields = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
+    let min_two_fields = if use_raw_fast_paths && !exit_status && field_access.is_none() {
         filter.detect_min_two_fields()
     } else { None };
-    let minmax_two = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && min_two_fields.is_none() {
+    let minmax_two = if use_raw_fast_paths && !exit_status && field_access.is_none() && min_two_fields.is_none() {
         filter.detect_minmax_two_fields()
     } else { None };
-    let minmax_n = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && min_two_fields.is_none() && minmax_two.is_none() {
+    let minmax_n = if use_raw_fast_paths && !exit_status && field_access.is_none() && min_two_fields.is_none() && minmax_two.is_none() {
         filter.detect_minmax_n_fields()
     } else { None };
-    let sort_two_fields = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && min_two_fields.is_none() && minmax_two.is_none() && minmax_n.is_none() {
+    let sort_two_fields = if use_raw_fast_paths && !exit_status && field_access.is_none() && min_two_fields.is_none() && minmax_two.is_none() && minmax_n.is_none() {
         filter.detect_sort_two_fields()
     } else { None };
-    let field_tostring_length = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
+    let field_tostring_length = if use_raw_fast_paths && !exit_status && field_access.is_none() {
         filter.detect_field_tostring_length()
     } else { None };
-    let field_length_tostring = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_tostring_length.is_none() {
+    let field_length_tostring = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_tostring_length.is_none() {
         filter.detect_field_length_tostring()
     } else { None };
-    let field_alt = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
+    let field_alt = if use_raw_fast_paths && !exit_status && field_access.is_none() {
         filter.detect_field_alternative()
     } else { None };
-    let field_field_alt = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_alt.is_none() {
+    let field_field_alt = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_alt.is_none() {
         filter.detect_field_field_alternative()
     } else { None };
-    let cond_chain = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() {
+    let cond_chain = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() {
         filter.detect_cond_chain()
     } else { None };
-    let cmp_branch_lit = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() {
+    let cmp_branch_lit = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() {
         filter.detect_cmp_branch_literals()
     } else { None };
-    let arith_cmp_branch_lit = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() {
+    let arith_cmp_branch_lit = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() {
         filter.detect_arith_cmp_branch_literals()
     } else { None };
-    let field_unary_cmp_branch_lit = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() {
+    let field_unary_cmp_branch_lit = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() {
         filter.detect_field_unary_cmp_branch_literals()
     } else { None };
-    let null_branch_lit = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() {
+    let null_branch_lit = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() {
         filter.detect_field_null_branch_literals()
     } else { None };
-    let cmp_branch_merge = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() && null_branch_lit.is_none() {
+    let cmp_branch_merge = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() && null_branch_lit.is_none() {
         filter.detect_cmp_branch_merge()
     } else { None };
-    let strfunc_cmp_branch_lit = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() && field_unary_cmp_branch_lit.is_none() {
+    let strfunc_cmp_branch_lit = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() && field_unary_cmp_branch_lit.is_none() {
         filter.detect_field_strfunc_cmp_branch_literals()
     } else { None };
-    let field_field_cmp_branch = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() && null_branch_lit.is_none() && cmp_branch_merge.is_none() {
+    let field_field_cmp_branch = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() && null_branch_lit.is_none() && cmp_branch_merge.is_none() {
         filter.detect_field_field_cmp_branch()
     } else { None };
-    let if_ff_cmp_fields = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && field_field_cmp_branch.is_none() {
+    let if_ff_cmp_fields = if use_raw_fast_paths && !exit_status && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && field_field_cmp_branch.is_none() {
         filter.detect_if_ff_cmp_then_fields()
     } else { None };
-    let if_ff_cmp_computed = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && field_field_cmp_branch.is_none() && if_ff_cmp_fields.is_none() {
+    let if_ff_cmp_computed = if use_raw_fast_paths && !exit_status && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && field_field_cmp_branch.is_none() && if_ff_cmp_fields.is_none() {
         filter.detect_if_ff_cmp_then_computed()
     } else { None };
-    let if_ff_cmp_remaps = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && field_field_cmp_branch.is_none() && if_ff_cmp_fields.is_none() && if_ff_cmp_computed.is_none() {
+    let if_ff_cmp_remaps = if use_raw_fast_paths && !exit_status && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && field_field_cmp_branch.is_none() && if_ff_cmp_fields.is_none() && if_ff_cmp_computed.is_none() {
         filter.detect_if_ff_cmp_then_remaps()
     } else { None };
-    let cmp_branch_remaps = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && field_field_cmp_branch.is_none() && if_ff_cmp_fields.is_none() && if_ff_cmp_computed.is_none() && if_ff_cmp_remaps.is_none() {
+    let cmp_branch_remaps = if use_raw_fast_paths && !exit_status && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && field_field_cmp_branch.is_none() && if_ff_cmp_fields.is_none() && if_ff_cmp_computed.is_none() && if_ff_cmp_remaps.is_none() {
         filter.detect_cmp_branch_remaps()
     } else { None };
-    let if_cmp_arrays = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && field_field_cmp_branch.is_none() {
+    let if_cmp_arrays = if use_raw_fast_paths && !exit_status && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && field_field_cmp_branch.is_none() {
         filter.detect_if_cmp_then_arrays()
     } else { None };
-    let cmp_branch_interp = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() && field_field_cmp_branch.is_none() {
+    let cmp_branch_interp = if use_raw_fast_paths && !exit_status && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() && field_field_cmp_branch.is_none() {
         filter.detect_cmp_branch_string_interp()
     } else { None };
-    let select_num_str = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() {
+    let select_num_str = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() {
         filter.detect_select_num_and_str()
     } else { None };
-    let select_compound = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() && cond_chain.is_none() {
+    let select_compound = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() && cond_chain.is_none() {
         filter.detect_select_compound_cmp()
     } else { None };
-    let select_compound_field = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_compound.is_none() && field_access.is_none() {
+    let select_compound_field = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_compound.is_none() && field_access.is_none() {
         filter.detect_select_compound_cmp_then_field()
     } else { None };
-    let select_compound_remap = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_compound.is_none() && select_compound_field.is_none() && field_access.is_none() {
+    let select_compound_remap = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_compound.is_none() && select_compound_field.is_none() && field_access.is_none() {
         filter.detect_select_compound_cmp_then_remap()
     } else { None };
-    let select_compound_computed = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_compound.is_none() && select_compound_field.is_none() && select_compound_remap.is_none() && field_access.is_none() {
+    let select_compound_computed = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_compound.is_none() && select_compound_field.is_none() && select_compound_remap.is_none() && field_access.is_none() {
         filter.detect_select_compound_cmp_then_computed()
     } else { None };
-    let select_compound_cremap = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_compound.is_none() && select_compound_field.is_none() && select_compound_remap.is_none() && select_compound_computed.is_none() && field_access.is_none() {
+    let select_compound_cremap = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_compound.is_none() && select_compound_field.is_none() && select_compound_remap.is_none() && select_compound_computed.is_none() && field_access.is_none() {
         filter.detect_select_compound_cmp_then_cremap()
     } else { None };
-    let select_compound_str_chain = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_compound.is_none() && select_compound_field.is_none() && select_compound_remap.is_none() && select_compound_computed.is_none() && select_compound_cremap.is_none() && field_access.is_none() {
+    let select_compound_str_chain = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_compound.is_none() && select_compound_field.is_none() && select_compound_remap.is_none() && select_compound_computed.is_none() && select_compound_cremap.is_none() && field_access.is_none() {
         filter.detect_select_compound_cmp_then_str_chain()
     } else { None };
-    let select_has_multi = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() {
+    let select_has_multi = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() {
         filter.detect_select_has_multi()
     } else { None };
-    let select_cmp_field = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && field_access.is_none() {
+    let select_cmp_field = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() {
         filter.detect_select_cmp_then_field()
     } else { None };
-    let select_arith_cmp_field = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
+    let select_arith_cmp_field = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
         filter.detect_select_arith_cmp_then_field()
     } else { None };
-    let select_cmp_field_unary = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_arith_cmp_field.is_none() && field_access.is_none() {
+    let select_cmp_field_unary = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_arith_cmp_field.is_none() && field_access.is_none() {
         filter.detect_select_cmp_then_field_unary()
     } else { None };
-    let select_cmp_remap = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
+    let select_cmp_remap = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
         filter.detect_select_cmp_then_remap()
     } else { None };
-    let select_cmp_cremap = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && field_access.is_none() {
+    let select_cmp_cremap = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && field_access.is_none() {
         filter.detect_select_cmp_then_computed_remap()
     } else { None };
-    let select_cmp_dynkey = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && select_cmp_cremap.is_none() && field_access.is_none() {
+    let select_cmp_dynkey = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && select_cmp_cremap.is_none() && field_access.is_none() {
         filter.detect_select_cmp_then_dynkey()
     } else { None };
-    let select_cmp_dynkey_mixed = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && select_cmp_cremap.is_none() && select_cmp_dynkey.is_none() && field_access.is_none() {
+    let select_cmp_dynkey_mixed = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && select_cmp_cremap.is_none() && select_cmp_dynkey.is_none() && field_access.is_none() {
         filter.detect_select_cmp_then_dynkey_mixed()
     } else { None };
-    let select_cmp_array = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && select_cmp_cremap.is_none() && select_cmp_dynkey.is_none() && select_cmp_dynkey_mixed.is_none() && field_access.is_none() {
+    let select_cmp_array = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && select_cmp_cremap.is_none() && select_cmp_dynkey.is_none() && select_cmp_dynkey_mixed.is_none() && field_access.is_none() {
         filter.detect_select_cmp_then_array()
     } else { None };
-    let select_arith_cmp_array = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_array.is_none() && field_access.is_none() {
+    let select_arith_cmp_array = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_array.is_none() && field_access.is_none() {
         filter.detect_select_arith_cmp_then_array()
     } else { None };
-    let select_cmp_value = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && select_cmp_cremap.is_none() && select_cmp_array.is_none() && select_arith_cmp_array.is_none() && field_access.is_none() {
+    let select_cmp_value = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && select_cmp_cremap.is_none() && select_cmp_array.is_none() && select_arith_cmp_array.is_none() && field_access.is_none() {
         filter.detect_select_cmp_then_value()
     } else { None };
-    let select_cmp_str_chain = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_value.is_none() && field_access.is_none() {
+    let select_cmp_str_chain = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_value.is_none() && field_access.is_none() {
         filter.detect_select_cmp_then_str_chain()
     } else { None };
-    let select_ff_cmp_field = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
+    let select_ff_cmp_field = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
         filter.detect_select_field_cmp_field_then_field()
     } else { None };
-    let select_ff_cmp = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_ff_cmp_field.is_none() && field_access.is_none() {
+    let select_ff_cmp = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_ff_cmp_field.is_none() && field_access.is_none() {
         filter.detect_select_field_field_cmp()
     } else { None };
-    let select_ff_cmp_cremap = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_ff_cmp.is_none() && select_ff_cmp_field.is_none() && field_access.is_none() {
+    let select_ff_cmp_cremap = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_ff_cmp.is_none() && select_ff_cmp_field.is_none() && field_access.is_none() {
         filter.detect_select_ff_cmp_then_computed_remap()
     } else { None };
-    let select_ff_cmp_value = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_ff_cmp.is_none() && select_ff_cmp_field.is_none() && select_ff_cmp_cremap.is_none() && field_access.is_none() {
+    let select_ff_cmp_value = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_ff_cmp.is_none() && select_ff_cmp_field.is_none() && select_ff_cmp_cremap.is_none() && field_access.is_none() {
         filter.detect_select_ff_cmp_then_value()
     } else { None };
-    let select_ff_cmp_array = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_ff_cmp.is_none() && select_ff_cmp_field.is_none() && select_ff_cmp_cremap.is_none() && select_ff_cmp_value.is_none() && field_access.is_none() {
+    let select_ff_cmp_array = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_ff_cmp.is_none() && select_ff_cmp_field.is_none() && select_ff_cmp_cremap.is_none() && select_ff_cmp_value.is_none() && field_access.is_none() {
         filter.detect_select_ff_cmp_then_array()
     } else { None };
-    let select_compound_array = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_compound.is_none() && select_compound_field.is_none() && select_compound_remap.is_none() && field_access.is_none() {
+    let select_compound_array = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_compound.is_none() && select_compound_field.is_none() && select_compound_remap.is_none() && field_access.is_none() {
         filter.detect_select_compound_cmp_then_array()
     } else { None };
-    let select_str_field = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
+    let select_str_field = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
         filter.detect_select_str_then_field()
     } else { None };
-    let field_string_chain = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && field_str_builtin.is_none() {
+    let field_string_chain = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_str_builtin.is_none() {
         filter.detect_field_string_chain()
     } else { None };
-    let remap_tostring_join = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() && array_join.is_none() {
+    let remap_tostring_join = if use_raw_fast_paths && !exit_status && field_access.is_none() && array_join.is_none() {
         filter.detect_remap_tostring_join()
     } else { None };
-    let select_str_cremap = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_str_field.is_none() && field_access.is_none() {
+    let select_str_cremap = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_str_field.is_none() && field_access.is_none() {
         filter.detect_select_str_then_computed_remap()
     } else { None };
-    let select_str_array = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_str_field.is_none() && select_str_cremap.is_none() && field_access.is_none() {
+    let select_str_array = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_str_field.is_none() && select_str_cremap.is_none() && field_access.is_none() {
         filter.detect_select_str_then_array()
     } else { None };
-    let select_str_str_chain = if (use_compact_buf || use_pretty_buf) && !exit_status && select_cmp.is_none() && select_str_field.is_none() && select_str_cremap.is_none() && select_str_array.is_none() && field_access.is_none() {
+    let select_str_str_chain = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_str_field.is_none() && select_str_cremap.is_none() && select_str_array.is_none() && field_access.is_none() {
         filter.detect_select_str_then_str_chain()
     } else { None };
-    let walk_num_op = if (use_compact_buf || use_pretty_buf) && !exit_status && field_access.is_none() {
+    let walk_num_op = if use_raw_fast_paths && !exit_status && field_access.is_none() {
         filter.detect_walk_num_op()
     } else { None };
     // Field projection: if filter only accesses specific fields, skip parsing the rest.
@@ -2617,20 +2620,24 @@ fn real_main() {
                 *any_false = true;
             }
             if use_compact_buf {
-                // Raw passthrough: if result is the unmodified input and bytes are compact,
-                // copy original bytes directly instead of re-serializing
-                if let Some(raw) = raw_bytes {
-                    if std::ptr::eq(result, input) && is_json_compact(raw) {
-                        cbuf.extend_from_slice(raw);
-                        cbuf.push(b'\n');
-                        if cbuf.len() >= 1 << 17 {
-                            let _ = out.write_all(cbuf);
-                            cbuf.clear();
+                if !color_output {
+                    // Raw passthrough: if result is the unmodified input and bytes are compact,
+                    // copy original bytes directly instead of re-serializing
+                    if let Some(raw) = raw_bytes {
+                        if std::ptr::eq(result, input) && is_json_compact(raw) {
+                            cbuf.extend_from_slice(raw);
+                            cbuf.push(b'\n');
+                            if cbuf.len() >= 1 << 17 {
+                                let _ = out.write_all(cbuf);
+                                cbuf.clear();
+                            }
+                            return Ok(true);
                         }
-                        return Ok(true);
                     }
+                    push_compact_line(cbuf, result);
+                } else {
+                    push_compact_line_color(cbuf, result);
                 }
-                push_compact_line(cbuf, result);
                 if cbuf.len() >= 1 << 17 {
                     let _ = out.write_all(cbuf);
                     cbuf.clear();
@@ -4942,7 +4949,7 @@ fn real_main() {
                         }
                         Ok(())
                     })
-                } else if filter.is_identity() && use_compact_buf && !exit_status {
+                } else if filter.is_identity() && use_compact_buf && !color_output && !exit_status {
                     // Fast path: if the entire file is compact NDJSON, write it in one shot
                     let ib = input_bytes;
                     let mut bom_skip = 0usize;
@@ -4996,7 +5003,7 @@ fn real_main() {
                             Ok(())
                         })
                     }
-                } else if filter.is_identity() && use_pretty_buf && !exit_status {
+                } else if filter.is_identity() && use_pretty_buf && !color_output && !exit_status {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         push_json_pretty_raw(&mut compact_buf, raw, indent_n, tab);
@@ -21423,7 +21430,7 @@ fn real_main() {
                     }
                     Ok(())
                 })
-            } else if filter.is_identity() && use_compact_buf && !exit_status {
+            } else if filter.is_identity() && use_compact_buf && !color_output && !exit_status {
                 // Identity fast path: skip JSON parsing entirely, just validate structure
                 // and copy raw bytes directly. Falls back to parse+serialize for non-compact input.
                 let content_bytes = content.as_bytes();
@@ -21476,7 +21483,7 @@ fn real_main() {
                         Ok(())
                     })
                 }
-            } else if filter.is_identity() && use_pretty_buf && !exit_status {
+            } else if filter.is_identity() && use_pretty_buf && !color_output && !exit_status {
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
