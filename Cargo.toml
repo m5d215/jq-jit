@@ -26,6 +26,7 @@ fast-float = "0.2"
 memchr = "2"
 ryu = "1"
 stacker = "0.1"
+csv = "1"
 
 [profile.release]
 lto = "thin"

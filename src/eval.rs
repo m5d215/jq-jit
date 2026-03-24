@@ -4084,6 +4084,19 @@ fn eval_call_builtin(name: &str, args: &[Expr], input: Value, env: &EnvRef, cb: 
             // exec(generator; "cmd"): spawn cmd once, pipe generator outputs to stdin, yield stdout lines
             return eval_exec_pipe(&args[0], &args[1], input, env, cb);
         }
+        ("fromcsv", 0) | ("fromtsv", 0) => {
+            return eval_fromcsv(&input, name == "fromtsv", cb);
+        }
+        ("fromcsvh", _) | ("fromtsvh", _) => {
+            let is_tsv = name == "fromtsvh";
+            if args.is_empty() {
+                return eval_fromcsvh_auto(&input, is_tsv, cb);
+            } else {
+                return eval(&args[0], input.clone(), env, &mut |headers_val| {
+                    eval_fromcsvh_with_headers(&input, &headers_val, is_tsv, cb)
+                });
+            }
+        }
         ("bsearch", 1) => {
             // bsearch(target): binary search - evaluate target then call runtime
             return eval(&args[0], input.clone(), env, &mut |target| {
@@ -4152,6 +4165,81 @@ fn eval_exec_pipe(gen_expr: &Expr, cmd_expr: &Expr, input: Value, env: &EnvRef, 
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.as_ref().lines() {
         cb(Value::from_str(line))?;
+    }
+    Ok(true)
+}
+
+fn eval_fromcsv(input: &Value, is_tsv: bool, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
+    let s = match input {
+        Value::Str(s) => s.as_str().to_string(),
+        _ => bail!("fromcsv input must be a string"),
+    };
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .delimiter(if is_tsv { b'\t' } else { b',' })
+        .from_reader(s.as_bytes());
+    for result in rdr.records() {
+        let record = result.map_err(|e| anyhow::anyhow!("CSV parse error: {}", e))?;
+        let arr: Vec<Value> = record.iter().map(Value::from_str).collect();
+        cb(Value::Arr(Rc::new(arr)))?;
+    }
+    Ok(true)
+}
+
+fn eval_fromcsvh_auto(input: &Value, is_tsv: bool, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
+    let s = match input {
+        Value::Str(s) => s.as_str().to_string(),
+        _ => bail!("fromcsvh input must be a string"),
+    };
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .delimiter(if is_tsv { b'\t' } else { b',' })
+        .from_reader(s.as_bytes());
+    let headers: Vec<String> = rdr.headers()
+        .map_err(|e| anyhow::anyhow!("CSV parse error: {}", e))?
+        .iter()
+        .map(|h| h.to_string())
+        .collect();
+    for result in rdr.records() {
+        let record = result.map_err(|e| anyhow::anyhow!("CSV parse error: {}", e))?;
+        let mut obj = crate::value::new_objmap();
+        for (i, field) in record.iter().enumerate() {
+            if let Some(key) = headers.get(i) {
+                obj.insert(KeyStr::from(key.as_str()), Value::from_str(field));
+            }
+        }
+        cb(Value::Obj(Rc::new(obj)))?;
+    }
+    Ok(true)
+}
+
+fn eval_fromcsvh_with_headers(input: &Value, headers_val: &Value, is_tsv: bool, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
+    let s = match input {
+        Value::Str(s) => s.as_str().to_string(),
+        _ => bail!("fromcsvh input must be a string"),
+    };
+    let headers: Vec<String> = match headers_val {
+        Value::Arr(arr) => {
+            arr.iter().map(|v| match v {
+                Value::Str(s) => Ok(s.as_str().to_string()),
+                _ => Err(anyhow::anyhow!("fromcsvh headers must be strings")),
+            }).collect::<Result<Vec<_>, _>>()?
+        }
+        _ => bail!("fromcsvh argument must be an array of strings"),
+    };
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .delimiter(if is_tsv { b'\t' } else { b',' })
+        .from_reader(s.as_bytes());
+    for result in rdr.records() {
+        let record = result.map_err(|e| anyhow::anyhow!("CSV parse error: {}", e))?;
+        let mut obj = crate::value::new_objmap();
+        for (i, field) in record.iter().enumerate() {
+            if let Some(key) = headers.get(i) {
+                obj.insert(KeyStr::from(key.as_str()), Value::from_str(field));
+            }
+        }
+        cb(Value::Obj(Rc::new(obj)))?;
     }
     Ok(true)
 }

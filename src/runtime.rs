@@ -2419,6 +2419,7 @@ pub fn rt_builtins() -> Value {
         "ascii_downcase/0", "ascii_upcase/0",
         "strflocaltime/1",
         "exec/1", "exec/2", "execv/1",
+        "fromcsv/0", "fromtsv/0", "fromcsvh/0", "fromcsvh/1", "fromtsvh/0", "fromtsvh/1",
         "toboolean/0",
     ];
     let arr: Vec<Value> = builtins.iter()

@@ -2625,6 +2625,7 @@ impl Parser {
             | "select" | "map"
             | "toboolean" | "walk" | "pick" | "bsearch" | "skip" | "del"
             | "IN" | "INDEX" | "JOIN" | "strflocaltime"
+            | "fromcsv" | "fromtsv" | "fromcsvh" | "fromtsvh"
             if !matches!(self.current(), Token::LParen) => {
                 self.compile_builtin_noargs(name)
             }
@@ -2809,6 +2810,9 @@ impl Parser {
             }
             "halt_error" => {
                 Ok(Expr::CallBuiltin { name: "halt_error".to_string(), args: vec![] })
+            }
+            "fromcsv" | "fromtsv" | "fromcsvh" | "fromtsvh" => {
+                Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
             }
             _ => {
                 // Check user-defined functions
@@ -3396,6 +3400,29 @@ impl Parser {
                 let gen = args.next().unwrap();
                 let cmd = args.next().unwrap();
                 Ok(Expr::CallBuiltin { name: "exec".to_string(), args: vec![gen, cmd] })
+            }
+            // fromcsv/0, fromtsv/0: parse CSV/TSV string, yield arrays per row
+            ("fromcsv", 0) => {
+                Ok(Expr::CallBuiltin { name: "fromcsv".to_string(), args: vec![] })
+            }
+            ("fromtsv", 0) => {
+                Ok(Expr::CallBuiltin { name: "fromtsv".to_string(), args: vec![] })
+            }
+            // fromcsvh/0, fromcsvh/1: parse CSV with headers, yield objects per row
+            ("fromcsvh", 0) => {
+                Ok(Expr::CallBuiltin { name: "fromcsvh".to_string(), args: vec![] })
+            }
+            ("fromcsvh", 1) => {
+                let headers = args.into_iter().next().unwrap();
+                Ok(Expr::CallBuiltin { name: "fromcsvh".to_string(), args: vec![headers] })
+            }
+            // fromtsvh/0, fromtsvh/1: parse TSV with headers, yield objects per row
+            ("fromtsvh", 0) => {
+                Ok(Expr::CallBuiltin { name: "fromtsvh".to_string(), args: vec![] })
+            }
+            ("fromtsvh", 1) => {
+                let headers = args.into_iter().next().unwrap();
+                Ok(Expr::CallBuiltin { name: "fromtsvh".to_string(), args: vec![headers] })
             }
             // IN/1: IN(s) = any(. == s; .)... actually IN(s) = . as $x | first(s | if . == $x then true else empty end) // false
             ("IN", 1) => {
