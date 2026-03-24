@@ -2401,7 +2401,7 @@ pub fn rt_builtins() -> Value {
         "@html/0", "@json/0", "@text/0", "@sh/0",
         "ascii_downcase/0", "ascii_upcase/0",
         "strflocaltime/1",
-        "exec/1",
+        "exec/1", "exec/2",
         "toboolean/0",
     ];
     let arr: Vec<Value> = builtins.iter()

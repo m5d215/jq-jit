@@ -3385,6 +3385,13 @@ impl Parser {
                 let cmd = args.into_iter().next().unwrap();
                 Ok(Expr::CallBuiltin { name: "exec".to_string(), args: vec![cmd] })
             }
+            // exec/2: pipe generator output to shell command, yield stdout lines
+            ("exec", 2) => {
+                let mut args = args.into_iter();
+                let gen = args.next().unwrap();
+                let cmd = args.next().unwrap();
+                Ok(Expr::CallBuiltin { name: "exec".to_string(), args: vec![gen, cmd] })
+            }
             // IN/1: IN(s) = any(. == s; .)... actually IN(s) = . as $x | first(s | if . == $x then true else empty end) // false
             ("IN", 1) => {
                 let s = args.into_iter().next().unwrap();

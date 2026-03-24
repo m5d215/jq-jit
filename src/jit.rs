@@ -229,7 +229,7 @@ fn is_scalar(expr: &Expr) -> bool {
         Expr::CallBuiltin { name, args } => {
             // Filter-argument builtins can't be treated as scalar
             match (name.as_str(), args.len()) {
-                ("walk", _) | ("pick", _) | ("skip", _) | ("del", _) => false,
+                ("walk", _) | ("pick", _) | ("skip", _) | ("del", _) | ("exec", 2) => false,
                 ("add", 1) => false,
                 _ => args.iter().all(is_scalar),
             }
