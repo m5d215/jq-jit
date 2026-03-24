@@ -263,6 +263,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             })
         }
         "gmtime" => unary_op(args, rt_gmtime),
+        "localtime" => unary_op(args, rt_localtime),
         "mktime" => unary_op(args, rt_mktime),
         "strftime" => binary_arg(args, rt_strftime),
         "strptime" => binary_arg(args, rt_strptime),
@@ -2206,6 +2207,29 @@ fn libc_gmtime(secs: i64) -> Value {
         Value::Num(result.tm_wday as f64, None),
         Value::Num(result.tm_yday as f64, None),
     ]))
+}
+
+fn rt_localtime(v: &Value) -> Result<Value> {
+    match v {
+        Value::Num(n, _) => {
+            let secs = *n as i64;
+            use libc::{localtime_r, time_t, tm};
+            let t = secs as time_t;
+            let mut result: tm = unsafe { std::mem::zeroed() };
+            unsafe { localtime_r(&t, &mut result) };
+            Ok(Value::Arr(Rc::new(vec![
+                Value::Num((result.tm_year + 1900) as f64, None),
+                Value::Num(result.tm_mon as f64, None),
+                Value::Num(result.tm_mday as f64, None),
+                Value::Num(result.tm_hour as f64, None),
+                Value::Num(result.tm_min as f64, None),
+                Value::Num(result.tm_sec as f64, None),
+                Value::Num(result.tm_wday as f64, None),
+                Value::Num(result.tm_yday as f64, None),
+            ])))
+        }
+        _ => bail!("localtime requires number"),
+    }
 }
 
 fn time_arr_to_tm(a: &[Value]) -> Result<libc::tm> {

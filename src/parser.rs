@@ -2609,7 +2609,7 @@ impl Parser {
             | "keys" | "keys_unsorted" | "values" | "sort" | "reverse"
             | "unique" | "flatten" | "min" | "max" | "add" | "any" | "all"
             | "transpose" | "to_entries" | "from_entries"
-            | "gmtime" | "mktime" | "now" | "abs"
+            | "gmtime" | "localtime" | "mktime" | "now" | "abs"
             | "not" | "env" | "builtins" | "input" | "inputs"
             | "debug" | "stderr" | "modulemeta" | "path"
             | "with_entries" | "recurse" | "recurse_down" | "leaf_paths"
@@ -3875,6 +3875,7 @@ fn name_to_unary_op(name: &str) -> Result<UnaryOp> {
         "to_entries" => Ok(UnaryOp::ToEntries),
         "from_entries" => Ok(UnaryOp::FromEntries),
         "gmtime" => Ok(UnaryOp::Gmtime),
+        "localtime" => Ok(UnaryOp::Localtime),
         "mktime" => Ok(UnaryOp::Mktime),
         "now" => Ok(UnaryOp::Now),
         "abs" => Ok(UnaryOp::Abs),

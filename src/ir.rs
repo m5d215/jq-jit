@@ -468,6 +468,7 @@ pub enum UnaryOp {
 
     // Date/Time
     Gmtime,
+    Localtime,
     Mktime,
     Now,
 

@@ -3044,7 +3044,7 @@ pub fn eval_unaryop(op: UnaryOp, val: &Value) -> Result<Value> {
         UnaryOp::Min => "min", UnaryOp::Max => "max", UnaryOp::Add => "add",
         UnaryOp::Any => "any", UnaryOp::All => "all", UnaryOp::Transpose => "transpose",
         UnaryOp::ToEntries => "to_entries", UnaryOp::FromEntries => "from_entries",
-        UnaryOp::Gmtime => "gmtime", UnaryOp::Mktime => "mktime", UnaryOp::Now => "now",
+        UnaryOp::Gmtime => "gmtime", UnaryOp::Localtime => "localtime", UnaryOp::Mktime => "mktime", UnaryOp::Now => "now",
         UnaryOp::Abs => "abs", UnaryOp::GetModuleMeta => "modulemeta",
         _ => unreachable!(),
     };

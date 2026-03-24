@@ -7196,7 +7196,7 @@ fn unaryop_from_i32(op: i32) -> Option<UnaryOp> {
         59 => UnaryOp::Logb, 60 => UnaryOp::NearbyInt, 61 => UnaryOp::Trunc,
         62 => UnaryOp::Rint, 63 => UnaryOp::J0, 64 => UnaryOp::J1,
         65 => UnaryOp::Gmtime, 66 => UnaryOp::Mktime, 67 => UnaryOp::Now,
-        68 => UnaryOp::GetModuleMeta,
+        68 => UnaryOp::GetModuleMeta, 69 => UnaryOp::Localtime,
         _ => return None,
     })
 }
@@ -7224,7 +7224,7 @@ fn unaryop_to_i32(op: UnaryOp) -> i32 {
         UnaryOp::Logb => 59, UnaryOp::NearbyInt => 60, UnaryOp::Trunc => 61,
         UnaryOp::Rint => 62, UnaryOp::J0 => 63, UnaryOp::J1 => 64,
         UnaryOp::Gmtime => 65, UnaryOp::Mktime => 66, UnaryOp::Now => 67,
-        UnaryOp::GetModuleMeta => 68,
+        UnaryOp::GetModuleMeta => 68, UnaryOp::Localtime => 69,
     }
 }
 
