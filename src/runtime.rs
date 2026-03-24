@@ -269,6 +269,8 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "todate" => unary_op(args, |v| rt_strftime(v, &Value::from_str("%Y-%m-%dT%H:%M:%SZ"))),
         "fromdate" => unary_op(args, |v| rt_strptime(v, &Value::from_str("%Y-%m-%dT%H:%M:%SZ"))),
         "date" => unary_op(args, |v| rt_strftime(v, &Value::from_str("%Y-%m-%dT%H:%M:%SZ"))),
+        "fromisodate" => unary_op(args, rt_fromisodate),
+        "toisodate" => unary_op(args, rt_toisodate),
         "trimstr" => binary_arg(args, |a, b| {
             let v = rt_ltrimstr(a, b)?;
             rt_rtrimstr(&v, b)
@@ -2340,6 +2342,88 @@ fn rt_strflocaltime_impl(input: &Value, fmt: &Value) -> Result<Value> {
 }
 
 // -----------------------------------------------------------------------
+// ISO 8601 date conversion
+// -----------------------------------------------------------------------
+
+fn rt_fromisodate(v: &Value) -> Result<Value> {
+    use chrono::{DateTime, FixedOffset, NaiveDateTime, NaiveDate, Local};
+
+    let s = match v {
+        Value::Str(s) => s.as_str().to_string(),
+        _ => bail!("fromisodate input must be a string"),
+    };
+
+    // Try RFC 3339 first (handles Z and +HH:MM offsets)
+    if let Ok(dt) = DateTime::<FixedOffset>::parse_from_rfc3339(&s) {
+        let epoch = dt.timestamp();
+        let nanos = dt.timestamp_subsec_nanos();
+        return Ok(epoch_with_frac(epoch, nanos));
+    }
+
+    // Try datetime without timezone (local timezone)
+    for fmt in &["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S"] {
+        if let Ok(ndt) = NaiveDateTime::parse_from_str(&s, fmt) {
+            let local_dt = ndt.and_local_timezone(Local)
+                .single()
+                .ok_or_else(|| anyhow::anyhow!("ambiguous local time: {}", s))?;
+            let epoch = local_dt.timestamp();
+            let nanos = local_dt.timestamp_subsec_nanos();
+            return Ok(epoch_with_frac(epoch, nanos));
+        }
+    }
+
+    // Try date only (local timezone at midnight)
+    if let Ok(nd) = NaiveDate::parse_from_str(&s, "%Y-%m-%d") {
+        let ndt = nd.and_hms_opt(0, 0, 0).unwrap();
+        let local_dt = ndt.and_local_timezone(Local)
+            .single()
+            .ok_or_else(|| anyhow::anyhow!("ambiguous local time: {}", s))?;
+        let epoch = local_dt.timestamp();
+        return Ok(Value::Num(epoch as f64, None));
+    }
+
+    bail!("fromisodate: invalid ISO 8601 date string: {}", s)
+}
+
+fn epoch_with_frac(epoch: i64, nanos: u32) -> Value {
+    if nanos == 0 {
+        Value::Num(epoch as f64, None)
+    } else {
+        let frac = epoch as f64 + nanos as f64 / 1_000_000_000.0;
+        Value::Num(frac, None)
+    }
+}
+
+fn rt_toisodate(v: &Value) -> Result<Value> {
+    use chrono::DateTime;
+
+    let epoch = match v {
+        Value::Num(n, _) => *n,
+        _ => bail!("toisodate input must be a number"),
+    };
+
+    let secs = epoch.floor() as i64;
+    let frac = epoch - epoch.floor();
+
+    if frac.abs() < 1e-9 {
+        // Integer epoch: no fractional part
+        let dt = DateTime::from_timestamp(secs, 0)
+            .ok_or_else(|| anyhow::anyhow!("toisodate: invalid epoch: {}", epoch))?;
+        let formatted = dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        Ok(Value::from_str(&formatted))
+    } else {
+        // Float epoch: include milliseconds
+        // Use round(frac * 1000) to get millis to avoid precision loss
+        let millis = (frac * 1000.0).round() as u32;
+        let nanos = millis * 1_000_000;
+        let dt = DateTime::from_timestamp(secs, nanos)
+            .ok_or_else(|| anyhow::anyhow!("toisodate: invalid epoch: {}", epoch))?;
+        let formatted = format!("{}.{:03}Z", dt.format("%Y-%m-%dT%H:%M:%S"), millis);
+        Ok(Value::from_str(&formatted))
+    }
+}
+
+// -----------------------------------------------------------------------
 // Environment
 // -----------------------------------------------------------------------
 
@@ -2421,6 +2505,7 @@ pub fn rt_builtins() -> Value {
         "exec/1", "exec/2", "execv/1",
         "fromcsv/0", "fromtsv/0", "fromcsvh/0", "fromcsvh/1", "fromtsvh/0", "fromtsvh/1",
         "toboolean/0",
+        "fromisodate/0", "toisodate/0",
     ];
     let arr: Vec<Value> = builtins.iter()
         .map(|&name| Value::from_str(name))

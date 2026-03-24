@@ -2626,6 +2626,7 @@ impl Parser {
             | "toboolean" | "walk" | "pick" | "bsearch" | "skip" | "del"
             | "IN" | "INDEX" | "JOIN" | "strflocaltime"
             | "fromcsv" | "fromtsv" | "fromcsvh" | "fromtsvh"
+            | "fromisodate" | "toisodate"
             if !matches!(self.current(), Token::LParen) => {
                 self.compile_builtin_noargs(name)
             }
@@ -2812,6 +2813,9 @@ impl Parser {
                 Ok(Expr::CallBuiltin { name: "halt_error".to_string(), args: vec![] })
             }
             "fromcsv" | "fromtsv" | "fromcsvh" | "fromtsvh" => {
+                Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
+            }
+            "fromisodate" | "toisodate" => {
                 Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
             }
             _ => {
@@ -3423,6 +3427,13 @@ impl Parser {
             ("fromtsvh", 1) => {
                 let headers = args.into_iter().next().unwrap();
                 Ok(Expr::CallBuiltin { name: "fromtsvh".to_string(), args: vec![headers] })
+            }
+            // fromisodate/0, toisodate/0: ISO 8601 date conversion
+            ("fromisodate", 0) => {
+                Ok(Expr::CallBuiltin { name: "fromisodate".to_string(), args: vec![] })
+            }
+            ("toisodate", 0) => {
+                Ok(Expr::CallBuiltin { name: "toisodate".to_string(), args: vec![] })
             }
             // IN/1: IN(s) = any(. == s; .)... actually IN(s) = . as $x | first(s | if . == $x then true else empty end) // false
             ("IN", 1) => {

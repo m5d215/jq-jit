@@ -27,6 +27,7 @@ memchr = "2"
 ryu = "1"
 stacker = "0.1"
 csv = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 
 [profile.release]
 lto = "thin"
