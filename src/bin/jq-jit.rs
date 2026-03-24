@@ -2727,25 +2727,26 @@ fn real_main() {
         // Read from stdin
         let stdin = io::stdin();
         if raw_input {
-            let mut lines: Vec<Value> = Vec::new();
-            for line in stdin.lock().lines() {
-                match line {
-                    Ok(l) => {
-                        if slurp {
-                            lines.push(Value::from_str(&l));
-                        } else {
+            if slurp {
+                // -Rs: read entire stdin as a single string (jq compat)
+                let mut buf = String::new();
+                if let Err(e) = stdin.lock().read_to_string(&mut buf) {
+                    eprintln!("jq: error reading input: {}", e);
+                    process::exit(2);
+                }
+                process_input(&Value::from_str(&buf), None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+            } else {
+                for line in stdin.lock().lines() {
+                    match line {
+                        Ok(l) => {
                             process_input(&Value::from_str(&l), None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
-                    }
-                    Err(e) => {
-                        eprintln!("jq: error reading input: {}", e);
-                        process::exit(2);
+                        Err(e) => {
+                            eprintln!("jq: error reading input: {}", e);
+                            process::exit(2);
+                        }
                     }
                 }
-            }
-            if slurp {
-                let arr = Value::Arr(std::rc::Rc::new(lines));
-                process_input(&arr, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
             }
         } else {
             // stdin_data was pre-read above for JIT size estimation
