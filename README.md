@@ -14,6 +14,7 @@ Passes 100% of the official jq test suite (509/509) while being **8x-180x faster
 - **Streaming JSON parser** for memory-efficient NDJSON processing
 - **Memory-mapped file I/O** — mmap-based file reading with no upfront allocation
 - **Optimized value representation** with compact strings, mimalloc, and inline Cranelift codegen
+- **jqx extensions** — shell command execution (`exec`/`execv`) and CSV/TSV parsing (`fromcsv`/`fromcsvh`)
 
 ## Performance
 
@@ -112,6 +113,59 @@ jq-jit --arg name "test" '.[$name]' data.json
 
 # Positional arguments
 jq-jit -n '$ARGS.positional' --args foo bar baz
+```
+
+## Extensions (jqx)
+
+jq-jit includes extensions beyond standard jq. These are available on the `jqx` branch.
+
+### Shell Command Execution
+
+| Function | Description |
+|----------|-------------|
+| `exec("cmd")` | Execute command, return stdout. Non-zero exit raises a catchable error. |
+| `exec(generator; "cmd")` | Pipe generator outputs to a single process's stdin, yield each stdout line. |
+| `execv("cmd")` | Execute command, return `{exitcode, stdout, stderr}` object. |
+
+When input is non-null, it is passed to the command's stdin (strings as-is, other values JSON-encoded). Trailing newlines are trimmed.
+
+```bash
+# Run a command and use its output
+jq-jit -n 'exec("git rev-parse @") | "commit: \(.[:7])"'
+
+# Pipe input to a command
+echo '"hello"' | jq-jit 'exec("tr a-z A-Z")'  # → "HELLO"
+
+# Stream a generator through a single process
+jq-jit -n 'exec(range(0;10); "sed s/^/+/")'
+
+# Capture exit code and stderr
+jq-jit -n 'execv("ls /nope") | if .exitcode != 0 then .stderr else .stdout end'
+```
+
+### CSV/TSV Parsing
+
+| Function | Description |
+|----------|-------------|
+| `fromcsv` | Parse CSV, yield `["field1","field2",...]` per row. |
+| `fromcsvh` | Parse CSV with first row as headers, yield `{"col":"val",...}` per row. |
+| `fromcsvh(["col1","col2"])` | Parse CSV with specified headers, yield objects per row. |
+| `fromtsv` / `fromtsvh` / `fromtsvh(headers)` | Same as above, tab-delimited. |
+
+All values are returned as strings. Parsing is RFC 4180 compliant (handles quoted fields, escaped quotes, commas/newlines within fields).
+
+```bash
+# Parse CSV into arrays
+echo 'name,age\nAlice,30' | jq-jit -R 'fromcsv'
+
+# Parse CSV file with headers into objects
+jq-jit -Rsc 'fromcsvh' < data.csv
+
+# Use custom headers
+jq-jit -Rsc 'fromcsvh(["name","age"])' < no-header.csv
+
+# Combine with exec
+jq-jit -n 'exec("cat data.csv") | fromcsvh | select(.age | tonumber > 25)'
 ```
 
 ## Testing
