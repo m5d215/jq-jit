@@ -2609,7 +2609,7 @@ impl Parser {
             | "keys" | "keys_unsorted" | "values" | "sort" | "reverse"
             | "unique" | "flatten" | "min" | "max" | "add" | "any" | "all"
             | "transpose" | "to_entries" | "from_entries"
-            | "gmtime" | "mktime" | "now" | "abs"
+            | "gmtime" | "localtime" | "mktime" | "now" | "abs"
             | "not" | "env" | "builtins" | "input" | "inputs"
             | "debug" | "stderr" | "modulemeta" | "path"
             | "with_entries" | "recurse" | "recurse_down" | "leaf_paths"
@@ -2625,6 +2625,8 @@ impl Parser {
             | "select" | "map"
             | "toboolean" | "walk" | "pick" | "bsearch" | "skip" | "del"
             | "IN" | "INDEX" | "JOIN" | "strflocaltime"
+            | "fromcsv" | "fromtsv" | "fromcsvh" | "fromtsvh"
+            | "fromisodate" | "toisodate"
             if !matches!(self.current(), Token::LParen) => {
                 self.compile_builtin_noargs(name)
             }
@@ -2809,6 +2811,12 @@ impl Parser {
             }
             "halt_error" => {
                 Ok(Expr::CallBuiltin { name: "halt_error".to_string(), args: vec![] })
+            }
+            "fromcsv" | "fromtsv" | "fromcsvh" | "fromtsvh" => {
+                Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
+            }
+            "fromisodate" | "toisodate" => {
+                Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
             }
             _ => {
                 // Check user-defined functions
@@ -3380,6 +3388,53 @@ impl Parser {
                 let f = args.into_iter().next().unwrap();
                 Ok(Expr::CallBuiltin { name: "walk".to_string(), args: vec![f] })
             }
+            // exec/1: execute shell command and return stdout
+            ("exec", 1) => {
+                let cmd = args.into_iter().next().unwrap();
+                Ok(Expr::CallBuiltin { name: "exec".to_string(), args: vec![cmd] })
+            }
+            // execv/1: execute shell command, return {exitcode, stdout, stderr}
+            ("execv", 1) => {
+                let cmd = args.into_iter().next().unwrap();
+                Ok(Expr::CallBuiltin { name: "execv".to_string(), args: vec![cmd] })
+            }
+            // exec/2: pipe generator output to shell command, yield stdout lines
+            ("exec", 2) => {
+                let mut args = args.into_iter();
+                let gen = args.next().unwrap();
+                let cmd = args.next().unwrap();
+                Ok(Expr::CallBuiltin { name: "exec".to_string(), args: vec![gen, cmd] })
+            }
+            // fromcsv/0, fromtsv/0: parse CSV/TSV string, yield arrays per row
+            ("fromcsv", 0) => {
+                Ok(Expr::CallBuiltin { name: "fromcsv".to_string(), args: vec![] })
+            }
+            ("fromtsv", 0) => {
+                Ok(Expr::CallBuiltin { name: "fromtsv".to_string(), args: vec![] })
+            }
+            // fromcsvh/0, fromcsvh/1: parse CSV with headers, yield objects per row
+            ("fromcsvh", 0) => {
+                Ok(Expr::CallBuiltin { name: "fromcsvh".to_string(), args: vec![] })
+            }
+            ("fromcsvh", 1) => {
+                let headers = args.into_iter().next().unwrap();
+                Ok(Expr::CallBuiltin { name: "fromcsvh".to_string(), args: vec![headers] })
+            }
+            // fromtsvh/0, fromtsvh/1: parse TSV with headers, yield objects per row
+            ("fromtsvh", 0) => {
+                Ok(Expr::CallBuiltin { name: "fromtsvh".to_string(), args: vec![] })
+            }
+            ("fromtsvh", 1) => {
+                let headers = args.into_iter().next().unwrap();
+                Ok(Expr::CallBuiltin { name: "fromtsvh".to_string(), args: vec![headers] })
+            }
+            // fromisodate/0, toisodate/0: ISO 8601 date conversion
+            ("fromisodate", 0) => {
+                Ok(Expr::CallBuiltin { name: "fromisodate".to_string(), args: vec![] })
+            }
+            ("toisodate", 0) => {
+                Ok(Expr::CallBuiltin { name: "toisodate".to_string(), args: vec![] })
+            }
             // IN/1: IN(s) = any(. == s; .)... actually IN(s) = . as $x | first(s | if . == $x then true else empty end) // false
             ("IN", 1) => {
                 let s = args.into_iter().next().unwrap();
@@ -3820,6 +3875,7 @@ fn name_to_unary_op(name: &str) -> Result<UnaryOp> {
         "to_entries" => Ok(UnaryOp::ToEntries),
         "from_entries" => Ok(UnaryOp::FromEntries),
         "gmtime" => Ok(UnaryOp::Gmtime),
+        "localtime" => Ok(UnaryOp::Localtime),
         "mktime" => Ok(UnaryOp::Mktime),
         "now" => Ok(UnaryOp::Now),
         "abs" => Ok(UnaryOp::Abs),

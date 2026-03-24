@@ -3044,7 +3044,7 @@ pub fn eval_unaryop(op: UnaryOp, val: &Value) -> Result<Value> {
         UnaryOp::Min => "min", UnaryOp::Max => "max", UnaryOp::Add => "add",
         UnaryOp::Any => "any", UnaryOp::All => "all", UnaryOp::Transpose => "transpose",
         UnaryOp::ToEntries => "to_entries", UnaryOp::FromEntries => "from_entries",
-        UnaryOp::Gmtime => "gmtime", UnaryOp::Mktime => "mktime", UnaryOp::Now => "now",
+        UnaryOp::Gmtime => "gmtime", UnaryOp::Localtime => "localtime", UnaryOp::Mktime => "mktime", UnaryOp::Now => "now",
         UnaryOp::Abs => "abs", UnaryOp::GetModuleMeta => "modulemeta",
         _ => unreachable!(),
     };
@@ -4080,6 +4080,23 @@ fn eval_call_builtin(name: &str, args: &[Expr], input: Value, env: &EnvRef, cb: 
             // del(f) = delpaths([path(f)])
             return eval_del(&args[0], input, env, cb);
         }
+        ("exec", 2) => {
+            // exec(generator; "cmd"): spawn cmd once, pipe generator outputs to stdin, yield stdout lines
+            return eval_exec_pipe(&args[0], &args[1], input, env, cb);
+        }
+        ("fromcsv", 0) | ("fromtsv", 0) => {
+            return eval_fromcsv(&input, name == "fromtsv", cb);
+        }
+        ("fromcsvh", _) | ("fromtsvh", _) => {
+            let is_tsv = name == "fromtsvh";
+            if args.is_empty() {
+                return eval_fromcsvh_auto(&input, is_tsv, cb);
+            } else {
+                return eval(&args[0], input.clone(), env, &mut |headers_val| {
+                    eval_fromcsvh_with_headers(&input, &headers_val, is_tsv, cb)
+                });
+            }
+        }
         ("bsearch", 1) => {
             // bsearch(target): binary search - evaluate target then call runtime
             return eval(&args[0], input.clone(), env, &mut |target| {
@@ -4096,6 +4113,135 @@ fn eval_call_builtin(name: &str, args: &[Expr], input: Value, env: &EnvRef, cb: 
     }
     // Default: evaluate args as generators and call runtime with input + args
     eval_call_builtin_args(name, args, 0, vec![input.clone()], input, env, cb)
+}
+
+fn eval_exec_pipe(gen_expr: &Expr, cmd_expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
+    use std::io::Write;
+    // Evaluate the command string first
+    let mut cmd_str = None;
+    eval(cmd_expr, input.clone(), env, &mut |cmd_val| {
+        match &cmd_val {
+            Value::Str(s) => { cmd_str = Some(s.as_str().to_string()); }
+            _ => { return Err(anyhow::anyhow!("exec: command must be a string")); }
+        }
+        Ok(true)
+    })?;
+    let cmd_str = cmd_str.ok_or_else(|| anyhow::anyhow!("exec: command produced no value"))?;
+
+    // Spawn the process once
+    let mut child = std::process::Command::new("sh")
+        .args(["-c", &cmd_str])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("exec: failed to spawn: {}", e))?;
+
+    // Pipe generator outputs to stdin
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        eval(gen_expr, input, env, &mut |val| {
+            let line = match &val {
+                Value::Str(s) => s.as_str().to_string(),
+                other => crate::value::value_to_json(other),
+            };
+            writeln!(stdin, "{}", line)
+                .map_err(|e| anyhow::anyhow!("exec: write to stdin failed: {}", e))?;
+            Ok(true)
+        })?;
+        // stdin is dropped here, signaling EOF
+    }
+
+    let output = child.wait_with_output()
+        .map_err(|e| anyhow::anyhow!("exec: failed to wait: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let code = output.status.code().unwrap_or(-1);
+        bail!("exec: command exited with code {}: {}", code, stderr.trim_end());
+    }
+
+    // Yield each line of stdout as a separate value
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.as_ref().lines() {
+        cb(Value::from_str(line))?;
+    }
+    Ok(true)
+}
+
+fn eval_fromcsv(input: &Value, is_tsv: bool, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
+    let s = match input {
+        Value::Str(s) => s.as_str().to_string(),
+        _ => bail!("fromcsv input must be a string"),
+    };
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .delimiter(if is_tsv { b'\t' } else { b',' })
+        .from_reader(s.as_bytes());
+    for result in rdr.records() {
+        let record = result.map_err(|e| anyhow::anyhow!("CSV parse error: {}", e))?;
+        let arr: Vec<Value> = record.iter().map(Value::from_str).collect();
+        cb(Value::Arr(Rc::new(arr)))?;
+    }
+    Ok(true)
+}
+
+fn eval_fromcsvh_auto(input: &Value, is_tsv: bool, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
+    let s = match input {
+        Value::Str(s) => s.as_str().to_string(),
+        _ => bail!("fromcsvh input must be a string"),
+    };
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .delimiter(if is_tsv { b'\t' } else { b',' })
+        .from_reader(s.as_bytes());
+    let headers: Vec<String> = rdr.headers()
+        .map_err(|e| anyhow::anyhow!("CSV parse error: {}", e))?
+        .iter()
+        .map(|h| h.to_string())
+        .collect();
+    for result in rdr.records() {
+        let record = result.map_err(|e| anyhow::anyhow!("CSV parse error: {}", e))?;
+        let mut obj = crate::value::new_objmap();
+        for (i, field) in record.iter().enumerate() {
+            if let Some(key) = headers.get(i) {
+                obj.insert(KeyStr::from(key.as_str()), Value::from_str(field));
+            }
+        }
+        cb(Value::Obj(Rc::new(obj)))?;
+    }
+    Ok(true)
+}
+
+fn eval_fromcsvh_with_headers(input: &Value, headers_val: &Value, is_tsv: bool, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
+    let s = match input {
+        Value::Str(s) => s.as_str().to_string(),
+        _ => bail!("fromcsvh input must be a string"),
+    };
+    let headers: Vec<String> = match headers_val {
+        Value::Arr(arr) => {
+            arr.iter().map(|v| match v {
+                Value::Str(s) => Ok(s.as_str().to_string()),
+                _ => Err(anyhow::anyhow!("fromcsvh headers must be strings")),
+            }).collect::<Result<Vec<_>, _>>()?
+        }
+        _ => bail!("fromcsvh argument must be an array of strings"),
+    };
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .delimiter(if is_tsv { b'\t' } else { b',' })
+        .from_reader(s.as_bytes());
+    for result in rdr.records() {
+        let record = result.map_err(|e| anyhow::anyhow!("CSV parse error: {}", e))?;
+        let mut obj = crate::value::new_objmap();
+        for (i, field) in record.iter().enumerate() {
+            if let Some(key) = headers.get(i) {
+                obj.insert(KeyStr::from(key.as_str()), Value::from_str(field));
+            }
+        }
+        cb(Value::Obj(Rc::new(obj)))?;
+    }
+    Ok(true)
 }
 
 fn eval_call_builtin_args(name: &str, args: &[Expr], idx: usize, collected: Vec<Value>, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {

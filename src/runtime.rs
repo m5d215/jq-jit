@@ -129,6 +129,8 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "inside" => binary_arg(args, |a, b| rt_contains(b, a)),
         "startswith" => binary_arg(args, rt_startswith),
         "endswith" => binary_arg(args, rt_endswith),
+        "exec" => binary_arg(args, rt_exec),
+        "execv" => binary_arg(args, rt_execv),
         "ltrimstr" => binary_arg(args, rt_ltrimstr),
         "rtrimstr" => binary_arg(args, rt_rtrimstr),
         "split" if args.len() <= 2 => binary_arg(args, rt_split),
@@ -261,12 +263,15 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             })
         }
         "gmtime" => unary_op(args, rt_gmtime),
+        "localtime" => unary_op(args, rt_localtime),
         "mktime" => unary_op(args, rt_mktime),
         "strftime" => binary_arg(args, rt_strftime),
         "strptime" => binary_arg(args, rt_strptime),
         "todate" => unary_op(args, |v| rt_strftime(v, &Value::from_str("%Y-%m-%dT%H:%M:%SZ"))),
         "fromdate" => unary_op(args, |v| rt_strptime(v, &Value::from_str("%Y-%m-%dT%H:%M:%SZ"))),
         "date" => unary_op(args, |v| rt_strftime(v, &Value::from_str("%Y-%m-%dT%H:%M:%SZ"))),
+        "fromisodate" => unary_op(args, rt_fromisodate),
+        "toisodate" => unary_op(args, rt_toisodate),
         "trimstr" => binary_arg(args, |a, b| {
             let v = rt_ltrimstr(a, b)?;
             rt_rtrimstr(&v, b)
@@ -1403,6 +1408,61 @@ fn rt_endswith(v: &Value, suffix: &Value) -> Result<Value> {
     }
 }
 
+fn exec_spawn(input: &Value, cmd: &Value) -> Result<std::process::Output> {
+    let cmd_str = match cmd {
+        Value::Str(s) => s.as_str().to_string(),
+        _ => bail!("exec requires a string command"),
+    };
+    let stdin_data = match input {
+        Value::Null => None,
+        Value::Str(s) => Some(s.as_str().to_string()),
+        other => Some(crate::value::value_to_json(other)),
+    };
+    let mut child = std::process::Command::new("sh")
+        .args(["-c", &cmd_str])
+        .stdin(if stdin_data.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("exec: failed to spawn: {}", e))?;
+    if let Some(data) = stdin_data {
+        use std::io::Write;
+        if let Some(ref mut stdin) = child.stdin {
+            let _ = stdin.write_all(data.as_bytes());
+        }
+    }
+    child.wait_with_output()
+        .map_err(|e| anyhow::anyhow!("exec: failed to wait: {}", e))
+}
+
+fn rt_exec(input: &Value, cmd: &Value) -> Result<Value> {
+    let output = exec_spawn(input, cmd)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let code = output.status.code().unwrap_or(-1);
+        bail!("exec: command exited with code {}: {}", code, stderr.trim_end());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim_end_matches('\n');
+    Ok(Value::from_str(trimmed))
+}
+
+fn rt_execv(input: &Value, cmd: &Value) -> Result<Value> {
+    let output = exec_spawn(input, cmd)?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let code = output.status.code().unwrap_or(-1);
+    let mut obj = new_objmap();
+    obj.insert(KeyStr::const_new("exitcode"), Value::Num(code as f64, None));
+    obj.insert(KeyStr::const_new("stdout"), Value::from_str(stdout.trim_end_matches('\n')));
+    obj.insert(KeyStr::const_new("stderr"), Value::from_str(stderr.trim_end_matches('\n')));
+    Ok(Value::Obj(Rc::new(obj)))
+}
+
 fn rt_ltrimstr(v: &Value, prefix: &Value) -> Result<Value> {
     match (v, prefix) {
         (Value::Str(s), Value::Str(p)) => {
@@ -2149,6 +2209,29 @@ fn libc_gmtime(secs: i64) -> Value {
     ]))
 }
 
+fn rt_localtime(v: &Value) -> Result<Value> {
+    match v {
+        Value::Num(n, _) => {
+            let secs = *n as i64;
+            use libc::{localtime_r, time_t, tm};
+            let t = secs as time_t;
+            let mut result: tm = unsafe { std::mem::zeroed() };
+            unsafe { localtime_r(&t, &mut result) };
+            Ok(Value::Arr(Rc::new(vec![
+                Value::Num((result.tm_year + 1900) as f64, None),
+                Value::Num(result.tm_mon as f64, None),
+                Value::Num(result.tm_mday as f64, None),
+                Value::Num(result.tm_hour as f64, None),
+                Value::Num(result.tm_min as f64, None),
+                Value::Num(result.tm_sec as f64, None),
+                Value::Num(result.tm_wday as f64, None),
+                Value::Num(result.tm_yday as f64, None),
+            ])))
+        }
+        _ => bail!("localtime requires number"),
+    }
+}
+
 fn time_arr_to_tm(a: &[Value]) -> Result<libc::tm> {
     let get = |i: usize| -> f64 { a.get(i).and_then(|v| v.as_f64()).unwrap_or(0.0) };
     // Validate that first element is a number
@@ -2283,6 +2366,88 @@ fn rt_strflocaltime_impl(input: &Value, fmt: &Value) -> Result<Value> {
 }
 
 // -----------------------------------------------------------------------
+// ISO 8601 date conversion
+// -----------------------------------------------------------------------
+
+fn rt_fromisodate(v: &Value) -> Result<Value> {
+    use chrono::{DateTime, FixedOffset, NaiveDateTime, NaiveDate, Local};
+
+    let s = match v {
+        Value::Str(s) => s.as_str().to_string(),
+        _ => bail!("fromisodate input must be a string"),
+    };
+
+    // Try RFC 3339 first (handles Z and +HH:MM offsets)
+    if let Ok(dt) = DateTime::<FixedOffset>::parse_from_rfc3339(&s) {
+        let epoch = dt.timestamp();
+        let nanos = dt.timestamp_subsec_nanos();
+        return Ok(epoch_with_frac(epoch, nanos));
+    }
+
+    // Try datetime without timezone (local timezone)
+    for fmt in &["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S"] {
+        if let Ok(ndt) = NaiveDateTime::parse_from_str(&s, fmt) {
+            let local_dt = ndt.and_local_timezone(Local)
+                .single()
+                .ok_or_else(|| anyhow::anyhow!("ambiguous local time: {}", s))?;
+            let epoch = local_dt.timestamp();
+            let nanos = local_dt.timestamp_subsec_nanos();
+            return Ok(epoch_with_frac(epoch, nanos));
+        }
+    }
+
+    // Try date only (local timezone at midnight)
+    if let Ok(nd) = NaiveDate::parse_from_str(&s, "%Y-%m-%d") {
+        let ndt = nd.and_hms_opt(0, 0, 0).unwrap();
+        let local_dt = ndt.and_local_timezone(Local)
+            .single()
+            .ok_or_else(|| anyhow::anyhow!("ambiguous local time: {}", s))?;
+        let epoch = local_dt.timestamp();
+        return Ok(Value::Num(epoch as f64, None));
+    }
+
+    bail!("fromisodate: invalid ISO 8601 date string: {}", s)
+}
+
+fn epoch_with_frac(epoch: i64, nanos: u32) -> Value {
+    if nanos == 0 {
+        Value::Num(epoch as f64, None)
+    } else {
+        let frac = epoch as f64 + nanos as f64 / 1_000_000_000.0;
+        Value::Num(frac, None)
+    }
+}
+
+fn rt_toisodate(v: &Value) -> Result<Value> {
+    use chrono::DateTime;
+
+    let epoch = match v {
+        Value::Num(n, _) => *n,
+        _ => bail!("toisodate input must be a number"),
+    };
+
+    let secs = epoch.floor() as i64;
+    let frac = epoch - epoch.floor();
+
+    if frac.abs() < 1e-9 {
+        // Integer epoch: no fractional part
+        let dt = DateTime::from_timestamp(secs, 0)
+            .ok_or_else(|| anyhow::anyhow!("toisodate: invalid epoch: {}", epoch))?;
+        let formatted = dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        Ok(Value::from_str(&formatted))
+    } else {
+        // Float epoch: include milliseconds
+        // Use round(frac * 1000) to get millis to avoid precision loss
+        let millis = (frac * 1000.0).round() as u32;
+        let nanos = millis * 1_000_000;
+        let dt = DateTime::from_timestamp(secs, nanos)
+            .ok_or_else(|| anyhow::anyhow!("toisodate: invalid epoch: {}", epoch))?;
+        let formatted = format!("{}.{:03}Z", dt.format("%Y-%m-%dT%H:%M:%S"), millis);
+        Ok(Value::from_str(&formatted))
+    }
+}
+
+// -----------------------------------------------------------------------
 // Environment
 // -----------------------------------------------------------------------
 
@@ -2361,7 +2526,10 @@ pub fn rt_builtins() -> Value {
         "@html/0", "@json/0", "@text/0", "@sh/0",
         "ascii_downcase/0", "ascii_upcase/0",
         "strflocaltime/1",
+        "exec/1", "exec/2", "execv/1",
+        "fromcsv/0", "fromtsv/0", "fromcsvh/0", "fromcsvh/1", "fromtsvh/0", "fromtsvh/1",
         "toboolean/0",
+        "fromisodate/0", "toisodate/0",
     ];
     let arr: Vec<Value> = builtins.iter()
         .map(|&name| Value::from_str(name))
