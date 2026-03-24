@@ -129,6 +129,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "inside" => binary_arg(args, |a, b| rt_contains(b, a)),
         "startswith" => binary_arg(args, rt_startswith),
         "endswith" => binary_arg(args, rt_endswith),
+        "exec" => binary_arg(args, rt_exec),
         "ltrimstr" => binary_arg(args, rt_ltrimstr),
         "rtrimstr" => binary_arg(args, rt_rtrimstr),
         "split" if args.len() <= 2 => binary_arg(args, rt_split),
@@ -1403,6 +1404,45 @@ fn rt_endswith(v: &Value, suffix: &Value) -> Result<Value> {
     }
 }
 
+fn rt_exec(input: &Value, cmd: &Value) -> Result<Value> {
+    let cmd_str = match cmd {
+        Value::Str(s) => s.as_str().to_string(),
+        _ => bail!("exec requires a string command"),
+    };
+    let stdin_data = match input {
+        Value::Null => None,
+        Value::Str(s) => Some(s.as_str().to_string()),
+        other => Some(crate::value::value_to_json(other)),
+    };
+    let mut child = std::process::Command::new("sh")
+        .args(["-c", &cmd_str])
+        .stdin(if stdin_data.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("exec: failed to spawn: {}", e))?;
+    if let Some(data) = stdin_data {
+        use std::io::Write;
+        if let Some(ref mut stdin) = child.stdin {
+            let _ = stdin.write_all(data.as_bytes());
+        }
+    }
+    let output = child.wait_with_output()
+        .map_err(|e| anyhow::anyhow!("exec: failed to wait: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let code = output.status.code().unwrap_or(-1);
+        bail!("exec: command exited with code {}: {}", code, stderr.trim_end());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim_end_matches('\n');
+    Ok(Value::from_str(trimmed))
+}
+
 fn rt_ltrimstr(v: &Value, prefix: &Value) -> Result<Value> {
     match (v, prefix) {
         (Value::Str(s), Value::Str(p)) => {
@@ -2361,6 +2401,7 @@ pub fn rt_builtins() -> Value {
         "@html/0", "@json/0", "@text/0", "@sh/0",
         "ascii_downcase/0", "ascii_upcase/0",
         "strflocaltime/1",
+        "exec/1",
         "toboolean/0",
     ];
     let arr: Vec<Value> = builtins.iter()

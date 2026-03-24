@@ -3380,6 +3380,11 @@ impl Parser {
                 let f = args.into_iter().next().unwrap();
                 Ok(Expr::CallBuiltin { name: "walk".to_string(), args: vec![f] })
             }
+            // exec/1: execute shell command and return stdout
+            ("exec", 1) => {
+                let cmd = args.into_iter().next().unwrap();
+                Ok(Expr::CallBuiltin { name: "exec".to_string(), args: vec![cmd] })
+            }
             // IN/1: IN(s) = any(. == s; .)... actually IN(s) = . as $x | first(s | if . == $x then true else empty end) // false
             ("IN", 1) => {
                 let s = args.into_iter().next().unwrap();
