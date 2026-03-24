@@ -130,6 +130,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "startswith" => binary_arg(args, rt_startswith),
         "endswith" => binary_arg(args, rt_endswith),
         "exec" => binary_arg(args, rt_exec),
+        "execv" => binary_arg(args, rt_execv),
         "ltrimstr" => binary_arg(args, rt_ltrimstr),
         "rtrimstr" => binary_arg(args, rt_rtrimstr),
         "split" if args.len() <= 2 => binary_arg(args, rt_split),
@@ -1404,7 +1405,7 @@ fn rt_endswith(v: &Value, suffix: &Value) -> Result<Value> {
     }
 }
 
-fn rt_exec(input: &Value, cmd: &Value) -> Result<Value> {
+fn exec_spawn(input: &Value, cmd: &Value) -> Result<std::process::Output> {
     let cmd_str = match cmd {
         Value::Str(s) => s.as_str().to_string(),
         _ => bail!("exec requires a string command"),
@@ -1431,8 +1432,12 @@ fn rt_exec(input: &Value, cmd: &Value) -> Result<Value> {
             let _ = stdin.write_all(data.as_bytes());
         }
     }
-    let output = child.wait_with_output()
-        .map_err(|e| anyhow::anyhow!("exec: failed to wait: {}", e))?;
+    child.wait_with_output()
+        .map_err(|e| anyhow::anyhow!("exec: failed to wait: {}", e))
+}
+
+fn rt_exec(input: &Value, cmd: &Value) -> Result<Value> {
+    let output = exec_spawn(input, cmd)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let code = output.status.code().unwrap_or(-1);
@@ -1441,6 +1446,18 @@ fn rt_exec(input: &Value, cmd: &Value) -> Result<Value> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let trimmed = stdout.trim_end_matches('\n');
     Ok(Value::from_str(trimmed))
+}
+
+fn rt_execv(input: &Value, cmd: &Value) -> Result<Value> {
+    let output = exec_spawn(input, cmd)?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let code = output.status.code().unwrap_or(-1);
+    let mut obj = new_objmap();
+    obj.insert(KeyStr::const_new("exitcode"), Value::Num(code as f64, None));
+    obj.insert(KeyStr::const_new("stdout"), Value::from_str(stdout.trim_end_matches('\n')));
+    obj.insert(KeyStr::const_new("stderr"), Value::from_str(stderr.trim_end_matches('\n')));
+    Ok(Value::Obj(Rc::new(obj)))
 }
 
 fn rt_ltrimstr(v: &Value, prefix: &Value) -> Result<Value> {
@@ -2401,7 +2418,7 @@ pub fn rt_builtins() -> Value {
         "@html/0", "@json/0", "@text/0", "@sh/0",
         "ascii_downcase/0", "ascii_upcase/0",
         "strflocaltime/1",
-        "exec/1", "exec/2",
+        "exec/1", "exec/2", "execv/1",
         "toboolean/0",
     ];
     let arr: Vec<Value> = builtins.iter()

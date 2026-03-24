@@ -3385,6 +3385,11 @@ impl Parser {
                 let cmd = args.into_iter().next().unwrap();
                 Ok(Expr::CallBuiltin { name: "exec".to_string(), args: vec![cmd] })
             }
+            // execv/1: execute shell command, return {exitcode, stdout, stderr}
+            ("execv", 1) => {
+                let cmd = args.into_iter().next().unwrap();
+                Ok(Expr::CallBuiltin { name: "execv".to_string(), args: vec![cmd] })
+            }
             // exec/2: pipe generator output to shell command, yield stdout lines
             ("exec", 2) => {
                 let mut args = args.into_iter();
