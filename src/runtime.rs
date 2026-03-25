@@ -2067,6 +2067,7 @@ fn rt_match(v: &Value, re: &Value) -> Result<Value> {
                         None => bail!("match failed"),
                     }
                 } else {
+                    let capture_names: Vec<Option<&str>> = regex.capture_names().skip(1).collect();
                     match regex.captures(s) {
                         Some(caps) => {
                             let m = caps.get(0).unwrap();
@@ -2076,19 +2077,23 @@ fn rt_match(v: &Value, re: &Value) -> Result<Value> {
                             result.insert("string".into(), Value::from_str(m.as_str()));
                             let mut captures = Vec::with_capacity(num_groups - 1);
                             for i in 1..num_groups {
+                                let name_val = match capture_names.get(i - 1).and_then(|n| *n) {
+                                    Some(name) => Value::from_str(name),
+                                    None => Value::Null,
+                                };
                                 if let Some(cap) = caps.get(i) {
                                     let mut c = new_objmap();
                                     c.insert("offset".into(), Value::Num(cap.start() as f64, None));
                                     c.insert("length".into(), Value::Num(cap.len() as f64, None));
                                     c.insert("string".into(), Value::from_str(cap.as_str()));
-                                    c.insert("name".into(), Value::Null);
+                                    c.insert("name".into(), name_val);
                                     captures.push(Value::Obj(Rc::new(c)));
                                 } else {
                                     let mut c = new_objmap();
                                     c.insert("offset".into(), Value::Num(-1.0, None));
                                     c.insert("length".into(), Value::Num(0.0, None));
                                     c.insert("string".into(), Value::Null);
-                                    c.insert("name".into(), Value::Null);
+                                    c.insert("name".into(), name_val);
                                     captures.push(Value::Obj(Rc::new(c)));
                                 }
                             }
