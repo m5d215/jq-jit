@@ -17,8 +17,10 @@ TIMEOUT=30
 RUNS=3
 
 if [ "$1" = "--quick" ]; then
-    RUNS=1
+    #RUNS=1
     TIMEOUT=15
+    JQ=
+    JAQ=
 fi
 
 if [ ! -x "$JQ_JIT" ]; then
@@ -233,7 +235,7 @@ bench_gen "null propagation(2M)"        2000000   '[range(.) | null] | map(.a.b.
 echo ""
 echo "--- jaq-derived ---"
 header
-BENCH_DIR="/tmp/jaq-repo/examples/benches"
+BENCH_DIR="$HOME/src/github.com/01mf02/jaq/examples/benches"
 if [ -d "$BENCH_DIR" ]; then
     for name in reverse sort group-by min-max ex-implode repeat from last cumsum cumsum-xy try-catch add reduce reduce-update kv kv-update kv-entries pyramid upto tree-flatten tree-update to-fromjson str-slice; do
         f="$BENCH_DIR/$name.jq"
