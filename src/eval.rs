@@ -2822,25 +2822,31 @@ pub fn eval(
             })
         }
 
-        Expr::RegexSub { input_expr, re, tostr, flags } => {
-            eval(input_expr, input.clone(), env, &mut |s| {
-                eval(re, input.clone(), env, &mut |rv| {
-                    eval(tostr, input.clone(), env, &mut |tv| {
-                        eval(flags, input.clone(), env, &mut |fv| {
-                            cb(crate::runtime::call_builtin("sub", &[s.clone(), rv.clone(), tv.clone(), fv.clone()])?)
-                        })
-                    })
-                })
-            })
-        }
-
+        Expr::RegexSub { input_expr, re, tostr, flags } |
         Expr::RegexGsub { input_expr, re, tostr, flags } => {
+            let is_global = matches!(expr, Expr::RegexGsub { .. });
             eval(input_expr, input.clone(), env, &mut |s| {
                 eval(re, input.clone(), env, &mut |rv| {
-                    eval(tostr, input.clone(), env, &mut |tv| {
-                        eval(flags, input.clone(), env, &mut |fv| {
-                            cb(crate::runtime::call_builtin("gsub", &[s.clone(), rv.clone(), tv.clone(), fv.clone()])?)
-                        })
+                    eval(flags, input.clone(), env, &mut |fv| {
+                        let input_str = s.as_str().ok_or_else(|| anyhow::anyhow!("sub/gsub input must be string"))?;
+                        let re_str = rv.as_str().ok_or_else(|| anyhow::anyhow!("sub/gsub regex must be string"))?;
+                        let segments = crate::runtime::sub_gsub_segments(input_str, re_str, &fv, is_global)?;
+                        let mut result = String::new();
+                        for seg in &segments {
+                            result.push_str(&seg.literal);
+                            if let Some(ref cap_obj) = seg.captures {
+                                let mut replacement = Value::Null;
+                                eval(tostr, cap_obj.clone(), env, &mut |tv| {
+                                    replacement = tv;
+                                    Ok(true)
+                                })?;
+                                match &replacement {
+                                    Value::Str(s) => result.push_str(s),
+                                    other => result.push_str(&other.to_string()),
+                                }
+                            }
+                        }
+                        cb(Value::from_string(result))
                     })
                 })
             })

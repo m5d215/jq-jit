@@ -2269,6 +2269,75 @@ fn rt_sub_gsub(v: &Value, re: &Value, replacement: &Value, global: bool) -> Resu
     }
 }
 
+/// A match segment for sub/gsub with capture-aware replacement.
+/// Each segment is either a literal string (non-matched part) or a capture object.
+pub struct SubGsubSegment {
+    /// The literal text before this match (or trailing text for the last segment).
+    pub literal: String,
+    /// If Some, this is a capture object (named captures as keys → matched strings as values).
+    pub captures: Option<Value>,
+}
+
+/// Find regex matches and return segments for capture-aware sub/gsub replacement.
+/// Returns segments alternating: literal, capture_obj, literal, capture_obj, ..., literal.
+pub fn sub_gsub_segments(input: &str, pattern: &str, flags: &Value, global: bool) -> Result<Vec<SubGsubSegment>> {
+    let (pat, flag_global) = apply_regex_flags(pattern, flags);
+    let is_global = global || flag_global;
+    with_regex(&pat, |regex| {
+        let mut segments = Vec::new();
+        let mut last_end = 0;
+
+        let mut process_match = |m: regex::Match, caps: Option<&regex::Captures>| {
+            // Add literal text before this match
+            let literal = input[last_end..m.start()].to_string();
+            // Build capture object
+            let mut obj = new_objmap();
+            if let Some(caps) = caps {
+                for name in regex.capture_names().flatten() {
+                    if let Some(cm) = caps.name(name) {
+                        obj.insert(KeyStr::from(name), Value::from_str(cm.as_str()));
+                    } else {
+                        obj.insert(KeyStr::from(name), Value::Null);
+                    }
+                }
+            }
+            segments.push(SubGsubSegment {
+                literal,
+                captures: Some(Value::Obj(Rc::new(obj))),
+            });
+            last_end = m.end();
+        };
+
+        let has_captures = regex.captures_len() > 1;
+        if is_global {
+            if has_captures {
+                for caps in regex.captures_iter(input) {
+                    let m = caps.get(0).unwrap();
+                    process_match(m, Some(&caps));
+                }
+            } else {
+                for m in regex.find_iter(input) {
+                    process_match(m, None);
+                }
+            }
+        } else if has_captures {
+            if let Some(caps) = regex.captures(input) {
+                let m = caps.get(0).unwrap();
+                process_match(m, Some(&caps));
+            }
+        } else if let Some(m) = regex.find(input) {
+            process_match(m, None);
+        }
+
+        // Trailing literal
+        segments.push(SubGsubSegment {
+            literal: input[last_end..].to_string(),
+            captures: None,
+        });
+        segments
+    })
+}
+
 // -----------------------------------------------------------------------
 // Date/Time
 // -----------------------------------------------------------------------

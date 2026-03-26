@@ -63,3 +63,25 @@ gsub("hello";"HI";"i")
 @json
 ["b"]
 "[\"b\"]"
+
+# Issue #5: gsub/sub cannot reference named capture groups in replacement expression
+
+# gsub with named capture group
+gsub("(?<x>.)"; "\(.x|ascii_upcase)")
+"abc"
+"ABC"
+
+# sub with named capture group (first match only)
+sub("(?<x>\\w+)"; "\(.x|ascii_upcase)")
+"hello world"
+"HELLO world"
+
+# sub with multiple named capture groups
+sub("(?<y>\\d+)-(?<m>\\d+)-(?<d>\\d+)"; "\(.d)/\(.m)/\(.y)")
+"2024-01-15"
+"15/01/2024"
+
+# gsub with simple string replacement still works
+gsub(" "; "_")
+"hello world"
+"hello_world"
