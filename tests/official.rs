@@ -421,3 +421,57 @@ fn official_jq_test_suite() {
 
     assert_eq!(fail, 0, "{} tests failed out of {} total ({} skipped)", fail, total, skip);
 }
+
+#[test]
+fn regression_test_suite() {
+    let test_file = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/regression.test");
+    let content = std::fs::read_to_string(test_file)
+        .unwrap_or_else(|e| panic!("Failed to read test file {}: {}", test_file, e));
+
+    let cases = parse_test_file(&content);
+    let total = cases.len();
+
+    let mut pass = 0usize;
+    let mut fail = 0usize;
+    let mut skip = 0usize;
+    let mut failures: Vec<TestResult> = Vec::new();
+
+    for case in &cases {
+        let result = run_test(case);
+        match &result.status {
+            TestStatus::Pass => pass += 1,
+            TestStatus::Fail => {
+                fail += 1;
+                failures.push(result);
+            }
+            TestStatus::Skip(reason) => {
+                skip += 1;
+                eprintln!("SKIP #{} ({}): {}", case.test_num, reason, case.filter);
+            }
+        }
+    }
+
+    // Print summary
+    eprintln!();
+    eprintln!("=== Regression Test Suite Results ===");
+    eprintln!("PASS: {}", pass);
+    eprintln!("FAIL: {}", fail);
+    eprintln!("SKIP: {}", skip);
+    eprintln!("TOTAL: {}", total);
+    if total > 0 {
+        eprintln!("PASS rate: {:.1}%", pass as f64 * 100.0 / total as f64);
+    }
+
+    if !failures.is_empty() {
+        eprintln!();
+        eprintln!("=== Failures ===");
+        for f in &failures {
+            eprintln!("  #{}: {}", f.test_num, f.filter);
+            eprintln!("    input:    {}", f.input);
+            eprintln!("    expected: {}", f.expected.lines().take(3).collect::<Vec<_>>().join(" | "));
+            eprintln!("    actual:   {}", f.actual.lines().take(3).collect::<Vec<_>>().join(" | "));
+        }
+    }
+
+    assert_eq!(fail, 0, "{} regression tests failed out of {} total ({} skipped)", fail, total, skip);
+}
