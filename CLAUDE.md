@@ -5,10 +5,10 @@ JIT compilation implementation of jq.
 ## Commands
 
 ```bash
-cargo build --release    # Build (must have zero warnings)
-cargo test --release     # Test (official 509 + regression)
-./bench/run.sh           # Benchmark
-./bench/comprehensive.sh # Benchmark (vs past results, see docs/benchmark-history.md)
+cargo build --release            # Build (must have zero warnings)
+cargo test --release             # Test (official 509 + regression)
+./bench/run.sh                   # Benchmark
+./bench/comprehensive.sh --quick # Benchmark (vs past results, see docs/benchmark-history.md)
 ```
 
 ## Issue Fix Workflow
