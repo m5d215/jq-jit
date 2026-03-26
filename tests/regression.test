@@ -85,3 +85,35 @@ sub("(?<y>\\d+)-(?<m>\\d+)-(?<d>\\d+)"; "\(.d)/\(.m)/\(.y)")
 gsub(" "; "_")
 "hello world"
 "hello_world"
+
+# Issue #7: @json double-escapes non-string values
+
+# @json on null
+@json
+null
+"null"
+
+# @json on boolean
+@json
+true
+"true"
+
+# @json on number
+@json
+123
+"123"
+
+# @json on string
+@json
+"a"
+"\"a\""
+
+# @json on array
+@json
+["a"]
+"[\"a\"]"
+
+# @json on object
+@json
+{"k":"v"}
+"{\"k\":\"v\"}"
