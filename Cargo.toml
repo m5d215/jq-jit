@@ -8,11 +8,11 @@ repository = "https://github.com/m5d215/jq-jit"
 authors = ["m5d215"]
 
 [dependencies]
-cranelift-codegen = "0.129"
-cranelift-frontend = "0.129"
-cranelift-jit = "0.129"
-cranelift-module = "0.129"
-cranelift-native = "0.129"
+cranelift-codegen = "0.130"
+cranelift-frontend = "0.130"
+cranelift-jit = "0.130"
+cranelift-module = "0.130"
+cranelift-native = "0.130"
 anyhow = "1"
 regex = "1"
 libm = "0.2"
