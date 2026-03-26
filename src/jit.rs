@@ -273,8 +273,16 @@ fn is_scalar(expr: &Expr) -> bool {
         // match/capture are generators (0 or 1 outputs) — non-match produces empty
         Expr::RegexMatch { .. } => false,
         Expr::RegexCapture { .. } => false,
-        Expr::RegexSub { input_expr, re, tostr, flags } => is_scalar(input_expr) && is_scalar(re) && is_scalar(tostr) && is_scalar(flags),
-        Expr::RegexGsub { input_expr, re, tostr, flags } => is_scalar(input_expr) && is_scalar(re) && is_scalar(tostr) && is_scalar(flags),
+        Expr::RegexSub { input_expr, re, tostr, flags } => {
+            // Only JIT when tostr is a literal string (no capture group references)
+            matches!(tostr.as_ref(), Expr::Literal(Literal::Str(_)))
+                && is_scalar(input_expr) && is_scalar(re) && is_scalar(flags)
+        }
+        Expr::RegexGsub { input_expr, re, tostr, flags } => {
+            // Only JIT when tostr is a literal string (no capture group references)
+            matches!(tostr.as_ref(), Expr::Literal(Literal::Str(_)))
+                && is_scalar(input_expr) && is_scalar(re) && is_scalar(flags)
+        }
         _ => false,
     }
 }
