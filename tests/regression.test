@@ -117,3 +117,35 @@ true
 @json
 {"k":"v"}
 "{\"k\":\"v\"}"
+
+# Issue #8: @sh does not correctly handle array and numeric input
+
+# @sh on number (no quotes)
+@sh
+42
+"42"
+
+# @sh on null (no quotes)
+@sh
+null
+"null"
+
+# @sh on boolean (no quotes)
+@sh
+true
+"true"
+
+# @sh on string (single-quoted)
+@sh
+"hello"
+"'hello'"
+
+# @sh on array (elements individually quoted, space-separated)
+@sh
+["a","b c"]
+"'a' 'b c'"
+
+# @sh on mixed array
+@sh
+["a",1,null]
+"'a' 1 null"
