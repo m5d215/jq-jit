@@ -3175,6 +3175,21 @@ fn eval_obj_pairs(pairs: &[(Expr, Expr)], idx: usize, cur: crate::value::ObjMap,
     })
 }
 
+fn format_sh(val: &Value) -> String {
+    match val {
+        Value::Str(s) => format!("'{}'", s.replace('\'', "'\\''")),
+        Value::Null => "null".to_string(),
+        Value::True => "true".to_string(),
+        Value::False => "false".to_string(),
+        Value::Num(n, _) => crate::value::format_jq_number(*n),
+        Value::Arr(a) => {
+            let parts: Vec<String> = a.iter().map(|v| format_sh(v)).collect();
+            parts.join(" ")
+        }
+        _ => format!("'{}'", crate::value::value_to_json(val).replace('\'', "'\\''")),
+    }
+}
+
 pub fn eval_format(name: &str, val: &Value) -> Result<String> {
     // For csv/tsv, the input must be an array
     match name {
@@ -3285,7 +3300,7 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
             }
             Ok(String::from_utf8_lossy(&decoded).into_owned())
         }
-        "sh" => Ok(format!("'{}'", s.replace('\'', "'\\''"))),
+        "sh" => Ok(format_sh(val)),
         "base64" => {
             const C: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
             let d = s.as_bytes(); let mut r = String::new();
