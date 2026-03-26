@@ -171,3 +171,15 @@ null
 @text
 ["a","b"]
 "[\"a\",\"b\"]"
+
+# Issue #10: split returns [""] instead of [] for empty string input
+
+# split on empty string with non-empty separator
+split(",")
+""
+[]
+
+# split on empty string with empty separator
+split("")
+""
+[]

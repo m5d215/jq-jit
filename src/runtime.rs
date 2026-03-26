@@ -1528,6 +1528,9 @@ fn rt_rtrimstr(v: &Value, suffix: &Value) -> Result<Value> {
 fn rt_split(v: &Value, sep: &Value) -> Result<Value> {
     match (v, sep) {
         (Value::Str(s), Value::Str(p)) => {
+            if s.is_empty() {
+                return Ok(Value::Arr(Rc::new(Vec::new())));
+            }
             if p.is_empty() {
                 // split("") = each character as a separate element
                 let mut parts = Vec::with_capacity(s.len());
