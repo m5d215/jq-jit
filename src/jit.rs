@@ -1421,6 +1421,17 @@ impl Flattener {
                 self.emit(JitOp::Drop { slot: flags_val });
                 out
             }
+            Expr::RegexScan { input_expr, re, flags } => {
+                let inp = self.flatten_scalar(input_expr, input_slot);
+                let re_val = self.flatten_scalar(re, input_slot);
+                let flags_val = self.flatten_scalar(flags, input_slot);
+                let out = self.alloc_slot();
+                self.emit(JitOp::CallBuiltin { dst: out, name: "scan".to_string(), args: vec![inp, re_val, flags_val] });
+                self.emit(JitOp::Drop { slot: inp });
+                self.emit(JitOp::Drop { slot: re_val });
+                self.emit(JitOp::Drop { slot: flags_val });
+                out
+            }
             // RegexMatch/RegexCapture are handled as generators (via eval fallback)
             // since they can produce 0 or 1 outputs (non-match → empty)
             Expr::RegexMatch { .. } | Expr::RegexCapture { .. } => {
@@ -2345,8 +2356,7 @@ impl Flattener {
                 self.try_catch_target = Some((catch_label, error_slot));
                 self.try_depth += 1;
                 self.emit(JitOp::TryCatchBegin);
-                self.emit(JitOp::CallBuiltin { dst: out, name: builtin_name.to_string(), args: vec![inp, re_val] });
-                self.emit(JitOp::Drop { slot: flags_val });
+                self.emit(JitOp::CallBuiltin { dst: out, name: builtin_name.to_string(), args: vec![inp, re_val, flags_val] });
                 self.emit_yield(out);
                 self.emit(JitOp::Drop { slot: out });
                 self.emit(JitOp::TryCatchEnd);
@@ -2360,6 +2370,7 @@ impl Flattener {
                 self.emit(JitOp::Label { id: done_label });
                 self.emit(JitOp::Drop { slot: inp });
                 self.emit(JitOp::Drop { slot: re_val });
+                self.emit(JitOp::Drop { slot: flags_val });
                 true
             }
 

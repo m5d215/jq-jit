@@ -1,0 +1,65 @@
+# Regression tests for jq-jit
+# Format: 3-line groups (filter / input / expected output)
+
+# Issue #3: Regex flags ignored (i/g/x/s)
+
+# Case-insensitive flag
+test("hello"; "i")
+"Hello"
+true
+
+# Global flag - count matches
+[match("foo"; "g")] | length
+"foo bar foo"
+2
+
+# Global flag - first match offset
+[match("foo"; "g")][0].offset
+"foo bar foo"
+0
+
+# Global flag - second match offset
+[match("foo"; "g")][1].offset
+"foo bar foo"
+8
+
+# Extended flag (ignore whitespace in pattern)
+test("hel lo"; "x")
+"hello"
+true
+
+# Issue #4: match offset/length should be character position, not byte position
+
+# Offset after multibyte characters
+match("test") | .offset
+"日本語test"
+3
+
+# Length of ASCII match after multibyte prefix
+match("test") | .length
+"日本語test"
+4
+
+# Offset of multibyte character in multibyte string
+match("う") | .offset
+"あいうえお"
+2
+
+# Length of single multibyte character match
+match("う") | .length
+"あいうえお"
+1
+
+# Issue #6: gsub/sub regex flags
+
+# Case-insensitive gsub
+gsub("hello";"HI";"i")
+"Hello World"
+"HI World"
+
+# Issue #7: @json double-escape
+
+# @json should produce JSON-encoded string
+@json
+["b"]
+"[\"b\"]"

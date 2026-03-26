@@ -2765,8 +2765,8 @@ pub fn eval(
         Expr::RegexTest { input_expr, re, flags } => {
             eval(input_expr, input.clone(), env, &mut |s| {
                 eval(re, input.clone(), env, &mut |re_val| {
-                    eval(flags, input.clone(), env, &mut |_fv| {
-                        cb(crate::runtime::call_builtin("test", &[s.clone(), re_val.clone()])?)
+                    eval(flags, input.clone(), env, &mut |fv| {
+                        cb(crate::runtime::call_builtin("test", &[s.clone(), re_val.clone(), fv.clone()])?)
                     })
                 })
             })
@@ -2775,9 +2775,19 @@ pub fn eval(
         Expr::RegexMatch { input_expr, re, flags } => {
             eval(input_expr, input.clone(), env, &mut |s| {
                 eval(re, input.clone(), env, &mut |re_val| {
-                    eval(flags, input.clone(), env, &mut |_fv| {
-                        match crate::runtime::call_builtin("match", &[s.clone(), re_val.clone()]) {
-                            Ok(v) => cb(v),
+                    eval(flags, input.clone(), env, &mut |fv| {
+                        match crate::runtime::call_builtin("match", &[s.clone(), re_val.clone(), fv.clone()]) {
+                            Ok(v) => {
+                                // "g" flag: match returns array of all matches
+                                if let Value::Arr(a) = &v {
+                                    for item in a.iter() {
+                                        if !cb(item.clone())? { return Ok(false); }
+                                    }
+                                    Ok(true)
+                                } else {
+                                    cb(v)
+                                }
+                            }
                             Err(_) => Ok(true), // non-match → empty (like jq)
                         }
                     })
@@ -2788,8 +2798,8 @@ pub fn eval(
         Expr::RegexCapture { input_expr, re, flags } => {
             eval(input_expr, input.clone(), env, &mut |s| {
                 eval(re, input.clone(), env, &mut |re_val| {
-                    eval(flags, input.clone(), env, &mut |_fv| {
-                        match crate::runtime::call_builtin("capture", &[s.clone(), re_val.clone()]) {
+                    eval(flags, input.clone(), env, &mut |fv| {
+                        match crate::runtime::call_builtin("capture", &[s.clone(), re_val.clone(), fv.clone()]) {
                             Ok(v) => cb(v),
                             Err(_) => Ok(true), // non-match → empty (like jq)
                         }
@@ -2801,8 +2811,8 @@ pub fn eval(
         Expr::RegexScan { input_expr, re, flags } => {
             eval(input_expr, input.clone(), env, &mut |s| {
                 eval(re, input.clone(), env, &mut |re_val| {
-                    eval(flags, input.clone(), env, &mut |_fv| {
-                        let result = crate::runtime::call_builtin("scan", &[s.clone(), re_val.clone()])?;
+                    eval(flags, input.clone(), env, &mut |fv| {
+                        let result = crate::runtime::call_builtin("scan", &[s.clone(), re_val.clone(), fv.clone()])?;
                         if let Value::Arr(a) = &result {
                             for v in a.iter() { if !cb(v.clone())? { return Ok(false); } }
                             Ok(true)
@@ -2816,8 +2826,8 @@ pub fn eval(
             eval(input_expr, input.clone(), env, &mut |s| {
                 eval(re, input.clone(), env, &mut |rv| {
                     eval(tostr, input.clone(), env, &mut |tv| {
-                        eval(flags, input.clone(), env, &mut |_fv| {
-                            cb(crate::runtime::call_builtin("sub", &[s.clone(), rv.clone(), tv.clone()])?)
+                        eval(flags, input.clone(), env, &mut |fv| {
+                            cb(crate::runtime::call_builtin("sub", &[s.clone(), rv.clone(), tv.clone(), fv.clone()])?)
                         })
                     })
                 })
@@ -2828,8 +2838,8 @@ pub fn eval(
             eval(input_expr, input.clone(), env, &mut |s| {
                 eval(re, input.clone(), env, &mut |rv| {
                     eval(tostr, input.clone(), env, &mut |tv| {
-                        eval(flags, input.clone(), env, &mut |_fv| {
-                            cb(crate::runtime::call_builtin("gsub", &[s.clone(), rv.clone(), tv.clone()])?)
+                        eval(flags, input.clone(), env, &mut |fv| {
+                            cb(crate::runtime::call_builtin("gsub", &[s.clone(), rv.clone(), tv.clone(), fv.clone()])?)
                         })
                     })
                 })
