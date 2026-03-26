@@ -54,7 +54,7 @@ jobs:
           tar czf ../../jq-jit-${{ matrix.target }}.tar.gz jq-jit
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: jq-jit-${{ matrix.target }}
           path: jq-jit-${{ matrix.target }}.tar.gz
