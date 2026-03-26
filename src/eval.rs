@@ -3240,7 +3240,7 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
     let s = match val { Value::Str(s) => s.to_string(), _ => crate::value::value_to_json(val) };
     match name {
         "text" => Ok(s),
-        "json" => Ok(serde_json::to_string(&s).unwrap_or_else(|_| format!("{:?}", s))),
+        "json" => Ok(crate::value::value_to_json(val)),
         "html" => {
             let mut r = String::with_capacity(s.len());
             for c in s.chars() {
