@@ -143,13 +143,49 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "join" => binary_arg(args, rt_join),
         "index" | "rindex" => binary_arg(args, |a, b| rt_str_index(a, b, name == "rindex")),
         "indices" | "rindices" => binary_arg(args, rt_indices),
-        "test" => binary_arg(args, rt_test),
-        "match" => binary_arg(args, rt_match),
-        "capture" => binary_arg(args, rt_capture),
-        "scan" => binary_arg(args, rt_scan),
-        "sub" | "gsub" => {
-            // These need 3 args: input, regex, replacement
+        "test" => {
             if args.len() >= 3 {
+                let (pat, _) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2]);
+                rt_test(&args[0], &Value::from_string(pat))
+            } else {
+                binary_arg(args, rt_test)
+            }
+        }
+        "match" => {
+            if args.len() >= 3 {
+                let (pat, global) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2]);
+                let re = Value::from_string(pat);
+                if global {
+                    rt_match_global(&args[0], &re)
+                } else {
+                    rt_match(&args[0], &re)
+                }
+            } else {
+                binary_arg(args, rt_match)
+            }
+        }
+        "capture" => {
+            if args.len() >= 3 {
+                let (pat, _) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2]);
+                rt_capture(&args[0], &Value::from_string(pat))
+            } else {
+                binary_arg(args, rt_capture)
+            }
+        }
+        "scan" => {
+            if args.len() >= 3 {
+                let (pat, _) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2]);
+                rt_scan(&args[0], &Value::from_string(pat))
+            } else {
+                binary_arg(args, rt_scan)
+            }
+        }
+        "sub" | "gsub" => {
+            if args.len() >= 4 {
+                // sub/gsub with flags: input, regex, replacement, flags
+                let (pat, _) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[3]);
+                rt_sub_gsub(&args[0], &Value::from_string(pat), &args[2], name == "gsub")
+            } else if args.len() >= 3 {
                 rt_sub_gsub(&args[0], &args[1], &args[2], name == "gsub")
             } else {
                 bail!("{} requires 3 arguments", name);
@@ -2037,6 +2073,30 @@ fn with_regex<R>(pattern: &str, f: impl FnOnce(&regex::Regex) -> R) -> Result<R>
     Ok(f(re))
 }
 
+/// Parse jq regex flags string and return (pattern_with_inline_flags, is_global).
+/// Supported flags: i (case-insensitive), x (extended), s (dotall/single-line), g (global).
+fn apply_regex_flags(pattern: &str, flags: &Value) -> (String, bool) {
+    let flags_str = match flags {
+        Value::Str(s) => s.as_str(),
+        _ => return (pattern.to_string(), false),
+    };
+    let mut inline = String::new();
+    let mut global = false;
+    for ch in flags_str.chars() {
+        match ch {
+            'i' | 'x' | 's' => inline.push(ch),
+            'g' => global = true,
+            _ => {} // ignore unknown flags (jq behavior)
+        }
+    }
+    let pat = if inline.is_empty() {
+        pattern.to_string()
+    } else {
+        format!("(?{}){}", inline, pattern)
+    };
+    (pat, global)
+}
+
 fn rt_test(v: &Value, re: &Value) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
@@ -2051,58 +2111,88 @@ fn rt_match(v: &Value, re: &Value) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
             with_regex(r, |regex| {
-                // Use captures() once instead of find() + captures() separately
+                let capture_names: Vec<Option<&str>> = regex.capture_names().skip(1).collect();
                 let num_groups = regex.captures_len();
                 if num_groups <= 1 {
-                    // No capture groups — just use find() which is faster
                     match regex.find(s) {
-                        Some(m) => {
-                            let mut result = new_objmap();
-                            result.insert("offset".into(), Value::Num(m.start() as f64, None));
-                            result.insert("length".into(), Value::Num(m.len() as f64, None));
-                            result.insert("string".into(), Value::from_str(m.as_str()));
-                            result.insert("captures".into(), Value::Arr(Rc::new(Vec::new())));
-                            Ok(Value::Obj(Rc::new(result)))
-                        }
+                        Some(m) => Ok(build_match_obj(&m, None, &capture_names, s)),
                         None => bail!("match failed"),
                     }
                 } else {
-                    let capture_names: Vec<Option<&str>> = regex.capture_names().skip(1).collect();
                     match regex.captures(s) {
                         Some(caps) => {
                             let m = caps.get(0).unwrap();
-                            let mut result = new_objmap();
-                            result.insert("offset".into(), Value::Num(m.start() as f64, None));
-                            result.insert("length".into(), Value::Num(m.len() as f64, None));
-                            result.insert("string".into(), Value::from_str(m.as_str()));
-                            let mut captures = Vec::with_capacity(num_groups - 1);
-                            for i in 1..num_groups {
-                                let name_val = match capture_names.get(i - 1).and_then(|n| *n) {
-                                    Some(name) => Value::from_str(name),
-                                    None => Value::Null,
-                                };
-                                if let Some(cap) = caps.get(i) {
-                                    let mut c = new_objmap();
-                                    c.insert("offset".into(), Value::Num(cap.start() as f64, None));
-                                    c.insert("length".into(), Value::Num(cap.len() as f64, None));
-                                    c.insert("string".into(), Value::from_str(cap.as_str()));
-                                    c.insert("name".into(), name_val);
-                                    captures.push(Value::Obj(Rc::new(c)));
-                                } else {
-                                    let mut c = new_objmap();
-                                    c.insert("offset".into(), Value::Num(-1.0, None));
-                                    c.insert("length".into(), Value::Num(0.0, None));
-                                    c.insert("string".into(), Value::Null);
-                                    c.insert("name".into(), name_val);
-                                    captures.push(Value::Obj(Rc::new(c)));
-                                }
-                            }
-                            result.insert("captures".into(), Value::Arr(Rc::new(captures)));
-                            Ok(Value::Obj(Rc::new(result)))
+                            Ok(build_match_obj(&m, Some(&caps), &capture_names, s))
                         }
                         None => bail!("match failed"),
                     }
                 }
+            })?
+        }
+        _ => bail!("match requires string and regex"),
+    }
+}
+
+fn build_match_obj(m: &regex::Match, caps: Option<&regex::Captures>, capture_names: &[Option<&str>], s: &str) -> Value {
+    let byte_offset = m.start();
+    let char_offset = s[..byte_offset].chars().count();
+    let char_length = m.as_str().chars().count();
+    let mut result = new_objmap();
+    result.insert("offset".into(), Value::Num(char_offset as f64, None));
+    result.insert("length".into(), Value::Num(char_length as f64, None));
+    result.insert("string".into(), Value::from_str(m.as_str()));
+    let mut captures_vec = Vec::new();
+    if let Some(caps) = caps {
+        for (i, name_opt) in capture_names.iter().enumerate() {
+            let name_val = match name_opt {
+                Some(name) => Value::from_str(name),
+                None => Value::Null,
+            };
+            if let Some(cap) = caps.get(i + 1) {
+                let cap_byte_offset = cap.start();
+                let cap_char_offset = s[..cap_byte_offset].chars().count();
+                let cap_char_length = cap.as_str().chars().count();
+                let mut c = new_objmap();
+                c.insert("offset".into(), Value::Num(cap_char_offset as f64, None));
+                c.insert("length".into(), Value::Num(cap_char_length as f64, None));
+                c.insert("string".into(), Value::from_str(cap.as_str()));
+                c.insert("name".into(), name_val);
+                captures_vec.push(Value::Obj(Rc::new(c)));
+            } else {
+                let mut c = new_objmap();
+                c.insert("offset".into(), Value::Num(-1.0, None));
+                c.insert("length".into(), Value::Num(0.0, None));
+                c.insert("string".into(), Value::Null);
+                c.insert("name".into(), name_val);
+                captures_vec.push(Value::Obj(Rc::new(c)));
+            }
+        }
+    }
+    result.insert("captures".into(), Value::Arr(Rc::new(captures_vec)));
+    Value::Obj(Rc::new(result))
+}
+
+fn rt_match_global(v: &Value, re: &Value) -> Result<Value> {
+    match (v, re) {
+        (Value::Str(s), Value::Str(r)) => {
+            with_regex(r, |regex| {
+                let capture_names: Vec<Option<&str>> = regex.capture_names().skip(1).collect();
+                let num_groups = regex.captures_len();
+                let mut results = Vec::new();
+                if num_groups <= 1 {
+                    for m in regex.find_iter(s) {
+                        results.push(build_match_obj(&m, None, &capture_names, s));
+                    }
+                } else {
+                    for caps in regex.captures_iter(s) {
+                        let m = caps.get(0).unwrap();
+                        results.push(build_match_obj(&m, Some(&caps), &capture_names, s));
+                    }
+                }
+                if results.is_empty() {
+                    bail!("match failed");
+                }
+                Ok(Value::Arr(Rc::new(results)))
             })?
         }
         _ => bail!("match requires string and regex"),
