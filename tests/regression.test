@@ -149,3 +149,25 @@ true
 @sh
 ["a",1,null]
 "'a' 1 null"
+
+# Issue #9: @text double-quotes string input
+
+# @text on string (should be identity, no extra quotes)
+@text
+"hello"
+"hello"
+
+# @text on number
+@text
+42
+"42"
+
+# @text on null
+@text
+null
+"null"
+
+# @text on array
+@text
+["a","b"]
+"[\"a\",\"b\"]"
