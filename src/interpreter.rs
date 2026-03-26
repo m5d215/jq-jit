@@ -6805,7 +6805,7 @@ impl Filter {
         use crate::ir::{Expr, UnaryOp};
         let expr = match self.detect_expr() { Some(e) => e, None => return false };
         matches!(expr, Expr::UnaryOp { op: UnaryOp::ToJson, operand } if matches!(operand.as_ref(), Expr::Input))
-            || matches!(expr, Expr::Format { name, expr: inner } if (name == "json" || name == "text") && matches!(inner.as_ref(), Expr::Input))
+            || matches!(expr, Expr::Format { name, expr: inner } if name == "json" && matches!(inner.as_ref(), Expr::Input))
     }
 
     /// Detect `tojson | fromjson` — identity for valid JSON input (from files).
@@ -6839,7 +6839,7 @@ impl Filter {
         let is_tojson = matches!(tojson_check,
             Expr::UnaryOp { op: UnaryOp::ToJson, operand } if matches!(operand.as_ref(), Expr::Input))
             || matches!(tojson_check,
-            Expr::Format { name, expr: inner } if (name == "json" || name == "text") && matches!(inner.as_ref(), Expr::Input));
+            Expr::Format { name, expr: inner } if name == "json" && matches!(inner.as_ref(), Expr::Input));
         if !is_tojson { return None; }
         // Check left is {key: .field, ...}
         if let Expr::ObjectConstruct { pairs } = remap_expr {
