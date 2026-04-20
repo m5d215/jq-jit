@@ -34,6 +34,22 @@ On a 2M-line NDJSON file (typical ETL/data pipeline workload):
 
 Run `bash bench/run.sh` to benchmark on your machine.
 
+## Installation
+
+### Homebrew (macOS arm64, Linux x86_64)
+
+Pre-built binaries from the [latest release](https://github.com/m5d215/jq-jit/releases/latest) are available via a personal tap:
+
+```bash
+brew install m5d215/tap/jq-jit
+```
+
+Only macOS arm64 and Linux x86_64 binaries are currently published. For other platforms, build from source (see below).
+
+### Prebuilt binaries (manual)
+
+Download the tarball for your platform from the [releases page](https://github.com/m5d215/jq-jit/releases/latest) and extract `jq-jit` onto your `PATH`.
+
 ## Building
 
 ### Prerequisites
