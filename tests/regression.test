@@ -172,6 +172,28 @@ null
 ["a","b"]
 "[\"a\",\"b\"]"
 
+# paths(f) and leaf_paths must drop the root (empty) path just like bare paths
+
+# paths(f) on a scalar yields no paths
+[paths(type == "string")]
+"hello"
+[]
+
+# paths(f) on a scalar number still yields no paths
+[paths(type == "number")]
+42
+[]
+
+# Mix of matching/non-matching nested values
+[paths(type == "string")]
+{"a":1,"b":{"c":"x"}}
+[["b","c"]]
+
+# leaf_paths on a scalar yields no paths
+[leaf_paths]
+"hello"
+[]
+
 # [.[] | select(. cmp N)] must respect jq's cross-type ordering, not only numbers
 
 # Array and object values outrank numbers

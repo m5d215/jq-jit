@@ -2711,14 +2711,26 @@ impl Parser {
                         rhs: Box::new(Expr::Literal(Literal::Str("object".to_string()))),
                     }),
                 };
-                Ok(Expr::PathExpr {
-                    expr: Box::new(Expr::Pipe {
-                        left: Box::new(Expr::Recurse { input_expr: Box::new(Expr::Input) }),
-                        right: Box::new(Expr::IfThenElse {
-                            cond: Box::new(scalars_cond),
-                            then_branch: Box::new(Expr::Input),
-                            else_branch: Box::new(Expr::Empty),
+                // Same shape as `paths(f)`: filter out the empty root path.
+                Ok(Expr::Pipe {
+                    left: Box::new(Expr::PathExpr {
+                        expr: Box::new(Expr::Pipe {
+                            left: Box::new(Expr::Recurse { input_expr: Box::new(Expr::Input) }),
+                            right: Box::new(Expr::IfThenElse {
+                                cond: Box::new(scalars_cond),
+                                then_branch: Box::new(Expr::Input),
+                                else_branch: Box::new(Expr::Empty),
+                            }),
                         }),
+                    }),
+                    right: Box::new(Expr::IfThenElse {
+                        cond: Box::new(Expr::BinOp {
+                            op: BinOp::Gt,
+                            lhs: Box::new(Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) }),
+                            rhs: Box::new(Expr::Literal(Literal::Num(0.0, None))),
+                        }),
+                        then_branch: Box::new(Expr::Input),
+                        else_branch: Box::new(Expr::Empty),
                     }),
                 })
             }
@@ -3088,16 +3100,28 @@ impl Parser {
             }
             ("paths", 1) => {
                 let f = args.into_iter().next().unwrap();
-                // paths(f) = path(recurse | select(f))... actually it's more complex
-                // paths(node_filter) outputs paths to nodes matching filter
-                Ok(Expr::PathExpr {
-                    expr: Box::new(Expr::Pipe {
-                        left: Box::new(Expr::Recurse { input_expr: Box::new(Expr::Input) }),
-                        right: Box::new(Expr::IfThenElse {
-                            cond: Box::new(f),
-                            then_branch: Box::new(Expr::Input),
-                            else_branch: Box::new(Expr::Empty),
+                // paths(f) = paths | select(getpath(.) | f) in jq's builtin.jq.
+                // We approximate as path(recurse | select(f)), but must also drop the
+                // root (empty) path that recurse yields — jq's `paths` filters `length > 0`.
+                Ok(Expr::Pipe {
+                    left: Box::new(Expr::PathExpr {
+                        expr: Box::new(Expr::Pipe {
+                            left: Box::new(Expr::Recurse { input_expr: Box::new(Expr::Input) }),
+                            right: Box::new(Expr::IfThenElse {
+                                cond: Box::new(f),
+                                then_branch: Box::new(Expr::Input),
+                                else_branch: Box::new(Expr::Empty),
+                            }),
                         }),
+                    }),
+                    right: Box::new(Expr::IfThenElse {
+                        cond: Box::new(Expr::BinOp {
+                            op: BinOp::Gt,
+                            lhs: Box::new(Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) }),
+                            rhs: Box::new(Expr::Literal(Literal::Num(0.0, None))),
+                        }),
+                        then_branch: Box::new(Expr::Input),
+                        else_branch: Box::new(Expr::Empty),
                     }),
                 })
             }
