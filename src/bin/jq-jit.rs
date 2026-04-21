@@ -1677,6 +1677,38 @@ fn eval_arith_raw(
     }
 }
 
+/// Does the raw JSON value `val` satisfy `val <op> cmp_n` under jq's cross-type ordering?
+///
+/// jq compares values in the order null < false < true < number < string < array < object,
+/// so e.g. `[1] > 1` is true because arrays outrank numbers. The fast paths driving this
+/// helper bypass full JSON parsing, so we dispatch on the first byte.
+fn select_cmp_passes(val: &[u8], op: jq_jit::ir::BinOp, cmp_n: f64) -> bool {
+    use jq_jit::ir::BinOp;
+    if val.is_empty() { return false; }
+    match val[0] {
+        b'-' | b'0'..=b'9' => {
+            if let Some(v) = parse_json_num(val) {
+                match op {
+                    BinOp::Gt => v > cmp_n,
+                    BinOp::Lt => v < cmp_n,
+                    BinOp::Ge => v >= cmp_n,
+                    BinOp::Le => v <= cmp_n,
+                    BinOp::Eq => v == cmp_n,
+                    BinOp::Ne => v != cmp_n,
+                    _ => false,
+                }
+            } else {
+                false
+            }
+        }
+        // null, false, true all rank below numbers.
+        b'n' | b'f' | b't' => matches!(op, BinOp::Lt | BinOp::Le | BinOp::Ne),
+        // strings, arrays, objects all rank above numbers.
+        b'"' | b'[' | b'{' => matches!(op, BinOp::Gt | BinOp::Ge | BinOp::Ne),
+        _ => false,
+    }
+}
+
 fn main() {
     // Run on a thread with a large stack to handle deep recursion.
     // macOS lazily pages the stack, so the physical memory usage is proportional to actual depth.
@@ -11458,7 +11490,6 @@ fn real_main() {
                     })
                 } else if let Some((ref cmp_op, cmp_n)) = collect_each_select_cmp {
                     // [.[] | select(. cmp N)] — collect values passing numeric comparison
-                    use jq_jit::ir::BinOp;
                     let op = *cmp_op;
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
@@ -11466,24 +11497,12 @@ fn real_main() {
                         compact_buf.push(b'[');
                         let mut first_elem = true;
                         let ok = json_each_value_cb(raw, 0, |vs, ve| {
-                            if let Some(v) = parse_json_num(&raw[vs..ve]) {
-                                let pass = match op {
-                                    BinOp::Gt => v > cmp_n,
-                                    BinOp::Lt => v < cmp_n,
-                                    BinOp::Ge => v >= cmp_n,
-                                    BinOp::Le => v <= cmp_n,
-                                    BinOp::Eq => v == cmp_n,
-                                    BinOp::Ne => v != cmp_n,
-                                    _ => false,
-                                };
-                                if pass {
-                                    if !first_elem { compact_buf.push(b','); }
-                                    first_elem = false;
-                                    compact_buf.extend_from_slice(&raw[vs..ve]);
-                                }
-                            } else {
-                                // Non-numeric values: in jq, comparison with number is false for strings
-                                // so they are just skipped
+                            let val = &raw[vs..ve];
+                            let pass = select_cmp_passes(val, op, cmp_n);
+                            if pass {
+                                if !first_elem { compact_buf.push(b','); }
+                                first_elem = false;
+                                compact_buf.extend_from_slice(val);
                             }
                         });
                         if ok {
@@ -20703,7 +20722,6 @@ fn real_main() {
                 })
             } else if let Some((ref cmp_op, cmp_n)) = collect_each_select_cmp {
                 // [.[] | select(. cmp N)] — collect values passing comparison (stdin)
-                use jq_jit::ir::BinOp;
                 let op = *cmp_op;
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
@@ -20712,21 +20730,12 @@ fn real_main() {
                     compact_buf.push(b'[');
                     let mut first_elem = true;
                     let ok = json_each_value_cb(raw, 0, |vs, ve| {
-                        if let Some(v) = parse_json_num(&raw[vs..ve]) {
-                            let pass = match op {
-                                BinOp::Gt => v > cmp_n,
-                                BinOp::Lt => v < cmp_n,
-                                BinOp::Ge => v >= cmp_n,
-                                BinOp::Le => v <= cmp_n,
-                                BinOp::Eq => v == cmp_n,
-                                BinOp::Ne => v != cmp_n,
-                                _ => false,
-                            };
-                            if pass {
-                                if !first_elem { compact_buf.push(b','); }
-                                first_elem = false;
-                                compact_buf.extend_from_slice(&raw[vs..ve]);
-                            }
+                        let val = &raw[vs..ve];
+                        let pass = select_cmp_passes(val, op, cmp_n);
+                        if pass {
+                            if !first_elem { compact_buf.push(b','); }
+                            first_elem = false;
+                            compact_buf.extend_from_slice(val);
                         }
                     });
                     if ok {

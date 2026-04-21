@@ -6899,6 +6899,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                 if let (Some(path_expr), Some(value_expr)) = (path_expr, value_expr) {
                     let input = if !args.is_empty() { args[0].clone() } else { Value::Null };
                     let env = Rc::new(RefCell::new(crate::eval::Env::new(vec![])));
+                    seed_eval_env_from_jit(&env, &[&path_expr, &value_expr]);
                     match crate::eval::eval_assign_standalone(&path_expr, &value_expr, input, &env) {
                         Ok(v) => { std::ptr::write(dst, v); return 0; }
                         Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
@@ -6920,6 +6921,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                 if let (Some(path_expr), Some(update_expr)) = (path_expr, update_expr) {
                     let input = if !args.is_empty() { args[0].clone() } else { Value::Null };
                     let env = Rc::new(RefCell::new(crate::eval::Env::new(vec![])));
+                    seed_eval_env_from_jit(&env, &[&path_expr, &update_expr]);
                     match crate::eval::eval_update_standalone(&path_expr, &update_expr, input, &env) {
                         Ok(v) => { std::ptr::write(dst, v); return 0; }
                         Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
@@ -9004,6 +9006,28 @@ unsafe extern "C" fn collect_callback(value: *const Value, ctx: *mut u8) -> i64 
 struct GlobalJitEnv(std::cell::UnsafeCell<Option<JitEnv>>);
 unsafe impl Sync for GlobalJitEnv {}
 static REUSABLE_ENV: GlobalJitEnv = GlobalJitEnv(std::cell::UnsafeCell::new(None));
+
+/// Copy live LoadVar bindings from the JIT env into the eval Env before we delegate
+/// a complex path expression back to eval. Without this, constructs like
+/// `let $r = 100 in (.a, .b) |= . + $r` (emitted as `+=` desugaring) lose `$r`
+/// when the Update falls off the JIT's fast path and is handed to eval with a
+/// fresh Env.
+fn seed_eval_env_from_jit(env: &Rc<RefCell<crate::eval::Env>>, exprs: &[&Expr]) {
+    let mut indices: Vec<u16> = Vec::new();
+    for e in exprs {
+        Flattener::collect_loadvar_indices(e, &mut indices);
+    }
+    if indices.is_empty() { return; }
+    let jit_env_opt = unsafe { &mut *REUSABLE_ENV.0.get() };
+    let jit_env = match jit_env_opt.as_ref() { Some(e) => e, None => return };
+    let mut env_mut = env.borrow_mut();
+    for idx in indices {
+        let i = idx as usize;
+        if i < jit_env.vars.len() {
+            env_mut.seed_var(idx, jit_env.vars[i].clone());
+        }
+    }
+}
 
 fn with_jit_env<R>(f: impl FnOnce(&mut JitEnv) -> R) -> R {
     let env_opt = unsafe { &mut *REUSABLE_ENV.0.get() };

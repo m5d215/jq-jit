@@ -1078,14 +1078,16 @@ fn rt_add_all(v: &Value) -> Result<Value> {
 fn rt_any(v: &Value) -> Result<Value> {
     match v {
         Value::Arr(a) => Ok(Value::from_bool(a.iter().any(|v| v.is_true()))),
-        _ => bail!("{} is not an array", v.type_name()),
+        Value::Obj(o) => Ok(Value::from_bool(o.values().any(|v| v.is_true()))),
+        _ => bail!("Cannot iterate over {}", v.type_name()),
     }
 }
 
 fn rt_all(v: &Value) -> Result<Value> {
     match v {
         Value::Arr(a) => Ok(Value::from_bool(a.iter().all(|v| v.is_true()))),
-        _ => bail!("{} is not an array", v.type_name()),
+        Value::Obj(o) => Ok(Value::from_bool(o.values().all(|v| v.is_true()))),
+        _ => bail!("Cannot iterate over {}", v.type_name()),
     }
 }
 

@@ -2627,6 +2627,7 @@ impl Parser {
             | "IN" | "INDEX" | "JOIN" | "strflocaltime"
             | "fromcsv" | "fromtsv" | "fromcsvh" | "fromtsvh"
             | "fromisodate" | "toisodate"
+            | "input_line_number"
             if !matches!(self.current(), Token::LParen) => {
                 self.compile_builtin_noargs(name)
             }
@@ -2710,14 +2711,26 @@ impl Parser {
                         rhs: Box::new(Expr::Literal(Literal::Str("object".to_string()))),
                     }),
                 };
-                Ok(Expr::PathExpr {
-                    expr: Box::new(Expr::Pipe {
-                        left: Box::new(Expr::Recurse { input_expr: Box::new(Expr::Input) }),
-                        right: Box::new(Expr::IfThenElse {
-                            cond: Box::new(scalars_cond),
-                            then_branch: Box::new(Expr::Input),
-                            else_branch: Box::new(Expr::Empty),
+                // Same shape as `paths(f)`: filter out the empty root path.
+                Ok(Expr::Pipe {
+                    left: Box::new(Expr::PathExpr {
+                        expr: Box::new(Expr::Pipe {
+                            left: Box::new(Expr::Recurse { input_expr: Box::new(Expr::Input) }),
+                            right: Box::new(Expr::IfThenElse {
+                                cond: Box::new(scalars_cond),
+                                then_branch: Box::new(Expr::Input),
+                                else_branch: Box::new(Expr::Empty),
+                            }),
                         }),
+                    }),
+                    right: Box::new(Expr::IfThenElse {
+                        cond: Box::new(Expr::BinOp {
+                            op: BinOp::Gt,
+                            lhs: Box::new(Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) }),
+                            rhs: Box::new(Expr::Literal(Literal::Num(0.0, None))),
+                        }),
+                        then_branch: Box::new(Expr::Input),
+                        else_branch: Box::new(Expr::Empty),
                     }),
                 })
             }
@@ -2811,6 +2824,12 @@ impl Parser {
             }
             "halt_error" => {
                 Ok(Expr::CallBuiltin { name: "halt_error".to_string(), args: vec![] })
+            }
+            "input_line_number" => {
+                // Line tracking is not plumbed through our input pipeline; returning 0
+                // matches jq's behaviour before any line is consumed and, more importantly,
+                // avoids a libjq assertion crash when delegating this builtin.
+                Ok(Expr::Literal(Literal::Num(0.0, None)))
             }
             "fromcsv" | "fromtsv" | "fromcsvh" | "fromtsvh" => {
                 Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
@@ -3081,16 +3100,28 @@ impl Parser {
             }
             ("paths", 1) => {
                 let f = args.into_iter().next().unwrap();
-                // paths(f) = path(recurse | select(f))... actually it's more complex
-                // paths(node_filter) outputs paths to nodes matching filter
-                Ok(Expr::PathExpr {
-                    expr: Box::new(Expr::Pipe {
-                        left: Box::new(Expr::Recurse { input_expr: Box::new(Expr::Input) }),
-                        right: Box::new(Expr::IfThenElse {
-                            cond: Box::new(f),
-                            then_branch: Box::new(Expr::Input),
-                            else_branch: Box::new(Expr::Empty),
+                // paths(f) = paths | select(getpath(.) | f) in jq's builtin.jq.
+                // We approximate as path(recurse | select(f)), but must also drop the
+                // root (empty) path that recurse yields — jq's `paths` filters `length > 0`.
+                Ok(Expr::Pipe {
+                    left: Box::new(Expr::PathExpr {
+                        expr: Box::new(Expr::Pipe {
+                            left: Box::new(Expr::Recurse { input_expr: Box::new(Expr::Input) }),
+                            right: Box::new(Expr::IfThenElse {
+                                cond: Box::new(f),
+                                then_branch: Box::new(Expr::Input),
+                                else_branch: Box::new(Expr::Empty),
+                            }),
                         }),
+                    }),
+                    right: Box::new(Expr::IfThenElse {
+                        cond: Box::new(Expr::BinOp {
+                            op: BinOp::Gt,
+                            lhs: Box::new(Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) }),
+                            rhs: Box::new(Expr::Literal(Literal::Num(0.0, None))),
+                        }),
+                        then_branch: Box::new(Expr::Input),
+                        else_branch: Box::new(Expr::Empty),
                     }),
                 })
             }
@@ -3945,7 +3976,12 @@ fn optimize_pipe(left: Expr, right: Expr) -> Expr {
                     }
                 }
                 collect_comma(generator, &mut elems);
-                if elems.len() >= 2 {
+                // Only safe when every branch yields exactly one value. An `Empty`
+                // branch contributes nothing to the array, but `x + empty` (or
+                // `empty + x`) yields nothing — the rewrite would silently drop the
+                // whole output.
+                let all_single = elems.iter().all(|e| !matches!(e, Expr::Empty));
+                if all_single && elems.len() >= 2 {
                     // Rewrite [a, b, c, ...] | add → a + b + c + ...
                     let mut result = elems.remove(0);
                     for elem in elems {
