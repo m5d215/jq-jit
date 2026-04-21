@@ -26,6 +26,13 @@ Follow this workflow for bug fixes:
 9. **Close issue**: Rely on automatic closing via `Closes` keyword
 10. **Update local**: `git checkout main && git pull`
 
+## Maintenance Notes
+
+When hunting jq compatibility bugs or adding new optimizations, read
+`docs/maintenance.md` first — it catalogs the fast-path layout, the
+invariants each must preserve (dedup, env seeding, Empty handling, path
+guards), and the diff-loop method that reliably surfaces divergences.
+
 ## Test Format
 
 `tests/regression.test` uses a 3-line group format:
