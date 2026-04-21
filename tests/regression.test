@@ -172,6 +172,28 @@ null
 ["a","b"]
 "[\"a\",\"b\"]"
 
+# `[gen] | add` rewrite must not drop generator branches that yield zero values
+
+# [] | add should be null, not empty
+[] | add
+null
+null
+
+# Keeps the null output when followed by another value
+[[] | add, 999]
+null
+[null,999]
+
+# Array literal containing an empty generator mixed with values
+[empty, 1] | add
+null
+1
+
+# Empty generator after value in array literal
+[1, empty] | add
+null
+1
+
 # foreach must emit once per value yielded by update, not once per source value
 
 # update yielding multiple values in 2-arg foreach (no extract)

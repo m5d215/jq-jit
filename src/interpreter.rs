@@ -840,19 +840,27 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                     let mut elems = Vec::new();
                     collect_elems_for_add(lg, &mut elems);
-                    if elems.len() == 1 {
-                        // [expr] | add → expr (single element, add is identity)
-                        return elems.remove(0);
-                    } else if elems.len() >= 2 {
-                        let mut result = elems.remove(0);
-                        for elem in elems {
-                            result = Expr::BinOp {
-                                op: crate::ir::BinOp::Add,
-                                lhs: Box::new(result),
-                                rhs: Box::new(elem),
-                            };
+                    // Only safe when every element yields exactly one value. An `Empty`
+                    // branch yields zero, so the rewrite would either drop outputs
+                    // (`[] | add` becoming the `Empty` branch itself) or produce the
+                    // wrong sum when mixed with other branches.
+                    let all_single = !elems.is_empty()
+                        && elems.iter().all(|e| !matches!(e, Expr::Empty));
+                    if all_single {
+                        if elems.len() == 1 {
+                            // [expr] | add → expr (single element, add is identity)
+                            return elems.remove(0);
+                        } else if elems.len() >= 2 {
+                            let mut result = elems.remove(0);
+                            for elem in elems {
+                                result = Expr::BinOp {
+                                    op: crate::ir::BinOp::Add,
+                                    lhs: Box::new(result),
+                                    rhs: Box::new(elem),
+                                };
+                            }
+                            return result;
                         }
-                        return result;
                     }
                 }
             }

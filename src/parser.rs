@@ -3952,7 +3952,12 @@ fn optimize_pipe(left: Expr, right: Expr) -> Expr {
                     }
                 }
                 collect_comma(generator, &mut elems);
-                if elems.len() >= 2 {
+                // Only safe when every branch yields exactly one value. An `Empty`
+                // branch contributes nothing to the array, but `x + empty` (or
+                // `empty + x`) yields nothing — the rewrite would silently drop the
+                // whole output.
+                let all_single = elems.iter().all(|e| !matches!(e, Expr::Empty));
+                if all_single && elems.len() >= 2 {
                     // Rewrite [a, b, c, ...] | add → a + b + c + ...
                     let mut result = elems.remove(0);
                     for elem in elems {
