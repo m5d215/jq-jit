@@ -172,6 +172,24 @@ null
 ["a","b"]
 "[\"a\",\"b\"]"
 
+# (.a, .b) += N must hit every path — the += desugaring wraps Update in a
+# LetBinding, so the JIT runtime fallback needs the let-bound value seeded.
+
+# += on a comma path updates every field
+(.a, .b) += 100
+{"a":1,"b":2}
+{"a":101,"b":102}
+
+# -= on a comma path
+(.a, .b) -= 1
+{"a":1,"b":2}
+{"a":0,"b":1}
+
+# *= on a comma path
+(.a, .b) *= 10
+{"a":1,"b":2}
+{"a":10,"b":20}
+
 # Duplicate keys in object literals must collapse so later values win
 
 # Literal-only object with repeated key

@@ -122,6 +122,12 @@ impl Env {
         // SAFETY: bounds ensured above
         unsafe { *self.vars.get_unchecked_mut(idx) = val; }
     }
+    /// Public setter used by the JIT runtime when it delegates complex paths
+    /// back to eval — the JIT has its own var storage, so we copy the live
+    /// bindings into the eval Env before dispatch.
+    pub fn seed_var(&mut self, idx: u16, val: Value) {
+        self.set_var(idx, val);
+    }
     fn ensure_var(&mut self, idx: u16) {
         let idx = idx as usize;
         if idx >= self.vars.len() { self.vars.resize(idx + 1, Value::Null); }
