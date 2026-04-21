@@ -2627,6 +2627,7 @@ impl Parser {
             | "IN" | "INDEX" | "JOIN" | "strflocaltime"
             | "fromcsv" | "fromtsv" | "fromcsvh" | "fromtsvh"
             | "fromisodate" | "toisodate"
+            | "input_line_number"
             if !matches!(self.current(), Token::LParen) => {
                 self.compile_builtin_noargs(name)
             }
@@ -2811,6 +2812,12 @@ impl Parser {
             }
             "halt_error" => {
                 Ok(Expr::CallBuiltin { name: "halt_error".to_string(), args: vec![] })
+            }
+            "input_line_number" => {
+                // Line tracking is not plumbed through our input pipeline; returning 0
+                // matches jq's behaviour before any line is consumed and, more importantly,
+                // avoids a libjq assertion crash when delegating this builtin.
+                Ok(Expr::Literal(Literal::Num(0.0, None)))
             }
             "fromcsv" | "fromtsv" | "fromcsvh" | "fromtsvh" => {
                 Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
