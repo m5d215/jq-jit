@@ -172,6 +172,23 @@ null
 ["a","b"]
 "[\"a\",\"b\"]"
 
+# [.[] | select(. cmp N)] must respect jq's cross-type ordering, not only numbers
+
+# Array and object values outrank numbers
+[.[] | select(. > 1)]
+{"a":1,"b":[1,2,3],"c":{"x":9}}
+[[1,2,3],{"x":9}]
+
+# null and booleans rank below numbers, so they pass <
+[.[] | select(. < 1)]
+[null,1,"hi",[0],{},true,false]
+[null,true,false]
+
+# `!=` holds across mismatched types
+[.[] | select(. != 1)]
+{"a":null,"b":1,"c":"hi","d":[0]}
+[null,"hi",[0]]
+
 # `[gen] | add` rewrite must not drop generator branches that yield zero values
 
 # [] | add should be null, not empty
