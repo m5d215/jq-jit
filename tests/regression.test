@@ -172,6 +172,33 @@ null
 ["a","b"]
 "[\"a\",\"b\"]"
 
+# all/any should iterate object values, not error
+
+# all on object with all truthy values
+all
+{"a":1,"b":2}
+true
+
+# all on object with a null value
+all
+{"a":1,"b":null}
+false
+
+# any on object with at least one truthy value
+any
+{"a":null,"b":1}
+true
+
+# any on empty object
+any
+{}
+false
+
+# all on empty object
+all
+{}
+true
+
 # Issue #10: split returns [""] instead of [] for empty string input
 
 # split on empty string with non-empty separator
