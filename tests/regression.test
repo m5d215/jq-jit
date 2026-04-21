@@ -172,6 +172,33 @@ null
 ["a","b"]
 "[\"a\",\"b\"]"
 
+# Duplicate keys in object literals must collapse so later values win
+
+# Literal-only object with repeated key
+{a:1, a:2}
+null
+{"a":2}
+
+# Duplicate key surrounded by other keys keeps the original position
+{a:1, b:2, a:3}
+null
+{"a":3,"b":2}
+
+# Object merge (`+`) with overlapping key collapses to last
+{a:1} + {a:2}
+null
+{"a":2}
+
+# Computed values also dedupe via the remap fast path
+{a:.x, a:.x + 1}
+{"x":5}
+{"a":6}
+
+# length of a constructed object counts distinct keys
+{a:1, a:2, b:3} | length
+null
+2
+
 # paths(f) and leaf_paths must drop the root (empty) path just like bare paths
 
 # paths(f) on a scalar yields no paths

@@ -525,9 +525,26 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             }
             // Semantic: {pairs} | length → N (number of keys)
             // Also: {pairs} | to_entries | ... gets simplified via to_entries | length → constant
+            // Only safe when all keys are literal strings — otherwise we can't know whether two
+            // pairs refer to the same key. And even with literal keys, duplicates collapse, so
+            // count distinct keys rather than the raw pair count.
             if let Expr::ObjectConstruct { pairs } = &sl {
                 if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
-                    return Expr::Literal(Literal::Num(pairs.len() as f64, None));
+                    let mut distinct: Vec<&str> = Vec::with_capacity(pairs.len());
+                    let mut all_literal = true;
+                    for (k, _) in pairs {
+                        if let Expr::Literal(Literal::Str(s)) = k {
+                            if !distinct.iter().any(|d| *d == s.as_str()) {
+                                distinct.push(s.as_str());
+                            }
+                        } else {
+                            all_literal = false;
+                            break;
+                        }
+                    }
+                    if all_literal {
+                        return Expr::Literal(Literal::Num(distinct.len() as f64, None));
+                    }
                 }
             }
             // Semantic: [elements] | length → N (number of elements, if known at compile time)
@@ -1792,10 +1809,28 @@ fn push_const_json(expr: &crate::ir::Expr, buf: &mut Vec<u8>) -> bool {
             true
         }
         Expr::ObjectConstruct { pairs } => {
+            // Pre-check: all keys must be string literals. Values may need further
+            // recursion, but we need to know the final key order before writing so
+            // that duplicate keys collapse to the last occurrence (as jq does).
+            let mut ordered_keys: Vec<&str> = Vec::with_capacity(pairs.len());
+            let mut chosen: Vec<usize> = Vec::with_capacity(pairs.len());
+            for (i, (key, _)) in pairs.iter().enumerate() {
+                let k = match key {
+                    Expr::Literal(Literal::Str(k)) => k.as_str(),
+                    _ => return false,
+                };
+                if let Some(pos) = ordered_keys.iter().position(|&ok| ok == k) {
+                    // Later occurrence wins — overwrite the pair we'd emit, keep position.
+                    chosen[pos] = i;
+                } else {
+                    ordered_keys.push(k);
+                    chosen.push(i);
+                }
+            }
             buf.push(b'{');
-            for (i, (key, val)) in pairs.iter().enumerate() {
+            for (i, &pair_idx) in chosen.iter().enumerate() {
                 if i > 0 { buf.push(b','); }
-                // Key must be a literal string
+                let (key, val) = &pairs[pair_idx];
                 if let Expr::Literal(Literal::Str(k)) = key {
                     buf.push(b'"');
                     buf.extend_from_slice(k.as_bytes());
@@ -3380,13 +3415,25 @@ impl Filter {
             }
             None
         }
+        // Collapse duplicate keys (later wins), preserving insertion order.
+        fn dedup_pairs(pairs: Vec<(String, String)>) -> Vec<(String, String)> {
+            let mut out: Vec<(String, String)> = Vec::with_capacity(pairs.len());
+            for (k, v) in pairs {
+                if let Some(existing) = out.iter_mut().find(|(ek, _)| *ek == k) {
+                    existing.1 = v;
+                } else {
+                    out.push((k, v));
+                }
+            }
+            out
+        }
         // Direct ObjectConstruct
-        if let Some(r) = extract_remap_pairs(expr) { return Some(r); }
+        if let Some(r) = extract_remap_pairs(expr) { return Some(dedup_pairs(r)); }
         // {a:.x} + {b:.y} — merged object constructs
         if let Expr::BinOp { op: BinOp::Add, lhs, rhs } = expr {
             if let (Some(mut left), Some(right)) = (extract_remap_pairs(lhs), extract_remap_pairs(rhs)) {
                 left.extend(right);
-                return Some(left);
+                return Some(dedup_pairs(left));
             }
         }
         None
@@ -3417,16 +3464,28 @@ impl Filter {
             let _ = this; // silence unused
             None
         }
+        // Collapse duplicate keys (later wins), preserving original insertion order.
+        fn dedup_keys(pairs: Vec<(String, RemapExpr)>) -> Vec<(String, RemapExpr)> {
+            let mut out: Vec<(String, RemapExpr)> = Vec::with_capacity(pairs.len());
+            for (k, v) in pairs {
+                if let Some(existing) = out.iter_mut().find(|(ek, _)| *ek == k) {
+                    existing.1 = v;
+                } else {
+                    out.push((k, v));
+                }
+            }
+            out
+        }
         // Direct ObjectConstruct
         if let Some((result, has_computed)) = extract_computed_pairs(self, expr) {
-            if has_computed { return Some(result); }
+            if has_computed { return Some(dedup_keys(result)); }
             return None;
         }
         // {a:.x,b:(.y*2)} + {c:.z} — merged object constructs
         if let Expr::BinOp { op: BinOp::Add, lhs, rhs } = expr {
             if let (Some((mut left, lc)), Some((right, rc))) = (extract_computed_pairs(self, lhs), extract_computed_pairs(self, rhs)) {
                 left.extend(right);
-                if lc || rc { return Some(left); }
+                if lc || rc { return Some(dedup_keys(left)); }
             }
         }
         None
