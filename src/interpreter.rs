@@ -1631,8 +1631,9 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     if is_single_output(&sg) {
                         return sg;
                     }
-                    // first(a, b, ...) where a is single-output → a
-                    if *n >= 1.0 {
+                    // first(a, b, ...) where a is single-output → a. Only valid for
+                    // limit(1; ...): for larger counts we must keep the full generator.
+                    if *n == 1.0 {
                         let mut g = &sg;
                         while let Expr::Comma { left, .. } = g {
                             if is_single_output(left) {

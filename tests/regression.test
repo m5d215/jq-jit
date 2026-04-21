@@ -172,6 +172,28 @@ null
 ["a","b"]
 "[\"a\",\"b\"]"
 
+# limit(n; comma_generator) must yield n values, not just the first
+
+# limit with number literals as generator
+[limit(3; 1,2,3,4,5)]
+null
+[1,2,3]
+
+# limit with string literals as generator
+[limit(2; "a","b","c","d")]
+null
+["a","b"]
+
+# limit(1; ...) on comma generator still acts like first()
+limit(1; 1,2,3)
+null
+1
+
+# limit with arithmetic expressions in comma generator
+[limit(2; 1+1, 2+2, 3+3)]
+null
+[2,4]
+
 # input_line_number must not trigger a libjq assertion crash
 
 # input_line_number returns 0 before any line has been consumed
