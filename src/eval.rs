@@ -2199,49 +2199,45 @@ pub fn eval(
                 let mut acc = init_val;
                 eval(source, input.clone(), env, &mut |val| {
                     let acc_val = std::mem::replace(&mut acc, Value::Null);
-                    if acc_used {
-                        let (old_var, old_acc) = {
-                            let mut e = env.borrow_mut();
-                            let ov = std::mem::replace(&mut e.vars[vi as usize], val);
-                            let oa = std::mem::replace(&mut e.vars[ai as usize], acc_val.clone());
-                            (ov, oa)
+                    let (old_var, old_acc) = {
+                        let mut e = env.borrow_mut();
+                        let ov = std::mem::replace(&mut e.vars[vi as usize], val);
+                        let oa = if acc_used {
+                            std::mem::replace(&mut e.vars[ai as usize], acc_val.clone())
+                        } else {
+                            Value::Null
                         };
-                        eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
+                        (ov, oa)
+                    };
+                    let mut stopped = false;
+                    // jq semantics: for each value yielded by update, update the
+                    // accumulator and emit extract(acc) (or acc itself when no extract).
+                    let update_result = eval(update, acc_val, env, &mut |new_acc| {
+                        acc = new_acc.clone();
+                        if acc_used {
+                            env.borrow_mut().vars[ai as usize] = new_acc.clone();
+                        }
                         let cont = if let Some(extract_expr) = extract {
-                            match eval_one_filter(extract_expr, &acc, env) {
+                            match eval_one_filter(extract_expr, &new_acc, env) {
                                 Ok(Some(v)) => cb(v)?,
                                 Ok(None) => true,
-                                Err(()) => eval(extract_expr, acc.clone(), env, cb)?,
+                                Err(()) => eval(extract_expr, new_acc, env, cb)?,
                             }
                         } else {
-                            cb(acc.clone())?
+                            cb(new_acc)?
                         };
-                        {
-                            let mut e = env.borrow_mut();
+                        if !cont { stopped = true; }
+                        Ok(cont)
+                    });
+                    {
+                        let mut e = env.borrow_mut();
+                        if acc_used {
                             e.vars[ai as usize] = old_acc;
-                            e.vars[vi as usize] = old_var;
                         }
-                        Ok(cont)
-                    } else {
-                        let old_var = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], val);
-                        // Try scalar fast path for update to avoid callback dispatch
-                        if let Ok(new_acc) = eval_one(update, &acc_val, env) {
-                            acc = new_acc;
-                        } else {
-                            eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
-                        }
-                        let cont = if let Some(extract_expr) = extract {
-                            match eval_one_filter(extract_expr, &acc, env) {
-                                Ok(Some(v)) => cb(v)?,
-                                Ok(None) => true,
-                                Err(()) => eval(extract_expr, acc.clone(), env, cb)?,
-                            }
-                        } else {
-                            cb(acc.clone())?
-                        };
-                        env.borrow_mut().vars[vi as usize] = old_var;
-                        Ok(cont)
+                        e.vars[vi as usize] = old_var;
                     }
+                    update_result?;
+                    Ok(!stopped)
                 })
             })
         }
