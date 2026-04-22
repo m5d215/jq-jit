@@ -437,3 +437,14 @@ capture("(?<n>\\d+)"; "g")
 
 capture("(?<n>\\d+)")
 "1,2,3"
+
+# ---------- Issue #45: string interpolation of container must JSON-escape ----------
+
+"\(.b)"
+{"b":{"c":3}}
+
+"\(.x)"
+{"x":["a","b"]}
+
+"prefix \(.b) suffix"
+{"b":{"c":3}}

@@ -6976,6 +6976,23 @@ fn real_main() {
                                     if val[0] == b'"' && val.len() >= 2 {
                                         // String: copy inner content (already JSON-escaped)
                                         compact_buf.extend_from_slice(&val[1..val.len()-1]);
+                                    } else if val[0] == b'[' || val[0] == b'{' {
+                                        // Container: embed JSON text, re-escaping for the
+                                        // surrounding string literal so the output stays
+                                        // valid JSON. Whitespace is copied as-is, which is
+                                        // fine since json_object_get_fields_raw_buf returns
+                                        // the compact slice from input.
+                                        for &b in val {
+                                            match b {
+                                                b'"' => compact_buf.extend_from_slice(b"\\\""),
+                                                b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                                                b'\n' => compact_buf.extend_from_slice(b"\\n"),
+                                                b'\r' => compact_buf.extend_from_slice(b"\\r"),
+                                                b'\t' => compact_buf.extend_from_slice(b"\\t"),
+                                                c if c < 0x20 => { let _ = write!(compact_buf, "\\u{:04x}", c); }
+                                                _ => compact_buf.push(b),
+                                            }
+                                        }
                                     } else {
                                         // Number/bool/null: copy as-is (jq tostring behavior)
                                         compact_buf.extend_from_slice(val);
@@ -19981,6 +19998,18 @@ fn real_main() {
                                 let val = &raw[vs..ve];
                                 if val[0] == b'"' && val.len() >= 2 {
                                     compact_buf.extend_from_slice(&val[1..val.len()-1]);
+                                } else if val[0] == b'[' || val[0] == b'{' {
+                                    for &b in val {
+                                        match b {
+                                            b'"' => compact_buf.extend_from_slice(b"\\\""),
+                                            b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                                            b'\n' => compact_buf.extend_from_slice(b"\\n"),
+                                            b'\r' => compact_buf.extend_from_slice(b"\\r"),
+                                            b'\t' => compact_buf.extend_from_slice(b"\\t"),
+                                            c if c < 0x20 => { let _ = write!(compact_buf, "\\u{:04x}", c); }
+                                            _ => compact_buf.push(b),
+                                        }
+                                    }
                                 } else {
                                     compact_buf.extend_from_slice(val);
                                 }

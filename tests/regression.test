@@ -644,3 +644,20 @@ unique_by(.a)
 capture("(?<n>\\d+)")
 "1,2,3"
 {"n":"1"}
+
+# Issue #45: string interpolation of field-accessed container must JSON-escape
+
+# Object container: inner quotes become \"
+"\(.b)"
+{"b":{"c":3}}
+"{\"c\":3}"
+
+# Array container: elements re-escaped
+"\(.x)"
+{"x":["a","b"]}
+"[\"a\",\"b\"]"
+
+# Scalar string is unchanged (identity into interpolation)
+"\(.b)"
+{"b":"hi"}
+"hi"
