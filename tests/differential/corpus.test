@@ -482,3 +482,22 @@ null
 
 {(.k):2, a:1}
 {"k":"a"}
+# ---------- Issue #40: // propagates errors from the LHS ----------
+
+.x // 0
+1
+
+.x // 0
+true
+
+.x // 0
+"s"
+
+.x // 0
+[1]
+
+tonumber // 99
+"x"
+
+sort_by(.x // 0)
+[1,2,3]

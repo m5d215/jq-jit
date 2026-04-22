@@ -2249,6 +2249,9 @@ pub fn eval(
         }
 
         Expr::Alternative { primary, fallback } => {
+            // `A // B`: yield each truthy value from A; fall back to B only when
+            // A emits nothing non-false/non-null. Errors must propagate — use
+            // `f?` or `try f catch g` to suppress them, per jq semantics.
             let mut has_output = false;
             let result = eval(primary, input.clone(), env, &mut |val| {
                 if val.is_truthy() { has_output = true; cb(val) } else { Ok(true) }
@@ -2256,7 +2259,7 @@ pub fn eval(
             match result {
                 Ok(_) if !has_output => eval(fallback, input, env, cb),
                 Ok(cont) => Ok(cont),
-                Err(_) => eval(fallback, input, env, cb),
+                Err(e) => Err(e),
             }
         }
 

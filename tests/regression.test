@@ -719,3 +719,41 @@ null
 {(.k):2, a:1}
 {"k":"a"}
 {"a":1}
+# Issue #40: `//` must propagate errors from the LHS
+
+# .x on a non-object must error, not silently fall through to the RHS
+.x // 0
+1
+
+# Non-object inputs of other types all error the same way
+.x // 0
+true
+
+.x // 0
+"s"
+
+.x // 0
+[1]
+
+# tonumber failure bubbles through //
+tonumber // 99
+"x"
+
+# sort_by propagates the per-element error from .x on a number input
+sort_by(.x // 0)
+[1,2,3]
+
+# null input to .field // fb is still null → fallback; no error
+.x // 0
+null
+0
+
+# Object with the key null is still null → fallback; no error
+.x // 0
+{"x":null}
+0
+
+# Object without the key → fallback (no error)
+.x // 0
+{"a":1}
+0

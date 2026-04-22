@@ -7572,9 +7572,16 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref alt_field, ref fallback_bytes)) = field_alt {
-                    // .field // literal: extract field, output raw or fallback if null/false
+                    // .field // literal. `//` must not swallow type errors, so
+                    // route non-object, non-null inputs through the eval path
+                    // where `.field` raises "Cannot index ... with string".
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
+                        if raw.is_empty() || (raw[0] != b'{' && raw != b"null") {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            return Ok(());
+                        }
                         if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, alt_field) {
                             let val = &raw[vs..ve];
                             if val == b"null" || val == b"false" {
@@ -15070,6 +15077,11 @@ fn real_main() {
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
+                    if raw.is_empty() || (raw[0] != b'{' && raw != b"null") {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        return Ok(());
+                    }
                     if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, alt_field) {
                         let val = &raw[vs..ve];
                         if val == b"null" || val == b"false" {
