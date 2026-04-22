@@ -3082,15 +3082,17 @@ impl Parser {
                 let mut args = args.into_iter();
                 let f = args.next().unwrap();
                 let cond = args.next().unwrap();
-                // recurse(f; cond) = def r: ., (select(cond) | f | r); r
+                // jq: def recurse(f; cond): def r: ., (f | select(cond) | r); r;
+                // `cond` filters the values produced by `f`, so it must run
+                // AFTER `f`, not before. Swapping the order was issue #49.
                 Ok(Expr::Recurse {
                     input_expr: Box::new(Expr::Pipe {
-                        left: Box::new(Expr::IfThenElse {
+                        left: Box::new(f),
+                        right: Box::new(Expr::IfThenElse {
                             cond: Box::new(cond),
                             then_branch: Box::new(Expr::Input),
                             else_branch: Box::new(Expr::Empty),
                         }),
-                        right: Box::new(f),
                     }),
                 })
             }

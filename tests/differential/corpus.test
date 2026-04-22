@@ -569,3 +569,11 @@ del(.a)
 
 del(.[0])
 [1,2,3]
+
+# ---------- Issue #49: recurse(f; cond) must filter emitted values by cond ----------
+
+[recurse(.[]?; . != null)]
+[1,2,3,null]
+
+[recurse(.[]?; . != null)]
+{"a":1,"b":null,"c":2}

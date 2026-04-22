@@ -877,3 +877,15 @@ del(.a)
 del(.[0])
 [1,2,3]
 [2,3]
+
+# Issue #49: recurse(f; cond) must filter emitted values by cond
+
+# Array recurse with null filter — null child is neither emitted nor traversed
+[recurse(.[]?; . != null)]
+[1,2,3,null]
+[[1,2,3,null],1,2,3]
+
+# Same on an object with a null value
+[recurse(.[]?; . != null)]
+{"a":1,"b":null,"c":2}
+[{"a":1,"b":null,"c":2},1,2]
