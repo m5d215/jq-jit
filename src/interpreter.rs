@@ -329,6 +329,29 @@ fn extract_strfunc_cond(expr: &crate::ir::Expr) -> Option<StrFuncCond> {
     None
 }
 
+/// Collapse duplicate keys in an object-pair list: keep each key at the
+/// position of its *first* occurrence and overwrite its value with the
+/// value of the *last* occurrence. Matches jq's `{a:1, a:2}` → `{"a":2}`
+/// object-literal semantics.
+///
+/// Every fast path that constructs an object from a static pair list must
+/// route through this helper so new paths inherit the invariant. See
+/// `docs/maintenance.md` §3 "オブジェクト重複キーの dedup".
+pub(crate) fn normalize_object_pairs<K, V>(pairs: Vec<(K, V)>) -> Vec<(K, V)>
+where
+    K: PartialEq,
+{
+    let mut out: Vec<(K, V)> = Vec::with_capacity(pairs.len());
+    for (k, v) in pairs {
+        if let Some(existing) = out.iter_mut().find(|(ek, _)| *ek == k) {
+            existing.1 = v;
+        } else {
+            out.push((k, v));
+        }
+    }
+    out
+}
+
 /// Serialize a constant expression to compact JSON bytes.
 /// Supports string, number, null, true, false, and constant ObjectConstruct/Collect.
 fn const_expr_to_json(expr: &crate::ir::Expr) -> Option<Vec<u8>> {
@@ -364,17 +387,24 @@ fn const_expr_to_json(expr: &crate::ir::Expr) -> Option<Vec<u8>> {
         Expr::Literal(Literal::True) => Some(b"true".to_vec()),
         Expr::Literal(Literal::False) => Some(b"false".to_vec()),
         Expr::ObjectConstruct { pairs } => {
+            let mut extracted: Vec<(&str, &Expr)> = Vec::with_capacity(pairs.len());
+            for (k, v) in pairs {
+                if let Expr::Literal(Literal::Str(key)) = k {
+                    extracted.push((key.as_str(), v));
+                } else {
+                    return None;
+                }
+            }
+            let normalized = normalize_object_pairs(extracted);
             let mut buf = Vec::new();
             buf.push(b'{');
-            for (i, (k, v)) in pairs.iter().enumerate() {
+            for (i, (key, v)) in normalized.iter().enumerate() {
                 if i > 0 { buf.push(b','); }
-                if let Expr::Literal(Literal::Str(key)) = k {
-                    buf.push(b'"');
-                    buf.extend_from_slice(key.as_bytes());
-                    buf.push(b'"');
-                    buf.push(b':');
-                    buf.extend(const_expr_to_json(v)?);
-                } else { return None; }
+                buf.push(b'"');
+                buf.extend_from_slice(key.as_bytes());
+                buf.push(b'"');
+                buf.push(b':');
+                buf.extend(const_expr_to_json(v)?);
             }
             buf.push(b'}');
             Some(buf)
@@ -526,24 +556,23 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             // Semantic: {pairs} | length → N (number of keys)
             // Also: {pairs} | to_entries | ... gets simplified via to_entries | length → constant
             // Only safe when all keys are literal strings — otherwise we can't know whether two
-            // pairs refer to the same key. And even with literal keys, duplicates collapse, so
-            // count distinct keys rather than the raw pair count.
+            // pairs refer to the same key. After normalization duplicate keys collapse to one,
+            // so the pair count matches jq's output.
             if let Expr::ObjectConstruct { pairs } = &sl {
                 if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
-                    let mut distinct: Vec<&str> = Vec::with_capacity(pairs.len());
+                    let mut extracted: Vec<(&str, ())> = Vec::with_capacity(pairs.len());
                     let mut all_literal = true;
                     for (k, _) in pairs {
                         if let Expr::Literal(Literal::Str(s)) = k {
-                            if !distinct.iter().any(|d| *d == s.as_str()) {
-                                distinct.push(s.as_str());
-                            }
+                            extracted.push((s.as_str(), ()));
                         } else {
                             all_literal = false;
                             break;
                         }
                     }
                     if all_literal {
-                        return Expr::Literal(Literal::Num(distinct.len() as f64, None));
+                        let n = normalize_object_pairs(extracted).len();
+                        return Expr::Literal(Literal::Num(n as f64, None));
                     }
                 }
             }
@@ -1809,35 +1838,22 @@ fn push_const_json(expr: &crate::ir::Expr, buf: &mut Vec<u8>) -> bool {
             true
         }
         Expr::ObjectConstruct { pairs } => {
-            // Pre-check: all keys must be string literals. Values may need further
-            // recursion, but we need to know the final key order before writing so
-            // that duplicate keys collapse to the last occurrence (as jq does).
-            let mut ordered_keys: Vec<&str> = Vec::with_capacity(pairs.len());
-            let mut chosen: Vec<usize> = Vec::with_capacity(pairs.len());
-            for (i, (key, _)) in pairs.iter().enumerate() {
-                let k = match key {
-                    Expr::Literal(Literal::Str(k)) => k.as_str(),
+            // All keys must be string literals. Duplicates collapse via
+            // `normalize_object_pairs` (last value wins, keeps first position).
+            let mut extracted: Vec<(&str, &Expr)> = Vec::with_capacity(pairs.len());
+            for (key, val) in pairs {
+                match key {
+                    Expr::Literal(Literal::Str(k)) => extracted.push((k.as_str(), val)),
                     _ => return false,
-                };
-                if let Some(pos) = ordered_keys.iter().position(|&ok| ok == k) {
-                    // Later occurrence wins — overwrite the pair we'd emit, keep position.
-                    chosen[pos] = i;
-                } else {
-                    ordered_keys.push(k);
-                    chosen.push(i);
                 }
             }
+            let normalized = normalize_object_pairs(extracted);
             buf.push(b'{');
-            for (i, &pair_idx) in chosen.iter().enumerate() {
+            for (i, (k, val)) in normalized.iter().enumerate() {
                 if i > 0 { buf.push(b','); }
-                let (key, val) = &pairs[pair_idx];
-                if let Expr::Literal(Literal::Str(k)) = key {
-                    buf.push(b'"');
-                    buf.extend_from_slice(k.as_bytes());
-                    buf.push(b'"');
-                } else {
-                    return false;
-                }
+                buf.push(b'"');
+                buf.extend_from_slice(k.as_bytes());
+                buf.push(b'"');
                 buf.push(b':');
                 if !push_const_json(val, buf) { return false; }
             }
@@ -3415,25 +3431,13 @@ impl Filter {
             }
             None
         }
-        // Collapse duplicate keys (later wins), preserving insertion order.
-        fn dedup_pairs(pairs: Vec<(String, String)>) -> Vec<(String, String)> {
-            let mut out: Vec<(String, String)> = Vec::with_capacity(pairs.len());
-            for (k, v) in pairs {
-                if let Some(existing) = out.iter_mut().find(|(ek, _)| *ek == k) {
-                    existing.1 = v;
-                } else {
-                    out.push((k, v));
-                }
-            }
-            out
-        }
         // Direct ObjectConstruct
-        if let Some(r) = extract_remap_pairs(expr) { return Some(dedup_pairs(r)); }
+        if let Some(r) = extract_remap_pairs(expr) { return Some(normalize_object_pairs(r)); }
         // {a:.x} + {b:.y} — merged object constructs
         if let Expr::BinOp { op: BinOp::Add, lhs, rhs } = expr {
             if let (Some(mut left), Some(right)) = (extract_remap_pairs(lhs), extract_remap_pairs(rhs)) {
                 left.extend(right);
-                return Some(dedup_pairs(left));
+                return Some(normalize_object_pairs(left));
             }
         }
         None
@@ -3464,28 +3468,16 @@ impl Filter {
             let _ = this; // silence unused
             None
         }
-        // Collapse duplicate keys (later wins), preserving original insertion order.
-        fn dedup_keys(pairs: Vec<(String, RemapExpr)>) -> Vec<(String, RemapExpr)> {
-            let mut out: Vec<(String, RemapExpr)> = Vec::with_capacity(pairs.len());
-            for (k, v) in pairs {
-                if let Some(existing) = out.iter_mut().find(|(ek, _)| *ek == k) {
-                    existing.1 = v;
-                } else {
-                    out.push((k, v));
-                }
-            }
-            out
-        }
         // Direct ObjectConstruct
         if let Some((result, has_computed)) = extract_computed_pairs(self, expr) {
-            if has_computed { return Some(dedup_keys(result)); }
+            if has_computed { return Some(normalize_object_pairs(result)); }
             return None;
         }
         // {a:.x,b:(.y*2)} + {c:.z} — merged object constructs
         if let Expr::BinOp { op: BinOp::Add, lhs, rhs } = expr {
             if let (Some((mut left, lc)), Some((right, rc))) = (extract_computed_pairs(self, lhs), extract_computed_pairs(self, rhs)) {
                 left.extend(right);
-                if lc || rc { return Some(dedup_keys(left)); }
+                if lc || rc { return Some(normalize_object_pairs(left)); }
             }
         }
         None
