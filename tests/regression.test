@@ -470,3 +470,53 @@ null
 -. | tostring
 0
 "0"
+
+# Issue #39: abs/fabs diverge on non-number inputs
+
+# fabs errors on null
+fabs
+null
+
+# fabs errors on boolean
+fabs
+true
+
+# fabs errors on string
+fabs
+"s"
+
+# fabs errors on array
+fabs
+[1,2,3]
+
+# fabs errors on object
+fabs
+{"a":1,"b":2}
+
+# abs errors on null
+abs
+null
+
+# abs errors on boolean
+abs
+true
+
+# abs returns string identity
+abs
+"s"
+"s"
+
+# abs returns array identity
+abs
+[1,2,3]
+[1,2,3]
+
+# abs returns object identity
+abs
+{"a":1}
+{"a":1}
+
+# abs negates numbers
+abs
+-5
+5

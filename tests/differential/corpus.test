@@ -333,3 +333,29 @@ null
 
 [0, -0] | add
 null
+
+# ---------- Issue #39: abs/fabs diverge on non-number inputs ----------
+
+fabs
+true
+
+fabs
+"s"
+
+fabs
+[1,2,3]
+
+abs
+null
+
+abs
+true
+
+abs
+"s"
+
+abs
+[1,2,3]
+
+abs
+{"a":1}

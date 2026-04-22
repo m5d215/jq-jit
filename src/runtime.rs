@@ -51,7 +51,8 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "floor" => unary_op(args, rt_floor),
         "ceil" => unary_op(args, rt_ceil),
         "round" => unary_op(args, rt_round),
-        "fabs" | "abs" => unary_op(args, rt_fabs),
+        "fabs" => unary_op(args, rt_fabs),
+        "abs" => unary_op(args, rt_abs),
         "sqrt" => unary_op(args, rt_sqrt),
         "tostring" => unary_op(args, rt_tostring),
         "tonumber" => unary_op(args, rt_tonumber),
@@ -1118,10 +1119,20 @@ fn rt_fabs(v: &Value) -> Result<Value> {
             if *n >= 0.0 { Ok(Value::Num(*n, repr.clone())) }
             else { Ok(Value::Num(n.abs(), None)) }
         }
-        // abs on non-numbers returns the value for strings, errors for others
-        Value::Str(_) => Ok(v.clone()),
-        Value::Null => Ok(Value::Null),
-        _ => v.length(),
+        _ => bail!("{} ({}) number required", v.type_name(), crate::value::value_to_json(v)),
+    }
+}
+
+fn rt_abs(v: &Value) -> Result<Value> {
+    match v {
+        Value::Num(n, repr) => {
+            if *n >= 0.0 { Ok(Value::Num(*n, repr.clone())) }
+            else { Ok(Value::Num(n.abs(), None)) }
+        }
+        Value::Str(_) | Value::Arr(_) | Value::Obj(_) => Ok(v.clone()),
+        _ => {
+            bail!("{} ({}) cannot be negated", v.type_name(), crate::value::value_to_json(v))
+        }
     }
 }
 
