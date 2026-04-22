@@ -845,3 +845,35 @@ null
 (.a)?
 {"a":5}
 5
+
+# Issue #54: del(path) errors on type-incompatible input
+
+# del(.a) on number errors
+del(.a)
+1
+
+# del(.a) on array errors (wrong key type for array)
+del(.a)
+[1,2]
+
+# del(.[0]) on object errors
+del(.[0])
+{}
+
+# del(.[]) on number errors (cannot iterate)
+del(.[])
+1
+
+# del(.[]) on null errors — jq treats null as non-iterable here
+del(.[])
+null
+
+# del still works on valid input
+del(.a)
+{"a":1,"b":2}
+{"b":2}
+
+# del on an array index removes that element
+del(.[0])
+[1,2,3]
+[2,3]

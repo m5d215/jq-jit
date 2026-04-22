@@ -546,3 +546,26 @@ true
 
 (.a)?
 {"a":5}
+
+# ---------- Issue #54: del(path) errors on type-incompatible input ----------
+
+del(.a)
+1
+
+del(.a)
+[1,2]
+
+del(.[0])
+{}
+
+del(.[])
+1
+
+del(.[])
+null
+
+del(.a)
+{"a":1,"b":2}
+
+del(.[0])
+[1,2,3]

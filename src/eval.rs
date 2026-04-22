@@ -3866,7 +3866,12 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 match &base {
                     Value::Arr(a) => { for i in 0..a.len() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::Num(i as f64, None)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
                     Value::Obj(o) => { for k in o.keys() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::from_str(k)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
-                    _ => Ok(true),
+                    _ => {
+                        // jq errors `del(.[])` etc. when the current path
+                        // points at a non-iterable (issue #54). Silent
+                        // "no paths" turned type errors into no-ops.
+                        bail!("Cannot iterate over {} ({})", base.type_name(), crate::value::value_to_json(&base))
+                    }
                 }
             });
             match result {
