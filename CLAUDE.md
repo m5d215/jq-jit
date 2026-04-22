@@ -11,6 +11,17 @@ cargo test --release             # Test (official 509 + regression)
 ./bench/comprehensive.sh --quick # Benchmark (vs past results, see docs/benchmark-history.md)
 ```
 
+## Language Policy
+
+Write all GitHub artifacts in English:
+
+- Issue titles and bodies
+- Pull request titles and descriptions
+- Commit messages (Conventional Commits)
+- Code comments and documentation in the repository
+
+This applies regardless of the conversation language used with the assistant.
+
 ## Issue Fix Workflow
 
 Follow this workflow for bug fixes:
