@@ -1,0 +1,238 @@
+# Differential test corpus
+# Format: 3-line groups (filter / input / comment-tag optional on same line as filter)
+#
+# Each group is (filter, input). The harness runs both `jq-jit` and reference
+# `jq` (1.8.x) on the input and flags value-level divergences. Error cases
+# where both implementations error are treated as pass (error-message wording
+# differs). Single-side errors are failures.
+#
+# When a new compat bug ships a fix, add a probe here.
+
+# ---------- PR #27 bug 1: all/any on object ----------
+
+{"a":1,"b":2} | all
+null
+
+{"a":true,"b":false} | any
+null
+
+{"a":true,"b":true} | all
+null
+
+# ---------- PR #27 bug 2: input_line_number ----------
+# Intentionally omitted — jq-jit stubs input_line_number to 0 (crash avoidance,
+# not a semantic match). jq-1.8.x returns the current input index. Tracking
+# this in a differential corpus would block every run on a known divergence.
+
+# ---------- PR #27 bug 3: limit(n>1) ----------
+
+[limit(3; 1,2,3,4,5)]
+null
+
+[limit(2; range(5))]
+null
+
+[limit(1; 1,2,3)]
+null
+
+# ---------- PR #27 bug 4: foreach emits per update yield ----------
+
+[foreach range(3) as $i (0; . + $i; .)]
+null
+
+[foreach range(3) as $i (0; ., . + $i; .)]
+null
+
+[label $out | foreach range(5) as $i (0; if $i == 3 then ., break $out else . + $i end; .)]
+null
+
+# ---------- PR #27 bug 5: [gen] | add with Empty branches ----------
+
+[] | add
+null
+
+[empty, 1] | add
+null
+
+[empty, 1, 2] | add
+null
+
+[[] | add]
+null
+
+[empty] | add
+null
+
+# ---------- PR #27 bug 6: [.[] | select(. cmp N)] cross-type ordering ----------
+
+[.[] | select(. > 1)]
+[1, 2, [1,2,3], "foo", null, true, 3]
+
+[.[] | select(. >= 2)]
+[1, 2, 3, null, "x"]
+
+[.[] | select(. < 3)]
+[1, 2, 3, [1], {"a":1}, null]
+
+[.[] | select(. <= 1)]
+[0, 1, 2, null, false, true]
+
+# ---------- PR #27 bug 7: paths(f) skips the empty root path ----------
+# `leaf_paths` was removed from jq-1.8.x; exercise the same invariant via
+# paths(f) instead. jq-jit still defines leaf_paths for compatibility.
+
+[paths(type=="string")]
+"hello"
+
+[paths(type | (. != "object") and (. != "array"))]
+"scalar"
+
+[paths(type | (. != "object") and (. != "array"))]
+42
+
+[paths]
+{"a":{"b":1}}
+
+[paths(type | (. != "object") and (. != "array"))]
+{"a":{"b":1},"c":[1,2]}
+
+# ---------- PR #27 bug 8: duplicate-key collapse in object literals ----------
+
+{a:1, a:2}
+null
+
+{a:1, a:2} | length
+null
+
+{a:.x, a:.x+1}
+{"x":5}
+
+{a:.x, a:.x+1} | length
+{"x":5}
+
+{a:1, b:2, a:3}
+null
+
+{a:1, a:2, a:3}
+null
+
+# ---------- PR #27 bug 9: (path1, path2) += N loses let-binding ----------
+
+(.a, .b) += 100
+{"a":1,"b":2}
+
+(.a, .b) -= 10
+{"a":100,"b":50}
+
+(.a, .b) *= 2
+{"a":3,"b":4}
+
+(.[0], .[2]) += 1
+[10,20,30]
+
+.[] |= . + 1
+[1,2,3]
+
+# ---------- Extra probes: generator-heavy filters ----------
+
+[range(5) | select(. % 2 == 0)]
+null
+
+[.[] | .a // "none"]
+[{"a":1},{},{"a":null},{"a":3}]
+
+[.. | numbers]
+{"a":1,"b":[2,[3,4]],"c":{"d":5}}
+
+[.. | arrays]
+{"a":1,"b":[2,[3,4]],"c":{"d":5}}
+
+# ---------- Extra probes: object updates ----------
+
+.a.b = 42
+{"a":{"b":1,"c":2}}
+
+.a.b |= . + 1
+{"a":{"b":1}}
+
+del(.a, .b)
+{"a":1,"b":2,"c":3}
+
+.[] |= select(. > 1)
+[1,2,3]
+
+# ---------- Extra probes: arithmetic edge cases ----------
+
+1 + 2
+null
+
+.x - .y
+{"x":5,"y":3}
+
+[range(3) | . * .]
+null
+
+# ---------- Extra probes: string and regex ----------
+
+split(",")
+"a,b,c,"
+
+[scan("[0-9]+")]
+"abc 123 def 456"
+
+test("^\\d+$")
+"42"
+
+# ---------- Extra probes: type functions ----------
+
+type
+null
+
+[.[] | type]
+[1, "x", [1], {"a":1}, null, true]
+
+# ---------- Extra probes: group/unique/sort ----------
+
+group_by(.a)
+[{"a":1,"b":1},{"a":2,"b":2},{"a":1,"b":3}]
+
+unique_by(.a)
+[{"a":1,"b":1},{"a":2,"b":2},{"a":1,"b":3}]
+
+sort_by(.a)
+[{"a":2},{"a":1},{"a":3}]
+
+# ---------- Extra probes: to_entries / from_entries ----------
+
+to_entries
+{"a":1,"b":2}
+
+from_entries
+[{"key":"a","value":1},{"key":"b","value":2}]
+
+with_entries(.value += 10)
+{"a":1,"b":2}
+
+# ---------- Extra probes: recurse and tostream ----------
+
+[recurse] | length
+{"a":{"b":{"c":1}}}
+
+[tostream]
+{"a":[1,2]}
+
+# ---------- Extra probes: reduce ----------
+
+reduce range(5) as $i (0; . + $i)
+null
+
+reduce .[] as $x ({}; .[$x | tostring] = 1)
+[1,2,3,2,1]
+
+# ---------- Extra probes: mixed pipe with comma ----------
+
+(.a, .b, .c) | . + 1
+{"a":10,"b":20,"c":30}
+
+[.a, .b] | add
+{"a":[1,2],"b":[3,4]}

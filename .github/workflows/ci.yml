@@ -37,6 +37,11 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install jq oniguruma
 
+      - name: Verify jq version
+        run: |
+          jq --version
+          jq --version | grep -q '^jq-1\.8\.'
+
       - name: Build
         run: cargo build --release
 
