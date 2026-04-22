@@ -51,7 +51,8 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "floor" => unary_op(args, rt_floor),
         "ceil" => unary_op(args, rt_ceil),
         "round" => unary_op(args, rt_round),
-        "fabs" | "abs" => unary_op(args, rt_fabs),
+        "fabs" => unary_op(args, rt_fabs),
+        "abs" => unary_op(args, rt_abs),
         "sqrt" => unary_op(args, rt_sqrt),
         "tostring" => unary_op(args, rt_tostring),
         "tonumber" => unary_op(args, rt_tonumber),
@@ -1071,7 +1072,16 @@ fn rt_add_all(v: &Value) -> Result<Value> {
             }
             Ok(result)
         }
-        _ => bail!("{} is not an array", v.type_name()),
+        Value::Obj(o) => {
+            let mut iter = o.values();
+            let Some(first) = iter.next() else { return Ok(Value::Null); };
+            let mut result = first.clone();
+            for item in iter {
+                result = rt_add(&result, item)?;
+            }
+            Ok(result)
+        }
+        _ => bail!("Cannot iterate over {} ({})", v.type_name(), crate::value::value_to_json(v)),
     }
 }
 
@@ -1118,10 +1128,20 @@ fn rt_fabs(v: &Value) -> Result<Value> {
             if *n >= 0.0 { Ok(Value::Num(*n, repr.clone())) }
             else { Ok(Value::Num(n.abs(), None)) }
         }
-        // abs on non-numbers returns the value for strings, errors for others
-        Value::Str(_) => Ok(v.clone()),
-        Value::Null => Ok(Value::Null),
-        _ => v.length(),
+        _ => bail!("{} ({}) number required", v.type_name(), crate::value::value_to_json(v)),
+    }
+}
+
+fn rt_abs(v: &Value) -> Result<Value> {
+    match v {
+        Value::Num(n, repr) => {
+            if *n >= 0.0 { Ok(Value::Num(*n, repr.clone())) }
+            else { Ok(Value::Num(n.abs(), None)) }
+        }
+        Value::Str(_) | Value::Arr(_) | Value::Obj(_) => Ok(v.clone()),
+        _ => {
+            bail!("{} ({}) cannot be negated", v.type_name(), crate::value::value_to_json(v))
+        }
     }
 }
 
@@ -1302,6 +1322,15 @@ fn rt_to_entries(v: &Value) -> Result<Value> {
             let entries: Vec<Value> = o.iter().map(|(k, v)| {
                 let mut entry = new_objmap();
                 entry.insert("key".into(), Value::from_str(k));
+                entry.insert("value".into(), v.clone());
+                Value::Obj(Rc::new(entry))
+            }).collect();
+            Ok(Value::Arr(Rc::new(entries)))
+        }
+        Value::Arr(a) => {
+            let entries: Vec<Value> = a.iter().enumerate().map(|(i, v)| {
+                let mut entry = new_objmap();
+                entry.insert("key".into(), Value::Num(i as f64, None));
                 entry.insert("value".into(), v.clone());
                 Value::Obj(Rc::new(entry))
             }).collect();
@@ -1558,16 +1587,7 @@ fn rt_split(v: &Value, sep: &Value) -> Result<Value> {
 fn rt_regex_split(v: &Value, re: &Value, flags: &Value) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
-            let mut pat = String::new();
-            if let Value::Str(f) = flags {
-                // Build regex with flags (e.g., "ix" → (?ix)pattern)
-                if !f.is_empty() {
-                    pat.push_str("(?");
-                    pat.push_str(f.as_str());
-                    pat.push(')');
-                }
-            }
-            pat.push_str(r.as_str());
+            let (pat, _global) = apply_regex_flags(r.as_str(), flags);
             with_regex(&pat, |regex| {
                 let parts: Vec<Value> = regex.split(s.as_str())
                     .map(Value::from_str)

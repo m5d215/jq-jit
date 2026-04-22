@@ -333,3 +333,76 @@ null
 
 [0, -0] | add
 null
+
+# ---------- Issue #39: abs/fabs diverge on non-number inputs ----------
+
+fabs
+true
+
+fabs
+"s"
+
+fabs
+[1,2,3]
+
+abs
+null
+
+abs
+true
+
+abs
+"s"
+
+abs
+[1,2,3]
+
+abs
+{"a":1}
+
+# ---------- Issue #43: length on boolean returns 0/1 instead of erroring ----------
+
+length
+true
+
+length
+false
+
+map(length)
+[true]
+
+# ---------- Issue #44: to_entries rejects array input ----------
+
+to_entries
+[1,2,3]
+
+to_entries
+["a","b"]
+
+# ---------- Issue #48: add on object folds values ----------
+
+add
+{}
+
+add
+{"a":1,"b":2}
+
+add
+{"a":"x","b":"y"}
+
+add
+1
+
+add
+"x"
+
+# ---------- Issue #51: split(regex; "g") rejected the global flag ----------
+
+split(","; "g")
+"a,b,c"
+
+split("a"; "gi")
+"aAbAc"
+
+[splits(","; "g")]
+"a,b,c"

@@ -495,8 +495,9 @@ impl Value {
     pub fn length(&self) -> Result<Value> {
         match self {
             Value::Null => Ok(Value::Num(0.0, None)),
-            Value::False => Ok(Value::Num(0.0, None)),
-            Value::True => Ok(Value::Num(1.0, None)),
+            Value::True | Value::False => {
+                bail!("{} ({}) has no length", self.type_name(), crate::value::value_to_json(self))
+            }
             Value::Num(n, repr) => {
                 if *n >= 0.0 { Ok(Value::Num(*n, repr.clone())) }
                 else { Ok(Value::Num(n.abs(), None)) }

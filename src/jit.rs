@@ -5606,8 +5606,15 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
         if op == 0 {
             let v = match &*input {
                 Value::Null => Value::Num(0.0, None),
-                Value::False => Value::Num(0.0, None),
-                Value::True => Value::Num(1.0, None),
+                Value::True | Value::False => {
+                    set_jit_error(format!(
+                        "{} ({}) has no length",
+                        (*input).type_name(),
+                        crate::value::value_to_json(&*input)
+                    ));
+                    std::ptr::write(dst, Value::Null);
+                    return GEN_ERROR;
+                }
                 Value::Num(n, _) => Value::Num(n.abs(), None),
                 Value::Str(s) => {
                     let len = if s.is_ascii() { s.len() } else { s.chars().count() };

@@ -470,3 +470,133 @@ null
 -. | tostring
 0
 "0"
+
+# Issue #39: abs/fabs diverge on non-number inputs
+
+# fabs errors on null
+fabs
+null
+
+# fabs errors on boolean
+fabs
+true
+
+# fabs errors on string
+fabs
+"s"
+
+# fabs errors on array
+fabs
+[1,2,3]
+
+# fabs errors on object
+fabs
+{"a":1,"b":2}
+
+# abs errors on null
+abs
+null
+
+# abs errors on boolean
+abs
+true
+
+# abs returns string identity
+abs
+"s"
+"s"
+
+# abs returns array identity
+abs
+[1,2,3]
+[1,2,3]
+
+# abs returns object identity
+abs
+{"a":1}
+{"a":1}
+
+# abs negates numbers
+abs
+-5
+5
+
+# Issue #43: length on boolean returns 0/1 instead of erroring
+
+# length on true errors
+length
+true
+
+# length on false errors
+length
+false
+
+# map(length) propagates the error from boolean element
+map(length)
+[true]
+
+# length on null is still 0
+length
+null
+0
+
+# length on number absolute value still works
+length
+-3
+3
+
+# Issue #44: to_entries rejects array input
+
+# to_entries on array of numbers
+to_entries
+[1,2,3]
+[{"key":0,"value":1},{"key":1,"value":2},{"key":2,"value":3}]
+
+# to_entries on array of strings
+to_entries
+["a","b"]
+[{"key":0,"value":"a"},{"key":1,"value":"b"}]
+
+# to_entries | from_entries on object round-trips to the same object
+to_entries | from_entries
+{"a":1,"b":2}
+{"a":1,"b":2}
+
+# Issue #48: add folds object values instead of erroring
+
+# add on empty object returns null
+add
+{}
+null
+
+# add on object with one numeric value returns that value
+add
+{"a":1}
+1
+
+# add on object with two numeric values folds them
+add
+{"a":1,"b":2}
+3
+
+# add on object with string values concatenates them
+add
+{"a":"x","b":"y"}
+"xy"
+
+# Issue #51: split(regex; "g") errored on the global flag
+
+# split with literal and "g" flag
+split(","; "g")
+"a,b,c"
+["a","b","c"]
+
+# split with combined global + case-insensitive flags
+split("a"; "gi")
+"aAbAc"
+["","","b","c"]
+
+# splits expansion propagates flags through the split call
+[splits(","; "g")]
+"a,b,c"
+["a","b","c"]
