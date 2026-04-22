@@ -661,3 +661,34 @@ capture("(?<n>\\d+)")
 "\(.b)"
 {"b":"hi"}
 "hi"
+
+# Issue #52: computed object key `{(expr): val}` must error on non-strings
+
+# Null computed key errors
+{(null):1}
+null
+
+# Number computed key errors
+{(1):"x"}
+null
+
+# Boolean computed key errors
+{(true):1}
+null
+
+# Array computed key errors
+{([1]):1}
+null
+
+# Object computed key errors
+{({}):1}
+null
+
+# Null field as computed key errors
+{(.k):1}
+null
+
+# String computed key still succeeds
+{(.k):1}
+{"k":"a"}
+{"a":1}

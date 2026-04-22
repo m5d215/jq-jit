@@ -448,3 +448,20 @@ capture("(?<n>\\d+)")
 
 "prefix \(.b) suffix"
 {"b":{"c":3}}
+
+# ---------- Issue #52: computed object key accepts non-string by stringification ----------
+
+{(null):1}
+null
+
+{(1):"x"}
+null
+
+{(true):1}
+null
+
+{(.k):1}
+null
+
+{(.k):1}
+{"k":"a"}
