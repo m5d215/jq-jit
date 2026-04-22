@@ -236,3 +236,37 @@ reduce .[] as $x ({}; .[$x | tostring] = 1)
 
 [.a, .b] | add
 {"a":[1,2],"b":[3,4]}
+
+# ---------- Issue #30: duplicate-key collapse across fast paths ----------
+# Each case exercises a different object-construction detector. A new fast
+# path that forgets to run through normalize_object_pairs should flag here.
+
+{a:1, a:2}
+null
+
+{a:1, b:2, a:3}
+null
+
+{"a": .x, "b": .y, "a": .z}
+{"x":1,"y":2,"z":3}
+
+{a: .x + 1, a: .x * 2}
+{"x":3}
+
+{a: {b: 1, b: 2}}
+null
+
+[{a:1, a:2}, {b:3, b:4}]
+null
+
+{a:1, a:2, b:3} | length
+null
+
+{a: .x, b: .y, a: .z} | length
+{"x":1,"y":2,"z":3}
+
+{a: 1, b: 2} + {b: 3}
+null
+
+{a: 1} + {a: 2}
+null

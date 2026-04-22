@@ -101,16 +101,23 @@ JIT にまで降りる filter はここ。`flatten_scalar` / `flatten_gen` の m
 
 ### オブジェクト重複キーの dedup
 
-jq は `{a:1, a:2}` → `{"a":2}`（後勝ち、最初の位置を保持）。構築系 fast path すべてでこれを守る:
+jq は `{a:1, a:2}` → `{"a":2}`（後勝ち、最初の位置を保持）。構築系 fast path すべてで
+`interpreter.rs` の `normalize_object_pairs<K, V>` ヘルパを通して守る:
 
 | 場所 | 関数 |
 |---|---|
+| `interpreter.rs` | `const_expr_to_json`（ObjectConstruct 分岐） |
 | `interpreter.rs` | `push_const_json`（`detect_literal_output` 経由） |
 | `interpreter.rs` | `simplify_expr` の `{pairs} | length` 畳み込み |
 | `interpreter.rs` | `detect_field_remap`（戻り値 dedup） |
 | `interpreter.rs` | `detect_computed_remap`（戻り値 dedup） |
 
-新しい object 構築 fast path を足す時は、リテラル string キーの後勝ち collapse を必ず通す。
+新しい object 構築 fast path を足す時は、`(key, value)` ペアのリストを組み立てた後に
+`normalize_object_pairs` を必ず通す（キー型は `PartialEq` でよい）。`| length` 系の
+個数だけ欲しい場合も `.len()` を取れば jq と一致する。
+
+invariant 回帰は `tests/regression.test` の "Issue #30" ブロックと
+`tests/differential/corpus.test` の "duplicate-key collapse" ブロックで監視している。
 
 ### `[gen] | add` の Empty 扱い
 
