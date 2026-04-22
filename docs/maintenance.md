@@ -46,6 +46,13 @@ done
 
 エラーメッセージの差は無視（`jq: error` を含むペアは除外）。実値の差と crash だけを拾う。
 
+### 常設 differential harness
+
+`cargo test --release --test differential` が `tests/differential/corpus.test` の
+`(filter, input)` ペアを jq 1.8.x と突き合わせる。新しい compat バグを直したら
+コーパスに 1 件追加すること（`tests/regression.test` の追加に加えて）。
+jq バイナリは `JQ_BIN` → `/opt/homebrew/opt/jq/bin/jq` → `PATH` の順で解決する。
+
 ### テスト出力
 
 `cargo test --release` だけだと regression 通過数が非表示。必ず `--nocapture`:
