@@ -1318,6 +1318,15 @@ fn rt_to_entries(v: &Value) -> Result<Value> {
             }).collect();
             Ok(Value::Arr(Rc::new(entries)))
         }
+        Value::Arr(a) => {
+            let entries: Vec<Value> = a.iter().enumerate().map(|(i, v)| {
+                let mut entry = new_objmap();
+                entry.insert("key".into(), Value::Num(i as f64, None));
+                entry.insert("value".into(), v.clone());
+                Value::Obj(Rc::new(entry))
+            }).collect();
+            Ok(Value::Arr(Rc::new(entries)))
+        }
         _ => bail!("{} has no entries", v.type_name()),
     }
 }

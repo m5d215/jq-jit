@@ -544,3 +544,20 @@ null
 length
 -3
 3
+
+# Issue #44: to_entries rejects array input
+
+# to_entries on array of numbers
+to_entries
+[1,2,3]
+[{"key":0,"value":1},{"key":1,"value":2},{"key":2,"value":3}]
+
+# to_entries on array of strings
+to_entries
+["a","b"]
+[{"key":0,"value":"a"},{"key":1,"value":"b"}]
+
+# to_entries | from_entries on object round-trips to the same object
+to_entries | from_entries
+{"a":1,"b":2}
+{"a":1,"b":2}

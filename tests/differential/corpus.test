@@ -370,3 +370,11 @@ false
 
 map(length)
 [true]
+
+# ---------- Issue #44: to_entries rejects array input ----------
+
+to_entries
+[1,2,3]
+
+to_entries
+["a","b"]
