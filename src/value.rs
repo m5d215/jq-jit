@@ -3971,7 +3971,8 @@ pub fn push_jq_number_str(buf: &mut String, n: f64) {
         return;
     }
     if n == 0.0 {
-        buf.push_str(if n.is_sign_negative() { "-0" } else { "0" });
+        // jq normalises negative zero to "0" on output; match that.
+        buf.push_str("0");
         return;
     }
 
@@ -4335,7 +4336,8 @@ fn write_jq_number(w: &mut dyn io::Write, n: f64) -> io::Result<()> {
         else { w.write_all(b"-1.7976931348623157e+308") };
     }
     if n == 0.0 {
-        return if n.is_sign_negative() { w.write_all(b"-0") } else { w.write_all(b"0") };
+        // jq normalises negative zero to "0" on output; match that.
+        return w.write_all(b"0");
     }
     // Integer fast path
     if n == n.trunc() && n.abs() < 1e16 {
@@ -4621,12 +4623,9 @@ pub fn push_jq_number_bytes(buf: &mut Vec<u8>, n: f64) {
     // The i64 roundtrip check (i as f64 == n) naturally rejects NaN, infinity, and non-integers.
     let i = n as i64;
     if i as f64 == n && i.unsigned_abs() < 10_000_000_000_000_000 {
-        if i == 0 && n.is_sign_negative() {
-            buf.extend_from_slice(b"-0");
-        } else {
-            let mut ibuf = itoa::Buffer::new();
-            buf.extend_from_slice(ibuf.format(i).as_bytes());
-        }
+        // jq normalises negative zero to "0" on output; match that.
+        let mut ibuf = itoa::Buffer::new();
+        buf.extend_from_slice(ibuf.format(i).as_bytes());
         return;
     }
     // Slow path: NaN, infinity, decimals, very large numbers
