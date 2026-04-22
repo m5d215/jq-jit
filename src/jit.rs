@@ -6432,23 +6432,29 @@ extern "C" fn jit_rt_obj_new(dst: *mut Value, cap: usize) {
     unsafe { std::ptr::write(dst, Value::Obj(crate::value::rc_objmap_pool_get(cap))); }
 }
 /// Insert key-value pair into object. Takes ownership of both key and val (ptr::read, no clone).
-extern "C" fn jit_rt_obj_insert(obj: *mut Value, key: *mut Value, val: *mut Value) {
+/// Returns 0 on success, -1 on error (jq errors when the key is not a string).
+extern "C" fn jit_rt_obj_insert(obj: *mut Value, key: *mut Value, val: *mut Value) -> i64 {
     unsafe {
         let key_val = std::ptr::read(key);
         let val_val = std::ptr::read(val);
         if let Value::Obj(o) = &mut *obj {
-            // Move KeyStr out of Value::Str to avoid clone+drop
             let k: crate::value::KeyStr = match key_val {
                 Value::Str(s) => s,
                 other => {
-                    let k = crate::value::KeyStr::from(crate::value::value_to_json(&other));
+                    set_jit_error(format!(
+                        "Cannot use {} ({}) as object key",
+                        other.type_name(),
+                        crate::value::value_to_json(&other)
+                    ));
                     drop(other);
-                    k
+                    drop(val_val);
+                    return -1;
                 }
             };
             // Safety: obj was just created by jit_rt_obj_new, refcount is always 1
             Rc::get_mut(o).unwrap_unchecked().insert(k, val_val);
         }
+        0
     }
 }
 
@@ -8646,7 +8652,20 @@ impl JitCompiler {
                         let o = slot_addr(&mut b, *obj);
                         let k = slot_addr(&mut b, *key);
                         let v = slot_addr(&mut b, *val);
-                        b.ins().call(rt["obj_insert"], &[o, k, v]);
+                        let call = b.ins().call(rt["obj_insert"], &[o, k, v]);
+                        let status = b.inst_results(call)[0];
+                        let zero = b.ins().iconst(ptr_ty, 0);
+                        let is_err = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, status, zero);
+                        let err_blk = b.create_block();
+                        let ok_blk = b.create_block();
+                        b.ins().brif(is_err, err_blk, &[], ok_blk, &[]);
+                        b.switch_to_block(err_blk);
+                        b.seal_block(err_blk);
+                        b.ins().call(rt["propagate_error"], &[env_ptr]);
+                        let gerr = b.ins().iconst(ptr_ty, GEN_ERROR);
+                        b.ins().return_(&[gerr]);
+                        b.switch_to_block(ok_blk);
+                        b.seal_block(ok_blk);
                     }
                     JitOp::ObjInsertStrKey { obj, key, val } => {
                         let o = slot_addr(&mut b, *obj);
@@ -9088,7 +9107,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("collect_push", [p, p], []);
     decl!("collect_finish", [p, p], []);
     decl!("obj_new", [p, p], []);
-    decl!("obj_insert", [p, p, p], []);
+    decl!("obj_insert", [p, p, p], [p]);
     decl!("obj_insert_str_key", [p, p, p, p], []);
     decl!("obj_push_str_key", [p, p, p, p], []);
     decl!("obj_copy_field", [p, p, p, p, p, p], []);

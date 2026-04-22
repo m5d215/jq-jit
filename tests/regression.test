@@ -600,3 +600,122 @@ split("a"; "gi")
 [splits(","; "g")]
 "a,b,c"
 ["a","b","c"]
+
+# Issue #41: unique_by(f) must sort by f — not just dedupe in input order
+
+# unique_by(.) on integers sorts ascending
+unique_by(.)
+[3,1,2]
+[1,2,3]
+
+# unique_by(.) places null before numbers per jq's cross-type order
+unique_by(.)
+[1,2,3,null]
+[null,1,2,3]
+
+# unique_by(tostring) sorts by stringified key with ASCII ordering
+unique_by(tostring)
+[null,1,2,3]
+[1,2,3,null]
+
+# unique_by(.) across mixed types respects null < number < string
+unique_by(.)
+[1,"a",null,2]
+[null,1,2,"a"]
+
+# unique_by(.a) on objects picks the first per distinct key, in sorted order
+unique_by(.a)
+[{"a":1,"b":1},{"a":2,"b":2},{"a":1,"b":3}]
+[{"a":1,"b":1},{"a":2,"b":2}]
+
+# Issue #55: capture(regex; "g") must iterate over every match
+
+# capture with global flag yields one object per match
+[capture("(?<n>\\d+)"; "g")]
+"a1 b2 c3"
+[{"n":"1"},{"n":"2"},{"n":"3"}]
+
+# capture with global flag on comma-delimited digits
+[capture("(?<n>\\d+)"; "g")]
+"1,2,3"
+[{"n":"1"},{"n":"2"},{"n":"3"}]
+
+# capture without global returns only the first match
+capture("(?<n>\\d+)")
+"1,2,3"
+{"n":"1"}
+
+# Issue #45: string interpolation of field-accessed container must JSON-escape
+
+# Object container: inner quotes become \"
+"\(.b)"
+{"b":{"c":3}}
+"{\"c\":3}"
+
+# Array container: elements re-escaped
+"\(.x)"
+{"x":["a","b"]}
+"[\"a\",\"b\"]"
+
+# Scalar string is unchanged (identity into interpolation)
+"\(.b)"
+{"b":"hi"}
+"hi"
+
+# Issue #52: computed object key `{(expr): val}` must error on non-strings
+
+# Null computed key errors
+{(null):1}
+null
+
+# Number computed key errors
+{(1):"x"}
+null
+
+# Boolean computed key errors
+{(true):1}
+null
+
+# Array computed key errors
+{([1]):1}
+null
+
+# Object computed key errors
+{({}):1}
+null
+
+# Null field as computed key errors
+{(.k):1}
+null
+
+# String computed key still succeeds
+{(.k):1}
+{"k":"a"}
+{"a":1}
+
+# Issue #53: computed key ordering + dedup across static/dynamic keys
+
+# Static `a:1` must come first, then dynamic `(.k):2` at its source position
+{a:1, (.k):2}
+{"k":"b"}
+{"a":1,"b":2}
+
+# Dynamic-key slot preserved in the middle of a three-pair object
+{a:1, (.k):2, c:3}
+{"k":"z"}
+{"a":1,"z":2,"c":3}
+
+# Dynamic key collides with earlier static key — first position, last value wins
+{a:1, (.k):2}
+{"k":"a"}
+{"a":2}
+
+# Dynamic key colliding with static key in a longer object still dedupes
+{a:1, (.k):2, c:3}
+{"k":"a"}
+{"a":2,"c":3}
+
+# Dynamic key first, static key after with same name — first position holds last value
+{(.k):2, a:1}
+{"k":"a"}
+{"a":1}

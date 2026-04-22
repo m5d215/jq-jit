@@ -2801,8 +2801,19 @@ pub fn eval(
             eval(input_expr, input.clone(), env, &mut |s| {
                 eval(re, input.clone(), env, &mut |re_val| {
                     eval(flags, input.clone(), env, &mut |fv| {
+                        let global = matches!(&fv, Value::Str(f) if f.as_str().contains('g'));
                         match crate::runtime::call_builtin("capture", &[s.clone(), re_val.clone(), fv.clone()]) {
-                            Ok(v) => cb(v),
+                            Ok(v) => {
+                                if global {
+                                    if let Value::Arr(a) = &v {
+                                        for item in a.iter() {
+                                            if !cb(item.clone())? { return Ok(false); }
+                                        }
+                                        return Ok(true);
+                                    }
+                                }
+                                cb(v)
+                            }
                             Err(_) => Ok(true), // non-match → empty (like jq)
                         }
                     })
@@ -3146,6 +3157,17 @@ fn eval_range(from: &Value, to: &Value, step: Option<&Value>, cb: &mut dyn FnMut
     Ok(true)
 }
 
+fn object_key_from_value(kv: &Value) -> Result<KeyStr> {
+    match kv {
+        Value::Str(s) => Ok(KeyStr::from(s.as_str())),
+        _ => bail!(
+            "Cannot use {} ({}) as object key",
+            kv.type_name(),
+            crate::value::value_to_json(kv)
+        ),
+    }
+}
+
 fn eval_object_construct(pairs: &[(Expr, Expr)], input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
     // Fast path: if all keys and values are scalar expressions, build directly without cloning
     let mut obj = crate::value::new_objmap_with_capacity(pairs.len());
@@ -3154,7 +3176,7 @@ fn eval_object_construct(pairs: &[(Expr, Expr)], input: Value, env: &EnvRef, cb:
             Ok(v) => v,
             Err(()) => return eval_obj_pairs(pairs, 0, crate::value::new_objmap_with_capacity(pairs.len()), input, env, cb),
         };
-        let ks: KeyStr = match &kv { Value::Str(s) => KeyStr::from(s.as_str()), _ => KeyStr::from(crate::value::value_to_json(&kv)) };
+        let ks = object_key_from_value(&kv)?;
         let vv = match eval_one(ve, &input, env) {
             Ok(v) => v,
             Err(()) => return eval_obj_pairs(pairs, 0, crate::value::new_objmap_with_capacity(pairs.len()), input, env, cb),
@@ -3168,7 +3190,7 @@ fn eval_obj_pairs(pairs: &[(Expr, Expr)], idx: usize, cur: crate::value::ObjMap,
     if idx >= pairs.len() { return cb(Value::Obj(Rc::new(cur))); }
     let (ke, ve) = &pairs[idx];
     eval(ke, input.clone(), env, &mut |kv| {
-        let ks: KeyStr = match &kv { Value::Str(s) => KeyStr::from(s.as_str()), _ => KeyStr::from(crate::value::value_to_json(&kv)) };
+        let ks = object_key_from_value(&kv)?;
         eval(ve, input.clone(), env, &mut |vv| {
             let mut next = cur.clone();
             next.insert(ks.clone(), vv);
@@ -3404,12 +3426,16 @@ fn eval_closure_op_f64(op: ClosureOpKind, a: &[Value], keys: &[f64], cb: &mut dy
             cb(Value::Arr(Rc::new(groups)))
         }
         ClosureOpKind::UniqueBy => {
-            let mut seen = std::collections::HashSet::with_capacity(a.len().min(4096));
+            // jq: unique_by(f) = group_by(f) | map(.[0]) — sorted by key, deduped.
+            let mut indices: Vec<usize> = (0..a.len()).collect();
+            indices.sort_by(|&i, &j| cmp_f64(&keys[i], &keys[j]));
             let mut result: Vec<Value> = Vec::new();
-            for (i, item) in a.iter().enumerate() {
-                let k = keys[i].to_bits();
-                if seen.insert(k) {
-                    result.push(item.clone());
+            let mut prev: Option<f64> = None;
+            for &idx in &indices {
+                let k = keys[idx];
+                if prev.map_or(true, |pk| cmp_f64(&pk, &k) != std::cmp::Ordering::Equal) {
+                    result.push(a[idx].clone());
+                    prev = Some(k);
                 }
             }
             cb(Value::Arr(Rc::new(result)))
@@ -3494,63 +3520,15 @@ fn eval_closure_op_value_ref(op: ClosureOpKind, a: &[Value], keyed: Vec<(&Value,
             cb(Value::Arr(Rc::new(groups)))
         }
         ClosureOpKind::UniqueBy => {
+            // jq: unique_by(f) = group_by(f) | map(.[0]) — sorted by key, deduped.
+            let mut indexed: Vec<(usize, &Value)> = keyed.iter().enumerate().map(|(i, (k, _))| (i, *k)).collect();
+            sort_indexed_by_key(&mut indexed);
             let mut result: Vec<Value> = Vec::new();
-            // Specialized path based on key type to avoid JSON serialization
-            if !keyed.is_empty() {
-                match keyed[0].0 {
-                    Value::Str(_) => {
-                        let mut seen = std::collections::HashSet::<&str>::with_capacity(keyed.len().min(4096));
-                        for (key, item) in &keyed {
-                            if let Value::Str(s) = key {
-                                if seen.insert(s.as_str()) {
-                                    result.push((*item).clone());
-                                }
-                            } else {
-                                // Mixed types — fall back to JSON
-                                let hash_key = crate::value::value_to_json(key);
-                                let mut seen2 = std::collections::HashSet::new();
-                                for s in &seen { seen2.insert(format!("\"{}\"", s)); }
-                                seen2.insert(hash_key);
-                                result.push((*item).clone());
-                                for (key2, item2) in keyed.iter().skip(result.len()) {
-                                    let h = crate::value::value_to_json(key2);
-                                    if seen2.insert(h) { result.push((*item2).clone()); }
-                                }
-                                return cb(Value::Arr(Rc::new(result)));
-                            }
-                        }
-                    }
-                    Value::Num(..) => {
-                        let mut seen = std::collections::HashSet::<u64>::with_capacity(keyed.len().min(4096));
-                        for (key, item) in &keyed {
-                            if let Value::Num(n, _) = key {
-                                if seen.insert(n.to_bits()) {
-                                    result.push((*item).clone());
-                                }
-                            } else {
-                                // Mixed — fall back
-                                let mut seen2 = std::collections::HashSet::new();
-                                for b in &seen { seen2.insert(format!("{}", f64::from_bits(*b))); }
-                                let hash_key = crate::value::value_to_json(key);
-                                seen2.insert(hash_key);
-                                result.push((*item).clone());
-                                for (key2, item2) in keyed.iter().skip(result.len()) {
-                                    let h = crate::value::value_to_json(key2);
-                                    if seen2.insert(h) { result.push((*item2).clone()); }
-                                }
-                                return cb(Value::Arr(Rc::new(result)));
-                            }
-                        }
-                    }
-                    _ => {
-                        let mut seen = std::collections::HashSet::with_capacity(keyed.len().min(4096));
-                        for (key, item) in &keyed {
-                            let hash_key = crate::value::value_to_json(key);
-                            if seen.insert(hash_key) {
-                                result.push((*item).clone());
-                            }
-                        }
-                    }
+            let mut prev: Option<&Value> = None;
+            for &(idx, key) in &indexed {
+                if prev.map_or(true, |pk| !crate::runtime::values_equal(pk, key)) {
+                    result.push(a[idx].clone());
+                    prev = Some(key);
                 }
             }
             cb(Value::Arr(Rc::new(result)))
@@ -3729,17 +3707,18 @@ fn eval_closure_op(op: ClosureOpKind, container: &Value, key_expr: &Expr, _input
             cb(Value::Arr(Rc::new(groups)))
         }
         ClosureOpKind::UniqueBy => {
-            let mut seen = std::collections::HashSet::with_capacity(keyed.len().min(4096));
+            // jq: unique_by(f) = group_by(f) | map(.[0]) — sorted by key, deduped.
+            keyed.sort_by(|(ka, _), (kb, _)| { ka.iter().zip(kb.iter()).map(|(a, b)| crate::runtime::compare_values(a, b)).find(|o| *o != std::cmp::Ordering::Equal).unwrap_or(std::cmp::Ordering::Equal) });
             let mut result: Vec<Value> = Vec::new();
+            let mut prev: Option<Vec<Value>> = None;
             for (keys, val) in keyed {
-                // Hash by JSON serialization of keys
-                let hash_key = if keys.len() == 1 {
-                    crate::value::value_to_json(&keys[0])
-                } else {
-                    keys.iter().map(|k| crate::value::value_to_json(k)).collect::<Vec<_>>().join("\x00")
+                let is_dup = match &prev {
+                    Some(pk) => pk.len() == keys.len() && pk.iter().zip(keys.iter()).all(|(a, b)| crate::runtime::values_equal(a, b)),
+                    None => false,
                 };
-                if seen.insert(hash_key) {
+                if !is_dup {
                     result.push(val);
+                    prev = Some(keys);
                 }
             }
             cb(Value::Arr(Rc::new(result)))

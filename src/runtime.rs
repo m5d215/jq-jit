@@ -167,8 +167,13 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         }
         "capture" => {
             if args.len() >= 3 {
-                let (pat, _) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2]);
-                rt_capture(&args[0], &Value::from_string(pat))
+                let (pat, global) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2]);
+                let re = Value::from_string(pat);
+                if global {
+                    rt_capture_global(&args[0], &re)
+                } else {
+                    rt_capture(&args[0], &re)
+                }
             } else {
                 binary_arg(args, rt_capture)
             }
@@ -2238,6 +2243,29 @@ fn rt_capture(v: &Value, re: &Value) -> Result<Value> {
                     }
                     None => bail!("capture failed"),
                 }
+            })?
+        }
+        _ => bail!("capture requires string and regex"),
+    }
+}
+
+pub fn rt_capture_global(v: &Value, re: &Value) -> Result<Value> {
+    match (v, re) {
+        (Value::Str(s), Value::Str(r)) => {
+            with_regex(r, |regex| {
+                let mut results: Vec<Value> = Vec::new();
+                for caps in regex.captures_iter(s) {
+                    let mut obj = new_objmap();
+                    for name in regex.capture_names().flatten() {
+                        if let Some(m) = caps.name(name) {
+                            obj.insert(KeyStr::from(name), Value::from_str(m.as_str()));
+                        } else {
+                            obj.insert(KeyStr::from(name), Value::Null);
+                        }
+                    }
+                    results.push(Value::Obj(Rc::new(obj)));
+                }
+                Ok(Value::Arr(Rc::new(results)))
             })?
         }
         _ => bail!("capture requires string and regex"),
