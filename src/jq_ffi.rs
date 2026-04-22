@@ -1,4 +1,11 @@
 //! Raw FFI bindings for libjq (jq 1.8.1).
+//!
+//! The struct layouts, opcode enum values, and function signatures in this
+//! module mirror declarations from jq's public headers (`jv.h`, `jq.h`) and
+//! internal bytecode layout. Those portions are derivative works of
+//! [jq](https://github.com/jqlang/jq) (Copyright (C) 2012 Stephen Dolan),
+//! redistributed under the MIT License. See `THIRD-PARTY-LICENSES.md` at the
+//! repository root for details.
 
 use std::ffi::c_char;
 use std::ffi::c_int;

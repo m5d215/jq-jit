@@ -50,8 +50,11 @@ jobs:
 
       - name: Package
         run: |
-          cd target/release
-          tar czf ../../jq-jit-${{ matrix.target }}.tar.gz jq-jit
+          staging="jq-jit-${{ matrix.target }}"
+          mkdir -p "$staging"
+          cp target/release/jq-jit "$staging/"
+          cp LICENSE-MIT LICENSE-APACHE THIRD-PARTY-LICENSES.md README.md "$staging/"
+          tar czf "${staging}.tar.gz" -C "$staging" .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
