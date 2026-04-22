@@ -6831,12 +6831,21 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             };
             if let Some(v) = result { std::ptr::write(dst, v); return 0; }
         }
-        // Fast path: in(container) — avoid dispatch overhead
+        // Fast path: in(container) — avoid dispatch overhead.
+        // Mirrors `has` with swapped operands: args are (key, container) here.
+        // Error cases (type mismatch) fall through to runtime for a proper jq error.
         if name == "in" && args.len() == 2 {
-            let result = match (&args[0], &args[1]) {
-                (Value::Str(k), Value::Obj(o)) => Some(Value::from_bool(o.contains_key(k.as_str()))),
-                (Value::Num(n, _), Value::Arr(a)) => Some(Value::from_bool((*n as usize) < a.len())),
-                _ => Some(Value::False),
+            let result = match (&args[1], &args[0]) {
+                (Value::Obj(o), Value::Str(k)) => Some(Value::from_bool(o.contains_key(k.as_str()))),
+                (Value::Arr(a), Value::Num(n, _)) => {
+                    if n.is_nan() || n.is_infinite() { Some(Value::False) }
+                    else {
+                        let idx = *n as i64;
+                        Some(Value::from_bool(idx >= 0 && (idx as usize) < a.len()))
+                    }
+                }
+                (Value::Null, _) => Some(Value::False),
+                _ => None,
             };
             if let Some(v) = result { std::ptr::write(dst, v); return 0; }
         }

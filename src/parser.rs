@@ -3156,6 +3156,10 @@ impl Parser {
                 let key = args.into_iter().next().unwrap();
                 Ok(Expr::CallBuiltin { name: "has".to_string(), args: vec![key] })
             }
+            ("in", 1) => {
+                let container = args.into_iter().next().unwrap();
+                Ok(Expr::CallBuiltin { name: "in".to_string(), args: vec![container] })
+            }
             ("contains", 1) => {
                 let other = args.into_iter().next().unwrap();
                 Ok(Expr::CallBuiltin { name: "contains".to_string(), args: vec![other] })

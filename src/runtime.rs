@@ -1403,14 +1403,10 @@ fn rt_has(v: &Value, key: &Value) -> Result<Value> {
 }
 
 fn rt_in(v: &Value, container: &Value) -> Result<Value> {
-    match (v, container) {
-        (Value::Str(k), Value::Obj(o)) => Ok(Value::from_bool(o.contains_key(k.as_str()))),
-        (Value::Num(n, _), Value::Arr(a)) => {
-            let idx = *n as usize;
-            Ok(Value::from_bool(idx < a.len()))
-        }
-        _ => Ok(Value::False),
-    }
+    // `in(x)` is defined as `. as $k | x | has($k)`, so the containment check
+    // reuses `has` with input as the key. This preserves jq's type-mismatch
+    // errors (e.g. non-string key on object) instead of silently returning false.
+    rt_has(container, v)
 }
 
 fn rt_contains(a: &Value, b: &Value) -> Result<Value> {
