@@ -757,3 +757,35 @@ null
 .x // 0
 {"a":1}
 0
+
+# Issue #42: literal array piped into negative-index returns null when out of range
+
+# Negative overshoot by one — should be null, not elems[0]
+[1,2,3] | .[-4]
+null
+null
+
+# Large negative overshoot
+[1,2,3] | .[-100]
+null
+null
+
+# Four-element array, overshoot by one
+[10,20,30,40] | .[-5]
+null
+null
+
+# String array overshoot
+["a","b"] | .[-3]
+null
+null
+
+# Bound negative index still works
+[1,2,3] | .[-1]
+null
+3
+
+# Positive overshoot still returns null at runtime
+[1,2,3] | .[10]
+null
+null

@@ -967,11 +967,21 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                             }
                             let mut elems = Vec::new();
                             collect_comma_for_idx(lg, &mut elems);
-                            let actual = if idx >= 0 { idx as usize } else {
-                                (elems.len() as i64 + idx).max(0) as usize
+                            // Only constant-fold when the negative index
+                            // actually lands inside the array. Previously the
+                            // negative branch clamped to 0 via `.max(0)`,
+                            // returning the first element for any out-of-range
+                            // negative index (issue #42). Falling through for
+                            // the out-of-range cases lets the runtime emit the
+                            // correct null result.
+                            let effective: Option<usize> = if idx >= 0 {
+                                if (idx as usize) < elems.len() { Some(idx as usize) } else { None }
+                            } else {
+                                let v = elems.len() as i64 + idx;
+                                if v >= 0 && (v as usize) < elems.len() { Some(v as usize) } else { None }
                             };
-                            if actual < elems.len() {
-                                return elems.swap_remove(actual);
+                            if let Some(i) = effective {
+                                return elems.swap_remove(i);
                             }
                             }
                         }
