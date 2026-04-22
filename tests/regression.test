@@ -190,6 +190,21 @@ null
 {"a":1,"b":2}
 {"a":10,"b":20}
 
+# JIT→eval delegated Update must seed $vars no matter where they hide in
+# the update expression. Pre-refactor the LoadVar walker only descended
+# through BinOp/Pipe/etc.; $r buried inside Index/StringInterpolation was
+# silently lost and the update collapsed to a no-op.
+
+# $var inside Index on the update RHS
+[100] as $r | (.a, .b) |= $r[0]
+{"a":1,"b":2}
+{"a":100,"b":100}
+
+# $var inside string interpolation on the update RHS
+"x" as $r | (.a, .b) |= "\($r)!"
+{"a":1,"b":2}
+{"a":"x!","b":"x!"}
+
 # Duplicate keys in object literals must collapse so later values win
 
 # Literal-only object with repeated key

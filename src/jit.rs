@@ -4226,20 +4226,158 @@ impl Flattener {
     }
 
 
-    /// Collect all LoadVar var_indices referenced in an expression.
+    /// Collect all LoadVar var_indices referenced anywhere in an expression.
+    ///
+    /// Must be exhaustive across every `Expr` variant that can contain sub-expressions:
+    /// the JIT→eval closure-op dispatchers rely on this to seed delegated `eval::Env`
+    /// from the JIT env (see `new_delegated_env` / `reset_delegated_env`). A missing
+    /// variant here silently loses any `$var` buried inside and degrades the
+    /// delegated call to `null`.
     fn collect_loadvar_indices(expr: &Expr, out: &mut Vec<u16>) {
+        use crate::ir::StringPart;
         match expr {
-            Expr::LoadVar { var_index } => { if !out.contains(var_index) { out.push(*var_index); } }
-            Expr::BinOp { lhs, rhs, .. } => { Self::collect_loadvar_indices(lhs, out); Self::collect_loadvar_indices(rhs, out); }
-            Expr::Negate { operand } | Expr::UnaryOp { operand, .. } => Self::collect_loadvar_indices(operand, out),
-            Expr::Pipe { left, right } => { Self::collect_loadvar_indices(left, out); Self::collect_loadvar_indices(right, out); }
+            Expr::LoadVar { var_index } => {
+                if !out.contains(var_index) { out.push(*var_index); }
+            }
+            Expr::Input | Expr::Empty | Expr::Literal(_) | Expr::Not
+            | Expr::Loc { .. } | Expr::Env | Expr::Builtins
+            | Expr::ReadInput | Expr::ReadInputs
+            | Expr::ModuleMeta | Expr::GenLabel => {}
+            Expr::BinOp { lhs, rhs, .. } => {
+                Self::collect_loadvar_indices(lhs, out);
+                Self::collect_loadvar_indices(rhs, out);
+            }
+            Expr::UnaryOp { operand, .. } | Expr::Negate { operand } => {
+                Self::collect_loadvar_indices(operand, out);
+            }
+            Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => {
+                Self::collect_loadvar_indices(expr, out);
+                Self::collect_loadvar_indices(key, out);
+            }
+            Expr::Pipe { left, right } | Expr::Comma { left, right } => {
+                Self::collect_loadvar_indices(left, out);
+                Self::collect_loadvar_indices(right, out);
+            }
             Expr::IfThenElse { cond, then_branch, else_branch } => {
                 Self::collect_loadvar_indices(cond, out);
                 Self::collect_loadvar_indices(then_branch, out);
                 Self::collect_loadvar_indices(else_branch, out);
             }
-            Expr::LetBinding { value, body, .. } => { Self::collect_loadvar_indices(value, out); Self::collect_loadvar_indices(body, out); }
-            _ => {}
+            Expr::TryCatch { try_expr, catch_expr } => {
+                Self::collect_loadvar_indices(try_expr, out);
+                Self::collect_loadvar_indices(catch_expr, out);
+            }
+            Expr::Each { input_expr } | Expr::EachOpt { input_expr }
+            | Expr::Recurse { input_expr } => {
+                Self::collect_loadvar_indices(input_expr, out);
+            }
+            Expr::LetBinding { value, body, .. } => {
+                Self::collect_loadvar_indices(value, out);
+                Self::collect_loadvar_indices(body, out);
+            }
+            Expr::Reduce { source, init, update, .. } => {
+                Self::collect_loadvar_indices(source, out);
+                Self::collect_loadvar_indices(init, out);
+                Self::collect_loadvar_indices(update, out);
+            }
+            Expr::Foreach { source, init, update, extract, .. } => {
+                Self::collect_loadvar_indices(source, out);
+                Self::collect_loadvar_indices(init, out);
+                Self::collect_loadvar_indices(update, out);
+                if let Some(e) = extract { Self::collect_loadvar_indices(e, out); }
+            }
+            Expr::Collect { generator } => Self::collect_loadvar_indices(generator, out),
+            Expr::ObjectConstruct { pairs } => {
+                for (k, v) in pairs {
+                    Self::collect_loadvar_indices(k, out);
+                    Self::collect_loadvar_indices(v, out);
+                }
+            }
+            Expr::Alternative { primary, fallback } => {
+                Self::collect_loadvar_indices(primary, out);
+                Self::collect_loadvar_indices(fallback, out);
+            }
+            Expr::Range { from, to, step } => {
+                Self::collect_loadvar_indices(from, out);
+                Self::collect_loadvar_indices(to, out);
+                if let Some(s) = step { Self::collect_loadvar_indices(s, out); }
+            }
+            Expr::Label { body, .. } => Self::collect_loadvar_indices(body, out),
+            Expr::Break { value, .. } => Self::collect_loadvar_indices(value, out),
+            Expr::Update { path_expr, update_expr } => {
+                Self::collect_loadvar_indices(path_expr, out);
+                Self::collect_loadvar_indices(update_expr, out);
+            }
+            Expr::Assign { path_expr, value_expr } => {
+                Self::collect_loadvar_indices(path_expr, out);
+                Self::collect_loadvar_indices(value_expr, out);
+            }
+            Expr::PathExpr { expr } => Self::collect_loadvar_indices(expr, out),
+            Expr::SetPath { path, value } => {
+                Self::collect_loadvar_indices(path, out);
+                Self::collect_loadvar_indices(value, out);
+            }
+            Expr::GetPath { path } => Self::collect_loadvar_indices(path, out),
+            Expr::DelPaths { paths } => Self::collect_loadvar_indices(paths, out),
+            Expr::FuncCall { args, .. } => {
+                for a in args { Self::collect_loadvar_indices(a, out); }
+            }
+            Expr::StringInterpolation { parts } => {
+                for p in parts {
+                    if let StringPart::Expr(e) = p { Self::collect_loadvar_indices(e, out); }
+                }
+            }
+            Expr::Limit { count, generator } => {
+                Self::collect_loadvar_indices(count, out);
+                Self::collect_loadvar_indices(generator, out);
+            }
+            Expr::While { cond, update } | Expr::Until { cond, update } => {
+                Self::collect_loadvar_indices(cond, out);
+                Self::collect_loadvar_indices(update, out);
+            }
+            Expr::Repeat { update } => Self::collect_loadvar_indices(update, out),
+            Expr::AllShort { generator, predicate }
+            | Expr::AnyShort { generator, predicate } => {
+                Self::collect_loadvar_indices(generator, out);
+                Self::collect_loadvar_indices(predicate, out);
+            }
+            Expr::Error { msg } => {
+                if let Some(m) = msg { Self::collect_loadvar_indices(m, out); }
+            }
+            Expr::Format { expr, .. } => Self::collect_loadvar_indices(expr, out),
+            Expr::ClosureOp { input_expr, key_expr, .. } => {
+                Self::collect_loadvar_indices(input_expr, out);
+                Self::collect_loadvar_indices(key_expr, out);
+            }
+            Expr::RegexTest { input_expr, re, flags }
+            | Expr::RegexMatch { input_expr, re, flags }
+            | Expr::RegexCapture { input_expr, re, flags }
+            | Expr::RegexScan { input_expr, re, flags } => {
+                Self::collect_loadvar_indices(input_expr, out);
+                Self::collect_loadvar_indices(re, out);
+                Self::collect_loadvar_indices(flags, out);
+            }
+            Expr::RegexSub { input_expr, re, tostr, flags }
+            | Expr::RegexGsub { input_expr, re, tostr, flags } => {
+                Self::collect_loadvar_indices(input_expr, out);
+                Self::collect_loadvar_indices(re, out);
+                Self::collect_loadvar_indices(tostr, out);
+                Self::collect_loadvar_indices(flags, out);
+            }
+            Expr::AlternativeDestructure { alternatives } => {
+                for a in alternatives { Self::collect_loadvar_indices(a, out); }
+            }
+            Expr::Slice { expr, from, to } => {
+                Self::collect_loadvar_indices(expr, out);
+                if let Some(f) = from { Self::collect_loadvar_indices(f, out); }
+                if let Some(t) = to { Self::collect_loadvar_indices(t, out); }
+            }
+            Expr::Debug { expr } | Expr::Stderr { expr } => {
+                Self::collect_loadvar_indices(expr, out);
+            }
+            Expr::CallBuiltin { args, .. } => {
+                for a in args { Self::collect_loadvar_indices(a, out); }
+            }
         }
     }
 
@@ -6898,8 +7036,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                 };
                 if let (Some(path_expr), Some(value_expr)) = (path_expr, value_expr) {
                     let input = if !args.is_empty() { args[0].clone() } else { Value::Null };
-                    let env = Rc::new(RefCell::new(crate::eval::Env::new(vec![])));
-                    seed_eval_env_from_jit(&env, &[&path_expr, &value_expr]);
+                    let env = new_delegated_env(&[&path_expr, &value_expr]);
                     match crate::eval::eval_assign_standalone(&path_expr, &value_expr, input, &env) {
                         Ok(v) => { std::ptr::write(dst, v); return 0; }
                         Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
@@ -6920,8 +7057,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                 };
                 if let (Some(path_expr), Some(update_expr)) = (path_expr, update_expr) {
                     let input = if !args.is_empty() { args[0].clone() } else { Value::Null };
-                    let env = Rc::new(RefCell::new(crate::eval::Env::new(vec![])));
-                    seed_eval_env_from_jit(&env, &[&path_expr, &update_expr]);
+                    let env = new_delegated_env(&[&path_expr, &update_expr]);
                     match crate::eval::eval_update_standalone(&path_expr, &update_expr, input, &env) {
                         Ok(v) => { std::ptr::write(dst, v); return 0; }
                         Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
@@ -6945,21 +7081,18 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                         None
                     });
 
-                // For general filters, use cached Env
+                // For general filters, use cached Env (auto-seeded from JIT env).
                 let env = if compiled_filter.is_none() {
                     thread_local! {
                         static PATHS_FILTER_ENV: RefCell<Option<Rc<RefCell<crate::eval::Env>>>> = const { RefCell::new(None) };
                     }
                     Some(PATHS_FILTER_ENV.with(|cell| {
                         let mut opt = cell.borrow_mut();
-                        if let Some(ref env) = *opt {
-                            env.borrow_mut().reset();
-                            env.clone()
-                        } else {
-                            let e = Rc::new(RefCell::new(crate::eval::Env::new(vec![])));
-                            *opt = Some(e.clone());
-                            e
-                        }
+                        let env = opt.get_or_insert_with(|| {
+                            Rc::new(RefCell::new(crate::eval::Env::new(vec![])))
+                        }).clone();
+                        reset_delegated_env(&env, &[&filter_expr]);
+                        env
                     }))
                 } else {
                     None
@@ -7024,7 +7157,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             let path_expr = (&*JIT_CLOSURE_OPS.0.get()).get(idx).cloned();
             if let Some(path_expr) = path_expr {
                 let input = if !args.is_empty() { args[0].clone() } else { Value::Null };
-                let env = Rc::new(RefCell::new(crate::eval::Env::new(vec![])));
+                let env = new_delegated_env(&[&path_expr]);
                 match crate::eval::eval_path_standalone(&path_expr, input, &env) {
                     Ok(v) => { std::ptr::write(dst, v); return 0; }
                     Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
@@ -7051,21 +7184,19 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                             _ => None,
                         };
                         if let Some(op_kind) = op_kind {
-                            // Use eval infrastructure to perform the closure op
-                            // Cache the Env to avoid 2MB allocation per call
+                            // Use eval infrastructure to perform the closure op.
+                            // Cache the Env to avoid 2MB allocation per call, and
+                            // auto-seed any $vars referenced by `key_expr`.
                             thread_local! {
                                 static CLOSURE_OP_ENV: RefCell<Option<Rc<RefCell<crate::eval::Env>>>> = const { RefCell::new(None) };
                             }
                             let env = CLOSURE_OP_ENV.with(|cell| {
                                 let mut opt = cell.borrow_mut();
-                                if let Some(ref env) = *opt {
-                                    env.borrow_mut().reset();
-                                    env.clone()
-                                } else {
-                                    let e = Rc::new(RefCell::new(crate::eval::Env::new(vec![])));
-                                    *opt = Some(e.clone());
-                                    e
-                                }
+                                let env = opt.get_or_insert_with(|| {
+                                    Rc::new(RefCell::new(crate::eval::Env::new(vec![])))
+                                }).clone();
+                                reset_delegated_env(&env, &[&key_expr]);
+                                env
                             });
                             let eval_result = crate::eval::eval_closure_op_standalone(
                                 op_kind, container, &key_expr, &env,
@@ -9008,10 +9139,15 @@ unsafe impl Sync for GlobalJitEnv {}
 static REUSABLE_ENV: GlobalJitEnv = GlobalJitEnv(std::cell::UnsafeCell::new(None));
 
 /// Copy live LoadVar bindings from the JIT env into the eval Env before we delegate
-/// a complex path expression back to eval. Without this, constructs like
+/// a complex closure-op expression back to eval. Without this, constructs like
 /// `let $r = 100 in (.a, .b) |= . + $r` (emitted as `+=` desugaring) lose `$r`
 /// when the Update falls off the JIT's fast path and is handed to eval with a
 /// fresh Env.
+///
+/// Every `__xxx__:` runtime dispatcher must construct its delegated `eval::Env`
+/// through [`new_delegated_env`] or [`reset_delegated_env`] rather than calling
+/// `Env::new` directly — they guarantee the JIT-set let-bindings are seeded so
+/// new closure ops can't silently regress.
 fn seed_eval_env_from_jit(env: &Rc<RefCell<crate::eval::Env>>, exprs: &[&Expr]) {
     let mut indices: Vec<u16> = Vec::new();
     for e in exprs {
@@ -9027,6 +9163,24 @@ fn seed_eval_env_from_jit(env: &Rc<RefCell<crate::eval::Env>>, exprs: &[&Expr]) 
             env_mut.seed_var(idx, jit_env.vars[i].clone());
         }
     }
+}
+
+/// Build a fresh `eval::Env` for a JIT→eval closure-op delegation, auto-seeded
+/// with any `$var` referenced by `exprs`. Use this instead of
+/// `Rc::new(RefCell::new(Env::new(vec![])))` from inside an `__xxx__:` dispatcher.
+fn new_delegated_env(exprs: &[&Expr]) -> Rc<RefCell<crate::eval::Env>> {
+    let env = Rc::new(RefCell::new(crate::eval::Env::new(vec![])));
+    seed_eval_env_from_jit(&env, exprs);
+    env
+}
+
+/// Reset a cached `eval::Env` for a JIT→eval closure-op delegation and re-seed
+/// any `$var` referenced by `exprs` from the JIT env. Use this instead of a
+/// bare `env.borrow_mut().reset()` when the dispatcher caches its Env in a
+/// thread-local to amortize allocation.
+fn reset_delegated_env(env: &Rc<RefCell<crate::eval::Env>>, exprs: &[&Expr]) {
+    env.borrow_mut().reset();
+    seed_eval_env_from_jit(env, exprs);
 }
 
 fn with_jit_env<R>(f: impl FnOnce(&mut JitEnv) -> R) -> R {
