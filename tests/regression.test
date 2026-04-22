@@ -877,3 +877,64 @@ del(.a)
 del(.[0])
 [1,2,3]
 [2,3]
+
+# Issue #49: recurse(f; cond) must filter emitted values by cond
+
+# Array recurse with null filter — null child is neither emitted nor traversed
+[recurse(.[]?; . != null)]
+[1,2,3,null]
+[[1,2,3,null],1,2,3]
+
+# Same on an object with a null value
+[recurse(.[]?; . != null)]
+{"a":1,"b":null,"c":2}
+[{"a":1,"b":null,"c":2},1,2]
+
+# Issue #56: [gen] | add must fold the generator's values, not drop the collect
+
+# [.[]] | add on an array folds numbers
+[.[]] | add
+[1,2,3]
+6
+
+# [.[]] | add on an object folds numeric values
+[.[]] | add
+{"a":1,"b":2}
+3
+
+# [.[]] | add on an object with strings concatenates values
+[.[]] | add
+{"a":"x","b":"y"}
+"xy"
+
+# [.[]] | add on an array of arrays flattens-and-adds
+[.[]] | add
+[[1],[2]]
+[1,2]
+
+# [.[]] | length still counts elements
+[.[]] | length
+[1,2,3]
+3
+
+# Issue #57: until(cond; update) must test cond on the original input
+
+# string input: "hello" > 5 is true, so exit immediately with "hello"
+until(. > 5; . + 1)
+"hello"
+"hello"
+
+# array input with mixed cond/update: cond short-circuits before update
+until(. > 5; . + 1)
+[1]
+[1]
+
+# until on a number still loops as before
+until(. > 2; . + 10)
+0
+10
+
+# Input already satisfying cond returns input unchanged
+until(. > 2; . + 10)
+5
+5

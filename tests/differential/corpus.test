@@ -569,3 +569,36 @@ del(.a)
 
 del(.[0])
 [1,2,3]
+
+# ---------- Issue #49: recurse(f; cond) must filter emitted values by cond ----------
+
+[recurse(.[]?; . != null)]
+[1,2,3,null]
+
+[recurse(.[]?; . != null)]
+{"a":1,"b":null,"c":2}
+
+# ---------- Issue #56: [gen] | add must fold ----------
+
+[.[]] | add
+[1,2,3]
+
+[.[]] | add
+{"a":1,"b":2}
+
+[.[]] | add
+[[1],[2]]
+
+# ---------- Issue #57: until(cond; update) tests cond on the raw input ----------
+
+until(. > 5; . + 1)
+"hello"
+
+until(. > 5; . + 1)
+[1]
+
+until(. > 2; . + 10)
+0
+
+until(. > 2; . + 10)
+5

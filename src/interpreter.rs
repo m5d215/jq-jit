@@ -884,14 +884,46 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                             other => out.push(other.clone()),
                         }
                     }
+                    // Rewrite is only valid when every element yields exactly
+                    // one value. `Empty` yields zero; `.[]`, `recurse`, and
+                    // other generators yield many. `[.[]] | add` was collapsing
+                    // to `.[]` (issue #56) because a single-element list with
+                    // a generator inside was treated as "identity".
+                    fn is_single_valued(e: &Expr) -> bool {
+                        match e {
+                            Expr::Empty => false,
+                            Expr::Each { .. } | Expr::EachOpt { .. }
+                            | Expr::Comma { .. } | Expr::Recurse { .. }
+                            | Expr::Range { .. } | Expr::Limit { .. }
+                            | Expr::RegexMatch { .. } | Expr::RegexScan { .. }
+                            | Expr::RegexCapture { .. } => false,
+                            Expr::Pipe { left, right } => is_single_valued(left) && is_single_valued(right),
+                            Expr::IfThenElse { cond, then_branch, else_branch } => {
+                                is_single_valued(cond) && is_single_valued(then_branch) && is_single_valued(else_branch)
+                            }
+                            Expr::TryCatch { try_expr, catch_expr } => {
+                                is_single_valued(try_expr) && is_single_valued(catch_expr)
+                            }
+                            Expr::Alternative { primary, fallback } => {
+                                is_single_valued(primary) && is_single_valued(fallback)
+                            }
+                            Expr::LetBinding { value, body, .. } => {
+                                is_single_valued(value) && is_single_valued(body)
+                            }
+                            Expr::Collect { .. } => true,
+                            Expr::Input | Expr::Literal(_) | Expr::LoadVar { .. }
+                            | Expr::Not | Expr::Negate { .. }
+                            | Expr::Index { .. } | Expr::IndexOpt { .. }
+                            | Expr::Slice { .. } | Expr::UnaryOp { .. } | Expr::BinOp { .. }
+                            | Expr::StringInterpolation { .. } | Expr::ObjectConstruct { .. }
+                            | Expr::RegexTest { .. } | Expr::RegexSub { .. } | Expr::RegexGsub { .. } => true,
+                            _ => false,
+                        }
+                    }
                     let mut elems = Vec::new();
                     collect_elems_for_add(lg, &mut elems);
-                    // Only safe when every element yields exactly one value. An `Empty`
-                    // branch yields zero, so the rewrite would either drop outputs
-                    // (`[] | add` becoming the `Empty` branch itself) or produce the
-                    // wrong sum when mixed with other branches.
                     let all_single = !elems.is_empty()
-                        && elems.iter().all(|e| !matches!(e, Expr::Empty));
+                        && elems.iter().all(|e| is_single_valued(e));
                     if all_single {
                         if elems.len() == 1 {
                             // [expr] | add → expr (single element, add is identity)
