@@ -135,15 +135,39 @@ invariant 回帰は `tests/regression.test` の "Issue #30" ブロックと
 
 ### JIT → eval 委譲時の env seeding
 
-JIT が複雑な Update/Assign を処理する時、`__update__:path_idx:update_idx` / `__assign__:…` という closure op 経由で `eval_update_standalone` / `eval_assign_standalone` に落とす。このとき**新しい `eval::Env` を作る**ので、JIT が set していた let-binding 変数が消える。
+JIT が複雑な Update/Assign/sort_by/paths(f)/path(..) などを処理する時、
+`__update__:path_idx:update_idx` / `__assign__:…` / `__closure_op__:sort_by:idx`
+/ `__paths_filtered__:idx` / `__path__:idx` といった closure op 経由で eval
+側の `eval_*_standalone` に落とす。このとき**新しい `eval::Env` を作る**ので、
+JIT が set していた let-binding 変数がそのままでは消える。
 
 具体例: `(.a, .b) += 100` は parser で
 ```text
 let $r = 100 in update((.a, .b); . + $r)
 ```
-に desugar される。JIT は `$r` を自分の var slot に入れるが、complex path で runtime 委譲した先の fresh Env は `$r` を知らず、`. + null` になって update が no-op 化する。
+に desugar される。JIT は `$r` を自分の var slot に入れるが、complex path で
+runtime 委譲した先の fresh Env は `$r` を知らず、`. + null` になって update が
+no-op 化する。
 
-対策は `src/jit.rs` の `seed_eval_env_from_jit` で、委譲 expression の `LoadVar` 参照を集めて JIT env から eval env にコピーする。**新しい `__xxx__:` closure op を追加する時は必ず同じ seeding を通す**。
+対策は `src/jit.rs` の `new_delegated_env(&[&expr, ...])` /
+`reset_delegated_env(&env, &[&expr, ...])` を**必ず**使うこと。内部で
+`seed_eval_env_from_jit` を呼び、委譲 expression 内の `LoadVar` 参照を
+`Flattener::collect_loadvar_indices` で exhaustive に歩いて JIT env から
+eval env にコピーする。個別の handler は seeding を意識せずに済む。
+
+つまり、新しい `__xxx__:` closure op を追加する時は:
+
+- fresh Env が欲しいなら `new_delegated_env(&[&delegated_expr])`
+- cached Env を reuse するなら `reset_delegated_env(&env, &[&delegated_expr])`
+
+を呼ぶ。`Rc::new(RefCell::new(crate::eval::Env::new(vec![])))` を直接書いては
+いけない（書くと let-binding がまた消える）。
+
+また、`collect_loadvar_indices` は **全 `Expr` variant を再帰的に歩く契約**。
+Index / ObjectConstruct / StringInterpolation / CallBuiltin / FuncCall 等に
+LoadVar が埋もれていても拾える。新しい `Expr` variant を足した時は、この
+walker にも再帰呼び出しを追加すること（足し忘れると let-binding が潜って
+silently null になる）。
 
 ### `paths` / `leaf_paths` / `paths(f)` は root を落とす
 

@@ -133,6 +133,14 @@ null
 .[] |= . + 1
 [1,2,3]
 
+# ---------- Issue #31: JIT→eval delegation must seed $vars buried deep in update ----------
+
+[100] as $r | (.a, .b) |= $r[0]
+{"a":1,"b":2}
+
+"x" as $r | (.a, .b) |= "\($r)!"
+{"a":1,"b":2}
+
 # ---------- Extra probes: generator-heavy filters ----------
 
 [range(5) | select(. % 2 == 0)]
