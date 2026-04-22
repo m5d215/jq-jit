@@ -916,3 +916,25 @@ del(.[0])
 [.[]] | length
 [1,2,3]
 3
+
+# Issue #57: until(cond; update) must test cond on the original input
+
+# string input: "hello" > 5 is true, so exit immediately with "hello"
+until(. > 5; . + 1)
+"hello"
+"hello"
+
+# array input with mixed cond/update: cond short-circuits before update
+until(. > 5; . + 1)
+[1]
+[1]
+
+# until on a number still loops as before
+until(. > 2; . + 10)
+0
+10
+
+# Input already satisfying cond returns input unchanged
+until(. > 2; . + 10)
+5
+5

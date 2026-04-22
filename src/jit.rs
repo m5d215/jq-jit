@@ -1187,6 +1187,57 @@ impl Flattener {
                     && Self::is_pure_f64_expr_multi(cond, &ext_vars)
                     && Self::is_pure_f64_expr_multi(update, &ext_vars);
 
+                // Both fused paths coerce input to f64 via `to_f64`, which
+                // silently turns a non-numeric input into 0.0 and runs the
+                // loop from there. jq instead compares the raw input value
+                // via cross-type ordering and e.g. exits immediately from
+                // `"hello" | until(. > 5; . + 1)` (issue #57). Guard the
+                // fused paths with a runtime Num check on the input; fall
+                // back to the generic semantic path otherwise.
+                let use_type_guard = narrow_fused.is_some() || general_f64;
+                let (generic_entry, merge_label, result_slot) = if use_type_guard {
+                    let gen = self.alloc_label();
+                    let merge = self.alloc_label();
+                    let result = self.alloc_slot();
+                    let fused_label = self.alloc_label();
+                    self.emit(JitOp::TypeCmpBranch {
+                        src: input_slot,
+                        tags: 1u8 << 3, // TAG_NUM
+                        then_label: fused_label,
+                        else_label: gen,
+                    });
+                    self.emit(JitOp::Label { id: fused_label });
+                    (Some(gen), Some(merge), Some(result))
+                } else {
+                    (None, None, None)
+                };
+
+                let emit_fused_tail = |s: &mut Self, fused_out: SlotId| {
+                    if let (Some(merge), Some(gen_lbl)) = (merge_label, generic_entry) {
+                        s.emit(JitOp::Jump { label: merge });
+                        s.emit(JitOp::Label { id: gen_lbl });
+                        // Inline generic path writing result into fused_out.
+                        let current = s.alloc_slot();
+                        s.emit(JitOp::Clone { dst: current, src: input_slot });
+                        let g_head = s.alloc_label();
+                        let g_body = s.alloc_label();
+                        let g_done = s.alloc_label();
+                        s.emit(JitOp::Label { id: g_head });
+                        let cond_val = s.flatten_scalar(cond, current);
+                        s.emit(JitOp::IfTruthy { src: cond_val, then_label: g_done, else_label: g_body });
+                        s.emit(JitOp::Drop { slot: cond_val });
+                        s.emit(JitOp::Label { id: g_body });
+                        let new_val = s.flatten_scalar(update, current);
+                        s.emit(JitOp::Drop { slot: current });
+                        s.emit(JitOp::Clone { dst: current, src: new_val });
+                        s.emit(JitOp::Drop { slot: new_val });
+                        s.emit(JitOp::Jump { label: g_head });
+                        s.emit(JitOp::Label { id: g_done });
+                        s.emit(JitOp::Clone { dst: fused_out, src: current });
+                        s.emit(JitOp::Drop { slot: current });
+                        s.emit(JitOp::Label { id: merge });
+                    }
+                };
                 if let Some((cond_cc, cond_const, update_op, update_const)) = narrow_fused {
                     // Fast narrow path: preload constants outside loop
                     let acc = self.alloc_var();
@@ -1211,9 +1262,10 @@ impl Flattener {
                     }
                     self.emit(JitOp::Jump { label: head });
                     self.emit(JitOp::Label { id: done });
-                    let result = self.alloc_slot();
-                    self.emit(JitOp::F64Num { dst: result, src_var: acc });
-                    result
+                    let fused_out = result_slot.unwrap_or_else(|| self.alloc_slot());
+                    self.emit(JitOp::F64Num { dst: fused_out, src_var: acc });
+                    emit_fused_tail(self, fused_out);
+                    fused_out
                 } else if general_f64 {
                     // General fused path: compile_f64_expr inside loop
                     // Pre-load external variables as f64 vars
@@ -1241,9 +1293,10 @@ impl Flattener {
                     }
                     self.emit(JitOp::Jump { label: head });
                     self.emit(JitOp::Label { id: done });
-                    let result = self.alloc_slot();
-                    self.emit(JitOp::F64Num { dst: result, src_var: acc });
-                    result
+                    let fused_out = result_slot.unwrap_or_else(|| self.alloc_slot());
+                    self.emit(JitOp::F64Num { dst: fused_out, src_var: acc });
+                    emit_fused_tail(self, fused_out);
+                    fused_out
                 } else {
                     // Generic path: until(cond; update): loop { if cond then break; update }; yield current
                     let current = self.alloc_slot();

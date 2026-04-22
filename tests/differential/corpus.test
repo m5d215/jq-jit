@@ -588,3 +588,17 @@ del(.[0])
 
 [.[]] | add
 [[1],[2]]
+
+# ---------- Issue #57: until(cond; update) tests cond on the raw input ----------
+
+until(. > 5; . + 1)
+"hello"
+
+until(. > 5; . + 1)
+[1]
+
+until(. > 2; . + 10)
+0
+
+until(. > 2; . + 10)
+5
