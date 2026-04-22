@@ -1712,15 +1712,10 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
         }
         Expr::PathExpr { expr: pe } => {
             let sp = simplify_expr(pe);
-            // path(.field) → ["field"]
-            if let Expr::Index { expr: base, key } = &sp {
-                if matches!(base.as_ref(), Expr::Input) {
-                    if let Expr::Literal(lit) = key.as_ref() {
-                        return Expr::Collect { generator: Box::new(Expr::Literal(lit.clone())) };
-                    }
-                }
-            }
-            // path(.a, .b) → (["a"], ["b"])
+            // Note: `path(.field)` cannot be folded to `["field"]` at
+            // compile time — jq errors when the input type is not
+            // indexable, so the type check must happen at runtime
+            // (issue #46). Only comma distributivity is safe to fold.
             if let Expr::Comma { left, right } = &sp {
                 let lp = simplify_expr(&Expr::PathExpr { expr: left.clone() });
                 let rp = simplify_expr(&Expr::PathExpr { expr: right.clone() });

@@ -3814,9 +3814,28 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
         Expr::Input => cb(Value::Arr(Rc::new(vec![]))),
         Expr::Index { expr: be, key: ke } => {
             let cb_called = std::cell::Cell::new(false);
+            let input_for_check = input.clone();
             let result = eval_path(be, input.clone(), env, &mut |bp| {
                 cb_called.set(true);
                 eval(ke, input.clone(), env, &mut |key| {
+                    // jq errors `path(.field)` when the base value at the
+                    // current path can't accept the key type (issue #46).
+                    // Only objects (with string keys), arrays (with number
+                    // keys), and null (a no-op) are valid bases.
+                    let base_val = crate::runtime::rt_getpath(&input_for_check, &bp).unwrap_or(Value::Null);
+                    match (&base_val, &key) {
+                        (Value::Obj(_), Value::Str(_)) => {}
+                        (Value::Arr(_), Value::Num(_, _)) => {}
+                        (Value::Null, _) => {}
+                        _ => {
+                            let key_desc = match &key {
+                                Value::Str(s) => format!("string \"{}\"", s),
+                                Value::Num(n, _) => format!("number ({})", crate::value::format_jq_number(*n)),
+                                other => format!("{} ({})", other.type_name(), crate::value::value_to_json(other)),
+                            };
+                            bail!("Cannot index {} with {}", base_val.type_name(), key_desc);
+                        }
+                    }
                     let mut p = match &bp { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
                     p.push(key); cb(Value::Arr(Rc::new(p)))
                 })

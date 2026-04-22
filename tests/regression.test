@@ -789,3 +789,35 @@ null
 [1,2,3] | .[10]
 null
 null
+
+# Issue #46: path(f) errors on type-incompatible input, like the bare access
+
+# path(.a) on a number errors
+path(.a)
+1
+
+# path(.a) on a boolean errors
+path(.a)
+true
+
+# path(.[0]) on an object errors (wrong key type for that base)
+path(.[0])
+{}
+
+# Nested path walk surfaces the same error when the initial step is invalid
+path(.a.b)
+1
+
+# path(.a,.b) errors on the first branch when the base is not indexable
+path(.a,.b)
+1
+
+# Valid paths still succeed
+path(.a)
+{"a":1}
+["a"]
+
+# path on null is a no-op (empty check happens naturally)
+path(.a)
+null
+["a"]

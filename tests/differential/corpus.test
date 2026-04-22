@@ -515,3 +515,17 @@ null
 
 ["a","b"] | .[-3]
 null
+
+# ---------- Issue #46: path(f) errors on type-incompatible input ----------
+
+path(.a)
+1
+
+path(.[0])
+{}
+
+path(.a.b)
+1
+
+path(.a,.b)
+1
