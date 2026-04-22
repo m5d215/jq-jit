@@ -378,3 +378,20 @@ to_entries
 
 to_entries
 ["a","b"]
+
+# ---------- Issue #48: add on object folds values ----------
+
+add
+{}
+
+add
+{"a":1,"b":2}
+
+add
+{"a":"x","b":"y"}
+
+add
+1
+
+add
+"x"

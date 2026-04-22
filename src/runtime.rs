@@ -1072,7 +1072,16 @@ fn rt_add_all(v: &Value) -> Result<Value> {
             }
             Ok(result)
         }
-        _ => bail!("{} is not an array", v.type_name()),
+        Value::Obj(o) => {
+            let mut iter = o.values();
+            let Some(first) = iter.next() else { return Ok(Value::Null); };
+            let mut result = first.clone();
+            for item in iter {
+                result = rt_add(&result, item)?;
+            }
+            Ok(result)
+        }
+        _ => bail!("Cannot iterate over {} ({})", v.type_name(), crate::value::value_to_json(v)),
     }
 }
 

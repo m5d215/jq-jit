@@ -561,3 +561,25 @@ to_entries
 to_entries | from_entries
 {"a":1,"b":2}
 {"a":1,"b":2}
+
+# Issue #48: add folds object values instead of erroring
+
+# add on empty object returns null
+add
+{}
+null
+
+# add on object with one numeric value returns that value
+add
+{"a":1}
+1
+
+# add on object with two numeric values folds them
+add
+{"a":1,"b":2}
+3
+
+# add on object with string values concatenates them
+add
+{"a":"x","b":"y"}
+"xy"
