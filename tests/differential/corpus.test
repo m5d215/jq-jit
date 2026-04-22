@@ -482,3 +482,90 @@ null
 
 {(.k):2, a:1}
 {"k":"a"}
+# ---------- Issue #40: // propagates errors from the LHS ----------
+
+.x // 0
+1
+
+.x // 0
+true
+
+.x // 0
+"s"
+
+.x // 0
+[1]
+
+tonumber // 99
+"x"
+
+sort_by(.x // 0)
+[1,2,3]
+
+# ---------- Issue #42: literal array negative index out-of-range ----------
+
+[1,2,3] | .[-4]
+null
+
+[1,2,3] | .[-100]
+null
+
+[10,20,30,40] | .[-5]
+null
+
+["a","b"] | .[-3]
+null
+
+# ---------- Issue #46: path(f) errors on type-incompatible input ----------
+
+path(.a)
+1
+
+path(.[0])
+{}
+
+path(.a.b)
+1
+
+path(.a,.b)
+1
+
+# ---------- Issue #50: (expr)? emits null instead of nothing on errors ----------
+
+(.a)?
+true
+
+(.a)?
+1
+
+(.a)?
+"x"
+
+(.a)?
+{}
+
+(.a)?
+{"a":5}
+
+# ---------- Issue #54: del(path) errors on type-incompatible input ----------
+
+del(.a)
+1
+
+del(.a)
+[1,2]
+
+del(.[0])
+{}
+
+del(.[])
+1
+
+del(.[])
+null
+
+del(.a)
+{"a":1,"b":2}
+
+del(.[0])
+[1,2,3]

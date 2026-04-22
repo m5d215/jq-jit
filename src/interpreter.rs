@@ -967,11 +967,21 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                             }
                             let mut elems = Vec::new();
                             collect_comma_for_idx(lg, &mut elems);
-                            let actual = if idx >= 0 { idx as usize } else {
-                                (elems.len() as i64 + idx).max(0) as usize
+                            // Only constant-fold when the negative index
+                            // actually lands inside the array. Previously the
+                            // negative branch clamped to 0 via `.max(0)`,
+                            // returning the first element for any out-of-range
+                            // negative index (issue #42). Falling through for
+                            // the out-of-range cases lets the runtime emit the
+                            // correct null result.
+                            let effective: Option<usize> = if idx >= 0 {
+                                if (idx as usize) < elems.len() { Some(idx as usize) } else { None }
+                            } else {
+                                let v = elems.len() as i64 + idx;
+                                if v >= 0 && (v as usize) < elems.len() { Some(v as usize) } else { None }
                             };
-                            if actual < elems.len() {
-                                return elems.swap_remove(actual);
+                            if let Some(i) = effective {
+                                return elems.swap_remove(i);
                             }
                             }
                         }
@@ -1702,15 +1712,10 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
         }
         Expr::PathExpr { expr: pe } => {
             let sp = simplify_expr(pe);
-            // path(.field) → ["field"]
-            if let Expr::Index { expr: base, key } = &sp {
-                if matches!(base.as_ref(), Expr::Input) {
-                    if let Expr::Literal(lit) = key.as_ref() {
-                        return Expr::Collect { generator: Box::new(Expr::Literal(lit.clone())) };
-                    }
-                }
-            }
-            // path(.a, .b) → (["a"], ["b"])
+            // Note: `path(.field)` cannot be folded to `["field"]` at
+            // compile time — jq errors when the input type is not
+            // indexable, so the type check must happen at runtime
+            // (issue #46). Only comma distributivity is safe to fold.
             if let Expr::Comma { left, right } = &sp {
                 let lp = simplify_expr(&Expr::PathExpr { expr: left.clone() });
                 let rp = simplify_expr(&Expr::PathExpr { expr: right.clone() });
@@ -1884,25 +1889,20 @@ fn push_const_comma_list(expr: &crate::ir::Expr, buf: &mut Vec<u8>, first: bool)
 }
 
 impl Filter {
-    /// Get the inner expression for pattern detection, unwrapping top-level
-    /// `try EXPR` (TryCatch with Empty catch) since the raw byte fast paths
-    /// handle missing fields gracefully (return null/nothing).
+    /// Get the inner expression for pattern detection.
+    ///
+    /// Previously this stripped top-level `try EXPR` (TryCatch with Empty
+    /// catch) on the assumption that the raw byte fast paths handled missing
+    /// fields gracefully. They don't: `(.a)?` on a non-object needs to emit
+    /// nothing (the error is caught), while the fast path emitted `null`.
+    /// Leave TryCatch visible so the fast paths that can't honour `?`
+    /// semantics simply don't match, and eval handles it correctly (see
+    /// issue #50).
     fn detect_expr(&self) -> Option<&crate::ir::Expr> {
-        // Use simplified expression (identity pipes stripped) for pattern detection
         if let Some(ref simplified) = self.simplified {
-            if let crate::ir::Expr::TryCatch { try_expr, catch_expr } = simplified {
-                if matches!(catch_expr.as_ref(), crate::ir::Expr::Empty) {
-                    return Some(try_expr);
-                }
-            }
             return Some(simplified);
         }
         let (ref expr, _) = self.parsed.as_ref()?;
-        if let crate::ir::Expr::TryCatch { try_expr, catch_expr } = expr {
-            if matches!(catch_expr.as_ref(), crate::ir::Expr::Empty) {
-                return Some(try_expr);
-            }
-        }
         Some(expr)
     }
 

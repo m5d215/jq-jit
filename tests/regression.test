@@ -719,3 +719,161 @@ null
 {(.k):2, a:1}
 {"k":"a"}
 {"a":1}
+# Issue #40: `//` must propagate errors from the LHS
+
+# .x on a non-object must error, not silently fall through to the RHS
+.x // 0
+1
+
+# Non-object inputs of other types all error the same way
+.x // 0
+true
+
+.x // 0
+"s"
+
+.x // 0
+[1]
+
+# tonumber failure bubbles through //
+tonumber // 99
+"x"
+
+# sort_by propagates the per-element error from .x on a number input
+sort_by(.x // 0)
+[1,2,3]
+
+# null input to .field // fb is still null → fallback; no error
+.x // 0
+null
+0
+
+# Object with the key null is still null → fallback; no error
+.x // 0
+{"x":null}
+0
+
+# Object without the key → fallback (no error)
+.x // 0
+{"a":1}
+0
+
+# Issue #42: literal array piped into negative-index returns null when out of range
+
+# Negative overshoot by one — should be null, not elems[0]
+[1,2,3] | .[-4]
+null
+null
+
+# Large negative overshoot
+[1,2,3] | .[-100]
+null
+null
+
+# Four-element array, overshoot by one
+[10,20,30,40] | .[-5]
+null
+null
+
+# String array overshoot
+["a","b"] | .[-3]
+null
+null
+
+# Bound negative index still works
+[1,2,3] | .[-1]
+null
+3
+
+# Positive overshoot still returns null at runtime
+[1,2,3] | .[10]
+null
+null
+
+# Issue #46: path(f) errors on type-incompatible input, like the bare access
+
+# path(.a) on a number errors
+path(.a)
+1
+
+# path(.a) on a boolean errors
+path(.a)
+true
+
+# path(.[0]) on an object errors (wrong key type for that base)
+path(.[0])
+{}
+
+# Nested path walk surfaces the same error when the initial step is invalid
+path(.a.b)
+1
+
+# path(.a,.b) errors on the first branch when the base is not indexable
+path(.a,.b)
+1
+
+# Valid paths still succeed
+path(.a)
+{"a":1}
+["a"]
+
+# path on null is a no-op (empty check happens naturally)
+path(.a)
+null
+["a"]
+
+# Issue #50: (expr)? emits null instead of nothing when expr errors
+
+# Parenthesised field access with ? emits nothing on boolean input
+(.a)?
+true
+
+# Same behaviour on a number
+(.a)?
+1
+
+# Same behaviour on a string
+(.a)?
+"x"
+
+# Missing field on an object still returns null (no error to catch)
+(.a)?
+{}
+null
+
+# Field present still returns the value
+(.a)?
+{"a":5}
+5
+
+# Issue #54: del(path) errors on type-incompatible input
+
+# del(.a) on number errors
+del(.a)
+1
+
+# del(.a) on array errors (wrong key type for array)
+del(.a)
+[1,2]
+
+# del(.[0]) on object errors
+del(.[0])
+{}
+
+# del(.[]) on number errors (cannot iterate)
+del(.[])
+1
+
+# del(.[]) on null errors — jq treats null as non-iterable here
+del(.[])
+null
+
+# del still works on valid input
+del(.a)
+{"a":1,"b":2}
+{"b":2}
+
+# del on an array index removes that element
+del(.[0])
+[1,2,3]
+[2,3]

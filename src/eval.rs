@@ -2249,6 +2249,9 @@ pub fn eval(
         }
 
         Expr::Alternative { primary, fallback } => {
+            // `A // B`: yield each truthy value from A; fall back to B only when
+            // A emits nothing non-false/non-null. Errors must propagate — use
+            // `f?` or `try f catch g` to suppress them, per jq semantics.
             let mut has_output = false;
             let result = eval(primary, input.clone(), env, &mut |val| {
                 if val.is_truthy() { has_output = true; cb(val) } else { Ok(true) }
@@ -2256,7 +2259,7 @@ pub fn eval(
             match result {
                 Ok(_) if !has_output => eval(fallback, input, env, cb),
                 Ok(cont) => Ok(cont),
-                Err(_) => eval(fallback, input, env, cb),
+                Err(e) => Err(e),
             }
         }
 
@@ -3811,9 +3814,28 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
         Expr::Input => cb(Value::Arr(Rc::new(vec![]))),
         Expr::Index { expr: be, key: ke } => {
             let cb_called = std::cell::Cell::new(false);
+            let input_for_check = input.clone();
             let result = eval_path(be, input.clone(), env, &mut |bp| {
                 cb_called.set(true);
                 eval(ke, input.clone(), env, &mut |key| {
+                    // jq errors `path(.field)` when the base value at the
+                    // current path can't accept the key type (issue #46).
+                    // Only objects (with string keys), arrays (with number
+                    // keys), and null (a no-op) are valid bases.
+                    let base_val = crate::runtime::rt_getpath(&input_for_check, &bp).unwrap_or(Value::Null);
+                    match (&base_val, &key) {
+                        (Value::Obj(_), Value::Str(_)) => {}
+                        (Value::Arr(_), Value::Num(_, _)) => {}
+                        (Value::Null, _) => {}
+                        _ => {
+                            let key_desc = match &key {
+                                Value::Str(s) => format!("string \"{}\"", s),
+                                Value::Num(n, _) => format!("number ({})", crate::value::format_jq_number(*n)),
+                                other => format!("{} ({})", other.type_name(), crate::value::value_to_json(other)),
+                            };
+                            bail!("Cannot index {} with {}", base_val.type_name(), key_desc);
+                        }
+                    }
                     let mut p = match &bp { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
                     p.push(key); cb(Value::Arr(Rc::new(p)))
                 })
@@ -3844,7 +3866,12 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 match &base {
                     Value::Arr(a) => { for i in 0..a.len() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::Num(i as f64, None)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
                     Value::Obj(o) => { for k in o.keys() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::from_str(k)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
-                    _ => Ok(true),
+                    _ => {
+                        // jq errors `del(.[])` etc. when the current path
+                        // points at a non-iterable (issue #54). Silent
+                        // "no paths" turned type errors into no-ops.
+                        bail!("Cannot iterate over {} ({})", base.type_name(), crate::value::value_to_json(&base))
+                    }
                 }
             });
             match result {
