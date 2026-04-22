@@ -443,3 +443,30 @@ false
 in([10,20,30])
 -1
 false
+
+# Issue #38: Unary minus on 0 emits "-0" instead of "0"
+
+# Unary minus on integer zero
+-.
+0
+0
+
+# Literal -0 in filter source
+-0
+null
+0
+
+# map unary minus over array with zero
+map(-.)
+[0,1,-2,0]
+[0,-1,2,0]
+
+# Literal array containing -0
+[0, -0]
+null
+[0,0]
+
+# tostring on negated zero
+-. | tostring
+0
+"0"

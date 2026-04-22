@@ -313,3 +313,23 @@ in([10,20,30])
 
 in([10,20,30])
 null
+
+# ---------- Issue #38: Unary minus on 0 emits "-0" instead of "0" ----------
+
+-.
+0
+
+-0
+null
+
+map(-.)
+[0,1,-2,0]
+
+[0, -0]
+null
+
+-.a
+{"a":0}
+
+[0, -0] | add
+null
