@@ -359,3 +359,14 @@ abs
 
 abs
 {"a":1}
+
+# ---------- Issue #43: length on boolean returns 0/1 instead of erroring ----------
+
+length
+true
+
+length
+false
+
+map(length)
+[true]

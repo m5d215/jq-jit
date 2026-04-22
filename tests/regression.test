@@ -520,3 +520,27 @@ abs
 abs
 -5
 5
+
+# Issue #43: length on boolean returns 0/1 instead of erroring
+
+# length on true errors
+length
+true
+
+# length on false errors
+length
+false
+
+# map(length) propagates the error from boolean element
+map(length)
+[true]
+
+# length on null is still 0
+length
+null
+0
+
+# length on number absolute value still works
+length
+-3
+3
