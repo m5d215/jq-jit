@@ -8,6 +8,24 @@ use std::process;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+#[inline]
+fn jqjit_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("JQJIT_TRACE")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false)
+    })
+}
+
+fn jqjit_trace_fast_path(name: &str, filter_text: &str) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static EMITTED: AtomicBool = AtomicBool::new(false);
+    if jqjit_trace_enabled() && !EMITTED.swap(true, Ordering::Relaxed) {
+        eprintln!("[trace] filter='{}' matched={}", filter_text, name);
+    }
+}
+
 use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, json_object_get_nested_field_raw, parse_json_num, json_value_length, json_object_keys_to_buf_reuse, json_object_extract_keys_only, json_object_keys_unsorted_to_buf, json_object_keys_join_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_type_byte, json_object_del_field, json_object_del_fields, json_object_filter_by_key_str, json_object_merge_literal, json_object_sort_keys, json_object_filter_by_value_type, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_with_entries_select_value_cmp, json_object_set_field_raw, json_object_update_field_num, json_object_update_field_num_chain, json_object_update_field_case, json_object_update_field_gsub, json_object_update_field_split_first, json_object_update_field_split_last, json_object_update_field_trim, json_object_update_field_slice, json_object_update_field_str_map, json_object_update_field_str_concat, json_object_update_field_length, json_object_update_field_tostring, json_object_update_field_test, json_object_assign_field_arith, json_object_assign_two_fields_arith, json_object_select_then_update_num, json_object_select_then_update_str_concat, json_object_select_compound_then_update_num, json_object_select_str_then_update_num, json_object_values_tostring, is_json_compact, push_json_compact_raw, push_tojson_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_compact_line_color, push_pretty_line, push_pretty_line_color, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line_color, value_to_json_pretty_color, walk_json_transform_nums, pool_value, skip_json_value};
 use jq_jit::interpreter::Filter;
 
@@ -1918,6 +1936,10 @@ fn real_main() {
         }
     };
 
+    // Original user-provided filter text, captured before $ARGS/bind prefixing
+    // so JQJIT_TRACE output matches what the user actually typed.
+    let filter_text: String = filter_str.clone();
+
     // Prepend --arg / --argjson / $ARGS bindings to the filter expression
     let filter_str = {
         let mut prefix = String::new();
@@ -2062,357 +2084,378 @@ fn real_main() {
     // Raw byte fast paths bypass Value construction and cannot inject color codes.
     // Disable them when color output is requested.
     let use_raw_fast_paths = (use_compact_buf || use_pretty_buf) && !color_output;
+
+    // JQJIT_TRACE: emit a single [trace] line naming the first fast path that
+    // fires. `trace_detect!` wraps `Option`-returning detectors; `trace_is!`
+    // wraps `bool`-returning predicates. The cascade below already gates most
+    // downstream detectors on earlier misses, so in practice at most one trace
+    // is emitted per invocation (deduped via an AtomicBool).
+    macro_rules! trace_detect {
+        ($filter:expr, $method:ident) => {{
+            let v = $filter.$method();
+            if v.is_some() { jqjit_trace_fast_path(stringify!($method), &filter_text); }
+            v
+        }};
+    }
+    macro_rules! trace_is {
+        ($filter:expr, $method:ident) => {{
+            let v = $filter.$method();
+            if v { jqjit_trace_fast_path(stringify!($method), &filter_text); }
+            v
+        }};
+    }
+
     let field_access = if use_raw_fast_paths && !exit_status {
-        filter.detect_field_access()
+        trace_detect!(filter, detect_field_access)
     } else { None };
     let nested_field = if use_raw_fast_paths && !exit_status && field_access.is_none() {
-        filter.detect_nested_field_access()
+        trace_detect!(filter, detect_nested_field_access)
     } else { None };
     let field_remap = if use_raw_fast_paths && !exit_status && field_access.is_none() && nested_field.is_none() {
-        filter.detect_field_remap()
+        trace_detect!(filter, detect_field_remap)
     } else { None };
     let computed_remap = if use_raw_fast_paths && !exit_status && field_access.is_none() && nested_field.is_none() && field_remap.is_none() {
-        filter.detect_computed_remap()
+        trace_detect!(filter, detect_computed_remap)
     } else { None };
     let standalone_array = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_remap.is_none() && computed_remap.is_none() {
-        filter.detect_standalone_array()
+        trace_detect!(filter, detect_standalone_array)
     } else { None };
     let field_binop = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_remap.is_none() && computed_remap.is_none() {
-        filter.detect_field_binop()
+        trace_detect!(filter, detect_field_binop)
     } else { None };
     let field_unary_num = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_binop.is_none() {
-        filter.detect_field_unary_num()
+        trace_detect!(filter, detect_field_unary_num)
     } else { None };
     let field_unary_arith = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_binop.is_none() && field_unary_num.is_none() {
-        filter.detect_field_unary_arith()
+        trace_detect!(filter, detect_field_unary_arith)
     } else { None };
     let field_binop_const_unary = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_binop.is_none() && field_unary_num.is_none() && field_unary_arith.is_none() {
-        filter.detect_field_binop_const_unary()
+        trace_detect!(filter, detect_field_binop_const_unary)
     } else { None };
     let two_field_binop_const = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_binop.is_none() && field_binop_const_unary.is_none() {
-        filter.detect_two_field_binop_const()
+        trace_detect!(filter, detect_two_field_binop_const)
     } else { None };
     let field_arith_chain = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_binop.is_none() && field_binop_const_unary.is_none() && two_field_binop_const.is_none() {
-        filter.detect_field_arith_chain()
+        trace_detect!(filter, detect_field_arith_chain)
     } else { None };
     let field_arith_tostring = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_arith_chain.is_none() {
-        filter.detect_field_arith_chain_tostring()
+        trace_detect!(filter, detect_field_arith_chain_tostring)
     } else { None };
     let field_binop_tostring = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_binop.is_none() && field_arith_tostring.is_none() {
-        filter.detect_field_binop_tostring()
+        trace_detect!(filter, detect_field_binop_tostring)
     } else { None };
     let numeric_expr = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_binop.is_none() && field_binop_const_unary.is_none() && field_arith_chain.is_none() {
-        filter.detect_numeric_expr()
+        trace_detect!(filter, detect_numeric_expr)
     } else { None };
     let numeric_expr_unary = if use_raw_fast_paths && !exit_status && field_access.is_none() && numeric_expr.is_none() && field_binop.is_none() && field_arith_chain.is_none() {
-        filter.detect_numeric_expr_unary()
+        trace_detect!(filter, detect_numeric_expr_unary)
     } else { None };
     let field_field_cmp = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_binop.is_none() {
-        filter.detect_field_field_cmp()
+        trace_detect!(filter, detect_field_field_cmp)
     } else { None };
     let field_const_cmp = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_binop.is_none() && field_field_cmp.is_none() {
-        filter.detect_field_const_cmp()
+        trace_detect!(filter, detect_field_const_cmp)
     } else { None };
     let arith_chain_cmp = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_const_cmp.is_none() && field_field_cmp.is_none() {
-        filter.detect_arith_chain_cmp()
+        trace_detect!(filter, detect_arith_chain_cmp)
     } else { None };
     let compound_field_cmp = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_const_cmp.is_none() && field_field_cmp.is_none() && arith_chain_cmp.is_none() {
-        filter.detect_compound_field_cmp()
+        trace_detect!(filter, detect_compound_field_cmp)
     } else { None };
     let field_str_builtin = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_unary_num.is_none() {
-        filter.detect_field_str_builtin()
+        trace_detect!(filter, detect_field_str_builtin)
     } else { None };
     let field_index_arith = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_str_builtin.is_none() {
-        filter.detect_field_index_arith()
+        trace_detect!(filter, detect_field_index_arith)
     } else { None };
     let field_test = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_str_builtin.is_none() {
-        filter.detect_field_test()
+        trace_detect!(filter, detect_field_test)
     } else { None };
     let field_gsub = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() {
-        filter.detect_field_gsub()
+        trace_detect!(filter, detect_field_gsub)
     } else { None };
     let field_case_gsub = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_gsub.is_none() {
-        filter.detect_field_case_gsub()
+        trace_detect!(filter, detect_field_case_gsub)
     } else { None };
     let field_case_test = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_test.is_none() && field_case_gsub.is_none() {
-        filter.detect_field_case_test()
+        trace_detect!(filter, detect_field_case_test)
     } else { None };
     let field_scan = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() && field_gsub.is_none() {
-        filter.detect_field_scan()
+        trace_detect!(filter, detect_field_scan)
     } else { None };
     let field_match = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() && field_gsub.is_none() && field_scan.is_none() {
-        filter.detect_field_match()
+        trace_detect!(filter, detect_field_match)
     } else { None };
     let field_capture = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() && field_gsub.is_none() && field_scan.is_none() && field_match.is_none() {
-        filter.detect_field_capture()
+        trace_detect!(filter, detect_field_capture)
     } else { None };
     let field_format = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() && field_gsub.is_none() && field_scan.is_none() {
-        filter.detect_field_format()
+        trace_detect!(filter, detect_field_format)
     } else { None };
     let field_ltrimstr_tonumber = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_str_builtin.is_none() && field_test.is_none() {
-        filter.detect_field_ltrimstr_tonumber()
+        trace_detect!(filter, detect_field_ltrimstr_tonumber)
     } else { None };
     let field_str_concat = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() {
-        filter.detect_field_str_concat()
+        trace_detect!(filter, detect_field_str_concat)
     } else { None };
     let type_filter = if use_raw_fast_paths && !exit_status {
-        filter.detect_type_filter()
+        trace_detect!(filter, detect_type_filter)
     } else { None };
     let select_cmp = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() && field_str_concat.is_none() {
-        filter.detect_select_field_cmp()
+        trace_detect!(filter, detect_select_field_cmp)
     } else { None };
     let select_field_null = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() {
-        filter.detect_select_field_null()
+        trace_detect!(filter, detect_select_field_null)
     } else { None };
     let select_arith_cmp = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() {
-        filter.detect_select_arith_cmp()
+        trace_detect!(filter, detect_select_arith_cmp)
     } else { None };
     let select_str = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() {
-        filter.detect_select_field_str()
+        trace_detect!(filter, detect_select_field_str)
     } else { None };
     let select_str_test = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_str.is_none() && field_access.is_none() {
-        filter.detect_select_field_str_test()
+        trace_detect!(filter, detect_select_field_str_test)
     } else { None };
     let select_string_chain = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() && field_access.is_none() {
-        filter.detect_select_string_chain()
+        trace_detect!(filter, detect_select_string_chain)
     } else { None };
     let select_compound_str_test = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() && select_string_chain.is_none() && field_access.is_none() {
-        filter.detect_select_compound_str_test()
+        trace_detect!(filter, detect_select_compound_str_test)
     } else { None };
     let select_mixed_compound = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() && select_compound_str_test.is_none() && field_access.is_none() {
-        filter.detect_select_mixed_compound()
+        trace_detect!(filter, detect_select_mixed_compound)
     } else { None };
     let select_regex_test = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() && field_access.is_none() {
-        filter.detect_select_field_regex_test()
+        trace_detect!(filter, detect_select_field_regex_test)
     } else { None };
     let select_regex_value = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_regex_test.is_none() && field_access.is_none() {
-        filter.detect_select_regex_then_value()
+        trace_detect!(filter, detect_select_regex_then_value)
     } else { None };
     let select_nested_cmp = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_str.is_none() && select_str_test.is_none() {
-        filter.detect_select_nested_cmp()
+        trace_detect!(filter, detect_select_nested_cmp)
     } else { None };
     let computed_array = if use_raw_fast_paths && !exit_status && field_access.is_none() && computed_remap.is_none() {
-        filter.detect_computed_array()
+        trace_detect!(filter, detect_computed_array)
     } else { None };
     let array_field = if use_raw_fast_paths && !exit_status && field_access.is_none() && computed_array.is_none() {
-        filter.detect_array_field_access()
+        trace_detect!(filter, detect_array_field_access)
     } else { None };
     let multi_field = if use_raw_fast_paths && !exit_status && field_access.is_none() && array_field.is_none() {
-        filter.detect_multi_field_access()
+        trace_detect!(filter, detect_multi_field_access)
     } else { None };
-    let is_length = use_raw_fast_paths && !exit_status && field_access.is_none() && multi_field.is_none() && select_cmp.is_none() && filter.is_length();
-    let is_keys = use_raw_fast_paths && !exit_status && field_access.is_none() && select_cmp.is_none() && !is_length && filter.is_keys();
-    let is_keys_unsorted = use_raw_fast_paths && !exit_status && !is_keys && !is_length && filter.is_keys_unsorted();
+    let is_length = use_raw_fast_paths && !exit_status && field_access.is_none() && multi_field.is_none() && select_cmp.is_none() && trace_is!(filter, is_length);
+    let is_keys = use_raw_fast_paths && !exit_status && field_access.is_none() && select_cmp.is_none() && !is_length && trace_is!(filter, is_keys);
+    let is_keys_unsorted = use_raw_fast_paths && !exit_status && !is_keys && !is_length && trace_is!(filter, is_keys_unsorted);
     let keys_join = if use_raw_fast_paths && !exit_status && !is_keys && !is_keys_unsorted && !is_length && field_access.is_none() {
-        filter.detect_keys_join()
+        trace_detect!(filter, detect_keys_join)
     } else { None };
     let has_field = if use_raw_fast_paths && !exit_status && !is_length && !is_keys {
-        filter.detect_has_field()
+        trace_detect!(filter, detect_has_field)
     } else { None };
     let has_multi = if use_raw_fast_paths && !exit_status && !is_length && !is_keys && has_field.is_none() {
-        filter.detect_has_multi_field()
+        trace_detect!(filter, detect_has_multi_field)
     } else { None };
-    let is_type = use_raw_fast_paths && !exit_status && !is_length && !is_keys && has_field.is_none() && has_multi.is_none() && filter.is_type();
+    let is_type = use_raw_fast_paths && !exit_status && !is_length && !is_keys && has_field.is_none() && has_multi.is_none() && trace_is!(filter, is_type);
     let del_field = if use_raw_fast_paths && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() {
-        filter.detect_del_field()
+        trace_detect!(filter, detect_del_field)
     } else { None };
     let select_cmp_del = if use_raw_fast_paths && !exit_status && del_field.is_none() && select_cmp.is_none() {
-        filter.detect_select_cmp_del()
+        trace_detect!(filter, detect_select_cmp_del)
     } else { None };
     let select_str_del = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_del.is_none() {
-        filter.detect_select_str_del()
+        trace_detect!(filter, detect_select_str_del)
     } else { None };
     let select_cmp_merge = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_del.is_none() {
-        filter.detect_select_cmp_merge()
+        trace_detect!(filter, detect_select_cmp_merge)
     } else { None };
     let select_str_merge = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_del.is_none() && select_str_del.is_none() && select_cmp_merge.is_none() {
-        filter.detect_select_str_merge()
+        trace_detect!(filter, detect_select_str_merge)
     } else { None };
     let del_fields = if use_raw_fast_paths && !exit_status && del_field.is_none() && select_cmp_del.is_none() {
-        filter.detect_del_fields()
+        trace_detect!(filter, detect_del_fields)
     } else { None };
     let obj_merge_lit = if use_raw_fast_paths && !exit_status && del_field.is_none() && del_fields.is_none() {
-        filter.detect_obj_merge_literal()
+        trace_detect!(filter, detect_obj_merge_literal)
     } else { None };
     let obj_merge_computed = if use_raw_fast_paths && !exit_status && obj_merge_lit.is_none() && del_field.is_none() {
-        filter.detect_obj_merge_computed()
+        trace_detect!(filter, detect_obj_merge_computed)
     } else { None };
     let obj_merge_multi = if use_raw_fast_paths && !exit_status && obj_merge_lit.is_none() && obj_merge_computed.is_none() && del_field.is_none() {
-        filter.detect_obj_merge_multi_computed()
+        trace_detect!(filter, detect_obj_merge_multi_computed)
     } else { None };
-    let is_collect_each = use_raw_fast_paths && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() && del_field.is_none() && field_access.is_none() && filter.is_collect_each();
+    let is_collect_each = use_raw_fast_paths && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() && del_field.is_none() && field_access.is_none() && trace_is!(filter, is_collect_each);
     let collect_each_arith = if use_raw_fast_paths && !exit_status && !is_collect_each && field_access.is_none() {
-        filter.detect_collect_each_arith()
+        trace_detect!(filter, detect_collect_each_arith)
     } else { None };
     let collect_each_select_type = if use_raw_fast_paths && !exit_status && !is_collect_each && collect_each_arith.is_none() && field_access.is_none() {
-        filter.detect_collect_each_select_type()
+        trace_detect!(filter, detect_collect_each_select_type)
     } else { None };
     let collect_each_select_cmp = if use_raw_fast_paths && !exit_status && !is_collect_each && collect_each_arith.is_none() && collect_each_select_type.is_none() && field_access.is_none() {
-        filter.detect_collect_each_select_cmp()
+        trace_detect!(filter, detect_collect_each_select_cmp)
     } else { None };
     let first_each_select_type = if use_raw_fast_paths && !exit_status && !is_collect_each && field_access.is_none() {
-        filter.detect_first_each_select_type()
+        trace_detect!(filter, detect_first_each_select_type)
     } else { None };
     let count_each_select_cmp = if use_raw_fast_paths && !exit_status && !is_collect_each && collect_each_select_cmp.is_none() && field_access.is_none() {
-        filter.detect_count_each_select_cmp()
+        trace_detect!(filter, detect_count_each_select_cmp)
     } else { None };
-    let is_each = use_raw_fast_paths && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() && del_field.is_none() && field_access.is_none() && !is_collect_each && collect_each_arith.is_none() && collect_each_select_type.is_none() && filter.is_each();
+    let is_each = use_raw_fast_paths && !exit_status && !is_length && !is_keys && !is_type && has_field.is_none() && del_field.is_none() && field_access.is_none() && !is_collect_each && collect_each_arith.is_none() && collect_each_select_type.is_none() && trace_is!(filter, is_each);
     let each_type_filter = if use_raw_fast_paths && !exit_status && !is_each {
-        filter.detect_each_type_filter()
+        trace_detect!(filter, detect_each_type_filter)
     } else { None };
-    let is_sort_keys = use_raw_fast_paths && !exit_status && !is_each && filter.is_sort_keys();
-    let is_to_entries = use_raw_fast_paths && !exit_status && !is_each && !is_sort_keys && filter.is_to_entries();
+    let is_sort_keys = use_raw_fast_paths && !exit_status && !is_each && trace_is!(filter, is_sort_keys);
+    let is_to_entries = use_raw_fast_paths && !exit_status && !is_each && !is_sort_keys && trace_is!(filter, is_to_entries);
     let to_entries_each_interp = if use_raw_fast_paths && !exit_status && !is_to_entries {
-        filter.detect_to_entries_each_interp()
+        trace_detect!(filter, detect_to_entries_each_interp)
     } else { None };
     let remap_to_entries = if use_raw_fast_paths && !exit_status && !is_to_entries && to_entries_each_interp.is_none() && field_remap.is_none() {
-        filter.detect_remap_to_entries()
+        trace_detect!(filter, detect_remap_to_entries)
     } else { None };
     let with_entries_select = if use_raw_fast_paths && !exit_status && !is_to_entries && remap_to_entries.is_none() {
-        filter.detect_with_entries_select_value_cmp()
+        trace_detect!(filter, detect_with_entries_select_value_cmp)
     } else { None };
     let with_entries_del = if use_raw_fast_paths && !exit_status && !is_to_entries && remap_to_entries.is_none() && with_entries_select.is_none() && del_field.is_none() && del_fields.is_none() {
-        filter.detect_with_entries_del_keys()
+        trace_detect!(filter, detect_with_entries_del_keys)
     } else { None };
     let with_entries_type = if use_raw_fast_paths && !exit_status && !is_to_entries && remap_to_entries.is_none() && with_entries_select.is_none() && with_entries_del.is_none() {
-        filter.detect_with_entries_select_value_type()
+        trace_detect!(filter, detect_with_entries_select_value_type)
     } else { None };
     let with_entries_key_str = if use_raw_fast_paths && !exit_status && !is_to_entries && remap_to_entries.is_none() && with_entries_select.is_none() && with_entries_del.is_none() && with_entries_type.is_none() {
-        filter.detect_with_entries_select_key_str()
+        trace_detect!(filter, detect_with_entries_select_key_str)
     } else { None };
-    let is_with_entries_tostring = use_raw_fast_paths && !exit_status && !is_to_entries && with_entries_type.is_none() && filter.is_with_entries_tostring();
-    let is_tojson_fromjson = use_raw_fast_paths && !exit_status && filter.is_tojson_fromjson();
-    let is_tojson = !is_tojson_fromjson && use_raw_fast_paths && !exit_status && !is_each && !is_to_entries && remap_to_entries.is_none() && with_entries_select.is_none() && with_entries_type.is_none() && filter.is_tojson();
+    let is_with_entries_tostring = use_raw_fast_paths && !exit_status && !is_to_entries && with_entries_type.is_none() && trace_is!(filter, is_with_entries_tostring);
+    let is_tojson_fromjson = use_raw_fast_paths && !exit_status && trace_is!(filter, is_tojson_fromjson);
+    let is_tojson = !is_tojson_fromjson && use_raw_fast_paths && !exit_status && !is_each && !is_to_entries && remap_to_entries.is_none() && with_entries_select.is_none() && with_entries_type.is_none() && trace_is!(filter, is_tojson);
     let remap_tojson = if use_raw_fast_paths && !exit_status && !is_tojson && field_remap.is_none() {
-        filter.detect_remap_tojson()
+        trace_detect!(filter, detect_remap_tojson)
     } else { None };
     let string_interp_fields = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_remap.is_none() && field_binop.is_none() && field_str_concat.is_none() {
-        filter.detect_string_interp_fields()
+        trace_detect!(filter, detect_string_interp_fields)
     } else { None };
     let string_add_chain = if use_raw_fast_paths && !exit_status && field_access.is_none() && string_interp_fields.is_none() && field_str_concat.is_none() {
-        filter.detect_string_add_chain()
+        trace_detect!(filter, detect_string_add_chain)
     } else { None };
     let array_join = if use_raw_fast_paths && !exit_status && field_access.is_none() {
-        filter.detect_array_join()
+        trace_detect!(filter, detect_array_join)
     } else { None };
-    let literal_output = if use_raw_fast_paths && !exit_status { filter.detect_literal_output() } else { None };
+    let literal_output = if use_raw_fast_paths && !exit_status { trace_detect!(filter, detect_literal_output) } else { None };
     let input_free_output = if use_raw_fast_paths && !exit_status && literal_output.is_none() {
-        filter.detect_input_free_output()
+        trace_detect!(filter, detect_input_free_output)
     } else { None };
     let array_fields_format = if use_raw_fast_paths && !exit_status && field_access.is_none() {
-        filter.detect_array_fields_format()
+        trace_detect!(filter, detect_array_fields_format)
     } else { None };
     // For -r mode: raw CSV/TSV output bypasses JSON encoding entirely
     let raw_csv_fields = if raw_output && !exit_status && !slurp && !join_output && array_fields_format.is_none() {
-        filter.detect_array_fields_format()
+        trace_detect!(filter, detect_array_fields_format)
     } else { None };
     let field_str_reverse = if use_raw_fast_paths && !exit_status && field_access.is_none() {
-        filter.detect_field_str_reverse()
+        trace_detect!(filter, detect_field_str_reverse)
     } else { None };
     let field_split_rev_join = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_str_reverse.is_none() {
-        filter.detect_field_split_reverse_join()
+        trace_detect!(filter, detect_field_split_reverse_join)
     } else { None };
     let field_case_split_join = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_str_reverse.is_none() && field_split_rev_join.is_none() {
-        filter.detect_field_case_split_join()
+        trace_detect!(filter, detect_field_case_split_join)
     } else { None };
     let field_case_split_nth = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_case_split_join.is_none() {
-        filter.detect_field_case_split_nth()
+        trace_detect!(filter, detect_field_case_split_nth)
     } else { None };
     let field_case_split = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_case_split_join.is_none() && field_case_split_nth.is_none() {
-        filter.detect_field_case_split()
+        trace_detect!(filter, detect_field_case_split)
     } else { None };
     let field_split_join = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_str_reverse.is_none() && field_split_rev_join.is_none() && field_case_split_join.is_none() && field_case_split.is_none() {
-        filter.detect_field_split_join()
+        trace_detect!(filter, detect_field_split_join)
     } else { None };
     let field_split_slice_join = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_split_join.is_none() {
-        filter.detect_field_split_slice_join()
+        trace_detect!(filter, detect_field_split_slice_join)
     } else { None };
     let field_split_first = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_split_join.is_none() && field_split_slice_join.is_none() {
-        filter.detect_field_split_first()
+        trace_detect!(filter, detect_field_split_first)
     } else { None };
     let field_split_last = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_split_join.is_none() && field_split_first.is_none() {
-        filter.detect_field_split_last()
+        trace_detect!(filter, detect_field_split_last)
     } else { None };
     let field_split_last_tonum = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_split_join.is_none() && field_split_first.is_none() && field_split_last.is_none() {
-        filter.detect_field_split_last_tonumber()
+        trace_detect!(filter, detect_field_split_last_tonumber)
     } else { None };
     let field_split_nth_tonum = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_split_join.is_none() && field_split_first.is_none() && field_split_last.is_none() && field_split_last_tonum.is_none() {
-        filter.detect_field_split_nth_tonumber()
+        trace_detect!(filter, detect_field_split_nth_tonumber)
     } else { None };
     let field_split_nth = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_split_join.is_none() && field_split_first.is_none() && field_split_last.is_none() && field_split_last_tonum.is_none() && field_split_nth_tonum.is_none() {
-        filter.detect_field_split_index()
+        trace_detect!(filter, detect_field_split_index)
     } else { None };
     let field_split_concat = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_split_join.is_none() && field_split_first.is_none() && field_split_last.is_none() && field_split_nth.is_none() {
-        filter.detect_field_split_concat()
+        trace_detect!(filter, detect_field_split_concat)
     } else { None };
     let field_slice = if use_raw_fast_paths && !exit_status && field_access.is_none() {
-        filter.detect_field_slice()
+        trace_detect!(filter, detect_field_slice)
     } else { None };
     let dynamic_key_obj = if use_raw_fast_paths && !exit_status && field_access.is_none() && computed_remap.is_none() {
-        filter.detect_dynamic_key_obj()
+        trace_detect!(filter, detect_dynamic_key_obj)
     } else { None };
     let dynamic_key_mixed = if use_raw_fast_paths && !exit_status && field_access.is_none() && computed_remap.is_none() && dynamic_key_obj.is_none() {
-        filter.detect_dynamic_key_mixed_obj()
+        trace_detect!(filter, detect_dynamic_key_mixed_obj)
     } else { None };
     let field_update_num = if use_raw_fast_paths && !exit_status && field_access.is_none() && computed_remap.is_none() && dynamic_key_obj.is_none() {
-        filter.detect_field_update_num()
+        trace_detect!(filter, detect_field_update_num)
     } else { None };
     let field_assign_const = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_num.is_none() {
-        filter.detect_field_assign_const()
+        trace_detect!(filter, detect_field_assign_const)
     } else { None };
     let field_assign_field_arith = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_assign_const.is_none() && field_update_num.is_none() {
-        filter.detect_field_assign_field_arith()
+        trace_detect!(filter, detect_field_assign_field_arith)
     } else { None };
     let field_assign_two_fields = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_assign_const.is_none() && field_assign_field_arith.is_none() {
-        filter.detect_field_assign_two_fields()
+        trace_detect!(filter, detect_field_assign_two_fields)
     } else { None };
     let select_cmp_then_update_num = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_num.is_none() {
-        filter.detect_select_cmp_then_update_num()
+        trace_detect!(filter, detect_select_cmp_then_update_num)
     } else { None };
     let select_cmp_then_update_str = if use_raw_fast_paths && !exit_status && field_access.is_none() && select_cmp_then_update_num.is_none() {
-        filter.detect_select_cmp_then_update_str_concat()
+        trace_detect!(filter, detect_select_cmp_then_update_str_concat)
     } else { None };
     let select_compound_then_update_num = if use_raw_fast_paths && !exit_status && field_access.is_none() && select_cmp_then_update_num.is_none() && select_cmp_then_update_str.is_none() {
-        filter.detect_select_compound_then_update_num()
+        trace_detect!(filter, detect_select_compound_then_update_num)
     } else { None };
     let select_str_then_update_num = if use_raw_fast_paths && !exit_status && field_access.is_none() && select_cmp_then_update_num.is_none() {
-        filter.detect_select_str_then_update_num()
+        trace_detect!(filter, detect_select_str_then_update_num)
     } else { None };
     let field_update_num_chain = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_num.is_none() {
-        filter.detect_field_update_num_chain()
+        trace_detect!(filter, detect_field_update_num_chain)
     } else { None };
     let field_update_gsub = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_num.is_none() && field_update_num_chain.is_none() {
-        filter.detect_field_update_gsub()
+        trace_detect!(filter, detect_field_update_gsub)
     } else { None };
     let field_update_split_first = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_num.is_none() && field_update_num_chain.is_none() && field_update_gsub.is_none() {
-        filter.detect_field_update_split_first()
+        trace_detect!(filter, detect_field_update_split_first)
     } else { None };
     let field_update_split_last = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_split_first.is_none() && field_update_gsub.is_none() {
-        filter.detect_field_update_split_last()
+        trace_detect!(filter, detect_field_update_split_last)
     } else { None };
     let field_update_case = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_num.is_none() && field_assign_const.is_none() {
-        filter.detect_field_update_case()
+        trace_detect!(filter, detect_field_update_case)
     } else { None };
     let field_update_trim = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_case.is_none() {
-        filter.detect_field_update_trim()
+        trace_detect!(filter, detect_field_update_trim)
     } else { None };
     let field_update_slice = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_trim.is_none() {
-        filter.detect_field_update_slice()
+        trace_detect!(filter, detect_field_update_slice)
     } else { None };
     let field_update_str_map = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_trim.is_none() && field_update_slice.is_none() {
-        filter.detect_field_update_str_map()
+        trace_detect!(filter, detect_field_update_str_map)
     } else { None };
     let field_update_str_concat = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_str_map.is_none() {
-        filter.detect_field_update_str_concat()
+        trace_detect!(filter, detect_field_update_str_concat)
     } else { None };
     let field_update_length = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_str_concat.is_none() {
-        filter.detect_field_update_length()
+        trace_detect!(filter, detect_field_update_length)
     } else { None };
     let field_update_tostring = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_length.is_none() {
-        filter.detect_field_update_tostring()
+        trace_detect!(filter, detect_field_update_tostring)
     } else { None };
     let field_update_test = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_update_tostring.is_none() {
-        filter.detect_field_update_test().and_then(|(field, pattern, flags)| {
+        trace_detect!(filter, detect_field_update_test).and_then(|(field, pattern, flags)| {
             let mut re_pattern = String::new();
             if flags.contains('x') {
                 // strip whitespace and comments for extended mode
@@ -2432,190 +2475,190 @@ fn real_main() {
         })
     } else { None };
     let field_split_length = if use_raw_fast_paths && !exit_status && field_access.is_none() {
-        filter.detect_field_split_length()
+        trace_detect!(filter, detect_field_split_length)
     } else { None };
     let field_split_length_cmp = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_split_length.is_none() {
-        filter.detect_field_split_length_cmp()
+        trace_detect!(filter, detect_field_split_length_cmp)
     } else { None };
     let field_strop_length = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_split_length.is_none() && field_split_length_cmp.is_none() {
-        filter.detect_field_strop_length()
+        trace_detect!(filter, detect_field_strop_length)
     } else { None };
     let field_length_cmp = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_strop_length.is_none() {
-        filter.detect_field_length_cmp()
+        trace_detect!(filter, detect_field_length_cmp)
     } else { None };
     let select_length_cmp = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_length_cmp.is_none() && select_cmp.is_none() {
-        filter.detect_select_field_length_cmp()
+        trace_detect!(filter, detect_select_field_length_cmp)
     } else { None };
     let select_length_cmp_field = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_length_cmp.is_none() && select_length_cmp.is_none() {
-        filter.detect_select_field_length_cmp_then_field()
+        trace_detect!(filter, detect_select_field_length_cmp_then_field)
     } else { None };
     let if_length_cmp_fields = if use_raw_fast_paths && !exit_status && field_access.is_none() && select_length_cmp.is_none() && select_length_cmp_field.is_none() {
-        filter.detect_if_field_length_cmp_then_fields()
+        trace_detect!(filter, detect_if_field_length_cmp_then_fields)
     } else { None };
     let select_length_cmp_remap = if use_raw_fast_paths && !exit_status && field_access.is_none() && select_length_cmp.is_none() && select_length_cmp_field.is_none() && if_length_cmp_fields.is_none() {
-        filter.detect_select_field_length_cmp_then_remap()
+        trace_detect!(filter, detect_select_field_length_cmp_then_remap)
     } else { None };
     let min_two_fields = if use_raw_fast_paths && !exit_status && field_access.is_none() {
-        filter.detect_min_two_fields()
+        trace_detect!(filter, detect_min_two_fields)
     } else { None };
     let minmax_two = if use_raw_fast_paths && !exit_status && field_access.is_none() && min_two_fields.is_none() {
-        filter.detect_minmax_two_fields()
+        trace_detect!(filter, detect_minmax_two_fields)
     } else { None };
     let minmax_n = if use_raw_fast_paths && !exit_status && field_access.is_none() && min_two_fields.is_none() && minmax_two.is_none() {
-        filter.detect_minmax_n_fields()
+        trace_detect!(filter, detect_minmax_n_fields)
     } else { None };
     let sort_two_fields = if use_raw_fast_paths && !exit_status && field_access.is_none() && min_two_fields.is_none() && minmax_two.is_none() && minmax_n.is_none() {
-        filter.detect_sort_two_fields()
+        trace_detect!(filter, detect_sort_two_fields)
     } else { None };
     let field_tostring_length = if use_raw_fast_paths && !exit_status && field_access.is_none() {
-        filter.detect_field_tostring_length()
+        trace_detect!(filter, detect_field_tostring_length)
     } else { None };
     let field_length_tostring = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_tostring_length.is_none() {
-        filter.detect_field_length_tostring()
+        trace_detect!(filter, detect_field_length_tostring)
     } else { None };
     let field_alt = if use_raw_fast_paths && !exit_status && field_access.is_none() {
-        filter.detect_field_alternative()
+        trace_detect!(filter, detect_field_alternative)
     } else { None };
     let field_field_alt = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_alt.is_none() {
-        filter.detect_field_field_alternative()
+        trace_detect!(filter, detect_field_field_alternative)
     } else { None };
     let cond_chain = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() {
-        filter.detect_cond_chain()
+        trace_detect!(filter, detect_cond_chain)
     } else { None };
     let cmp_branch_lit = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() {
-        filter.detect_cmp_branch_literals()
+        trace_detect!(filter, detect_cmp_branch_literals)
     } else { None };
     let arith_cmp_branch_lit = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() {
-        filter.detect_arith_cmp_branch_literals()
+        trace_detect!(filter, detect_arith_cmp_branch_literals)
     } else { None };
     let field_unary_cmp_branch_lit = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() {
-        filter.detect_field_unary_cmp_branch_literals()
+        trace_detect!(filter, detect_field_unary_cmp_branch_literals)
     } else { None };
     let null_branch_lit = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() {
-        filter.detect_field_null_branch_literals()
+        trace_detect!(filter, detect_field_null_branch_literals)
     } else { None };
     let cmp_branch_merge = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() && null_branch_lit.is_none() {
-        filter.detect_cmp_branch_merge()
+        trace_detect!(filter, detect_cmp_branch_merge)
     } else { None };
     let strfunc_cmp_branch_lit = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() && field_unary_cmp_branch_lit.is_none() {
-        filter.detect_field_strfunc_cmp_branch_literals()
+        trace_detect!(filter, detect_field_strfunc_cmp_branch_literals)
     } else { None };
     let field_field_cmp_branch = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() && null_branch_lit.is_none() && cmp_branch_merge.is_none() {
-        filter.detect_field_field_cmp_branch()
+        trace_detect!(filter, detect_field_field_cmp_branch)
     } else { None };
     let if_ff_cmp_fields = if use_raw_fast_paths && !exit_status && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && field_field_cmp_branch.is_none() {
-        filter.detect_if_ff_cmp_then_fields()
+        trace_detect!(filter, detect_if_ff_cmp_then_fields)
     } else { None };
     let if_ff_cmp_computed = if use_raw_fast_paths && !exit_status && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && field_field_cmp_branch.is_none() && if_ff_cmp_fields.is_none() {
-        filter.detect_if_ff_cmp_then_computed()
+        trace_detect!(filter, detect_if_ff_cmp_then_computed)
     } else { None };
     let if_ff_cmp_remaps = if use_raw_fast_paths && !exit_status && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && field_field_cmp_branch.is_none() && if_ff_cmp_fields.is_none() && if_ff_cmp_computed.is_none() {
-        filter.detect_if_ff_cmp_then_remaps()
+        trace_detect!(filter, detect_if_ff_cmp_then_remaps)
     } else { None };
     let cmp_branch_remaps = if use_raw_fast_paths && !exit_status && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && field_field_cmp_branch.is_none() && if_ff_cmp_fields.is_none() && if_ff_cmp_computed.is_none() && if_ff_cmp_remaps.is_none() {
-        filter.detect_cmp_branch_remaps()
+        trace_detect!(filter, detect_cmp_branch_remaps)
     } else { None };
     let if_cmp_arrays = if use_raw_fast_paths && !exit_status && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && field_field_cmp_branch.is_none() {
-        filter.detect_if_cmp_then_arrays()
+        trace_detect!(filter, detect_if_cmp_then_arrays)
     } else { None };
     let cmp_branch_interp = if use_raw_fast_paths && !exit_status && field_access.is_none() && cond_chain.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() && field_field_cmp_branch.is_none() {
-        filter.detect_cmp_branch_string_interp()
+        trace_detect!(filter, detect_cmp_branch_string_interp)
     } else { None };
     let select_num_str = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() {
-        filter.detect_select_num_and_str()
+        trace_detect!(filter, detect_select_num_and_str)
     } else { None };
     let select_compound = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() && cmp_branch_lit.is_none() && arith_cmp_branch_lit.is_none() && cond_chain.is_none() {
-        filter.detect_select_compound_cmp()
+        trace_detect!(filter, detect_select_compound_cmp)
     } else { None };
     let select_compound_field = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_compound.is_none() && field_access.is_none() {
-        filter.detect_select_compound_cmp_then_field()
+        trace_detect!(filter, detect_select_compound_cmp_then_field)
     } else { None };
     let select_compound_remap = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_compound.is_none() && select_compound_field.is_none() && field_access.is_none() {
-        filter.detect_select_compound_cmp_then_remap()
+        trace_detect!(filter, detect_select_compound_cmp_then_remap)
     } else { None };
     let select_compound_computed = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_compound.is_none() && select_compound_field.is_none() && select_compound_remap.is_none() && field_access.is_none() {
-        filter.detect_select_compound_cmp_then_computed()
+        trace_detect!(filter, detect_select_compound_cmp_then_computed)
     } else { None };
     let select_compound_cremap = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_compound.is_none() && select_compound_field.is_none() && select_compound_remap.is_none() && select_compound_computed.is_none() && field_access.is_none() {
-        filter.detect_select_compound_cmp_then_cremap()
+        trace_detect!(filter, detect_select_compound_cmp_then_cremap)
     } else { None };
     let select_compound_str_chain = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_compound.is_none() && select_compound_field.is_none() && select_compound_remap.is_none() && select_compound_computed.is_none() && select_compound_cremap.is_none() && field_access.is_none() {
-        filter.detect_select_compound_cmp_then_str_chain()
+        trace_detect!(filter, detect_select_compound_cmp_then_str_chain)
     } else { None };
     let select_has_multi = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() {
-        filter.detect_select_has_multi()
+        trace_detect!(filter, detect_select_has_multi)
     } else { None };
     let select_cmp_field = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && field_access.is_none() {
-        filter.detect_select_cmp_then_field()
+        trace_detect!(filter, detect_select_cmp_then_field)
     } else { None };
     let select_arith_cmp_field = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
-        filter.detect_select_arith_cmp_then_field()
+        trace_detect!(filter, detect_select_arith_cmp_then_field)
     } else { None };
     let select_cmp_field_unary = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_arith_cmp_field.is_none() && field_access.is_none() {
-        filter.detect_select_cmp_then_field_unary()
+        trace_detect!(filter, detect_select_cmp_then_field_unary)
     } else { None };
     let select_cmp_remap = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
-        filter.detect_select_cmp_then_remap()
+        trace_detect!(filter, detect_select_cmp_then_remap)
     } else { None };
     let select_cmp_cremap = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && field_access.is_none() {
-        filter.detect_select_cmp_then_computed_remap()
+        trace_detect!(filter, detect_select_cmp_then_computed_remap)
     } else { None };
     let select_cmp_dynkey = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && select_cmp_cremap.is_none() && field_access.is_none() {
-        filter.detect_select_cmp_then_dynkey()
+        trace_detect!(filter, detect_select_cmp_then_dynkey)
     } else { None };
     let select_cmp_dynkey_mixed = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && select_cmp_cremap.is_none() && select_cmp_dynkey.is_none() && field_access.is_none() {
-        filter.detect_select_cmp_then_dynkey_mixed()
+        trace_detect!(filter, detect_select_cmp_then_dynkey_mixed)
     } else { None };
     let select_cmp_array = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && select_cmp_cremap.is_none() && select_cmp_dynkey.is_none() && select_cmp_dynkey_mixed.is_none() && field_access.is_none() {
-        filter.detect_select_cmp_then_array()
+        trace_detect!(filter, detect_select_cmp_then_array)
     } else { None };
     let select_arith_cmp_array = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_array.is_none() && field_access.is_none() {
-        filter.detect_select_arith_cmp_then_array()
+        trace_detect!(filter, detect_select_arith_cmp_then_array)
     } else { None };
     let select_cmp_value = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_remap.is_none() && select_cmp_cremap.is_none() && select_cmp_array.is_none() && select_arith_cmp_array.is_none() && field_access.is_none() {
-        filter.detect_select_cmp_then_value()
+        trace_detect!(filter, detect_select_cmp_then_value)
     } else { None };
     let select_cmp_str_chain = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && select_cmp_value.is_none() && field_access.is_none() {
-        filter.detect_select_cmp_then_str_chain()
+        trace_detect!(filter, detect_select_cmp_then_str_chain)
     } else { None };
     let select_ff_cmp_field = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
-        filter.detect_select_field_cmp_field_then_field()
+        trace_detect!(filter, detect_select_field_cmp_field_then_field)
     } else { None };
     let select_ff_cmp = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_ff_cmp_field.is_none() && field_access.is_none() {
-        filter.detect_select_field_field_cmp()
+        trace_detect!(filter, detect_select_field_field_cmp)
     } else { None };
     let select_ff_cmp_cremap = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_ff_cmp.is_none() && select_ff_cmp_field.is_none() && field_access.is_none() {
-        filter.detect_select_ff_cmp_then_computed_remap()
+        trace_detect!(filter, detect_select_ff_cmp_then_computed_remap)
     } else { None };
     let select_ff_cmp_value = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_ff_cmp.is_none() && select_ff_cmp_field.is_none() && select_ff_cmp_cremap.is_none() && field_access.is_none() {
-        filter.detect_select_ff_cmp_then_value()
+        trace_detect!(filter, detect_select_ff_cmp_then_value)
     } else { None };
     let select_ff_cmp_array = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_ff_cmp.is_none() && select_ff_cmp_field.is_none() && select_ff_cmp_cremap.is_none() && select_ff_cmp_value.is_none() && field_access.is_none() {
-        filter.detect_select_ff_cmp_then_array()
+        trace_detect!(filter, detect_select_ff_cmp_then_array)
     } else { None };
     let select_compound_array = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_compound.is_none() && select_compound_field.is_none() && select_compound_remap.is_none() && field_access.is_none() {
-        filter.detect_select_compound_cmp_then_array()
+        trace_detect!(filter, detect_select_compound_cmp_then_array)
     } else { None };
     let select_str_field = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_cmp_field.is_none() && field_access.is_none() {
-        filter.detect_select_str_then_field()
+        trace_detect!(filter, detect_select_str_then_field)
     } else { None };
     let field_string_chain = if use_raw_fast_paths && !exit_status && field_access.is_none() && field_str_builtin.is_none() {
-        filter.detect_field_string_chain()
+        trace_detect!(filter, detect_field_string_chain)
     } else { None };
     let remap_tostring_join = if use_raw_fast_paths && !exit_status && field_access.is_none() && array_join.is_none() {
-        filter.detect_remap_tostring_join()
+        trace_detect!(filter, detect_remap_tostring_join)
     } else { None };
     let select_str_cremap = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_str_field.is_none() && field_access.is_none() {
-        filter.detect_select_str_then_computed_remap()
+        trace_detect!(filter, detect_select_str_then_computed_remap)
     } else { None };
     let select_str_array = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_str_field.is_none() && select_str_cremap.is_none() && field_access.is_none() {
-        filter.detect_select_str_then_array()
+        trace_detect!(filter, detect_select_str_then_array)
     } else { None };
     let select_str_str_chain = if use_raw_fast_paths && !exit_status && select_cmp.is_none() && select_str_field.is_none() && select_str_cremap.is_none() && select_str_array.is_none() && field_access.is_none() {
-        filter.detect_select_str_then_str_chain()
+        trace_detect!(filter, detect_select_str_then_str_chain)
     } else { None };
     let walk_num_op = if use_raw_fast_paths && !exit_status && field_access.is_none() {
-        filter.detect_walk_num_op()
+        trace_detect!(filter, detect_walk_num_op)
     } else { None };
     // Field projection: if filter only accesses specific fields, skip parsing the rest.
     // Only activate when no raw byte fast path matched (those handle their own parsing).
@@ -2636,7 +2679,17 @@ fn real_main() {
         || literal_output.is_some() || input_free_output.is_some() || array_fields_format.is_some() || raw_csv_fields.is_some()
         || field_str_reverse.is_some() || field_split_rev_join.is_some() || field_case_split_join.is_some() || field_case_split_nth.is_some() || field_case_split.is_some() || field_split_join.is_some() || field_split_slice_join.is_some() || field_split_first.is_some() || field_split_last.is_some() || field_split_last_tonum.is_some() || field_split_nth_tonum.is_some() || field_split_nth.is_some() || field_split_concat.is_some() || field_split_length.is_some() || field_split_length_cmp.is_some() || field_strop_length.is_some() || field_length_cmp.is_some() || select_length_cmp.is_some() || select_length_cmp_field.is_some() || if_length_cmp_fields.is_some() || select_length_cmp_remap.is_some() || field_tostring_length.is_some() || if_ff_cmp_fields.is_some() || if_ff_cmp_computed.is_some() || field_index_arith.is_some() || field_slice.is_some()
         || dynamic_key_obj.is_some() || dynamic_key_mixed.is_some() || field_update_num.is_some() || field_update_num_chain.is_some() || field_update_gsub.is_some() || field_update_split_first.is_some() || field_update_split_last.is_some() || field_assign_const.is_some() || field_update_case.is_some() || field_update_trim.is_some() || field_update_slice.is_some() || field_update_str_map.is_some() || field_update_str_concat.is_some() || field_update_length.is_some() || field_update_tostring.is_some() || field_update_test.is_some() || field_assign_field_arith.is_some() || field_assign_two_fields.is_some() || select_cmp_then_update_num.is_some() || select_cmp_then_update_str.is_some() || select_compound_then_update_num.is_some() || select_str_then_update_num.is_some()
-        || min_two_fields.is_some() || minmax_two.is_some() || minmax_n.is_some() || field_string_chain.is_some() || remap_tostring_join.is_some() || walk_num_op.is_some() || filter.is_empty();
+        || min_two_fields.is_some() || minmax_two.is_some() || minmax_n.is_some() || field_string_chain.is_some() || remap_tostring_join.is_some() || walk_num_op.is_some() || trace_is!(filter, is_empty);
+
+    // If no raw fast path matched, the generic interpreter/JIT path will run.
+    // Emit a single trace line so the user can distinguish generic dispatch
+    // from an unmatched detector. `filter.has_jit()` reflects the JIT decision
+    // made above (based on input size and loop constructs).
+    if !has_raw_fast_path {
+        let fallback = if filter.has_jit() { "jit" } else { "eval" };
+        jqjit_trace_fast_path(fallback, &filter_text);
+    }
+
     let projection_fields: Option<Vec<String>> = if !has_raw_fast_path && !slurp && !raw_input {
         filter.needed_input_fields()
     } else { None };
