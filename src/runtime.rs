@@ -1587,16 +1587,7 @@ fn rt_split(v: &Value, sep: &Value) -> Result<Value> {
 fn rt_regex_split(v: &Value, re: &Value, flags: &Value) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
-            let mut pat = String::new();
-            if let Value::Str(f) = flags {
-                // Build regex with flags (e.g., "ix" → (?ix)pattern)
-                if !f.is_empty() {
-                    pat.push_str("(?");
-                    pat.push_str(f.as_str());
-                    pat.push(')');
-                }
-            }
-            pat.push_str(r.as_str());
+            let (pat, _global) = apply_regex_flags(r.as_str(), flags);
             with_regex(&pat, |regex| {
                 let parts: Vec<Value> = regex.split(s.as_str())
                     .map(Value::from_str)

@@ -395,3 +395,14 @@ add
 
 add
 "x"
+
+# ---------- Issue #51: split(regex; "g") rejected the global flag ----------
+
+split(","; "g")
+"a,b,c"
+
+split("a"; "gi")
+"aAbAc"
+
+[splits(","; "g")]
+"a,b,c"

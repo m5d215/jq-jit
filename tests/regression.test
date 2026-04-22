@@ -583,3 +583,20 @@ add
 add
 {"a":"x","b":"y"}
 "xy"
+
+# Issue #51: split(regex; "g") errored on the global flag
+
+# split with literal and "g" flag
+split(","; "g")
+"a,b,c"
+["a","b","c"]
+
+# split with combined global + case-insensitive flags
+split("a"; "gi")
+"aAbAc"
+["","","b","c"]
+
+# splits expansion propagates flags through the split call
+[splits(","; "g")]
+"a,b,c"
+["a","b","c"]
