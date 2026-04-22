@@ -406,3 +406,20 @@ split("a"; "gi")
 
 [splits(","; "g")]
 "a,b,c"
+
+# ---------- Issue #41: unique_by(f) must sort by f ----------
+
+unique_by(.)
+[3,1,2]
+
+unique_by(.)
+[1,2,3,null]
+
+unique_by(tostring)
+[null,1,2,3]
+
+unique_by(.)
+[1,"a",null,2]
+
+unique_by(.a)
+[{"a":1,"b":1},{"a":2,"b":2},{"a":1,"b":3}]

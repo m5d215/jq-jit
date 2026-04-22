@@ -600,3 +600,30 @@ split("a"; "gi")
 [splits(","; "g")]
 "a,b,c"
 ["a","b","c"]
+
+# Issue #41: unique_by(f) must sort by f — not just dedupe in input order
+
+# unique_by(.) on integers sorts ascending
+unique_by(.)
+[3,1,2]
+[1,2,3]
+
+# unique_by(.) places null before numbers per jq's cross-type order
+unique_by(.)
+[1,2,3,null]
+[null,1,2,3]
+
+# unique_by(tostring) sorts by stringified key with ASCII ordering
+unique_by(tostring)
+[null,1,2,3]
+[1,2,3,null]
+
+# unique_by(.) across mixed types respects null < number < string
+unique_by(.)
+[1,"a",null,2]
+[null,1,2,"a"]
+
+# unique_by(.a) on objects picks the first per distinct key, in sorted order
+unique_by(.a)
+[{"a":1,"b":1},{"a":2,"b":2},{"a":1,"b":3}]
+[{"a":1,"b":1},{"a":2,"b":2}]
