@@ -1,4 +1,9 @@
 //! Safe wrappers around libjq's bytecode structures.
+//!
+//! The structure mirrors jq's internal bytecode representation and is a
+//! derivative work of [jq](https://github.com/jqlang/jq) (Copyright (C) 2012
+//! Stephen Dolan), redistributed under the MIT License. See
+//! `THIRD-PARTY-LICENSES.md` at the repository root for details.
 
 use std::ffi::{CStr, CString};
 

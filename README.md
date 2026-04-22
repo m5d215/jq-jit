@@ -204,9 +204,26 @@ This generates 2M NDJSON objects and measures performance across 100+ filter pat
 
 ## License
 
-Licensed under either of
+jq-jit's own source code is licensed under either of
 
 - [MIT License](LICENSE-MIT)
 - [Apache License, Version 2.0](LICENSE-APACHE)
 
 at your option.
+
+### Third-party components
+
+When distributed as a compiled binary, jq-jit also includes or links against
+third-party code — most notably [jq](https://github.com/jqlang/jq) (MIT),
+[Oniguruma](https://github.com/kkos/oniguruma) (BSD-2-Clause), and
+[Cranelift](https://cranelift.dev/) (Apache-2.0 WITH LLVM-exception) — whose
+own license terms must be preserved. Because several required dependencies
+(Cranelift, `ryu`, and others) do not offer an MIT option, **a binary
+distribution in practice must comply with Apache-2.0 terms for those
+components, regardless of which option a user selects for jq-jit's own
+code**.
+
+See [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) for the full
+attribution listing. In addition, the FFI layer (`src/jq_ffi.rs`,
+`src/bytecode.rs`) mirrors structures from jq's headers and is a derivative
+work of jq, redistributed under the MIT License.
