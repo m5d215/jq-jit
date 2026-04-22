@@ -416,3 +416,30 @@ split(",")
 split("")
 ""
 []
+
+# Issue #37: in(object) with non-string key crashes via libjq assertion
+
+# in({obj}) with matching string key
+in({"a":1})
+"a"
+true
+
+# in({obj}) with missing string key
+in({"a":1})
+"nope"
+false
+
+# in([arr]) with valid index
+in([10,20,30])
+1
+true
+
+# in([arr]) with out-of-range positive index
+in([10,20,30])
+5
+false
+
+# in([arr]) with negative index
+in([10,20,30])
+-1
+false
