@@ -938,3 +938,8 @@ until(. > 2; . + 10)
 until(. > 2; . + 10)
 5
 5
+
+# Issue #71: from_entries on {} round-trips to {} (follow-up to #44)
+from_entries
+{}
+{}

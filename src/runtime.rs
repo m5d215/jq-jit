@@ -1369,6 +1369,9 @@ fn rt_from_entries(v: &Value) -> Result<Value> {
             }
             Ok(Value::Obj(Rc::new(obj)))
         }
+        // jq's from_entries desugars to `map(...) | add + {}`. On {} the map yields [],
+        // add yields null, and null + {} is {} — so empty objects round-trip to {}.
+        Value::Obj(o) if o.is_empty() => Ok(Value::Obj(Rc::new(new_objmap()))),
         _ => bail!("{} cannot be converted from entries", v.type_name()),
     }
 }
