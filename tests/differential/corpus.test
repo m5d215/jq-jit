@@ -465,3 +465,20 @@ null
 
 {(.k):1}
 {"k":"a"}
+
+# ---------- Issue #53: computed key ordering + dedup across static/dynamic keys ----------
+
+{a:1, (.k):2}
+{"k":"b"}
+
+{a:1, (.k):2, c:3}
+{"k":"z"}
+
+{a:1, (.k):2}
+{"k":"a"}
+
+{a:1, (.k):2, c:3}
+{"k":"a"}
+
+{(.k):2, a:1}
+{"k":"a"}

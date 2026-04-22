@@ -692,3 +692,30 @@ null
 {(.k):1}
 {"k":"a"}
 {"a":1}
+
+# Issue #53: computed key ordering + dedup across static/dynamic keys
+
+# Static `a:1` must come first, then dynamic `(.k):2` at its source position
+{a:1, (.k):2}
+{"k":"b"}
+{"a":1,"b":2}
+
+# Dynamic-key slot preserved in the middle of a three-pair object
+{a:1, (.k):2, c:3}
+{"k":"z"}
+{"a":1,"z":2,"c":3}
+
+# Dynamic key collides with earlier static key — first position, last value wins
+{a:1, (.k):2}
+{"k":"a"}
+{"a":2}
+
+# Dynamic key colliding with static key in a longer object still dedupes
+{a:1, (.k):2, c:3}
+{"k":"a"}
+{"a":2,"c":3}
+
+# Dynamic key first, static key after with same name — first position holds last value
+{(.k):2, a:1}
+{"k":"a"}
+{"a":1}

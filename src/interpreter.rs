@@ -7304,38 +7304,13 @@ impl Filter {
     }
 
     /// Detect `{(.name): .x, static_key: val, ...}` — object with one dynamic key and N static keys.
-    /// Returns (dyn_key_field, dyn_val_rexpr, static_pairs: Vec<(String, RemapExpr)>).
+    ///
+    /// Disabled: the generated output placed the dynamic key first regardless
+    /// of source order and skipped duplicate-key collapse, producing both
+    /// reordered output and invalid JSON when the dynamic key collided with a
+    /// static one (issue #53). Falling back to the generic object-construct
+    /// path preserves both invariants.
     pub fn detect_dynamic_key_mixed_obj(&self) -> Option<(String, RemapExpr, Vec<(String, RemapExpr)>)> {
-        use crate::ir::{Expr, Literal};
-        let expr = self.detect_expr()?;
-        if let Expr::ObjectConstruct { pairs } = expr {
-            if pairs.len() < 2 { return None; }
-            let mut dyn_key: Option<(String, RemapExpr)> = None;
-            let mut static_pairs: Vec<(String, RemapExpr)> = Vec::new();
-            for (k, v) in pairs {
-                match k {
-                    // Dynamic key: (.field)
-                    Expr::Index { expr: base, key } if matches!(base.as_ref(), Expr::Input) => {
-                        if dyn_key.is_some() { return None; } // only one dynamic key
-                        if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
-                            let val_rexpr = Self::classify_remap_value(v)?;
-                            dyn_key = Some((f.clone(), val_rexpr));
-                        } else { return None; }
-                    }
-                    // Static key: "literal_key"
-                    Expr::Literal(Literal::Str(key_name)) => {
-                        let val_rexpr = Self::classify_remap_value(v)?;
-                        static_pairs.push((key_name.clone(), val_rexpr));
-                    }
-                    _ => return None,
-                }
-            }
-            if let Some((dk_field, dk_val)) = dyn_key {
-                if !static_pairs.is_empty() {
-                    return Some((dk_field, dk_val, static_pairs));
-                }
-            }
-        }
         None
     }
 
