@@ -1889,25 +1889,20 @@ fn push_const_comma_list(expr: &crate::ir::Expr, buf: &mut Vec<u8>, first: bool)
 }
 
 impl Filter {
-    /// Get the inner expression for pattern detection, unwrapping top-level
-    /// `try EXPR` (TryCatch with Empty catch) since the raw byte fast paths
-    /// handle missing fields gracefully (return null/nothing).
+    /// Get the inner expression for pattern detection.
+    ///
+    /// Previously this stripped top-level `try EXPR` (TryCatch with Empty
+    /// catch) on the assumption that the raw byte fast paths handled missing
+    /// fields gracefully. They don't: `(.a)?` on a non-object needs to emit
+    /// nothing (the error is caught), while the fast path emitted `null`.
+    /// Leave TryCatch visible so the fast paths that can't honour `?`
+    /// semantics simply don't match, and eval handles it correctly (see
+    /// issue #50).
     fn detect_expr(&self) -> Option<&crate::ir::Expr> {
-        // Use simplified expression (identity pipes stripped) for pattern detection
         if let Some(ref simplified) = self.simplified {
-            if let crate::ir::Expr::TryCatch { try_expr, catch_expr } = simplified {
-                if matches!(catch_expr.as_ref(), crate::ir::Expr::Empty) {
-                    return Some(try_expr);
-                }
-            }
             return Some(simplified);
         }
         let (ref expr, _) = self.parsed.as_ref()?;
-        if let crate::ir::Expr::TryCatch { try_expr, catch_expr } = expr {
-            if matches!(catch_expr.as_ref(), crate::ir::Expr::Empty) {
-                return Some(try_expr);
-            }
-        }
         Some(expr)
     }
 

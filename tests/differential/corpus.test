@@ -529,3 +529,20 @@ path(.a.b)
 
 path(.a,.b)
 1
+
+# ---------- Issue #50: (expr)? emits null instead of nothing on errors ----------
+
+(.a)?
+true
+
+(.a)?
+1
+
+(.a)?
+"x"
+
+(.a)?
+{}
+
+(.a)?
+{"a":5}

@@ -821,3 +821,27 @@ path(.a)
 path(.a)
 null
 ["a"]
+
+# Issue #50: (expr)? emits null instead of nothing when expr errors
+
+# Parenthesised field access with ? emits nothing on boolean input
+(.a)?
+true
+
+# Same behaviour on a number
+(.a)?
+1
+
+# Same behaviour on a string
+(.a)?
+"x"
+
+# Missing field on an object still returns null (no error to catch)
+(.a)?
+{}
+null
+
+# Field present still returns the value
+(.a)?
+{"a":5}
+5
