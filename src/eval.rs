@@ -2801,8 +2801,19 @@ pub fn eval(
             eval(input_expr, input.clone(), env, &mut |s| {
                 eval(re, input.clone(), env, &mut |re_val| {
                     eval(flags, input.clone(), env, &mut |fv| {
+                        let global = matches!(&fv, Value::Str(f) if f.as_str().contains('g'));
                         match crate::runtime::call_builtin("capture", &[s.clone(), re_val.clone(), fv.clone()]) {
-                            Ok(v) => cb(v),
+                            Ok(v) => {
+                                if global {
+                                    if let Value::Arr(a) = &v {
+                                        for item in a.iter() {
+                                            if !cb(item.clone())? { return Ok(false); }
+                                        }
+                                        return Ok(true);
+                                    }
+                                }
+                                cb(v)
+                            }
                             Err(_) => Ok(true), // non-match → empty (like jq)
                         }
                     })

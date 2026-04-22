@@ -423,3 +423,17 @@ unique_by(.)
 
 unique_by(.a)
 [{"a":1,"b":1},{"a":2,"b":2},{"a":1,"b":3}]
+
+# ---------- Issue #55: capture(regex; "g") must yield every match ----------
+
+[capture("(?<n>\\d+)"; "g")]
+"a1 b2 c3"
+
+[capture("(?<n>\\d+)"; "g")]
+"1,2,3"
+
+capture("(?<n>\\d+)"; "g")
+"1 2 3"
+
+capture("(?<n>\\d+)")
+"1,2,3"

@@ -627,3 +627,20 @@ unique_by(.)
 unique_by(.a)
 [{"a":1,"b":1},{"a":2,"b":2},{"a":1,"b":3}]
 [{"a":1,"b":1},{"a":2,"b":2}]
+
+# Issue #55: capture(regex; "g") must iterate over every match
+
+# capture with global flag yields one object per match
+[capture("(?<n>\\d+)"; "g")]
+"a1 b2 c3"
+[{"n":"1"},{"n":"2"},{"n":"3"}]
+
+# capture with global flag on comma-delimited digits
+[capture("(?<n>\\d+)"; "g")]
+"1,2,3"
+[{"n":"1"},{"n":"2"},{"n":"3"}]
+
+# capture without global returns only the first match
+capture("(?<n>\\d+)")
+"1,2,3"
+{"n":"1"}
