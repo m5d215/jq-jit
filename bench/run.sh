@@ -1,8 +1,16 @@
 #!/bin/bash
 # Quick daily benchmark — 17 NDJSON workloads, ~30s, colored output with ratios
 # For thorough analysis (80+ patterns), use: bench/comprehensive.sh
-# Usage: bench/run.sh [data_file]
+# Usage:
+#   bench/run.sh [data_file]               # full run incl. jq/gojq/jaq if installed
+#   bench/run.sh --self-only [data_file]   # jq-jit only (skips slow competitors)
 set -e
+
+SELF_ONLY=0
+if [ "$1" = "--self-only" ]; then
+    SELF_ONLY=1
+    shift
+fi
 
 DATAFILE="${1:-/tmp/bench_2m.json}"
 RUNS=3
@@ -27,16 +35,18 @@ fi
 TOOLS=("$JQ_JIT")
 NAMES=("jq-jit")
 
-for cmd in jq gojq jaq; do
-    if command -v "$cmd" > /dev/null 2>&1; then
-        TOOLS+=("$(command -v "$cmd")")
-        case "$cmd" in
-            jq)   NAMES+=("jq $($cmd --version 2>&1 | head -1)") ;;
-            gojq) NAMES+=("gojq $(gojq --version 2>&1 | awk '{print $2}')") ;;
-            jaq)  NAMES+=("jaq $(jaq --version 2>&1 | awk '{print $2}')") ;;
-        esac
-    fi
-done
+if [ "$SELF_ONLY" -eq 0 ]; then
+    for cmd in jq gojq jaq; do
+        if command -v "$cmd" > /dev/null 2>&1; then
+            TOOLS+=("$(command -v "$cmd")")
+            case "$cmd" in
+                jq)   NAMES+=("jq $($cmd --version 2>&1 | head -1)") ;;
+                gojq) NAMES+=("gojq $(gojq --version 2>&1 | awk '{print $2}')") ;;
+                jaq)  NAMES+=("jaq $(jaq --version 2>&1 | awk '{print $2}')") ;;
+            esac
+        fi
+    done
+fi
 
 echo "Tools: ${NAMES[*]}"
 echo "Data:  $DATAFILE ($COUNT NDJSON objects)"
