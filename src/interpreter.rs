@@ -10783,6 +10783,14 @@ impl Filter {
 
     /// Execute the filter against an input value, collecting all results.
     pub fn execute(&self, input: &Value) -> Result<Vec<Value>> {
+        // Typed fast path (issue #83): probed ahead of JIT / eval. Only
+        // migrated filter shapes return `Some`; every other shape or
+        // unhandled input type returns `None` and falls through to the
+        // authoritative generic path below.
+        if let Some(verdict) = self.try_typed_fast_path(input) {
+            return verdict.map(|v| vec![v]);
+        }
+
         // Try JIT execution first
         if let Some(jit_fn) = self.jit_fn {
             return crate::jit::execute_jit(jit_fn, input);
@@ -10795,6 +10803,15 @@ impl Filter {
     /// Execute the filter with a callback for each result (avoids Vec allocation).
     /// Returns Ok(true) if all values were processed, Ok(false) if stopped early.
     pub fn execute_cb(&self, input: &Value, cb: &mut dyn FnMut(&Value) -> Result<bool>) -> Result<bool> {
+        // Typed fast path (issue #83) — see `execute` for rationale. The
+        // current pilot emits a single value, so hitting it closes out the
+        // generator: we invoke `cb` once with the verdict and return its
+        // continue/stop decision to the caller.
+        if let Some(verdict) = self.try_typed_fast_path(input) {
+            let val = verdict?;
+            return cb(&val);
+        }
+
         if let Some(jit_fn) = self.jit_fn {
             return crate::jit::execute_jit_cb(jit_fn, input, cb);
         }
