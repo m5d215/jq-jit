@@ -1621,7 +1621,7 @@ fn rt_join(v: &Value, sep: &Value) -> Result<Value> {
                     Value::Str(sv) => buf.extend_from_slice(sv.as_bytes()),
                     Value::Null => {},
                     Value::Num(n, repr) => {
-                        if let Some(r) = repr {
+                        if let Some(r) = repr.as_ref().filter(|r| crate::value::is_valid_json_number(r)) {
                             buf.extend_from_slice(r.as_bytes());
                         } else {
                             crate::value::push_jq_number_bytes(&mut buf, *n);
