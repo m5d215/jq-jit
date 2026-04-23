@@ -437,6 +437,78 @@ impl Value {
         Value::Obj(Rc::new(pairs.into_iter().map(|(k, v)| (KeyStr::from(k), v)).collect()))
     }
 
+    /// Canonical object factory: dedupes duplicate keys (last value wins,
+    /// earliest position preserved) to match jq's `{a:1, a:2}` → `{"a":2}`
+    /// object-literal semantics. Every Obj construction that builds a pair
+    /// list from user-controlled / fast-path sources should route through
+    /// this function so the dedup invariant is enforced structurally instead
+    /// of by a per-site "remember to call the helper" convention. See
+    /// `docs/maintenance.md` §3.
+    pub fn object_from_pairs<K, I>(pairs: I) -> Self
+    where
+        K: Into<KeyStr>,
+        I: IntoIterator<Item = (K, Value)>,
+    {
+        let iter = pairs.into_iter();
+        let (lo, _) = iter.size_hint();
+        let mut map = ObjMap::with_capacity(lo);
+        for (k, v) in iter {
+            map.insert(k.into(), v);
+        }
+        Value::Obj(Rc::new(map))
+    }
+
+    /// Bypass variant of [`Value::object_from_pairs`]: trusts the caller to
+    /// provide an already-normalized pair list (no duplicate keys, order
+    /// reflects insertion order). Prefer the normalizing variant unless the
+    /// source is provably unique — parser output, a clone of an existing
+    /// `Rc<ObjMap>`, or a rebuild of a structure that went through dedup
+    /// earlier in the same pipeline. In debug builds this asserts the
+    /// caller's contract.
+    pub fn object_from_normalized_pairs<K, I>(pairs: I) -> Self
+    where
+        K: Into<KeyStr>,
+        I: IntoIterator<Item = (K, Value)>,
+    {
+        let iter = pairs.into_iter();
+        let (lo, _) = iter.size_hint();
+        let mut map = ObjMap::with_capacity(lo);
+        for (k, v) in iter {
+            let key: KeyStr = k.into();
+            debug_assert!(
+                !map.contains_key(key.as_str()),
+                "object_from_normalized_pairs: duplicate key `{}`", key
+            );
+            map.push_unique(key, v);
+        }
+        Value::Obj(Rc::new(map))
+    }
+
+    /// Wrap an existing `ObjMap` that was built with invariant-preserving
+    /// operations (`insert` / `push_unique` / JSON parsing). Reuses the
+    /// caller's allocation — does not dedupe.
+    pub fn object_from_map(map: ObjMap) -> Self {
+        Value::Obj(Rc::new(map))
+    }
+
+    /// Numeric factory that drops the repr annotation. Equivalent to
+    /// [`Value::from_f64`], named consistently with [`Value::object_from_pairs`].
+    #[inline]
+    pub fn number(n: f64) -> Self {
+        Value::Num(n, None)
+    }
+
+    /// Numeric factory that preserves the original textual representation.
+    /// Callers that read a number from source (parser, literal fold,
+    /// identity-preserving round-trips) should prefer this so `1.0` stays
+    /// `1.0` and `-1.0` stays `-1.0`. Operations that produce a fresh number
+    /// value (arithmetic, length, etc.) should use [`Value::number`] so the
+    /// repr does not carry over misleadingly.
+    #[inline]
+    pub fn number_with_repr(n: f64, repr: Rc<str>) -> Self {
+        Value::Num(n, Some(repr))
+    }
+
     pub fn is_true(&self) -> bool {
         !matches!(self, Value::Null | Value::False)
     }

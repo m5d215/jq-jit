@@ -1,0 +1,33 @@
+# Grandfathered direct `Value::Obj(Rc::new(…))` construction sites.
+# Format: `<path>  <count>` — one file per line.
+# Blank lines and `#`-prefixed comments are ignored.
+#
+# The test in tests/value_factory_enforcement.rs enforces both an upper
+# and lower bound: the count is the exact number of raw construction
+# sites tolerated in each file. Adding a new site without bumping the
+# count fails the test; reducing the count (by migrating to a factory)
+# without editing the allowlist also fails the test, so the numbers
+# stay in sync with reality.
+#
+# Shrink-only policy: when migrating a site to a factory, lower the
+# count here. When the count reaches zero, remove the line. The goal
+# is an empty allowlist — every Value::Obj construction routed through
+# Value::object_from_pairs / object_from_normalized_pairs / object_from_map.
+#
+# Rationale for each currently-allowed file is below; each entry should
+# eventually be zeroed out:
+#
+# - src/value.rs: the factories themselves live here; also JSON parser
+#   construction where keys come pre-deduped by the parser's lookahead.
+# - src/module.rs: module-loader fixed maps with compile-time-known
+#   unique keys.
+# - src/runtime.rs / src/eval.rs / src/jit.rs: execution-path sites
+#   that currently rebuild objects after dedup helpers or from
+#   insert-based maps. Converting these to `object_from_map(map)` is
+#   mechanical but noisy; do it in follow-up PRs.
+
+src/value.rs      8
+src/module.rs     4
+src/eval.rs       9
+src/jit.rs        6
+src/runtime.rs    24

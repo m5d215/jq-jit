@@ -101,20 +101,26 @@ JIT にまで降りる filter はここ。`flatten_scalar` / `flatten_gen` の m
 
 ### オブジェクト重複キーの dedup
 
-jq は `{a:1, a:2}` → `{"a":2}`（後勝ち、最初の位置を保持）。構築系 fast path すべてで
-`interpreter.rs` の `normalize_object_pairs<K, V>` ヘルパを通して守る:
+jq は `{a:1, a:2}` → `{"a":2}`（後勝ち、最初の位置を保持）。
 
-| 場所 | 関数 |
+**canonical な作り方**: `Value::Obj` を直接作らず、`src/value.rs` の
+ファクトリを通す。dedup 不変性は関数シグネチャで強制される（"opt-out" 方式、#84）:
+
+| 目的 | API |
 |---|---|
-| `interpreter.rs` | `const_expr_to_json`（ObjectConstruct 分岐） |
-| `interpreter.rs` | `push_const_json`（`detect_literal_output` 経由） |
-| `interpreter.rs` | `simplify_expr` の `{pairs} | length` 畳み込み |
-| `interpreter.rs` | `detect_field_remap`（戻り値 dedup） |
-| `interpreter.rs` | `detect_computed_remap`（戻り値 dedup） |
+| pair list から構築（dedup） | `Value::object_from_pairs(pairs)` |
+| dedup 済みと分かっている場合 | `Value::object_from_normalized_pairs(pairs)` （debug_assert で重複検知） |
+| `ObjMap` を insert/push_unique 経由で組み立て済み | `Value::object_from_map(map)` |
 
-新しい object 構築 fast path を足す時は、`(key, value)` ペアのリストを組み立てた後に
-`normalize_object_pairs` を必ず通す（キー型は `PartialEq` でよい）。`| length` 系の
-個数だけ欲しい場合も `.len()` を取れば jq と一致する。
+`Value::Obj(Rc::new(..))` を直書きすると
+`tests/value_factory_enforcement.rs` が旧サイト以外で検知して fail する
+（旧サイトの count は `tests/value_factory_enforcement.allowlist` に記録、
+削減方向にしか更新できない）。
+
+pair list を他形式（JSON バイト、Vec<(String, RemapExpr)> など）に変換する前に
+dedup だけしたい場合は従来の `interpreter.rs::normalize_object_pairs<K, V>`
+を使う（キー型は `PartialEq` でよい）。`| length` 系で個数だけ欲しい場合は
+dedup 後の `.len()` を取れば jq と一致する。
 
 invariant 回帰は `tests/regression.test` の "Issue #30" ブロックと
 `tests/differential/corpus.test` の "duplicate-key collapse" ブロックで監視している。
