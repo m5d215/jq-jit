@@ -519,6 +519,24 @@ impl Value {
         Value::Num(n, repr)
     }
 
+    /// Flip the sign of a numeric repr, preserving the original textual form
+    /// (so `1.0` ↔ `-1.0`, `1e10` ↔ `-1e10`). Returns `None` if the input is
+    /// `None` or if the repr is not a JSON-valid number.
+    #[inline]
+    pub fn negate_repr(repr: Option<Rc<str>>) -> Option<Rc<str>> {
+        let r = repr?;
+        if !is_valid_json_number(&r) { return None; }
+        let s: &str = &r;
+        if let Some(rest) = s.strip_prefix('-') {
+            Some(Rc::from(rest))
+        } else {
+            let mut out = String::with_capacity(s.len() + 1);
+            out.push('-');
+            out.push_str(s);
+            Some(Rc::from(out.as_str()))
+        }
+    }
+
     pub fn is_true(&self) -> bool {
         !matches!(self, Value::Null | Value::False)
     }
@@ -4609,6 +4627,90 @@ pub fn value_to_json(v: &Value) -> String {
 /// Convert Value to compact JSON string, using precise repr when available.
 pub fn value_to_json_precise(v: &Value) -> String {
     value_to_json_depth(v, 0, true)
+}
+
+/// Convert Value to compact JSON string for `tojson`. Uses the repr when it
+/// exactly represents the stored f64, otherwise falls back to the f64 form.
+/// jq 1.8.1 decnum preserves all reprs; without decnum we can only honor the
+/// ones f64 can hold exactly (so `1.0` stays `"1.0"` but `13911860366432393`
+/// renders as the rounded `"13911860366432392"`).
+pub fn value_to_json_tojson(v: &Value) -> String {
+    let mut out = String::new();
+    push_value_tojson(v, &mut out, 0);
+    out
+}
+
+fn push_value_tojson(v: &Value, out: &mut String, depth: usize) {
+    if depth > MAX_JSON_DEPTH {
+        out.push_str("\"<skipped: too deep>\"");
+        return;
+    }
+    match v {
+        Value::Null => out.push_str("null"),
+        Value::False => out.push_str("false"),
+        Value::True => out.push_str("true"),
+        Value::Num(n, repr) => {
+            if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r) && repr_is_exact_for_f64(r, *n)) {
+                out.push_str(r);
+            } else {
+                push_jq_number_str(out, *n);
+            }
+        }
+        Value::Str(s) => push_json_string(out, s),
+        Value::Arr(a) => {
+            out.push('[');
+            for (i, item) in a.iter().enumerate() {
+                if i > 0 { out.push(','); }
+                push_value_tojson(item, out, depth + 1);
+            }
+            out.push(']');
+        }
+        Value::Obj(o) => {
+            out.push('{');
+            for (i, (k, v)) in o.iter().enumerate() {
+                if i > 0 { out.push(','); }
+                push_json_string(out, k);
+                out.push(':');
+                push_value_tojson(v, out, depth + 1);
+            }
+            out.push('}');
+        }
+        Value::Error(e) => push_json_string(out, e),
+    }
+}
+
+/// True iff `repr` (a JSON-valid decimal literal) represents a value that f64
+/// can hold exactly. Rejects mantissas with more than 15 significant decimal
+/// digits and exponents outside f64's dynamic range.
+fn repr_is_exact_for_f64(repr: &str, n: f64) -> bool {
+    if !n.is_finite() { return false; }
+    let bytes = repr.as_bytes();
+    let mut i = 0;
+    if matches!(bytes.first(), Some(b'-') | Some(b'+')) { i += 1; }
+    let mut sig_digits = 0u32;
+    let mut started = false;
+    while i < bytes.len() && bytes[i] != b'e' && bytes[i] != b'E' {
+        let c = bytes[i];
+        if c == b'.' { i += 1; continue; }
+        if !c.is_ascii_digit() { return false; }
+        if c != b'0' { started = true; }
+        if started { sig_digits += 1; }
+        i += 1;
+    }
+    let mut exp_val: i32 = 0;
+    if i < bytes.len() {
+        i += 1;
+        let mut exp_neg = false;
+        if matches!(bytes.get(i), Some(b'-')) { exp_neg = true; i += 1; }
+        else if matches!(bytes.get(i), Some(b'+')) { i += 1; }
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            exp_val = exp_val.saturating_mul(10).saturating_add((bytes[i] - b'0') as i32);
+            i += 1;
+        }
+        if exp_neg { exp_val = -exp_val; }
+    }
+    if exp_val > 308 || exp_val < -323 { return false; }
+    sig_digits <= 15
 }
 
 fn value_to_json_depth(v: &Value, depth: usize, precise: bool) -> String {

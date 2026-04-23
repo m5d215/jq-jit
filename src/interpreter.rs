@@ -1585,8 +1585,9 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
         }
         Expr::Negate { operand } => {
             let s = simplify_expr(operand);
-            if let Expr::Literal(Literal::Num(n, _)) = &s {
-                Expr::Literal(Literal::Num(-n, None))
+            if let Expr::Literal(Literal::Num(n, repr)) = &s {
+                let new_repr = crate::value::Value::negate_repr(repr.clone());
+                Expr::Literal(Literal::Num(-n, new_repr))
             } else {
                 Expr::Negate { operand: Box::new(s) }
             }

@@ -1070,7 +1070,7 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
         Expr::Negate { operand } => {
             let val = eval_one(operand, input, env)?;
             match val {
-                Value::Num(n, _) => Ok(Value::number(-n)),
+                Value::Num(n, repr) => Ok(Value::number_opt(-n, crate::value::Value::negate_repr(repr))),
                 _ => Err(()),
             }
         }
@@ -2266,7 +2266,7 @@ pub fn eval(
         Expr::Negate { operand } => {
             eval(operand, input, env, &mut |val| {
                 match &val {
-                    Value::Num(n, _) => cb(Value::number(-n)),
+                    Value::Num(n, repr) => cb(Value::number_opt(-n, crate::value::Value::negate_repr(repr.clone()))),
                     _ => {
                         bail!("{} cannot be negated", crate::runtime::errdesc_pub(&val))
                     }

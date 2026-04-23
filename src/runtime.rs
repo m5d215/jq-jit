@@ -1305,7 +1305,11 @@ fn rt_implode(v: &Value) -> Result<Value> {
 }
 
 fn rt_tojson(v: &Value) -> Result<Value> {
-    Ok(Value::from_string(crate::value::value_to_json(v)))
+    // Preserve the lexical form of numbers so `1.0 | tojson` yields `"1.0"`
+    // (not `"1"`). jq 1.8.1 does the same via decnum; jq-jit has only f64, so
+    // reprs carrying more precision than f64 can hold (or overflowing to ±inf)
+    // fall back to the f64-formatted form inside `value_to_json_tojson`.
+    Ok(Value::from_string(crate::value::value_to_json_tojson(v)))
 }
 
 fn rt_fromjson(v: &Value) -> Result<Value> {
