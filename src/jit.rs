@@ -82,7 +82,7 @@ fn try_const_eval(expr: &Expr) -> Option<Value> {
         }),
         Expr::Negate { operand } => {
             if let Value::Num(n, _) = try_const_eval(operand)? {
-                Some(Value::Num(-n, None))
+                Some(Value::number(-n))
             } else { None }
         }
         Expr::Collect { generator } => {
@@ -147,9 +147,9 @@ fn const_eval_gen(expr: &Expr, out: &mut Vec<Value>) -> Option<()> {
             if count < 0 || count > 10000 { return None; }
             let mut i = f;
             if s > 0.0 {
-                while i < t { out.push(Value::Num(i, None)); i += s; }
+                while i < t { out.push(Value::number(i)); i += s; }
             } else {
-                while i > t { out.push(Value::Num(i, None)); i += s; }
+                while i > t { out.push(Value::number(i)); i += s; }
             }
             Some(())
         }
@@ -5260,7 +5260,7 @@ extern "C" fn jit_rt_false(dst: *mut Value) {
     unsafe { std::ptr::write(dst, Value::False); }
 }
 extern "C" fn jit_rt_num(dst: *mut Value, n: f64) {
-    unsafe { std::ptr::write(dst, Value::Num(n, None)); }
+    unsafe { std::ptr::write(dst, Value::number(n)); }
 }
 extern "C" fn jit_rt_num_repr(dst: *mut Value, n: f64, repr_ptr: *const Rc<str>) {
     unsafe { std::ptr::write(dst, Value::Num(n, Some((*repr_ptr).clone()))); }
@@ -5363,9 +5363,9 @@ extern "C" fn jit_rt_field_binop_field(
         // Fast path: both fields are Num (most common case for arithmetic)
         if let (Some(Value::Num(na, _)), Some(Value::Num(nb, _))) = (va, vb) {
             match op {
-                0 => { std::ptr::write(dst, Value::Num(na + nb, None)); return 0; }
-                1 => { std::ptr::write(dst, Value::Num(na - nb, None)); return 0; }
-                2 => { std::ptr::write(dst, Value::Num(na * nb, None)); return 0; }
+                0 => { std::ptr::write(dst, Value::number(na + nb)); return 0; }
+                1 => { std::ptr::write(dst, Value::number(na - nb)); return 0; }
+                2 => { std::ptr::write(dst, Value::number(na * nb)); return 0; }
                 5 => { std::ptr::write(dst, Value::from_bool(na == nb)); return 0; }
                 6 => { std::ptr::write(dst, Value::from_bool(na != nb)); return 0; }
                 7 => { std::ptr::write(dst, Value::from_bool(na < nb)); return 0; }
@@ -5415,9 +5415,9 @@ extern "C" fn jit_rt_field_binop_const(
         // Fast path: Num OP Num
         if let (Value::Num(na, _), Value::Num(nb, _)) = (lv, rv) {
             match op {
-                0 => { std::ptr::write(dst, Value::Num(na + nb, None)); return 0; }
-                1 => { std::ptr::write(dst, Value::Num(na - nb, None)); return 0; }
-                2 => { std::ptr::write(dst, Value::Num(na * nb, None)); return 0; }
+                0 => { std::ptr::write(dst, Value::number(na + nb)); return 0; }
+                1 => { std::ptr::write(dst, Value::number(na - nb)); return 0; }
+                2 => { std::ptr::write(dst, Value::number(na * nb)); return 0; }
                 5 => { std::ptr::write(dst, Value::from_bool(na == nb)); return 0; }
                 6 => { std::ptr::write(dst, Value::from_bool(na != nb)); return 0; }
                 7 => { std::ptr::write(dst, Value::from_bool(na < nb)); return 0; }
@@ -5548,12 +5548,12 @@ extern "C" fn jit_rt_binop(dst: *mut Value, op: i32, lhs: *const Value, rhs: *co
         // Fast path for Num op Num (most common case in filters)
         if let (Value::Num(a, _), Value::Num(b, _)) = (&*lhs, &*rhs) {
             match op {
-                0 => { std::ptr::write(dst, Value::Num(a + b, None)); return 0; }
-                1 => { std::ptr::write(dst, Value::Num(a - b, None)); return 0; }
-                2 => { std::ptr::write(dst, Value::Num(a * b, None)); return 0; }
+                0 => { std::ptr::write(dst, Value::number(a + b)); return 0; }
+                1 => { std::ptr::write(dst, Value::number(a - b)); return 0; }
+                2 => { std::ptr::write(dst, Value::number(a * b)); return 0; }
                 3 => { // Div: fast path for non-zero, non-NaN
                     if *b != 0.0 && !b.is_nan() && !a.is_nan() {
-                        std::ptr::write(dst, Value::Num(a / b, None)); return 0;
+                        std::ptr::write(dst, Value::number(a / b)); return 0;
                     }
                 }
                 4 => { // Mod: fast path for non-zero integer modulo
@@ -5563,7 +5563,7 @@ extern "C" fn jit_rt_binop(dst: *mut Value, op: i32, lhs: *const Value, rhs: *co
                             let xi = *a as i64;
                             // Avoid overflow for i64::MIN % -1
                             let r = if xi == i64::MIN && yi == -1 { 0 } else { xi % yi };
-                            std::ptr::write(dst, Value::Num(r as f64, None)); return 0;
+                            std::ptr::write(dst, Value::number(r as f64)); return 0;
                         }
                     }
                 }
@@ -5604,7 +5604,7 @@ extern "C" fn jit_rt_add_move(dst: *mut Value, lhs: *mut Value, rhs: *const Valu
     unsafe {
         // Fast path: Num + Num
         if let (Value::Num(a, _), Value::Num(b, _)) = (&*lhs, &*rhs) {
-            let result = Value::Num(a + b, None);
+            let result = Value::number(a + b);
             std::ptr::write(dst, result);
             return 0;
         }
@@ -5642,7 +5642,7 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 Value::Str(s) => {
                     match s.as_str().trim().parse::<f64>() {
                         Ok(n) => {
-                            std::ptr::write(dst, Value::Num(n, None));
+                            std::ptr::write(dst, Value::number(n));
                             return 0;
                         }
                         Err(_) => {
@@ -5658,7 +5658,7 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
         // Fast path: length (op 0) — very common, avoid full dispatch
         if op == 0 {
             let v = match &*input {
-                Value::Null => Value::Num(0.0, None),
+                Value::Null => Value::number(0.0),
                 Value::True | Value::False => {
                     set_jit_error(format!(
                         "{} ({}) has no length",
@@ -5668,14 +5668,14 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                     std::ptr::write(dst, Value::Null);
                     return GEN_ERROR;
                 }
-                Value::Num(n, _) => Value::Num(n.abs(), None),
+                Value::Num(n, _) => Value::number(n.abs()),
                 Value::Str(s) => {
                     let len = if s.is_ascii() { s.len() } else { s.chars().count() };
-                    Value::Num(len as f64, None)
+                    Value::number(len as f64)
                 }
-                Value::Arr(a) => Value::Num(a.len() as f64, None),
-                Value::Obj(o) => Value::Num(o.len() as f64, None),
-                Value::Error(_) => Value::Num(0.0, None),
+                Value::Arr(a) => Value::number(a.len() as f64),
+                Value::Obj(o) => Value::number(o.len() as f64),
+                Value::Error(_) => Value::number(0.0),
             };
             std::ptr::write(dst, v);
             return 0;
@@ -5704,7 +5704,7 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                     return 0;
                 }
                 Value::Arr(a) => {
-                    let keys: Vec<Value> = (0..a.len()).map(|i| Value::Num(i as f64, None)).collect();
+                    let keys: Vec<Value> = (0..a.len()).map(|i| Value::number(i as f64)).collect();
                     std::ptr::write(dst, Value::Arr(Rc::new(keys)));
                     return 0;
                 }
@@ -5760,7 +5760,7 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 } else if !trimmed.is_empty() {
                     let b = trimmed.as_bytes()[0];
                     if b == b'-' || b.is_ascii_digit() {
-                        trimmed.parse::<f64>().ok().map(|n| Value::Num(n, None))
+                        trimmed.parse::<f64>().ok().map(Value::number)
                     } else if b == b'"' {
                         if trimmed.len() >= 2 && trimmed.as_bytes()[trimmed.len()-1] == b'"' && !trimmed[1..trimmed.len()-1].contains('\\') {
                             Some(Value::from_string(trimmed[1..trimmed.len()-1].to_string()))
@@ -5798,7 +5798,7 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
         // Fast path: utf8bytelength (op 43)
         if op == 43 {
             if let Value::Str(s) = &*input {
-                std::ptr::write(dst, Value::Num(s.len() as f64, None));
+                std::ptr::write(dst, Value::number(s.len() as f64));
                 return 0;
             }
         }
@@ -5874,12 +5874,12 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 if str.is_ascii() {
                     let mut codepoints = Vec::with_capacity(str.len());
                     for &b in str.as_bytes() {
-                        codepoints.push(Value::Num(b as f64, None));
+                        codepoints.push(Value::number(b as f64));
                     }
                     std::ptr::write(dst, Value::Arr(Rc::new(codepoints)));
                 } else {
                     let codepoints: Vec<Value> = str.chars()
-                        .map(|c| Value::Num(c as u32 as f64, None))
+                        .map(|c| Value::number(c as u32 as f64))
                         .collect();
                     std::ptr::write(dst, Value::Arr(Rc::new(codepoints)));
                 }
@@ -6077,7 +6077,7 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                             }
                         }
                         if all_num {
-                            std::ptr::write(dst, Value::Num(sum, None));
+                            std::ptr::write(dst, Value::number(sum));
                             return 0;
                         }
                     }
@@ -6108,11 +6108,11 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
         }
         // Fast path: infinite (op 34), nan (op 35)
         if op == 34 {
-            std::ptr::write(dst, Value::Num(f64::INFINITY, None));
+            std::ptr::write(dst, Value::number(f64::INFINITY));
             return 0;
         }
         if op == 35 {
-            std::ptr::write(dst, Value::Num(f64::NAN, None));
+            std::ptr::write(dst, Value::number(f64::NAN));
             return 0;
         }
         // Fast path: now (op 67)
@@ -6184,7 +6184,7 @@ extern "C" fn jit_rt_sort_inplace(v: *mut Value) -> i64 {
 extern "C" fn jit_rt_negate(dst: *mut Value, input: *const Value) -> i64 {
     unsafe {
         match &*input {
-            Value::Num(n, _) => { std::ptr::write(dst, Value::Num(-n, None)); 0 }
+            Value::Num(n, _) => { std::ptr::write(dst, Value::number(-n)); 0 }
             _ => {
                 set_jit_error(format!("{} cannot be negated", crate::runtime::errdesc_pub(&*input)));
                 std::ptr::write(dst, Value::Null); GEN_ERROR
@@ -6434,7 +6434,7 @@ extern "C" fn jit_rt_collect_range(dst: *mut Value, n: f64) {
     let count = count as usize;
     let mut arr = Vec::with_capacity(count);
     for i in 0..count {
-        arr.push(Value::Num(i as f64, None));
+        arr.push(Value::number(i as f64));
     }
     unsafe { std::ptr::write(dst, Value::Arr(Rc::new(arr))); }
 }
@@ -6632,7 +6632,7 @@ extern "C" fn jit_rt_to_f64(v: *const Value) -> f64 {
     unsafe { match &*v { Value::Num(n, _) => *n, _ => 0.0 } }
 }
 extern "C" fn jit_rt_f64_to_num(dst: *mut Value, n: f64) {
-    unsafe { std::ptr::write(dst, Value::Num(n, None)); }
+    unsafe { std::ptr::write(dst, Value::number(n)); }
 }
 extern "C" fn jit_rt_range_check(cur: f64, to: f64, step: f64) -> i64 {
     if step > 0.0 { if cur < to { 1 } else { 0 } }
@@ -6697,7 +6697,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                 let file = parts[1];
                 let mut obj = crate::value::new_objmap();
                 obj.insert(crate::value::KeyStr::from("file"), Value::from_str(file));
-                obj.insert(crate::value::KeyStr::from("line"), Value::Num(line_n as f64, None));
+                obj.insert(crate::value::KeyStr::from("line"), Value::number(line_n as f64));
                 std::ptr::write(dst, Value::Obj(Rc::new(obj)));
                 return 0;
             }
@@ -6777,7 +6777,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                     }
                     Value::Arr(a) => {
                         for (i, val) in a.iter().enumerate().rev() {
-                            stack.push((val.clone(), vec![Value::Num(i as f64, None)]));
+                            stack.push((val.clone(), vec![Value::number(i as f64)]));
                         }
                     }
                     _ => {}
@@ -6795,7 +6795,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                         Value::Arr(a) => {
                             for (i, child) in a.iter().enumerate().rev() {
                                 let mut p = path.clone();
-                                p.push(Value::Num(i as f64, None));
+                                p.push(Value::number(i as f64));
                                 stack.push((child.clone(), p));
                             }
                         }
@@ -6932,7 +6932,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                         let mut pos = 0;
                         while pos < sb.len() {
                             if let Some(found) = memchr::memchr(needle, &sb[pos..]) {
-                                indices.push(Value::Num((pos + found) as f64, None));
+                                indices.push(Value::number((pos + found) as f64));
                                 pos += found + 1;
                             } else {
                                 break;
@@ -6941,7 +6941,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                     } else if tb.len() <= sb.len() {
                         for i in 0..=sb.len() - tb.len() {
                             if &sb[i..i+tb.len()] == tb {
-                                indices.push(Value::Num(i as f64, None));
+                                indices.push(Value::number(i as f64));
                             }
                         }
                     }
@@ -7213,7 +7213,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                         }
                         Value::Arr(a) => {
                             for (i, child) in a.iter().enumerate() {
-                                path.push(Value::Num(i as f64, None));
+                                path.push(Value::number(i as f64));
                                 paths_dfs_filtered(child, path, results, compiled_filter, filter_expr, env);
                                 path.pop();
                             }
@@ -9365,7 +9365,7 @@ mod tests {
     fn test_jit_identity() {
         let mut c = JitCompiler::new().unwrap();
         let f = c.compile(&Expr::Input).unwrap();
-        let r = execute_jit(f, &Value::Num(42.0, None)).unwrap();
+        let r = execute_jit(f, &Value::number(42.0)).unwrap();
         assert_eq!(r.len(), 1);
         assert!(matches!(&r[0], Value::Num(n, _) if *n == 42.0));
     }
@@ -9387,7 +9387,7 @@ mod tests {
             right: Box::new(Expr::Input),
         };
         let f = c.compile(&expr).unwrap();
-        let r = execute_jit(f, &Value::Num(7.0, None)).unwrap();
+        let r = execute_jit(f, &Value::number(7.0)).unwrap();
         assert_eq!(r.len(), 1);
         assert!(matches!(&r[0], Value::Num(n, _) if *n == 7.0));
     }

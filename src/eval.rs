@@ -986,18 +986,18 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
                                 get_num_leaf(rhs, input, &e.vars),
                             ) {
                                 return Ok(match *op {
-                                    BinOp::Add => Value::Num(ln + rn, None),
-                                    BinOp::Sub => Value::Num(ln - rn, None),
-                                    BinOp::Mul => Value::Num(ln * rn, None),
+                                    BinOp::Add => Value::number(ln + rn),
+                                    BinOp::Sub => Value::number(ln - rn),
+                                    BinOp::Mul => Value::number(ln * rn),
                                     BinOp::Div => {
                                         if rn == 0.0 { drop(e); return Err(()); }
-                                        Value::Num(ln / rn, None)
+                                        Value::number(ln / rn)
                                     }
                                     BinOp::Mod => {
                                         if !ln.is_finite() || !rn.is_finite() { drop(e); return Err(()); }
                                         let yi = rn as i64;
                                         if yi == 0 { drop(e); return Err(()); }
-                                        Value::Num((ln as i64 % yi) as f64, None)
+                                        Value::number((ln as i64 % yi) as f64)
                                     }
                                     BinOp::Eq => if ln == rn { Value::True } else { Value::False },
                                     BinOp::Ne => if ln != rn { Value::True } else { Value::False },
@@ -1015,18 +1015,18 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
                     // Fast path: both numeric, avoid function call dispatch
                     if let (Value::Num(ln, _), Value::Num(rn, _)) = (&l, &r) {
                         return Ok(match *op {
-                            BinOp::Add => Value::Num(ln + rn, None),
-                            BinOp::Sub => Value::Num(ln - rn, None),
-                            BinOp::Mul => Value::Num(ln * rn, None),
+                            BinOp::Add => Value::number(ln + rn),
+                            BinOp::Sub => Value::number(ln - rn),
+                            BinOp::Mul => Value::number(ln * rn),
                             BinOp::Div => {
                                 if *rn == 0.0 { return eval_binop(*op, &l, &r).map_err(|_| ()); }
-                                Value::Num(ln / rn, None)
+                                Value::number(ln / rn)
                             }
                             BinOp::Mod => {
                                 if !ln.is_finite() || !rn.is_finite() { return eval_binop(*op, &l, &r).map_err(|_| ()); }
                                 let yi = *rn as i64;
                                 if yi == 0 { return eval_binop(*op, &l, &r).map_err(|_| ()); }
-                                Value::Num((*ln as i64 % yi) as f64, None)
+                                Value::number((*ln as i64 % yi) as f64)
                             }
                             BinOp::Eq => if ln == rn { Value::True } else { Value::False },
                             BinOp::Ne => if ln != rn { Value::True } else { Value::False },
@@ -1046,12 +1046,12 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
             // Fast path for numeric unary ops
             if let Value::Num(n, _) = &val {
                 return Ok(match *op {
-                    UnaryOp::Floor => Value::Num(n.floor(), None),
-                    UnaryOp::Ceil => Value::Num(n.ceil(), None),
-                    UnaryOp::Round => Value::Num(n.round(), None),
-                    UnaryOp::Fabs | UnaryOp::Abs => Value::Num(n.abs(), None),
-                    UnaryOp::Length => Value::Num(n.abs(), None),
-                    UnaryOp::Sqrt => Value::Num(n.sqrt(), None),
+                    UnaryOp::Floor => Value::number(n.floor()),
+                    UnaryOp::Ceil => Value::number(n.ceil()),
+                    UnaryOp::Round => Value::number(n.round()),
+                    UnaryOp::Fabs | UnaryOp::Abs => Value::number(n.abs()),
+                    UnaryOp::Length => Value::number(n.abs()),
+                    UnaryOp::Sqrt => Value::number(n.sqrt()),
                     _ => return eval_unaryop(*op, &val).map_err(|_| ()),
                 });
             }
@@ -1070,7 +1070,7 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
         Expr::Negate { operand } => {
             let val = eval_one(operand, input, env)?;
             match val {
-                Value::Num(n, _) => Ok(Value::Num(-n, None)),
+                Value::Num(n, _) => Ok(Value::number(-n)),
                 _ => Err(()),
             }
         }
@@ -1586,7 +1586,7 @@ pub fn eval(
                                 // Test if predicate works with eval_bool_compound.
                                 // Use 1.0 as dummy (not 0.0) to avoid false negatives from
                                 // fmod/div-by-zero returning None in get_num_leaf.
-                                let dummy = Value::Num(1.0, None);
+                                let dummy = Value::number(1.0);
                                 eval_bool_compound(predicate, &dummy, &env.borrow().vars).is_some()
                             } else { false };
                             eval(generator, input, env, &mut |elem| {
@@ -2266,7 +2266,7 @@ pub fn eval(
         Expr::Negate { operand } => {
             eval(operand, input, env, &mut |val| {
                 match &val {
-                    Value::Num(n, _) => cb(Value::Num(-n, None)),
+                    Value::Num(n, _) => cb(Value::number(-n)),
                     _ => {
                         bail!("{} cannot be negated", crate::runtime::errdesc_pub(&val))
                     }
@@ -2307,7 +2307,7 @@ pub fn eval(
                 let mut e = env.borrow_mut();
                 let id = e.next_label;
                 e.next_label = id + 1;
-                e.set_var(*var_index, Value::Num(id as f64, None));
+                e.set_var(*var_index, Value::number(id as f64));
                 id
             };
             match eval(body, input, env, cb) {
@@ -2896,7 +2896,7 @@ pub fn eval(
         Expr::Loc { file, line } => {
             let mut obj = crate::value::new_objmap();
             obj.insert("file".into(), Value::from_str(file));
-            obj.insert("line".into(), Value::Num(*line as f64, None));
+            obj.insert("line".into(), Value::number(*line as f64));
             cb(Value::Obj(Rc::new(obj)))
         }
 
@@ -2954,7 +2954,7 @@ pub fn eval(
         Expr::GenLabel => {
             let id = env.borrow().next_label;
             env.borrow_mut().next_label = id + 1;
-            cb(Value::Num(id as f64, None))
+            cb(Value::number(id as f64))
         }
 
         Expr::CallBuiltin { name, args } => {
@@ -2969,18 +2969,18 @@ pub fn eval_binop(op: BinOp, lhs: &Value, rhs: &Value) -> Result<Value> {
     // Numeric fast path: avoid runtime function dispatch for common numeric ops
     if let (Value::Num(ln, _), Value::Num(rn, _)) = (lhs, rhs) {
         return Ok(match op {
-            BinOp::Add => Value::Num(ln + rn, None),
-            BinOp::Sub => Value::Num(ln - rn, None),
-            BinOp::Mul => Value::Num(ln * rn, None),
+            BinOp::Add => Value::number(ln + rn),
+            BinOp::Sub => Value::number(ln - rn),
+            BinOp::Mul => Value::number(ln * rn),
             BinOp::Div => {
                 if *rn == 0.0 { return crate::runtime::rt_div(lhs, rhs); }
-                Value::Num(ln / rn, None)
+                Value::number(ln / rn)
             }
             BinOp::Mod => {
                 if !ln.is_finite() || !rn.is_finite() { return crate::runtime::rt_mod(lhs, rhs); }
                 let yi = *rn as i64;
                 if yi == 0 { return crate::runtime::rt_mod(lhs, rhs); }
-                Value::Num((*ln as i64 % yi) as f64, None)
+                Value::number((*ln as i64 % yi) as f64)
             }
             BinOp::Eq => if ln == rn { Value::True } else { Value::False },
             BinOp::Ne => if ln != rn { Value::True } else { Value::False },
@@ -3015,18 +3015,18 @@ fn eval_binop_owned(op: BinOp, lhs: Value, rhs: &Value) -> Result<Value> {
     // Numeric fast path: avoid function dispatch overhead
     if let (Value::Num(ln, _), Value::Num(rn, _)) = (&lhs, rhs) {
         return Ok(match op {
-            BinOp::Add => Value::Num(ln + rn, None),
-            BinOp::Sub => Value::Num(ln - rn, None),
-            BinOp::Mul => Value::Num(ln * rn, None),
+            BinOp::Add => Value::number(ln + rn),
+            BinOp::Sub => Value::number(ln - rn),
+            BinOp::Mul => Value::number(ln * rn),
             BinOp::Div => {
                 if *rn == 0.0 { return crate::runtime::rt_div(&lhs, rhs); }
-                Value::Num(ln / rn, None)
+                Value::number(ln / rn)
             }
             BinOp::Mod => {
                 if !ln.is_finite() || !rn.is_finite() { return crate::runtime::rt_mod(&lhs, rhs); }
                 let yi = *rn as i64;
                 if yi == 0 { return crate::runtime::rt_mod(&lhs, rhs); }
-                Value::Num((*ln as i64 % yi) as f64, None)
+                Value::number((*ln as i64 % yi) as f64)
             }
             BinOp::Eq => if ln == rn { Value::True } else { Value::False },
             BinOp::Ne => if ln != rn { Value::True } else { Value::False },
@@ -3046,8 +3046,8 @@ fn eval_binop_owned(op: BinOp, lhs: Value, rhs: &Value) -> Result<Value> {
 pub fn eval_unaryop(op: UnaryOp, val: &Value) -> Result<Value> {
     match op {
         UnaryOp::Not => return Ok(if val.is_truthy() { Value::False } else { Value::True }),
-        UnaryOp::Infinite => return Ok(Value::Num(f64::INFINITY, None)),
-        UnaryOp::Nan => return Ok(Value::Num(f64::NAN, None)),
+        UnaryOp::Infinite => return Ok(Value::number(f64::INFINITY)),
+        UnaryOp::Nan => return Ok(Value::number(f64::NAN)),
         _ => {}
     }
     let name = match op {
@@ -3155,8 +3155,8 @@ fn eval_range(from: &Value, to: &Value, step: Option<&Value>, cb: &mut dyn FnMut
     let s = match step { Some(Value::Num(n, _)) => *n, Some(_) => bail!("range: step must be number"), None => 1.0 };
     if s == 0.0 { return Ok(true); }
     let mut c = f;
-    if s > 0.0 { while c < t { if !cb(Value::Num(c, None))? { return Ok(false); } c += s; } }
-    else { while c > t { if !cb(Value::Num(c, None))? { return Ok(false); } c += s; } }
+    if s > 0.0 { while c < t { if !cb(Value::number(c))? { return Ok(false); } c += s; } }
+    else { while c > t { if !cb(Value::number(c))? { return Ok(false); } c += s; } }
     Ok(true)
 }
 
@@ -3616,7 +3616,7 @@ fn try_eval_key_f64(expr: &Expr, input: &Value) -> Option<f64> {
         Expr::Pipe { left, right } => {
             // Try f64 pipe first
             if let Some(mid_val) = try_eval_key_f64(left, input) {
-                let mid = Value::Num(mid_val, None);
+                let mid = Value::number(mid_val);
                 return try_eval_key_f64(right, &mid);
             }
             // Try Value pipe (e.g., .name | length)
@@ -3864,7 +3864,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 cb_called.set(true);
                 let base = crate::runtime::rt_getpath(&input, &bp).unwrap_or(Value::Null);
                 match &base {
-                    Value::Arr(a) => { for i in 0..a.len() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::Num(i as f64, None)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
+                    Value::Arr(a) => { for i in 0..a.len() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::number(i as f64)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
                     Value::Obj(o) => { for k in o.keys() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::from_str(k)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
                     _ => {
                         // jq errors `del(.[])` etc. when the current path
@@ -3970,8 +3970,8 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 let mut p = match &bp { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
                 p.push(Value::Obj(Rc::new({
                     let mut m = crate::value::new_objmap();
-                    m.insert("start".into(), Value::Num(fi as f64, None));
-                    m.insert("end".into(), Value::Num(ti as f64, None));
+                    m.insert("start".into(), Value::number(fi as f64));
+                    m.insert("end".into(), Value::number(ti as f64));
                     m
                 })));
                 cb(Value::Arr(Rc::new(p)))
@@ -4021,7 +4021,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             eval_path(input_expr, input.clone(), env, &mut |bp| {
                 let base = crate::runtime::rt_getpath(&input, &bp).unwrap_or(Value::Null);
                 match &base {
-                    Value::Arr(a) => { for i in 0..a.len() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::Num(i as f64, None)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
+                    Value::Arr(a) => { for i in 0..a.len() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::number(i as f64)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
                     Value::Obj(o) => { for k in o.keys() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::from_str(k)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
                     _ => Ok(true),
                 }
@@ -4054,7 +4054,7 @@ fn eval_recurse_paths_inner(val: &Value, path: &mut Vec<Value>, cb: &mut dyn FnM
     match val {
         Value::Arr(a) => {
             for (i, item) in a.iter().enumerate() {
-                path.push(Value::Num(i as f64, None));
+                path.push(Value::number(i as f64));
                 if !eval_recurse_paths_inner(item, path, cb)? { return Ok(false); }
                 path.pop();
             }
@@ -4720,13 +4720,13 @@ fn rt_bsearch(input: &Value, target: &Value) -> Result<Value> {
                 let mid = (lo + hi) / 2;
                 let cmp = crate::runtime::compare_values(&a[mid as usize], target);
                 match cmp {
-                    std::cmp::Ordering::Equal => return Ok(Value::Num(mid as f64, None)),
+                    std::cmp::Ordering::Equal => return Ok(Value::number(mid as f64)),
                     std::cmp::Ordering::Less => lo = mid + 1,
                     std::cmp::Ordering::Greater => hi = mid - 1,
                 }
             }
             // Not found: return -(insertion_point) - 1
-            Ok(Value::Num(-(lo as f64) - 1.0, None))
+            Ok(Value::number(-(lo as f64) - 1.0))
         }
         _ => {
             let ty = input.type_name();
