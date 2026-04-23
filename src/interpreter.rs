@@ -1939,6 +1939,30 @@ impl Filter {
         Some(&self.simplified)
     }
 
+    /// Probe the [`crate::fast_path::FastPath`]-shaped (typed) dispatch
+    /// table for this filter. See `src/fast_path.rs` for the contract.
+    ///
+    /// Returns the fast path's verdict:
+    ///
+    /// - `Some(Ok(v))`  — the typed fast path produced `v`.
+    /// - `Some(Err(e))` — the typed fast path detected the same error
+    ///   jq would raise on this input.
+    /// - `None`         — no typed fast path matched this filter shape,
+    ///   or the fast path declined to handle this input type. The caller
+    ///   should run the generic eval / jit path (authoritative).
+    ///
+    /// Currently wired paths: [`crate::fast_path::FieldAccessPath`]
+    /// (single `.field` access). More paths migrate in follow-up PRs —
+    /// each migration replaces a raw-byte detector whose type-dispatch
+    /// obligations have historically leaked (see issue #83).
+    pub fn try_typed_fast_path(&self, input: &Value) -> Option<Result<Value>> {
+        use crate::fast_path::{FastPath, FieldAccessPath};
+        if let Some(field) = self.detect_field_access() {
+            return FieldAccessPath::new(field).run(input);
+        }
+        None
+    }
+
     pub fn new(program: &str) -> Result<Self> {
         Self::with_options(program, &[], true)
     }
