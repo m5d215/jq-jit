@@ -4,7 +4,7 @@
 //! Fallback: libjq execution (for filters we can't parse yet).
 
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 use crate::ir::CompiledFunc;
 use crate::value::Value;
@@ -282,11 +282,10 @@ pub enum MixedCond {
 
 /// A compiled jq filter, ready to execute.
 pub struct Filter {
-    program: String,
-    /// Our parsed IR (if parsing succeeded).
-    parsed: Option<(crate::ir::Expr, Vec<CompiledFunc>)>,
+    /// Our parsed IR.
+    parsed: (crate::ir::Expr, Vec<CompiledFunc>),
     /// Simplified expression for fast path detection (identity pipes stripped).
-    simplified: Option<crate::ir::Expr>,
+    simplified: crate::ir::Expr,
     /// JIT-compiled function (if JIT compilation succeeded).
     jit_fn: Option<crate::jit::JitFilterFn>,
     /// JIT compiler kept alive to own the compiled code.
@@ -1937,11 +1936,7 @@ impl Filter {
     /// semantics simply don't match, and eval handles it correctly (see
     /// issue #50).
     fn detect_expr(&self) -> Option<&crate::ir::Expr> {
-        if let Some(ref simplified) = self.simplified {
-            return Some(simplified);
-        }
-        let (ref expr, _) = self.parsed.as_ref()?;
-        Some(expr)
+        Some(&self.simplified)
     }
 
     pub fn new(program: &str) -> Result<Self> {
@@ -1953,37 +1948,28 @@ impl Filter {
     }
 
     pub fn with_options(program: &str, lib_dirs: &[String], use_jit: bool) -> Result<Self> {
-        // Try our parser first
-        let parsed = match crate::parser::Parser::parse_with_libs(program, lib_dirs) {
-            Ok(result) => Some((result.expr, result.funcs)),
-            Err(_e) => {
-                // Fall back to libjq for compilation check
-                let mut jq = crate::bytecode::JqState::new()?;
-                let _bc = jq.compile(program)?;
-                None
-            }
-        };
+        let result = crate::parser::Parser::parse_with_libs(program, lib_dirs)?;
+        let parsed = (result.expr, result.funcs);
 
-        // Try JIT compilation for the parsed expression
+        // Try JIT compilation for the parsed expression.
         let mut jit_fn = None;
         let mut jit_compiler = None;
         if use_jit {
-            if let Some((ref expr, ref funcs)) = parsed {
-                if crate::jit::is_jit_compilable_with_funcs(expr, funcs) {
-                    if let Ok(mut compiler) = crate::jit::JitCompiler::new() {
-                        if let Ok(func) = compiler.compile_with_funcs(expr, funcs) {
-                            jit_fn = Some(func);
-                            jit_compiler = Some(Box::new(compiler));
-                        }
+            let (ref expr, ref funcs) = parsed;
+            if crate::jit::is_jit_compilable_with_funcs(expr, funcs) {
+                if let Ok(mut compiler) = crate::jit::JitCompiler::new() {
+                    if let Ok(func) = compiler.compile_with_funcs(expr, funcs) {
+                        jit_fn = Some(func);
+                        jit_compiler = Some(Box::new(compiler));
                     }
                 }
             }
         }
 
-        let simplified = parsed.as_ref().map(|(expr, _)| simplify_expr(expr));
+        let simplified = simplify_expr(&parsed.0);
 
+        let _ = program;
         Ok(Filter {
-            program: program.to_string(),
             parsed,
             simplified,
             jit_fn,
@@ -1997,7 +1983,8 @@ impl Filter {
     /// Call this after determining the input is large enough to justify compilation.
     pub fn compile_jit(&mut self) {
         if self.jit_fn.is_some() { return; }
-        if let Some((ref expr, ref funcs)) = self.parsed {
+        {
+            let (ref expr, ref funcs) = self.parsed;
             if crate::jit::is_jit_compilable_with_funcs(expr, funcs) {
                 if let Ok(mut compiler) = crate::jit::JitCompiler::new() {
                     if let Ok(func) = compiler.compile_with_funcs(expr, funcs) {
@@ -2086,11 +2073,7 @@ impl Filter {
                 _ => false,
             }
         }
-        if let Some((ref expr, _)) = self.parsed {
-            walk(expr)
-        } else {
-            false
-        }
+        walk(&self.parsed.0)
     }
 
     /// Returns true if the filter uses `input` or `inputs` anywhere.
@@ -2127,11 +2110,7 @@ impl Filter {
                 _ => false,
             }
         }
-        if let Some((ref expr, _)) = self.parsed {
-            walk(expr)
-        } else {
-            false
-        }
+        walk(&self.parsed.0)
     }
 
     /// Returns true if this filter is a simple identity (`.`) that passes through input unchanged.
@@ -10785,16 +10764,8 @@ impl Filter {
             return crate::jit::execute_jit(jit_fn, input);
         }
 
-        if let Some((ref expr, ref funcs)) = self.parsed {
-            // Use our own interpreter
-            crate::eval::execute_ir_with_libs(expr, input.clone(), funcs.clone(), self.lib_dirs.clone())
-        } else {
-            // with_options validates every program through libjq's compile, so
-            // reaching execute() with parsed == None means the native parser
-            // rejected something libjq accepted — a coverage gap, not a user
-            // input error. Surface it loudly.
-            bail!("native parser failed to parse program: {}", self.program)
-        }
+        let (ref expr, ref funcs) = self.parsed;
+        crate::eval::execute_ir_with_libs(expr, input.clone(), funcs.clone(), self.lib_dirs.clone())
     }
 
     /// Execute the filter with a callback for each result (avoids Vec allocation).
@@ -10804,52 +10775,40 @@ impl Filter {
             return crate::jit::execute_jit_cb(jit_fn, input, cb);
         }
 
-        if let Some((ref expr, ref funcs)) = self.parsed {
-            // Use cached env to avoid re-allocation per call
-            let env = {
-                let mut cached = self.cached_env.borrow_mut();
-                if let Some(ref env) = *cached {
-                    env.clone()
-                } else {
-                    let env = std::rc::Rc::new(std::cell::RefCell::new(
-                        crate::eval::Env::with_lib_dirs(funcs.clone(), self.lib_dirs.clone())
-                    ));
-                    *cached = Some(env.clone());
-                    env
+        let (ref expr, ref funcs) = self.parsed;
+        // Use cached env to avoid re-allocation per call
+        let env = {
+            let mut cached = self.cached_env.borrow_mut();
+            if let Some(ref env) = *cached {
+                env.clone()
+            } else {
+                let env = std::rc::Rc::new(std::cell::RefCell::new(
+                    crate::eval::Env::with_lib_dirs(funcs.clone(), self.lib_dirs.clone())
+                ));
+                *cached = Some(env.clone());
+                env
+            }
+        };
+        crate::eval::execute_ir_with_env_cb(
+            expr, input.clone(), &env,
+            &mut |val| {
+                if let Value::Error(e) = &val {
+                    eprintln!("jq: error: {}", e.as_str());
+                    return Ok(true);
                 }
-            };
-            return crate::eval::execute_ir_with_env_cb(
-                expr, input.clone(), &env,
-                &mut |val| {
-                    if let Value::Error(e) = &val {
-                        eprintln!("jq: error: {}", e.as_str());
-                        return Ok(true);
-                    }
-                    cb(&val)
-                },
-            );
-        }
-
-        // See execute() — native parser failure at this point is an internal
-        // invariant violation, not a user input error.
-        bail!("native parser failed to parse program: {}", self.program)
+                cb(&val)
+            },
+        )
     }
 
     /// Returns the set of input fields accessed by the filter, if it can be statically determined.
     /// Returns None if the filter might access any/all fields (e.g., identity, iteration).
     pub fn needed_input_fields(&self) -> Option<Vec<String>> {
-        // Use simplified expression (beta-reduced) if available, since the raw parsed
-        // expression has Input references that refer to pipe inputs, not the original input.
+        // Use simplified expression (beta-reduced) since the raw parsed expression
+        // has Input references that refer to pipe inputs, not the original input.
         // After beta-reduction, all Input references refer to the actual top-level input.
-        let expr = if let Some(ref simplified) = self.simplified {
-            simplified
-        } else if let Some((ref expr, _)) = self.parsed {
-            expr
-        } else {
-            return None;
-        };
         let mut fields = Vec::new();
-        if collect_input_fields(expr, &mut fields) {
+        if collect_input_fields(&self.simplified, &mut fields) {
             fields.sort();
             fields.dedup();
             if !fields.is_empty() {
