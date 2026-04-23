@@ -1,37 +1,18 @@
 # Third-Party Licenses
 
 jq-jit is distributed under the [MIT](LICENSE-MIT) or
-[Apache-2.0](LICENSE-APACHE) license (at your option). However, the compiled
-binary statically links or dynamically links against third-party code whose
-own licenses must be preserved when distributing the binary.
+[Apache-2.0](LICENSE-APACHE) license (at your option). The compiled binary
+statically links against third-party Rust code whose own licenses must be
+preserved when distributing the binary.
 
 This file enumerates those third-party components and their licenses. Full
 license texts for each component are available from the upstream source
 repositories linked below, and (for Rust crates) inside each crate's
 distribution on [crates.io](https://crates.io).
 
----
-
-## System libraries (dynamically linked at runtime)
-
-| Component | Version | License | Upstream |
-|-----------|---------|---------|----------|
-| [jq](https://github.com/jqlang/jq) | ≥ 1.7 | MIT | <https://github.com/jqlang/jq/blob/master/COPYING> |
-| [Oniguruma (libonig)](https://github.com/kkos/oniguruma) | runtime dep of jq | BSD-2-Clause | <https://github.com/kkos/oniguruma/blob/master/COPYING> |
-
-### jq
-
-Copyright (C) 2012 Stephen Dolan.
-Licensed under the MIT License. jq-jit's `src/jq_ffi.rs` and `src/bytecode.rs`
-include Rust FFI declarations that mirror data structures from jq's public
-headers (`jv.h`, `jq.h`) and internal bytecode layout. Those portions are
-derivative works of jq and are redistributed under the MIT License.
-
-### Oniguruma
-
-Copyright (c) 2002-2024 K.Kosako.
-Licensed under the BSD 2-Clause License. Oniguruma is used transitively via
-jq's regex support; jq-jit does not call Oniguruma directly.
+Earlier versions of jq-jit also dynamically linked against `libjq` and
+`libonig`; that C dependency was removed along with the FFI layer in the
+1.3.0 line.
 
 ---
 

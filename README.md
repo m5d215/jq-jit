@@ -55,23 +55,10 @@ Download the tarball for your platform from the [releases page](https://github.c
 ### Prerequisites
 
 - Rust toolchain (edition 2021)
-- `libjq` (≥ 1.7) and `libonig` (development libraries)
 
-On macOS (Homebrew):
-
-```bash
-brew install jq oniguruma
-```
-
-On Ubuntu/Debian:
-
-```bash
-sudo apt-get install libonig-dev
-# For jq 1.8+, build from source:
-git clone --depth 1 --branch jq-1.8.1 https://github.com/jqlang/jq.git /tmp/jq
-cd /tmp/jq && git submodule update --init && autoreconf -i
-./configure --prefix=/usr && make -j$(nproc) && sudo make install
-```
+jq-jit has no runtime C dependencies: parsing, evaluation, and JIT codegen
+are all pure Rust. (Earlier versions linked against `libjq` and `libonig`;
+that dependency was removed in the 1.3.0 line.)
 
 ### Build
 
@@ -213,17 +200,13 @@ at your option.
 
 ### Third-party components
 
-When distributed as a compiled binary, jq-jit also includes or links against
-third-party code — most notably [jq](https://github.com/jqlang/jq) (MIT),
-[Oniguruma](https://github.com/kkos/oniguruma) (BSD-2-Clause), and
-[Cranelift](https://cranelift.dev/) (Apache-2.0 WITH LLVM-exception) — whose
-own license terms must be preserved. Because several required dependencies
-(Cranelift, `ryu`, and others) do not offer an MIT option, **a binary
-distribution in practice must comply with Apache-2.0 terms for those
-components, regardless of which option a user selects for jq-jit's own
-code**.
+When distributed as a compiled binary, jq-jit includes third-party Rust
+code — most notably [Cranelift](https://cranelift.dev/) (Apache-2.0 WITH
+LLVM-exception) — whose own license terms must be preserved. Because
+several required dependencies (Cranelift, `ryu`, and others) do not offer
+an MIT option, **a binary distribution in practice must comply with
+Apache-2.0 terms for those components, regardless of which option a user
+selects for jq-jit's own code**.
 
 See [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) for the full
-attribution listing. In addition, the FFI layer (`src/jq_ffi.rs`,
-`src/bytecode.rs`) mirrors structures from jq's headers and is a derivative
-work of jq, redistributed under the MIT License.
+attribution listing.

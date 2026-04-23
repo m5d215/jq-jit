@@ -1,7 +1,8 @@
 //! Recursive descent parser for jq filter expressions.
 //!
-//! Parses jq filter strings directly into our IR (`Expr`), bypassing libjq's
-//! bytecode entirely. This gives us full control over execution.
+//! Parses jq filter strings directly into our IR (`Expr`). This gives us
+//! full control over execution and lets the eval / JIT layers see a
+//! higher-level form than jq's stack-based bytecode.
 
 use std::rc::Rc;
 use anyhow::{Result, bail};
@@ -2838,8 +2839,7 @@ impl Parser {
             }
             "input_line_number" => {
                 // Line tracking is not plumbed through our input pipeline; returning 0
-                // matches jq's behaviour before any line is consumed and, more importantly,
-                // avoids a libjq assertion crash when delegating this builtin.
+                // matches jq's behaviour before any line is consumed.
                 Ok(Expr::Literal(Literal::Num(0.0, None)))
             }
             "fromcsv" | "fromtsv" | "fromcsvh" | "fromtsvh" => {
