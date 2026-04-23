@@ -495,12 +495,9 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     });
                 }
             }
-            // Semantic: to_entries | from_entries → identity
-            if matches!(&sl, Expr::UnaryOp { op: UnaryOp::ToEntries, .. })
-                && matches!(&sr, Expr::UnaryOp { op: UnaryOp::FromEntries, operand } if matches!(operand.as_ref(), Expr::Input))
-            {
-                return Expr::Input;
-            }
+            // NOTE: `to_entries | from_entries` is NOT identity. It's identity only
+            // for string-keyed objects; arrays and other inputs must flow through
+            // `from_entries`'s type check (issue #73). Do not rewrite.
             // NOTE: tojson | fromjson is NOT identity — tojson normalizes nan/inf to null.
             // E.g., {a:nan} | tojson | fromjson → {a:null}. Do not simplify.
             // Semantic: to_entries | map(.key) → keys_unsorted
@@ -2146,16 +2143,17 @@ impl Filter {
     }
 
     fn expr_is_identity(expr: &crate::ir::Expr) -> bool {
-        use crate::ir::{Expr, UnaryOp};
+        use crate::ir::Expr;
         match expr {
             Expr::Input => true,
             Expr::Pipe { left, right } => {
                 // . | X → X, X | . → X (recursive identity simplification)
                 if Self::expr_is_identity(left) { return Self::expr_is_identity(right); }
                 if Self::expr_is_identity(right) { return Self::expr_is_identity(left); }
-                // to_entries | from_entries → identity
-                matches!(left.as_ref(), Expr::UnaryOp { op: UnaryOp::ToEntries, operand } if matches!(operand.as_ref(), Expr::Input))
-                && matches!(right.as_ref(), Expr::UnaryOp { op: UnaryOp::FromEntries, operand } if matches!(operand.as_ref(), Expr::Input))
+                // NOTE: `to_entries | from_entries` is NOT universal identity — it's
+                // identity only for string-keyed objects. Arrays get a type error
+                // on numeric keys, and `[]` round-trips to `{}` (issue #73).
+                false
             }
             _ => false,
         }

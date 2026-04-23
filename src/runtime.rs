@@ -1358,15 +1358,31 @@ fn rt_from_entries(v: &Value) -> Result<Value> {
             for entry in a.iter() {
                 match entry {
                     Value::Obj(o) => {
-                        let key = o.get("key").or_else(|| o.get("Key"))
-                            .or_else(|| o.get("name")).or_else(|| o.get("Name"))
-                            .cloned().unwrap_or(Value::Null);
+                        // jq resolves the key via `.key // .key_ // .Key // .name // .Name`
+                        // — `//` skips null/false — and errors when the resolved key is
+                        // not a string. Matches jq 1.8.1 wording.
+                        let pick_truthy = |name: &str| -> Option<&Value> {
+                            match o.get(name) {
+                                Some(v) if !matches!(v, Value::Null | Value::False) => Some(v),
+                                _ => None,
+                            }
+                        };
+                        let key = pick_truthy("key")
+                            .or_else(|| pick_truthy("key_"))
+                            .or_else(|| pick_truthy("Key"))
+                            .or_else(|| pick_truthy("name"))
+                            .or_else(|| pick_truthy("Name"))
+                            .cloned()
+                            .unwrap_or(Value::Null);
                         let val = o.get("value").or_else(|| o.get("Value"))
                             .cloned().unwrap_or(Value::Null);
                         let key_str = match &key {
                             Value::Str(s) => s.to_string(),
-                            Value::Num(n, _) => crate::value::format_jq_number(*n),
-                            _ => crate::value::value_to_json(&key),
+                            other => bail!(
+                                "Cannot use {} ({}) as object key",
+                                other.type_name(),
+                                crate::value::value_to_json(other),
+                            ),
                         };
                         obj.insert(KeyStr::from(key_str), val);
                     }

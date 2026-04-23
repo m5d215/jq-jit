@@ -3314,3 +3314,38 @@ null
 "\"" | @html
 null
 
+
+# ---------- #73: from_entries type check ----------
+
+from_entries
+[{"key":0,"value":"x"}]
+
+from_entries
+[{"key":0,"value":1},{"key":1,"value":2}]
+
+to_entries | from_entries
+[1,2,3]
+
+to_entries | from_entries
+[]
+
+to_entries | from_entries
+["a","b"]
+
+to_entries | from_entries
+{"a":1,"b":2}
+
+to_entries | map(.value *= 10) | from_entries
+[1,2,3]
+
+from_entries
+[{"key":null,"value":1}]
+
+from_entries
+[{"key":true,"value":1}]
+
+from_entries
+[{"name":"foo","value":1}]
+
+with_entries(.value += 10)
+{"a":1,"b":2}

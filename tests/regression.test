@@ -968,3 +968,28 @@ null
 [-1.0, -2.0]
 null
 [-1.0,-2.0]
+
+# Issue #73: to_entries | from_entries is identity on objects (not arrays)
+to_entries | from_entries
+{"a":1,"b":2}
+{"a":1,"b":2}
+
+# Issue #73: [] round-trips to {} (empty array picks up object type)
+to_entries | from_entries
+[]
+{}
+
+# Issue #73: from_entries on empty array returns {}
+from_entries
+[]
+{}
+
+# Issue #73: name fallback still works when key is missing
+from_entries
+[{"name":"foo","value":1}]
+{"foo":1}
+
+# Issue #73: with_entries on object preserves through round-trip
+with_entries(.value += 10)
+{"a":1}
+{"a":11}
