@@ -1033,3 +1033,28 @@ null
 [.a,.b] | @csv
 {"a":1,"b":2}
 "1,2"
+
+# Issue #77: getpath still works for nested objects
+getpath(["a","b"])
+{"a":{"b":5}}
+5
+
+# Issue #77: getpath on null with string/number key yields null
+getpath(["a"])
+null
+null
+
+# Issue #77: delpaths on missing keys is no-op (does not error)
+delpaths([["b"]])
+{"a":1}
+{"a":1}
+
+# Issue #77: setpath with negative-in-range stays correct
+setpath([-3]; "x")
+[1,2,3]
+["x",2,3]
+
+# Issue #77: delpaths with empty path list is identity
+delpaths([])
+{"a":1,"b":2}
+{"a":1,"b":2}

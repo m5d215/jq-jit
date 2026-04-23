@@ -3421,3 +3421,56 @@ null
 
 [.a,.b] | @tsv
 {"a":{"x":1},"b":2}
+
+# ---------- #77: getpath / setpath / delpaths type + OOB checks ----------
+
+getpath([0,1])
+1
+
+getpath(["a",0])
+1
+
+getpath(["a","b","c"])
+"x"
+
+getpath([null])
+null
+
+getpath(["a","b","c"])
+{"a":1}
+
+getpath([null])
+[1]
+
+getpath([true])
+[1]
+
+setpath([-5]; "x")
+[1,2,3]
+
+setpath([-3]; "x")
+[1,2,3]
+
+setpath([-1]; "x")
+[1,2,3]
+
+setpath([-10]; "x")
+[1,2,3]
+
+delpaths([["a"]])
+1
+
+delpaths([[0]])
+"x"
+
+delpaths([[0],[2]])
+{}
+
+delpaths([["a","b"]])
+{"a":"x"}
+
+delpaths([[0]])
+{}
+
+delpaths([])
+null
