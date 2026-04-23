@@ -3,7 +3,6 @@
 //! Primary path: our own parser + eval (full control, correct behavior).
 //! Fallback: libjq execution (for filters we can't parse yet).
 
-use std::rc::Rc;
 
 use anyhow::{Result, bail};
 
@@ -10790,8 +10789,11 @@ impl Filter {
             // Use our own interpreter
             crate::eval::execute_ir_with_libs(expr, input.clone(), funcs.clone(), self.lib_dirs.clone())
         } else {
-            // Fall back to libjq
-            execute_via_libjq(&self.program, input)
+            // with_options validates every program through libjq's compile, so
+            // reaching execute() with parsed == None means the native parser
+            // rejected something libjq accepted — a coverage gap, not a user
+            // input error. Surface it loudly.
+            bail!("native parser failed to parse program: {}", self.program)
         }
     }
 
@@ -10828,12 +10830,9 @@ impl Filter {
             );
         }
 
-        // Fall back to libjq: collect results and iterate
-        let results = self.execute(input)?;
-        for result in &results {
-            if !cb(result)? { return Ok(false); }
-        }
-        Ok(true)
+        // See execute() — native parser failure at this point is an internal
+        // invariant violation, not a user input error.
+        bail!("native parser failed to parse program: {}", self.program)
     }
 
     /// Returns the set of input fields accessed by the filter, if it can be statically determined.
@@ -10986,84 +10985,3 @@ fn collect_input_fields(expr: &crate::ir::Expr, fields: &mut Vec<String>) -> boo
     }
 }
 
-/// Execute a jq filter using libjq directly.
-fn execute_via_libjq(program: &str, input: &Value) -> Result<Vec<Value>> {
-    use crate::jq_ffi;
-    let mut jq = crate::bytecode::JqState::new()?;
-    let _bc = jq.compile(program)?;
-
-    let input_jv = value_to_jv(input)?;
-
-    unsafe {
-        jq_ffi::jq_start(jq.as_ptr(), input_jv, 0);
-
-        let mut results = Vec::new();
-        loop {
-            let result = jq_ffi::jq_next(jq.as_ptr());
-            if jq_ffi::jv_get_kind(result) == jq_ffi::JvKind::Invalid {
-                let msg = jq_ffi::jv_invalid_get_msg(jq_ffi::jv_copy(result));
-                let kind = jq_ffi::jv_get_kind(msg);
-                if kind == jq_ffi::JvKind::Null {
-                    jq_ffi::jv_free(msg);
-                    jq_ffi::jv_free(result);
-                    break;
-                } else if kind == jq_ffi::JvKind::String {
-                    let cstr = jq_ffi::jv_string_value(msg);
-                    let err = std::ffi::CStr::from_ptr(cstr)
-                        .to_string_lossy()
-                        .into_owned();
-                    jq_ffi::jv_free(msg);
-                    jq_ffi::jv_free(result);
-                    results.push(Value::Error(Rc::new(err)));
-                    continue;
-                } else {
-                    jq_ffi::jv_free(msg);
-                    jq_ffi::jv_free(result);
-                    break;
-                }
-            }
-            let val = crate::value::jv_to_value(result)?;
-            results.push(val);
-        }
-
-        Ok(results)
-    }
-}
-
-/// Convert a Value to a libjq jv using direct FFI constructors (no jv_parse roundtrip).
-fn value_to_jv(v: &Value) -> Result<crate::jq_ffi::Jv> {
-    use crate::jq_ffi;
-    use std::os::raw::c_char;
-
-    unsafe {
-        Ok(match v {
-            Value::Null => jq_ffi::jv_null(),
-            Value::True => jq_ffi::jv_true(),
-            Value::False => jq_ffi::jv_false(),
-            Value::Num(n, _) => jq_ffi::jv_number(*n),
-            Value::Str(s) => {
-                let bytes = s.as_bytes();
-                jq_ffi::jv_string_sized(bytes.as_ptr() as *const c_char, bytes.len() as std::ffi::c_int)
-            }
-            Value::Arr(a) => {
-                let mut arr = jq_ffi::jv_array();
-                for item in a.iter() {
-                    let ji = value_to_jv(item)?;
-                    arr = jq_ffi::jv_array_append(arr, ji);
-                }
-                arr
-            }
-            Value::Obj(o) => {
-                let mut obj = jq_ffi::jv_object();
-                for (k, val) in o.iter() {
-                    let kb = k.as_bytes();
-                    let jk = jq_ffi::jv_string_sized(kb.as_ptr() as *const c_char, kb.len() as std::ffi::c_int);
-                    let jval = value_to_jv(val)?;
-                    obj = jq_ffi::jv_object_set(obj, jk, jval);
-                }
-                obj
-            }
-            Value::Error(_) => bail!("cannot convert Error value to jv"),
-        })
-    }
-}

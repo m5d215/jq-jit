@@ -1832,7 +1832,8 @@ impl Parser {
 
     fn parse_unary(&mut self) -> Result<Expr> {
         if self.eat(&Token::Minus) {
-            let operand = self.parse_postfix()?;
+            // Allow chained unary minus: `- -1`, `- - -1`.
+            let operand = self.parse_unary()?;
             Ok(Expr::Negate { operand: Box::new(operand) })
         } else {
             self.parse_postfix()
