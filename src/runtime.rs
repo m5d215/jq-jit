@@ -81,8 +81,8 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             let msg = crate::value::value_to_json(input);
             bail!("{}", msg);
         }
-        "nan" => Ok(Value::Num(f64::NAN, None)),
-        "infinite" => Ok(Value::Num(f64::INFINITY, None)),
+        "nan" => Ok(Value::number(f64::NAN)),
+        "infinite" => Ok(Value::number(f64::INFINITY)),
         "isinfinite" => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::from_bool(n.is_infinite())),
             _ => Ok(Value::False),
@@ -227,55 +227,55 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         // flatten with depth already handled above
         "pow" => ternary_arg(args, rt_pow),
         "atan2" => ternary_arg(args, |a, b| match (a, b) {
-            (Value::Num(y, _), Value::Num(x, _)) => Ok(Value::Num(y.atan2(*x), None)),
+            (Value::Num(y, _), Value::Num(x, _)) => Ok(Value::number(y.atan2(*x))),
             _ => bail!("atan2 requires numbers"),
         }),
         "log" => unary_op(args, |v| match v {
-            Value::Num(n, _) => Ok(Value::Num(n.ln(), None)),
+            Value::Num(n, _) => Ok(Value::number(n.ln())),
             _ => bail!("log requires number"),
         }),
         "log2" => unary_op(args, |v| match v {
-            Value::Num(n, _) => Ok(Value::Num(n.log2(), None)),
+            Value::Num(n, _) => Ok(Value::number(n.log2())),
             _ => bail!("log2 requires number"),
         }),
         "log10" => unary_op(args, |v| match v {
-            Value::Num(n, _) => Ok(Value::Num(n.log10(), None)),
+            Value::Num(n, _) => Ok(Value::number(n.log10())),
             _ => bail!("log10 requires number"),
         }),
         "exp" => unary_op(args, |v| match v {
-            Value::Num(n, _) => Ok(Value::Num(n.exp(), None)),
+            Value::Num(n, _) => Ok(Value::number(n.exp())),
             _ => bail!("exp requires number"),
         }),
         "exp2" => unary_op(args, |v| match v {
-            Value::Num(n, _) => Ok(Value::Num(2f64.powf(*n), None)),
+            Value::Num(n, _) => Ok(Value::number(2f64.powf(*n))),
             _ => bail!("exp2 requires number"),
         }),
         "sin" => unary_op(args, |v| match v {
-            Value::Num(n, _) => Ok(Value::Num(n.sin(), None)),
+            Value::Num(n, _) => Ok(Value::number(n.sin())),
             _ => bail!("sin requires number"),
         }),
         "cos" => unary_op(args, |v| match v {
-            Value::Num(n, _) => Ok(Value::Num(n.cos(), None)),
+            Value::Num(n, _) => Ok(Value::number(n.cos())),
             _ => bail!("cos requires number"),
         }),
         "tan" => unary_op(args, |v| match v {
-            Value::Num(n, _) => Ok(Value::Num(n.tan(), None)),
+            Value::Num(n, _) => Ok(Value::number(n.tan())),
             _ => bail!("tan requires number"),
         }),
         "asin" => unary_op(args, |v| match v {
-            Value::Num(n, _) => Ok(Value::Num(n.asin(), None)),
+            Value::Num(n, _) => Ok(Value::number(n.asin())),
             _ => bail!("asin requires number"),
         }),
         "acos" => unary_op(args, |v| match v {
-            Value::Num(n, _) => Ok(Value::Num(n.acos(), None)),
+            Value::Num(n, _) => Ok(Value::number(n.acos())),
             _ => bail!("acos requires number"),
         }),
         "atan" => unary_op(args, |v| match v {
-            Value::Num(n, _) => Ok(Value::Num(n.atan(), None)),
+            Value::Num(n, _) => Ok(Value::number(n.atan())),
             _ => bail!("atan requires number"),
         }),
         "cbrt" => unary_op(args, |v| match v {
-            Value::Num(n, _) => Ok(Value::Num(n.cbrt(), None)),
+            Value::Num(n, _) => Ok(Value::number(n.cbrt())),
             _ => bail!("cbrt requires number"),
         }),
         "significand" | "exponent" | "logb" | "nearbyint" | "trunc" | "rint" | "j0" | "j1" => {
@@ -299,7 +299,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                         "j1" => libm::j1(*n),
                         _ => unreachable!(),
                     };
-                    Ok(Value::Num(r, None))
+                    Ok(Value::number(r))
                 }
                 _ => bail!("{} requires number", name),
             })
@@ -329,7 +329,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             // For now, try to find module in common paths
             Ok(Value::Obj(Rc::new({
                 let mut m = new_objmap();
-                m.insert("version".into(), Value::Num(0.1, None));
+                m.insert("version".into(), Value::number(0.1));
                 m.insert("deps".into(), Value::Arr(Rc::new(vec![])));
                 m.insert("defs".into(), Value::Arr(Rc::new(vec![])));
                 m
@@ -370,12 +370,12 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                         let mid = (lo + hi) / 2;
                         let cmp = compare_values(&a[mid as usize], target);
                         match cmp {
-                            std::cmp::Ordering::Equal => return Ok(Value::Num(mid as f64, None)),
+                            std::cmp::Ordering::Equal => return Ok(Value::number(mid as f64)),
                             std::cmp::Ordering::Less => lo = mid + 1,
                             std::cmp::Ordering::Greater => hi = mid - 1,
                         }
                     }
-                    Ok(Value::Num(-(lo as f64) - 1.0, None))
+                    Ok(Value::number(-(lo as f64) - 1.0))
                 }
                 _ => {
                     let ty = input.type_name();
@@ -508,7 +508,7 @@ fn ternary_arg(args: &[Value], f: impl FnOnce(&Value, &Value) -> Result<Value>) 
 
 pub fn rt_add(a: &Value, b: &Value) -> Result<Value> {
     match (a, b) {
-        (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::Num(x + y, None)),
+        (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(x + y)),
         (Value::Str(x), Value::Str(y)) => {
             let mut cs = x.clone();
             cs.push_str(y.as_str());
@@ -538,7 +538,7 @@ pub fn rt_add(a: &Value, b: &Value) -> Result<Value> {
 /// Like rt_add but takes ownership of the left operand for in-place mutation.
 pub fn rt_add_owned(a: Value, b: &Value) -> Result<Value> {
     match (a, b) {
-        (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::Num(x + y, None)),
+        (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(x + y)),
         (Value::Str(mut x), Value::Str(y)) => {
             x.push_str(y.as_str());
             Ok(Value::Str(x))
@@ -585,7 +585,7 @@ pub fn rt_add_owned(a: Value, b: &Value) -> Result<Value> {
 
 pub fn rt_sub(a: &Value, b: &Value) -> Result<Value> {
     match (a, b) {
-        (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::Num(x - y, None)),
+        (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(x - y)),
         (Value::Arr(x), Value::Arr(y)) => {
             let result: Vec<Value> = x.iter()
                 .filter(|v| !y.contains(v))
@@ -603,7 +603,7 @@ pub fn rt_sub(a: &Value, b: &Value) -> Result<Value> {
 
 pub fn rt_mul(a: &Value, b: &Value) -> Result<Value> {
     match (a, b) {
-        (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::Num(x * y, None)),
+        (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(x * y)),
         (Value::Str(s), Value::Num(n, _)) | (Value::Num(n, _), Value::Str(s)) => {
             if n.is_nan() || *n < 0.0 {
                 Ok(Value::Null)
@@ -649,7 +649,7 @@ pub fn rt_div(a: &Value, b: &Value) -> Result<Value> {
             if *y == 0.0 {
                 bail!("{} and {} cannot be divided because the divisor is zero", errdesc(a), errdesc(b));
             }
-            Ok(Value::Num(x / y, None))
+            Ok(Value::number(x / y))
         }
         (Value::Str(s), Value::Str(sep)) => {
             // String division = split
@@ -671,7 +671,7 @@ pub fn rt_mod(a: &Value, b: &Value) -> Result<Value> {
         (Value::Num(x, _), Value::Num(y, _)) => {
             // NaN inputs → NaN output
             if x.is_nan() || y.is_nan() {
-                return Ok(Value::Num(f64::NAN, None));
+                return Ok(Value::number(f64::NAN));
             }
             if *y == 0.0 {
                 bail!("{} and {} cannot be divided (remainder) because the divisor is zero", errdesc(a), errdesc(b));
@@ -684,9 +684,9 @@ pub fn rt_mod(a: &Value, b: &Value) -> Result<Value> {
             }
             // Avoid overflow for i64::MIN % -1
             if xi == i64::MIN && yi == -1 {
-                Ok(Value::Num(0.0, None))
+                Ok(Value::number(0.0))
             } else {
-                Ok(Value::Num((xi % yi) as f64, None))
+                Ok(Value::number((xi % yi) as f64))
             }
         }
         _ => bail!(
@@ -812,7 +812,7 @@ fn rt_length(v: &Value) -> Result<Value> {
 
 fn rt_utf8bytelength(v: &Value) -> Result<Value> {
     match v {
-        Value::Str(s) => Ok(Value::Num(s.len() as f64, None)),
+        Value::Str(s) => Ok(Value::number(s.len() as f64)),
         _ => bail!("{} ({}) only strings have UTF-8 byte length", v.type_name(), crate::value::value_to_json(v)),
     }
 }
@@ -831,7 +831,7 @@ fn rt_keys(v: &Value, sorted: bool) -> Result<Value> {
             Ok(Value::Arr(Rc::new(keys)))
         }
         Value::Arr(a) => {
-            let keys: Vec<Value> = (0..a.len()).map(|i| Value::Num(i as f64, None)).collect();
+            let keys: Vec<Value> = (0..a.len()).map(|i| Value::number(i as f64)).collect();
             Ok(Value::Arr(Rc::new(keys)))
         }
         _ => bail!("{} has no keys", v.type_name()),
@@ -988,7 +988,7 @@ fn rt_add_all(v: &Value) -> Result<Value> {
                         }
                     }
                     if all_num {
-                        return Ok(Value::Num(sum, None));
+                        return Ok(Value::number(sum));
                     }
                 }
                 Value::Arr(_) => {
@@ -1108,21 +1108,21 @@ fn rt_all(v: &Value) -> Result<Value> {
 
 fn rt_floor(v: &Value) -> Result<Value> {
     match v {
-        Value::Num(n, _) => Ok(Value::Num(n.floor(), None)),
+        Value::Num(n, _) => Ok(Value::number(n.floor())),
         _ => bail!("{} cannot be floored", v.type_name()),
     }
 }
 
 fn rt_ceil(v: &Value) -> Result<Value> {
     match v {
-        Value::Num(n, _) => Ok(Value::Num(n.ceil(), None)),
+        Value::Num(n, _) => Ok(Value::number(n.ceil())),
         _ => bail!("{} cannot be ceiled", v.type_name()),
     }
 }
 
 fn rt_round(v: &Value) -> Result<Value> {
     match v {
-        Value::Num(n, _) => Ok(Value::Num(n.round(), None)),
+        Value::Num(n, _) => Ok(Value::number(n.round())),
         _ => bail!("{} cannot be rounded", v.type_name()),
     }
 }
@@ -1131,7 +1131,7 @@ fn rt_fabs(v: &Value) -> Result<Value> {
     match v {
         Value::Num(n, repr) => {
             if *n >= 0.0 { Ok(Value::Num(*n, repr.clone())) }
-            else { Ok(Value::Num(n.abs(), None)) }
+            else { Ok(Value::number(n.abs())) }
         }
         _ => bail!("{} ({}) number required", v.type_name(), crate::value::value_to_json(v)),
     }
@@ -1141,7 +1141,7 @@ fn rt_abs(v: &Value) -> Result<Value> {
     match v {
         Value::Num(n, repr) => {
             if *n >= 0.0 { Ok(Value::Num(*n, repr.clone())) }
-            else { Ok(Value::Num(n.abs(), None)) }
+            else { Ok(Value::number(n.abs())) }
         }
         Value::Str(_) | Value::Arr(_) | Value::Obj(_) => Ok(v.clone()),
         _ => {
@@ -1152,7 +1152,7 @@ fn rt_abs(v: &Value) -> Result<Value> {
 
 fn rt_sqrt(v: &Value) -> Result<Value> {
     match v {
-        Value::Num(n, _) => Ok(Value::Num(n.sqrt(), None)),
+        Value::Num(n, _) => Ok(Value::number(n.sqrt())),
         _ => bail!("{} is not a number", v.type_name()),
     }
 }
@@ -1179,7 +1179,7 @@ fn rt_tonumber(v: &Value) -> Result<Value> {
             // Strip leading '+' for compatibility with jq
             let parse_str = s_ref.strip_prefix('+').unwrap_or(s_ref);
             match fast_float::parse(parse_str) {
-                Ok(n) => Ok(Value::Num(n, None)),
+                Ok(n) => Ok(Value::number(n)),
                 Err(_) => bail!("Invalid numeric literal: {}", crate::value::value_to_json(v)),
             }
         }
@@ -1255,12 +1255,12 @@ fn rt_explode(v: &Value) -> Result<Value> {
                 // ASCII fast path: byte value == codepoint, pre-allocate exact size
                 let mut codepoints = Vec::with_capacity(str.len());
                 for &b in str.as_bytes() {
-                    codepoints.push(Value::Num(b as f64, None));
+                    codepoints.push(Value::number(b as f64));
                 }
                 Ok(Value::Arr(Rc::new(codepoints)))
             } else {
                 let codepoints: Vec<Value> = str.chars()
-                    .map(|c| Value::Num(c as u32 as f64, None))
+                    .map(|c| Value::number(c as u32 as f64))
                     .collect();
                 Ok(Value::Arr(Rc::new(codepoints)))
             }
@@ -1337,7 +1337,7 @@ fn rt_to_entries(v: &Value) -> Result<Value> {
         Value::Arr(a) => {
             let entries: Vec<Value> = a.iter().enumerate().map(|(i, v)| {
                 let mut entry = new_objmap();
-                entry.insert("key".into(), Value::Num(i as f64, None));
+                entry.insert("key".into(), Value::number(i as f64));
                 entry.insert("value".into(), v.clone());
                 Value::Obj(Rc::new(entry))
             }).collect();
@@ -1530,7 +1530,7 @@ fn rt_execv(input: &Value, cmd: &Value) -> Result<Value> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let code = output.status.code().unwrap_or(-1);
     let mut obj = new_objmap();
-    obj.insert(KeyStr::const_new("exitcode"), Value::Num(code as f64, None));
+    obj.insert(KeyStr::const_new("exitcode"), Value::number(code as f64));
     obj.insert(KeyStr::const_new("stdout"), Value::from_str(stdout.trim_end_matches('\n')));
     obj.insert(KeyStr::const_new("stderr"), Value::from_str(stderr.trim_end_matches('\n')));
     Ok(Value::Obj(Rc::new(obj)))
@@ -1652,12 +1652,12 @@ fn rt_str_index(v: &Value, target: &Value, is_rindex: bool) -> Result<Value> {
             if s.is_ascii() && t.is_ascii() {
                 if is_rindex {
                     return Ok(match s.rfind(t.as_str()) {
-                        Some(pos) => Value::Num(pos as f64, None),
+                        Some(pos) => Value::number(pos as f64),
                         None => Value::Null,
                     });
                 } else {
                     return Ok(match s.find(t.as_str()) {
-                        Some(pos) => Value::Num(pos as f64, None),
+                        Some(pos) => Value::number(pos as f64),
                         None => Value::Null,
                     });
                 }
@@ -1668,14 +1668,14 @@ fn rt_str_index(v: &Value, target: &Value, is_rindex: bool) -> Result<Value> {
             if is_rindex {
                 for i in (0..chars.len()).rev() {
                     if i + tchars.len() <= chars.len() && chars[i..i+tchars.len()] == tchars[..] {
-                        return Ok(Value::Num(i as f64, None));
+                        return Ok(Value::number(i as f64));
                     }
                 }
                 Ok(Value::Null)
             } else {
                 for i in 0..chars.len() {
                     if i + tchars.len() <= chars.len() && chars[i..i+tchars.len()] == tchars[..] {
-                        return Ok(Value::Num(i as f64, None));
+                        return Ok(Value::number(i as f64));
                     }
                 }
                 Ok(Value::Null)
@@ -1685,14 +1685,14 @@ fn rt_str_index(v: &Value, target: &Value, is_rindex: bool) -> Result<Value> {
             if is_rindex {
                 for (i, item) in a.iter().enumerate().rev() {
                     if values_equal(item, target) {
-                        return Ok(Value::Num(i as f64, None));
+                        return Ok(Value::number(i as f64));
                     }
                 }
                 Ok(Value::Null)
             } else {
                 for (i, item) in a.iter().enumerate() {
                     if values_equal(item, target) {
-                        return Ok(Value::Num(i as f64, None));
+                        return Ok(Value::number(i as f64));
                     }
                 }
                 Ok(Value::Null)
@@ -1720,7 +1720,7 @@ fn rt_indices(v: &Value, target: &Value) -> Result<Value> {
                     let mut pos = 0;
                     while pos < sb.len() {
                         if let Some(found) = memchr::memchr(needle, &sb[pos..]) {
-                            indices.push(Value::Num((pos + found) as f64, None));
+                            indices.push(Value::number((pos + found) as f64));
                             pos += found + 1;
                         } else {
                             break;
@@ -1729,7 +1729,7 @@ fn rt_indices(v: &Value, target: &Value) -> Result<Value> {
                 } else if tlen <= sb.len() {
                     for i in 0..=sb.len() - tlen {
                         if &sb[i..i+tlen] == tb {
-                            indices.push(Value::Num(i as f64, None));
+                            indices.push(Value::number(i as f64));
                         }
                     }
                 }
@@ -1740,7 +1740,7 @@ fn rt_indices(v: &Value, target: &Value) -> Result<Value> {
             let tchars: Vec<char> = t.chars().collect();
             for i in 0..chars.len() {
                 if i + tchars.len() <= chars.len() && chars[i..i+tchars.len()] == tchars[..] {
-                    indices.push(Value::Num(i as f64, None));
+                    indices.push(Value::number(i as f64));
                 }
             }
             Ok(Value::Arr(Rc::new(indices)))
@@ -1758,7 +1758,7 @@ fn rt_indices(v: &Value, target: &Value) -> Result<Value> {
                         if !values_equal(&a[i+j], &sub[j]) { matches = false; break; }
                     }
                     if matches {
-                        indices.push(Value::Num(i as f64, None));
+                        indices.push(Value::number(i as f64));
                     }
                 }
             }
@@ -1769,7 +1769,7 @@ fn rt_indices(v: &Value, target: &Value) -> Result<Value> {
             let mut indices = Vec::new();
             for (i, item) in a.iter().enumerate() {
                 if values_equal(item, target) {
-                    indices.push(Value::Num(i as f64, None));
+                    indices.push(Value::number(i as f64));
                 }
             }
             Ok(Value::Arr(Rc::new(indices)))
@@ -1780,7 +1780,7 @@ fn rt_indices(v: &Value, target: &Value) -> Result<Value> {
 
 fn rt_pow(a: &Value, b: &Value) -> Result<Value> {
     match (a, b) {
-        (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::Num(x.powf(*y), None)),
+        (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(x.powf(*y))),
         _ => bail!("pow requires numbers"),
     }
 }
@@ -2169,8 +2169,8 @@ fn build_match_obj(m: &regex::Match, caps: Option<&regex::Captures>, capture_nam
     let char_offset = s[..byte_offset].chars().count();
     let char_length = m.as_str().chars().count();
     let mut result = new_objmap();
-    result.insert("offset".into(), Value::Num(char_offset as f64, None));
-    result.insert("length".into(), Value::Num(char_length as f64, None));
+    result.insert("offset".into(), Value::number(char_offset as f64));
+    result.insert("length".into(), Value::number(char_length as f64));
     result.insert("string".into(), Value::from_str(m.as_str()));
     let mut captures_vec = Vec::new();
     if let Some(caps) = caps {
@@ -2184,15 +2184,15 @@ fn build_match_obj(m: &regex::Match, caps: Option<&regex::Captures>, capture_nam
                 let cap_char_offset = s[..cap_byte_offset].chars().count();
                 let cap_char_length = cap.as_str().chars().count();
                 let mut c = new_objmap();
-                c.insert("offset".into(), Value::Num(cap_char_offset as f64, None));
-                c.insert("length".into(), Value::Num(cap_char_length as f64, None));
+                c.insert("offset".into(), Value::number(cap_char_offset as f64));
+                c.insert("length".into(), Value::number(cap_char_length as f64));
                 c.insert("string".into(), Value::from_str(cap.as_str()));
                 c.insert("name".into(), name_val);
                 captures_vec.push(Value::Obj(Rc::new(c)));
             } else {
                 let mut c = new_objmap();
-                c.insert("offset".into(), Value::Num(-1.0, None));
-                c.insert("length".into(), Value::Num(0.0, None));
+                c.insert("offset".into(), Value::number(-1.0));
+                c.insert("length".into(), Value::number(0.0));
                 c.insert("string".into(), Value::Null);
                 c.insert("name".into(), name_val);
                 captures_vec.push(Value::Obj(Rc::new(c)));
@@ -2416,14 +2416,14 @@ fn libc_gmtime(secs: i64) -> Value {
     // But test expects [2015,2,5,23,51,47,4,63] for epoch 1425599507
     // That matches: year=2015, mon=2(march, 0-indexed), mday=5, hour=23, min=51, sec=47, wday=4(thu), yday=63
     Value::Arr(Rc::new(vec![
-        Value::Num((result.tm_year + 1900) as f64, None),
-        Value::Num(result.tm_mon as f64, None),
-        Value::Num(result.tm_mday as f64, None),
-        Value::Num(result.tm_hour as f64, None),
-        Value::Num(result.tm_min as f64, None),
-        Value::Num(result.tm_sec as f64, None),
-        Value::Num(result.tm_wday as f64, None),
-        Value::Num(result.tm_yday as f64, None),
+        Value::number((result.tm_year + 1900) as f64),
+        Value::number(result.tm_mon as f64),
+        Value::number(result.tm_mday as f64),
+        Value::number(result.tm_hour as f64),
+        Value::number(result.tm_min as f64),
+        Value::number(result.tm_sec as f64),
+        Value::number(result.tm_wday as f64),
+        Value::number(result.tm_yday as f64),
     ]))
 }
 
@@ -2436,14 +2436,14 @@ fn rt_localtime(v: &Value) -> Result<Value> {
             let mut result: tm = unsafe { std::mem::zeroed() };
             unsafe { localtime_r(&t, &mut result) };
             Ok(Value::Arr(Rc::new(vec![
-                Value::Num((result.tm_year + 1900) as f64, None),
-                Value::Num(result.tm_mon as f64, None),
-                Value::Num(result.tm_mday as f64, None),
-                Value::Num(result.tm_hour as f64, None),
-                Value::Num(result.tm_min as f64, None),
-                Value::Num(result.tm_sec as f64, None),
-                Value::Num(result.tm_wday as f64, None),
-                Value::Num(result.tm_yday as f64, None),
+                Value::number((result.tm_year + 1900) as f64),
+                Value::number(result.tm_mon as f64),
+                Value::number(result.tm_mday as f64),
+                Value::number(result.tm_hour as f64),
+                Value::number(result.tm_min as f64),
+                Value::number(result.tm_sec as f64),
+                Value::number(result.tm_wday as f64),
+                Value::number(result.tm_yday as f64),
             ])))
         }
         _ => bail!("localtime requires number"),
@@ -2476,7 +2476,7 @@ fn rt_mktime(v: &Value) -> Result<Value> {
             let mut t = time_arr_to_tm(a)?;
             // Use timegm for UTC
             let result = unsafe { libc::timegm(&mut t) };
-            Ok(Value::Num(result as f64, None))
+            Ok(Value::number(result as f64))
         }
         Value::Arr(a) if !a.is_empty() => {
             if let Value::Str(_) = &a[0] {
@@ -2541,14 +2541,14 @@ fn rt_strptime(v: &Value, fmt: &Value) -> Result<Value> {
             t.tm_wday = t2.tm_wday;
             t.tm_yday = t2.tm_yday;
             Ok(Value::Arr(Rc::new(vec![
-                Value::Num((t.tm_year + 1900) as f64, None),
-                Value::Num(t.tm_mon as f64, None),
-                Value::Num(t.tm_mday as f64, None),
-                Value::Num(t.tm_hour as f64, None),
-                Value::Num(t.tm_min as f64, None),
-                Value::Num(t.tm_sec as f64, None),
-                Value::Num(t.tm_wday as f64, None),
-                Value::Num(t.tm_yday as f64, None),
+                Value::number((t.tm_year + 1900) as f64),
+                Value::number(t.tm_mon as f64),
+                Value::number(t.tm_mday as f64),
+                Value::number(t.tm_hour as f64),
+                Value::number(t.tm_min as f64),
+                Value::number(t.tm_sec as f64),
+                Value::number(t.tm_wday as f64),
+                Value::number(t.tm_yday as f64),
             ])))
         }
         _ => bail!("strptime requires string and format"),
@@ -2621,7 +2621,7 @@ fn rt_fromisodate(v: &Value) -> Result<Value> {
             .single()
             .ok_or_else(|| anyhow::anyhow!("ambiguous local time: {}", s))?;
         let epoch = local_dt.timestamp();
-        return Ok(Value::Num(epoch as f64, None));
+        return Ok(Value::number(epoch as f64));
     }
 
     bail!("fromisodate: invalid ISO 8601 date string: {}", s)
@@ -2629,10 +2629,10 @@ fn rt_fromisodate(v: &Value) -> Result<Value> {
 
 fn epoch_with_frac(epoch: i64, nanos: u32) -> Value {
     if nanos == 0 {
-        Value::Num(epoch as f64, None)
+        Value::number(epoch as f64)
     } else {
         let frac = epoch as f64 + nanos as f64 / 1_000_000_000.0;
-        Value::Num(frac, None)
+        Value::number(frac)
     }
 }
 

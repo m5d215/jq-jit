@@ -563,20 +563,20 @@ impl Value {
 
     pub fn length(&self) -> Result<Value> {
         match self {
-            Value::Null => Ok(Value::Num(0.0, None)),
+            Value::Null => Ok(Value::number(0.0)),
             Value::True | Value::False => {
                 bail!("{} ({}) has no length", self.type_name(), crate::value::value_to_json(self))
             }
             Value::Num(n, repr) => {
                 if *n >= 0.0 { Ok(Value::Num(*n, repr.clone())) }
-                else { Ok(Value::Num(n.abs(), None)) }
+                else { Ok(Value::number(n.abs())) }
             }
             Value::Str(s) => {
                 // jq counts Unicode codepoints
-                Ok(Value::Num(s.chars().count() as f64, None))
+                Ok(Value::number(s.chars().count() as f64))
             }
-            Value::Arr(a) => Ok(Value::Num(a.len() as f64, None)),
-            Value::Obj(o) => Ok(Value::Num(o.len() as f64, None)),
+            Value::Arr(a) => Ok(Value::number(a.len() as f64)),
+            Value::Obj(o) => Ok(Value::number(o.len() as f64)),
             Value::Error(_) => bail!("error has no length"),
         }
     }
@@ -3639,7 +3639,7 @@ fn parse_json_value(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)
     match b[pos] {
         b'n' => {
             if b.get(pos..pos+4) == Some(b"null") { Ok((Value::Null, pos + 4)) }
-            else if b.get(pos..pos+3) == Some(b"nan") { Ok((Value::Num(f64::NAN, None), pos + 3)) }
+            else if b.get(pos..pos+3) == Some(b"nan") { Ok((Value::number(f64::NAN), pos + 3)) }
             else { bail!("Invalid JSON at position {}", pos) }
         }
         b't' => {
@@ -3651,11 +3651,11 @@ fn parse_json_value(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)
             else { bail!("Invalid JSON at position {}", pos) }
         }
         b'N' => {
-            if b.get(pos..pos+3) == Some(b"NaN") { Ok((Value::Num(f64::NAN, None), pos + 3)) }
+            if b.get(pos..pos+3) == Some(b"NaN") { Ok((Value::number(f64::NAN), pos + 3)) }
             else { bail!("Invalid JSON at position {}", pos) }
         }
         b'I' => {
-            if b.get(pos..pos+8) == Some(b"Infinity") { Ok((Value::Num(f64::INFINITY, None), pos + 8)) }
+            if b.get(pos..pos+8) == Some(b"Infinity") { Ok((Value::number(f64::INFINITY), pos + 8)) }
             else { bail!("Invalid JSON at position {}", pos) }
         }
         b'"' => parse_json_string(b, pos),
@@ -3672,21 +3672,21 @@ fn parse_json_value(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)
                     k += 1;
                 }
                 if (k >= b.len() || (b[k] != b'.' && b[k] != b'e' && b[k] != b'E')) && (k - j) <= 15 {
-                    return Ok((Value::Num(n as f64, None), k));
+                    return Ok((Value::number(n as f64), k));
                 }
                 // Has decimal/exponent — fall through to full parser
                 parse_json_number(b, pos)
             }
             // -Infinity, -NaN, or other
-            else if b.get(pos..pos+9) == Some(b"-Infinity") { Ok((Value::Num(f64::NEG_INFINITY, None), pos + 9)) }
-            else if b.get(pos..pos+4) == Some(b"-NaN") { Ok((Value::Num(f64::NAN, None), pos + 4)) }
+            else if b.get(pos..pos+9) == Some(b"-Infinity") { Ok((Value::number(f64::NEG_INFINITY), pos + 9)) }
+            else if b.get(pos..pos+4) == Some(b"-NaN") { Ok((Value::number(f64::NAN), pos + 4)) }
             else { parse_json_number(b, pos) }
         }
         b'0' => {
             // Fast path for zero or numbers starting with 0 (must be just "0" unless "0." etc)
             let j = pos + 1;
             if j >= b.len() || (b[j] != b'.' && b[j] != b'e' && b[j] != b'E' && !b[j].is_ascii_digit()) {
-                Ok((Value::Num(0.0, None), j))
+                Ok((Value::number(0.0), j))
             } else {
                 parse_json_number(b, pos)
             }
@@ -3700,7 +3700,7 @@ fn parse_json_value(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)
                 j += 1;
             }
             if (j >= b.len() || (b[j] != b'.' && b[j] != b'e' && b[j] != b'E')) && (j - pos) <= 15 {
-                Ok((Value::Num(n as f64, None), j))
+                Ok((Value::number(n as f64), j))
             } else {
                 parse_json_number(b, pos)
             }
@@ -3867,7 +3867,7 @@ fn parse_json_number(b: &[u8], pos: usize) -> Result<(Value, usize)> {
             n = n * 10 + (c - b'0') as i64;
         }
         if is_neg { n = -n; }
-        return Ok((Value::Num(n as f64, None), i));
+        return Ok((Value::number(n as f64), i));
     }
     // Safety: number bytes are ASCII digits/signs/dots, always valid UTF-8
     let num_str = unsafe { std::str::from_utf8_unchecked(&b[pos..i]) };
@@ -3877,7 +3877,7 @@ fn parse_json_number(b: &[u8], pos: usize) -> Result<(Value, usize)> {
     if !has_exp && has_dot && (i - digits_start) <= 16 {
         let last = b[i - 1];
         if last != b'0' && (b[digits_start] != b'0' || digits_start + 1 == i || b[digits_start + 1] == b'.') {
-            return Ok((Value::Num(n, None), i));
+            return Ok((Value::number(n), i));
         }
         // Integer value with decimal notation (e.g., "1.0", "2.00") — format_jq_number would
         // return just the integer, so repr always differs. Skip format call.
@@ -4175,7 +4175,7 @@ impl<'a> JqFromJsonParser<'a> {
                 Err(_) => return Err("Invalid numeric literal"),
             };
             match parse_jq_strtod(s) {
-                Some(n) => self.push_value(Value::Num(n, None), false)?,
+                Some(n) => self.push_value(Value::number(n), false)?,
                 None => return Err("Invalid numeric literal"),
             }
         }

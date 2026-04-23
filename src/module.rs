@@ -147,7 +147,7 @@ fn parse_simple_value(s: &str) -> Value {
             Value::from_str(&s[1..s.len()-1])
         }
         _ if s.parse::<f64>().is_ok() => {
-            Value::Num(s.parse().unwrap(), None)
+            Value::number(s.parse().unwrap())
         }
         _ => Value::Null,
     }
