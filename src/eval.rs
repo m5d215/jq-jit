@@ -2897,7 +2897,7 @@ pub fn eval(
             let mut obj = crate::value::new_objmap();
             obj.insert("file".into(), Value::from_str(file));
             obj.insert("line".into(), Value::number(*line as f64));
-            cb(Value::Obj(Rc::new(obj)))
+            cb(Value::object_from_map(obj))
         }
 
         Expr::Env => {
@@ -2908,7 +2908,7 @@ pub fn eval(
             if cached.is_none() {
                 let mut obj = crate::value::new_objmap();
                 for (k, v) in std::env::vars() { obj.insert(KeyStr::from(k), Value::from_str(&v)); }
-                *cached = Some(Value::Obj(Rc::new(obj)));
+                *cached = Some(Value::object_from_map(obj));
             }
             cb(cached.as_ref().unwrap().clone())
         }
@@ -3186,11 +3186,11 @@ fn eval_object_construct(pairs: &[(Expr, Expr)], input: Value, env: &EnvRef, cb:
         };
         obj.insert(ks, vv);
     }
-    cb(Value::Obj(Rc::new(obj)))
+    cb(Value::object_from_map(obj))
 }
 
 fn eval_obj_pairs(pairs: &[(Expr, Expr)], idx: usize, cur: crate::value::ObjMap, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
-    if idx >= pairs.len() { return cb(Value::Obj(Rc::new(cur))); }
+    if idx >= pairs.len() { return cb(Value::object_from_map(cur)); }
     let (ke, ve) = &pairs[idx];
     eval(ke, input.clone(), env, &mut |kv| {
         let ks = object_key_from_value(&kv)?;
@@ -3968,12 +3968,12 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 let ti = match &to_val { Value::Num(n, _) => { let i = n.ceil() as i64; if i < 0 { (len + i).max(0) } else { i.min(len) } }, Value::Null => len, _ => len };
                 // Return a special path that indicates slicing
                 let mut p = match &bp { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
-                p.push(Value::Obj(Rc::new({
+                p.push(Value::object_from_map({
                     let mut m = crate::value::new_objmap();
                     m.insert("start".into(), Value::number(fi as f64));
                     m.insert("end".into(), Value::number(ti as f64));
                     m
-                })));
+                }));
                 cb(Value::Arr(Rc::new(p)))
             })
         }
@@ -4247,7 +4247,7 @@ fn eval_fromcsvh_auto(input: &Value, is_tsv: bool, cb: &mut dyn FnMut(Value) -> 
                 obj.insert(KeyStr::from(key.as_str()), Value::from_str(field));
             }
         }
-        cb(Value::Obj(Rc::new(obj)))?;
+        cb(Value::object_from_map(obj))?;
     }
     Ok(true)
 }
@@ -4278,7 +4278,7 @@ fn eval_fromcsvh_with_headers(input: &Value, headers_val: &Value, is_tsv: bool, 
                 obj.insert(KeyStr::from(key.as_str()), Value::from_str(field));
             }
         }
-        cb(Value::Obj(Rc::new(obj)))?;
+        cb(Value::object_from_map(obj))?;
     }
     Ok(true)
 }
@@ -4498,7 +4498,7 @@ fn walk_value_cb(f: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value)
                     new_obj.insert(k.clone(), val);
                 }
             }
-            let rebuilt = Value::Obj(Rc::new(new_obj));
+            let rebuilt = Value::object_from_map(new_obj);
             eval(f, rebuilt, env, cb)
         }
         _ => {
@@ -4530,7 +4530,7 @@ fn walk_value_single(f: &Expr, input: Value, env: &EnvRef, out: &mut Vec<Value>)
                     new_obj.insert(k.clone(), val);
                 }
             }
-            let rebuilt = Value::Obj(Rc::new(new_obj));
+            let rebuilt = Value::object_from_map(new_obj);
             eval(f, rebuilt, env, &mut |val| {
                 out.push(val);
                 Ok(true)

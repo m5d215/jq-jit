@@ -17,17 +17,9 @@
 # Rationale for each currently-allowed file is below; each entry should
 # eventually be zeroed out:
 #
-# - src/value.rs: the factories themselves live here; also JSON parser
-#   construction where keys come pre-deduped by the parser's lookahead.
-# - src/module.rs: module-loader fixed maps with compile-time-known
-#   unique keys.
-# - src/runtime.rs / src/eval.rs / src/jit.rs: execution-path sites
-#   that currently rebuild objects after dedup helpers or from
-#   insert-based maps. Converting these to `object_from_map(map)` is
-#   mechanical but noisy; do it in follow-up PRs.
+# - src/value.rs: the factories themselves live here. The four remaining
+#   construction sites are the factory bodies (`from_pairs`,
+#   `object_from_pairs`, `object_from_normalized_pairs`, `object_from_map`)
+#   and cannot be routed through themselves without recursing.
 
-src/value.rs      8
-src/module.rs     4
-src/eval.rs       9
-src/jit.rs        6
-src/runtime.rs    24
+src/value.rs      4
