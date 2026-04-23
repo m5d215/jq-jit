@@ -943,3 +943,118 @@ until(. > 2; . + 10)
 from_entries
 {}
 {}
+
+# Issue #75: unary minus preserves literal repr (".0" survives)
+-1.0
+null
+-1.0
+
+# Issue #75: tojson on literal preserves repr
+1.0 | tojson
+null
+"1.0"
+
+# Issue #75: tojson on scientific literal preserves normalized form
+1e10 | tojson
+null
+"1E+10"
+
+# Issue #75: tojson on 0.0 preserves repr
+0.0 | tojson
+null
+"0.0"
+
+# Issue #75: negated literal inside array keeps repr
+[-1.0, -2.0]
+null
+[-1.0,-2.0]
+
+# Issue #73: to_entries | from_entries is identity on objects (not arrays)
+to_entries | from_entries
+{"a":1,"b":2}
+{"a":1,"b":2}
+
+# Issue #73: [] round-trips to {} (empty array picks up object type)
+to_entries | from_entries
+[]
+{}
+
+# Issue #73: from_entries on empty array returns {}
+from_entries
+[]
+{}
+
+# Issue #73: name fallback still works when key is missing
+from_entries
+[{"name":"foo","value":1}]
+{"foo":1}
+
+# Issue #73: with_entries on object preserves through round-trip
+with_entries(.value += 10)
+{"a":1}
+{"a":11}
+
+# Issue #76: all-fail destructure alt raises last attempt's error
+. as [$a] ?// {b: $a} | $a
+[1,2]
+1
+
+# Issue #76: pattern succeeds on object matching destructure
+. as [$a] ?// {b: $a} | $a
+{"b":9}
+9
+
+# Issue #78: [range(N)] | .[0] returns indexed element, not the generator
+[range(3)] | .[0]
+null
+0
+
+# Issue #78: [range(N)] | .[-1] returns the last element
+[range(3)] | .[-1]
+null
+2
+
+# Issue #78: parenthesized index also works
+[range(3)] | (.[0])
+null
+0
+
+# Issue #78: larger range returns correct endpoint
+[range(100)] | .[-1]
+null
+99
+
+# Issue #79: scalar-only row still works for @csv
+@csv
+[1,2,3]
+"1,2,3"
+
+# Issue #79: scalar-only row still works for @tsv (tab separator)
+[.a,.b] | @csv
+{"a":1,"b":2}
+"1,2"
+
+# Issue #77: getpath still works for nested objects
+getpath(["a","b"])
+{"a":{"b":5}}
+5
+
+# Issue #77: getpath on null with string/number key yields null
+getpath(["a"])
+null
+null
+
+# Issue #77: delpaths on missing keys is no-op (does not error)
+delpaths([["b"]])
+{"a":1}
+{"a":1}
+
+# Issue #77: setpath with negative-in-range stays correct
+setpath([-3]; "x")
+[1,2,3]
+["x",2,3]
+
+# Issue #77: delpaths with empty path list is identity
+delpaths([])
+{"a":1,"b":2}
+{"a":1,"b":2}

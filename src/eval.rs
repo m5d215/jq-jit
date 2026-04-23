@@ -1070,7 +1070,7 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
         Expr::Negate { operand } => {
             let val = eval_one(operand, input, env)?;
             match val {
-                Value::Num(n, _) => Ok(Value::number(-n)),
+                Value::Num(n, repr) => Ok(Value::number_opt(-n, crate::value::Value::negate_repr(repr))),
                 _ => Err(()),
             }
         }
@@ -2266,7 +2266,7 @@ pub fn eval(
         Expr::Negate { operand } => {
             eval(operand, input, env, &mut |val| {
                 match &val {
-                    Value::Num(n, _) => cb(Value::number(-n)),
+                    Value::Num(n, repr) => cb(Value::number_opt(-n, crate::value::Value::negate_repr(repr.clone()))),
                     _ => {
                         bail!("{} cannot be negated", crate::runtime::errdesc_pub(&val))
                     }
@@ -3244,6 +3244,12 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
                     Value::Num(n, _) => {
                         crate::value::push_jq_number_str(&mut buf, *n);
                     }
+                    // jq rejects arrays/objects as row elements (issue #79).
+                    Value::Arr(_) | Value::Obj(_) => bail!(
+                        "{} ({}) is not valid in a csv row",
+                        v.type_name(),
+                        crate::value::value_to_json(v),
+                    ),
                     _ => buf.push_str(&crate::value::value_to_json(v)),
                 }
             }
@@ -3270,6 +3276,12 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
                     Value::True => buf.push_str("true"),
                     Value::False => buf.push_str("false"),
                     Value::Num(n, _) => crate::value::push_jq_number_str(&mut buf, *n),
+                    // jq uses the same "csv row" wording for @tsv (issue #79).
+                    Value::Arr(_) | Value::Obj(_) => bail!(
+                        "{} ({}) is not valid in a csv row",
+                        v.type_name(),
+                        crate::value::value_to_json(v),
+                    ),
                     _ => buf.push_str(&crate::value::value_to_json(v)),
                 }
             }

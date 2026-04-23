@@ -1305,7 +1305,11 @@ fn rt_implode(v: &Value) -> Result<Value> {
 }
 
 fn rt_tojson(v: &Value) -> Result<Value> {
-    Ok(Value::from_string(crate::value::value_to_json(v)))
+    // Preserve the lexical form of numbers so `1.0 | tojson` yields `"1.0"`
+    // (not `"1"`). jq 1.8.1 does the same via decnum; jq-jit has only f64, so
+    // reprs carrying more precision than f64 can hold (or overflowing to ±inf)
+    // fall back to the f64-formatted form inside `value_to_json_tojson`.
+    Ok(Value::from_string(crate::value::value_to_json_tojson(v)))
 }
 
 fn rt_fromjson(v: &Value) -> Result<Value> {
@@ -1354,15 +1358,31 @@ fn rt_from_entries(v: &Value) -> Result<Value> {
             for entry in a.iter() {
                 match entry {
                     Value::Obj(o) => {
-                        let key = o.get("key").or_else(|| o.get("Key"))
-                            .or_else(|| o.get("name")).or_else(|| o.get("Name"))
-                            .cloned().unwrap_or(Value::Null);
+                        // jq resolves the key via `.key // .key_ // .Key // .name // .Name`
+                        // — `//` skips null/false — and errors when the resolved key is
+                        // not a string. Matches jq 1.8.1 wording.
+                        let pick_truthy = |name: &str| -> Option<&Value> {
+                            match o.get(name) {
+                                Some(v) if !matches!(v, Value::Null | Value::False) => Some(v),
+                                _ => None,
+                            }
+                        };
+                        let key = pick_truthy("key")
+                            .or_else(|| pick_truthy("key_"))
+                            .or_else(|| pick_truthy("Key"))
+                            .or_else(|| pick_truthy("name"))
+                            .or_else(|| pick_truthy("Name"))
+                            .cloned()
+                            .unwrap_or(Value::Null);
                         let val = o.get("value").or_else(|| o.get("Value"))
                             .cloned().unwrap_or(Value::Null);
                         let key_str = match &key {
                             Value::Str(s) => s.to_string(),
-                            Value::Num(n, _) => crate::value::format_jq_number(*n),
-                            _ => crate::value::value_to_json(&key),
+                            other => bail!(
+                                "Cannot use {} ({}) as object key",
+                                other.type_name(),
+                                crate::value::value_to_json(other),
+                            ),
                         };
                         obj.insert(KeyStr::from(key_str), val);
                     }
@@ -1799,15 +1819,36 @@ pub fn rt_getpath(v: &Value, path: &Value) -> Result<Value> {
                         let actual = if idx < 0 { (a.len() as i64 + idx) as usize } else { idx as usize };
                         current = a.get(actual).cloned().unwrap_or(Value::Null);
                     }
-                    (Value::Null, _) => {
+                    // jq allows string or number keys through null (yielding null) but
+                    // still errors on other key types — matches `.[null]` on null.
+                    (Value::Null, Value::Str(_)) | (Value::Null, Value::Num(_, _)) => {
                         current = Value::Null;
                     }
-                    _ => return Ok(Value::Null),
+                    // jq errors on type-incompatible path elements (issue #77).
+                    (_, _) => bail!(
+                        "Cannot index {} with {}",
+                        current.type_name(),
+                        index_err_desc(key),
+                    ),
                 }
             }
             Ok(current)
         }
         _ => bail!("getpath requires array path"),
+    }
+}
+
+/// Match jq 1.8.1's "Cannot index X with Y" wording for the Y side.
+/// Numbers omit the value; strings keep the quoted content; others show the type name.
+fn index_err_desc(key: &Value) -> String {
+    match key {
+        Value::Str(s) => format!("string \"{}\"", s),
+        Value::Num(_, _) => "number".to_string(),
+        Value::Null => "null".to_string(),
+        Value::True | Value::False => "boolean".to_string(),
+        Value::Arr(_) => "array".to_string(),
+        Value::Obj(_) => "object".to_string(),
+        Value::Error(_) => "error".to_string(),
     }
 }
 
@@ -1828,7 +1869,13 @@ pub fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
                 (Value::Arr(a), Value::Num(n, _)) => {
                     if n.is_nan() { bail!("Cannot set array element at NaN index"); }
                     let idx = *n as i64;
-                    let actual = if idx < 0 { (a.len() as i64 + idx) as usize } else { idx as usize };
+                    let actual = if idx < 0 {
+                        // Out-of-range negative indices must error — clamping silently
+                        // rewrote the first element, see issue #77.
+                        let adj = a.len() as i64 + idx;
+                        if adj < 0 { bail!("Out of bounds negative array index"); }
+                        adj as usize
+                    } else { idx as usize };
                     if actual > 536870911 { bail!("Array index too large"); }
                     let inner = a.get(actual).cloned().unwrap_or(Value::Null);
                     let new_inner = rt_setpath(&inner, &rest, val)?;
@@ -1955,7 +2002,13 @@ pub fn rt_setpath_mut(v: &mut Value, path: &[Value], val: Value) -> Result<()> {
             }
             if let Value::Arr(a) = v {
                 let arr = Rc::make_mut(a);
-                let actual = if idx < 0 { (arr.len() as i64 + idx).max(0) as usize } else { idx as usize };
+                let actual = if idx < 0 {
+                    // Out-of-range negative indices error — the previous `.max(0)`
+                    // clamp silently rewrote the first element (issue #77).
+                    let adj = arr.len() as i64 + idx;
+                    if adj < 0 { bail!("Out of bounds negative array index"); }
+                    adj as usize
+                } else { idx as usize };
                 if actual > 536870911 { bail!("Array index too large"); }
                 while arr.len() <= actual {
                     arr.push(Value::Null);
@@ -1998,6 +2051,7 @@ fn delete_path(v: &Value, path: &Value) -> Result<Value> {
         Value::Arr(p) if p.is_empty() => Ok(Value::Null),
         Value::Arr(p) if p.len() == 1 => {
             match (v, &p[0]) {
+                (Value::Null, _) => Ok(Value::Null),
                 (Value::Obj(o), Value::Str(k)) => {
                     let mut new_obj = (**o).clone();
                     new_obj.shift_remove(k.as_str());
@@ -2014,13 +2068,17 @@ fn delete_path(v: &Value, path: &Value) -> Result<Value> {
                         Ok(v.clone())
                     }
                 }
-                _ => Ok(v.clone()),
+                // Match jq 1.8.1's error wording for type-incompatible paths (issue #77).
+                (Value::Obj(_), key) => bail!("Cannot delete {} field of object", index_err_desc(key)),
+                (Value::Arr(_), key) => bail!("Cannot delete {} element of array", index_err_desc(key)),
+                (other, _) => bail!("Cannot delete fields from {}", other.type_name()),
             }
         }
         Value::Arr(p) => {
             let key = &p[0];
             let rest = Value::Arr(Rc::new(p[1..].to_vec()));
             match (v, key) {
+                (Value::Null, _) => Ok(Value::Null),
                 (Value::Obj(o), Value::Str(k)) => {
                     if let Some(inner) = o.get(k.as_str()) {
                         let new_inner = delete_path(inner, &rest)?;
@@ -2045,7 +2103,9 @@ fn delete_path(v: &Value, path: &Value) -> Result<Value> {
                         Ok(v.clone())
                     }
                 }
-                _ => Ok(v.clone()),
+                (Value::Obj(_), key) => bail!("Cannot delete {} field of object", index_err_desc(key)),
+                (Value::Arr(_), key) => bail!("Cannot delete {} element of array", index_err_desc(key)),
+                (other, _) => bail!("Cannot delete fields from {}", other.type_name()),
             }
         }
         _ => Ok(v.clone()),

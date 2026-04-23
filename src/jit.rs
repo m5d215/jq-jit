@@ -442,6 +442,11 @@ enum JitOp {
     /// If so, write the error value to error_dst and jump to catch_label.
     CheckError { error_dst: SlotId, catch_label: LabelId },
 
+    /// Like `CheckError` but does *not* drain the pending error. Used on the
+    /// outside-try-catch propagation path so `ReturnError` / `propagate_error`
+    /// can still read `JIT_LAST_ERROR` and transfer it to `env.error_msg`.
+    JumpIfError { label: LabelId },
+
     // Error throwing
     ThrowError { msg: SlotId },
 
@@ -569,10 +574,9 @@ impl Flattener {
                 }
                 // Semantic optimizations for to_entries pipelines (must run before beta-reduction)
                 if let Expr::UnaryOp { op: UnaryOp::ToEntries, .. } = new_left.as_ref() {
-                    // to_entries | from_entries → identity
-                    if matches!(new_right.as_ref(), Expr::UnaryOp { op: UnaryOp::FromEntries, operand } if matches!(operand.as_ref(), Expr::Input)) {
-                        return Expr::Input;
-                    }
+                    // NOTE: `to_entries | from_entries` is NOT universal identity — arrays
+                    // must surface the numeric-key type error and `[]` round-trips to `{}`
+                    // (issue #73). Do not rewrite.
                     // to_entries | map(.value) → [.[]]
                     // to_entries | map(.key) → keys_unsorted
                     if let Expr::Collect { generator } = new_right.as_ref() {
@@ -861,14 +865,14 @@ impl Flattener {
             if let Some((catch_label, error_slot)) = self.try_catch_target {
                 self.ops.push(JitOp::CheckError { error_dst: error_slot, catch_label });
             } else {
-                // Propagate errors even outside try-catch blocks
-                let error_slot = self.alloc_slot();
+                // Outside a try-catch: branch to ReturnError without draining the
+                // pending error, so `propagate_error` can still hand it off to
+                // `env.error_msg` (fixes generic "JIT execution error" messages).
                 let error_label = self.alloc_label();
                 let ok_label = self.alloc_label();
-                self.ops.push(JitOp::CheckError { error_dst: error_slot, catch_label: error_label });
+                self.ops.push(JitOp::JumpIfError { label: error_label });
                 self.ops.push(JitOp::Jump { label: ok_label });
                 self.ops.push(JitOp::Label { id: error_label });
-                self.ops.push(JitOp::Drop { slot: error_slot });
                 self.ops.push(JitOp::ReturnError);
                 self.ops.push(JitOp::Label { id: ok_label });
             }
@@ -881,13 +885,11 @@ impl Flattener {
         if let Some((catch_label, error_slot)) = self.try_catch_target {
             self.ops.push(JitOp::CheckError { error_dst: error_slot, catch_label });
         } else {
-            let error_slot = self.alloc_slot();
             let error_label = self.alloc_label();
             let ok_label = self.alloc_label();
-            self.ops.push(JitOp::CheckError { error_dst: error_slot, catch_label: error_label });
+            self.ops.push(JitOp::JumpIfError { label: error_label });
             self.ops.push(JitOp::Jump { label: ok_label });
             self.ops.push(JitOp::Label { id: error_label });
-            self.ops.push(JitOp::Drop { slot: error_slot });
             self.ops.push(JitOp::ReturnError);
             self.ops.push(JitOp::Label { id: ok_label });
         }
@@ -5821,7 +5823,8 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 return 0;
             }
         }
-        // Fast path: from_entries (op 28)
+        // Fast path: from_entries (op 28). Bail to the generic builtin path when the
+        // key resolves to a non-string so the eval path emits jq's type error (issue #73).
         if op == 28 {
             if let Value::Arr(a) = &*input {
                 let mut obj = crate::value::new_objmap();
@@ -5829,15 +5832,24 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 for entry in a.iter() {
                     match entry {
                         Value::Obj(o) => {
-                            let key = o.get("key").or_else(|| o.get("Key"))
-                                .or_else(|| o.get("name")).or_else(|| o.get("Name"))
-                                .cloned().unwrap_or(Value::Null);
+                            let pick_truthy = |name: &str| -> Option<&Value> {
+                                match o.get(name) {
+                                    Some(v) if !matches!(v, Value::Null | Value::False) => Some(v),
+                                    _ => None,
+                                }
+                            };
+                            let key = pick_truthy("key")
+                                .or_else(|| pick_truthy("key_"))
+                                .or_else(|| pick_truthy("Key"))
+                                .or_else(|| pick_truthy("name"))
+                                .or_else(|| pick_truthy("Name"))
+                                .cloned()
+                                .unwrap_or(Value::Null);
                             let val = o.get("value").or_else(|| o.get("Value"))
                                 .cloned().unwrap_or(Value::Null);
                             let key_str = match &key {
                                 Value::Str(s) => crate::value::KeyStr::from(s.as_str()),
-                                Value::Num(n, _) => crate::value::KeyStr::from(crate::value::format_jq_number(*n)),
-                                _ => crate::value::KeyStr::from(crate::value::value_to_json(&key)),
+                                _ => { ok = false; break; }
                             };
                             obj.insert(key_str, val);
                         }
@@ -7340,6 +7352,9 @@ extern "C" fn jit_rt_try_end(env: *mut JitEnv) {
 
 /// Transfer error from JIT_LAST_ERROR to env.error_msg for propagation.
 extern "C" fn jit_rt_propagate_error(env: *mut JitEnv) {
+    // Always clear the flag — the error is either consumed here or already
+    // drained by CheckError::get_error.
+    unsafe { *JIT_ERROR_FLAG.0.get() = 0; }
     // Check for direct Value from `error` builtin (deferred serialization)
     if let Some(val) = take_jit_error_value() {
         let _ = take_jit_error(); // clear the marker
@@ -9012,6 +9027,17 @@ impl JitCompiler {
                         b.ins().call(rt["get_error"], &[d]);
                         b.ins().jump(label_blocks[*catch_label as usize], &[]);
                         // OK path: continue
+                        b.switch_to_block(ok_blk);
+                        b.seal_block(ok_blk);
+                    }
+                    JitOp::JumpIfError { label } => {
+                        // Branch on JIT_ERROR_FLAG without draining the pending error.
+                        let flag_addr = b.ins().iconst(ptr_ty, JIT_ERROR_FLAG.0.get() as i64);
+                        let flag_val = b.ins().load(types::I64, cranelift_codegen::ir::MemFlags::new(), flag_addr, 0);
+                        let zero = b.ins().iconst(types::I64, 0);
+                        let is_err = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, flag_val, zero);
+                        let ok_blk = b.create_block();
+                        b.ins().brif(is_err, label_blocks[*label as usize], &[], ok_blk, &[]);
                         b.switch_to_block(ok_blk);
                         b.seal_block(ok_blk);
                     }

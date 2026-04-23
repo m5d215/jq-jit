@@ -1181,18 +1181,24 @@ impl Parser {
         self.expect(&Token::Pipe)?;
         let body = self.parse_pipe()?;
 
-        // Build: try (bind pattern1 | body) catch try (bind pattern2 | body) catch ... catch empty
+        // Build: try (bind pattern1 | body) catch try (bind pattern2 | body) catch ... bind patternN | body
+        // The last alternative runs WITHOUT a try-catch so its error propagates —
+        // per the jq spec, "if they all fail, then an error is emitted" (issue #76).
         let tmp_idx = self.scope.alloc_var("__altdestruct_tmp__");
         let tmp_ref = Expr::LoadVar { var_index: tmp_idx };
 
-        let mut result = Expr::Empty; // final fallback: empty
+        let mut result: Option<Expr> = None;
         for pattern in alt_patterns.into_iter().rev() {
             let binding = self.build_binding_with_varmap(tmp_ref.clone(), &pattern, &var_map, body.clone())?;
-            result = Expr::TryCatch {
-                try_expr: Box::new(binding),
-                catch_expr: Box::new(result),
-            };
+            result = Some(match result {
+                None => binding,
+                Some(prev) => Expr::TryCatch {
+                    try_expr: Box::new(binding),
+                    catch_expr: Box::new(prev),
+                },
+            });
         }
+        let result = result.expect("alt_patterns has at least two entries here");
 
         Ok(Expr::LetBinding {
             var_index: tmp_idx,
@@ -3144,19 +3150,11 @@ impl Parser {
             }
             ("getpath", 1) => {
                 let path = args.into_iter().next().unwrap();
-                // Optimize getpath(["key1","key2",...]) → .key1.key2...
-                if let Some(keys) = extract_literal_str_array(&path) {
-                    if !keys.is_empty() {
-                        let mut expr = Expr::Input;
-                        for key in keys {
-                            expr = Expr::Index {
-                                expr: Box::new(expr),
-                                key: Box::new(Expr::Literal(Literal::Str(key))),
-                            };
-                        }
-                        return Ok(expr);
-                    }
-                }
+                // Don't rewrite `getpath([...keys])` → `.key.key.key`: the
+                // chained-Index path inherits a pre-existing divergence where
+                // `.a` on a non-indexable (number/string/boolean) yields null
+                // instead of erroring, which hides the type error `getpath`
+                // must raise (issue #77). `rt_getpath` surfaces the error.
                 Ok(Expr::GetPath { path: Box::new(path) })
             }
             ("setpath", 2) => {
@@ -3938,30 +3936,6 @@ fn name_to_unary_op(name: &str) -> Result<UnaryOp> {
         "isfinite" => Ok(UnaryOp::IsFinite),
         "ascii" => Ok(UnaryOp::Ascii),
         _ => bail!("unknown unary operation: {}", name),
-    }
-}
-
-/// Extract a literal string array from an expression like `Collect(Comma("a", "b", ...))`.
-/// Returns None if the expression isn't a constant string array.
-fn extract_literal_str_array(expr: &Expr) -> Option<Vec<String>> {
-    use crate::ir::Literal;
-    match expr {
-        Expr::Collect { generator } => {
-            let mut keys = Vec::new();
-            fn collect_strings(e: &Expr, out: &mut Vec<String>) -> bool {
-                match e {
-                    Expr::Literal(Literal::Str(s)) => { out.push(s.clone()); true }
-                    Expr::Comma { left, right } => collect_strings(left, out) && collect_strings(right, out),
-                    _ => false,
-                }
-            }
-            if collect_strings(generator, &mut keys) {
-                Some(keys)
-            } else {
-                None
-            }
-        }
-        _ => None,
     }
 }
 

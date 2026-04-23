@@ -17,7 +17,6 @@
 detect_arith_chain_cmp
 detect_arith_cmp_branch_literals
 detect_array_field_access
-detect_array_fields_format
 detect_array_join
 detect_cmp_branch_literals
 detect_cmp_branch_merge

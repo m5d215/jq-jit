@@ -2884,15 +2884,22 @@ fn real_main() {
                         let raw = &input_bytes[start..end];
                         if json_object_get_fields_raw_buf(raw, 0, &aff_refs, &mut ranges_buf) {
                             // Check all string fields for escape sequences — fall back if any
+                            // Also bail out when any value is a nested array/object —
+                            // jq rejects those in a csv/tsv row (issue #79).
                             let mut has_escapes = false;
+                            let mut has_container = false;
                             for (vs, ve) in &ranges_buf {
                                 let val = &raw[*vs..*ve];
                                 if val[0] == b'"' && val[1..val.len()-1].contains(&b'\\') {
                                     has_escapes = true;
                                     break;
                                 }
+                                if val[0] == b'[' || val[0] == b'{' {
+                                    has_container = true;
+                                    break;
+                                }
                             }
-                            if has_escapes {
+                            if has_escapes || has_container {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             } else {
@@ -2944,6 +2951,21 @@ fn real_main() {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         if json_object_get_fields_raw_buf(raw, 0, &rcf_refs, &mut ranges_buf) {
+                            // Bail to the generic path if any field is a nested array/object —
+                            // jq rejects those in a csv/tsv row (issue #79).
+                            let has_container = ranges_buf.iter().any(|(vs, ve)| {
+                                let val = &raw[*vs..*ve];
+                                !val.is_empty() && (val[0] == b'[' || val[0] == b'{')
+                            });
+                            if has_container {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                if compact_buf.len() >= 1 << 17 {
+                                    let _ = out.write_all(&compact_buf);
+                                    compact_buf.clear();
+                                }
+                                return Ok(());
+                            }
                             for (i, (vs, ve)) in ranges_buf.iter().enumerate() {
                                 if i > 0 { compact_buf.push(sep); }
                                 let val = &raw[*vs..*ve];
@@ -12410,14 +12432,19 @@ fn real_main() {
                     let raw = &content_bytes[start..end];
                     if json_object_get_fields_raw_buf(raw, 0, &aff_refs, &mut ranges_buf) {
                         let mut has_escapes = false;
+                        let mut has_container = false;
                         for (vs, ve) in &ranges_buf {
                             let val = &raw[*vs..*ve];
                             if val[0] == b'"' && val[1..val.len()-1].contains(&b'\\') {
                                 has_escapes = true;
                                 break;
                             }
+                            if val[0] == b'[' || val[0] == b'{' {
+                                has_container = true;
+                                break;
+                            }
                         }
-                        if has_escapes {
+                        if has_escapes || has_container {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         } else {
@@ -12465,6 +12492,21 @@ fn real_main() {
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
                     if json_object_get_fields_raw_buf(raw, 0, &rcf_refs, &mut ranges_buf) {
+                        // Bail to the generic path if any field is a nested array/object —
+                        // jq rejects those in a csv/tsv row (issue #79).
+                        let has_container = ranges_buf.iter().any(|(vs, ve)| {
+                            let val = &raw[*vs..*ve];
+                            !val.is_empty() && (val[0] == b'[' || val[0] == b'{')
+                        });
+                        if has_container {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            if compact_buf.len() >= 1 << 17 {
+                                let _ = out.write_all(&compact_buf);
+                                compact_buf.clear();
+                            }
+                            return Ok(());
+                        }
                         for (i, (vs, ve)) in ranges_buf.iter().enumerate() {
                             if i > 0 { compact_buf.push(sep); }
                             let val = &raw[*vs..*ve];

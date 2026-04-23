@@ -3314,3 +3314,163 @@ null
 "\"" | @html
 null
 
+
+# ---------- #73: from_entries type check ----------
+
+from_entries
+[{"key":0,"value":"x"}]
+
+from_entries
+[{"key":0,"value":1},{"key":1,"value":2}]
+
+to_entries | from_entries
+[1,2,3]
+
+to_entries | from_entries
+[]
+
+to_entries | from_entries
+["a","b"]
+
+to_entries | from_entries
+{"a":1,"b":2}
+
+to_entries | map(.value *= 10) | from_entries
+[1,2,3]
+
+from_entries
+[{"key":null,"value":1}]
+
+from_entries
+[{"key":true,"value":1}]
+
+from_entries
+[{"name":"foo","value":1}]
+
+with_entries(.value += 10)
+{"a":1,"b":2}
+
+# ---------- #76: ?// destructure propagates last error ----------
+
+. as [$a] ?// {b: $a} | $a
+"x"
+
+. as [$a] ?// {b: $a} | $a
+1
+
+. as [$a] ?// {b: $a} | $a
+true
+
+. as [$a] ?// {b: $a} | $a
+[1,2]
+
+. as [$a] ?// {b: $a} | $a
+{"b":9}
+
+. as [$a] ?// {b: $a} ?// {c: $a} | $a
+"x"
+
+. as [$a] ?// {b: $a} ?// {c: $a} | $a
+{"c":5}
+
+# ---------- #78: [gen] | .[N] fast path only for single-valued elements ----------
+
+[range(3)] | .[0]
+null
+
+[range(3)] | .[-1]
+null
+
+[range(100)] | .[-1]
+null
+
+[range(3)] | (.[0])
+null
+
+[range(3)] | .[3]
+null
+
+[.[], .[]] | .[0]
+[1,2,3]
+
+# ---------- #79: @csv/@tsv reject nested array/object row elements ----------
+
+@csv
+[[1,2]]
+
+@csv
+[[1,2],3]
+
+@csv
+[{"a":1}]
+
+@tsv
+[[1,2]]
+
+@csv
+[1,2,3]
+
+@csv
+[null,true,1.5,"x"]
+
+[.a,.b] | @csv
+{"a":[1,2],"b":3}
+
+[.a,.b] | @csv
+{"a":1,"b":2}
+
+[.a,.b] | @tsv
+{"a":{"x":1},"b":2}
+
+# ---------- #77: getpath / setpath / delpaths type + OOB checks ----------
+
+getpath([0,1])
+1
+
+getpath(["a",0])
+1
+
+getpath(["a","b","c"])
+"x"
+
+getpath([null])
+null
+
+getpath(["a","b","c"])
+{"a":1}
+
+getpath([null])
+[1]
+
+getpath([true])
+[1]
+
+setpath([-5]; "x")
+[1,2,3]
+
+setpath([-3]; "x")
+[1,2,3]
+
+setpath([-1]; "x")
+[1,2,3]
+
+setpath([-10]; "x")
+[1,2,3]
+
+delpaths([["a"]])
+1
+
+delpaths([[0]])
+"x"
+
+delpaths([[0],[2]])
+{}
+
+delpaths([["a","b"]])
+{"a":"x"}
+
+delpaths([[0]])
+{}
+
+delpaths([])
+null
