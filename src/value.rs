@@ -2,13 +2,10 @@
 //!
 //! Uses Vec-backed ordered map for objects (optimal for typical small JSON objects).
 
-use std::ffi::CStr;
 use std::fmt;
 use std::rc::Rc;
 
 use anyhow::{Result, bail};
-
-use crate::jq_ffi::{self, Jv, JvKind};
 
 /// Inline-optimized string for object keys (≤24 bytes stored on stack, no heap alloc).
 pub type KeyStr = compact_str::CompactString;
@@ -4401,86 +4398,6 @@ fn parse_jq_strtod(s: &str) -> Option<f64> {
     Some(if neg { -parsed } else { parsed })
 }
 
-/// # Safety
-/// `jv` must be a valid `Jv` value obtained from libjq.
-pub unsafe fn jv_to_value(jv: Jv) -> Result<Value> {
-    unsafe {
-        let kind = jq_ffi::jv_get_kind(jv);
-        match kind {
-            JvKind::Null => {
-                jq_ffi::jv_free(jv);
-                Ok(Value::Null)
-            }
-            JvKind::True => {
-                jq_ffi::jv_free(jv);
-                Ok(Value::True)
-            }
-            JvKind::False => {
-                jq_ffi::jv_free(jv);
-                Ok(Value::False)
-            }
-            JvKind::Number => {
-                let n = jq_ffi::jv_number_value(jq_ffi::jv_copy(jv));
-                // Get precise string representation via jv_dump_string
-                let dump_jv = jq_ffi::jv_dump_string(jv, 0);
-                let repr = if jq_ffi::jv_get_kind(dump_jv) == JvKind::String {
-                    let cstr = jq_ffi::jv_string_value(jq_ffi::jv_copy(dump_jv));
-                    let s = CStr::from_ptr(cstr).to_string_lossy().into_owned();
-                    jq_ffi::jv_free(dump_jv);
-                    // Check if the precise repr differs from f64 round-trip
-                    let f64_repr = format_jq_number(n);
-                    if s != f64_repr {
-                        Some(Rc::from(s.as_str()))
-                    } else {
-                        None
-                    }
-                } else {
-                    jq_ffi::jv_free(dump_jv);
-                    None
-                };
-                Ok(Value::Num(n, repr))
-            }
-            JvKind::String => {
-                let cstr = jq_ffi::jv_string_value(jq_ffi::jv_copy(jv));
-                let len = jq_ffi::jv_string_length_bytes(jq_ffi::jv_copy(jv)) as usize;
-                let bytes = std::slice::from_raw_parts(cstr as *const u8, len);
-                let s = String::from_utf8_lossy(bytes).into_owned();
-                jq_ffi::jv_free(jv);
-                Ok(Value::Str(KeyStr::from(s)))
-            }
-            JvKind::Array => {
-                let len = jq_ffi::jv_array_length(jq_ffi::jv_copy(jv));
-                let mut items = Vec::with_capacity(len as usize);
-                for i in 0..len {
-                    let elem = jq_ffi::jv_array_get(jq_ffi::jv_copy(jv), i);
-                    items.push(jv_to_value(elem)?);
-                }
-                jq_ffi::jv_free(jv);
-                Ok(Value::Arr(Rc::new(items)))
-            }
-            JvKind::Object => {
-                let mut map = new_objmap();
-                let mut iter = jq_ffi::jv_object_iter(jv);
-                while jq_ffi::jv_object_iter_valid(jv, iter) != 0 {
-                    let key_jv = jq_ffi::jv_object_iter_key(jv, iter);
-                    let val_jv = jq_ffi::jv_object_iter_value(jv, iter);
-                    let key_cstr = jq_ffi::jv_string_value(key_jv);
-                    let key = KeyStr::from(CStr::from_ptr(key_cstr).to_string_lossy().as_ref());
-                    jq_ffi::jv_free(key_jv);
-                    let val = jv_to_value(val_jv)?;
-                    map.insert(key, val);
-                    iter = jq_ffi::jv_object_iter_next(jv, iter);
-                }
-                jq_ffi::jv_free(jv);
-                Ok(Value::Obj(Rc::new(map)))
-            }
-            JvKind::Invalid => {
-                jq_ffi::jv_free(jv);
-                bail!("jv_to_value: invalid jv");
-            }
-        }
-    }
-}
 
 /// Format f64 the way jq does — shortest representation with scientific notation for large/small values.
 /// Whether a string is a JSON-conformant number (RFC 8259 §6).
