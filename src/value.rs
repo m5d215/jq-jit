@@ -3868,8 +3868,8 @@ fn parse_json_object(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize
 //
 // The `fromjson` builtin needs error messages byte-identical to jq's, because
 // many filters use `try fromjson catch .` to inspect the message. This parser
-// mirrors jq's state machine so we can drop the libjq FFI fallback without
-// changing observable behaviour.
+// mirrors jq's state machine so we match observable behaviour without an
+// FFI bridge to libjq.
 //
 // Key invariants preserved from jv_parse.c:
 //   - `column` is incremented for every consumed byte; a newline also resets

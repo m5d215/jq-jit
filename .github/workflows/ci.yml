@@ -18,32 +18,21 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
+      - name: Install jq 1.8.1 (for differential tests)
         run: |
-          sudo apt-get update
-          sudo apt-get remove -y jq libjq1 libjq-dev 2>/dev/null || true
-          sudo apt-get install -y libonig-dev autoconf automake libtool
-          git clone --depth 1 --branch jq-1.8.1 https://github.com/jqlang/jq.git /tmp/jq
-          cd /tmp/jq
-          git submodule update --init
-          autoreconf -i
-          ./configure --prefix=/usr --libdir=/usr/lib/x86_64-linux-gnu --disable-docs
-          make -j$(nproc)
-          sudo make install
-          sudo ldconfig
-
-      - name: Install system dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: brew install jq oniguruma
-
-      - name: Verify jq version
-        run: |
-          jq --version
+          case "${{ runner.os }}-${{ runner.arch }}" in
+            Linux-X64)   asset=jq-linux-amd64 ;;
+            Linux-ARM64) asset=jq-linux-arm64 ;;
+            macOS-X64)   asset=jq-macos-amd64 ;;
+            macOS-ARM64) asset=jq-macos-arm64 ;;
+            *) echo "unsupported runner: ${{ runner.os }}-${{ runner.arch }}"; exit 1 ;;
+          esac
+          curl -L -o /tmp/jq "https://github.com/jqlang/jq/releases/download/jq-1.8.1/${asset}"
+          sudo install -m 0755 /tmp/jq /usr/local/bin/jq
           jq --version | grep -q '^jq-1\.8\.'
 
       - name: Build
         run: cargo build --release
 
       - name: Run tests
-        run: cargo test --release -- --test-threads=1
+        run: cargo test --release

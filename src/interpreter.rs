@@ -1,7 +1,7 @@
-//! Filter execution: parser → IR → tree-walking interpreter.
+//! Filter execution: parser → IR → tree-walking interpreter or JIT.
 //!
-//! Primary path: our own parser + eval (full control, correct behavior).
-//! Fallback: libjq execution (for filters we can't parse yet).
+//! All paths (parse / eval / JIT) run in pure Rust — the libjq fallback
+//! was removed in the 1.3.0 line.
 
 
 use anyhow::Result;
