@@ -930,7 +930,7 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
             Literal::Null => Value::Null,
             Literal::True => Value::True,
             Literal::False => Value::False,
-            Literal::Num(n, repr) => Value::Num(*n, repr.clone()),
+            Literal::Num(n, repr) => Value::number_opt(*n, repr.clone()),
             Literal::Str(s) => Value::from_str(s),
         }),
         Expr::LoadVar { var_index } => {
@@ -1321,7 +1321,7 @@ pub fn eval(
             Literal::Null => Value::Null,
             Literal::True => Value::True,
             Literal::False => Value::False,
-            Literal::Num(n, repr) => Value::Num(*n, repr.clone()),
+            Literal::Num(n, repr) => Value::number_opt(*n, repr.clone()),
             Literal::Str(s) => Value::from_str(s),
         }),
 

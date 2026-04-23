@@ -114,10 +114,10 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             // These need special handling with the input source
             Ok(Value::Null)
         }
-        "now" => Ok(Value::Num(std::time::SystemTime::now()
+        "now" => Ok(Value::number(std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs_f64(), None)),
+            .as_secs_f64())),
         "path" => {
             // path() needs special handling
             Ok(Value::Arr(Rc::new(vec![])))
@@ -1130,7 +1130,7 @@ fn rt_round(v: &Value) -> Result<Value> {
 fn rt_fabs(v: &Value) -> Result<Value> {
     match v {
         Value::Num(n, repr) => {
-            if *n >= 0.0 { Ok(Value::Num(*n, repr.clone())) }
+            if *n >= 0.0 { Ok(Value::number_opt(*n, repr.clone())) }
             else { Ok(Value::number(n.abs())) }
         }
         _ => bail!("{} ({}) number required", v.type_name(), crate::value::value_to_json(v)),
@@ -1140,7 +1140,7 @@ fn rt_fabs(v: &Value) -> Result<Value> {
 fn rt_abs(v: &Value) -> Result<Value> {
     match v {
         Value::Num(n, repr) => {
-            if *n >= 0.0 { Ok(Value::Num(*n, repr.clone())) }
+            if *n >= 0.0 { Ok(Value::number_opt(*n, repr.clone())) }
             else { Ok(Value::number(n.abs())) }
         }
         Value::Str(_) | Value::Arr(_) | Value::Obj(_) => Ok(v.clone()),
