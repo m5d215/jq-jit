@@ -1783,3 +1783,1534 @@ null
 error("x") // "caught"
 null
 
+
+# ---------- 2026-04-23 hunt corpus expansion (Issue #82) ----------
+
+# ----- cases1: array / object basics, select, range, arithmetic -----
+
+. | length
+null
+
+. | keys
+[]
+
+. | keys_unsorted
+[]
+
+. | values
+null
+
+[.[]]
+[]
+
+[.[] | select(. > 1)]
+[]
+
+[.[] | select(. == null)]
+[]
+
+[.[] | select(. != null)]
+[]
+
+map(.)
+[]
+
+map(.+1)
+[]
+
+map(. * 2)
+[]
+
+map(tostring)
+[]
+
+map(tonumber)
+[]
+
+[range(5)]
+null
+
+[range(0;5)]
+null
+
+[range(0;10;2)]
+null
+
+[range(5;0;-1)]
+null
+
+[range(0.5;3.5;0.5)]
+null
+
+. + 1
+null
+
+. - 1
+0
+
+. * 2
+0
+
+. / 2
+0
+
+. % 3
+0
+
+-.
+0
+
+. | not
+null
+
+. | type
+null
+
+. | tostring
+null
+
+. | tonumber
+0
+
+. | utf8bytelength
+""
+
+. | ascii
+null
+
+. | ascii_downcase
+""
+
+. | ascii_upcase
+""
+
+. | tojson
+null
+
+. | fromjson
+null
+
+. | explode
+""
+
+. | implode
+[]
+
+. | ltrimstr("a")
+""
+
+. | rtrimstr("z")
+""
+
+# ----- cases2: as-binding, index chains, tojson/fromjson round-trips -----
+
+. | tojson | fromjson
+null
+
+. | tostring | tonumber
+0
+
+. as $x | {x: $x, y: $x}
+null
+
+. | .[] | . * 2
+[]
+
+.a?.b?.c?
+null
+
+..
+null
+
+[..]
+null
+
+[.. | numbers]
+null
+
+getpath(["a","b"])
+null
+
+setpath(["a","b"]; 1)
+null
+
+delpaths([["a"]])
+null
+
+. | has("a")
+null
+
+. | in({"a":1})
+""
+
+. | env
+null
+
+. | $ENV
+null
+
+. | input
+null
+
+. | inputs
+null
+
+[$__loc__]
+null
+
+.[]?
+null
+
+[.[]?]
+null
+
+try . catch "err"
+null
+
+try (1/0) catch "div0"
+null
+
+try error("x") catch .
+null
+
+[range(10) | . * . | select(. < 50)]
+null
+
+[range(10)] | [.[] | . * . | select(. < 50)]
+null
+
+# ----- cases3: modulo / division edge cases -----
+
+. % -3
+0
+
+-5 % 3
+null
+
+5 % -3
+null
+
+5 % 0
+null
+
+5 / 0
+null
+
+0 / 0
+null
+
+-0 / 0
+null
+
+. | pow(2; .)
+0
+
+. | pow(.; 2)
+0
+
+. | ceil | type
+0
+
+. | floor | type
+0
+
+.[0:2]
+null
+
+.[:2]
+null
+
+.[2:]
+null
+
+.[-2:]
+null
+
+.[-2:-1]
+null
+
+.[0:0]
+null
+
+.[10:20]
+null
+
+.[-100:100]
+null
+
+. * {}
+{}
+
+. * {"a":1}
+{}
+
+.+1
+null
+
+[1,2]+[3,4]
+null
+
+[1,2]-[2]
+null
+
+{"a":1}+{"b":2}
+null
+
+{"a":1}+{"a":2}
+null
+
+{"a":{"b":1}}*{"a":{"c":2}}
+null
+
+. | sort_by(.)
+[]
+
+. | sort_by(-.)
+[]
+
+. | sort_by(.a)
+[]
+
+[.[]]|sort
+[]
+
+[.[]]|unique
+[]
+
+[.[]]|unique_by(.)
+[]
+
+[.[]]|group_by(.)
+[]
+
+sort_by(.a)
+[]
+
+# ----- cases4: split / regex-style string ops -----
+
+split(""; "g")
+""
+
+split(","; null)
+""
+
+split("a"; null)
+""
+
+split("a"; "g")
+""
+
+splits("")
+""
+
+[splits("a"; "g")]
+""
+
+gsub("."; "x")
+""
+
+gsub("."; "x"; "g")
+""
+
+gsub("(?<c>.)"; "\(.c | ascii_upcase)")
+""
+
+gsub("(?<a>.)(?<b>.)"; "\(.a)\(.b)\(.a)")
+""
+
+sub("x"; "X")
+""
+
+sub("(?<a>.)"; "[\(.a)]")
+""
+
+match(".")
+""
+
+match("."; "g")
+""
+
+[match("."; "g")]
+""
+
+test("abc")
+""
+
+test(".*")
+""
+
+ascii_downcase
+""
+
+ascii_upcase
+""
+
+"αβγ" | ascii_downcase
+null
+
+"Ωω" | ascii_upcase
+null
+
+"ABC" | explode
+null
+
+"あ" | explode
+null
+
+"あ" | utf8bytelength
+null
+
+"a" | utf8bytelength
+null
+
+length
+null
+
+keys
+[]
+
+keys_unsorted
+[]
+
+to_entries
+[]
+
+from_entries
+[]
+
+from_entries([{"key":"a","value":1}])
+null
+
+to_entries | from_entries
+{}
+
+[1,2,3] | [.[] | . * 10]
+null
+
+fromjson
+null
+
+tojson
+null
+
+@html
+null
+
+# ----- cases5: if / try / catch / alternative -----
+
+if . then "yes" else "no" end
+null
+
+if . then "yes" end
+null
+
+if . then "a" elif . == 0 then "b" else "c" end
+null
+
+if .a then "yes" else "no" end
+null
+
+try .a catch "err"
+null
+
+try .[0] catch "err"
+null
+
+try (1/0) catch .
+null
+
+try (1 + "x") catch .
+null
+
+try error("boom") catch "caught"
+null
+
+.a = 1
+null
+
+.a = null
+null
+
+.a = "x"
+null
+
+.a |= 1
+null
+
+.a |= . + 1
+null
+
+(.a, .b) = 1
+null
+
+(.a, .b) |= . + 1
+null
+
+(.. | select(type == "number")) |= . * 2
+null
+
+(.[] | select(. > 0)) |= . + 100
+[]
+
+.[].a |= . + 1
+[]
+
+.a //= 99
+null
+
+.a += 1
+null
+
+.a -= 1
+{"a":1,"b":2}
+
+.a *= 2
+{"a":1,"b":2}
+
+.a /= 2
+{"a":1,"b":2}
+
+.a %= 3
+{"a":1,"b":2}
+
+{a} | .a
+null
+
+{(.x)}
+null
+
+{x}
+null
+
+[1,2,3] | {count: length, total: add}
+null
+
+. as $x | . * $x
+0
+
+[1,2,3] | . as $arr | $arr | length
+null
+
+[[1,2],[3,4]] | .[] as $x | $x[0]
+null
+
+[1,2,3] | limit(2;.[])
+null
+
+[limit(2;.[])]
+[]
+
+[limit(5;.[])]
+[]
+
+[limit(0;.[])]
+null
+
+[1,2,3] | first(.[])
+null
+
+[1,2,3] | last(.[])
+null
+
+# ----- cases6: recursion (..), scalars / leaf_paths -----
+
+.. | type
+null
+
+[.. | scalars]
+null
+
+[.. | strings]
+null
+
+recurse
+null
+
+[recurse(.[]? ; . != null)]
+null
+
+gsub("(?<x>o)"; "\(.x | ascii_upcase)")
+""
+
+gsub("(?<x>a)(?<y>b)"; "[\(.x)-\(.y)]")
+""
+
+sub("hello"; "WORLD")
+""
+
+sub("(?<w>\\w+)"; "\(.w | ascii_upcase)")
+""
+
+"A" | ascii_downcase
+null
+
+"z" | ascii_upcase
+null
+
+"Ⓐ" | ascii_downcase
+null
+
+tostring
+null
+
+[1, 2, 3] | tostring
+null
+
+{"a":1} | tostring
+null
+
+"already string" | tostring
+null
+
+0.1 + 0.2
+null
+
+1e100
+null
+
+1e300 * 1e300
+null
+
+1/0
+null
+
+0/0
+null
+
+-infinite
+null
+
+infinite | isinfinite
+null
+
+nan | isnan
+null
+
+[1, infinite, 3] | sort
+null
+
+[nan, nan] | unique
+null
+
+"<script>" | @html
+null
+
+"a&b" | @html
+null
+
+# ----- cases7: number repr (exponent notation) -----
+
+1e5
+null
+
+1e16
+null
+
+1e17
+null
+
+0.0001
+null
+
+0.00001
+null
+
+12345.67
+null
+
+123456789012345678
+null
+
+-1.5e-3
+null
+
+[1, 2, 3] | @csv
+null
+
+["a","b,c","d\"e"] | @csv
+null
+
+["a","b","c"] | @tsv
+null
+
+["a","b\tc","d"] | @tsv
+null
+
+[null, true, false] | @csv
+null
+
+[null, true, false] | @tsv
+null
+
+[1, 2, 3] | @sh
+null
+
+[1,"a","b"] | @sh
+null
+
+["a b", "c\td"] | @sh
+null
+
+"\u00ff" | @json
+null
+
+"\u001f" | @json
+null
+
+"hello\u0000world" | @json
+null
+
+"日本語" | @json
+null
+
+"日本語" | length
+null
+
+"日本語" | utf8bytelength
+null
+
+"日本語" | explode
+null
+
+[26085,26412,35486] | implode
+null
+
+"\u{1f600}" | length
+null
+
+[128512] | implode
+null
+
+. // . // "x"
+null
+
+null // null // "x"
+null
+
+false // false // "x"
+null
+
+.a? // .b? // "none"
+null
+
+[.[] | tostring] | join(",")
+[]
+
+[.[]] | join("")
+[]
+
+# ----- cases8: object construct (computed / duplicate keys / multi-valued rhs) -----
+
+{(.k): .v}
+{"k":"x","v":42}
+
+{"\(.k)": .v}
+null
+
+{a: 1, (.k): 2}
+{"k":"x","v":42}
+
+{x: .a, y: .a | . + 1}
+null
+
+{a: (1,2,3)}
+null
+
+[{a: (1,2,3)}]
+null
+
+{a: 1, a: 2}
+null
+
+{(.a,.b): .c}
+null
+
+{a: .x, a: .x+1}
+null
+
+[{a: range(3)}]
+null
+
+[{(1,2,3|tostring): 1}]
+null
+
+label $x | 1,2,3
+null
+
+label $x | range(10) | ., if . > 3 then ., "stop" else empty end
+null
+
+label $x | 1, 2, 3, ., 5
+null
+
+label $x | .[] | if . > 2 then ., . else . end
+[]
+
+[label $x | range(10) | if . > 3 then ., "break" else . end]
+null
+
+label $out | foreach range(10) as $i (0; . + $i)
+null
+
+.[1:5]
+null
+
+.[1:null]
+null
+
+.[null:5]
+null
+
+.[null:null]
+null
+
+.[:5]
+null
+
+.[-1:]
+null
+
+"abcdef" | .[1:4]
+null
+
+"abcdef" | .[-2:]
+null
+
+"abcdef" | .[100:200]
+null
+
+"abcdef" | .[-100:-200]
+null
+
+"日本語" | .[1:2]
+null
+
+"日本語" | .[0:1]
+null
+
+[1,2,3] | .[1:null]
+null
+
+[1,2,3] | .[null:null]
+null
+
+{a:1} as {a: $x} | $x
+null
+
+{a: {b: 1}} as {a: {b: $x}} | $x
+null
+
+[1,2,3] as [$a, $b, $c] | $b
+null
+
+[1,2] as [$a, $b, $c] | $c
+null
+
+[1] as [$a, $b] | $b
+null
+
+# ----- cases9: map_values / with_entries / to_entries / from_entries -----
+
+[1,2,3] | map_values(. + 10)
+null
+
+{"a":1,"b":2} | map_values(. + 10)
+null
+
+{"a":1,"b":2} | map_values(. * 2)
+null
+
+map(. // "x")
+[]
+
+[1,null,2,null] | map(. // "x")
+null
+
+[1,null,2] | .[] // "x"
+null
+
+. | with_entries(.value += 100)
+[]
+
+{"a":1,"b":2} | with_entries(.value += 100)
+null
+
+{"a":1,"b":2} | with_entries(.key += "_")
+null
+
+gsub("(?<n>\\d+)"; "\(.n | tonumber + 1)")
+""
+
+"test1 and test2" | gsub("(?<n>\\d+)"; "\(.n | tonumber + 1)")
+null
+
+"abc123def456" | gsub("(?<n>\\d+)"; "X")
+null
+
+"abc123def456" | scan("\\d+")
+null
+
+[scan("\\d+")]
+""
+
+"aaaa" | scan("a")
+null
+
+"aaaa" | [scan("a")]
+null
+
+"a1b2c3" | match("\\d+"; "g") | .offset
+null
+
+[match("(?<x>\\d+)"; "g")]
+""
+
+"a1b2c3" | [match("(?<x>\\d+)"; "g")]
+null
+
+"a1b2" | capture("(?<n>\\d+)")
+null
+
+"a1 b2" | [capture("(?<n>\\d+)"; "g")]
+null
+
+"ab" | capture("(?<a>a)(?<b>b)")
+null
+
+"a1b2c3" | [scan("([a-z])(\\d)")]
+null
+
+"abc" | split("")
+null
+
+"abc" | [splits("")]
+null
+
+"日本" | split("")
+null
+
+null | explode
+null
+
+"a" | explode
+null
+
+"abc" | explode | implode
+null
+
+"abc" | explode | reverse | implode
+null
+
+[0x20] | implode
+null
+
+[0, 1, 2] | implode
+null
+
+[65, 256, 65536] | implode
+null
+
+[65, 65535, 65536] | implode
+null
+
+[65, -1] | implode
+null
+
+# ----- cases10: until / while / limit / first / last -----
+
+until(. > 10; . + 1)
+null
+
+while(. < 5; . + 1)
+null
+
+[while(. < 5; . + 1)]
+null
+
+[until(. > 10; . + 1)]
+null
+
+. | until(. > 100; . * 2)
+1
+
+0 | while(. < 5; . + 1)
+null
+
+0 | [while(. < 5; . + 1)]
+null
+
+0 | until(. > 3; . + 1)
+null
+
+min_by(.)
+[]
+
+max_by(.)
+[]
+
+[] | min_by(.)
+null
+
+[] | max_by(.)
+null
+
+[1] | min_by(.)
+null
+
+[1,2,3] | min_by(-.)
+null
+
+[{"a":1},{"a":3},{"a":2}] | min_by(.a)
+null
+
+[{"a":1},{"a":null}] | min_by(.a)
+null
+
+[{"a":1},{"a":null},{"a":3}] | min_by(.a)
+null
+
+[{"a":1},{"a":null},{"a":3}] | max_by(.a)
+null
+
+.[] | select(. > 1) | . * 10
+[]
+
+.[] | [. * 10]
+[]
+
+[.[]] | add
+[]
+
+[.[]] | length
+[]
+
+map(. + 1) == map(. + 1)
+[]
+
+[1,2,3] == [1,2,3]
+null
+
+{"a":1} == {"a":1}
+null
+
+{"a":1,"b":2} == {"b":2,"a":1}
+null
+
+[1, 2] < [1, 3]
+null
+
+[1, 2] < [1, 2, 3]
+null
+
+[1] < [1, 0]
+null
+
+null < false
+null
+
+null < 0
+null
+
+false < true
+null
+
+1 < "a"
+null
+
+"a" < [1]
+null
+
+[1] < {"a":1}
+null
+
+.a < .b
+null
+
+null < null
+null
+
+[] < [null]
+null
+
+[null] < []
+null
+
+"abc" > "abd"
+null
+
+# ----- cases11: ascii_downcase / ascii_upcase unicode handling -----
+
+"ABC日本" | ascii_downcase
+null
+
+"abc日本" | ascii_upcase
+null
+
+"A1b2C3" | ascii_downcase
+null
+
+"Σ" | ascii_downcase
+null
+
+test("abc"; "i")
+""
+
+test("ABC"; "i")
+""
+
+test("abc"; "")
+""
+
+"ABC" | test("abc"; "i")
+null
+
+"ABC" | test("a.c"; "i")
+null
+
+match("a(?<n>\\d+)"; "i")
+""
+
+"A123" | match("a(?<n>\\d+)"; "i")
+null
+
+"abc" | match("^a"; "")
+null
+
+"abc" | match("^a")
+null
+
+"abc" | [match("\\w"; "g")]
+null
+
+"abc" | match("x")
+null
+
+"abc" | match("x"; "i")
+null
+
+gsub("a"; "X")
+""
+
+gsub("a"; "X"; "g")
+""
+
+gsub("A"; "X"; "i")
+""
+
+"aAaA" | gsub("a"; "X"; "i")
+null
+
+"aAa" | gsub("a"; "X")
+null
+
+"aAa" | gsub("a"; "X"; "g")
+null
+
+"aAa" | gsub("(a)"; "\(.captures[0].string)!")
+null
+
+"aAa" | gsub("(?<c>a)"; "\(.c)!")
+null
+
+sub("a"; "X"; "i")
+""
+
+sub("b"; "X")
+""
+
+"aaa" | sub("a"; "X")
+null
+
+"aaa" | sub("a"; "X"; "g")
+null
+
+"aaa" | gsub("a"; "X")
+null
+
+"abc" | test("$")
+null
+
+"abc" | test("^$")
+null
+
+"" | test("^$")
+null
+
+"" | match("^$")
+null
+
+"abc" | splits("")
+null
+
+"" | [splits("")]
+null
+
+"a" | [splits("a")]
+null
+
+"" | [splits("a")]
+null
+
+"aaa" | [splits("a")]
+null
+
+"a,b,c" | splits(",")
+null
+
+[splits(","; "")]
+""
+
+"abc"[0]
+null
+
+"abc"[-1]
+null
+
+# ----- cases12: getpath / setpath / delpaths / leaf_paths -----
+
+getpath([0, 1])
+null
+
+getpath(["a", 0])
+null
+
+getpath(["a", "b", "c"])
+null
+
+getpath(null)
+null
+
+setpath([0, 1]; "x")
+null
+
+setpath(["a"]; null)
+null
+
+setpath([]; null)
+null
+
+setpath(["a"]; .)
+null
+
+null | setpath([]; 99)
+null
+
+null | setpath(["a","b","c"]; 1)
+null
+
+[1,2,3] | setpath([0]; null)
+null
+
+{"a":1} | setpath(["a"]; null)
+null
+
+{"a":1} | setpath(["b","c"]; 2)
+null
+
+[1,2,3] | setpath([1]; "x")
+null
+
+[1,2,3] | setpath([-1]; "x")
+null
+
+[1,2,3] | setpath([10]; "x")
+null
+
+delpaths([[]])
+null
+
+delpaths([[0],[2]])
+null
+
+[1,2,3,4,5] | delpaths([[0],[2],[4]])
+null
+
+[1,2,3,4,5] | delpaths([[4],[2],[0]])
+null
+
+{"a":1,"b":2,"c":3} | delpaths([["a"],["c"]])
+null
+
+{"a":{"b":1,"c":2}} | delpaths([["a","b"]])
+null
+
+[[1,2],[3,4]] | delpaths([[0,0],[1,1]])
+null
+
+pick(.a)
+null
+
+pick(.a,.b)
+null
+
+pick(.a.b, .c)
+null
+
+{"a":1,"b":2,"c":3} | pick(.a)
+null
+
+{"a":1,"b":2,"c":3} | pick(.a, .b)
+null
+
+{"a":{"b":1,"c":2}} | pick(.a.b)
+null
+
+[1,2,3,4] | pick(.[0], .[2])
+null
+
+[1,2,3,4] | pick(.[0,2])
+null
+
+IN(1,2,3)
+null
+
+1 | IN(1,2,3)
+null
+
+4 | IN(1,2,3)
+null
+
+"prefix_value" | ltrimstr("prefix_")
+null
+
+"prefix_value" | ltrimstr("xxx")
+null
+
+"value_suffix" | rtrimstr("_suffix")
+null
+
+null | ltrimstr("x")
+null
+
+1 | ltrimstr("x")
+null
+
+[1] | ltrimstr("x")
+null
+
+# ----- cases13: implode / explode / ascii / chr -----
+
+ascii
+null
+
+[65, 66] | implode
+null
+
+chr
+null
+
+65 | [., .] | implode
+null
+
+tostring | length
+null
+
+tostring | type
+null
+
+1 + true
+null
+
+1 + false
+null
+
+true + 1
+null
+
+true + true
+null
+
+false + false
+null
+
+false - 1
+null
+
+true * 2
+null
+
+"a" + "b"
+null
+
+"a" * 3
+null
+
+"abc" * 0
+null
+
+"abc" * -1
+null
+
+[1,2] * 3
+null
+
+[1,2] * 0
+null
+
+[1,2] * -1
+null
+
+{a:1} * 2
+null
+
+{a:1} * 0
+null
+
+null == null
+null
+
+null == 0
+null
+
+0 == 0.0
+null
+
+0 == -0
+null
+
+0.0 == 0.0
+null
+
+{a:1} == {a:1}
+null
+
+[1,2] == [1,2]
+null
+
+"a" == "a"
+null
+
+nan == nan
+null
+
+[nan] == [nan]
+null
+
+nan > 1
+null
+
+1 < nan
+null
+
+[{"a":1,"b":2},{"a":1,"b":1},{"a":2}] | sort_by(.a, .b)
+null
+
+{a:{b:1}} | .a.b = 99
+null
+
+# ----- cases14: first(gen) / last(gen) / nth with generators -----
+
+first(empty, 1, 2)
+null
+
+last(empty, 1, 2)
+null
+
+nth(-1; empty)
+null
+
+nth(2; range(10))
+null
+
+[nth(5; 1,2,3)]
+null
+
+ltrimstr("a")
+""
+
+ltrimstr(null)
+null
+
+ltrimstr([])
+null
+
+ltrimstr(1)
+null
+
+null | ltrimstr("a")
+null
+
+1 | ltrimstr("a")
+null
+
+[1] | ltrimstr("a")
+null
+
+{a:1} | ltrimstr("a")
+null
+
+rtrimstr("a")
+""
+
+"hello" | ltrimstr(null)
+null
+
+"hello" | ltrimstr(1)
+null
+
+"hello" | ltrimstr([])
+null
+
+"abc" | sub("x"; "y")
+null
+
+"" | sub("x"; "y")
+null
+
+"abc" | sub(""; "X")
+null
+
+"abc" | gsub(""; "X")
+null
+
+"abc" | sub(".*"; "")
+null
+
+"abc" | gsub(".*"; "")
+null
+
+"abc" | gsub("[bc]"; "X")
+null
+
+"abc" | gsub("[bc]"; "X"; "")
+null
+
+1 / 3
+null
+
+1 / 3 | tostring
+null
+
+1.5 | tostring
+null
+
+1 | tostring
+null
+
+1 | . + 0.1
+null
+
+1 - 0.5
+null
+
+"\b" | @json
+null
+
+"\f" | @json
+null
+
+"\t" | @json
+null
+
+"\u0001" | @json
+null
+
+"<script>alert('x')</script>" | @html
+null
+
+"a&b<c>d\"e'f" | @html
+null
+
+"\"" | @html
+null
+
