@@ -3392,3 +3392,32 @@ null
 
 [.[], .[]] | .[0]
 [1,2,3]
+
+# ---------- #79: @csv/@tsv reject nested array/object row elements ----------
+
+@csv
+[[1,2]]
+
+@csv
+[[1,2],3]
+
+@csv
+[{"a":1}]
+
+@tsv
+[[1,2]]
+
+@csv
+[1,2,3]
+
+@csv
+[null,true,1.5,"x"]
+
+[.a,.b] | @csv
+{"a":[1,2],"b":3}
+
+[.a,.b] | @csv
+{"a":1,"b":2}
+
+[.a,.b] | @tsv
+{"a":{"x":1},"b":2}

@@ -1023,3 +1023,13 @@ null
 [range(100)] | .[-1]
 null
 99
+
+# Issue #79: scalar-only row still works for @csv
+@csv
+[1,2,3]
+"1,2,3"
+
+# Issue #79: scalar-only row still works for @tsv (tab separator)
+[.a,.b] | @csv
+{"a":1,"b":2}
+"1,2"
