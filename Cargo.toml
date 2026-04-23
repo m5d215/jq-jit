@@ -29,6 +29,9 @@ stacker = "0.1"
 csv = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std", "bit-set"] }
+
 [profile.release]
 lto = "thin"
 
