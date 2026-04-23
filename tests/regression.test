@@ -993,3 +993,13 @@ from_entries
 with_entries(.value += 10)
 {"a":1}
 {"a":11}
+
+# Issue #76: all-fail destructure alt raises last attempt's error
+. as [$a] ?// {b: $a} | $a
+[1,2]
+1
+
+# Issue #76: pattern succeeds on object matching destructure
+. as [$a] ?// {b: $a} | $a
+{"b":9}
+9

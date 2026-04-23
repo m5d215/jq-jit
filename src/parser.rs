@@ -1181,18 +1181,24 @@ impl Parser {
         self.expect(&Token::Pipe)?;
         let body = self.parse_pipe()?;
 
-        // Build: try (bind pattern1 | body) catch try (bind pattern2 | body) catch ... catch empty
+        // Build: try (bind pattern1 | body) catch try (bind pattern2 | body) catch ... bind patternN | body
+        // The last alternative runs WITHOUT a try-catch so its error propagates —
+        // per the jq spec, "if they all fail, then an error is emitted" (issue #76).
         let tmp_idx = self.scope.alloc_var("__altdestruct_tmp__");
         let tmp_ref = Expr::LoadVar { var_index: tmp_idx };
 
-        let mut result = Expr::Empty; // final fallback: empty
+        let mut result: Option<Expr> = None;
         for pattern in alt_patterns.into_iter().rev() {
             let binding = self.build_binding_with_varmap(tmp_ref.clone(), &pattern, &var_map, body.clone())?;
-            result = Expr::TryCatch {
-                try_expr: Box::new(binding),
-                catch_expr: Box::new(result),
-            };
+            result = Some(match result {
+                None => binding,
+                Some(prev) => Expr::TryCatch {
+                    try_expr: Box::new(binding),
+                    catch_expr: Box::new(prev),
+                },
+            });
         }
+        let result = result.expect("alt_patterns has at least two entries here");
 
         Ok(Expr::LetBinding {
             var_index: tmp_idx,

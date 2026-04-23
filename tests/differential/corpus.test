@@ -3349,3 +3349,26 @@ from_entries
 
 with_entries(.value += 10)
 {"a":1,"b":2}
+
+# ---------- #76: ?// destructure propagates last error ----------
+
+. as [$a] ?// {b: $a} | $a
+"x"
+
+. as [$a] ?// {b: $a} | $a
+1
+
+. as [$a] ?// {b: $a} | $a
+true
+
+. as [$a] ?// {b: $a} | $a
+[1,2]
+
+. as [$a] ?// {b: $a} | $a
+{"b":9}
+
+. as [$a] ?// {b: $a} ?// {c: $a} | $a
+"x"
+
+. as [$a] ?// {b: $a} ?// {c: $a} | $a
+{"c":5}
