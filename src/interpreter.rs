@@ -992,8 +992,41 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                                     other => out.push(other.clone()),
                                 }
                             }
+                            // Only constant-fold when every element yields
+                            // exactly one value — otherwise the rewrite promotes
+                            // a generator (range/recurse/.[] /limit/...) to the
+                            // top level and streams every element instead of
+                            // returning the indexed one (issue #78).
+                            fn is_single_valued_idx(e: &Expr) -> bool {
+                                match e {
+                                    Expr::Empty => false,
+                                    Expr::Each { .. } | Expr::EachOpt { .. }
+                                    | Expr::Comma { .. } | Expr::Recurse { .. }
+                                    | Expr::Range { .. } | Expr::Limit { .. }
+                                    | Expr::RegexMatch { .. } | Expr::RegexScan { .. }
+                                    | Expr::RegexCapture { .. } => false,
+                                    Expr::Pipe { left, right } => is_single_valued_idx(left) && is_single_valued_idx(right),
+                                    Expr::IfThenElse { cond, then_branch, else_branch } =>
+                                        is_single_valued_idx(cond) && is_single_valued_idx(then_branch) && is_single_valued_idx(else_branch),
+                                    Expr::TryCatch { try_expr, catch_expr } =>
+                                        is_single_valued_idx(try_expr) && is_single_valued_idx(catch_expr),
+                                    Expr::Alternative { primary, fallback } =>
+                                        is_single_valued_idx(primary) && is_single_valued_idx(fallback),
+                                    Expr::LetBinding { value, body, .. } =>
+                                        is_single_valued_idx(value) && is_single_valued_idx(body),
+                                    Expr::Collect { .. } => true,
+                                    Expr::Input | Expr::Literal(_) | Expr::LoadVar { .. }
+                                    | Expr::Not | Expr::Negate { .. }
+                                    | Expr::Index { .. } | Expr::IndexOpt { .. }
+                                    | Expr::Slice { .. } | Expr::UnaryOp { .. } | Expr::BinOp { .. }
+                                    | Expr::StringInterpolation { .. } | Expr::ObjectConstruct { .. }
+                                    | Expr::RegexTest { .. } | Expr::RegexSub { .. } | Expr::RegexGsub { .. } => true,
+                                    _ => false,
+                                }
+                            }
                             let mut elems = Vec::new();
                             collect_comma_for_idx(lg, &mut elems);
+                            let all_single = elems.iter().all(is_single_valued_idx);
                             // Only constant-fold when the negative index
                             // actually lands inside the array. Previously the
                             // negative branch clamped to 0 via `.max(0)`,
@@ -1007,8 +1040,10 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                                 let v = elems.len() as i64 + idx;
                                 if v >= 0 && (v as usize) < elems.len() { Some(v as usize) } else { None }
                             };
-                            if let Some(i) = effective {
-                                return elems.swap_remove(i);
+                            if all_single {
+                                if let Some(i) = effective {
+                                    return elems.swap_remove(i);
+                                }
                             }
                             }
                         }

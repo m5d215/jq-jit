@@ -1003,3 +1003,23 @@ with_entries(.value += 10)
 . as [$a] ?// {b: $a} | $a
 {"b":9}
 9
+
+# Issue #78: [range(N)] | .[0] returns indexed element, not the generator
+[range(3)] | .[0]
+null
+0
+
+# Issue #78: [range(N)] | .[-1] returns the last element
+[range(3)] | .[-1]
+null
+2
+
+# Issue #78: parenthesized index also works
+[range(3)] | (.[0])
+null
+0
+
+# Issue #78: larger range returns correct endpoint
+[range(100)] | .[-1]
+null
+99
