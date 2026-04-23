@@ -375,7 +375,7 @@ fn const_expr_to_json(expr: &crate::ir::Expr) -> Option<Vec<u8>> {
             Some(v)
         }
         Expr::Literal(Literal::Num(n, repr)) => {
-            if let Some(r) = repr {
+            if let Some(r) = repr.as_ref().filter(|r| crate::value::is_valid_json_number(r)) {
                 Some(r.as_bytes().to_vec())
             } else {
                 let mut buf = Vec::new();
@@ -1848,7 +1848,14 @@ fn push_const_json(expr: &crate::ir::Expr, buf: &mut Vec<u8>) -> bool {
         Expr::Literal(Literal::Null) => { buf.extend_from_slice(b"null"); true }
         Expr::Literal(Literal::True) => { buf.extend_from_slice(b"true"); true }
         Expr::Literal(Literal::False) => { buf.extend_from_slice(b"false"); true }
-        Expr::Literal(Literal::Num(_, Some(raw))) => { buf.extend_from_slice(raw.as_bytes()); true }
+        Expr::Literal(Literal::Num(n, Some(raw))) => {
+            if crate::value::is_valid_json_number(raw) {
+                buf.extend_from_slice(raw.as_bytes());
+            } else {
+                crate::value::push_jq_number_bytes(buf, *n);
+            }
+            true
+        }
         Expr::Literal(Literal::Num(n, None)) => {
             crate::value::push_jq_number_bytes(buf, *n);
             true
@@ -8525,7 +8532,7 @@ impl Filter {
                             v
                         }
                         Expr::Literal(Literal::Num(n, repr)) => {
-                            if let Some(r) = repr {
+                            if let Some(r) = repr.as_ref().filter(|r| crate::value::is_valid_json_number(r)) {
                                 r.as_bytes().to_vec()
                             } else {
                                 let i = *n as i64;
@@ -9091,8 +9098,9 @@ impl Filter {
             match e {
                 Expr::Literal(Literal::Num(n, repr)) => {
                     let mut buf = Vec::new();
-                    if let Some(r) = repr { buf.extend_from_slice(r.as_bytes()); }
-                    else {
+                    if let Some(r) = repr.as_ref().filter(|r| crate::value::is_valid_json_number(r)) {
+                        buf.extend_from_slice(r.as_bytes());
+                    } else {
                         let i = *n as i64;
                         if i as f64 == *n { buf.extend_from_slice(itoa::Buffer::new().format(i).as_bytes()); }
                         else { buf.extend_from_slice(ryu::Buffer::new().format(*n).as_bytes()); }

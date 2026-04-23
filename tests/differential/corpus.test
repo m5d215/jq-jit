@@ -814,3 +814,985 @@ fromjson
 
 fromjson
 "\"hello\""
+
+# ---------- Issue #65 parser coverage: destructuring ----------
+
+. as [$a, $b] | $a + $b
+[1, 2]
+
+. as [$a, $b, $c] | [$a, $b, $c]
+[10, 20, 30]
+
+. as {a: $x, b: $y} | $x + $y
+{"a":1,"b":2}
+
+. as {a: $x} | $x
+{"a":{"x":1}}
+
+. as [$a, [$b, $c]] | [$a, $b, $c]
+[1, [2, 3]]
+
+. as {a: [$x, $y]} | [$x, $y]
+{"a":[1,2]}
+
+. as {a: {b: $v}} | $v
+{"a":{"b":42}}
+
+[. as [$a, $b] | $a, $b]
+[[1,2], [3,4]]
+
+. as $orig | . as [$a, $b] | [$orig, $a, $b]
+[5, 6]
+
+# ---------- Issue #65 parser coverage: alternative destructuring ?// ----------
+
+. as [$a] ?// $a | $a
+"hello"
+
+. as [$a] ?// $a | $a
+[7]
+
+. as {x: $v} ?// $v | $v
+{"x":1}
+
+. as {x: $v} ?// $v | $v
+42
+
+# ---------- Issue #65 parser coverage: function definitions ----------
+
+def f: . + 1; f | f
+1
+
+def add(x): x + .; add(10)
+5
+
+def add($x): $x + .; add(3)
+10
+
+def apply(f; $x): $x | f; apply(. * 2; 7)
+null
+
+def inc: . + 1; def dec: . - 1; inc | inc | dec
+0
+
+def rec: if . >= 5 then . else . + 1 | rec end; 0 | rec
+null
+
+def f(g): g * 2; f(. + 1)
+10
+
+def id: .; id | id | id
+{"a":1}
+
+def twice(f): f | f; twice(. + 1)
+0
+
+# ---------- Issue #65 parser coverage: mutual recursion ----------
+
+def even: . == 0 or (. > 0 and (. - 1 | odd)); def odd: . > 0 and (. - 1 | even); 4 | even
+null
+
+def even: . == 0 or (. > 0 and (. - 1 | odd)); def odd: . > 0 and (. - 1 | even); 5 | even
+null
+
+# ---------- Issue #65 parser coverage: nested reduce / foreach ----------
+
+reduce range(3) as $i (0; . + reduce range(2) as $j (0; . + $j))
+null
+
+[foreach range(3) as $i ([]; . + [$i]; foreach range(2) as $j (0; . + $j; .))]
+null
+
+reduce .[] as $x (0; . + ($x | reduce range(.) as $i (0; . + $i)))
+[1, 2, 3]
+
+# ---------- Issue #65 parser coverage: label / break nested ----------
+
+label $out | reduce range(100) as $i (0; if . >= 5 then ., break $out else . + 1 end)
+null
+
+label $a | label $b | 1, 2, break $a, 3
+null
+
+[label $out | foreach range(10) as $i (0; if . > 3 then ., break $out else . + 1 end; .)]
+null
+
+# ---------- Issue #65 parser coverage: complex path expressions ----------
+
+.a.b.c
+{"a":{"b":{"c":42}}}
+
+.a["b"].c
+{"a":{"b":{"c":42}}}
+
+.a?.b?.c?
+null
+
+.[0].x
+[{"x":1}]
+
+.[0:2]
+[1, 2, 3, 4]
+
+.[:2]
+[1, 2, 3]
+
+.[2:]
+[1, 2, 3, 4]
+
+.[-2:]
+[1, 2, 3, 4]
+
+.[].x
+[{"x":1}, {"x":2}]
+
+.[]?.x
+null
+
+.a[].b
+{"a":[{"b":1},{"b":2}]}
+
+.a[]?.b?
+{"a":null}
+
+# ---------- Issue #65 parser coverage: assignment operators ----------
+
+.a = 10
+{"a":1}
+
+.a.b = "x"
+{"a":{"b":1}}
+
+.a |= . * 2
+{"a":5}
+
+.a += 1
+{"a":5}
+
+.a -= 1
+{"a":5}
+
+.a *= 2
+{"a":5}
+
+.a /= 2
+{"a":10}
+
+.a %= 3
+{"a":10}
+
+.a //= 100
+{"a":null}
+
+(.a, .b) = 0
+{"a":1,"b":2}
+
+.a[] |= . + 1
+{"a":[1,2,3]}
+
+.a[].b = 9
+{"a":[{"b":1},{"b":2}]}
+
+del(.a)
+{"a":1,"b":2}
+
+del(.a, .b)
+{"a":1,"b":2,"c":3}
+
+# ---------- Issue #65 parser coverage: try/catch variants ----------
+
+try error("fail") catch .
+null
+
+try (error("x")) catch .
+null
+
+try error("x") catch ("caught: " + .)
+null
+
+[try (range(3) | if . == 2 then error("stop") else . end) catch "done"]
+null
+
+(error("x"))?
+null
+
+[(1, error("x"), 2)?]
+null
+
+try . catch "never"
+42
+
+# ---------- Issue #65 parser coverage: string interpolation ----------
+
+"\(.)"
+42
+
+"\(. + 1)"
+5
+
+"a\(.)b\(.)c"
+1
+
+"\(.a.b)"
+{"a":{"b":"deep"}}
+
+"\(.a // "default")"
+{}
+
+"prefix-\(.)-suffix"
+"mid"
+
+"\("x" + "y")"
+null
+
+"\(.a.b | tostring)-\(.c)"
+{"a":{"b":1},"c":"end"}
+
+# ---------- Issue #65 parser coverage: format filters ----------
+
+@base64
+"hello"
+
+@base64d
+"aGVsbG8="
+
+@uri
+"hello world?a=1"
+
+@csv
+["a", 1, null, "b,c"]
+
+@tsv
+["a", 1, null, "x\ty"]
+
+@sh
+"hello world"
+
+@sh
+["hello", "world with spaces"]
+
+@html
+"<p>hi</p>"
+
+@json
+{"a": 1}
+
+@text
+42
+
+# ---------- Issue #65 parser coverage: format with interpolation ----------
+
+@csv "\(.a),\(.b)"
+{"a":"x","b":1}
+
+@uri "q=\(.q)"
+{"q":"hello world"}
+
+@sh "echo \(.name)"
+{"name":"world"}
+
+# ---------- Issue #65 parser coverage: regex extras ----------
+
+test("^h"; "i")
+"HELLO"
+
+match("a"; "gi")
+"AaAa"
+
+[scan("\\d+"; "g")]
+"1 2 3 45"
+
+sub("a"; "b"; "g")
+"banana"
+
+gsub("(?<x>a)"; "\(.x | ascii_upcase)")
+"banana"
+
+splits(","; "g")
+"a,b,,c"
+
+[splits(","; "g")]
+"a,b,c"
+
+# ---------- Issue #65 parser coverage: SQL-style ops ----------
+
+group_by(.a)
+[{"a":1,"b":10},{"a":2,"b":20},{"a":1,"b":30}]
+
+unique_by(.a)
+[{"a":1,"b":10},{"a":2,"b":20},{"a":1,"b":30}]
+
+sort_by(.a)
+[{"a":3},{"a":1},{"a":2}]
+
+min_by(.a)
+[{"a":3},{"a":1},{"a":2}]
+
+max_by(.a)
+[{"a":3},{"a":1},{"a":2}]
+
+# ---------- Issue #65 parser coverage: env / location ----------
+
+env | type
+null
+
+$ENV | type
+null
+
+$__loc__ | type
+null
+
+$__loc__.file | type
+null
+
+# ---------- Issue #65 parser coverage: streams ----------
+
+[tostream]
+{"a":1,"b":[2,3]}
+
+[tostream]
+[1,2,3]
+
+[truncate_stream([["a","b"], 1] | tostream)]
+[1]
+
+# ---------- Issue #65 parser coverage: path / leaf ----------
+
+[paths]
+{"a":1,"b":{"c":[2,3]}}
+
+[paths(numbers)]
+{"a":1,"b":{"c":[2,3]}}
+
+# NOTE: leaf_paths was removed in jq 1.8. jq-jit keeps it as a compat alias,
+# which is an intentional deviation from upstream. Not exercised here.
+
+getpath(["a","b"])
+{"a":{"b":42}}
+
+setpath(["a","b"]; 99)
+{"a":{"b":1}}
+
+delpaths([["a"]])
+{"a":1,"b":2}
+
+delpaths([["a","b"],["c"]])
+{"a":{"b":1,"c":2},"c":3}
+
+# ---------- Issue #65 parser coverage: walk / recurse variants ----------
+
+walk(if type == "number" then . + 1 else . end)
+{"a":1,"b":[2,3],"c":{"d":4}}
+
+[recurse(.children[]?; . != null) | .name]
+{"name":"r","children":[{"name":"a","children":[{"name":"b","children":[]}]}]}
+
+[.. | numbers]
+{"a":1,"b":[2,3],"c":{"d":4}}
+
+[.. | select(type == "string")]
+{"a":"x","b":[2,"y"],"c":{"d":"z"}}
+
+# ---------- Issue #65 parser coverage: generator / nth / first / last ----------
+
+first(range(10))
+null
+
+last(range(10))
+null
+
+nth(3; range(10))
+null
+
+isempty(empty)
+null
+
+isempty(range(1))
+null
+
+[limit(3; range(10))]
+null
+
+[first(range(3))]
+null
+
+# ---------- Issue #65 parser coverage: string ops ----------
+
+ascii_downcase
+"HeLLo"
+
+ascii_upcase
+"HeLLo"
+
+explode
+"abc"
+
+implode
+[97, 98, 99]
+
+split("-")
+"a-b-c"
+
+split("-"; null)
+"a-b-c"
+
+ltrimstr("ab")
+"abcdef"
+
+rtrimstr("ef")
+"abcdef"
+
+startswith("ab")
+"abcdef"
+
+endswith("ef")
+"abcdef"
+
+# ---------- Issue #65 parser coverage: misc builtins ----------
+
+to_number
+"42"
+
+tonumber
+"3.14"
+
+tostring
+42
+
+not
+true
+
+[not]
+[true, false, null, 0, 1, "x"]
+
+[.[] | not]
+[true, false, null, 0, 1, "x"]
+
+# ---------- Issue #65 parser coverage: if without else ----------
+
+if . > 0 then "pos" end
+5
+
+if . > 0 then "pos" end
+-1
+
+if . > 0 then "pos" elif . == 0 then "zero" end
+0
+
+if . > 0 then "pos" elif . == 0 then "zero" end
+-1
+
+if . > 0 then "pos" elif . == 0 then "zero" else "neg" end
+-5
+
+# ---------- Issue #65 parser coverage: complex interpolation + format ----------
+
+[ .[] | "\(.name) is \(.age)" ]
+[{"name":"a","age":1},{"name":"b","age":2}]
+
+.items | map("\(.id): \(.value)")
+{"items":[{"id":1,"value":"x"},{"id":2,"value":"y"}]}
+
+# ---------- Issue #65 parser coverage: comma / pipe mix ----------
+
+(1, 2, 3) | . * 2
+null
+
+1, 2, 3 | . + 10
+null
+
+[(1, 2, 3) as $x | $x * 2]
+null
+
+[range(3) as $i | range(3) as $j | $i * 10 + $j]
+null
+
+[(1, 2), (3, 4) | . + 100]
+null
+
+# ---------- Issue #65 parser coverage: literal arrays / objects with expressions ----------
+
+[1, 2, 3]
+null
+
+[., .+1, .+2]
+10
+
+{"a": ., "b": .+1}
+5
+
+{a, b, c: .c + 1}
+{"a":1,"b":2,"c":3}
+
+{(.k): .v}
+{"k":"dyn","v":99}
+
+{"\(.prefix)_x": 1}
+{"prefix":"p"}
+
+# ---------- Issue #65 parser coverage: object literal shorthand ----------
+
+{a}
+{"a":1,"b":2}
+
+{a, b}
+{"a":1,"b":2}
+
+{ $x }
+null
+
+[ . as $x | {$x} ]
+42
+
+# ---------- Issue #65 parser coverage: complex path alternatives ----------
+
+.a? // .b? // "none"
+{"b":"fallback"}
+
+(.a // "na") + "-" + (.b // "nb")
+{"a":"x"}
+
+first(.a // .b // .c)
+{"c":"z"}
+
+# ---------- Issue #65 parser coverage: complex function bodies ----------
+
+def wrap(f): "[" + (f | tostring) + "]"; wrap(. + 1)
+5
+
+def apply(f): f; apply(.[] | . * 2)
+[1, 2, 3]
+
+def countdown: if . <= 0 then empty else ., (. - 1 | countdown) end; [3 | countdown]
+null
+
+def sum(s): reduce s as $x (0; . + $x); sum(.[])
+[1, 2, 3, 4]
+
+# ---------- Issue #65 parser coverage: keywords as identifiers (builtins) ----------
+
+keys
+{"a":1,"b":2,"c":3}
+
+keys_unsorted
+{"b":1,"a":2}
+
+values
+{"a":1,"b":2}
+
+has("a")
+{"a":1}
+
+in({"a":1,"b":2})
+"a"
+
+contains({"a":1})
+{"a":1,"b":2}
+
+inside({"a":1,"b":2})
+{"a":1}
+
+# ---------- Issue #65 parser coverage: path on assignments with alternates ----------
+
+.a |= (. // 0) + 1
+{"a":null}
+
+.a |= (. // 0) + 1
+{}
+
+# ---------- Issue #65 parser coverage: numeric literal forms ----------
+
+[., 0.5, .5, 1e2, 1.5e+3, 2.5E-2]
+0
+
+# note: .5 in filter position is "start-of-filter .5" i.e. literal
+[.5, .5 + 1]
+null
+
+# ---------- Issue #65 parser coverage: unary minus binding ----------
+
+-1
+null
+
+-.
+5
+
+-(.+1)
+5
+
+[-1, -2, -3]
+null
+
+# ---------- Issue #65 parser coverage: comparison chains ----------
+
+.a > .b
+{"a":2,"b":1}
+
+(.a == .b) and (.b == .c)
+{"a":1,"b":1,"c":1}
+
+(.a < 10) or (.b > 5)
+{"a":1,"b":1}
+
+# ---------- Issue #65 parser coverage: if/then with generators ----------
+
+[if . > 0 then 1, 2 else 3, 4 end]
+5
+
+[if . > 0 then 1, 2 else 3, 4 end]
+-1
+
+# ---------- Issue #65 parser coverage: halt / debug / stderr variants ----------
+
+. | debug | .
+5
+
+. | debug("tag") | .
+5
+
+. | stderr | .
+5
+
+# ---------- Issue #65 parser coverage: recurse on different shapes ----------
+
+[recurse]
+{"a":{"b":{"c":1}}}
+
+[recurse(.a?)]
+{"a":{"a":{"a":null}}}
+
+# ---------- Issue #65 parser coverage: tostream / fromstream roundtrip ----------
+
+[tostream] | fromstream(.[])
+{"a":1,"b":[2,3,{"c":4}]}
+
+# ---------- Issue #65 parser coverage: path function ----------
+
+[path(.a.b)]
+{"a":{"b":1}}
+
+[path(.a.b[])]
+{"a":{"b":[1,2,3]}}
+
+[paths | select(length > 0)]
+{"a":{"b":1}}
+
+# ---------- Issue #65 parser coverage: variable scope in nested contexts ----------
+
+. as $outer | [.[] | . + $outer]
+10
+
+[. as $x | .[] | . + $x]
+5
+
+. as $x | reduce range(3) as $i (0; . + $i + $x)
+10
+
+# ---------- Issue #65 parser coverage: comments / whitespace oddities ----------
+# NOTE: The corpus harness treats each filter as a single line. Multi-line
+# filter cases (comments in the middle, bare-newline continuation) are still
+# exercised by the regression suite; here we test the single-line forms.
+
+. # trailing comment
+42
+
+# ---------- Issue #65 parser coverage: function with generator arg ----------
+
+def f(g): [g]; f(range(5))
+null
+
+def apply_each(f): [.[] | f]; apply_each(. * 2)
+[1, 2, 3]
+
+# ---------- Issue #65 parser coverage: $__loc__ in function ----------
+
+def where: $__loc__; where | .line | type
+null
+
+# ---------- Issue #65 parser coverage: error object ----------
+
+try error({"code": 1, "msg": "bad"}) catch .
+null
+
+try error({"code": 1}) catch .code
+null
+
+# ---------- Issue #65 parser coverage: multi-arg user funcs ----------
+
+def mkpair(a; b): [a, b]; mkpair(.x; .y)
+{"x":1,"y":2}
+
+def choose(cond; then; else_): if cond then then else else_ end; choose(. > 0; "pos"; "not")
+5
+
+def triple(a; b; c): a + b + c; triple(1; 2; 3)
+null
+
+# ---------- Issue #65 parser coverage: func with mixed filter/value args ----------
+
+def tag($label; f): {label: $label, value: f}; tag("x"; . * 2)
+5
+
+# ---------- Issue #65 parser coverage: generator inside object value ----------
+
+{xs: [range(3)]}
+null
+
+[{i: range(3)}]
+null
+
+# ---------- Issue #65 parser coverage: conditional in path ----------
+
+(if .a > 0 then .a else .b end)
+{"a":1,"b":2}
+
+(if .a > 0 then .a else .b end) |= . + 10
+{"a":1,"b":2}
+
+# ---------- Issue #65 parser coverage: string as key path ----------
+
+.["a"]
+{"a":1}
+
+.["a with space"]
+{"a with space":42}
+
+.["x"]["y"]
+{"x":{"y":3}}
+
+# ---------- Issue #65 parser coverage: large flat expressions ----------
+
+1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10
+null
+
+1 * 2 * 3 * 4 * 5
+null
+
+"a" + "b" + "c" + "d"
+null
+
+[1] + [2] + [3] + [4]
+null
+
+{} + {"a":1} + {"b":2}
+null
+
+# ---------- Issue #65 parser coverage: ascii / codepoints ----------
+
+[explode[]]
+"hello"
+
+[.[]] | implode
+[97, 98, 99]
+
+# ---------- Issue #65 parser coverage: negative number / unary edge ----------
+
+- -1
+null
+
+- - -1
+null
+
+- (-1)
+null
+
+# ---------- Issue #65 parser coverage: parenthesized generators ----------
+
+[(1, 2, 3)]
+null
+
+[(1, 2), (3, 4)]
+null
+
+((1, 2) | . * 10)
+null
+
+# ---------- Issue #65 parser coverage: try without explicit catch ----------
+
+[try error("x"), 1]
+null
+
+# ---------- Issue #65 parser coverage: combined assignments in generator ----------
+
+[.[] | .a = 0]
+[{"a":1},{"a":2}]
+
+[.[] | .a += 1]
+[{"a":1},{"a":2}]
+
+# ---------- Issue #65 parser coverage: complex alternatives ----------
+
+(.a? // .b? // empty) as $v | $v
+{"a":null,"b":null}
+
+[(.a? // empty)]
+{"a":null}
+
+[(.a? // empty)]
+{"a":1}
+
+# ---------- Issue #65 parser coverage: object with trailing comma NO: invalid ---
+# jq doesn't allow trailing commas — skip.
+
+# ---------- Issue #65 parser coverage: input/inputs semantics ----------
+# input and inputs depend on stdin state — skip behavior, test only parseability
+# through an error-wrapped form.
+
+try (inputs | length) catch "no more"
+null
+
+# ---------- Issue #65 parser coverage: infinite loop guards ----------
+# Use limit to cap otherwise-unbounded recursion.
+
+[limit(5; repeat(.))]
+1
+
+[limit(3; repeat(. + 1))]
+0
+
+# ---------- Issue #65 parser coverage: numeric conversions + math ----------
+
+sqrt
+16
+
+pow(.; 2)
+3
+
+log
+2.718281828
+
+exp
+1
+
+floor
+3.7
+
+ceil
+3.2
+
+round
+2.5
+
+fabs
+-5
+
+# ---------- Issue #65 parser coverage: arrays/builtins ----------
+
+[range(5)]
+null
+
+[range(0; 10; 2)]
+null
+
+[range(10; 0; -1)]
+null
+
+[range(.)]
+3
+
+add
+[1, 2, 3, 4]
+
+add
+["a","b","c"]
+
+add
+[[1],[2,3],[4]]
+
+add
+[]
+
+# ---------- Issue #65 parser coverage: object manipulation ----------
+
+with_entries(.value += 1)
+{"a":1,"b":2}
+
+to_entries
+{"a":1,"b":2}
+
+from_entries
+[{"key":"a","value":1},{"key":"b","value":2}]
+
+# ---------- Issue #65 parser coverage: null coalesce chains ----------
+
+.a // .b // .c // "default"
+{"c":"z"}
+
+.a // .b // .c // "default"
+{}
+
+# ---------- Issue #65 parser coverage: `any`/`all` with filter args ----------
+
+any(. > 0)
+[1, 2, -1]
+
+any(.; . > 0)
+[1, 2, -1]
+
+all(. > 0)
+[1, 2, -1]
+
+all(.; . > 0)
+[1, 2, 3]
+
+# ---------- Issue #65 parser coverage: object nested with arrays ----------
+
+{a: [1, 2, 3], b: {x: [4, 5]}}
+null
+
+[{"a": range(3)}]
+null
+
+# ---------- Issue #65 parser coverage: ascii codepoint helper ----------
+
+[range(65; 70)] | implode
+null
+
+# ---------- Issue #65 parser coverage: nested try chains ----------
+
+try (try error("inner") catch error("outer")) catch .
+null
+
+try error("x") catch (try error("y") catch .)
+null
+
+# ---------- Issue #65 parser coverage: if with multiple elif ----------
+
+if . == 0 then "zero" elif . == 1 then "one" elif . == 2 then "two" else "many" end
+2
+
+if . == 0 then "zero" elif . == 1 then "one" elif . == 2 then "two" else "many" end
+7
+
+# ---------- Issue #65 parser coverage: label nested two levels ----------
+
+label $a | label $b | (1, 2, break $b, 3, break $a, 4)
+null
+
+[label $out | range(100) | if . == 5 then ., break $out else . end]
+null
+
+# ---------- Issue #65 parser coverage: path to array element ----------
+
+.a[0].b
+{"a":[{"b":42}]}
+
+.a[0].b = 99
+{"a":[{"b":1}]}
+
+.a[0:2]
+{"a":[1,2,3,4]}
+
+# ---------- Issue #65 parser coverage: simple modulo ----------
+
+. % 3
+10
+
+. / 3
+10
+
+# ---------- Issue #65 parser coverage: alternative with error ----------
+
+error("x") // "caught"
+null
+

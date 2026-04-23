@@ -425,10 +425,17 @@ impl Lexer {
         }
         let num_str: String = self.chars[start..self.pos].iter().collect();
         let n: f64 = num_str.parse().map_err(|e| anyhow::anyhow!("invalid number '{}': {}", num_str, e))?;
-        // Preserve original string for numbers that lose precision in f64
+        // Preserve original string for numbers that lose precision in f64.
+        // Drop preservation for source forms that aren't valid JSON (e.g. `.5`),
+        // so downstream emitters can rely on repr being JSON-safe.
         let f64_repr = crate::value::format_jq_number(n);
         let repr = if f64_repr != num_str {
-            Some(Rc::from(normalize_num_repr(&num_str)))
+            let norm = normalize_num_repr(&num_str);
+            if crate::value::is_valid_json_number(&norm) {
+                Some(Rc::from(norm))
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -2189,10 +2196,7 @@ impl Parser {
                 } else {
                     match self.scope.lookup_var(&name) {
                         Some(idx) => Ok(Expr::LoadVar { var_index: idx }),
-                        None => {
-                            let idx = self.scope.alloc_var(&name);
-                            Ok(Expr::LoadVar { var_index: idx })
-                        }
+                        None => bail!("${} is not defined", name),
                     }
                 }
             }
@@ -2295,17 +2299,19 @@ impl Parser {
                 if self.eat(&Token::Colon) {
                     let val = self.parse_pipe_nocomma()?;
                     // $var: value — key is the variable's value converted to string
-                    let idx = self.scope.lookup_var(&name).unwrap_or(0);
+                    let idx = self.scope.lookup_var(&name)
+                        .ok_or_else(|| anyhow::anyhow!("${} is not defined", name))?;
                     let key_expr = Expr::LoadVar { var_index: idx };
                     Ok((key_expr, val))
                 } else {
-                    // Shorthand: {$x} = {($x|tostring): $x}
+                    // Shorthand: {$x} = {"x": $x}
                     let val_expr = if name == "__loc__" {
                         Expr::Loc { file: "<top-level>".to_string(), line: 1 }
                     } else if name == "ENV" {
                         Expr::Env
                     } else {
-                        let idx = self.scope.lookup_var(&name).unwrap_or(0);
+                        let idx = self.scope.lookup_var(&name)
+                            .ok_or_else(|| anyhow::anyhow!("${} is not defined", name))?;
                         Expr::LoadVar { var_index: idx }
                     };
                     Ok((
@@ -2653,6 +2659,10 @@ impl Parser {
     }
 
     fn compile_builtin_noargs(&self, name: &str) -> Result<Expr> {
+        // User-defined 0-arg functions shadow same-named builtins.
+        if let Some(func_id) = self.scope.lookup_func(name, 0) {
+            return Ok(Expr::FuncCall { func_id, args: vec![] });
+        }
         match name {
             "not" => Ok(Expr::Not),
             "empty" => Ok(Expr::Empty),
@@ -2859,6 +2869,10 @@ impl Parser {
     }
 
     fn compile_funcall(&mut self, name: &str, args: Vec<Expr>) -> Result<Expr> {
+        // User-defined functions shadow builtins (matches jq semantics).
+        if let Some(func_id) = self.scope.lookup_func(name, args.len()) {
+            return Ok(Expr::FuncCall { func_id, args });
+        }
         match (name, args.len()) {
             // Standard library functions
             ("select", 1) => {

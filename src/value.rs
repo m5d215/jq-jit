@@ -4483,6 +4483,38 @@ pub unsafe fn jv_to_value(jv: Jv) -> Result<Value> {
 }
 
 /// Format f64 the way jq does — shortest representation with scientific notation for large/small values.
+/// Whether a string is a JSON-conformant number (RFC 8259 §6).
+/// Used to guard against emitting preserved source forms like `.5` or `+1`
+/// that parse in jq but break strict JSON consumers.
+pub fn is_valid_json_number(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    if bytes.first() == Some(&b'-') { i += 1; }
+    let int_start = i;
+    match bytes.get(i) {
+        Some(&b'0') => { i += 1; }
+        Some(&c) if c.is_ascii_digit() => {
+            while bytes.get(i).map_or(false, |b| b.is_ascii_digit()) { i += 1; }
+        }
+        _ => return false,
+    }
+    let _ = int_start;
+    if bytes.get(i) == Some(&b'.') {
+        i += 1;
+        let frac_start = i;
+        while bytes.get(i).map_or(false, |b| b.is_ascii_digit()) { i += 1; }
+        if i == frac_start { return false; }
+    }
+    if matches!(bytes.get(i), Some(b'e') | Some(b'E')) {
+        i += 1;
+        if matches!(bytes.get(i), Some(b'+') | Some(b'-')) { i += 1; }
+        let exp_start = i;
+        while bytes.get(i).map_or(false, |b| b.is_ascii_digit()) { i += 1; }
+        if i == exp_start { return false; }
+    }
+    i == bytes.len()
+}
+
 pub fn format_jq_number(n: f64) -> String {
     let mut buf = String::with_capacity(24);
     push_jq_number_str(&mut buf, n);
@@ -4591,7 +4623,9 @@ fn value_to_json_depth(v: &Value, depth: usize, precise: bool) -> String {
         Value::Num(n, repr) => {
             if precise {
                 if let Some(r) = repr {
-                    return r.to_string();
+                    if is_valid_json_number(r) {
+                        return r.to_string();
+                    }
                 }
             }
             format_jq_number(*n)
@@ -4743,7 +4777,7 @@ fn write_pretty_to_string_impl<const COLOR: bool>(out: &mut String, v: &Value, d
         Value::True => { c!(COLOR_TRUE); out.push_str("true"); c!(COLOR_RESET); }
         Value::Num(n, repr) => {
             c!(COLOR_NUMBER);
-            if let Some(r) = repr {
+            if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r)) {
                 out.push_str(r);
             } else {
                 push_jq_number(out, *n);
@@ -4978,8 +5012,11 @@ fn push_compact_value_color(buf: &mut Vec<u8>, v: &Value) {
         Value::True => { c!(COLOR_TRUE); buf.extend_from_slice(b"true"); c!(COLOR_RESET); }
         Value::Num(n, repr) => {
             c!(COLOR_NUMBER);
-            if let Some(r) = repr { buf.extend_from_slice(r.as_bytes()); }
-            else { push_jq_number_bytes(buf, *n); }
+            if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r)) {
+                buf.extend_from_slice(r.as_bytes());
+            } else {
+                push_jq_number_bytes(buf, *n);
+            }
             c!(COLOR_RESET);
         }
         Value::Str(s) => { c!(COLOR_STRING); push_json_string_to_vec(buf, s.as_str()); c!(COLOR_RESET); }
@@ -5028,7 +5065,7 @@ fn push_pretty_value_impl<const COLOR: bool>(buf: &mut Vec<u8>, v: &Value, depth
         Value::True => { c!(COLOR_TRUE); buf.extend_from_slice(b"true"); c!(COLOR_RESET); }
         Value::Num(n, repr) => {
             c!(COLOR_NUMBER);
-            if let Some(r) = repr {
+            if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r)) {
                 buf.extend_from_slice(r.as_bytes());
             } else {
                 push_jq_number_bytes(buf, *n);
@@ -5095,7 +5132,7 @@ fn push_compact_value(buf: &mut Vec<u8>, v: &Value) {
         Value::False => buf.extend_from_slice(b"false"),
         Value::True => buf.extend_from_slice(b"true"),
         Value::Num(n, repr) => {
-            if let Some(r) = repr {
+            if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r)) {
                 buf.extend_from_slice(r.as_bytes());
             } else {
                 push_jq_number_bytes(buf, *n);
@@ -5263,7 +5300,7 @@ fn write_compact_buf_inner(v: &Value, buf: &mut [u8], pos: &mut usize) -> bool {
         Value::False => push!(b"false"),
         Value::True => push!(b"true"),
         Value::Num(n, repr) => {
-            if let Some(r) = repr {
+            if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r)) {
                 push!(r.as_bytes());
             } else if *n == n.trunc() && n.abs() < 1e15 {
                 let i = *n as i64;
@@ -5340,7 +5377,7 @@ fn write_value_compact_ext_inner(w: &mut dyn io::Write, v: &Value, sort_keys: bo
         Value::False => w.write_all(b"false"),
         Value::True => w.write_all(b"true"),
         Value::Num(n, repr) => {
-            if let Some(r) = repr {
+            if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r)) {
                 w.write_all(r.as_bytes())
             } else {
                 write_jq_number(w, *n)
