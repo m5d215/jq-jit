@@ -112,7 +112,7 @@ fn parse_module_metadata(content: &str) -> Result<Value> {
     result.insert("deps".into(), Value::Arr(Rc::new(deps)));
     result.insert("defs".into(), Value::Arr(Rc::new(defs)));
 
-    Ok(Value::Obj(Rc::new(result)))
+    Ok(Value::object_from_map(result))
 }
 
 fn parse_simple_object(s: &str) -> Result<Value> {
@@ -134,7 +134,7 @@ fn parse_simple_object(s: &str) -> Result<Value> {
         }
     }
 
-    Ok(Value::Obj(Rc::new(map)))
+    Ok(Value::object_from_map(map))
 }
 
 fn parse_simple_value(s: &str) -> Value {
@@ -254,7 +254,7 @@ fn parse_import_dep(chars: &[char], pos: &mut usize) -> Option<Value> {
     dep_map.insert("is_data".into(), Value::from_bool(is_data));
     dep_map.insert("relpath".into(), Value::from_str(&path));
 
-    Some(Value::Obj(Rc::new(dep_map)))
+    Some(Value::object_from_map(dep_map))
 }
 
 fn parse_include_dep(chars: &[char], pos: &mut usize) -> Option<Value> {
@@ -275,7 +275,7 @@ fn parse_include_dep(chars: &[char], pos: &mut usize) -> Option<Value> {
     let mut dep_map = new_objmap();
     dep_map.insert("is_data".into(), Value::False);
     dep_map.insert("relpath".into(), Value::from_str(&path));
-    Some(Value::Obj(Rc::new(dep_map)))
+    Some(Value::object_from_map(dep_map))
 }
 
 fn parse_def_info(chars: &[char], pos: &mut usize) -> Option<Value> {

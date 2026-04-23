@@ -3544,7 +3544,7 @@ fn parse_json_object_project(b: &[u8], pos: usize, depth: usize, fields: &[&str]
     let mut map = new_objmap_with_capacity(n);
     if i < b.len() && b[i] == b'}' {
         for &f in fields { map.push_unique(KeyStr::from(f), Value::Null); }
-        return Ok((Value::Obj(Rc::new(map)), i + 1));
+        return Ok((Value::object_from_map(map), i + 1));
     }
     let mut found = 0u64;
     let all_found: u64 = if n < 64 { (1u64 << n) - 1 } else { u64::MAX };
@@ -3620,7 +3620,7 @@ fn parse_json_object_project(b: &[u8], pos: usize, depth: usize, fields: &[&str]
         if fi < 64 && (found & (1u64 << fi)) != 0 { continue; }
         map.push_unique(KeyStr::from(f), Value::Null);
     }
-    Ok((Value::Obj(Rc::new(map)), i + 1))
+    Ok((Value::object_from_map(map), i + 1))
 }
 
 /// Stream JSON values from input, only parsing specified fields from top-level objects.
@@ -3922,7 +3922,7 @@ fn parse_json_array(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)
 fn parse_json_object(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)> {
     debug_assert_eq!(b[pos], b'{');
     let mut i = skip_ws(b, pos + 1);
-    if i < b.len() && b[i] == b'}' { return Ok((Value::Obj(Rc::new(ObjMap::new())), i + 1)); }
+    if i < b.len() && b[i] == b'}' { return Ok((Value::object_from_map(ObjMap::new()), i + 1)); }
     // Use Rc pool to recycle both the Rc allocation and the Vec buffer
     let mut rc = rc_objmap_pool_get(4);
     let map = Rc::get_mut(&mut rc).unwrap();
@@ -4376,7 +4376,7 @@ impl<'a> JqFromJsonParser<'a> {
                     Some(JqStack::Obj(o)) => o,
                     _ => unreachable!(),
                 };
-                self.next = Some(Value::Obj(Rc::new(obj)));
+                self.next = Some(Value::object_from_map(obj));
                 self.next_is_string = false;
             }
             _ => unreachable!("non-structural char dispatched to parse_structure"),

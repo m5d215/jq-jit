@@ -100,7 +100,7 @@ fn try_const_eval(expr: &Expr) -> Option<Value> {
                 let val = try_const_eval(v)?;
                 obj.insert(key, val);
             }
-            Some(Value::Obj(Rc::new(obj)))
+            Some(Value::object_from_map(obj))
         }
         Expr::BinOp { op, lhs, rhs } => {
             let l = try_const_eval(lhs)?;
@@ -5734,7 +5734,7 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                     let mut entry = crate::value::new_objmap();
                     entry.insert("key".into(), Value::from_str(k));
                     entry.insert("value".into(), v.clone());
-                    entries.push(Value::Obj(Rc::new(entry)));
+                    entries.push(Value::object_from_map(entry));
                 }
                 std::ptr::write(dst, Value::Arr(Rc::new(entries)));
                 return 0;
@@ -5845,7 +5845,7 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                     }
                 }
                 if ok {
-                    std::ptr::write(dst, Value::Obj(Rc::new(obj)));
+                    std::ptr::write(dst, Value::object_from_map(obj));
                     return 0;
                 }
             }
@@ -6412,7 +6412,7 @@ extern "C" fn jit_rt_path_insert(container: *mut Value, key: *const Value, val: 
             (Value::Null, Value::Str(k)) => {
                 let mut obj = crate::value::new_objmap();
                 obj.insert(crate::value::KeyStr::from(k.as_str()), new_val);
-                *container = Value::Obj(Rc::new(obj));
+                *container = Value::object_from_map(obj);
                 0
             }
             _ => {
@@ -6698,7 +6698,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                 let mut obj = crate::value::new_objmap();
                 obj.insert(crate::value::KeyStr::from("file"), Value::from_str(file));
                 obj.insert(crate::value::KeyStr::from("line"), Value::number(line_n as f64));
-                std::ptr::write(dst, Value::Obj(Rc::new(obj)));
+                std::ptr::write(dst, Value::object_from_map(obj));
                 return 0;
             }
         }
@@ -6713,7 +6713,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                 for (k, v) in std::env::vars() {
                     obj.insert(crate::value::KeyStr::from(k), Value::from_string(v));
                 }
-                *cached = Some(Value::Obj(Rc::new(obj)));
+                *cached = Some(Value::object_from_map(obj));
             }
             std::ptr::write(dst, cached.as_ref().unwrap().clone());
             return 0;

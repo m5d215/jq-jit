@@ -327,13 +327,13 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             };
             // Need lib_dirs from env - they're passed through args[1] if available
             // For now, try to find module in common paths
-            Ok(Value::Obj(Rc::new({
+            Ok(Value::object_from_map({
                 let mut m = new_objmap();
                 m.insert("version".into(), Value::number(0.1));
                 m.insert("deps".into(), Value::Arr(Rc::new(vec![])));
                 m.insert("defs".into(), Value::Arr(Rc::new(vec![])));
                 m
-            })))
+            }))
         }
         "have_decnum" => {
             // We don't have arbitrary precision, return false
@@ -524,7 +524,7 @@ pub fn rt_add(a: &Value, b: &Value) -> Result<Value> {
             for (k, v) in y.iter() {
                 result.insert(k.clone(), v.clone());
             }
-            Ok(Value::Obj(Rc::new(result)))
+            Ok(Value::object_from_map(result))
         }
         (Value::Null, x) | (x, Value::Null) => Ok(x.clone()),
         _ => bail!(
@@ -562,14 +562,14 @@ pub fn rt_add_owned(a: Value, b: &Value) -> Result<Value> {
                     for (k, v) in y.iter() {
                         map.insert(k.clone(), v.clone());
                     }
-                    Ok(Value::Obj(Rc::new(map)))
+                    Ok(Value::object_from_map(map))
                 }
                 Err(x) => {
                     let mut result = (*x).clone();
                     for (k, v) in y.iter() {
                         result.insert(k.clone(), v.clone());
                     }
-                    Ok(Value::Obj(Rc::new(result)))
+                    Ok(Value::object_from_map(result))
                 }
             }
         }
@@ -618,7 +618,7 @@ pub fn rt_mul(a: &Value, b: &Value) -> Result<Value> {
         }
         (Value::Obj(x), Value::Obj(y)) => {
             // Object multiplication = recursive merge
-            Ok(Value::Obj(Rc::new(merge_objects(x, y))))
+            Ok(Value::object_from_map(merge_objects(x, y)))
         }
         (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
         _ => bail!(
@@ -634,7 +634,7 @@ fn merge_objects(a: &ObjMap, b: &ObjMap) -> ObjMap {
     for (k, v) in b.iter() {
         if let Some(existing) = result.get(k) {
             if let (Value::Obj(ea), Value::Obj(eb)) = (existing, v) {
-                result.insert(k.clone(), Value::Obj(Rc::new(merge_objects(ea, eb))));
+                result.insert(k.clone(), Value::object_from_map(merge_objects(ea, eb)));
                 continue;
             }
         }
@@ -1065,7 +1065,7 @@ fn rt_add_all(v: &Value) -> Result<Value> {
                         for (k, v) in entries {
                             result.push_unique(k, v);
                         }
-                        return Ok(Value::Obj(Rc::new(result)));
+                        return Ok(Value::object_from_map(result));
                     }
                 }
                 _ => {}
@@ -1330,7 +1330,7 @@ fn rt_to_entries(v: &Value) -> Result<Value> {
                 let mut entry = new_objmap();
                 entry.insert("key".into(), Value::from_str(k));
                 entry.insert("value".into(), v.clone());
-                Value::Obj(Rc::new(entry))
+                Value::object_from_map(entry)
             }).collect();
             Ok(Value::Arr(Rc::new(entries)))
         }
@@ -1339,7 +1339,7 @@ fn rt_to_entries(v: &Value) -> Result<Value> {
                 let mut entry = new_objmap();
                 entry.insert("key".into(), Value::number(i as f64));
                 entry.insert("value".into(), v.clone());
-                Value::Obj(Rc::new(entry))
+                Value::object_from_map(entry)
             }).collect();
             Ok(Value::Arr(Rc::new(entries)))
         }
@@ -1369,11 +1369,11 @@ fn rt_from_entries(v: &Value) -> Result<Value> {
                     _ => bail!("from_entries requires array of objects"),
                 }
             }
-            Ok(Value::Obj(Rc::new(obj)))
+            Ok(Value::object_from_map(obj))
         }
         // jq's from_entries desugars to `map(...) | add + {}`. On {} the map yields [],
         // add yields null, and null + {} is {} — so empty objects round-trip to {}.
-        Value::Obj(o) if o.is_empty() => Ok(Value::Obj(Rc::new(new_objmap()))),
+        Value::Obj(o) if o.is_empty() => Ok(Value::object_from_map(new_objmap())),
         _ => bail!("{} cannot be converted from entries", v.type_name()),
     }
 }
@@ -1533,7 +1533,7 @@ fn rt_execv(input: &Value, cmd: &Value) -> Result<Value> {
     obj.insert(KeyStr::const_new("exitcode"), Value::number(code as f64));
     obj.insert(KeyStr::const_new("stdout"), Value::from_str(stdout.trim_end_matches('\n')));
     obj.insert(KeyStr::const_new("stderr"), Value::from_str(stderr.trim_end_matches('\n')));
-    Ok(Value::Obj(Rc::new(obj)))
+    Ok(Value::object_from_map(obj))
 }
 
 fn rt_ltrimstr(v: &Value, prefix: &Value) -> Result<Value> {
@@ -1823,7 +1823,7 @@ pub fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
                     let new_inner = rt_setpath(&inner, &rest, val)?;
                     let mut new_obj = (**o).clone();
                     new_obj.insert(KeyStr::from(k.as_str()), new_inner);
-                    Ok(Value::Obj(Rc::new(new_obj)))
+                    Ok(Value::object_from_map(new_obj))
                 }
                 (Value::Arr(a), Value::Num(n, _)) => {
                     if n.is_nan() { bail!("Cannot set array element at NaN index"); }
@@ -1843,7 +1843,7 @@ pub fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
                     let new_inner = rt_setpath(&Value::Null, &rest, val)?;
                     let mut obj = new_objmap();
                     obj.insert(KeyStr::from(k.as_str()), new_inner);
-                    Ok(Value::Obj(Rc::new(obj)))
+                    Ok(Value::object_from_map(obj))
                 }
                 (Value::Null, Value::Num(n, _)) => {
                     if n.is_nan() { bail!("Cannot set array element at NaN index"); }
@@ -1922,7 +1922,7 @@ pub fn rt_setpath_mut(v: &mut Value, path: &[Value], val: Value) -> Result<()> {
         Value::Str(k) => {
             // Ensure v is an Obj (or convert Null to Obj)
             if matches!(v, Value::Null) {
-                *v = Value::Obj(Rc::new(new_objmap()));
+                *v = Value::object_from_map(new_objmap());
             }
             if let Value::Obj(o) = v {
                 let obj = Rc::make_mut(o);
@@ -2001,7 +2001,7 @@ fn delete_path(v: &Value, path: &Value) -> Result<Value> {
                 (Value::Obj(o), Value::Str(k)) => {
                     let mut new_obj = (**o).clone();
                     new_obj.shift_remove(k.as_str());
-                    Ok(Value::Obj(Rc::new(new_obj)))
+                    Ok(Value::object_from_map(new_obj))
                 }
                 (Value::Arr(a), Value::Num(n, _)) => {
                     let ni = *n as i64;
@@ -2026,7 +2026,7 @@ fn delete_path(v: &Value, path: &Value) -> Result<Value> {
                         let new_inner = delete_path(inner, &rest)?;
                         let mut new_obj = (**o).clone();
                         new_obj.insert(KeyStr::from(k.as_str()), new_inner);
-                        Ok(Value::Obj(Rc::new(new_obj)))
+                        Ok(Value::object_from_map(new_obj))
                     } else {
                         Ok(v.clone())
                     }
@@ -2188,19 +2188,19 @@ fn build_match_obj(m: &regex::Match, caps: Option<&regex::Captures>, capture_nam
                 c.insert("length".into(), Value::number(cap_char_length as f64));
                 c.insert("string".into(), Value::from_str(cap.as_str()));
                 c.insert("name".into(), name_val);
-                captures_vec.push(Value::Obj(Rc::new(c)));
+                captures_vec.push(Value::object_from_map(c));
             } else {
                 let mut c = new_objmap();
                 c.insert("offset".into(), Value::number(-1.0));
                 c.insert("length".into(), Value::number(0.0));
                 c.insert("string".into(), Value::Null);
                 c.insert("name".into(), name_val);
-                captures_vec.push(Value::Obj(Rc::new(c)));
+                captures_vec.push(Value::object_from_map(c));
             }
         }
     }
     result.insert("captures".into(), Value::Arr(Rc::new(captures_vec)));
-    Value::Obj(Rc::new(result))
+    Value::object_from_map(result)
 }
 
 fn rt_match_global(v: &Value, re: &Value) -> Result<Value> {
@@ -2244,7 +2244,7 @@ fn rt_capture(v: &Value, re: &Value) -> Result<Value> {
                                 result.insert(KeyStr::from(name), Value::Null);
                             }
                         }
-                        Ok(Value::Obj(Rc::new(result)))
+                        Ok(Value::object_from_map(result))
                     }
                     None => bail!("capture failed"),
                 }
@@ -2268,7 +2268,7 @@ pub fn rt_capture_global(v: &Value, re: &Value) -> Result<Value> {
                             obj.insert(KeyStr::from(name), Value::Null);
                         }
                     }
-                    results.push(Value::Obj(Rc::new(obj)));
+                    results.push(Value::object_from_map(obj));
                 }
                 Ok(Value::Arr(Rc::new(results)))
             })?
@@ -2357,7 +2357,7 @@ pub fn sub_gsub_segments(input: &str, pattern: &str, flags: &Value, global: bool
             }
             segments.push(SubGsubSegment {
                 literal,
-                captures: Some(Value::Obj(Rc::new(obj))),
+                captures: Some(Value::object_from_map(obj)),
             });
             last_end = m.end();
         };
@@ -2674,7 +2674,7 @@ fn rt_env() -> Value {
     for (k, v) in std::env::vars() {
         env.insert(KeyStr::from(k), Value::from_string(v));
     }
-    Value::Obj(Rc::new(env))
+    Value::object_from_map(env)
 }
 
 pub fn rt_builtins() -> Value {
