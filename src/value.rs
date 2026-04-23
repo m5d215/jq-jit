@@ -391,7 +391,7 @@ impl Clone for Value {
             Value::Null => Value::Null,
             Value::False => Value::False,
             Value::True => Value::True,
-            Value::Num(n, repr) => Value::Num(*n, repr.clone()),
+            Value::Num(n, repr) => Value::number_opt(*n, repr.clone()),
             Value::Str(s) => Value::Str(s.clone()),
             Value::Arr(a) => Value::Arr(Rc::clone(a)),
             Value::Obj(o) => Value::Obj(Rc::clone(o)),
@@ -509,6 +509,16 @@ impl Value {
         Value::Num(n, Some(repr))
     }
 
+    /// Numeric factory that takes an already-built repr option. Convenience
+    /// wrapper for sites that hold a `Option<Rc<str>>` (cloned from another
+    /// number, carried through a pipeline) and want to avoid pattern-matching
+    /// on the option before dispatching to [`Value::number`] or
+    /// [`Value::number_with_repr`].
+    #[inline]
+    pub fn number_opt(n: f64, repr: Option<Rc<str>>) -> Self {
+        Value::Num(n, repr)
+    }
+
     pub fn is_true(&self) -> bool {
         !matches!(self, Value::Null | Value::False)
     }
@@ -568,7 +578,7 @@ impl Value {
                 bail!("{} ({}) has no length", self.type_name(), crate::value::value_to_json(self))
             }
             Value::Num(n, repr) => {
-                if *n >= 0.0 { Ok(Value::Num(*n, repr.clone())) }
+                if *n >= 0.0 { Ok(Value::number_opt(*n, repr.clone())) }
                 else { Ok(Value::number(n.abs())) }
             }
             Value::Str(s) => {
@@ -3884,13 +3894,13 @@ fn parse_json_number(b: &[u8], pos: usize) -> Result<(Value, usize)> {
         if n == n.trunc() && n.abs() < 1e16 {
             let iv = n as i64;
             if iv as f64 == n {
-                return Ok((Value::Num(n, Some(Rc::from(num_str))), i));
+                return Ok((Value::number_with_repr(n, Rc::from(num_str)), i));
             }
         }
     }
     let f64_repr = format_jq_number(n);
     let repr = if f64_repr == num_str { None } else { Some(Rc::from(num_str)) };
-    Ok((Value::Num(n, repr), i))
+    Ok((Value::number_opt(n, repr), i))
 }
 
 fn parse_json_array(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)> {

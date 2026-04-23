@@ -77,7 +77,7 @@ fn try_const_eval(expr: &Expr) -> Option<Value> {
             Literal::Null => Value::Null,
             Literal::True => Value::True,
             Literal::False => Value::False,
-            Literal::Num(n, repr) => Value::Num(*n, repr.clone()),
+            Literal::Num(n, repr) => Value::number_opt(*n, repr.clone()),
             Literal::Str(s) => Value::from_str(s),
         }),
         Expr::Negate { operand } => {
@@ -508,7 +508,7 @@ impl Flattener {
             Literal::Null => Value::Null,
             Literal::True => Value::True,
             Literal::False => Value::False,
-            Literal::Num(n, repr) => Value::Num(*n, repr.clone()),
+            Literal::Num(n, repr) => Value::number_opt(*n, repr.clone()),
             Literal::Str(s) => Value::Str(crate::value::KeyStr::from(s.as_str())),
         };
         self.hoist_value(val)
@@ -5263,7 +5263,7 @@ extern "C" fn jit_rt_num(dst: *mut Value, n: f64) {
     unsafe { std::ptr::write(dst, Value::number(n)); }
 }
 extern "C" fn jit_rt_num_repr(dst: *mut Value, n: f64, repr_ptr: *const Rc<str>) {
-    unsafe { std::ptr::write(dst, Value::Num(n, Some((*repr_ptr).clone()))); }
+    unsafe { std::ptr::write(dst, Value::number_with_repr(n, (*repr_ptr).clone())); }
 }
 extern "C" fn jit_rt_str(dst: *mut Value, ptr: *const u8, len: usize) {
     unsafe {
@@ -5968,7 +5968,7 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
             if let Some(r) = result {
                 // Preserve repr if result equals the original value
                 let keep_repr = repr.is_some() && r == n;
-                std::ptr::write(dst, Value::Num(r, if keep_repr { repr.clone() } else { None }));
+                std::ptr::write(dst, Value::number_opt(r, if keep_repr { repr.clone() } else { None }));
                 return 0;
             }
         }
@@ -6117,8 +6117,8 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
         }
         // Fast path: now (op 67)
         if op == 67 {
-            std::ptr::write(dst, Value::Num(std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64(), None));
+            std::ptr::write(dst, Value::number(std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()));
             return 0;
         }
         // Fast path: ltrimstr/rtrimstr/trim (op 40/41/42) — null-arg form trims whitespace
