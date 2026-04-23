@@ -2,11 +2,11 @@
 //!
 //! Uses Vec-backed ordered map for objects (optimal for typical small JSON objects).
 
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::fmt;
 use std::rc::Rc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 
 use crate::jq_ffi::{self, Jv, JvKind};
 
@@ -3679,9 +3679,11 @@ fn parse_json_string_raw(b: &[u8], pos: usize) -> Result<(String, usize)> {
                     b'r' => buf.push(b'\r'),
                     b't' => buf.push(b'\t'),
                     b'u' => {
-                        if i + 4 >= b.len() { bail!("Invalid unicode escape"); }
-                        let hex = std::str::from_utf8(&b[i+1..i+5]).unwrap_or("0000");
-                        let cp = u16::from_str_radix(hex, 16).unwrap_or(0);
+                        if i + 4 >= b.len() { bail!("Invalid \\uXXXX escape"); }
+                        let hex = std::str::from_utf8(&b[i+1..i+5])
+                            .map_err(|_| anyhow::anyhow!("Invalid characters in \\uXXXX escape"))?;
+                        let cp = u16::from_str_radix(hex, 16)
+                            .map_err(|_| anyhow::anyhow!("Invalid characters in \\uXXXX escape"))?;
                         i += 4;
                         if (0xD800..=0xDBFF).contains(&cp) {
                             if i + 6 <= b.len() && b[i+1] == b'\\' && b[i+2] == b'u' {
@@ -3705,7 +3707,7 @@ fn parse_json_string_raw(b: &[u8], pos: usize) -> Result<(String, usize)> {
                             buf.extend_from_slice(c.encode_utf8(&mut tmp).as_bytes());
                         }
                     }
-                    _ => { buf.push(b'\\'); buf.push(b[i]); }
+                    _ => bail!("Invalid escape"),
                 }
                 i += 1;
             }
@@ -3765,13 +3767,29 @@ fn parse_json_number(b: &[u8], pos: usize) -> Result<(Value, usize)> {
     let digits_start = i;
     if i < b.len() && b[i] == b'0' { i += 1; }
     else { while i < b.len() && b[i].is_ascii_digit() { i += 1; } }
+    let int_len = i - digits_start;
     let has_dot = i < b.len() && b[i] == b'.';
-    if has_dot { i += 1; while i < b.len() && b[i].is_ascii_digit() { i += 1; } }
+    let mut frac_len = 0usize;
+    if has_dot {
+        i += 1;
+        let frac_start = i;
+        while i < b.len() && b[i].is_ascii_digit() { i += 1; }
+        frac_len = i - frac_start;
+    }
+    // JSON requires at least one digit in either the integer or fractional
+    // part — bare "-", "-.", ".e5" etc. are invalid.
+    if int_len == 0 && frac_len == 0 {
+        bail!("Invalid numeric literal");
+    }
     let has_exp = i < b.len() && (b[i] == b'e' || b[i] == b'E');
     if has_exp {
         i += 1;
         if i < b.len() && (b[i] == b'+' || b[i] == b'-') { i += 1; }
+        let exp_start = i;
         while i < b.len() && b[i].is_ascii_digit() { i += 1; }
+        if i == exp_start {
+            bail!("Invalid numeric literal");
+        }
     }
     // Fast path for simple integers: parse directly without f64::from_str overhead
     if !has_dot && !has_exp && (i - digits_start) <= 15 {
@@ -3847,29 +3865,540 @@ fn parse_json_object(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize
     }
 }
 
-/// Parse JSON using libjq (for fromjson — produces libjq-compatible error messages)
-pub fn json_to_value_libjq(json: &str) -> Result<Value> {
-    let c_json = CString::new(json).context("JSON string contains null byte")?;
-    unsafe {
-        let jv = jq_ffi::jv_parse(c_json.as_ptr());
-        let kind = jq_ffi::jv_get_kind(jv);
-        if kind == JvKind::Invalid {
-            let msg_jv = jq_ffi::jv_invalid_get_msg(jq_ffi::jv_copy(jv));
-            let msg_kind = jq_ffi::jv_get_kind(msg_jv);
-            let err_msg = if msg_kind == JvKind::String {
-                let c_str = jq_ffi::jv_string_value(jq_ffi::jv_copy(msg_jv));
-                let msg = CStr::from_ptr(c_str).to_string_lossy().into_owned();
-                jq_ffi::jv_free(msg_jv);
-                msg
-            } else {
-                jq_ffi::jv_free(msg_jv);
-                format!("jv_parse({:?}) returned invalid", json)
-            };
-            jq_ffi::jv_free(jv);
-            bail!("{}", err_msg);
-        }
-        jv_to_value(jv)
+// =============================================================================
+// jq-compatible fromjson parser (port of jq 1.8.1 src/jv_parse.c)
+// =============================================================================
+//
+// The `fromjson` builtin needs error messages byte-identical to jq's, because
+// many filters use `try fromjson catch .` to inspect the message. This parser
+// mirrors jq's state machine so we can drop the libjq FFI fallback without
+// changing observable behaviour.
+//
+// Key invariants preserved from jv_parse.c:
+//   - `column` is incremented for every consumed byte; a newline also resets
+//     it to 0 (so the next byte is column 1 on the new line).
+//   - Pending-literal flush ("check_literal") happens on every transition from
+//     LITERAL to a non-LITERAL class, and at EOF.
+//   - Error messages are emitted without "at EOF" for mid-stream errors, and
+//     with "at EOF" when the scan reached the end of input before erroring.
+//   - The wrapping `jv_parse_sized_custom_flags` runs the parser twice: if the
+//     first value completes successfully and a second one is also produced, the
+//     error is the context-free "Unexpected extra JSON values".
+
+/// Parse `input` as JSON for the `fromjson` builtin.
+///
+/// Produces jq-1.8.1-compatible error messages such as:
+///   `Unfinished JSON term at EOF at line N, column M (while parsing '<input>')`
+/// Positions are 1-indexed; `"at EOF"` appears only when the error was reached
+/// at end-of-input.
+pub fn json_to_value_fromjson(input: &str) -> Result<Value> {
+    let mut p = JqFromJsonParser::new(input.as_bytes());
+    match p.parse_one() {
+        Ok(Some(first)) => match p.parse_one() {
+            Ok(None) => Ok(first),
+            Ok(Some(_)) => {
+                bail!("Unexpected extra JSON values (while parsing '{}')", input)
+            }
+            Err((msg, at_eof)) => Err(format_jq_error(msg, at_eof, p.line, p.col, input)),
+        },
+        Ok(None) => bail!("Expected JSON value (while parsing '{}')", input),
+        Err((msg, at_eof)) => Err(format_jq_error(msg, at_eof, p.line, p.col, input)),
     }
+}
+
+fn format_jq_error(
+    msg: &str,
+    at_eof: bool,
+    line: u32,
+    col: u32,
+    input: &str,
+) -> anyhow::Error {
+    if at_eof {
+        anyhow::anyhow!(
+            "{} at EOF at line {}, column {} (while parsing '{}')",
+            msg,
+            line,
+            col,
+            input
+        )
+    } else {
+        anyhow::anyhow!(
+            "{} at line {}, column {} (while parsing '{}')",
+            msg,
+            line,
+            col,
+            input
+        )
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum JqPState { Normal, StringBody, StringEscape }
+
+enum JqStack {
+    Arr(Vec<Value>),
+    Obj(ObjMap),
+    Key(KeyStr),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum JqCharClass { Literal, Whitespace, Quote, Structure }
+
+#[inline]
+fn jq_classify(c: u8) -> JqCharClass {
+    match c {
+        b' ' | b'\t' | b'\r' | b'\n' => JqCharClass::Whitespace,
+        b'"' => JqCharClass::Quote,
+        b'[' | b',' | b']' | b'{' | b':' | b'}' => JqCharClass::Structure,
+        _ => JqCharClass::Literal,
+    }
+}
+
+struct JqFromJsonParser<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+    line: u32,
+    col: u32,
+    state: JqPState,
+    token: Vec<u8>,
+    stack: Vec<JqStack>,
+    next: Option<Value>,
+    next_is_string: bool,
+}
+
+impl<'a> JqFromJsonParser<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        let mut pos = 0;
+        if bytes.len() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF {
+            pos = 3;
+        }
+        Self {
+            bytes,
+            pos,
+            line: 1,
+            col: 0,
+            state: JqPState::Normal,
+            token: Vec::new(),
+            stack: Vec::new(),
+            next: None,
+            next_is_string: false,
+        }
+    }
+
+    /// Parse a single top-level value.
+    /// Returns `Ok(Some(v))` when one value is complete, `Ok(None)` when EOF
+    /// was reached without consuming any token, and `Err((msg, at_eof))`
+    /// otherwise. `self.pos` is left just past the last byte consumed.
+    fn parse_one(&mut self) -> std::result::Result<Option<Value>, (&'static str, bool)> {
+        while self.pos < self.bytes.len() {
+            let ch = self.bytes[self.pos];
+            self.pos += 1;
+            self.col += 1;
+            if ch == b'\n' {
+                self.line += 1;
+                self.col = 0;
+            }
+            match self.state {
+                JqPState::StringBody => {
+                    if ch == b'"' {
+                        self.found_string().map_err(|m| (m, false))?;
+                        self.state = JqPState::Normal;
+                        if self.stack.is_empty() && self.next.is_some() {
+                            return Ok(self.next.take());
+                        }
+                    } else {
+                        self.token.push(ch);
+                        if ch == b'\\' {
+                            self.state = JqPState::StringEscape;
+                        }
+                    }
+                }
+                JqPState::StringEscape => {
+                    self.token.push(ch);
+                    self.state = JqPState::StringBody;
+                }
+                JqPState::Normal => {
+                    let cls = jq_classify(ch);
+                    if cls != JqCharClass::Literal && !self.token.is_empty() {
+                        self.check_literal().map_err(|m| (m, false))?;
+                        if self.stack.is_empty() && self.next.is_some() {
+                            // First-value flush via whitespace; we still need
+                            // to record that we've flushed, but we can't yet
+                            // return because the char we just consumed was ws
+                            // or structural — and a structural char may error.
+                            //
+                            // For whitespace we're done with this parse_one.
+                            if cls == JqCharClass::Whitespace {
+                                return Ok(self.next.take());
+                            }
+                            // For structure/quote the top-level value is
+                            // followed by more content; fall through so the
+                            // structural char gets processed (and likely errs
+                            // as unmatched `]`/`}` or "Expected separator").
+                        }
+                    }
+                    match cls {
+                        JqCharClass::Literal => self.token.push(ch),
+                        JqCharClass::Whitespace => {}
+                        JqCharClass::Quote => self.state = JqPState::StringBody,
+                        JqCharClass::Structure => {
+                            self.parse_structure(ch).map_err(|m| (m, false))?;
+                            if self.stack.is_empty() && self.next.is_some() {
+                                return Ok(self.next.take());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // EOF
+        match self.state {
+            JqPState::StringBody | JqPState::StringEscape => {
+                return Err(("Unfinished string", true));
+            }
+            _ => {}
+        }
+        if !self.token.is_empty() {
+            self.check_literal().map_err(|m| (m, true))?;
+        }
+        if !self.stack.is_empty() {
+            return Err(("Unfinished JSON term", true));
+        }
+        Ok(self.next.take())
+    }
+
+    fn push_value(&mut self, v: Value, is_string: bool) -> std::result::Result<(), &'static str> {
+        if self.next.is_some() {
+            return Err("Expected separator between values");
+        }
+        self.next = Some(v);
+        self.next_is_string = is_string;
+        Ok(())
+    }
+
+    fn check_literal(&mut self) -> std::result::Result<(), &'static str> {
+        if self.token.is_empty() {
+            return Ok(());
+        }
+        let first = self.token[0];
+        let keyword: Option<(&'static [u8], Value)> = match first {
+            b't' => Some((b"true", Value::True)),
+            b'f' => Some((b"false", Value::False)),
+            b'\'' => return Err("Invalid string literal; expected \", but got '"),
+            b'n' if self.token.len() > 1 && self.token[1] == b'u' => {
+                Some((b"null", Value::Null))
+            }
+            _ => None,
+        };
+        if let Some((pat, val)) = keyword {
+            if self.token.len() != pat.len() {
+                return Err("Invalid literal");
+            }
+            for i in 0..pat.len() {
+                if self.token[i] != pat[i] {
+                    return Err("Invalid literal");
+                }
+            }
+            self.push_value(val, false)?;
+        } else {
+            let s = match std::str::from_utf8(&self.token) {
+                Ok(s) => s,
+                Err(_) => return Err("Invalid numeric literal"),
+            };
+            match parse_jq_strtod(s) {
+                Some(n) => self.push_value(Value::Num(n, None), false)?,
+                None => return Err("Invalid numeric literal"),
+            }
+        }
+        self.token.clear();
+        Ok(())
+    }
+
+    fn found_string(&mut self) -> std::result::Result<(), &'static str> {
+        let t = std::mem::take(&mut self.token);
+        let mut out: Vec<u8> = Vec::with_capacity(t.len());
+        let mut i = 0;
+        while i < t.len() {
+            let c = t[i];
+            i += 1;
+            if c == b'\\' {
+                if i >= t.len() {
+                    return Err("Expected escape character at end of string");
+                }
+                let e = t[i];
+                i += 1;
+                match e {
+                    b'\\' | b'"' | b'/' => out.push(e),
+                    b'b' => out.push(0x08),
+                    b'f' => out.push(0x0C),
+                    b't' => out.push(b'\t'),
+                    b'n' => out.push(b'\n'),
+                    b'r' => out.push(b'\r'),
+                    b'u' => {
+                        if i + 4 > t.len() {
+                            return Err("Invalid \\uXXXX escape");
+                        }
+                        let hi = match unhex4(&t[i..i + 4]) {
+                            Some(v) => v,
+                            None => return Err("Invalid characters in \\uXXXX escape"),
+                        };
+                        i += 4;
+                        let cp = if (0xD800..=0xDBFF).contains(&hi) {
+                            if i + 6 > t.len() || t[i] != b'\\' || t[i + 1] != b'u' {
+                                return Err("Invalid \\uXXXX\\uXXXX surrogate pair escape");
+                            }
+                            let lo = match unhex4(&t[i + 2..i + 6]) {
+                                Some(v) => v,
+                                None => return Err("Invalid \\uXXXX\\uXXXX surrogate pair escape"),
+                            };
+                            if !(0xDC00..=0xDFFF).contains(&lo) {
+                                return Err("Invalid \\uXXXX\\uXXXX surrogate pair escape");
+                            }
+                            i += 6;
+                            0x10000 + (((hi - 0xD800) << 10) | (lo - 0xDC00))
+                        } else {
+                            hi
+                        };
+                        let cp = if cp > 0x10FFFF { 0xFFFD } else { cp };
+                        let chr = char::from_u32(cp).unwrap_or('\u{FFFD}');
+                        let mut buf = [0u8; 4];
+                        out.extend_from_slice(chr.encode_utf8(&mut buf).as_bytes());
+                    }
+                    _ => return Err("Invalid escape"),
+                }
+            } else {
+                if c < 0x20 {
+                    return Err("Invalid string: control characters from U+0000 through U+001F must be escaped");
+                }
+                out.push(c);
+            }
+        }
+        let s = String::from_utf8(out)
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+        self.push_value(Value::Str(KeyStr::from(s)), true)
+    }
+
+    fn parse_structure(&mut self, ch: u8) -> std::result::Result<(), &'static str> {
+        match ch {
+            b'[' => {
+                if self.next.is_some() {
+                    return Err("Expected separator between values");
+                }
+                if self.stack.len() >= MAX_JSON_DEPTH {
+                    return Err("Exceeds depth limit for parsing");
+                }
+                self.stack.push(JqStack::Arr(Vec::new()));
+            }
+            b'{' => {
+                if self.next.is_some() {
+                    return Err("Expected separator between values");
+                }
+                if self.stack.len() >= MAX_JSON_DEPTH {
+                    return Err("Exceeds depth limit for parsing");
+                }
+                self.stack.push(JqStack::Obj(new_objmap()));
+            }
+            b':' => {
+                if self.next.is_none() {
+                    return Err("Expected string key before ':'");
+                }
+                if !matches!(self.stack.last(), Some(JqStack::Obj(_))) {
+                    return Err("':' not as part of an object");
+                }
+                if !self.next_is_string {
+                    return Err("Object keys must be strings");
+                }
+                let key = match self.next.take() {
+                    Some(Value::Str(s)) => s,
+                    _ => unreachable!("next_is_string guarded"),
+                };
+                self.next_is_string = false;
+                self.stack.push(JqStack::Key(key));
+            }
+            b',' => {
+                if self.next.is_none() {
+                    return Err("Expected value before ','");
+                }
+                match self.stack.last_mut() {
+                    None => return Err("',' not as part of an object or array"),
+                    Some(JqStack::Arr(a)) => {
+                        a.push(self.next.take().unwrap());
+                        self.next_is_string = false;
+                    }
+                    Some(JqStack::Key(_)) => {
+                        let key = match self.stack.pop() {
+                            Some(JqStack::Key(k)) => k,
+                            _ => unreachable!(),
+                        };
+                        let val = self.next.take().unwrap();
+                        self.next_is_string = false;
+                        match self.stack.last_mut() {
+                            Some(JqStack::Obj(o)) => {
+                                o.insert(key, val);
+                            }
+                            _ => return Err("Objects must consist of key:value pairs"),
+                        }
+                    }
+                    Some(JqStack::Obj(_)) => {
+                        return Err("Objects must consist of key:value pairs");
+                    }
+                }
+            }
+            b']' => {
+                match self.stack.last_mut() {
+                    Some(JqStack::Arr(a)) => {
+                        if let Some(v) = self.next.take() {
+                            a.push(v);
+                            self.next_is_string = false;
+                        } else if !a.is_empty() {
+                            return Err("Expected another array element");
+                        }
+                        let arr = match self.stack.pop() {
+                            Some(JqStack::Arr(a)) => a,
+                            _ => unreachable!(),
+                        };
+                        self.next = Some(Value::Arr(Rc::new(arr)));
+                        self.next_is_string = false;
+                    }
+                    _ => return Err("Unmatched ']'"),
+                }
+            }
+            b'}' => {
+                match self.stack.last() {
+                    None | Some(JqStack::Arr(_)) => return Err("Unmatched '}'"),
+                    _ => {}
+                }
+                if self.next.is_some() {
+                    if !matches!(self.stack.last(), Some(JqStack::Key(_))) {
+                        return Err("Objects must consist of key:value pairs");
+                    }
+                    let key = match self.stack.pop() {
+                        Some(JqStack::Key(k)) => k,
+                        _ => unreachable!(),
+                    };
+                    let val = self.next.take().unwrap();
+                    self.next_is_string = false;
+                    match self.stack.last_mut() {
+                        Some(JqStack::Obj(o)) => {
+                            o.insert(key, val);
+                        }
+                        _ => unreachable!(),
+                    }
+                } else {
+                    match self.stack.last() {
+                        Some(JqStack::Obj(o)) if !o.is_empty() => {
+                            return Err("Expected another key-value pair");
+                        }
+                        Some(JqStack::Obj(_)) => {}
+                        _ => return Err("Unmatched '}'"),
+                    }
+                }
+                let obj = match self.stack.pop() {
+                    Some(JqStack::Obj(o)) => o,
+                    _ => unreachable!(),
+                };
+                self.next = Some(Value::Obj(Rc::new(obj)));
+                self.next_is_string = false;
+            }
+            _ => unreachable!("non-structural char dispatched to parse_structure"),
+        }
+        Ok(())
+    }
+}
+
+fn unhex4(h: &[u8]) -> Option<u32> {
+    if h.len() != 4 {
+        return None;
+    }
+    let mut r: u32 = 0;
+    for &c in h {
+        let n = match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            b'A'..=b'F' => c - b'A' + 10,
+            _ => return None,
+        };
+        r = (r << 4) | n as u32;
+    }
+    Some(r)
+}
+
+/// jq-compatible number parser (mirrors `jvp_strtod`).
+///
+/// Accepts the same shapes jq's `jv_parse` would hand to `strtod`:
+///   [+-]?digits(.digits)?([eE][+-]?digits)?
+///   [+-]?.digits([eE][+-]?digits)?
+///   [+-]?(nan|inf|infinity)  (case-insensitive)
+fn parse_jq_strtod(s: &str) -> Option<f64> {
+    let b = s.as_bytes();
+    if b.is_empty() {
+        return None;
+    }
+    let (sign_end, neg) = match b[0] {
+        b'+' => (1usize, false),
+        b'-' => (1usize, true),
+        _ => (0usize, false),
+    };
+    let rest = &b[sign_end..];
+    let eq_ci = |a: &[u8], w: &[u8]| -> bool {
+        a.len() == w.len() && a.iter().zip(w.iter()).all(|(x, y)| x.eq_ignore_ascii_case(y))
+    };
+    if eq_ci(rest, b"nan") {
+        return Some(f64::NAN);
+    }
+    if eq_ci(rest, b"inf") || eq_ci(rest, b"infinity") {
+        return Some(if neg { f64::NEG_INFINITY } else { f64::INFINITY });
+    }
+    // Structural validation of the numeric form.
+    let mut i = 0;
+    let int_start = i;
+    while i < rest.len() && rest[i].is_ascii_digit() {
+        i += 1;
+    }
+    let has_int = i > int_start;
+    let mut has_frac = false;
+    if i < rest.len() && rest[i] == b'.' {
+        i += 1;
+        let frac_start = i;
+        while i < rest.len() && rest[i].is_ascii_digit() {
+            i += 1;
+        }
+        has_frac = i > frac_start;
+    }
+    if !has_int && !has_frac {
+        return None;
+    }
+    if i < rest.len() && (rest[i] == b'e' || rest[i] == b'E') {
+        i += 1;
+        if i < rest.len() && (rest[i] == b'+' || rest[i] == b'-') {
+            i += 1;
+        }
+        let exp_start = i;
+        while i < rest.len() && rest[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == exp_start {
+            return None;
+        }
+    }
+    if i != rest.len() {
+        return None;
+    }
+    // Normalize forms Rust's f64 parser rejects: leading `.` and trailing `.`.
+    let tail = unsafe { std::str::from_utf8_unchecked(rest) };
+    let mut normalized = String::with_capacity(tail.len() + 2);
+    if tail.starts_with('.') {
+        normalized.push('0');
+    }
+    let mut it = tail.chars().peekable();
+    while let Some(c) = it.next() {
+        normalized.push(c);
+        if c == '.' && !matches!(it.peek(), Some(d) if d.is_ascii_digit()) {
+            normalized.push('0');
+        }
+    }
+    let parsed: f64 = normalized.parse().ok()?;
+    Some(if neg { -parsed } else { parsed })
 }
 
 /// # Safety

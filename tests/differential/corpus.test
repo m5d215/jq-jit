@@ -602,3 +602,215 @@ until(. > 2; . + 10)
 
 until(. > 2; . + 10)
 5
+
+# ---------- Issue #64: fromjson error parity with jq 1.8.1 ----------
+# Route the error message through `try/catch` so the differential harness can
+# compare it as a value. Each case verifies that the jq-jit native parser
+# produces byte-identical output to jq's `jv_parse.c`.
+
+# --- Unfinished JSON term at EOF ---
+
+try fromjson catch .
+"{"
+
+try fromjson catch .
+"[1,"
+
+try fromjson catch .
+"[1"
+
+try fromjson catch .
+"{\"a\""
+
+try fromjson catch .
+"{\"a\":"
+
+try fromjson catch .
+"{\"a\":1,"
+
+try fromjson catch .
+"{\"a\":1}{"
+
+# --- Unfinished string at EOF ---
+
+try fromjson catch .
+"\"unterm"
+
+try fromjson catch .
+"\"abc "
+
+try fromjson catch .
+"\""
+
+# --- Invalid numeric literal ---
+
+try fromjson catch .
+"xyz"
+
+try fromjson catch .
+"abc"
+
+try fromjson catch .
+"123abc"
+
+try fromjson catch .
+"1e"
+
+try fromjson catch .
+"1e+"
+
+try fromjson catch .
+"1.2.3"
+
+try fromjson catch .
+"-"
+
+try fromjson catch .
+"0.1.2"
+
+try fromjson catch .
+"abc d"
+
+try fromjson catch .
+"NaN1"
+
+# --- Invalid literal ---
+
+try fromjson catch .
+"tru"
+
+try fromjson catch .
+"nul"
+
+try fromjson catch .
+"nullz"
+
+try fromjson catch .
+"trueX"
+
+try fromjson catch .
+"falseyz"
+
+try fromjson catch .
+"foo bar"
+
+try fromjson catch .
+"trueabc"
+
+# --- Unmatched / extra closing delimiters ---
+
+try fromjson catch .
+"1}"
+
+try fromjson catch .
+"1]"
+
+try fromjson catch .
+"{\"a\":1 }}"
+
+try fromjson catch .
+"[1] 2"
+
+try fromjson catch .
+"null 2"
+
+# --- Object structural errors ---
+
+try fromjson catch .
+"{\"a\": }"
+
+try fromjson catch .
+"{\"a\":,}"
+
+try fromjson catch .
+"{\"a\":1,}"
+
+try fromjson catch .
+"{,}"
+
+try fromjson catch .
+"{\"a\":1 \"b\":2}"
+
+try fromjson catch .
+"{\"a\":1,\"b\"}"
+
+try fromjson catch .
+"{\"a\"}"
+
+# --- Array structural errors ---
+
+try fromjson catch .
+"[,]"
+
+try fromjson catch .
+"[1,]"
+
+try fromjson catch .
+"[1 2]"
+
+# --- Expected / extra values ---
+
+try fromjson catch .
+""
+
+try fromjson catch .
+"  "
+
+try fromjson catch .
+"1 2"
+
+try fromjson catch .
+"1 abc"
+
+try fromjson catch .
+"1 nul"
+
+# --- String escape errors ---
+
+try fromjson catch .
+"\"\\z\""
+
+try fromjson catch .
+"\"\\uXX\""
+
+try fromjson catch .
+"\"\\u00zz\""
+
+# --- Single-quote string literal ---
+
+try fromjson catch .
+"{'a': 123}"
+
+# --- Successful permissive number parsing ---
+
+fromjson
+".5"
+
+fromjson
+"+1"
+
+fromjson
+"01"
+
+fromjson
+"nan"
+
+fromjson
+"NaN"
+
+fromjson
+"-Infinity"
+
+# --- fromjson success on common shapes ---
+
+fromjson
+"null"
+
+fromjson
+"[1, 2, 3]"
+
+fromjson
+"{\"a\": 1}"
+
+fromjson
+"\"hello\""

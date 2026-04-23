@@ -11022,18 +11022,40 @@ fn execute_via_libjq(program: &str, input: &Value) -> Result<Vec<Value>> {
     }
 }
 
-/// Convert a Value to a libjq jv.
+/// Convert a Value to a libjq jv using direct FFI constructors (no jv_parse roundtrip).
 fn value_to_jv(v: &Value) -> Result<crate::jq_ffi::Jv> {
     use crate::jq_ffi;
-    use std::ffi::CString;
+    use std::os::raw::c_char;
 
-    let json = crate::value::value_to_json(v);
-    let c_json = CString::new(json)?;
-    let jv = unsafe { jq_ffi::jv_parse(c_json.as_ptr()) };
-    let kind = unsafe { jq_ffi::jv_get_kind(jv) };
-    if kind == jq_ffi::JvKind::Invalid {
-        unsafe { jq_ffi::jv_free(jv) };
-        bail!("Failed to convert Value to jv");
+    unsafe {
+        Ok(match v {
+            Value::Null => jq_ffi::jv_null(),
+            Value::True => jq_ffi::jv_true(),
+            Value::False => jq_ffi::jv_false(),
+            Value::Num(n, _) => jq_ffi::jv_number(*n),
+            Value::Str(s) => {
+                let bytes = s.as_bytes();
+                jq_ffi::jv_string_sized(bytes.as_ptr() as *const c_char, bytes.len() as std::ffi::c_int)
+            }
+            Value::Arr(a) => {
+                let mut arr = jq_ffi::jv_array();
+                for item in a.iter() {
+                    let ji = value_to_jv(item)?;
+                    arr = jq_ffi::jv_array_append(arr, ji);
+                }
+                arr
+            }
+            Value::Obj(o) => {
+                let mut obj = jq_ffi::jv_object();
+                for (k, val) in o.iter() {
+                    let kb = k.as_bytes();
+                    let jk = jq_ffi::jv_string_sized(kb.as_ptr() as *const c_char, kb.len() as std::ffi::c_int);
+                    let jval = value_to_jv(val)?;
+                    obj = jq_ffi::jv_object_set(obj, jk, jval);
+                }
+                obj
+            }
+            Value::Error(_) => bail!("cannot convert Error value to jv"),
+        })
     }
-    Ok(jv)
 }

@@ -5748,7 +5748,8 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
         // Fast path: fromjson (op 18)
         if op == 18 {
             if let Value::Str(s) = &*input {
-                // Trivial value fast path — avoid libjq FFI for common literals and numbers
+                // Trivial value fast paths — avoid the state-machine parser for
+                // common literals and simple numbers/strings with no escapes.
                 let trimmed = s.trim();
                 let result = if trimmed == "null" {
                     Some(Value::Null)
@@ -5761,7 +5762,6 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                     if b == b'-' || b.is_ascii_digit() {
                         trimmed.parse::<f64>().ok().map(|n| Value::Num(n, None))
                     } else if b == b'"' {
-                        // Simple string: "..." without escapes
                         if trimmed.len() >= 2 && trimmed.as_bytes()[trimmed.len()-1] == b'"' && !trimmed[1..trimmed.len()-1].contains('\\') {
                             Some(Value::from_string(trimmed[1..trimmed.len()-1].to_string()))
                         } else {
@@ -5780,8 +5780,10 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 match crate::value::json_to_value(trimmed) {
                     Ok(v) => { std::ptr::write(dst, v); return 0; }
                     Err(_) => {
-                        // Fall back to libjq for accurate error messages
-                        match crate::value::json_to_value_libjq(s) {
+                        // Strict parser rejected it; route through the
+                        // jq-compatible parser so the surfaced error message
+                        // stays byte-identical to jq 1.8.1.
+                        match crate::value::json_to_value_fromjson(s) {
                             Ok(v) => { std::ptr::write(dst, v); return 0; }
                             Err(e) => {
                                 set_jit_error(format!("{}", e));

@@ -247,9 +247,15 @@ unsafe extern "C" {
     pub fn jq_next(state: *mut JqState) -> Jv;
 
     pub fn jv_null() -> Jv;
+    pub fn jv_true() -> Jv;
+    pub fn jv_false() -> Jv;
     pub fn jv_number(n: f64) -> Jv;
     pub fn jv_string(s: *const c_char) -> Jv;
+    pub fn jv_string_sized(s: *const c_char, len: c_int) -> Jv;
     pub fn jv_array() -> Jv;
+    pub fn jv_object() -> Jv;
+    pub fn jv_array_append(arr: Jv, v: Jv) -> Jv;
+    pub fn jv_object_set(obj: Jv, key: Jv, val: Jv) -> Jv;
 
     pub fn jv_get_kind(v: Jv) -> JvKind;
     pub fn jv_number_value(v: Jv) -> f64;
@@ -262,7 +268,6 @@ unsafe extern "C" {
     pub fn jv_free(v: Jv);
 
     pub fn jv_invalid_get_msg(v: Jv) -> Jv;
-    pub fn jv_parse(s: *const c_char) -> Jv;
 
     pub fn jv_object_iter(v: Jv) -> c_int;
     pub fn jv_object_iter_next(v: Jv, iter: c_int) -> c_int;
