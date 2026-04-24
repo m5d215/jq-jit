@@ -26,6 +26,67 @@ fn jqjit_trace_fast_path(name: &str, filter_text: &str) {
     }
 }
 
+/// Decode a JSON-quoted string back to its raw character form, e.g.
+/// `"\"foo\\n\""` -> `foo\n`. Used when an `error(val)` sentinel carries
+/// a `JV_KIND_STRING`-shaped payload so we can strip the JSON quoting
+/// the way jq does. Returns None if the JSON is malformed.
+fn decode_json_string_literal(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    if b.len() < 2 || b[0] != b'"' || b[b.len()-1] != b'"' { return None; }
+    let inner = &b[1..b.len()-1];
+    let mut out = String::with_capacity(inner.len());
+    let mut i = 0;
+    while i < inner.len() {
+        let c = inner[i];
+        if c != b'\\' { out.push(c as char); i += 1; continue; }
+        if i + 1 >= inner.len() { return None; }
+        match inner[i+1] {
+            b'"' => out.push('"'),
+            b'\\' => out.push('\\'),
+            b'/' => out.push('/'),
+            b'b' => out.push('\u{08}'),
+            b'f' => out.push('\u{0C}'),
+            b'n' => out.push('\n'),
+            b'r' => out.push('\r'),
+            b't' => out.push('\t'),
+            b'u' => {
+                if i + 6 > inner.len() { return None; }
+                let hex = std::str::from_utf8(&inner[i+2..i+6]).ok()?;
+                let cp = u32::from_str_radix(hex, 16).ok()?;
+                out.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                i += 6;
+                continue;
+            }
+            _ => return None,
+        }
+        i += 2;
+    }
+    Some(out)
+}
+
+/// Emit a jq-style error line, matching jq 1.8.1's format:
+///   jq: error (at <stdin>:N)[ (not a string)]: <body>
+///
+/// `msg` is the raw error body we got from the anyhow chain. Strings
+/// produced by `error(val)` arrive prefixed with `__jqerror__:<JSON>`;
+/// the JSON form carries the type info jq normally reads from the
+/// original jv, so we use it to decide between the unquoted string
+/// branch and the ` (not a string)` branch.
+fn print_jq_error(msg: &str) {
+    let line = jq_jit::eval::get_input_line_number();
+    if let Some(jq_msg) = msg.strip_prefix("__jqerror__:") {
+        if jq_msg.starts_with('"') && jq_msg.ends_with('"') {
+            if let Some(unwrapped) = decode_json_string_literal(jq_msg) {
+                eprintln!("jq: error (at <stdin>:{}): {}", line, unwrapped);
+                return;
+            }
+        }
+        eprintln!("jq: error (at <stdin>:{}) (not a string): {}", line, jq_msg);
+    } else {
+        eprintln!("jq: error (at <stdin>:{}): {}", line, msg);
+    }
+}
+
 use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, json_object_get_nested_field_raw, parse_json_num, json_value_length, json_object_keys_to_buf_reuse, json_object_extract_keys_only, json_object_keys_unsorted_to_buf, json_object_keys_join_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_type_byte, json_object_del_field, json_object_del_fields, json_object_filter_by_key_str, json_object_merge_literal, json_object_sort_keys, json_object_filter_by_value_type, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_with_entries_select_value_cmp, json_object_set_field_raw, json_object_update_field_num, json_object_update_field_num_chain, json_object_update_field_case, json_object_update_field_gsub, json_object_update_field_split_first, json_object_update_field_split_last, json_object_update_field_trim, json_object_update_field_slice, json_object_update_field_str_map, json_object_update_field_str_concat, json_object_update_field_length, json_object_update_field_tostring, json_object_update_field_test, json_object_assign_field_arith, json_object_assign_two_fields_arith, json_object_select_then_update_num, json_object_select_then_update_str_concat, json_object_select_compound_then_update_num, json_object_select_str_then_update_num, json_object_values_tostring, is_json_compact, push_json_compact_raw, push_tojson_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_compact_line_color, push_pretty_line, push_pretty_line_color, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line_color, value_to_json_pretty_color, walk_json_transform_nums, pool_value, skip_json_value};
 use jq_jit::interpreter::Filter;
 
@@ -2724,7 +2785,7 @@ fn real_main() {
     let process_input = |input: &Value, raw_bytes: Option<&[u8]>, out: &mut io::BufWriter<io::StdoutLock>, cbuf: &mut Vec<u8>, any_false: &mut bool, had_error: &mut bool| {
         let result = filter.execute_cb(input, &mut |result| {
             if let Value::Error(e) = result {
-                eprintln!("jq: error: {}", e.as_str());
+                print_jq_error(e.as_str());
                 *had_error = true;
                 return Ok(true);
             }
@@ -2816,11 +2877,7 @@ fn real_main() {
                 let _ = out.flush();
                 std::process::exit(code);
             }
-            if let Some(jq_msg) = msg.strip_prefix("__jqerror__:") {
-                eprintln!("jq: error: {}", jq_msg);
-            } else {
-                eprintln!("jq: error: {}", msg);
-            }
+            print_jq_error(&msg);
             *had_error = true;
         }
     };
@@ -2911,6 +2968,13 @@ fn real_main() {
                 process_input(&arr, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
             } else {
                 let input_bytes = input_str.as_bytes();
+                // input_line_number state: jq reports the count of '\n' consumed
+                // when the value was emitted by the parser's line buffer. Equivalent
+                // here: count newlines in input_bytes[0..value_end], then +1 if any
+                // newline still exists after value_end (i.e. the line containing the
+                // value was terminated).
+                let total_nl: u64 = input_bytes.iter().filter(|&&b| b == b'\n').count() as u64;
+                let line_state = std::cell::Cell::new((0u64, 0usize));
                 let parse_result = if filter.is_empty() {
                     json_stream_raw(&input_str, |_, _| Ok(()))
                 } else if let Some(ref lit) = literal_output {
@@ -5147,6 +5211,17 @@ fn real_main() {
                                 if !line.is_empty() && !is_json_compact(line) {
                                     all_compact = false;
                                     break;
+                                }
+                                // Validate shape so obviously-invalid lines (trailing
+                                // commas, raw control chars, ...) can't slip through
+                                // the byte-copy shortcut below. When a sampled line
+                                // fails we fall through to json_stream_raw, which
+                                // parses every line and reports the error.
+                                if !line.is_empty() {
+                                    match skip_json_value(line, 0) {
+                                        Ok(end) if end == line.len() => {}
+                                        _ => { all_compact = false; break; }
+                                    }
                                 }
                                 checked += 1;
                             }
@@ -12376,13 +12451,21 @@ fn real_main() {
                     })
                 } else if use_compact_buf {
                     json_stream_offsets(&input_str, |v, start, end| {
+                        let (mut cnt, mut at) = line_state.get();
+                        while at < end { if input_bytes[at] == b'\n' { cnt += 1; } at += 1; }
+                        line_state.set((cnt, at));
+                        jq_jit::eval::set_input_line_number(if cnt < total_nl { cnt + 1 } else { cnt });
                         let raw = &input_bytes[start..end];
                         process_input(&v, Some(raw), &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         pool_value(v);
                         Ok(())
                     })
                 } else {
-                    json_stream(&input_str, |v| {
+                    json_stream_offsets(&input_str, |v, _start, end| {
+                        let (mut cnt, mut at) = line_state.get();
+                        while at < end { if input_bytes[at] == b'\n' { cnt += 1; } at += 1; }
+                        line_state.set((cnt, at));
+                        jq_jit::eval::set_input_line_number(if cnt < total_nl { cnt + 1 } else { cnt });
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         pool_value(v);
                         Ok(())

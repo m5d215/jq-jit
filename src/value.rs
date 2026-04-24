@@ -3494,16 +3494,32 @@ const MAX_JSON_DEPTH: usize = 10000;
 pub fn skip_json_value(b: &[u8], pos: usize) -> Result<usize> {
     if pos >= b.len() { bail!("Unexpected end of JSON"); }
     match b[pos] {
-        b'n' => { if b.get(pos..pos+4) == Some(b"null") { Ok(pos + 4) } else { bail!("Invalid JSON at position {}", pos) } }
+        b'n' => {
+            if b.get(pos..pos+4) == Some(b"null") { Ok(pos + 4) }
+            else if b.get(pos..pos+3) == Some(b"nan") { Ok(pos + 3) }
+            else { bail!("Invalid JSON at position {}", pos) }
+        }
         b't' => { if b.get(pos..pos+4) == Some(b"true") { Ok(pos + 4) } else { bail!("Invalid JSON at position {}", pos) } }
         b'f' => { if b.get(pos..pos+5) == Some(b"false") { Ok(pos + 5) } else { bail!("Invalid JSON at position {}", pos) } }
+        b'N' => { if b.get(pos..pos+3) == Some(b"NaN") { Ok(pos + 3) } else { bail!("Invalid JSON at position {}", pos) } }
+        b'I' => { if b.get(pos..pos+8) == Some(b"Infinity") { Ok(pos + 8) } else { bail!("Invalid JSON at position {}", pos) } }
         b'"' => {
+            // Validate the same way parse_json_string does — raw U+0000..U+001F
+            // inside a string is illegal JSON (RFC 8259). The fast path uses
+            // memchr2 to jump to the next `"`/`\\` and only then sweeps the
+            // in-between run for control chars (auto-vectorises to SIMD).
             let mut i = pos + 1;
             loop {
-                match memchr::memchr2(b'"', b'\\', &b[i..]) {
+                let rest = &b[i..];
+                match memchr::memchr2(b'"', b'\\', rest) {
                     Some(offset) => {
-                        if b[i + offset] == b'"' { return Ok(i + offset + 1); }
-                        i += offset + 2; // skip backslash + escaped char
+                        if rest[..offset].iter().any(|&c| c < 0x20) {
+                            bail!("Invalid string: control characters from U+0000 through U+001F must be escaped");
+                        }
+                        if rest[offset] == b'"' { return Ok(i + offset + 1); }
+                        // '\' : consume escape pair
+                        if i + offset + 1 >= b.len() { bail!("Unterminated string escape"); }
+                        i += offset + 2;
                     }
                     None => bail!("Unterminated string"),
                 }
@@ -3542,9 +3558,16 @@ pub fn skip_json_value(b: &[u8], pos: usize) -> Result<usize> {
                 i = skip_ws(b, i + 1);
             }
         }
-        b'-' | b'0'..=b'9' => {
+        b'-' | b'+' | b'0'..=b'9' => {
             let mut i = pos;
-            if b[i] == b'-' { i += 1; }
+            if b[i] == b'-' {
+                // -Infinity and -NaN are accepted by parse_json_value; match here too.
+                if b.get(pos..pos+9) == Some(b"-Infinity") { return Ok(pos + 9); }
+                if b.get(pos..pos+4) == Some(b"-NaN") { return Ok(pos + 4); }
+                i += 1;
+            } else if b[i] == b'+' {
+                i += 1;
+            }
             while i < b.len() && b[i].is_ascii_digit() { i += 1; }
             if i < b.len() && b[i] == b'.' { i += 1; while i < b.len() && b[i].is_ascii_digit() { i += 1; } }
             if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
@@ -3694,6 +3717,10 @@ fn parse_json_value(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)
         b'"' => parse_json_string(b, pos),
         b'[' => parse_json_array(b, pos, depth),
         b'{' => parse_json_object(b, pos, depth),
+        b'+' => {
+            // jq extension: leading '+' is ignored and the rest is parsed as a positive number.
+            parse_json_number(b, pos)
+        }
         b'-' => {
             // Fast path for negative integers (most common case for '-')
             let j = pos + 1;
@@ -3756,6 +3783,7 @@ fn parse_json_string_raw(b: &[u8], pos: usize) -> Result<(String, usize)> {
                 return Ok((s, i + 1));
             }
             b'\\' => break,
+            c if c < 0x20 => bail!("Invalid string: control characters from U+0000 through U+001F must be escaped"),
             _ => i += 1,
         }
     }
@@ -3813,6 +3841,7 @@ fn parse_json_string_raw(b: &[u8], pos: usize) -> Result<(String, usize)> {
                 }
                 i += 1;
             }
+            c if c < 0x20 => bail!("Invalid string: control characters from U+0000 through U+001F must be escaped"),
             c => { buf.push(c); i += 1; }
         }
     }
@@ -3832,6 +3861,7 @@ fn parse_json_string(b: &[u8], pos: usize) -> Result<(Value, usize)> {
                 return Ok((Value::Str(s), i + 1));
             }
             b'\\' => break,
+            c if c < 0x20 => bail!("Invalid string: control characters from U+0000 through U+001F must be escaped"),
             _ => i += 1,
         }
     }
@@ -3853,6 +3883,7 @@ fn parse_json_key(b: &[u8], pos: usize) -> Result<(KeyStr, usize)> {
                 return Ok((s, i + 1));
             }
             b'\\' => break,
+            c if c < 0x20 => bail!("Invalid string: control characters from U+0000 through U+001F must be escaped"),
             _ => i += 1,
         }
     }
@@ -3866,6 +3897,8 @@ fn parse_json_number(b: &[u8], pos: usize) -> Result<(Value, usize)> {
     let mut i = pos;
     let is_neg = i < b.len() && b[i] == b'-';
     if is_neg { i += 1; }
+    // jq extension: tolerate a leading '+' the same way it tolerates '-'.
+    else if i < b.len() && b[i] == b'+' { i += 1; }
     let digits_start = i;
     if i < b.len() && b[i] == b'0' { i += 1; }
     else { while i < b.len() && b[i].is_ascii_digit() { i += 1; } }
@@ -3900,6 +3933,15 @@ fn parse_json_number(b: &[u8], pos: usize) -> Result<(Value, usize)> {
             n = n * 10 + (c - b'0') as i64;
         }
         if is_neg { n = -n; }
+        // Preserve the sign of `-0` / `-0000...` (#110): i64 negation loses it,
+        // but f64 has a distinct -0.0 and jq keeps the lexical repr around so
+        // `tostring` / `tojson` can emit "-0". The test `n == 0 && is_neg`
+        // catches the generic leading-zeros case too.
+        if n == 0 && is_neg {
+            // Safety: digits are ASCII, always valid UTF-8
+            let num_str = unsafe { std::str::from_utf8_unchecked(&b[pos..i]) };
+            return Ok((Value::number_with_repr(-0.0, Rc::from(num_str)), i));
+        }
         return Ok((Value::number(n as f64), i));
     }
     // Safety: number bytes are ASCII digits/signs/dots, always valid UTF-8

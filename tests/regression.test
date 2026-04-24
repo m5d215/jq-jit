@@ -373,10 +373,10 @@ null
 
 # input_line_number must not trigger a libjq assertion crash
 
-# input_line_number returns 0 before any line has been consumed
+# input_line_number returns 1 for the only input (jq 1.8.1 parity; issue #117)
 input_line_number
 null
-0
+1
 
 # all/any should iterate object values, not error
 
@@ -1488,3 +1488,78 @@ false
 [1, nan, 2, nan] | sort
 null
 [null,null,1,2]
+
+# Issue #132: @base64d tolerates non-UTF-8 decoded bytes (matches jq via lossy replacement)
+@base64d | length
+"abc="
+2
+
+# Issue #132: Base64 decoding pure invalid UTF-8 yields replacement chars, not an error
+@base64d
+"/w=="
+"�"
+
+# Issue #132: Multi-byte invalid sequence survives without error
+@base64d | length > 0
+"////"
+true
+
+# Issue #117: input_line_number advances per-input (1-indexed when the line was terminated)
+input_line_number
+1
+1
+
+# Issue #117: input_line_number combined with other output
+. + input_line_number
+10
+11
+
+# Issue #122: leading '+' is tolerated on JSON input (jq extension)
+. + 0
++1
+1
+
+# Issue #122: Infinity parses to a finite large number (jq extension)
+. > 1.7e308
+Infinity
+true
+
+# Issue #122: NaN value equals null on JSON comparison (jq extension)
+. == null
+NaN
+false
+
+# Issue #110: -0 repr survives parse + identity-like paths
+. | tostring
+-0
+"-0"
+
+# Issue #110: -0 tonumber is a no-op on numbers (keeps repr)
+tonumber | tostring
+-0
+"-0"
+
+# Issue #110: -0 through values
+values | tostring
+-0
+"-0"
+
+# Issue #110: 0.0 tostring preserves trailing .0
+. | tostring
+0.0
+"0.0"
+
+# Issue #110: 0.0 through values
+values
+0.0
+0.0
+
+# Issue #110: try error catch . round-trips the repr
+try error catch . | tostring
+-0
+"-0"
+
+# Issue #110: getpath([]) returns input with repr
+getpath([]) | tostring
+-0
+"-0"

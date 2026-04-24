@@ -24,6 +24,25 @@ struct InputsCell(std::cell::UnsafeCell<(Vec<Value>, usize)>);
 unsafe impl Sync for InputsCell {}
 static INPUTS_STATE: InputsCell = InputsCell(std::cell::UnsafeCell::new((Vec::new(), 0)));
 
+/// Current input's 1-indexed line number for `input_line_number`.
+/// The CLI updates this before executing the filter on each input; jq defines
+/// it as the count of `\n` bytes consumed at the point the value was emitted
+/// (not where the value started), which for multi-value lines means every
+/// value on that line sees the same number.
+struct InputLineCell(std::cell::UnsafeCell<u64>);
+unsafe impl Sync for InputLineCell {}
+static INPUT_LINE_STATE: InputLineCell = InputLineCell(std::cell::UnsafeCell::new(0));
+
+/// Set the line number reported by `input_line_number` for the current input.
+pub fn set_input_line_number(n: u64) {
+    unsafe { *INPUT_LINE_STATE.0.get() = n; }
+}
+
+/// Read the current line number reported by `input_line_number`.
+pub fn get_input_line_number() -> u64 {
+    unsafe { *INPUT_LINE_STATE.0.get() }
+}
+
 /// Set the inputs queue for `input`/`inputs` builtins.
 pub fn set_inputs_queue(values: Vec<Value>) {
     unsafe {
@@ -2747,10 +2766,10 @@ pub fn eval(
         Expr::Error { msg } => {
             if let Some(msg_expr) = msg {
                 eval(msg_expr, input, env, &mut |val| {
-                    bail!("__jqerror__:{}", crate::value::value_to_json(&val))
+                    bail!("__jqerror__:{}", crate::value::value_to_json_precise(&val))
                 })
             } else {
-                bail!("__jqerror__:{}", crate::value::value_to_json(&input))
+                bail!("__jqerror__:{}", crate::value::value_to_json_precise(&input))
             }
         }
 
@@ -3392,7 +3411,7 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
             for ch in bs.chunks(4) { if ch.len()<2{break;} let a=D.get(ch[0] as usize).copied().unwrap_or(-1); let b=D.get(ch[1] as usize).copied().unwrap_or(-1); if a<0||b<0{bail!("invalid base64");}
                 r.push(((a as u8)<<2)|((b as u8)>>4)); if ch.len()>2&&ch[2]!=b'=' { let c=D.get(ch[2] as usize).copied().unwrap_or(-1); if c<0{bail!("invalid base64");} r.push(((b as u8)<<4)|((c as u8)>>2));
                 if ch.len()>3&&ch[3]!=b'=' { let d=D.get(ch[3] as usize).copied().unwrap_or(-1); if d<0{bail!("invalid base64");} r.push(((c as u8)<<6)|(d as u8)); } } }
-            String::from_utf8(r).map_err(|e| anyhow::anyhow!("invalid utf8: {}", e))
+            Ok(String::from_utf8_lossy(&r).into_owned())
         }
         _ => bail!("unknown format: @{}", name),
     }
@@ -3699,7 +3718,7 @@ fn try_eval_key_value<'a>(expr: &Expr, input: &'a Value) -> Option<&'a Value> {
 }
 
 fn eval_closure_op(op: ClosureOpKind, container: &Value, key_expr: &Expr, _input: &Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
-    let a = match container { Value::Arr(a) => a, _ => bail!("{} is not an array", container.type_name()) };
+    let a = match container { Value::Arr(a) => a, _ => bail!("Cannot iterate over {}", crate::runtime::errdesc_pub(container)) };
 
     // Fast path: f64 key extraction — avoids eval overhead and Vec<Value> allocations
     if !a.is_empty() {
@@ -4123,6 +4142,9 @@ fn eval_recurse_paths_inner(val: &Value, path: &mut Vec<Value>, cb: &mut dyn FnM
 fn eval_call_builtin(name: &str, args: &[Expr], input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
     // Special handling for builtins that take filter/closure arguments
     match (name, args.len()) {
+        ("input_line_number", 0) => {
+            return cb(Value::number(get_input_line_number() as f64));
+        }
         ("toboolean", 0) => {
             return cb(rt_toboolean(&input)?);
         }

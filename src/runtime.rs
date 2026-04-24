@@ -878,7 +878,7 @@ fn rt_keys(v: &Value, sorted: bool) -> Result<Value> {
             let keys: Vec<Value> = (0..a.len()).map(|i| Value::number(i as f64)).collect();
             Ok(Value::Arr(Rc::new(keys)))
         }
-        _ => bail!("{} has no keys", v.type_name()),
+        _ => bail!("{} has no keys", errdesc(v)),
     }
 }
 
@@ -1206,7 +1206,12 @@ fn rt_sqrt(v: &Value) -> Result<Value> {
 fn rt_tostring(v: &Value) -> Result<Value> {
     match v {
         Value::Str(_) => Ok(v.clone()),
-        _ => Ok(Value::from_string(crate::value::value_to_json(v))),
+        // Preserve the lexical form of numbers (#75 / #110) — `-0` stays `"-0"`,
+        // `0.0` stays `"0.0"`, etc. `value_to_json_tojson` honours the repr
+        // when f64 can round-trip it exactly, otherwise falls back to the
+        // canonical f64 form (which matches jq's no-decnum rounding, cf. the
+        // `13911860366432393` regression test).
+        _ => Ok(Value::from_string(crate::value::value_to_json_tojson(v))),
     }
 }
 
@@ -1229,7 +1234,7 @@ fn rt_tonumber(v: &Value) -> Result<Value> {
                 Err(_) => bail!("Invalid numeric literal: {}", crate::value::value_to_json(v)),
             }
         }
-        _ => bail!("{} cannot be converted to number", v.type_name()),
+        _ => bail!("{} cannot be parsed as a number", errdesc(v)),
     }
 }
 
@@ -1245,7 +1250,7 @@ fn rt_ascii_downcase(v: &Value) -> Result<Value> {
                 Ok(Value::from_string(s.chars().map(|c| if c.is_ascii() { c.to_ascii_lowercase() } else { c }).collect()))
             }
         }
-        _ => bail!("{} cannot be lowercased", v.type_name()),
+        _ => bail!("explode input must be a string"),
     }
 }
 
@@ -1260,7 +1265,7 @@ fn rt_ascii_upcase(v: &Value) -> Result<Value> {
                 Ok(Value::from_string(s.chars().map(|c| if c.is_ascii() { c.to_ascii_uppercase() } else { c }).collect()))
             }
         }
-        _ => bail!("{} cannot be uppercased", v.type_name()),
+        _ => bail!("explode input must be a string"),
     }
 }
 
@@ -1311,7 +1316,7 @@ fn rt_explode(v: &Value) -> Result<Value> {
                 Ok(Value::Arr(Rc::new(codepoints)))
             }
         }
-        _ => bail!("{} cannot be exploded", v.type_name()),
+        _ => bail!("explode input must be a string"),
     }
 }
 
@@ -1369,7 +1374,7 @@ fn rt_fromjson(v: &Value) -> Result<Value> {
                 Err(_) => crate::value::json_to_value_fromjson(s),
             }
         }
-        _ => bail!("{} cannot be parsed as JSON", v.type_name()),
+        _ => bail!("{} only strings can be parsed", errdesc(v)),
     }
 }
 

@@ -2883,9 +2883,9 @@ impl Parser {
                 Ok(Expr::CallBuiltin { name: "halt_error".to_string(), args: vec![] })
             }
             "input_line_number" => {
-                // Line tracking is not plumbed through our input pipeline; returning 0
-                // matches jq's behaviour before any line is consumed.
-                Ok(Expr::Literal(Literal::Num(0.0, None)))
+                // Resolved at eval/JIT time from the current input's line counter
+                // (set by the CLI before each input is processed).
+                Ok(Expr::CallBuiltin { name: "input_line_number".to_string(), args: vec![] })
             }
             "fromcsv" | "fromtsv" | "fromcsvh" | "fromtsvh" => {
                 Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
