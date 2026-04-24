@@ -3063,6 +3063,8 @@ pub fn eval_unaryop(op: UnaryOp, val: &Value) -> Result<Value> {
         UnaryOp::Fabs => "fabs", UnaryOp::Sqrt => "sqrt",
         UnaryOp::Sin => "sin", UnaryOp::Cos => "cos", UnaryOp::Tan => "tan",
         UnaryOp::Asin => "asin", UnaryOp::Acos => "acos", UnaryOp::Atan => "atan",
+        UnaryOp::Sinh => "sinh", UnaryOp::Cosh => "cosh", UnaryOp::Tanh => "tanh",
+        UnaryOp::Asinh => "asinh", UnaryOp::Acosh => "acosh", UnaryOp::Atanh => "atanh",
         UnaryOp::Exp => "exp", UnaryOp::Exp2 => "exp2", UnaryOp::Exp10 => "exp10",
         UnaryOp::Log => "log", UnaryOp::Log2 => "log2", UnaryOp::Log10 => "log10",
         UnaryOp::Cbrt => "cbrt", UnaryOp::Significand => "significand",

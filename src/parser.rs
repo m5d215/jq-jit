@@ -2617,6 +2617,7 @@ impl Parser {
             | "ascii_downcase" | "ascii_upcase" | "ltrim" | "rtrim" | "trim"
             | "floor" | "ceil" | "round" | "fabs" | "sqrt"
             | "sin" | "cos" | "tan" | "asin" | "acos" | "atan"
+            | "sinh" | "cosh" | "tanh" | "asinh" | "acosh" | "atanh"
             | "exp" | "exp2" | "exp10" | "log" | "log2" | "log10"
             | "cbrt" | "significand" | "exponent" | "logb"
             | "nearbyint" | "trunc" | "rint" | "j0" | "j1"
@@ -3894,6 +3895,12 @@ fn name_to_unary_op(name: &str) -> Result<UnaryOp> {
         "asin" => Ok(UnaryOp::Asin),
         "acos" => Ok(UnaryOp::Acos),
         "atan" => Ok(UnaryOp::Atan),
+        "sinh" => Ok(UnaryOp::Sinh),
+        "cosh" => Ok(UnaryOp::Cosh),
+        "tanh" => Ok(UnaryOp::Tanh),
+        "asinh" => Ok(UnaryOp::Asinh),
+        "acosh" => Ok(UnaryOp::Acosh),
+        "atanh" => Ok(UnaryOp::Atanh),
         "exp" => Ok(UnaryOp::Exp),
         "exp2" => Ok(UnaryOp::Exp2),
         "exp10" => Ok(UnaryOp::Exp10),

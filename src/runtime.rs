@@ -276,6 +276,30 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             Value::Num(n, _) => Ok(Value::number(n.atan())),
             _ => bail!("atan requires number"),
         }),
+        "sinh" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(n.sinh())),
+            _ => bail!("sinh requires number"),
+        }),
+        "cosh" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(n.cosh())),
+            _ => bail!("cosh requires number"),
+        }),
+        "tanh" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(n.tanh())),
+            _ => bail!("tanh requires number"),
+        }),
+        "asinh" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(n.asinh())),
+            _ => bail!("asinh requires number"),
+        }),
+        "acosh" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(n.acosh())),
+            _ => bail!("acosh requires number"),
+        }),
+        "atanh" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(n.atanh())),
+            _ => bail!("atanh requires number"),
+        }),
         "cbrt" => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.cbrt())),
             _ => bail!("cbrt requires number"),
