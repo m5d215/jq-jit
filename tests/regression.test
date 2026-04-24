@@ -1270,11 +1270,6 @@ null
 null
 6
 
-# Issue #121: exec/1, exec/2, execv/1 must not be registered (not in jq 1.8.1)
-[builtins[] | select(. | startswith("exec"))]
-null
-[]
-
 # Issue #127: .a on a number errors instead of returning null
 .a
 1
@@ -1563,3 +1558,18 @@ try error catch . | tostring
 getpath([]) | tostring
 -0
 "-0"
+
+# Restore #121: exec/1 executes shell command and returns stdout
+exec("printf hello")
+null
+"hello"
+
+# Restore #121: execv/1 returns {exitcode, stdout, stderr}
+execv("printf hi") | .stdout
+null
+"hi"
+
+# Restore #121: exec/1, exec/2, execv/1 are advertised in builtins (jqx extension)
+[builtins[] | select(. == "exec/1" or . == "exec/2" or . == "execv/1")] | sort
+null
+["exec/1","exec/2","execv/1"]
