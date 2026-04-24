@@ -3472,23 +3472,6 @@ impl Parser {
                 let f = args.into_iter().next().unwrap();
                 Ok(Expr::CallBuiltin { name: "walk".to_string(), args: vec![f] })
             }
-            // exec/1: execute shell command and return stdout
-            ("exec", 1) => {
-                let cmd = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "exec".to_string(), args: vec![cmd] })
-            }
-            // execv/1: execute shell command, return {exitcode, stdout, stderr}
-            ("execv", 1) => {
-                let cmd = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "execv".to_string(), args: vec![cmd] })
-            }
-            // exec/2: pipe generator output to shell command, yield stdout lines
-            ("exec", 2) => {
-                let mut args = args.into_iter();
-                let gen = args.next().unwrap();
-                let cmd = args.next().unwrap();
-                Ok(Expr::CallBuiltin { name: "exec".to_string(), args: vec![gen, cmd] })
-            }
             // fromcsv/0, fromtsv/0: parse CSV/TSV string, yield arrays per row
             ("fromcsv", 0) => {
                 Ok(Expr::CallBuiltin { name: "fromcsv".to_string(), args: vec![] })

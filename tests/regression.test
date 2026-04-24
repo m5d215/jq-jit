@@ -1269,3 +1269,8 @@ null
 [builtins[] | select(. == "acosh/0" or . == "asinh/0" or . == "atanh/0" or . == "cosh/0" or . == "sinh/0" or . == "tanh/0")] | length
 null
 6
+
+# Issue #121: exec/1, exec/2, execv/1 must not be registered (not in jq 1.8.1)
+[builtins[] | select(. | startswith("exec"))]
+null
+[]
