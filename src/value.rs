@@ -1900,8 +1900,9 @@ pub fn json_object_update_field_trim(
                 Ok(s) => s,
                 Err(_) => return false,
             };
-            let result = if is_rtrim {
-                s.strip_suffix(trim_str).unwrap_or(&s)
+            let result: &str = if is_rtrim {
+                // rtrimstr("") reduces to .[:-0], which is "" in jq slice semantics.
+                if trim_str.is_empty() { "" } else { s.strip_suffix(trim_str).unwrap_or(&s) }
             } else {
                 s.strip_prefix(trim_str).unwrap_or(&s)
             };
@@ -1924,7 +1925,9 @@ pub fn json_object_update_field_trim(
             buf.extend_from_slice(&b[pos..val_start]);
             buf.push(b'"');
             if is_rtrim {
-                if inner.ends_with(trim_bytes) {
+                if trim_bytes.is_empty() {
+                    // rtrimstr("") yields "" regardless of input (jq slice -0 quirk).
+                } else if inner.ends_with(trim_bytes) {
                     buf.extend_from_slice(&inner[..inner.len() - trim_bytes.len()]);
                 } else {
                     buf.extend_from_slice(inner);

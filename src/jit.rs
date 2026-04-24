@@ -7023,7 +7023,9 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                         return 0;
                     }
                     "rtrimstr" => {
-                        std::ptr::write(dst, if let Some(rest) = s.strip_suffix(t.as_str()) {
+                        std::ptr::write(dst, if t.is_empty() {
+                            Value::from_str("")
+                        } else if let Some(rest) = s.strip_suffix(t.as_str()) {
                             Value::from_str(rest)
                         } else {
                             args[0].clone()

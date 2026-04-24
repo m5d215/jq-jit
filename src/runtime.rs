@@ -1595,6 +1595,10 @@ fn rt_ltrimstr(v: &Value, prefix: &Value) -> Result<Value> {
 
 fn rt_rtrimstr(v: &Value, suffix: &Value) -> Result<Value> {
     match (v, suffix) {
+        // rtrimstr("") is defined as `if endswith($s) then .[:-($s|length)] end`.
+        // With $s="" that reduces to .[:-0]; jq's slice semantics make -0 end-indexed,
+        // so the result is the empty string.
+        (Value::Str(_), Value::Str(p)) if p.is_empty() => Ok(Value::from_str("")),
         (Value::Str(s), Value::Str(p)) => {
             if let Some(rest) = s.strip_suffix(p.as_str()) {
                 Ok(Value::from_str(rest))

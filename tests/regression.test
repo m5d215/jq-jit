@@ -1179,3 +1179,23 @@ null
 [range(5) | . + 1] | .[0]
 null
 1
+
+# Issue #111: rtrimstr("") yields "" (jq slice -0 quirk)
+rtrimstr("")
+"hello"
+""
+
+# Issue #111: rtrimstr("") on empty string stays ""
+rtrimstr("")
+""
+""
+
+# Issue #111: ltrimstr("") still returns input unchanged
+ltrimstr("")
+"hello"
+"hello"
+
+# Issue #111: rtrimstr with non-empty suffix still works
+rtrimstr("lo")
+"hello"
+"hel"
