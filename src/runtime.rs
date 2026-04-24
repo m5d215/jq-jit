@@ -101,7 +101,6 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             Value::Num(n, _) => Ok(Value::from_bool(!n.is_infinite())),
             _ => Ok(Value::False),
         }),
-        "ascii" => unary_op(args, rt_ascii),
         "env" | "$ENV" => Ok(rt_env()),
         "builtins" => Ok(rt_builtins()),
         "debug" => unary_op(args, |v| {
@@ -1429,19 +1428,6 @@ fn rt_transpose(v: &Value) -> Result<Value> {
 
 fn rt_not(v: &Value) -> Result<Value> {
     Ok(Value::from_bool(!v.is_true()))
-}
-
-fn rt_ascii(v: &Value) -> Result<Value> {
-    match v {
-        Value::Num(n, _) => {
-            let cp = *n as u32;
-            match char::from_u32(cp) {
-                Some(c) => Ok(Value::from_string(c.to_string())),
-                None => bail!("Invalid ASCII codepoint: {}", cp),
-            }
-        }
-        _ => bail!("{} cannot be converted to ASCII", v.type_name()),
-    }
 }
 
 // -----------------------------------------------------------------------
@@ -2838,7 +2824,7 @@ pub fn rt_builtins() -> Value {
         "while/2", "until/2", "repeat/1",
         "recurse/0", "recurse/1", "recurse/2", "recurse_down/0",
         "transpose/0",
-        "ascii/0", "now/0", "gmtime/0", "mktime/0",
+        "now/0", "gmtime/0", "mktime/0",
         "strftime/1", "strptime/1",
         "todate/0", "fromdate/0", "dateadd/2", "datesub/2",
         "modulemeta/0", "builtins/0",

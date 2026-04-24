@@ -2613,7 +2613,7 @@ impl Parser {
             "length" | "utf8bytelength" | "type" | "infinite" | "nan"
             | "isinfinite" | "isnan" | "isnormal" | "isfinite"
             | "tostring" | "tonumber" | "tojson" | "fromjson"
-            | "ascii" | "explode" | "implode"
+            | "explode" | "implode"
             | "ascii_downcase" | "ascii_upcase" | "ltrim" | "rtrim" | "trim"
             | "floor" | "ceil" | "round" | "fabs" | "sqrt"
             | "sin" | "cos" | "tan" | "asin" | "acos" | "atan"
@@ -3934,7 +3934,6 @@ fn name_to_unary_op(name: &str) -> Result<UnaryOp> {
         "isnan" => Ok(UnaryOp::IsNan),
         "isnormal" => Ok(UnaryOp::IsNormal),
         "isfinite" => Ok(UnaryOp::IsFinite),
-        "ascii" => Ok(UnaryOp::Ascii),
         _ => bail!("unknown unary operation: {}", name),
     }
 }

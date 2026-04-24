@@ -1199,3 +1199,18 @@ ltrimstr("")
 rtrimstr("lo")
 "hello"
 "hel"
+
+# Issue #112: ascii/0 must not be registered (jq 1.8.1 has no such builtin)
+[builtins[] | select(. == "ascii/0")]
+null
+[]
+
+# Issue #112: ascii_downcase/0 must stay registered
+builtins | any(. == "ascii_downcase/0")
+null
+true
+
+# Issue #112: ascii_upcase/0 must stay registered
+builtins | any(. == "ascii_upcase/0")
+null
+true
