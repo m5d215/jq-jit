@@ -19,10 +19,13 @@ null
 {"a":true,"b":true} | all
 null
 
-# ---------- PR #27 bug 2: input_line_number ----------
-# Intentionally omitted — jq-jit stubs input_line_number to 0 (crash avoidance,
-# not a semantic match). jq-1.8.x returns the current input index. Tracking
-# this in a differential corpus would block every run on a known divergence.
+# ---------- Issue #117: input_line_number ----------
+
+input_line_number
+1
+
+.,input_line_number
+42
 
 # ---------- PR #27 bug 3: limit(n>1) ----------
 

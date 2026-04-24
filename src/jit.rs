@@ -6746,6 +6746,10 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                 return 0;
             }
         }
+        if name == "input_line_number" {
+            std::ptr::write(dst, Value::number(crate::eval::get_input_line_number() as f64));
+            return 0;
+        }
         if name == "__env__" {
             // Cache env object — environment is constant during execution
             struct EnvCache(std::cell::UnsafeCell<Option<Value>>);

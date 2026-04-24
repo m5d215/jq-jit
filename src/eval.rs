@@ -24,6 +24,25 @@ struct InputsCell(std::cell::UnsafeCell<(Vec<Value>, usize)>);
 unsafe impl Sync for InputsCell {}
 static INPUTS_STATE: InputsCell = InputsCell(std::cell::UnsafeCell::new((Vec::new(), 0)));
 
+/// Current input's 1-indexed line number for `input_line_number`.
+/// The CLI updates this before executing the filter on each input; jq defines
+/// it as the count of `\n` bytes consumed at the point the value was emitted
+/// (not where the value started), which for multi-value lines means every
+/// value on that line sees the same number.
+struct InputLineCell(std::cell::UnsafeCell<u64>);
+unsafe impl Sync for InputLineCell {}
+static INPUT_LINE_STATE: InputLineCell = InputLineCell(std::cell::UnsafeCell::new(0));
+
+/// Set the line number reported by `input_line_number` for the current input.
+pub fn set_input_line_number(n: u64) {
+    unsafe { *INPUT_LINE_STATE.0.get() = n; }
+}
+
+/// Read the current line number reported by `input_line_number`.
+pub fn get_input_line_number() -> u64 {
+    unsafe { *INPUT_LINE_STATE.0.get() }
+}
+
 /// Set the inputs queue for `input`/`inputs` builtins.
 pub fn set_inputs_queue(values: Vec<Value>) {
     unsafe {
@@ -4123,6 +4142,9 @@ fn eval_recurse_paths_inner(val: &Value, path: &mut Vec<Value>, cb: &mut dyn FnM
 fn eval_call_builtin(name: &str, args: &[Expr], input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
     // Special handling for builtins that take filter/closure arguments
     match (name, args.len()) {
+        ("input_line_number", 0) => {
+            return cb(Value::number(get_input_line_number() as f64));
+        }
         ("toboolean", 0) => {
             return cb(rt_toboolean(&input)?);
         }

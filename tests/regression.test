@@ -373,10 +373,10 @@ null
 
 # input_line_number must not trigger a libjq assertion crash
 
-# input_line_number returns 0 before any line has been consumed
+# input_line_number returns 1 for the only input (jq 1.8.1 parity; issue #117)
 input_line_number
 null
-0
+1
 
 # all/any should iterate object values, not error
 
@@ -1503,3 +1503,13 @@ null
 @base64d | length > 0
 "////"
 true
+
+# Issue #117: input_line_number advances per-input (1-indexed when the line was terminated)
+input_line_number
+1
+1
+
+# Issue #117: input_line_number combined with other output
+. + input_line_number
+10
+11

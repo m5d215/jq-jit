@@ -2911,6 +2911,13 @@ fn real_main() {
                 process_input(&arr, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
             } else {
                 let input_bytes = input_str.as_bytes();
+                // input_line_number state: jq reports the count of '\n' consumed
+                // when the value was emitted by the parser's line buffer. Equivalent
+                // here: count newlines in input_bytes[0..value_end], then +1 if any
+                // newline still exists after value_end (i.e. the line containing the
+                // value was terminated).
+                let total_nl: u64 = input_bytes.iter().filter(|&&b| b == b'\n').count() as u64;
+                let line_state = std::cell::Cell::new((0u64, 0usize));
                 let parse_result = if filter.is_empty() {
                     json_stream_raw(&input_str, |_, _| Ok(()))
                 } else if let Some(ref lit) = literal_output {
@@ -12376,13 +12383,21 @@ fn real_main() {
                     })
                 } else if use_compact_buf {
                     json_stream_offsets(&input_str, |v, start, end| {
+                        let (mut cnt, mut at) = line_state.get();
+                        while at < end { if input_bytes[at] == b'\n' { cnt += 1; } at += 1; }
+                        line_state.set((cnt, at));
+                        jq_jit::eval::set_input_line_number(if cnt < total_nl { cnt + 1 } else { cnt });
                         let raw = &input_bytes[start..end];
                         process_input(&v, Some(raw), &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         pool_value(v);
                         Ok(())
                     })
                 } else {
-                    json_stream(&input_str, |v| {
+                    json_stream_offsets(&input_str, |v, _start, end| {
+                        let (mut cnt, mut at) = line_state.get();
+                        while at < end { if input_bytes[at] == b'\n' { cnt += 1; } at += 1; }
+                        line_state.set((cnt, at));
+                        jq_jit::eval::set_input_line_number(if cnt < total_nl { cnt + 1 } else { cnt });
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         pool_value(v);
                         Ok(())
