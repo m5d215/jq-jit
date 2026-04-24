@@ -1363,3 +1363,18 @@ null
 [JOIN({"1":{"v":"a"}}; .[]; .id; .[1].v)]
 [{"id":"1"}]
 ["a"]
+
+# Issue #134: format("csv") dispatches dynamically (not the literal name)
+[.. | format("csv")?]
+[1,2,"a",null,true,1.5]
+["1,2,\"a\",,true,1.5"]
+
+# Issue #134: format("json") stringifies as JSON
+{a:1} | format("json")
+null
+"{\"a\":1}"
+
+# Issue #134: format("html") applies HTML escaping
+"<&>" | format("html")
+null
+"&lt;&amp;&gt;"

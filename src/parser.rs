@@ -3423,11 +3423,13 @@ impl Parser {
             ("inputs", 0) => Ok(Expr::ReadInputs),
             ("genlabel", 0) => Ok(Expr::GenLabel),
             ("format", 1) => {
+                // `format(f)` is the dynamic form of `@<fmt>`: evaluate `f`
+                // at runtime to get the format name (one of csv, tsv, json,
+                // text, html, sh, uri, base64, base64d), then apply that
+                // format to the current input. Delegate to the runtime so
+                // the directive name can vary per input.
                 let fmt = args.into_iter().next().unwrap();
-                Ok(Expr::Format {
-                    name: "text".to_string(),
-                    expr: Box::new(fmt),
-                })
+                Ok(Expr::CallBuiltin { name: "format".to_string(), args: vec![fmt] })
             }
             ("length", 0) => Ok(Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) }),
             ("type", 0) => Ok(Expr::UnaryOp { op: UnaryOp::Type, operand: Box::new(Expr::Input) }),

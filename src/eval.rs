@@ -4170,6 +4170,17 @@ fn eval_call_builtin(name: &str, args: &[Expr], input: Value, env: &EnvRef, cb: 
                 cb(rt_strflocaltime(&input, &fmt)?)
             });
         }
+        ("format", 1) => {
+            // format(f): evaluate f to get the format directive name, then
+            // apply it to the current input (same result as `@<fmt>`).
+            return eval(&args[0], input.clone(), env, &mut |fmt_val| {
+                let fmt_name = match &fmt_val {
+                    Value::Str(s) => s.as_str().to_string(),
+                    _ => bail!("{} is not a valid format", crate::value::value_to_json(&fmt_val)),
+                };
+                cb(Value::from_str(&eval_format(&fmt_name, &input)?))
+            });
+        }
         _ => {}
     }
     // Default: evaluate args as generators and call runtime with input + args
