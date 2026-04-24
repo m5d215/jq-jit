@@ -1408,3 +1408,18 @@ halt
 halt_error(0)
 "msg"
 
+
+# Issue #133: builtins emits each spec at most once (no duplicates)
+(builtins | length) == (builtins | unique | length)
+null
+true
+
+# Issue #133: type-filter generators (arrays/0..scalars/0) are advertised
+builtins | any(. == "arrays/0") and any(. == "scalars/0")
+null
+true
+
+# Issue #133: trimstr/1, splits/1, add/1, localtime/0 are advertised
+[builtins[] | select(. == "trimstr/1" or . == "splits/1" or . == "add/1" or . == "localtime/0")] | length
+null
+4
