@@ -1529,14 +1529,18 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                 if let Some(r) = result {
                     return Expr::Literal(Literal::Num(r, None));
                 }
-                // Comparison ops
+                // Comparison ops. jq treats NaN as below every number
+                // (#115) so ordering folds must mirror runtime semantics
+                // — IEEE 754's "all false" would have NaN sort scattered
+                // and `nan < nan` come out false. `==`/`!=` keep IEEE 754
+                // inequality (`nan == nan` is still false).
                 let cmp_result = match op {
                     crate::ir::BinOp::Eq => Some(*a == *b),
                     crate::ir::BinOp::Ne => Some(*a != *b),
-                    crate::ir::BinOp::Lt => Some(*a < *b),
-                    crate::ir::BinOp::Gt => Some(*a > *b),
-                    crate::ir::BinOp::Le => Some(*a <= *b),
-                    crate::ir::BinOp::Ge => Some(*a >= *b),
+                    crate::ir::BinOp::Lt => Some(crate::eval::jq_num_lt(*a, *b)),
+                    crate::ir::BinOp::Gt => Some(crate::eval::jq_num_gt(*a, *b)),
+                    crate::ir::BinOp::Le => Some(crate::eval::jq_num_le(*a, *b)),
+                    crate::ir::BinOp::Ge => Some(crate::eval::jq_num_ge(*a, *b)),
                     _ => None,
                 };
                 if let Some(r) = cmp_result {

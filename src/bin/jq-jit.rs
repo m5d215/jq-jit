@@ -1759,6 +1759,8 @@ fn real_main() {
     let mut sort_keys = false;
     let mut exit_status = false;
     let mut color_output = false;
+    let mut unbuffered = false;
+    let mut seq = false;
     let mut arg_vars: Vec<(String, Value)> = Vec::new();
     let mut argjson_vars: Vec<(String, Value)> = Vec::new();
     let mut lib_dirs: Vec<String> = Vec::new();
@@ -1791,6 +1793,21 @@ fn real_main() {
             "-e" | "--exit-status" => exit_status = true,
             "-C" | "--color-output" => color_output = true,
             "-M" | "--monochrome-output" => color_output = false,
+            "--unbuffered" => unbuffered = true,
+            "--seq" => seq = true,
+            "-a" | "--ascii-output" => {
+                // Recognised but not yet implemented (#126). Emit a
+                // clear error instead of falling through to the filter
+                // tokenizer (which would raise "unknown unary operation: a").
+                eprintln!("jq: --ascii-output (-a) is not yet implemented in jq-jit");
+                process::exit(2);
+            }
+            "--stream" => {
+                // Stream mode requires a substantial transform of every
+                // input into path-value tuples; deferred (#126).
+                eprintln!("jq: --stream is not yet implemented in jq-jit");
+                process::exit(2);
+            }
             "--tab" => tab = true,
             "--indent" => {
                 i += 1;
@@ -2033,6 +2050,14 @@ fn real_main() {
     let stdin_data: Option<String> = if !null_input && files.is_empty() && !raw_input {
         let mut s = String::new();
         io::stdin().lock().read_to_string(&mut s).unwrap_or(0);
+        if seq {
+            // RFC 7464 input: strip the RS (0x1e) record separators
+            // before they reach the JSON parser. RS is a control char
+            // that would otherwise be illegal mid-input; valid JSON
+            // strings cannot contain it unescaped, so removing every
+            // 0x1e byte is safe and matches jq's --seq input handling.
+            s.retain(|c| c != '\u{1e}');
+        }
         Some(s)
     } else {
         None
@@ -2706,6 +2731,16 @@ fn real_main() {
             if exit_status && !result.is_true() {
                 *any_false = true;
             }
+            // RFC 7464 JSON Text Sequences: every output value is preceded
+            // by an RS (0x1e) byte. The trailing LF is already produced by
+            // each emitter below.
+            if seq {
+                if use_compact_buf || use_pretty_buf {
+                    cbuf.push(0x1e);
+                } else {
+                    let _ = out.write_all(&[0x1e]);
+                }
+            }
             if use_compact_buf {
                 if !color_output {
                     // Raw passthrough: if result is the unmodified input and bytes are compact,
@@ -2756,6 +2791,16 @@ fn real_main() {
             }
             Ok(true)
         });
+        // --unbuffered: flush after every input so consumers get
+        // results as they're produced rather than waiting for the
+        // 64KB BufWriter to fill.
+        if unbuffered {
+            if !cbuf.is_empty() {
+                let _ = out.write_all(cbuf);
+                cbuf.clear();
+            }
+            let _ = out.flush();
+        }
         if let Err(e) = result {
             let msg = format!("{}", e);
             if let Some(code_str) = msg.strip_prefix("__halt__:") {
@@ -5072,8 +5117,10 @@ fn real_main() {
                         }
                         Ok(())
                     })
-                } else if filter.is_identity() && use_compact_buf && !color_output && !exit_status {
-                    // Fast path: if the entire file is compact NDJSON, write it in one shot
+                } else if filter.is_identity() && use_compact_buf && !color_output && !exit_status && !seq {
+                    // Fast path: if the entire file is compact NDJSON, write it in one shot.
+                    // Skip the fast path under --seq so the per-output RS prefix gets
+                    // applied through the regular process_input route.
                     let ib = input_bytes;
                     let mut bom_skip = 0usize;
                     if ib.len() >= 3 && ib[0] == 0xEF && ib[1] == 0xBB && ib[2] == 0xBF { bom_skip = 3; }
@@ -5126,7 +5173,7 @@ fn real_main() {
                             Ok(())
                         })
                     }
-                } else if filter.is_identity() && use_pretty_buf && !color_output && !exit_status {
+                } else if filter.is_identity() && use_pretty_buf && !color_output && !exit_status && !seq {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         push_json_pretty_raw(&mut compact_buf, raw, indent_n, tab);
@@ -21629,9 +21676,11 @@ fn real_main() {
                     }
                     Ok(())
                 })
-            } else if filter.is_identity() && use_compact_buf && !color_output && !exit_status {
+            } else if filter.is_identity() && use_compact_buf && !color_output && !exit_status && !seq {
                 // Identity fast path: skip JSON parsing entirely, just validate structure
                 // and copy raw bytes directly. Falls back to parse+serialize for non-compact input.
+                // Skipped under --seq so the per-output RS prefix gets applied through
+                // the regular process_input route.
                 let content_bytes = content.as_bytes();
                 // Whole-file passthrough for compact NDJSON — sample multiple lines
                 let mut bom_skip2 = 0usize;
@@ -21682,7 +21731,7 @@ fn real_main() {
                         Ok(())
                     })
                 }
-            } else if filter.is_identity() && use_pretty_buf && !color_output && !exit_status {
+            } else if filter.is_identity() && use_pretty_buf && !color_output && !exit_status && !seq {
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];

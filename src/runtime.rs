@@ -771,6 +771,22 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// jq 1.8.1 puts NaN below every number (and reflexively below itself)
+/// so `sort`, `unique`, `min`/`max`, and the `<`/`>` operators stay
+/// total over numeric inputs. IEEE 754's "all comparisons false" would
+/// leave NaNs scattered. (`==` keeps IEEE 754 inequality so
+/// `nan == nan` is still false.)
+#[inline]
+pub fn cmp_num_jq(x: f64, y: f64) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (x.is_nan(), y.is_nan()) {
+        (true, true) => Ordering::Less,
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        (false, false) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+    }
+}
+
 #[inline]
 pub fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering;
@@ -795,7 +811,7 @@ pub fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     }
 
     match (a, b) {
-        (Value::Num(x, _), Value::Num(y, _)) => x.partial_cmp(y).unwrap_or(Ordering::Equal),
+        (Value::Num(x, _), Value::Num(y, _)) => cmp_num_jq(*x, *y),
         (Value::Str(x), Value::Str(y)) => x.cmp(y),
         (Value::Arr(x), Value::Arr(y)) => {
             for (a, b) in x.iter().zip(y.iter()) {
@@ -894,10 +910,12 @@ fn sort_values(sorted: &mut [Value]) {
     // Check first element type to select fast comparator
     match &sorted[0] {
         Value::Num(..) => {
-            // Optimistic: try numeric sort, fall back if mixed types
+            // Optimistic: try numeric sort, fall back if mixed types.
+            // NaN must rank below every number (jq's total order, #115);
+            // partial_cmp would scatter NaNs as Equal-ish.
             sorted.sort_by(|a, b| {
                 if let (Value::Num(x, _), Value::Num(y, _)) = (a, b) {
-                    x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+                    cmp_num_jq(*x, *y)
                 } else {
                     compare_values(a, b)
                 }
