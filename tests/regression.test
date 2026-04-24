@@ -1327,3 +1327,84 @@ null
 try .a catch "e"
 1
 "e"
+
+# Issue #131: todate/0 converts epoch to ISO 8601
+todate
+1700000000
+"2023-11-14T22:13:20Z"
+
+# Issue #131: todate/0 on epoch zero
+todate
+0
+"1970-01-01T00:00:00Z"
+
+# Issue #131: fromdate/0 converts ISO 8601 to epoch (not a broken-down array)
+fromdate
+"2023-11-14T22:13:20Z"
+1700000000
+
+# Issue #131: fromdate/0 round-trips with todate
+todate | fromdate
+1700000000
+1700000000
+
+# Issue #120: JOIN/3 streams [row, $idx[idx_expr]] pairs
+JOIN({"1":{"v":"a"},"2":{"v":"b"}}; [{id:"1"},{id:"2"}][]; .id)
+null
+[{"id":"1"},{"v":"a"}]
+[{"id":"2"},{"v":"b"}]
+
+# Issue #120: JOIN/4 applies join_expr to each [row, matched] pair
+[JOIN({"1":{"v":"a"},"2":{"v":"b"}}; [{id:"1"},{id:"2"}][]; .id; .[1].v)]
+null
+["a","b"]
+
+# Issue #120: JOIN/4 with array stream input
+[JOIN({"1":{"v":"a"}}; .[]; .id; .[1].v)]
+[{"id":"1"}]
+["a"]
+
+# Issue #134: format("csv") dispatches dynamically (not the literal name)
+[.. | format("csv")?]
+[1,2,"a",null,true,1.5]
+["1,2,\"a\",,true,1.5"]
+
+# Issue #134: format("json") stringifies as JSON
+{a:1} | format("json")
+null
+"{\"a\":1}"
+
+# Issue #134: format("html") applies HTML escaping
+"<&>" | format("html")
+null
+"&lt;&amp;&gt;"
+
+# Issue #113: strftime("%Y") on [] defaults tm_year to 0 (libc renders as 1900)
+strftime("%Y")
+[]
+"1900"
+
+# Issue #113: strftime("%Y") on [1900] matches libc (tm_year=0)
+strftime("%Y")
+[1900]
+"1900"
+
+# (Removed: strftime("%Y") on [0] depends on libc — BSD/macOS renders
+# tm_year=-1900 as "0000" while glibc renders it as "0". The core fix
+# for #113 is covered by the `[]` and `[1900]` cases above, both of
+# which format a zeroed tm_year and are platform-independent.)
+
+# Issue #114: halt short-circuits but emits already-yielded values
+2, halt, 3
+1
+2
+
+# Issue #114: halt on its own produces no stdout (exits 0)
+halt
+1
+
+
+# Issue #114: halt_error(0) still short-circuits without emitting its input
+halt_error(0)
+"msg"
+

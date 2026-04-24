@@ -2642,6 +2642,7 @@ impl Parser {
             | "IN" | "INDEX" | "JOIN" | "strflocaltime"
             | "fromcsv" | "fromtsv" | "fromcsvh" | "fromtsvh"
             | "fromdateiso8601" | "todateiso8601" | "fromisodate" | "toisodate"
+            | "todate" | "fromdate" | "date"
             | "input_line_number"
             if !matches!(self.current(), Token::LParen) => {
                 self.compile_builtin_noargs(name)
@@ -2886,6 +2887,9 @@ impl Parser {
                 Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
             }
             "fromdateiso8601" | "todateiso8601" | "fromisodate" | "toisodate" => {
+                Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
+            }
+            "todate" | "fromdate" | "date" => {
                 Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
             }
             _ => {
@@ -3342,8 +3346,12 @@ impl Parser {
                 Ok(Expr::Debug { expr: Box::new(msg) })
             }
             ("halt_error", 1) => {
+                // halt_error(exit_code): evaluate the argument to an exit
+                // code (default 5 only on failure to evaluate a number),
+                // print the *input* to stderr, then terminate. Runtime
+                // handles message encoding — see eval_call_builtin.
                 let code = args.into_iter().next().unwrap();
-                Ok(Expr::Error { msg: Some(Box::new(code)) })
+                Ok(Expr::CallBuiltin { name: "halt_error".to_string(), args: vec![code] })
             }
             ("pow", 2) | ("atan2", 2) | ("fma", 3)
             | ("remainder", 2) | ("hypot", 2) | ("ldexp", 2)
@@ -3411,7 +3419,7 @@ impl Parser {
             }
             ("tojson", 0) => Ok(Expr::UnaryOp { op: UnaryOp::ToJson, operand: Box::new(Expr::Input) }),
             ("fromjson", 0) => Ok(Expr::UnaryOp { op: UnaryOp::FromJson, operand: Box::new(Expr::Input) }),
-            ("strftime", 1) | ("strptime", 1) | ("dateadd", 2) | ("datesub", 2)
+            ("strftime", 1) | ("strptime", 1)
             | ("todate", 0) | ("fromdate", 0) | ("date", 0) => {
                 Ok(Expr::CallBuiltin { name: name.to_string(), args })
             }
@@ -3419,11 +3427,13 @@ impl Parser {
             ("inputs", 0) => Ok(Expr::ReadInputs),
             ("genlabel", 0) => Ok(Expr::GenLabel),
             ("format", 1) => {
+                // `format(f)` is the dynamic form of `@<fmt>`: evaluate `f`
+                // at runtime to get the format name (one of csv, tsv, json,
+                // text, html, sh, uri, base64, base64d), then apply that
+                // format to the current input. Delegate to the runtime so
+                // the directive name can vary per input.
                 let fmt = args.into_iter().next().unwrap();
-                Ok(Expr::Format {
-                    name: "text".to_string(),
-                    expr: Box::new(fmt),
-                })
+                Ok(Expr::CallBuiltin { name: "format".to_string(), args: vec![fmt] })
             }
             ("length", 0) => Ok(Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) }),
             ("type", 0) => Ok(Expr::UnaryOp { op: UnaryOp::Type, operand: Box::new(Expr::Input) }),
@@ -3631,6 +3641,59 @@ impl Parser {
                                     }),
                                 }),
                             }),
+                        }),
+                    }),
+                })
+            }
+            // JOIN/3: JOIN($idx; stream; idx_expr) = stream | [., $idx[idx_expr]]
+            ("JOIN", 3) => {
+                let mut args = args.into_iter();
+                let idx = args.next().unwrap();
+                let stream = args.next().unwrap();
+                let idx_expr = args.next().unwrap();
+                let idx_var = self.scope.alloc_var("__join_idx__");
+                Ok(Expr::LetBinding {
+                    var_index: idx_var,
+                    value: Box::new(idx),
+                    body: Box::new(Expr::Pipe {
+                        left: Box::new(stream),
+                        right: Box::new(Expr::Collect {
+                            generator: Box::new(Expr::Comma {
+                                left: Box::new(Expr::Input),
+                                right: Box::new(Expr::Index {
+                                    expr: Box::new(Expr::LoadVar { var_index: idx_var }),
+                                    key: Box::new(idx_expr),
+                                }),
+                            }),
+                        }),
+                    }),
+                })
+            }
+            // JOIN/4: JOIN($idx; stream; idx_expr; join_expr)
+            //         = stream | [., $idx[idx_expr]] | join_expr
+            ("JOIN", 4) => {
+                let mut args = args.into_iter();
+                let idx = args.next().unwrap();
+                let stream = args.next().unwrap();
+                let idx_expr = args.next().unwrap();
+                let join_expr = args.next().unwrap();
+                let idx_var = self.scope.alloc_var("__join_idx__");
+                Ok(Expr::LetBinding {
+                    var_index: idx_var,
+                    value: Box::new(idx),
+                    body: Box::new(Expr::Pipe {
+                        left: Box::new(stream),
+                        right: Box::new(Expr::Pipe {
+                            left: Box::new(Expr::Collect {
+                                generator: Box::new(Expr::Comma {
+                                    left: Box::new(Expr::Input),
+                                    right: Box::new(Expr::Index {
+                                        expr: Box::new(Expr::LoadVar { var_index: idx_var }),
+                                        key: Box::new(idx_expr),
+                                    }),
+                                }),
+                            }),
+                            right: Box::new(join_expr),
                         }),
                     }),
                 })

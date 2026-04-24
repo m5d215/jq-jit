@@ -4104,24 +4104,25 @@ fn eval_call_builtin(name: &str, args: &[Expr], input: Value, env: &EnvRef, cb: 
             return cb(rt_toboolean(&input)?);
         }
         ("halt", 0) => {
-            // halt: exit with code 0, print input to stderr if not null
-            if !matches!(input, Value::Null) {
-                let json = crate::value::value_to_json_precise(&input);
-                eprintln!("{}", json);
-            }
-            std::process::exit(0);
+            // halt: terminate with status 0 after emitting any values the
+            // preceding generator already yielded. Raising a sentinel
+            // error lets the CLI flush its buffered stdout before exiting
+            // (see `__halt__:` handling in bin/jq-jit.rs).
+            bail!("__halt__:0");
         }
         ("halt_error", 0) => {
-            // halt_error: exit with code from input (default 5)
-            let code = match &input {
-                Value::Num(n, _) => *n as i32,
-                _ => {
-                    let json = crate::value::value_to_json_precise(&input);
-                    eprintln!("{}", json);
-                    5
-                }
-            };
-            std::process::exit(code);
+            halt_error_write(&input);
+            bail!("__halt__:5");
+        }
+        ("halt_error", 1) => {
+            return eval(&args[0], input.clone(), env, &mut |code_val| {
+                let code = match &code_val {
+                    Value::Num(n, _) => *n as i32,
+                    _ => bail!("halt_error/1: exit code must be a number"),
+                };
+                halt_error_write(&input);
+                bail!("__halt__:{}", code);
+            });
         }
         ("add", 1) => {
             // add(f) = reduce .[] as $x (null; . + ($x | f))
@@ -4170,10 +4171,39 @@ fn eval_call_builtin(name: &str, args: &[Expr], input: Value, env: &EnvRef, cb: 
                 cb(rt_strflocaltime(&input, &fmt)?)
             });
         }
+        ("format", 1) => {
+            // format(f): evaluate f to get the format directive name, then
+            // apply it to the current input (same result as `@<fmt>`).
+            return eval(&args[0], input.clone(), env, &mut |fmt_val| {
+                let fmt_name = match &fmt_val {
+                    Value::Str(s) => s.as_str().to_string(),
+                    _ => bail!("{} is not a valid format", crate::value::value_to_json(&fmt_val)),
+                };
+                cb(Value::from_str(&eval_format(&fmt_name, &input)?))
+            });
+        }
         _ => {}
     }
     // Default: evaluate args as generators and call runtime with input + args
     eval_call_builtin_args(name, args, 0, vec![input.clone()], input, env, cb)
+}
+
+/// Emit the `halt_error` message to stderr using jq 1.8.1's rules:
+/// string inputs are written raw (no quotes, no newline); null inputs
+/// produce no output at all; everything else is JSON-encoded (no
+/// trailing newline).
+fn halt_error_write(input: &Value) {
+    use std::io::Write;
+    let stderr = std::io::stderr();
+    let mut stderr = stderr.lock();
+    match input {
+        Value::Null => {}
+        Value::Str(s) => { let _ = stderr.write_all(s.as_str().as_bytes()); }
+        _ => {
+            let json = crate::value::value_to_json_precise(input);
+            let _ = stderr.write_all(json.as_bytes());
+        }
+    }
 }
 
 fn eval_fromcsv(input: &Value, is_tsv: bool, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {

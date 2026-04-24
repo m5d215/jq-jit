@@ -2758,6 +2758,19 @@ fn real_main() {
         });
         if let Err(e) = result {
             let msg = format!("{}", e);
+            if let Some(code_str) = msg.strip_prefix("__halt__:") {
+                // halt / halt_error: drain any buffered output, release
+                // our hold on stdout, then terminate with the requested
+                // exit status. Stderr (halt_error's message) was already
+                // written directly in eval.rs before the sentinel bailed.
+                let code: i32 = code_str.parse().unwrap_or(0);
+                if !cbuf.is_empty() {
+                    let _ = out.write_all(cbuf);
+                    cbuf.clear();
+                }
+                let _ = out.flush();
+                std::process::exit(code);
+            }
             if let Some(jq_msg) = msg.strip_prefix("__jqerror__:") {
                 eprintln!("jq: error: {}", jq_msg);
             } else {

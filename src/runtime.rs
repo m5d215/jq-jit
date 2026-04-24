@@ -332,9 +332,11 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "mktime" => unary_op(args, rt_mktime),
         "strftime" => binary_arg(args, rt_strftime),
         "strptime" => binary_arg(args, rt_strptime),
-        "todate" => unary_op(args, |v| rt_strftime(v, &Value::from_str("%Y-%m-%dT%H:%M:%SZ"))),
-        "fromdate" => unary_op(args, |v| rt_strptime(v, &Value::from_str("%Y-%m-%dT%H:%M:%SZ"))),
-        "date" => unary_op(args, |v| rt_strftime(v, &Value::from_str("%Y-%m-%dT%H:%M:%SZ"))),
+        // jq defines `todate` / `fromdate` as aliases for the ISO-8601
+        // variants: `todate := todateiso8601`, `fromdate := fromdateiso8601`.
+        // `date` is a long-standing jq-jit extension kept for compatibility.
+        "todate" | "date" => unary_op(args, rt_toisodate),
+        "fromdate" => unary_op(args, rt_fromisodate),
         // Canonical jq names per the docs at
         // https://jqlang.github.io/jq/manual/#Dates. Keep the
         // non-standard `fromisodate` / `toisodate` aliases for backward
@@ -2535,7 +2537,14 @@ fn time_arr_to_tm(a: &[Value]) -> Result<libc::tm> {
         }
     }
     let mut t: libc::tm = unsafe { std::mem::zeroed() };
-    t.tm_year = get(0) as i32 - 1900;
+    // jq's broken-down-time arrays hold the literal year (e.g. 2023) at
+    // index 0, which is offset by 1900 before handing to libc. When the
+    // year field is absent we keep tm_year at 0 so `strftime("%Y")` renders
+    // as 1900 (libc's "0 years since 1900"), matching jq 1.8.1's default
+    // tm_year fill for `[] | strftime(...)`.
+    if !a.is_empty() {
+        t.tm_year = get(0) as i32 - 1900;
+    }
     t.tm_mon = get(1) as i32;
     t.tm_mday = if a.len() > 2 { get(2) as i32 } else { 1 };
     t.tm_hour = get(3) as i32;
@@ -2799,7 +2808,7 @@ pub fn rt_builtins() -> Value {
         "transpose/0",
         "now/0", "gmtime/0", "mktime/0",
         "strftime/1", "strptime/1",
-        "todate/0", "fromdate/0", "dateadd/2", "datesub/2",
+        "todate/0", "fromdate/0",
         "modulemeta/0", "builtins/0",
         "leaf_paths/0", "isempty/1",
         "del/1", "pick/1",
@@ -2813,7 +2822,7 @@ pub fn rt_builtins() -> Value {
         "j0/0", "j1/0", "cbrt/0",
         "limit/2", "first/1", "last/1",
         "INDEX/1", "INDEX/2", "IN/1", "IN/2",
-        "JOIN/2",
+        "JOIN/2", "JOIN/3", "JOIN/4",
         "skip/2",
         "getpath/1", "setpath/2", "delpaths/1",
         "tojson/0", "fromjson/0",
