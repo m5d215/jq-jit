@@ -1453,3 +1453,18 @@ modf
 input_filename
 1
 "<stdin>"
+
+# Issue #123: object literal trailing comma is allowed
+{a:1,}
+null
+{"a":1}
+
+# Issue #123: shorthand object literal with trailing comma
+{a,}
+{"a":10}
+{"a":10}
+
+# Issue #123: multi-pair object literal with trailing comma
+{a: 1, b: 2,}
+null
+{"a":1,"b":2}

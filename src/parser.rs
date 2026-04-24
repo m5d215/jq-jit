@@ -2096,6 +2096,9 @@ impl Parser {
                         let (key_expr, val_expr) = self.parse_object_pair()?;
                         pairs.push((key_expr, val_expr));
                         if !self.eat(&Token::Comma) { break; }
+                        // Allow a trailing comma (`{a:1,}`, `{a,}`, etc.)
+                        // to match jq 1.8.1's parser.
+                        if self.at(&Token::RBrace) { break; }
                     }
                 }
                 self.scope.restore_func_scope(saved);
