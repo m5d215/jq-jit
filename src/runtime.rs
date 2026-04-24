@@ -2838,6 +2838,7 @@ pub fn rt_builtins() -> Value {
         "pow/2", "log/0", "log2/0", "log10/0",
         "exp/0", "exp2/0", "exp10/0",
         "sin/0", "cos/0", "tan/0", "asin/0", "acos/0", "atan/0",
+        "sinh/0", "cosh/0", "tanh/0", "asinh/0", "acosh/0", "atanh/0",
         "atan/2", "atan2/2",
         "min/0", "max/0", "sort/0",
         "sort_by/1", "group_by/1", "unique/0", "unique_by/1",
