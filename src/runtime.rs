@@ -335,8 +335,12 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "todate" => unary_op(args, |v| rt_strftime(v, &Value::from_str("%Y-%m-%dT%H:%M:%SZ"))),
         "fromdate" => unary_op(args, |v| rt_strptime(v, &Value::from_str("%Y-%m-%dT%H:%M:%SZ"))),
         "date" => unary_op(args, |v| rt_strftime(v, &Value::from_str("%Y-%m-%dT%H:%M:%SZ"))),
-        "fromisodate" => unary_op(args, rt_fromisodate),
-        "toisodate" => unary_op(args, rt_toisodate),
+        // Canonical jq names per the docs at
+        // https://jqlang.github.io/jq/manual/#Dates. Keep the
+        // non-standard `fromisodate` / `toisodate` aliases for backward
+        // compatibility with callers that adopted them before #116.
+        "fromdateiso8601" | "fromisodate" => unary_op(args, rt_fromisodate),
+        "todateiso8601"   | "toisodate"   => unary_op(args, rt_toisodate),
         "trimstr" => binary_arg(args, |a, b| {
             let v = rt_ltrimstr(a, b)?;
             rt_rtrimstr(&v, b)
@@ -2820,6 +2824,7 @@ pub fn rt_builtins() -> Value {
         "strflocaltime/1",
         "fromcsv/0", "fromtsv/0", "fromcsvh/0", "fromcsvh/1", "fromtsvh/0", "fromtsvh/1",
         "toboolean/0",
+        "fromdateiso8601/0", "todateiso8601/0",
         "fromisodate/0", "toisodate/0",
     ];
     let arr: Vec<Value> = builtins.iter()
