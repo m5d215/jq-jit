@@ -2642,6 +2642,7 @@ impl Parser {
             | "IN" | "INDEX" | "JOIN" | "strflocaltime"
             | "fromcsv" | "fromtsv" | "fromcsvh" | "fromtsvh"
             | "fromdateiso8601" | "todateiso8601" | "fromisodate" | "toisodate"
+            | "todate" | "fromdate" | "date"
             | "input_line_number"
             if !matches!(self.current(), Token::LParen) => {
                 self.compile_builtin_noargs(name)
@@ -2886,6 +2887,9 @@ impl Parser {
                 Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
             }
             "fromdateiso8601" | "todateiso8601" | "fromisodate" | "toisodate" => {
+                Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
+            }
+            "todate" | "fromdate" | "date" => {
                 Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
             }
             _ => {
@@ -3411,7 +3415,7 @@ impl Parser {
             }
             ("tojson", 0) => Ok(Expr::UnaryOp { op: UnaryOp::ToJson, operand: Box::new(Expr::Input) }),
             ("fromjson", 0) => Ok(Expr::UnaryOp { op: UnaryOp::FromJson, operand: Box::new(Expr::Input) }),
-            ("strftime", 1) | ("strptime", 1) | ("dateadd", 2) | ("datesub", 2)
+            ("strftime", 1) | ("strptime", 1)
             | ("todate", 0) | ("fromdate", 0) | ("date", 0) => {
                 Ok(Expr::CallBuiltin { name: name.to_string(), args })
             }

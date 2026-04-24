@@ -332,9 +332,11 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "mktime" => unary_op(args, rt_mktime),
         "strftime" => binary_arg(args, rt_strftime),
         "strptime" => binary_arg(args, rt_strptime),
-        "todate" => unary_op(args, |v| rt_strftime(v, &Value::from_str("%Y-%m-%dT%H:%M:%SZ"))),
-        "fromdate" => unary_op(args, |v| rt_strptime(v, &Value::from_str("%Y-%m-%dT%H:%M:%SZ"))),
-        "date" => unary_op(args, |v| rt_strftime(v, &Value::from_str("%Y-%m-%dT%H:%M:%SZ"))),
+        // jq defines `todate` / `fromdate` as aliases for the ISO-8601
+        // variants: `todate := todateiso8601`, `fromdate := fromdateiso8601`.
+        // `date` is a long-standing jq-jit extension kept for compatibility.
+        "todate" | "date" => unary_op(args, rt_toisodate),
+        "fromdate" => unary_op(args, rt_fromisodate),
         // Canonical jq names per the docs at
         // https://jqlang.github.io/jq/manual/#Dates. Keep the
         // non-standard `fromisodate` / `toisodate` aliases for backward
@@ -2799,7 +2801,7 @@ pub fn rt_builtins() -> Value {
         "transpose/0",
         "now/0", "gmtime/0", "mktime/0",
         "strftime/1", "strptime/1",
-        "todate/0", "fromdate/0", "dateadd/2", "datesub/2",
+        "todate/0", "fromdate/0",
         "modulemeta/0", "builtins/0",
         "leaf_paths/0", "isempty/1",
         "del/1", "pick/1",

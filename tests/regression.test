@@ -1327,3 +1327,23 @@ null
 try .a catch "e"
 1
 "e"
+
+# Issue #131: todate/0 converts epoch to ISO 8601
+todate
+1700000000
+"2023-11-14T22:13:20Z"
+
+# Issue #131: todate/0 on epoch zero
+todate
+0
+"1970-01-01T00:00:00Z"
+
+# Issue #131: fromdate/0 converts ISO 8601 to epoch (not a broken-down array)
+fromdate
+"2023-11-14T22:13:20Z"
+1700000000
+
+# Issue #131: fromdate/0 round-trips with todate
+todate | fromdate
+1700000000
+1700000000
