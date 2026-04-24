@@ -1740,7 +1740,35 @@ fn rt_str_index(v: &Value, target: &Value, is_rindex: bool) -> Result<Value> {
                 Ok(Value::Null)
             }
         }
-        _ => bail!("index/rindex requires string or array"),
+        // jq's def is `index(x): indices(x) | .[0]` (and `rindex(x): ... | .[-1:][0]`),
+        // so non-string/array input falls through to `.[target]`-style indexing.
+        _ => {
+            let inner = rt_indices_dot_fallback(v, target)?;
+            match &inner {
+                Value::Null => Ok(Value::Null),
+                _ => {
+                    // Scalar from object lookup: jq's `.[0]` / `.[-1:][0]` on a
+                    // scalar errors with these specific wordings.
+                    if is_rindex {
+                        bail!("Cannot index {} with object", inner.type_name())
+                    } else {
+                        bail!("Cannot index {} with number", inner.type_name())
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Mimic jq's `.[target]` semantics used when indices/index/rindex fall through
+/// to builtin.jq's `.[$i]` branch on non-string/array input.
+fn rt_indices_dot_fallback(v: &Value, target: &Value) -> Result<Value> {
+    match (v, target) {
+        (Value::Null, Value::Str(_)) => Ok(Value::Null),
+        (Value::Null, Value::Num(_, _)) => Ok(Value::Null),
+        (Value::Null, Value::Obj(_)) => Ok(Value::Null),
+        (Value::Obj(o), Value::Str(k)) => Ok(o.get(k.as_str()).cloned().unwrap_or(Value::Null)),
+        _ => bail!("Cannot index {} with {}", v.type_name(), index_err_desc(target)),
     }
 }
 
@@ -1816,7 +1844,10 @@ fn rt_indices(v: &Value, target: &Value) -> Result<Value> {
             }
             Ok(Value::Arr(Rc::new(indices)))
         }
-        _ => bail!("indices requires string or array"),
+        // jq's `def indices($i)` falls through to `.[$i]` for non-string/array
+        // input, so the result here can be a scalar (object value) or null —
+        // not an array.
+        _ => rt_indices_dot_fallback(v, target),
     }
 }
 

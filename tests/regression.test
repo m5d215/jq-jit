@@ -1102,3 +1102,23 @@ true
 # Issue #105: nested array inside array errors
 @sh
 [1,[2]]
+
+# Issue #106: indices on null returns null
+indices("a")
+null
+null
+
+# Issue #106: index on object with missing string key returns null
+index("a")
+{}
+null
+
+# Issue #106: rindex on null returns null
+rindex("a")
+null
+null
+
+# Issue #106: indices on null with number target also returns null
+indices(0)
+null
+null

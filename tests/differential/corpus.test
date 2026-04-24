@@ -3513,3 +3513,20 @@ true
 
 @sh
 [1,[2]]
+
+# ---------- Issue #106: indices/index/rindex on null/object ----------
+
+indices("a")
+null
+
+index("a")
+{}
+
+rindex("a")
+null
+
+indices(0)
+null
+
+index("missing")
+{"a":1}
