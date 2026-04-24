@@ -1468,3 +1468,23 @@ null
 {a: 1, b: 2,}
 null
 {"a":1,"b":2}
+
+# Issue #115: nan ranks below every number in the total order
+nan < nan
+null
+true
+
+# Issue #115: 1 > nan because nan is below 1
+1 > nan
+null
+true
+
+# Issue #115: nan is not equal to nan (IEEE 754 inequality preserved)
+nan == nan
+null
+false
+
+# Issue #115: sort of array with NaN places NaN first (rendered as null in -c)
+[1, nan, 2, nan] | sort
+null
+[null,null,1,2]

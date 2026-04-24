@@ -1001,10 +1001,10 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
                                     }
                                     BinOp::Eq => if ln == rn { Value::True } else { Value::False },
                                     BinOp::Ne => if ln != rn { Value::True } else { Value::False },
-                                    BinOp::Lt => if ln < rn { Value::True } else { Value::False },
-                                    BinOp::Gt => if ln > rn { Value::True } else { Value::False },
-                                    BinOp::Le => if ln <= rn { Value::True } else { Value::False },
-                                    BinOp::Ge => if ln >= rn { Value::True } else { Value::False },
+                                    BinOp::Lt => if jq_num_lt(ln, rn) { Value::True } else { Value::False },
+                                    BinOp::Gt => if jq_num_gt(ln, rn) { Value::True } else { Value::False },
+                                    BinOp::Le => if jq_num_le(ln, rn) { Value::True } else { Value::False },
+                                    BinOp::Ge => if jq_num_ge(ln, rn) { Value::True } else { Value::False },
                                     _ => { drop(e); return Err(()); }
                                 });
                             }
@@ -1030,10 +1030,10 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
                             }
                             BinOp::Eq => if ln == rn { Value::True } else { Value::False },
                             BinOp::Ne => if ln != rn { Value::True } else { Value::False },
-                            BinOp::Lt => if ln < rn { Value::True } else { Value::False },
-                            BinOp::Gt => if ln > rn { Value::True } else { Value::False },
-                            BinOp::Le => if ln <= rn { Value::True } else { Value::False },
-                            BinOp::Ge => if ln >= rn { Value::True } else { Value::False },
+                            BinOp::Lt => if jq_num_lt(*ln, *rn) { Value::True } else { Value::False },
+                            BinOp::Gt => if jq_num_gt(*ln, *rn) { Value::True } else { Value::False },
+                            BinOp::Le => if jq_num_le(*ln, *rn) { Value::True } else { Value::False },
+                            BinOp::Ge => if jq_num_ge(*ln, *rn) { Value::True } else { Value::False },
                             _ => return eval_binop(*op, &l, &r).map_err(|_| ()),
                         });
                     }
@@ -2962,6 +2962,29 @@ pub fn eval(
     }
 }
 
+// jq treats NaN as less than every number (including itself, reflexively
+// via `<`) so the ordering operators stay total over numeric inputs and
+// `sort` is stable in the presence of NaN. IEEE 754's "all comparisons
+// false" leaves NaNs scattered, so each numeric fast path routes through
+// these helpers instead of `<`/`>` directly. (`==` / `!=` keep IEEE 754
+// inequality semantics — `nan == nan` is still false.)
+#[inline]
+pub fn jq_num_lt(ln: f64, rn: f64) -> bool {
+    if ln.is_nan() { true }
+    else if rn.is_nan() { false }
+    else { ln < rn }
+}
+#[inline]
+pub fn jq_num_gt(ln: f64, rn: f64) -> bool {
+    if rn.is_nan() && !ln.is_nan() { true }
+    else if ln.is_nan() { false }
+    else { ln > rn }
+}
+#[inline]
+pub fn jq_num_le(ln: f64, rn: f64) -> bool { !jq_num_gt(ln, rn) }
+#[inline]
+pub fn jq_num_ge(ln: f64, rn: f64) -> bool { !jq_num_lt(ln, rn) }
+
 // ---------------------------------------------------------------------------
 #[inline]
 pub fn eval_binop(op: BinOp, lhs: &Value, rhs: &Value) -> Result<Value> {
@@ -2983,10 +3006,10 @@ pub fn eval_binop(op: BinOp, lhs: &Value, rhs: &Value) -> Result<Value> {
             }
             BinOp::Eq => if ln == rn { Value::True } else { Value::False },
             BinOp::Ne => if ln != rn { Value::True } else { Value::False },
-            BinOp::Lt => if ln < rn { Value::True } else { Value::False },
-            BinOp::Gt => if ln > rn { Value::True } else { Value::False },
-            BinOp::Le => if ln <= rn { Value::True } else { Value::False },
-            BinOp::Ge => if ln >= rn { Value::True } else { Value::False },
+            BinOp::Lt => if jq_num_lt(*ln, *rn) { Value::True } else { Value::False },
+            BinOp::Gt => if jq_num_gt(*ln, *rn) { Value::True } else { Value::False },
+            BinOp::Le => if jq_num_le(*ln, *rn) { Value::True } else { Value::False },
+            BinOp::Ge => if jq_num_ge(*ln, *rn) { Value::True } else { Value::False },
             BinOp::And => if lhs.is_truthy() && rhs.is_truthy() { Value::True } else { Value::False },
             BinOp::Or => if lhs.is_truthy() || rhs.is_truthy() { Value::True } else { Value::False },
         });
@@ -3029,10 +3052,10 @@ fn eval_binop_owned(op: BinOp, lhs: Value, rhs: &Value) -> Result<Value> {
             }
             BinOp::Eq => if ln == rn { Value::True } else { Value::False },
             BinOp::Ne => if ln != rn { Value::True } else { Value::False },
-            BinOp::Lt => if ln < rn { Value::True } else { Value::False },
-            BinOp::Gt => if ln > rn { Value::True } else { Value::False },
-            BinOp::Le => if ln <= rn { Value::True } else { Value::False },
-            BinOp::Ge => if ln >= rn { Value::True } else { Value::False },
+            BinOp::Lt => if jq_num_lt(*ln, *rn) { Value::True } else { Value::False },
+            BinOp::Gt => if jq_num_gt(*ln, *rn) { Value::True } else { Value::False },
+            BinOp::Le => if jq_num_le(*ln, *rn) { Value::True } else { Value::False },
+            BinOp::Ge => if jq_num_ge(*ln, *rn) { Value::True } else { Value::False },
             BinOp::And | BinOp::Or => return eval_binop(op, &lhs, rhs),
         });
     }
