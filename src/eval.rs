@@ -3699,7 +3699,7 @@ fn try_eval_key_value<'a>(expr: &Expr, input: &'a Value) -> Option<&'a Value> {
 }
 
 fn eval_closure_op(op: ClosureOpKind, container: &Value, key_expr: &Expr, _input: &Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
-    let a = match container { Value::Arr(a) => a, _ => bail!("{} is not an array", container.type_name()) };
+    let a = match container { Value::Arr(a) => a, _ => bail!("Cannot iterate over {}", crate::runtime::errdesc_pub(container)) };
 
     // Fast path: f64 key extraction — avoids eval overhead and Vec<Value> allocations
     if !a.is_empty() {
