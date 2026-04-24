@@ -5127,15 +5127,20 @@ fn real_main() {
                 } else if let Some(ref fa_field) = field_access {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if raw[0] == b'{' {
-                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, fa_field) {
-                                let val_bytes = &raw[vs..ve];
-                                emit_raw_ln!(&mut compact_buf, val_bytes);
-                            } else {
-                                compact_buf.extend_from_slice(b"null\n");
+                        match raw[0] {
+                            b'{' => {
+                                if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, fa_field) {
+                                    let val_bytes = &raw[vs..ve];
+                                    emit_raw_ln!(&mut compact_buf, val_bytes);
+                                } else {
+                                    compact_buf.extend_from_slice(b"null\n");
+                                }
                             }
-                        } else {
-                            compact_buf.extend_from_slice(b"null\n");
+                            b'n' => { compact_buf.extend_from_slice(b"null\n"); }
+                            _ => {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -5147,11 +5152,21 @@ fn real_main() {
                     let nf_refs: Vec<&str> = nf.iter().map(|s| s.as_str()).collect();
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if let Some((vs, ve)) = json_object_get_nested_field_raw(raw, 0, &nf_refs) {
-                            let val_bytes = &raw[vs..ve];
-                            emit_raw_ln!(&mut compact_buf, val_bytes);
-                        } else {
-                            compact_buf.extend_from_slice(b"null\n");
+                        match raw[0] {
+                            b'{' => {
+                                if let Some((vs, ve)) = json_object_get_nested_field_raw(raw, 0, &nf_refs) {
+                                    let val_bytes = &raw[vs..ve];
+                                    emit_raw_ln!(&mut compact_buf, val_bytes);
+                                } else {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                            }
+                            b'n' => { compact_buf.extend_from_slice(b"null\n"); }
+                            _ => {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -14573,15 +14588,20 @@ fn real_main() {
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if raw[0] == b'{' {
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, fa_field) {
-                            let val_bytes = &raw[vs..ve];
-                            emit_raw_ln!(&mut compact_buf, val_bytes);
-                        } else {
-                            compact_buf.extend_from_slice(b"null\n");
+                    match raw[0] {
+                        b'{' => {
+                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, fa_field) {
+                                let val_bytes = &raw[vs..ve];
+                                emit_raw_ln!(&mut compact_buf, val_bytes);
+                            } else {
+                                compact_buf.extend_from_slice(b"null\n");
+                            }
                         }
-                    } else {
-                        compact_buf.extend_from_slice(b"null\n");
+                        b'n' => { compact_buf.extend_from_slice(b"null\n"); }
+                        _ => {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
@@ -14594,11 +14614,21 @@ fn real_main() {
                 let nf_refs: Vec<&str> = nf.iter().map(|s| s.as_str()).collect();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if let Some((vs, ve)) = json_object_get_nested_field_raw(raw, 0, &nf_refs) {
-                        let val_bytes = &raw[vs..ve];
-                        emit_raw_ln!(&mut compact_buf, val_bytes);
-                    } else {
-                        compact_buf.extend_from_slice(b"null\n");
+                    match raw[0] {
+                        b'{' => {
+                            if let Some((vs, ve)) = json_object_get_nested_field_raw(raw, 0, &nf_refs) {
+                                let val_bytes = &raw[vs..ve];
+                                emit_raw_ln!(&mut compact_buf, val_bytes);
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        }
+                        b'n' => { compact_buf.extend_from_slice(b"null\n"); }
+                        _ => {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
