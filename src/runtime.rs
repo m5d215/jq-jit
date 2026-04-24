@@ -101,7 +101,6 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             Value::Num(n, _) => Ok(Value::from_bool(!n.is_infinite())),
             _ => Ok(Value::False),
         }),
-        "ascii" => unary_op(args, rt_ascii),
         "env" | "$ENV" => Ok(rt_env()),
         "builtins" => Ok(rt_builtins()),
         "debug" => unary_op(args, |v| {
@@ -132,8 +131,6 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "inside" => binary_arg(args, |a, b| rt_contains(b, a)),
         "startswith" => binary_arg(args, rt_startswith),
         "endswith" => binary_arg(args, rt_endswith),
-        "exec" => binary_arg(args, rt_exec),
-        "execv" => binary_arg(args, rt_execv),
         "ltrimstr" => binary_arg(args, rt_ltrimstr),
         "rtrimstr" => binary_arg(args, rt_rtrimstr),
         "split" if args.len() <= 2 => binary_arg(args, rt_split),
@@ -275,6 +272,30 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "atan" => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.atan())),
             _ => bail!("atan requires number"),
+        }),
+        "sinh" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(n.sinh())),
+            _ => bail!("sinh requires number"),
+        }),
+        "cosh" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(n.cosh())),
+            _ => bail!("cosh requires number"),
+        }),
+        "tanh" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(n.tanh())),
+            _ => bail!("tanh requires number"),
+        }),
+        "asinh" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(n.asinh())),
+            _ => bail!("asinh requires number"),
+        }),
+        "acosh" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(n.acosh())),
+            _ => bail!("acosh requires number"),
+        }),
+        "atanh" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(n.atanh())),
+            _ => bail!("atanh requires number"),
         }),
         "cbrt" => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.cbrt())),
@@ -1431,19 +1452,6 @@ fn rt_not(v: &Value) -> Result<Value> {
     Ok(Value::from_bool(!v.is_true()))
 }
 
-fn rt_ascii(v: &Value) -> Result<Value> {
-    match v {
-        Value::Num(n, _) => {
-            let cp = *n as u32;
-            match char::from_u32(cp) {
-                Some(c) => Ok(Value::from_string(c.to_string())),
-                None => bail!("Invalid ASCII codepoint: {}", cp),
-            }
-        }
-        _ => bail!("{} cannot be converted to ASCII", v.type_name()),
-    }
-}
-
 // -----------------------------------------------------------------------
 // Binary builtins
 // -----------------------------------------------------------------------
@@ -1525,61 +1533,6 @@ fn rt_endswith(v: &Value, suffix: &Value) -> Result<Value> {
     }
 }
 
-fn exec_spawn(input: &Value, cmd: &Value) -> Result<std::process::Output> {
-    let cmd_str = match cmd {
-        Value::Str(s) => s.as_str().to_string(),
-        _ => bail!("exec requires a string command"),
-    };
-    let stdin_data = match input {
-        Value::Null => None,
-        Value::Str(s) => Some(s.as_str().to_string()),
-        other => Some(crate::value::value_to_json(other)),
-    };
-    let mut child = std::process::Command::new("sh")
-        .args(["-c", &cmd_str])
-        .stdin(if stdin_data.is_some() {
-            std::process::Stdio::piped()
-        } else {
-            std::process::Stdio::null()
-        })
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("exec: failed to spawn: {}", e))?;
-    if let Some(data) = stdin_data {
-        use std::io::Write;
-        if let Some(ref mut stdin) = child.stdin {
-            let _ = stdin.write_all(data.as_bytes());
-        }
-    }
-    child.wait_with_output()
-        .map_err(|e| anyhow::anyhow!("exec: failed to wait: {}", e))
-}
-
-fn rt_exec(input: &Value, cmd: &Value) -> Result<Value> {
-    let output = exec_spawn(input, cmd)?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let code = output.status.code().unwrap_or(-1);
-        bail!("exec: command exited with code {}: {}", code, stderr.trim_end());
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let trimmed = stdout.trim_end_matches('\n');
-    Ok(Value::from_str(trimmed))
-}
-
-fn rt_execv(input: &Value, cmd: &Value) -> Result<Value> {
-    let output = exec_spawn(input, cmd)?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let code = output.status.code().unwrap_or(-1);
-    let mut obj = new_objmap();
-    obj.insert(KeyStr::const_new("exitcode"), Value::number(code as f64));
-    obj.insert(KeyStr::const_new("stdout"), Value::from_str(stdout.trim_end_matches('\n')));
-    obj.insert(KeyStr::const_new("stderr"), Value::from_str(stderr.trim_end_matches('\n')));
-    Ok(Value::object_from_map(obj))
-}
-
 fn rt_ltrimstr(v: &Value, prefix: &Value) -> Result<Value> {
     match (v, prefix) {
         (Value::Str(s), Value::Str(p)) => {
@@ -1595,6 +1548,10 @@ fn rt_ltrimstr(v: &Value, prefix: &Value) -> Result<Value> {
 
 fn rt_rtrimstr(v: &Value, suffix: &Value) -> Result<Value> {
     match (v, suffix) {
+        // rtrimstr("") is defined as `if endswith($s) then .[:-($s|length)] end`.
+        // With $s="" that reduces to .[:-0]; jq's slice semantics make -0 end-indexed,
+        // so the result is the empty string.
+        (Value::Str(_), Value::Str(p)) if p.is_empty() => Ok(Value::from_str("")),
         (Value::Str(s), Value::Str(p)) => {
             if let Some(rest) = s.strip_suffix(p.as_str()) {
                 Ok(Value::from_str(rest))
@@ -2814,6 +2771,7 @@ pub fn rt_builtins() -> Value {
         "pow/2", "log/0", "log2/0", "log10/0",
         "exp/0", "exp2/0", "exp10/0",
         "sin/0", "cos/0", "tan/0", "asin/0", "acos/0", "atan/0",
+        "sinh/0", "cosh/0", "tanh/0", "asinh/0", "acosh/0", "atanh/0",
         "atan/2", "atan2/2",
         "min/0", "max/0", "sort/0",
         "sort_by/1", "group_by/1", "unique/0", "unique_by/1",
@@ -2827,6 +2785,7 @@ pub fn rt_builtins() -> Value {
         "indices/1", "index/1", "rindex/1",
         "ltrim/0", "rtrim/0", "trim/0",
         "nan/0", "infinite/0", "isinfinite/0", "isnan/0", "isnormal/0", "isfinite/0",
+        "finites/0", "normals/0",
         "env/0", "debug/0", "debug/1", "stderr/0",
         "input/0", "inputs/0",
         "limit/2", "first/0", "first/1", "last/0", "last/1",
@@ -2834,7 +2793,7 @@ pub fn rt_builtins() -> Value {
         "while/2", "until/2", "repeat/1",
         "recurse/0", "recurse/1", "recurse/2", "recurse_down/0",
         "transpose/0",
-        "ascii/0", "now/0", "gmtime/0", "mktime/0",
+        "now/0", "gmtime/0", "mktime/0",
         "strftime/1", "strptime/1",
         "todate/0", "fromdate/0", "dateadd/2", "datesub/2",
         "modulemeta/0", "builtins/0",
@@ -2859,7 +2818,6 @@ pub fn rt_builtins() -> Value {
         "@html/0", "@json/0", "@text/0", "@sh/0",
         "ascii_downcase/0", "ascii_upcase/0",
         "strflocaltime/1",
-        "exec/1", "exec/2", "execv/1",
         "fromcsv/0", "fromtsv/0", "fromcsvh/0", "fromcsvh/1", "fromtsvh/0", "fromtsvh/1",
         "toboolean/0",
         "fromisodate/0", "toisodate/0",

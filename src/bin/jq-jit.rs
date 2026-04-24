@@ -1367,7 +1367,9 @@ fn emit_resolved_value(
                         }
                     }
                     jq_jit::interpreter::StrBuiltin::Rtrimstr => {
-                        if inner.ends_with(&arg[..]) {
+                        if arg.is_empty() {
+                            buf.extend_from_slice(b"\"\"");
+                        } else if inner.ends_with(&arg[..]) {
                             buf.push(b'"');
                             buf.extend_from_slice(&inner[..inner.len()-arg.len()]);
                             buf.push(b'"');
@@ -7299,7 +7301,9 @@ fn real_main() {
                                         }
                                         StringChainOp::Rtrimstr(ref s) => {
                                             let sb = s.as_bytes();
-                                            if tmp_str.ends_with(sb) {
+                                            if sb.is_empty() {
+                                                tmp_str.clear();
+                                            } else if tmp_str.ends_with(sb) {
                                                 let new_len = tmp_str.len() - sb.len();
                                                 tmp_str.truncate(new_len);
                                             }
@@ -10507,7 +10511,9 @@ fn real_main() {
                                         }
                                         StringChainOp::Rtrimstr(ref suffix) => {
                                             let sb = suffix.as_bytes();
-                                            if tmp_str.len() >= sb.len() && &tmp_str[tmp_str.len()-sb.len()..] == sb {
+                                            if sb.is_empty() {
+                                                tmp_str.clear();
+                                            } else if tmp_str.len() >= sb.len() && &tmp_str[tmp_str.len()-sb.len()..] == sb {
                                                 let new_len = tmp_str.len() - sb.len();
                                                 tmp_str.truncate(new_len);
                                             }
@@ -14868,7 +14874,9 @@ fn real_main() {
                                     }
                                     StringChainOp::Rtrimstr(ref s) => {
                                         let sb = s.as_bytes();
-                                        if tmp_str.ends_with(sb) { let l = tmp_str.len() - sb.len(); tmp_str.truncate(l); }
+                                        if sb.is_empty() {
+                                            tmp_str.clear();
+                                        } else if tmp_str.ends_with(sb) { let l = tmp_str.len() - sb.len(); tmp_str.truncate(l); }
                                     }
                                     _ => {}
                                 }
@@ -17963,7 +17971,9 @@ fn real_main() {
                                     }
                                     StringChainOp::Rtrimstr(ref suffix) => {
                                         let sb = suffix.as_bytes();
-                                        if tmp_str.len() >= sb.len() && &tmp_str[tmp_str.len()-sb.len()..] == sb {
+                                        if sb.is_empty() {
+                                            tmp_str.clear();
+                                        } else if tmp_str.len() >= sb.len() && &tmp_str[tmp_str.len()-sb.len()..] == sb {
                                             let new_len = tmp_str.len() - sb.len();
                                             tmp_str.truncate(new_len);
                                         }

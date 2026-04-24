@@ -2613,10 +2613,11 @@ impl Parser {
             "length" | "utf8bytelength" | "type" | "infinite" | "nan"
             | "isinfinite" | "isnan" | "isnormal" | "isfinite"
             | "tostring" | "tonumber" | "tojson" | "fromjson"
-            | "ascii" | "explode" | "implode"
+            | "explode" | "implode"
             | "ascii_downcase" | "ascii_upcase" | "ltrim" | "rtrim" | "trim"
             | "floor" | "ceil" | "round" | "fabs" | "sqrt"
             | "sin" | "cos" | "tan" | "asin" | "acos" | "atan"
+            | "sinh" | "cosh" | "tanh" | "asinh" | "acosh" | "atanh"
             | "exp" | "exp2" | "exp10" | "log" | "log2" | "log10"
             | "cbrt" | "significand" | "exponent" | "logb"
             | "nearbyint" | "trunc" | "rint" | "j0" | "j1"
@@ -2821,6 +2822,39 @@ impl Parser {
                     }),
                     then_branch: Box::new(Expr::Empty),
                     else_branch: Box::new(Expr::Input),
+                })
+            }
+            "finites" => {
+                // finites = select(type == "number" and (isinfinite | not))
+                // Equivalent pipe form: numbers | select(isinfinite | not)
+                Ok(Expr::Pipe {
+                    left: Box::new(make_type_select("number")),
+                    right: Box::new(Expr::IfThenElse {
+                        cond: Box::new(Expr::UnaryOp {
+                            op: UnaryOp::Not,
+                            operand: Box::new(Expr::UnaryOp {
+                                op: UnaryOp::IsInfinite,
+                                operand: Box::new(Expr::Input),
+                            }),
+                        }),
+                        then_branch: Box::new(Expr::Input),
+                        else_branch: Box::new(Expr::Empty),
+                    }),
+                })
+            }
+            "normals" => {
+                // normals = select(type == "number" and isnormal)
+                // Equivalent pipe form: numbers | select(isnormal)
+                Ok(Expr::Pipe {
+                    left: Box::new(make_type_select("number")),
+                    right: Box::new(Expr::IfThenElse {
+                        cond: Box::new(Expr::UnaryOp {
+                            op: UnaryOp::IsNormal,
+                            operand: Box::new(Expr::Input),
+                        }),
+                        then_branch: Box::new(Expr::Input),
+                        else_branch: Box::new(Expr::Empty),
+                    }),
                 })
             }
             "isempty" => {
@@ -3438,23 +3472,6 @@ impl Parser {
                 let f = args.into_iter().next().unwrap();
                 Ok(Expr::CallBuiltin { name: "walk".to_string(), args: vec![f] })
             }
-            // exec/1: execute shell command and return stdout
-            ("exec", 1) => {
-                let cmd = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "exec".to_string(), args: vec![cmd] })
-            }
-            // execv/1: execute shell command, return {exitcode, stdout, stderr}
-            ("execv", 1) => {
-                let cmd = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "execv".to_string(), args: vec![cmd] })
-            }
-            // exec/2: pipe generator output to shell command, yield stdout lines
-            ("exec", 2) => {
-                let mut args = args.into_iter();
-                let gen = args.next().unwrap();
-                let cmd = args.next().unwrap();
-                Ok(Expr::CallBuiltin { name: "exec".to_string(), args: vec![gen, cmd] })
-            }
             // fromcsv/0, fromtsv/0: parse CSV/TSV string, yield arrays per row
             ("fromcsv", 0) => {
                 Ok(Expr::CallBuiltin { name: "fromcsv".to_string(), args: vec![] })
@@ -3894,6 +3911,12 @@ fn name_to_unary_op(name: &str) -> Result<UnaryOp> {
         "asin" => Ok(UnaryOp::Asin),
         "acos" => Ok(UnaryOp::Acos),
         "atan" => Ok(UnaryOp::Atan),
+        "sinh" => Ok(UnaryOp::Sinh),
+        "cosh" => Ok(UnaryOp::Cosh),
+        "tanh" => Ok(UnaryOp::Tanh),
+        "asinh" => Ok(UnaryOp::Asinh),
+        "acosh" => Ok(UnaryOp::Acosh),
+        "atanh" => Ok(UnaryOp::Atanh),
         "exp" => Ok(UnaryOp::Exp),
         "exp2" => Ok(UnaryOp::Exp2),
         "exp10" => Ok(UnaryOp::Exp10),
@@ -3934,7 +3957,6 @@ fn name_to_unary_op(name: &str) -> Result<UnaryOp> {
         "isnan" => Ok(UnaryOp::IsNan),
         "isnormal" => Ok(UnaryOp::IsNormal),
         "isfinite" => Ok(UnaryOp::IsFinite),
-        "ascii" => Ok(UnaryOp::Ascii),
         _ => bail!("unknown unary operation: {}", name),
     }
 }

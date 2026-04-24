@@ -229,7 +229,7 @@ fn is_scalar(expr: &Expr) -> bool {
         Expr::CallBuiltin { name, args } => {
             // Filter-argument builtins can't be treated as scalar
             match (name.as_str(), args.len()) {
-                ("walk", _) | ("pick", _) | ("skip", _) | ("del", _) | ("exec", 2)
+                ("walk", _) | ("pick", _) | ("skip", _) | ("del", _)
                 | ("fromcsv", _) | ("fromtsv", _) | ("fromcsvh", _) | ("fromtsvh", _) => false,
                 ("add", 1) => false,
                 _ => args.iter().all(is_scalar),
@@ -7023,7 +7023,9 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                         return 0;
                     }
                     "rtrimstr" => {
-                        std::ptr::write(dst, if let Some(rest) = s.strip_suffix(t.as_str()) {
+                        std::ptr::write(dst, if t.is_empty() {
+                            Value::from_str("")
+                        } else if let Some(rest) = s.strip_suffix(t.as_str()) {
                             Value::from_str(rest)
                         } else {
                             args[0].clone()
@@ -7476,6 +7478,8 @@ fn unaryop_from_i32(op: i32) -> Option<UnaryOp> {
         62 => UnaryOp::Rint, 63 => UnaryOp::J0, 64 => UnaryOp::J1,
         65 => UnaryOp::Gmtime, 66 => UnaryOp::Mktime, 67 => UnaryOp::Now,
         68 => UnaryOp::GetModuleMeta, 69 => UnaryOp::Localtime,
+        70 => UnaryOp::Sinh, 71 => UnaryOp::Cosh, 72 => UnaryOp::Tanh,
+        73 => UnaryOp::Asinh, 74 => UnaryOp::Acosh, 75 => UnaryOp::Atanh,
         _ => return None,
     })
 }
@@ -7504,6 +7508,8 @@ fn unaryop_to_i32(op: UnaryOp) -> i32 {
         UnaryOp::Rint => 62, UnaryOp::J0 => 63, UnaryOp::J1 => 64,
         UnaryOp::Gmtime => 65, UnaryOp::Mktime => 66, UnaryOp::Now => 67,
         UnaryOp::GetModuleMeta => 68, UnaryOp::Localtime => 69,
+        UnaryOp::Sinh => 70, UnaryOp::Cosh => 71, UnaryOp::Tanh => 72,
+        UnaryOp::Asinh => 73, UnaryOp::Acosh => 74, UnaryOp::Atanh => 75,
     }
 }
 

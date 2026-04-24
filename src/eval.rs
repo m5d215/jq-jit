@@ -3063,6 +3063,8 @@ pub fn eval_unaryop(op: UnaryOp, val: &Value) -> Result<Value> {
         UnaryOp::Fabs => "fabs", UnaryOp::Sqrt => "sqrt",
         UnaryOp::Sin => "sin", UnaryOp::Cos => "cos", UnaryOp::Tan => "tan",
         UnaryOp::Asin => "asin", UnaryOp::Acos => "acos", UnaryOp::Atan => "atan",
+        UnaryOp::Sinh => "sinh", UnaryOp::Cosh => "cosh", UnaryOp::Tanh => "tanh",
+        UnaryOp::Asinh => "asinh", UnaryOp::Acosh => "acosh", UnaryOp::Atanh => "atanh",
         UnaryOp::Exp => "exp", UnaryOp::Exp2 => "exp2", UnaryOp::Exp10 => "exp10",
         UnaryOp::Log => "log", UnaryOp::Log2 => "log2", UnaryOp::Log10 => "log10",
         UnaryOp::Cbrt => "cbrt", UnaryOp::Significand => "significand",
@@ -4143,10 +4145,6 @@ fn eval_call_builtin(name: &str, args: &[Expr], input: Value, env: &EnvRef, cb: 
             // del(f) = delpaths([path(f)])
             return eval_del(&args[0], input, env, cb);
         }
-        ("exec", 2) => {
-            // exec(generator; "cmd"): spawn cmd once, pipe generator outputs to stdin, yield stdout lines
-            return eval_exec_pipe(&args[0], &args[1], input, env, cb);
-        }
         ("fromcsv", 0) | ("fromtsv", 0) => {
             return eval_fromcsv(&input, name == "fromtsv", cb);
         }
@@ -4176,60 +4174,6 @@ fn eval_call_builtin(name: &str, args: &[Expr], input: Value, env: &EnvRef, cb: 
     }
     // Default: evaluate args as generators and call runtime with input + args
     eval_call_builtin_args(name, args, 0, vec![input.clone()], input, env, cb)
-}
-
-fn eval_exec_pipe(gen_expr: &Expr, cmd_expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
-    use std::io::Write;
-    // Evaluate the command string first
-    let mut cmd_str = None;
-    eval(cmd_expr, input.clone(), env, &mut |cmd_val| {
-        match &cmd_val {
-            Value::Str(s) => { cmd_str = Some(s.as_str().to_string()); }
-            _ => { return Err(anyhow::anyhow!("exec: command must be a string")); }
-        }
-        Ok(true)
-    })?;
-    let cmd_str = cmd_str.ok_or_else(|| anyhow::anyhow!("exec: command produced no value"))?;
-
-    // Spawn the process once
-    let mut child = std::process::Command::new("sh")
-        .args(["-c", &cmd_str])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("exec: failed to spawn: {}", e))?;
-
-    // Pipe generator outputs to stdin
-    {
-        let mut stdin = child.stdin.take().unwrap();
-        eval(gen_expr, input, env, &mut |val| {
-            let line = match &val {
-                Value::Str(s) => s.as_str().to_string(),
-                other => crate::value::value_to_json(other),
-            };
-            writeln!(stdin, "{}", line)
-                .map_err(|e| anyhow::anyhow!("exec: write to stdin failed: {}", e))?;
-            Ok(true)
-        })?;
-        // stdin is dropped here, signaling EOF
-    }
-
-    let output = child.wait_with_output()
-        .map_err(|e| anyhow::anyhow!("exec: failed to wait: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let code = output.status.code().unwrap_or(-1);
-        bail!("exec: command exited with code {}: {}", code, stderr.trim_end());
-    }
-
-    // Yield each line of stdout as a separate value
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.as_ref().lines() {
-        cb(Value::from_str(line))?;
-    }
-    Ok(true)
 }
 
 fn eval_fromcsv(input: &Value, is_tsv: bool, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
