@@ -1488,3 +1488,18 @@ false
 [1, nan, 2, nan] | sort
 null
 [null,null,1,2]
+
+# Issue #132: @base64d tolerates non-UTF-8 decoded bytes (matches jq via lossy replacement)
+@base64d | length
+"abc="
+2
+
+# Issue #132: Base64 decoding pure invalid UTF-8 yields replacement chars, not an error
+@base64d
+"/w=="
+"�"
+
+# Issue #132: Multi-byte invalid sequence survives without error
+@base64d | length > 0
+"////"
+true

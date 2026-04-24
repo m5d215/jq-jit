@@ -3392,7 +3392,7 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
             for ch in bs.chunks(4) { if ch.len()<2{break;} let a=D.get(ch[0] as usize).copied().unwrap_or(-1); let b=D.get(ch[1] as usize).copied().unwrap_or(-1); if a<0||b<0{bail!("invalid base64");}
                 r.push(((a as u8)<<2)|((b as u8)>>4)); if ch.len()>2&&ch[2]!=b'=' { let c=D.get(ch[2] as usize).copied().unwrap_or(-1); if c<0{bail!("invalid base64");} r.push(((b as u8)<<4)|((c as u8)>>2));
                 if ch.len()>3&&ch[3]!=b'=' { let d=D.get(ch[3] as usize).copied().unwrap_or(-1); if d<0{bail!("invalid base64");} r.push(((c as u8)<<6)|(d as u8)); } } }
-            String::from_utf8(r).map_err(|e| anyhow::anyhow!("invalid utf8: {}", e))
+            Ok(String::from_utf8_lossy(&r).into_owned())
         }
         _ => bail!("unknown format: @{}", name),
     }
