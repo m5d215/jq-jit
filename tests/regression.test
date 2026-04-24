@@ -1274,3 +1274,56 @@ null
 [builtins[] | select(. | startswith("exec"))]
 null
 []
+
+# Issue #127: .a on a number errors instead of returning null
+.a
+1
+
+# Issue #127: .a on a string errors
+.a
+"str"
+
+# Issue #127: .a on a boolean errors
+.a
+true
+
+# Issue #127: .a on an array errors
+.a
+[1,2]
+
+# Issue #127: .["a"] on a number errors (bracket-index form)
+.["a"]
+1
+
+# Issue #127: .a.b on a number errors (nested access bails to generic)
+.a.b
+1
+
+# Issue #127: .a.b on an object with non-object intermediate still errors
+.a.b
+{"a":1}
+
+# Issue #127: .a on null still returns null
+.a
+null
+null
+
+# Issue #127: .a on an object still returns the field
+.a
+{"a":42}
+42
+
+# Issue #127: missing field on object still returns null
+.a
+{"x":1}
+null
+
+# Issue #127: (.a)? on a non-object still swallows the error to empty
+[.[] | (.a)?]
+[1,"s",true,[1],null,{"a":9},{"b":1}]
+[null,9,null]
+
+# Issue #127: try .a catch "e" on a number now catches the raised error
+try .a catch "e"
+1
+"e"
