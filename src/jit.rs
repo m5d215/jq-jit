@@ -3922,7 +3922,22 @@ impl Flattener {
         self.emit(JitOp::Jump { label: done_lbl });
 
         self.emit(JitOp::Label { id: other_lbl });
-        if !is_opt { self.emit(JitOp::ReturnError); }
+        if !is_opt {
+            // Set "Cannot iterate over TYPE (VALUE)" before returning the error;
+            // bare ReturnError leaves the error message blank (issue #107).
+            let err_slot = self.alloc_slot();
+            self.emit(JitOp::CallBuiltin {
+                dst: err_slot,
+                name: "__each_error__".to_string(),
+                args: vec![container],
+            });
+            self.emit(JitOp::Drop { slot: err_slot });
+            if let Some((catch_label, error_slot)) = self.try_catch_target {
+                self.emit(JitOp::CheckError { error_dst: error_slot, catch_label });
+            } else {
+                self.emit(JitOp::ReturnError);
+            }
+        }
         self.emit(JitOp::Label { id: done_lbl });
         true
     }
@@ -4813,7 +4828,22 @@ impl Flattener {
         self.emit(JitOp::Jump { label: done_lbl });
 
         self.emit(JitOp::Label { id: other_lbl });
-        if !is_opt { self.emit(JitOp::ReturnError); }
+        if !is_opt {
+            // Set "Cannot iterate over TYPE (VALUE)" before returning the error;
+            // bare ReturnError leaves the error message blank (issue #107).
+            let err_slot = self.alloc_slot();
+            self.emit(JitOp::CallBuiltin {
+                dst: err_slot,
+                name: "__each_error__".to_string(),
+                args: vec![container],
+            });
+            self.emit(JitOp::Drop { slot: err_slot });
+            if let Some((catch_label, error_slot)) = self.try_catch_target {
+                self.emit(JitOp::CheckError { error_dst: error_slot, catch_label });
+            } else {
+                self.emit(JitOp::ReturnError);
+            }
+        }
         self.emit(JitOp::Label { id: done_lbl });
     }
 
@@ -5938,7 +5968,9 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                     36 => n.is_infinite(),
                     37 => n.is_nan(),
                     38 => n.is_normal(),
-                    39 => n.is_finite(),
+                    // isfinite: jq's def is `type == "number" and (isinfinite | not)`,
+                    // so NaN counts as finite (issue #108).
+                    39 => !n.is_infinite(),
                     _ => unreachable!(),
                 }
             } else {

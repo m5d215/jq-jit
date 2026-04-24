@@ -3474,3 +3474,101 @@ delpaths([[0]])
 
 delpaths([])
 null
+
+# ---------- Issue #103: null * n must error ----------
+
+null * 2
+null
+
+1 * null
+null
+
+null * null
+null
+
+# ---------- Issue #104: contains/inside type-mismatch error ----------
+
+contains(1)
+"hello"
+
+contains({})
+[]
+
+inside("hello")
+1
+
+contains(false)
+true
+
+# ---------- Issue #105: @sh on object errors ----------
+
+@sh
+{}
+
+@sh
+{"a":1}
+
+@sh
+[1,{}]
+
+@sh
+[1,[2]]
+
+# ---------- Issue #106: indices/index/rindex on null/object ----------
+
+indices("a")
+null
+
+index("a")
+{}
+
+rindex("a")
+null
+
+indices(0)
+null
+
+index("missing")
+{"a":1}
+
+# ---------- Issue #107: .[] on null errors ----------
+
+.[]
+null
+
+reduce .[] as $x (0; . + $x)
+null
+
+[foreach .[] as $x (0; . + $x)]
+null
+
+[.[]?]
+null
+
+# ---------- Issue #108: isfinite of NaN is true ----------
+
+nan | isfinite
+null
+
+infinite | isfinite
+null
+
+1 | isfinite
+null
+
+"x" | isfinite
+null
+
+# ---------- Issue #102: gen|.*k inside [...] | .[N] ----------
+
+[range(5) | . * 2] | .[0]
+null
+
+[range(5) | . + 1] | .[-1]
+null
+
+[1,2,3 | . * 2] | .[0]
+null
+
+[range(5) | . + 1] | .[0]
+null

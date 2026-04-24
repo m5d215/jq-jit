@@ -1058,3 +1058,124 @@ setpath([-3]; "x")
 delpaths([])
 {"a":1,"b":2}
 {"a":1,"b":2}
+
+# Issue #103: null * n errors instead of returning null
+null * 2
+null
+
+# Issue #103: n * null errors instead of returning null
+1 * null
+null
+
+# Issue #103: null * null errors
+null * null
+null
+
+# Issue #104: contains with type mismatch errors instead of returning false
+contains(1)
+"hello"
+
+# Issue #104: contains with array vs object errors
+contains({})
+[]
+
+# Issue #104: inside with type mismatch errors (inside is contains with operands swapped)
+inside("hello")
+1
+
+# Issue #104: contains across boolean kinds errors (true vs false are distinct)
+contains(false)
+true
+
+# Issue #105: @sh on object errors
+@sh
+{}
+
+# Issue #105: @sh on populated object errors
+@sh
+{"a":1}
+
+# Issue #105: nested object inside array errors too
+@sh
+[1,{}]
+
+# Issue #105: nested array inside array errors
+@sh
+[1,[2]]
+
+# Issue #106: indices on null returns null
+indices("a")
+null
+null
+
+# Issue #106: index on object with missing string key returns null
+index("a")
+{}
+null
+
+# Issue #106: rindex on null returns null
+rindex("a")
+null
+null
+
+# Issue #106: indices on null with number target also returns null
+indices(0)
+null
+null
+
+# Issue #107: .[] on null errors instead of yielding nothing
+.[]
+null
+
+# Issue #107: reduce over .[] on null errors
+reduce .[] as $x (0; . + $x)
+null
+
+# Issue #107: foreach over .[] on null errors
+[foreach .[] as $x (0; . + $x)]
+null
+
+# Issue #107: optional .[]? on null still yields nothing
+[.[]?]
+null
+[]
+
+# Issue #108: isfinite of NaN is true (jq def: type=="number" and (isinfinite|not))
+nan | isfinite
+null
+true
+
+# Issue #108: isfinite of infinity is false
+infinite | isfinite
+null
+false
+
+# Issue #108: isfinite of regular number is true
+1 | isfinite
+null
+true
+
+# Issue #108: isfinite of non-number is false
+"x" | isfinite
+null
+false
+
+# Issue #102: gen body with compound arithmetic must not collapse the array
+[range(5) | . * 2] | .[0]
+null
+0
+
+# Issue #102: negative endpoint with arithmetic body
+[range(5) | . + 1] | .[-1]
+null
+5
+
+# Issue #102: comma generator with arithmetic body
+[1,2,3 | . * 2] | .[0]
+null
+2
+
+# Issue #102: arithmetic body with addition still selects index 0
+[range(5) | . + 1] | .[0]
+null
+1
