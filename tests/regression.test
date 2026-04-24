@@ -1058,3 +1058,15 @@ setpath([-3]; "x")
 delpaths([])
 {"a":1,"b":2}
 {"a":1,"b":2}
+
+# Issue #103: null * n errors instead of returning null
+null * 2
+null
+
+# Issue #103: n * null errors instead of returning null
+1 * null
+null
+
+# Issue #103: null * null errors
+null * null
+null

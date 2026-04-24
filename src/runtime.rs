@@ -620,7 +620,6 @@ pub fn rt_mul(a: &Value, b: &Value) -> Result<Value> {
             // Object multiplication = recursive merge
             Ok(Value::object_from_map(merge_objects(x, y)))
         }
-        (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
         _ => bail!(
             "{} and {} cannot be multiplied",
             errdesc(a),
