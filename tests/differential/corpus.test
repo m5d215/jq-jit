@@ -3499,3 +3499,17 @@ inside("hello")
 
 contains(false)
 true
+
+# ---------- Issue #105: @sh on object errors ----------
+
+@sh
+{}
+
+@sh
+{"a":1}
+
+@sh
+[1,{}]
+
+@sh
+[1,[2]]

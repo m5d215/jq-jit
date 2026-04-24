@@ -3202,18 +3202,31 @@ fn eval_obj_pairs(pairs: &[(Expr, Expr)], idx: usize, cur: crate::value::ObjMap,
     })
 }
 
-fn format_sh(val: &Value) -> String {
+fn format_sh_scalar(val: &Value) -> Result<String> {
     match val {
-        Value::Str(s) => format!("'{}'", s.replace('\'', "'\\''")),
-        Value::Null => "null".to_string(),
-        Value::True => "true".to_string(),
-        Value::False => "false".to_string(),
-        Value::Num(n, _) => crate::value::format_jq_number(*n),
+        Value::Str(s) => Ok(format!("'{}'", s.replace('\'', "'\\''"))),
+        Value::Null => Ok("null".to_string()),
+        Value::True => Ok("true".to_string()),
+        Value::False => Ok("false".to_string()),
+        Value::Num(n, _) => Ok(crate::value::format_jq_number(*n)),
+        _ => bail!(
+            "{} ({}) can not be escaped for shell",
+            val.type_name(),
+            crate::value::value_to_json(val),
+        ),
+    }
+}
+
+fn format_sh(val: &Value) -> Result<String> {
+    match val {
         Value::Arr(a) => {
-            let parts: Vec<String> = a.iter().map(|v| format_sh(v)).collect();
-            parts.join(" ")
+            let mut parts: Vec<String> = Vec::with_capacity(a.len());
+            for v in a.iter() {
+                parts.push(format_sh_scalar(v)?);
+            }
+            Ok(parts.join(" "))
         }
-        _ => format!("'{}'", crate::value::value_to_json(val).replace('\'', "'\\''")),
+        _ => format_sh_scalar(val),
     }
 }
 
@@ -3339,7 +3352,7 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
             }
             Ok(String::from_utf8_lossy(&decoded).into_owned())
         }
-        "sh" => Ok(format_sh(val)),
+        "sh" => format_sh(val),
         "base64" => {
             const C: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
             let d = s.as_bytes(); let mut r = String::new();

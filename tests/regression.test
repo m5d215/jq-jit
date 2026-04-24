@@ -1086,3 +1086,19 @@ inside("hello")
 # Issue #104: contains across boolean kinds errors (true vs false are distinct)
 contains(false)
 true
+
+# Issue #105: @sh on object errors
+@sh
+{}
+
+# Issue #105: @sh on populated object errors
+@sh
+{"a":1}
+
+# Issue #105: nested object inside array errors too
+@sh
+[1,{}]
+
+# Issue #105: nested array inside array errors
+@sh
+[1,[2]]
