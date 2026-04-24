@@ -275,6 +275,30 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             Value::Num(n, _) => Ok(Value::number(n.atan())),
             _ => bail!("atan requires number"),
         }),
+        "sinh" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(n.sinh())),
+            _ => bail!("sinh requires number"),
+        }),
+        "cosh" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(n.cosh())),
+            _ => bail!("cosh requires number"),
+        }),
+        "tanh" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(n.tanh())),
+            _ => bail!("tanh requires number"),
+        }),
+        "asinh" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(n.asinh())),
+            _ => bail!("asinh requires number"),
+        }),
+        "acosh" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(n.acosh())),
+            _ => bail!("acosh requires number"),
+        }),
+        "atanh" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(n.atanh())),
+            _ => bail!("atanh requires number"),
+        }),
         "cbrt" => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.cbrt())),
             _ => bail!("cbrt requires number"),
@@ -2804,6 +2828,7 @@ pub fn rt_builtins() -> Value {
         "pow/2", "log/0", "log2/0", "log10/0",
         "exp/0", "exp2/0", "exp10/0",
         "sin/0", "cos/0", "tan/0", "asin/0", "acos/0", "atan/0",
+        "sinh/0", "cosh/0", "tanh/0", "asinh/0", "acosh/0", "atanh/0",
         "atan/2", "atan2/2",
         "min/0", "max/0", "sort/0",
         "sort_by/1", "group_by/1", "unique/0", "unique_by/1",

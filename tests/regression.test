@@ -1234,3 +1234,38 @@ true
 builtins | any(. == "normals/0")
 null
 true
+
+# Issue #119: acosh of 1 is 0
+1 | acosh
+null
+0
+
+# Issue #119: cosh of 0 is 1
+0 | cosh
+null
+1
+
+# Issue #119: sinh of 0 is 0
+0 | sinh
+null
+0
+
+# Issue #119: tanh of 0 is 0
+0 | tanh
+null
+0
+
+# Issue #119: asinh(1) matches jq's value
+1 | asinh
+null
+0.881373587019543
+
+# Issue #119: atanh(0) is 0
+0 | atanh
+null
+0
+
+# Issue #119: hyperbolic builtins registered
+[builtins[] | select(. == "acosh/0" or . == "asinh/0" or . == "atanh/0" or . == "cosh/0" or . == "sinh/0" or . == "tanh/0")] | length
+null
+6
