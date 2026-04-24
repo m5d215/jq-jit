@@ -1518,11 +1518,11 @@ split("")
 
 [.[]|rtrimstr("")]
 ["a", "xx", ""]
-["a", "xx", ""]
+["","",""]
 
 [.[]|trimstr("")]
 ["a", "xx", ""]
-["a", "xx", ""]
+["","",""]
 
 [(index(","), rindex(",")), indices(",")]
 "a,bc,def,ghij,klmno"
