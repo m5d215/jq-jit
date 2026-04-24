@@ -4898,9 +4898,12 @@ fn write_pretty_to_string_impl<const COLOR: bool>(out: &mut String, v: &Value, d
         Value::Obj(o) if o.is_empty() => { c!(COLOR_OBJECT); out.push_str("{}"); c!(COLOR_RESET); }
         Value::Arr(a) => {
             let inner_depth = depth + step;
-            c!(COLOR_ARRAY); out.push_str("[\n");
+            // Emit `\033[0m` before each newline so terminals that paint
+            // the rest of the line (powerline, less -R) do not extend the
+            // structural-character color. Matches jq -C byte-for-byte.
+            c!(COLOR_ARRAY); out.push('['); c!(COLOR_RESET); out.push('\n');
             for (i, item) in a.iter().enumerate() {
-                if i > 0 { c!(COLOR_ARRAY); out.push_str(",\n"); }
+                if i > 0 { c!(COLOR_ARRAY); out.push(','); c!(COLOR_RESET); out.push('\n'); }
                 push_indent(out, inner_depth, use_tab);
                 write_pretty_to_string_impl::<COLOR>(out, item, inner_depth, step, use_tab, sort_keys);
             }
@@ -4910,23 +4913,23 @@ fn write_pretty_to_string_impl<const COLOR: bool>(out: &mut String, v: &Value, d
         }
         Value::Obj(o) => {
             let inner_depth = depth + step;
-            c!(COLOR_OBJECT); out.push_str("{\n");
+            c!(COLOR_OBJECT); out.push('{'); c!(COLOR_RESET); out.push('\n');
             if sort_keys {
                 let mut entries: Vec<_> = o.iter().collect();
                 entries.sort_by(|a, b| a.0.cmp(&b.0));
                 for (i, (k, val)) in entries.iter().enumerate() {
-                    if i > 0 { c!(COLOR_OBJECT); out.push_str(",\n"); }
+                    if i > 0 { c!(COLOR_OBJECT); out.push(','); c!(COLOR_RESET); out.push('\n'); }
                     push_indent(out, inner_depth, use_tab);
                     c!(COLOR_KEY); push_json_string(out, k); c!(COLOR_RESET);
-                    c!(COLOR_OBJECT); out.push_str(": "); c!(COLOR_RESET);
+                    c!(COLOR_OBJECT); out.push(':'); c!(COLOR_RESET); out.push(' ');
                     write_pretty_to_string_impl::<COLOR>(out, val, inner_depth, step, use_tab, sort_keys);
                 }
             } else {
                 for (i, (k, val)) in o.iter().enumerate() {
-                    if i > 0 { c!(COLOR_OBJECT); out.push_str(",\n"); }
+                    if i > 0 { c!(COLOR_OBJECT); out.push(','); c!(COLOR_RESET); out.push('\n'); }
                     push_indent(out, inner_depth, use_tab);
                     c!(COLOR_KEY); push_json_string(out, k); c!(COLOR_RESET);
-                    c!(COLOR_OBJECT); out.push_str(": "); c!(COLOR_RESET);
+                    c!(COLOR_OBJECT); out.push(':'); c!(COLOR_RESET); out.push(' ');
                     write_pretty_to_string_impl::<COLOR>(out, val, inner_depth, step, use_tab, sort_keys);
                 }
             }
@@ -5188,9 +5191,12 @@ fn push_pretty_value_impl<const COLOR: bool>(buf: &mut Vec<u8>, v: &Value, depth
         Value::Obj(o) if o.is_empty() => { c!(COLOR_OBJECT); buf.extend_from_slice(b"{}"); c!(COLOR_RESET); }
         Value::Arr(a) => {
             let inner = depth + step;
-            c!(COLOR_ARRAY); buf.extend_from_slice(b"[\n");
+            // Reset color before every newline so terminals that paint
+            // the rest of the line don't extend the structural-character
+            // color. Matches jq -C byte-for-byte.
+            c!(COLOR_ARRAY); buf.push(b'['); c!(COLOR_RESET); buf.push(b'\n');
             for (i, item) in a.iter().enumerate() {
-                if i > 0 { c!(COLOR_ARRAY); buf.extend_from_slice(b",\n"); }
+                if i > 0 { c!(COLOR_ARRAY); buf.push(b','); c!(COLOR_RESET); buf.push(b'\n'); }
                 push_indent_bytes(buf, inner, use_tab);
                 push_pretty_value_impl::<COLOR>(buf, item, inner, step, use_tab);
             }
@@ -5200,12 +5206,12 @@ fn push_pretty_value_impl<const COLOR: bool>(buf: &mut Vec<u8>, v: &Value, depth
         }
         Value::Obj(o) => {
             let inner = depth + step;
-            c!(COLOR_OBJECT); buf.extend_from_slice(b"{\n");
+            c!(COLOR_OBJECT); buf.push(b'{'); c!(COLOR_RESET); buf.push(b'\n');
             for (i, (k, val)) in o.iter().enumerate() {
-                if i > 0 { c!(COLOR_OBJECT); buf.extend_from_slice(b",\n"); }
+                if i > 0 { c!(COLOR_OBJECT); buf.push(b','); c!(COLOR_RESET); buf.push(b'\n'); }
                 push_indent_bytes(buf, inner, use_tab);
                 c!(COLOR_KEY); push_json_string_to_vec(buf, k.as_str()); c!(COLOR_RESET);
-                c!(COLOR_OBJECT); buf.extend_from_slice(b": "); c!(COLOR_RESET);
+                c!(COLOR_OBJECT); buf.push(b':'); c!(COLOR_RESET); buf.push(b' ');
                 push_pretty_value_impl::<COLOR>(buf, val, inner, step, use_tab);
             }
             buf.push(b'\n');

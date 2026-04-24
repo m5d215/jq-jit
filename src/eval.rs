@@ -4182,10 +4182,71 @@ fn eval_call_builtin(name: &str, args: &[Expr], input: Value, env: &EnvRef, cb: 
                 cb(Value::from_str(&eval_format(&fmt_name, &input)?))
             });
         }
+        ("combinations", 0) => {
+            return eval_combinations(&input, cb);
+        }
+        ("combinations", 1) => {
+            // combinations(n) = . as $dot | [range(n) | $dot] | combinations
+            return eval(&args[0], input.clone(), env, &mut |n_val| {
+                let n = match &n_val {
+                    Value::Num(x, _) if x.is_finite() && *x >= 0.0 => *x as usize,
+                    _ => bail!("combinations/1 requires a non-negative integer"),
+                };
+                let arrays = Value::Arr(Rc::new(vec![input.clone(); n]));
+                eval_combinations(&arrays, cb)
+            });
+        }
+        ("modf", 0) => {
+            // modf returns [fractional_part, integer_part], with both
+            // truncated toward zero (matches libc modf).
+            let n = match &input {
+                Value::Num(n, _) => *n,
+                _ => bail!("modf requires number input"),
+            };
+            let int_part = n.trunc();
+            let frac_part = n - int_part;
+            return cb(Value::Arr(Rc::new(vec![
+                Value::number(frac_part),
+                Value::number(int_part),
+            ])));
+        }
         _ => {}
     }
     // Default: evaluate args as generators and call runtime with input + args
     eval_call_builtin_args(name, args, 0, vec![input.clone()], input, env, cb)
+}
+
+/// Yield each Cartesian-product combination of an array of arrays, in
+/// lexicographic order. Empty input array yields a single empty
+/// combination (matching jq).
+fn eval_combinations(input: &Value, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
+    let arrays = match input {
+        Value::Arr(a) => a.clone(),
+        _ => bail!("combinations requires array of arrays input"),
+    };
+    let mut current: Vec<Value> = Vec::with_capacity(arrays.len());
+    fn rec(
+        arrays: &[Value],
+        idx: usize,
+        current: &mut Vec<Value>,
+        cb: &mut dyn FnMut(Value) -> GenResult,
+    ) -> GenResult {
+        if idx == arrays.len() {
+            cb(Value::Arr(Rc::new(current.clone())))?;
+            return Ok(true);
+        }
+        let inner = match &arrays[idx] {
+            Value::Arr(a) => a.clone(),
+            _ => bail!("combinations: each element must be an array"),
+        };
+        for v in inner.iter() {
+            current.push(v.clone());
+            rec(arrays, idx + 1, current, cb)?;
+            current.pop();
+        }
+        Ok(true)
+    }
+    rec(&arrays, 0, &mut current, cb)
 }
 
 /// Emit the `halt_error` message to stderr using jq 1.8.1's rules:
