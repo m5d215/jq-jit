@@ -1423,3 +1423,33 @@ true
 [builtins[] | select(. == "trimstr/1" or . == "splits/1" or . == "add/1" or . == "localtime/0")] | length
 null
 4
+
+# Issue #135: combinations/0 yields cartesian product of array of arrays
+[combinations]
+[[1,2],[3,4]]
+[[1,3],[1,4],[2,3],[2,4]]
+
+# Issue #135: combinations/0 on empty array yields one empty combination
+[combinations]
+[]
+[[]]
+
+# Issue #135: combinations(n) yields n-tuples of input
+[combinations(2)]
+[1,2]
+[[1,1],[1,2],[2,1],[2,2]]
+
+# Issue #135: modf splits number into [fractional, integer] truncated toward zero
+modf
+1.5
+[0.5,1]
+
+# Issue #135: modf on negative number
+modf
+-1.5
+[-0.5,-1]
+
+# Issue #135: input_filename returns "<stdin>" when reading from stdin
+input_filename
+1
+"<stdin>"

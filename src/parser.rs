@@ -2643,7 +2643,8 @@ impl Parser {
             | "fromcsv" | "fromtsv" | "fromcsvh" | "fromtsvh"
             | "fromdateiso8601" | "todateiso8601" | "fromisodate" | "toisodate"
             | "todate" | "fromdate" | "date"
-            | "input_line_number"
+            | "input_line_number" | "input_filename"
+            | "combinations" | "modf"
             if !matches!(self.current(), Token::LParen) => {
                 self.compile_builtin_noargs(name)
             }
@@ -2891,6 +2892,18 @@ impl Parser {
             }
             "todate" | "fromdate" | "date" => {
                 Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
+            }
+            "combinations" | "modf" => {
+                Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
+            }
+            "input_filename" => {
+                // jq emits "<stdin>" for the default stdin input source
+                // (and the file path when one is specified). jq-jit reads
+                // exclusively from stdin and does not plumb file paths
+                // through the pipeline, so always return "<stdin>" — this
+                // matches jq for the common stdin pipeline; in `-n` mode
+                // jq would return null, which is a known divergence.
+                Ok(Expr::Literal(Literal::Str("<stdin>".to_string())))
             }
             _ => {
                 // Check user-defined functions
@@ -3422,6 +3435,9 @@ impl Parser {
             ("strftime", 1) | ("strptime", 1)
             | ("todate", 0) | ("fromdate", 0) | ("date", 0) => {
                 Ok(Expr::CallBuiltin { name: name.to_string(), args })
+            }
+            ("combinations", 1) => {
+                Ok(Expr::CallBuiltin { name: "combinations".to_string(), args })
             }
             ("input", 0) => Ok(Expr::ReadInput),
             ("inputs", 0) => Ok(Expr::ReadInputs),
