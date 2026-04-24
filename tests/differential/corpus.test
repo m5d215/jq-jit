@@ -3485,3 +3485,17 @@ null
 
 null * null
 null
+
+# ---------- Issue #104: contains/inside type-mismatch error ----------
+
+contains(1)
+"hello"
+
+contains({})
+[]
+
+inside("hello")
+1
+
+contains(false)
+true

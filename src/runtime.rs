@@ -1468,7 +1468,30 @@ fn rt_in(v: &Value, container: &Value) -> Result<Value> {
 }
 
 fn rt_contains(a: &Value, b: &Value) -> Result<Value> {
+    // jq treats true/false as distinct kinds at the top level: contains
+    // requires both operands to share a kind, otherwise it errors. Nested
+    // comparisons (inside arrays/objects) silently fall back to false.
+    if jq_kind_tag(a) != jq_kind_tag(b) {
+        bail!(
+            "{} and {} cannot have their containment checked",
+            errdesc(a),
+            errdesc(b)
+        );
+    }
     Ok(Value::from_bool(value_contains(a, b)))
+}
+
+fn jq_kind_tag(v: &Value) -> u8 {
+    match v {
+        Value::Null => 0,
+        Value::False => 1,
+        Value::True => 2,
+        Value::Num(_, _) => 3,
+        Value::Str(_) => 4,
+        Value::Arr(_) => 5,
+        Value::Obj(_) => 6,
+        Value::Error(_) => 7,
+    }
 }
 
 fn value_contains(a: &Value, b: &Value) -> bool {
