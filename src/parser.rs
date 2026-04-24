@@ -2823,6 +2823,39 @@ impl Parser {
                     else_branch: Box::new(Expr::Input),
                 })
             }
+            "finites" => {
+                // finites = select(type == "number" and (isinfinite | not))
+                // Equivalent pipe form: numbers | select(isinfinite | not)
+                Ok(Expr::Pipe {
+                    left: Box::new(make_type_select("number")),
+                    right: Box::new(Expr::IfThenElse {
+                        cond: Box::new(Expr::UnaryOp {
+                            op: UnaryOp::Not,
+                            operand: Box::new(Expr::UnaryOp {
+                                op: UnaryOp::IsInfinite,
+                                operand: Box::new(Expr::Input),
+                            }),
+                        }),
+                        then_branch: Box::new(Expr::Input),
+                        else_branch: Box::new(Expr::Empty),
+                    }),
+                })
+            }
+            "normals" => {
+                // normals = select(type == "number" and isnormal)
+                // Equivalent pipe form: numbers | select(isnormal)
+                Ok(Expr::Pipe {
+                    left: Box::new(make_type_select("number")),
+                    right: Box::new(Expr::IfThenElse {
+                        cond: Box::new(Expr::UnaryOp {
+                            op: UnaryOp::IsNormal,
+                            operand: Box::new(Expr::Input),
+                        }),
+                        then_branch: Box::new(Expr::Input),
+                        else_branch: Box::new(Expr::Empty),
+                    }),
+                })
+            }
             "isempty" => {
                 // isempty = first(empty) // true; first = limit(1; .)
                 // Actually: def isempty(f): first((f | false), true);

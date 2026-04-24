@@ -2817,6 +2817,7 @@ pub fn rt_builtins() -> Value {
         "indices/1", "index/1", "rindex/1",
         "ltrim/0", "rtrim/0", "trim/0",
         "nan/0", "infinite/0", "isinfinite/0", "isnan/0", "isnormal/0", "isfinite/0",
+        "finites/0", "normals/0",
         "env/0", "debug/0", "debug/1", "stderr/0",
         "input/0", "inputs/0",
         "limit/2", "first/0", "first/1", "last/0", "last/1",

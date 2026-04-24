@@ -1214,3 +1214,23 @@ true
 builtins | any(. == "ascii_upcase/0")
 null
 true
+
+# Issue #118: finites/0 keeps finite numbers, drops non-numbers and infinities
+[1,"a",null,[1],{}] | map(.. | finites?)
+null
+[1,1]
+
+# Issue #118: normals/0 keeps only normal numbers (drops 0, NaN, inf, non-numbers)
+[0,1,2] | map(normals)
+null
+[1,2]
+
+# Issue #118: finites/0 and normals/0 must be registered in builtins
+builtins | any(. == "finites/0")
+null
+true
+
+# Issue #118: normals/0 registered
+builtins | any(. == "normals/0")
+null
+true
