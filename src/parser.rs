@@ -3346,8 +3346,12 @@ impl Parser {
                 Ok(Expr::Debug { expr: Box::new(msg) })
             }
             ("halt_error", 1) => {
+                // halt_error(exit_code): evaluate the argument to an exit
+                // code (default 5 only on failure to evaluate a number),
+                // print the *input* to stderr, then terminate. Runtime
+                // handles message encoding — see eval_call_builtin.
                 let code = args.into_iter().next().unwrap();
-                Ok(Expr::Error { msg: Some(Box::new(code)) })
+                Ok(Expr::CallBuiltin { name: "halt_error".to_string(), args: vec![code] })
             }
             ("pow", 2) | ("atan2", 2) | ("fma", 3)
             | ("remainder", 2) | ("hypot", 2) | ("ldexp", 2)

@@ -1393,3 +1393,18 @@ strftime("%Y")
 strftime("%Y")
 [0]
 "0000"
+
+# Issue #114: halt short-circuits but emits already-yielded values
+2, halt, 3
+1
+2
+
+# Issue #114: halt on its own produces no stdout (exits 0)
+halt
+1
+
+
+# Issue #114: halt_error(0) still short-circuits without emitting its input
+halt_error(0)
+"msg"
+
