@@ -1139,3 +1139,23 @@ null
 [.[]?]
 null
 []
+
+# Issue #108: isfinite of NaN is true (jq def: type=="number" and (isinfinite|not))
+nan | isfinite
+null
+true
+
+# Issue #108: isfinite of infinity is false
+infinite | isfinite
+null
+false
+
+# Issue #108: isfinite of regular number is true
+1 | isfinite
+null
+true
+
+# Issue #108: isfinite of non-number is false
+"x" | isfinite
+null
+false

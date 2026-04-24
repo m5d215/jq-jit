@@ -5968,7 +5968,9 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                     36 => n.is_infinite(),
                     37 => n.is_nan(),
                     38 => n.is_normal(),
-                    39 => n.is_finite(),
+                    // isfinite: jq's def is `type == "number" and (isinfinite | not)`,
+                    // so NaN counts as finite (issue #108).
+                    39 => !n.is_infinite(),
                     _ => unreachable!(),
                 }
             } else {

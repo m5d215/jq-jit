@@ -96,7 +96,9 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             _ => Ok(Value::False),
         }),
         "isfinite" => unary_op(args, |v| match v {
-            Value::Num(n, _) => Ok(Value::from_bool(n.is_finite())),
+            // jq's isfinite is `type == "number" and (isinfinite | not)`,
+            // so NaN counts as finite (issue #108).
+            Value::Num(n, _) => Ok(Value::from_bool(!n.is_infinite())),
             _ => Ok(Value::False),
         }),
         "ascii" => unary_op(args, rt_ascii),

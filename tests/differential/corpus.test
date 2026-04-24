@@ -3544,3 +3544,17 @@ null
 
 [.[]?]
 null
+
+# ---------- Issue #108: isfinite of NaN is true ----------
+
+nan | isfinite
+null
+
+infinite | isfinite
+null
+
+1 | isfinite
+null
+
+"x" | isfinite
+null
