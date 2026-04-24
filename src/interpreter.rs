@@ -906,10 +906,19 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                                 is_single_valued(value) && is_single_valued(body)
                             }
                             Expr::Collect { .. } => true,
+                            // Compound nodes can hide generators in their operands
+                            // (e.g. simplify_expr beta-reduces `gen | .*k` into
+                            // `BinOp(gen, k)` — issue #102). Recurse so the fold
+                            // doesn't promote that buried generator.
+                            Expr::BinOp { lhs, rhs, .. } => is_single_valued(lhs) && is_single_valued(rhs),
+                            Expr::UnaryOp { operand, .. } => is_single_valued(operand),
+                            Expr::Negate { operand } => is_single_valued(operand),
+                            Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => {
+                                is_single_valued(expr) && is_single_valued(key)
+                            }
                             Expr::Input | Expr::Literal(_) | Expr::LoadVar { .. }
-                            | Expr::Not | Expr::Negate { .. }
-                            | Expr::Index { .. } | Expr::IndexOpt { .. }
-                            | Expr::Slice { .. } | Expr::UnaryOp { .. } | Expr::BinOp { .. }
+                            | Expr::Not
+                            | Expr::Slice { .. }
                             | Expr::StringInterpolation { .. } | Expr::ObjectConstruct { .. }
                             | Expr::RegexTest { .. } | Expr::RegexSub { .. } | Expr::RegexGsub { .. } => true,
                             _ => false,
@@ -1015,10 +1024,19 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                                     Expr::LetBinding { value, body, .. } =>
                                         is_single_valued_idx(value) && is_single_valued_idx(body),
                                     Expr::Collect { .. } => true,
+                                    // Compound nodes can hide generators in their
+                                    // operands (e.g. simplify_expr beta-reduces
+                                    // `gen | .*k` into `BinOp(gen, k)` — issue #102).
+                                    // Recurse so the fold doesn't promote it.
+                                    Expr::BinOp { lhs, rhs, .. } => is_single_valued_idx(lhs) && is_single_valued_idx(rhs),
+                                    Expr::UnaryOp { operand, .. } => is_single_valued_idx(operand),
+                                    Expr::Negate { operand } => is_single_valued_idx(operand),
+                                    Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => {
+                                        is_single_valued_idx(expr) && is_single_valued_idx(key)
+                                    }
                                     Expr::Input | Expr::Literal(_) | Expr::LoadVar { .. }
-                                    | Expr::Not | Expr::Negate { .. }
-                                    | Expr::Index { .. } | Expr::IndexOpt { .. }
-                                    | Expr::Slice { .. } | Expr::UnaryOp { .. } | Expr::BinOp { .. }
+                                    | Expr::Not
+                                    | Expr::Slice { .. }
                                     | Expr::StringInterpolation { .. } | Expr::ObjectConstruct { .. }
                                     | Expr::RegexTest { .. } | Expr::RegexSub { .. } | Expr::RegexGsub { .. } => true,
                                     _ => false,

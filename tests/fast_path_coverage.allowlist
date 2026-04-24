@@ -165,7 +165,6 @@ detect_with_entries_del_keys
 detect_with_entries_select_key_str
 detect_with_entries_select_value_cmp
 detect_with_entries_select_value_type
-is_each
 is_empty
 is_sort_keys
 is_with_entries_tostring

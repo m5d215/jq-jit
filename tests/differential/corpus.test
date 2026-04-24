@@ -3558,3 +3558,17 @@ null
 
 "x" | isfinite
 null
+
+# ---------- Issue #102: gen|.*k inside [...] | .[N] ----------
+
+[range(5) | . * 2] | .[0]
+null
+
+[range(5) | . + 1] | .[-1]
+null
+
+[1,2,3 | . * 2] | .[0]
+null
+
+[range(5) | . + 1] | .[0]
+null

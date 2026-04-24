@@ -1159,3 +1159,23 @@ true
 "x" | isfinite
 null
 false
+
+# Issue #102: gen body with compound arithmetic must not collapse the array
+[range(5) | . * 2] | .[0]
+null
+0
+
+# Issue #102: negative endpoint with arithmetic body
+[range(5) | . + 1] | .[-1]
+null
+5
+
+# Issue #102: comma generator with arithmetic body
+[1,2,3 | . * 2] | .[0]
+null
+2
+
+# Issue #102: arithmetic body with addition still selects index 0
+[range(5) | . + 1] | .[0]
+null
+1
