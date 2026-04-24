@@ -5155,6 +5155,17 @@ fn real_main() {
                                     all_compact = false;
                                     break;
                                 }
+                                // Validate shape so obviously-invalid lines (trailing
+                                // commas, raw control chars, ...) can't slip through
+                                // the byte-copy shortcut below. When a sampled line
+                                // fails we fall through to json_stream_raw, which
+                                // parses every line and reports the error.
+                                if !line.is_empty() {
+                                    match skip_json_value(line, 0) {
+                                        Ok(end) if end == line.len() => {}
+                                        _ => { all_compact = false; break; }
+                                    }
+                                }
                                 checked += 1;
                             }
                         }

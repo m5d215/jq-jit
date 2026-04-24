@@ -1513,3 +1513,18 @@ input_line_number
 . + input_line_number
 10
 11
+
+# Issue #122: leading '+' is tolerated on JSON input (jq extension)
+. + 0
++1
+1
+
+# Issue #122: Infinity parses to a finite large number (jq extension)
+. > 1.7e308
+Infinity
+true
+
+# Issue #122: NaN value equals null on JSON comparison (jq extension)
+. == null
+NaN
+false
