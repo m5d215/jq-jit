@@ -2766,10 +2766,10 @@ pub fn eval(
         Expr::Error { msg } => {
             if let Some(msg_expr) = msg {
                 eval(msg_expr, input, env, &mut |val| {
-                    bail!("__jqerror__:{}", crate::value::value_to_json(&val))
+                    bail!("__jqerror__:{}", crate::value::value_to_json_precise(&val))
                 })
             } else {
-                bail!("__jqerror__:{}", crate::value::value_to_json(&input))
+                bail!("__jqerror__:{}", crate::value::value_to_json_precise(&input))
             }
         }
 

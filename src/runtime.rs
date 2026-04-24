@@ -1206,7 +1206,12 @@ fn rt_sqrt(v: &Value) -> Result<Value> {
 fn rt_tostring(v: &Value) -> Result<Value> {
     match v {
         Value::Str(_) => Ok(v.clone()),
-        _ => Ok(Value::from_string(crate::value::value_to_json(v))),
+        // Preserve the lexical form of numbers (#75 / #110) — `-0` stays `"-0"`,
+        // `0.0` stays `"0.0"`, etc. `value_to_json_tojson` honours the repr
+        // when f64 can round-trip it exactly, otherwise falls back to the
+        // canonical f64 form (which matches jq's no-decnum rounding, cf. the
+        // `13911860366432393` regression test).
+        _ => Ok(Value::from_string(crate::value::value_to_json_tojson(v))),
     }
 }
 

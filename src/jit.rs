@@ -5656,9 +5656,13 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
             match &*input {
                 Value::Str(_) => { std::ptr::write(dst, (*input).clone()); return 0; }
                 Value::Num(n, _) => {
-                    let mut buf = String::with_capacity(24);
-                    crate::value::push_jq_number_str(&mut buf, *n);
-                    std::ptr::write(dst, Value::from_string(buf));
+                    // Delegate to value_to_json_tojson so the repr-preservation
+                    // policy matches the slow path (#110): keep the original
+                    // lexical form when f64 can round-trip it, otherwise fall
+                    // back to the canonical f64 form.
+                    let s = crate::value::value_to_json_tojson(&*input);
+                    std::ptr::write(dst, Value::from_string(s));
+                    let _ = n;
                     return 0;
                 }
                 Value::Null => { std::ptr::write(dst, Value::from_str("null")); return 0; }

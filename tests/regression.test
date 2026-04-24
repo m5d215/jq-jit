@@ -1528,3 +1528,38 @@ true
 . == null
 NaN
 false
+
+# Issue #110: -0 repr survives parse + identity-like paths
+. | tostring
+-0
+"-0"
+
+# Issue #110: -0 tonumber is a no-op on numbers (keeps repr)
+tonumber | tostring
+-0
+"-0"
+
+# Issue #110: -0 through values
+values | tostring
+-0
+"-0"
+
+# Issue #110: 0.0 tostring preserves trailing .0
+. | tostring
+0.0
+"0.0"
+
+# Issue #110: 0.0 through values
+values
+0.0
+0.0
+
+# Issue #110: try error catch . round-trips the repr
+try error catch . | tostring
+-0
+"-0"
+
+# Issue #110: getpath([]) returns input with repr
+getpath([]) | tostring
+-0
+"-0"

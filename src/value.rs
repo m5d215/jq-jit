@@ -3933,6 +3933,15 @@ fn parse_json_number(b: &[u8], pos: usize) -> Result<(Value, usize)> {
             n = n * 10 + (c - b'0') as i64;
         }
         if is_neg { n = -n; }
+        // Preserve the sign of `-0` / `-0000...` (#110): i64 negation loses it,
+        // but f64 has a distinct -0.0 and jq keeps the lexical repr around so
+        // `tostring` / `tojson` can emit "-0". The test `n == 0 && is_neg`
+        // catches the generic leading-zeros case too.
+        if n == 0 && is_neg {
+            // Safety: digits are ASCII, always valid UTF-8
+            let num_str = unsafe { std::str::from_utf8_unchecked(&b[pos..i]) };
+            return Ok((Value::number_with_repr(-0.0, Rc::from(num_str)), i));
+        }
         return Ok((Value::number(n as f64), i));
     }
     // Safety: number bytes are ASCII digits/signs/dots, always valid UTF-8
