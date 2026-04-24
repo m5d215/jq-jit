@@ -2537,7 +2537,14 @@ fn time_arr_to_tm(a: &[Value]) -> Result<libc::tm> {
         }
     }
     let mut t: libc::tm = unsafe { std::mem::zeroed() };
-    t.tm_year = get(0) as i32 - 1900;
+    // jq's broken-down-time arrays hold the literal year (e.g. 2023) at
+    // index 0, which is offset by 1900 before handing to libc. When the
+    // year field is absent we keep tm_year at 0 so `strftime("%Y")` renders
+    // as 1900 (libc's "0 years since 1900"), matching jq 1.8.1's default
+    // tm_year fill for `[] | strftime(...)`.
+    if !a.is_empty() {
+        t.tm_year = get(0) as i32 - 1900;
+    }
     t.tm_mon = get(1) as i32;
     t.tm_mday = if a.len() > 2 { get(2) as i32 } else { 1 };
     t.tm_hour = get(3) as i32;
