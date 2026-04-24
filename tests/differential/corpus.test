@@ -3530,3 +3530,17 @@ null
 
 index("missing")
 {"a":1}
+
+# ---------- Issue #107: .[] on null errors ----------
+
+.[]
+null
+
+reduce .[] as $x (0; . + $x)
+null
+
+[foreach .[] as $x (0; . + $x)]
+null
+
+[.[]?]
+null

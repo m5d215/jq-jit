@@ -1122,3 +1122,20 @@ null
 indices(0)
 null
 null
+
+# Issue #107: .[] on null errors instead of yielding nothing
+.[]
+null
+
+# Issue #107: reduce over .[] on null errors
+reduce .[] as $x (0; . + $x)
+null
+
+# Issue #107: foreach over .[] on null errors
+[foreach .[] as $x (0; . + $x)]
+null
+
+# Issue #107: optional .[]? on null still yields nothing
+[.[]?]
+null
+[]
