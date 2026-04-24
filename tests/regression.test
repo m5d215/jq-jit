@@ -1389,10 +1389,10 @@ strftime("%Y")
 [1900]
 "1900"
 
-# Issue #113: literal year 0 still means tm_year = -1900
-strftime("%Y")
-[0]
-"0000"
+# (Removed: strftime("%Y") on [0] depends on libc — BSD/macOS renders
+# tm_year=-1900 as "0000" while glibc renders it as "0". The core fix
+# for #113 is covered by the `[]` and `[1900]` cases above, both of
+# which format a zeroed tm_year and are platform-independent.)
 
 # Issue #114: halt short-circuits but emits already-yielded values
 2, halt, 3
