@@ -3359,6 +3359,8 @@ pub fn push_json_pretty_raw(buf: &mut Vec<u8>, b: &[u8], indent_n: usize, use_ta
 
 /// Pretty-print raw JSON bytes with a base indentation depth.
 pub fn push_json_pretty_raw_at(buf: &mut Vec<u8>, b: &[u8], indent_n: usize, use_tab: bool, base_depth: usize) {
+    // jq's --tab uses exactly one tab per indent level regardless of --indent.
+    let indent_n = if use_tab { 1 } else { indent_n };
     let mut depth: usize = base_depth;
     let mut i = 0;
     let len = b.len();
@@ -4872,6 +4874,8 @@ fn push_jq_number(out: &mut String, n: f64) {
 }
 
 fn write_pretty_to_string_impl<const COLOR: bool>(out: &mut String, v: &Value, depth: usize, step: usize, use_tab: bool, sort_keys: bool) {
+    // jq's --tab uses exactly one tab per indent level regardless of --indent.
+    let step = if use_tab { 1 } else { step };
     macro_rules! c {
         ($code:expr) => { if COLOR { out.push_str($code); } };
     }
@@ -5160,6 +5164,8 @@ pub fn push_pretty_line_color(buf: &mut Vec<u8>, v: &Value, indent: usize, use_t
 }
 
 fn push_pretty_value_impl<const COLOR: bool>(buf: &mut Vec<u8>, v: &Value, depth: usize, step: usize, use_tab: bool) {
+    // jq's --tab uses exactly one tab per indent level regardless of --indent.
+    let step = if use_tab { 1 } else { step };
     macro_rules! c {
         ($code:expr) => { if COLOR { buf.extend_from_slice($code.as_bytes()); } };
     }
