@@ -1347,3 +1347,19 @@ fromdate
 todate | fromdate
 1700000000
 1700000000
+
+# Issue #120: JOIN/3 streams [row, $idx[idx_expr]] pairs
+JOIN({"1":{"v":"a"},"2":{"v":"b"}}; [{id:"1"},{id:"2"}][]; .id)
+null
+[{"id":"1"},{"v":"a"}]
+[{"id":"2"},{"v":"b"}]
+
+# Issue #120: JOIN/4 applies join_expr to each [row, matched] pair
+[JOIN({"1":{"v":"a"},"2":{"v":"b"}}; [{id:"1"},{id:"2"}][]; .id; .[1].v)]
+null
+["a","b"]
+
+# Issue #120: JOIN/4 with array stream input
+[JOIN({"1":{"v":"a"}}; .[]; .id; .[1].v)]
+[{"id":"1"}]
+["a"]

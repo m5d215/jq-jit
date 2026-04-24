@@ -2815,7 +2815,7 @@ pub fn rt_builtins() -> Value {
         "j0/0", "j1/0", "cbrt/0",
         "limit/2", "first/1", "last/1",
         "INDEX/1", "INDEX/2", "IN/1", "IN/2",
-        "JOIN/2",
+        "JOIN/2", "JOIN/3", "JOIN/4",
         "skip/2",
         "getpath/1", "setpath/2", "delpaths/1",
         "tojson/0", "fromjson/0",
