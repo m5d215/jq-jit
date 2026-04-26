@@ -1730,7 +1730,20 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             }
         }
         Expr::Update { path_expr, update_expr } => {
-            Expr::Update { path_expr: Box::new(simplify_expr(path_expr)), update_expr: Box::new(simplify_expr(update_expr)) }
+            let sp = simplify_expr(path_expr);
+            let su = simplify_expr(update_expr);
+            // `path |= empty` deletes the path and yields the modified
+            // container exactly once — equivalent to `del(path)`. The
+            // generic JIT generator-update branch silently produces zero
+            // outputs because the closure is never invoked, so rewrite to
+            // `del` at compile time (issue #155).
+            if matches!(&su, Expr::Empty) {
+                return Expr::CallBuiltin {
+                    name: "del".to_string(),
+                    args: vec![sp],
+                };
+            }
+            Expr::Update { path_expr: Box::new(sp), update_expr: Box::new(su) }
         }
         Expr::Assign { path_expr, value_expr } => {
             let sp = simplify_expr(path_expr);

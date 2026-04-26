@@ -1849,3 +1849,28 @@ null
 [1, range(2)] | all
 null
 true
+
+# Issue #155: .a |= . // 0 must keep the path's value (`//` parses outside `|=`)
+.a |= . // 0
+null
+{"a":null}
+
+# Issue #155: .a |= . // 0 keeps falsey existing values too
+.a |= . // 0
+{"a":false}
+{"a":false}
+
+# Issue #155: .a |= empty deletes .a and yields the modified container once
+.a |= empty
+{"a":1}
+{}
+
+# Issue #155: .a |= empty over null yields null (no-op deletion)
+.a |= empty
+null
+null
+
+# Issue #155: .a |= (. // 0) keeps the parenthesised inner-eval semantics
+.a |= (. // 0)
+null
+{"a":0}
