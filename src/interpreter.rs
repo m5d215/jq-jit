@@ -433,6 +433,52 @@ fn const_expr_to_json(expr: &crate::ir::Expr) -> Option<Vec<u8>> {
     }
 }
 
+/// Conservatively decide whether `e` is guaranteed to yield exactly one value
+/// per evaluation. Used by `[gen0, gen1, …] | F` fold rewrites
+/// (`add`/`min`/`max`/`sort`/`reverse`/`any`/`all`) to bail when a non-single-valued
+/// branch would otherwise be promoted into the surrounding fold and stream
+/// every element instead of being collected first (issue #152). Safe default
+/// when uncertain: false.
+pub(crate) fn is_single_valued_expr(e: &crate::ir::Expr) -> bool {
+    use crate::ir::Expr;
+    match e {
+        Expr::Empty => false,
+        Expr::Each { .. } | Expr::EachOpt { .. }
+        | Expr::Comma { .. } | Expr::Recurse { .. }
+        | Expr::Range { .. } | Expr::Limit { .. }
+        | Expr::RegexMatch { .. } | Expr::RegexScan { .. }
+        | Expr::RegexCapture { .. } => false,
+        Expr::Pipe { left, right } => is_single_valued_expr(left) && is_single_valued_expr(right),
+        Expr::IfThenElse { cond, then_branch, else_branch } => {
+            is_single_valued_expr(cond)
+                && is_single_valued_expr(then_branch)
+                && is_single_valued_expr(else_branch)
+        }
+        Expr::TryCatch { try_expr, catch_expr } => {
+            is_single_valued_expr(try_expr) && is_single_valued_expr(catch_expr)
+        }
+        Expr::Alternative { primary, fallback } => {
+            is_single_valued_expr(primary) && is_single_valued_expr(fallback)
+        }
+        Expr::LetBinding { value, body, .. } => {
+            is_single_valued_expr(value) && is_single_valued_expr(body)
+        }
+        Expr::Collect { .. } => true,
+        Expr::BinOp { lhs, rhs, .. } => is_single_valued_expr(lhs) && is_single_valued_expr(rhs),
+        Expr::UnaryOp { operand, .. } => is_single_valued_expr(operand),
+        Expr::Negate { operand } => is_single_valued_expr(operand),
+        Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => {
+            is_single_valued_expr(expr) && is_single_valued_expr(key)
+        }
+        Expr::Input | Expr::Literal(_) | Expr::LoadVar { .. }
+        | Expr::Not
+        | Expr::Slice { .. }
+        | Expr::StringInterpolation { .. } | Expr::ObjectConstruct { .. }
+        | Expr::RegexTest { .. } | Expr::RegexSub { .. } | Expr::RegexGsub { .. } => true,
+        _ => false,
+    }
+}
+
 /// Recursively strip identity pipes and beta-reduce for fast path detection.
 /// Pipe(Input, X) → X, Pipe(X, Input) → X.
 /// Pipe(E, F) → F[E/.] when E is scalar and F has free Input.
@@ -779,7 +825,9 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                     let mut elements = Vec::new();
                     collect_comma_elements(generator, &mut elements);
-                    if elements.len() >= 2 {
+                    // Bail if any branch is multi-valued — otherwise the rewrite
+                    // promotes the generator out of the array (issue #152).
+                    if elements.len() >= 2 && elements.iter().all(is_single_valued_expr) {
                         elements.reverse();
                         let mut gen = elements.pop().unwrap();
                         while let Some(e) = elements.pop() {
@@ -843,7 +891,9 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     let mut elems = Vec::new();
                     collect_comma_elems2(lg, &mut elems);
                     let n = elems.len();
-                    if n >= 2 {
+                    // Bail when a branch is multi-valued: the array literal
+                    // would otherwise stream rather than fold (issue #152).
+                    if n >= 2 && elems.iter().all(is_single_valued_expr) {
                         let mut sum = elems.remove(0);
                         for elem in elems {
                             sum = Expr::BinOp {
@@ -1086,7 +1136,10 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                     let mut elems = Vec::new();
                     collect_elems(lg, &mut elems);
-                    if elems.len() >= 2 {
+                    // Bail on multi-valued branches — issue #152: the rewrite would
+                    // otherwise stream every value through the cmp instead of
+                    // folding the collected array.
+                    if elems.len() >= 2 && elems.iter().all(is_single_valued_expr) {
                         // Fold: min(a,b,c) = min(min(a,b), c)
                         let cmp_op = if is_min { crate::ir::BinOp::Le } else { crate::ir::BinOp::Gt };
                         let mut result = elems.remove(0);
@@ -1106,7 +1159,10 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                 let is_sort = matches!(&sr, Expr::UnaryOp { op: UnaryOp::Sort, operand } if matches!(operand.as_ref(), Expr::Input));
                 if is_sort {
                     if let Expr::Comma { left, right } = lg.as_ref() {
-                        if !matches!(left.as_ref(), Expr::Comma { .. }) && !matches!(right.as_ref(), Expr::Comma { .. }) {
+                        if !matches!(left.as_ref(), Expr::Comma { .. }) && !matches!(right.as_ref(), Expr::Comma { .. })
+                            && is_single_valued_expr(left) && is_single_valued_expr(right)
+                        {
+                            // Bail on multi-valued branches (issue #152).
                             let a = left.as_ref().clone();
                             let b = right.as_ref().clone();
                             return simplify_expr(&Expr::IfThenElse {
@@ -1141,7 +1197,10 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                     let mut elems = Vec::new();
                     collect_comma_elems(lg, &mut elems);
-                    if elems.len() >= 2 && elems.len() <= 16 {
+                    // Bail on multi-valued branches (issue #152).
+                    if elems.len() >= 2 && elems.len() <= 16
+                        && elems.iter().all(is_single_valued_expr)
+                    {
                         let n = elems.len();
                         let mut result = elems.remove(0);
                         for elem in elems {
@@ -1197,7 +1256,10 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                     let mut elems = Vec::new();
                     collect_comma_for_any(lg, &mut elems);
-                    if elems.len() >= 2 && elems.len() <= 8 {
+                    // Bail on multi-valued branches (issue #152).
+                    if elems.len() >= 2 && elems.len() <= 8
+                        && elems.iter().all(is_single_valued_expr)
+                    {
                         let combiner = if is_any { crate::ir::BinOp::Or } else { crate::ir::BinOp::And };
                         let mut result = simplify_expr(&Expr::Pipe {
                             left: Box::new(elems.remove(0)),

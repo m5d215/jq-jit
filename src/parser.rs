@@ -4072,11 +4072,12 @@ fn optimize_pipe(left: Expr, right: Expr) -> Expr {
                     }
                 }
                 collect_comma(generator, &mut elems);
-                // Only safe when every branch yields exactly one value. An `Empty`
-                // branch contributes nothing to the array, but `x + empty` (or
-                // `empty + x`) yields nothing — the rewrite would silently drop the
-                // whole output.
-                let all_single = elems.iter().all(|e| !matches!(e, Expr::Empty));
+                // Only safe when every branch yields exactly one value. `Empty`
+                // contributes nothing (`x + empty` collapses the whole output) and
+                // multi-valued branches like `range`/`.[]`/`recurse` would stream
+                // every value through the surrounding fold instead of being
+                // collected first (issue #152).
+                let all_single = elems.iter().all(crate::interpreter::is_single_valued_expr);
                 if all_single && elems.len() >= 2 {
                     // Rewrite [a, b, c, ...] | add → a + b + c + ...
                     let mut result = elems.remove(0);

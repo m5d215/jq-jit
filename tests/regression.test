@@ -1819,3 +1819,33 @@ try (.a | ltrimstr("$") | tonumber) catch "err"
 .a | ltrimstr("$") | tonumber
 {"a":"$42"}
 42
+
+# Issue #152: [lit, gen] | add must fold the collected array, not stream
+[1, range(3)] | add
+null
+4
+
+# Issue #152: reverse over a literal+generator list
+[1, range(2)] | reverse
+null
+[1,0,1]
+
+# Issue #152: add with null literal + generator
+[null, range(2)] | add
+null
+1
+
+# Issue #152: min over literal+generator
+[1, range(2)] | min
+null
+0
+
+# Issue #152: sort over literal+generator
+[1, range(2)] | sort
+null
+[0,1,1]
+
+# Issue #152: all over literal+generator
+[1, range(2)] | all
+null
+true
