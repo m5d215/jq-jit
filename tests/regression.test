@@ -1573,3 +1573,13 @@ null
 [builtins[] | select(. == "exec/1" or . == "exec/2" or . == "execv/1")] | sort
 null
 ["exec/1","exec/2","execv/1"]
+
+# Issue #151: scientific literal with all-zero mantissa parses without panic
+0e0
+null
+0
+
+# Issue #151: all-zero mantissa preserves fractional shape
+0.0e0
+null
+0.0

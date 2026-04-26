@@ -469,10 +469,20 @@ fn normalize_num_repr(s: &str) -> String {
         // Find position of first significant digit in combined digits
         let all_digits: String = format!("{}{}", int_part, frac_part);
         let digits: Vec<char> = all_digits.chars().collect();
-        let first_sig = digits.iter().position(|c| *c != '0').unwrap_or(0);
+        let first_sig = digits.iter().position(|c| *c != '0').unwrap_or(digits.len());
 
         if first_sig >= digits.len() {
-            return "0".to_string();
+            // All-zero mantissa. Drop the exponent and the leading sign;
+            // preserve fractional shape so `0.0e0` stays `0.0`, not `0`.
+            if frac_part.is_empty() {
+                return "0".to_string();
+            }
+            let mut out = String::with_capacity(2 + frac_part.len());
+            out.push_str("0.");
+            for _ in 0..frac_part.len() {
+                out.push('0');
+            }
+            return out;
         }
 
         // Compute normalized exponent
