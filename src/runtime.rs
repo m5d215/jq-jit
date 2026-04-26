@@ -303,6 +303,65 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             Value::Num(n, _) => Ok(Value::number(n.cbrt())),
             _ => bail!("cbrt requires number"),
         }),
+        "exp10" => unary_op(args, |v| match v {
+            // Use `10.powf(n)` rather than `libm::exp10`. jq's libc-backed
+            // exp10 reuses pow internally on Apple/Linux, so they agree;
+            // libm::exp10 takes a different polynomial path that drops the
+            // last decimal digit on values like `1.5`.
+            Value::Num(n, _) => Ok(Value::number(10f64.powf(*n))),
+            _ => bail!("exp10 requires number"),
+        }),
+        "gamma" | "tgamma" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(libm::tgamma(*n))),
+            _ => bail!("{} requires number", name),
+        }),
+        "lgamma" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(libm::lgamma(*n))),
+            _ => bail!("lgamma requires number"),
+        }),
+        "lgamma_r" => unary_op(args, |v| match v {
+            Value::Num(n, _) => {
+                let (r, sign) = libm::lgamma_r(*n);
+                Ok(Value::Arr(Rc::new(vec![Value::number(r), Value::number(sign as f64)])))
+            }
+            _ => bail!("lgamma_r requires number"),
+        }),
+        "frexp" => unary_op(args, |v| match v {
+            Value::Num(n, _) => {
+                let (m, e) = libm::frexp(*n);
+                Ok(Value::Arr(Rc::new(vec![Value::number(m), Value::number(e as f64)])))
+            }
+            _ => bail!("frexp requires number"),
+        }),
+        "hypot" => ternary_arg(args, |a, b| match (a, b) {
+            (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(libm::hypot(*x, *y))),
+            _ => bail!("hypot requires numbers"),
+        }),
+        "remainder" | "drem" => ternary_arg(args, |a, b| match (a, b) {
+            (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(libm::remainder(*x, *y))),
+            _ => bail!("{} requires numbers", name),
+        }),
+        "ldexp" | "scalbn" | "scalbln" => ternary_arg(args, |a, b| match (a, b) {
+            (Value::Num(x, _), Value::Num(y, _)) => {
+                Ok(Value::number(libm::scalbn(*x, *y as i32)))
+            }
+            _ => bail!("{} requires numbers", name),
+        }),
+        "scalb" => ternary_arg(args, |a, b| match (a, b) {
+            (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(*x * 2f64.powf(*y))),
+            _ => bail!("scalb requires numbers"),
+        }),
+        "fma" => {
+            // jq registers fma as fma/3: `fma(a; b; c) = a * b + c` with the
+            // pipeline input ignored. Args here = [input, a, b, c].
+            if args.len() != 4 { bail!("fma: wrong number of args ({})", args.len()); }
+            match (&args[1], &args[2], &args[3]) {
+                (Value::Num(a, _), Value::Num(b, _), Value::Num(c, _)) => {
+                    Ok(Value::number(libm::fma(*a, *b, *c)))
+                }
+                _ => bail!("fma requires numbers"),
+            }
+        },
         "significand" | "exponent" | "logb" | "nearbyint" | "trunc" | "rint" | "j0" | "j1" => {
             unary_op(args, |v| match v {
                 Value::Num(n, _) => {
@@ -2890,10 +2949,13 @@ pub fn rt_builtins() -> Value {
         "exp/0", "exp2/0", "exp10/0",
         "sin/0", "cos/0", "tan/0", "asin/0", "acos/0", "atan/0",
         "sinh/0", "cosh/0", "tanh/0", "asinh/0", "acosh/0", "atanh/0",
-        "atan2/2",
+        "atan2/2", "hypot/2",
         "significand/0", "exponent/0", "logb/0",
         "nearbyint/0", "trunc/0", "rint/0",
         "j0/0", "j1/0", "cbrt/0",
+        "gamma/0", "tgamma/0", "lgamma/0", "lgamma_r/0",
+        "frexp/0", "fma/3", "ldexp/2", "scalb/2", "scalbln/2",
+        "drem/2", "remainder/2",
         "min/0", "max/0", "min_by/1", "max_by/1",
         "sort/0", "sort_by/1", "group_by/1", "unique/0", "unique_by/1",
         "reverse/0",

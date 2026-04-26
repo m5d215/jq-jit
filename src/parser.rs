@@ -2634,6 +2634,7 @@ impl Parser {
             | "exp" | "exp2" | "exp10" | "log" | "log2" | "log10"
             | "cbrt" | "significand" | "exponent" | "logb"
             | "nearbyint" | "trunc" | "rint" | "j0" | "j1"
+            | "gamma" | "tgamma" | "lgamma" | "lgamma_r" | "frexp"
             | "keys" | "keys_unsorted" | "values" | "sort" | "reverse"
             | "unique" | "flatten" | "min" | "max" | "add" | "any" | "all"
             | "transpose" | "to_entries" | "from_entries"
@@ -2731,6 +2732,11 @@ impl Parser {
             }
             "recurse" | "recurse_down" => {
                 Ok(Expr::Recurse { input_expr: Box::new(Expr::Input) })
+            }
+            "gamma" | "tgamma" | "lgamma" | "lgamma_r" | "frexp" => {
+                // libm-backed math builtins not represented as UnaryOp.
+                // Run through CallBuiltin so the runtime dispatches them.
+                Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
             }
             "values" => {
                 // values = select(. != null) - type filter
@@ -3341,8 +3347,8 @@ impl Parser {
                 Ok(Expr::CallBuiltin { name: "halt_error".to_string(), args: vec![code] })
             }
             ("pow", 2) | ("atan2", 2) | ("fma", 3)
-            | ("remainder", 2) | ("hypot", 2) | ("ldexp", 2)
-            | ("scalb", 2) | ("scalbln", 2) => {
+            | ("remainder", 2) | ("drem", 2) | ("hypot", 2)
+            | ("ldexp", 2) | ("scalb", 2) | ("scalbln", 2) => {
                 Ok(Expr::CallBuiltin { name: name.to_string(), args })
             }
             ("nth", 1) | ("nth", 2) => {
