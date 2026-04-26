@@ -3950,8 +3950,11 @@ fn parse_json_number(b: &[u8], pos: usize) -> Result<(Value, usize)> {
         }
         return Ok((Value::number(n as f64), i));
     }
-    // Safety: number bytes are ASCII digits/signs/dots, always valid UTF-8
+    // Safety: number bytes are ASCII digits/signs/dots, always valid UTF-8.
+    // jq tolerates a leading `+` but never preserves it on output, so strip it
+    // before stashing the repr (issue #143).
     let num_str = unsafe { std::str::from_utf8_unchecked(&b[pos..i]) };
+    let canonical_in = if num_str.starts_with('+') { &num_str[1..] } else { num_str };
     let n: f64 = fast_float::parse(num_str).unwrap_or(0.0);
     // Fast path: for simple decimals (no exponent, no trailing zeros after dot, ≤15 sig digits),
     // Rust's Display roundtrips identically — skip format_jq_number to avoid String allocation.
@@ -3965,12 +3968,12 @@ fn parse_json_number(b: &[u8], pos: usize) -> Result<(Value, usize)> {
         if n == n.trunc() && n.abs() < 1e16 {
             let iv = n as i64;
             if iv as f64 == n {
-                return Ok((Value::number_with_repr(n, Rc::from(num_str)), i));
+                return Ok((Value::number_with_repr(n, Rc::from(canonical_in)), i));
             }
         }
     }
     let f64_repr = format_jq_number(n);
-    let repr = if f64_repr == num_str { None } else { Some(Rc::from(num_str)) };
+    let repr = if f64_repr == canonical_in { None } else { Some(Rc::from(canonical_in)) };
     Ok((Value::number_opt(n, repr), i))
 }
 
@@ -4603,8 +4606,13 @@ pub fn push_jq_number_str(buf: &mut String, n: f64) {
         return;
     }
     if n == 0.0 {
-        // jq normalises negative zero to "0" on output; match that.
-        buf.push_str("0");
+        // Preserve IEEE-754 negative zero: jq emits `-0` for arithmetic
+        // results that land on `-0.0` (e.g. `-0 * 1`, `-0 - 0`). Issue #110.
+        if n.is_sign_negative() {
+            buf.push_str("-0");
+        } else {
+            buf.push_str("0");
+        }
         return;
     }
 
@@ -4638,6 +4646,130 @@ pub fn push_jq_number_str(buf: &mut String, n: f64) {
     }
 
     buf.push_str(&s);
+}
+
+/// Pick the bytes to emit for `Value::Num(_, repr)` — either the canonical
+/// rewrite of `repr` (when scientific notation needs case/sign normalization
+/// or decimal expansion, see [`normalize_jq_repr`]) or the original repr.
+#[inline]
+pub fn canonical_repr_bytes(repr: &str) -> std::borrow::Cow<'_, str> {
+    match normalize_jq_repr(repr) {
+        Some(c) => std::borrow::Cow::Owned(c),
+        None => std::borrow::Cow::Borrowed(repr),
+    }
+}
+
+/// Re-render a JSON-shaped number literal `repr` into jq 1.8.1's canonical
+/// output form. Returns `None` if the repr is already canonical (or not
+/// scientific). Handles:
+/// - case + sign: `e` → `E+`/`E-`, no leading `+` on the mantissa,
+/// - decimal vs scientific threshold: small-exponent scientific literals
+///   expand to decimal (`1e-5` → `0.00001`) while larger magnitudes keep
+///   `E+N` (`1e10` → `1E+10`).
+///
+/// Mirrors jq's libmpdecimal output policy closely enough for the cases
+/// flagged in issues #110 and #143; not a full decnum reimplementation.
+pub fn normalize_jq_repr(repr: &str) -> Option<String> {
+    let bytes = repr.as_bytes();
+    let mut idx = 0;
+    let mut sign = "";
+    match bytes.first() {
+        Some(b'-') => { sign = "-"; idx = 1; }
+        Some(b'+') => { idx = 1; }
+        _ => {}
+    }
+    let mantissa_start = idx;
+    let mut dot_pos: Option<usize> = None;
+    let mut e_pos: Option<usize> = None;
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'.' => { dot_pos.get_or_insert(idx); }
+            b'e' | b'E' => { e_pos = Some(idx); break; }
+            _ => {}
+        }
+        idx += 1;
+    }
+    // No exponent and no leading `+`: nothing to normalize.
+    if e_pos.is_none() && sign != "-" && bytes.first() != Some(&b'+') {
+        return None;
+    }
+    let mantissa_end = e_pos.unwrap_or(bytes.len());
+    let mant_int_end = dot_pos.unwrap_or(mantissa_end);
+    let mant_frac_start = dot_pos.map(|d| d + 1).unwrap_or(mantissa_end);
+    let mant_int = &repr[mantissa_start..mant_int_end];
+    let mant_frac = &repr[mant_frac_start..mantissa_end];
+    let exp: i32 = match e_pos {
+        Some(p) => repr[p + 1..].parse().ok()?,
+        None => 0,
+    };
+    let mut combined = String::with_capacity(mant_int.len() + mant_frac.len());
+    combined.push_str(mant_int);
+    combined.push_str(mant_frac);
+    if combined.is_empty() || combined.bytes().any(|b| !b.is_ascii_digit()) {
+        return None;
+    }
+    let leading_zeros = combined.bytes().take_while(|&b| b == b'0').count();
+    if leading_zeros == combined.len() {
+        // Pure-zero value: jq keeps the explicit-exponent form when present
+        // (`0e10` → `0E+10`, `-0e10` → `-0E+10`) but folds plain `0.0` etc.
+        if let Some(_) = e_pos {
+            let s = if exp >= 0 { '+' } else { '-' };
+            return Some(format!("{}0E{}{}", sign, s, exp.abs()));
+        }
+        return None;
+    }
+    let sig: &str = &combined[leading_zeros..];
+    let ndigits = sig.len() as i32;
+    let te = ndigits - 1 + exp - (mant_frac.len() as i32);
+    // Bail if the input was a plain decimal (no exponent) — those are
+    // already canonical, except for the leading-`+` case handled below.
+    if e_pos.is_none() {
+        return None;
+    }
+    if te >= ndigits || te < -6 {
+        // Scientific form, jq style: <first>.<rest>E[+-]<|te|>.
+        let mantissa_str = format_canonical_mantissa(sig);
+        let sign_e = if te >= 0 { '+' } else { '-' };
+        return Some(format!("{}{}E{}{}", sign, mantissa_str, sign_e, te.abs()));
+    }
+    if te >= 0 {
+        let int_len = (te + 1) as usize;
+        if int_len >= sig.len() {
+            let pad = int_len - sig.len();
+            let mut s = String::with_capacity(int_len);
+            s.push_str(sig);
+            for _ in 0..pad { s.push('0'); }
+            return Some(format!("{}{}", sign, s));
+        }
+        let frac = sig[int_len..].trim_end_matches('0');
+        if frac.is_empty() {
+            return Some(format!("{}{}", sign, &sig[..int_len]));
+        }
+        return Some(format!("{}{}.{}", sign, &sig[..int_len], frac));
+    }
+    let zeros = (-te - 1) as usize;
+    let frac = sig.trim_end_matches('0');
+    if frac.is_empty() {
+        return Some(format!("{}0", sign));
+    }
+    let mut buf = String::with_capacity(zeros + frac.len() + 4);
+    buf.push_str(sign);
+    buf.push_str("0.");
+    for _ in 0..zeros { buf.push('0'); }
+    buf.push_str(frac);
+    Some(buf)
+}
+
+fn format_canonical_mantissa(sig: &str) -> String {
+    if sig.len() <= 1 {
+        return sig.to_string();
+    }
+    let frac = sig[1..].trim_end_matches('0');
+    if frac.is_empty() {
+        sig[..1].to_string()
+    } else {
+        format!("{}.{}", &sig[..1], frac)
+    }
 }
 
 /// Format a number in scientific notation matching jq's style.
@@ -4704,7 +4836,11 @@ fn push_value_tojson(v: &Value, out: &mut String, depth: usize) {
         Value::True => out.push_str("true"),
         Value::Num(n, repr) => {
             if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r) && repr_is_exact_for_f64(r, *n)) {
-                out.push_str(r);
+                if let Some(canonical) = normalize_jq_repr(r) {
+                    out.push_str(&canonical);
+                } else {
+                    out.push_str(r);
+                }
             } else {
                 push_jq_number_str(out, *n);
             }
@@ -4778,6 +4914,9 @@ fn value_to_json_depth(v: &Value, depth: usize, precise: bool) -> String {
             if precise {
                 if let Some(r) = repr {
                     if is_valid_json_number(r) {
+                        if let Some(canonical) = normalize_jq_repr(r) {
+                            return canonical;
+                        }
                         return r.to_string();
                     }
                 }
@@ -4934,7 +5073,11 @@ fn write_pretty_to_string_impl<const COLOR: bool>(out: &mut String, v: &Value, d
         Value::Num(n, repr) => {
             c!(COLOR_NUMBER);
             if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r)) {
-                out.push_str(r);
+                if let Some(canonical) = normalize_jq_repr(r) {
+                    out.push_str(&canonical);
+                } else {
+                    out.push_str(r);
+                }
             } else {
                 push_jq_number(out, *n);
             }
@@ -5172,7 +5315,7 @@ fn push_compact_value_color(buf: &mut Vec<u8>, v: &Value) {
         Value::Num(n, repr) => {
             c!(COLOR_NUMBER);
             if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r)) {
-                buf.extend_from_slice(r.as_bytes());
+                buf.extend_from_slice(canonical_repr_bytes(r).as_bytes());
             } else {
                 push_jq_number_bytes(buf, *n);
             }
@@ -5227,7 +5370,7 @@ fn push_pretty_value_impl<const COLOR: bool>(buf: &mut Vec<u8>, v: &Value, depth
         Value::Num(n, repr) => {
             c!(COLOR_NUMBER);
             if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r)) {
-                buf.extend_from_slice(r.as_bytes());
+                buf.extend_from_slice(canonical_repr_bytes(r).as_bytes());
             } else {
                 push_jq_number_bytes(buf, *n);
             }
@@ -5297,7 +5440,7 @@ fn push_compact_value(buf: &mut Vec<u8>, v: &Value) {
         Value::True => buf.extend_from_slice(b"true"),
         Value::Num(n, repr) => {
             if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r)) {
-                buf.extend_from_slice(r.as_bytes());
+                buf.extend_from_slice(canonical_repr_bytes(r).as_bytes());
             } else {
                 push_jq_number_bytes(buf, *n);
             }
@@ -5354,7 +5497,12 @@ pub fn push_jq_number_bytes(buf: &mut Vec<u8>, n: f64) {
     // The i64 roundtrip check (i as f64 == n) naturally rejects NaN, infinity, and non-integers.
     let i = n as i64;
     if i as f64 == n && i.unsigned_abs() < 10_000_000_000_000_000 {
-        // jq normalises negative zero to "0" on output; match that.
+        // Negative zero round-trips through `as i64` as `0`, which would
+        // erase the sign. Emit `-0` directly (issue #110).
+        if i == 0 && n.is_sign_negative() {
+            buf.extend_from_slice(b"-0");
+            return;
+        }
         let mut ibuf = itoa::Buffer::new();
         buf.extend_from_slice(ibuf.format(i).as_bytes());
         return;
@@ -5465,7 +5613,8 @@ fn write_compact_buf_inner(v: &Value, buf: &mut [u8], pos: &mut usize) -> bool {
         Value::True => push!(b"true"),
         Value::Num(n, repr) => {
             if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r)) {
-                push!(r.as_bytes());
+                let canonical = canonical_repr_bytes(r);
+                push!(canonical.as_bytes());
             } else if *n == n.trunc() && n.abs() < 1e15 {
                 let i = *n as i64;
                 if i as f64 == *n {
@@ -5542,7 +5691,7 @@ fn write_value_compact_ext_inner(w: &mut dyn io::Write, v: &Value, sort_keys: bo
         Value::True => w.write_all(b"true"),
         Value::Num(n, repr) => {
             if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r)) {
-                w.write_all(r.as_bytes())
+                w.write_all(canonical_repr_bytes(r).as_bytes())
             } else {
                 write_jq_number(w, *n)
             }

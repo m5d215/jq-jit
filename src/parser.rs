@@ -1134,7 +1134,7 @@ impl Parser {
     /// Like parse_pipe but does not consume comma at the top level.
     /// Used for object values where comma separates key-value pairs.
     fn parse_pipe_nocomma(&mut self) -> Result<Expr> {
-        let mut expr = self.parse_assign()?;
+        let mut expr = self.parse_alt_top()?;
 
         // Check for 'as' binding
         if self.at(&Token::As) {
@@ -1570,13 +1570,28 @@ impl Parser {
     }
 
     fn parse_comma(&mut self) -> Result<Expr> {
-        let mut expr = self.parse_assign()?;
+        let mut expr = self.parse_alt_top()?;
         while self.eat(&Token::Comma) {
-            let right = self.parse_assign()?;
+            let right = self.parse_alt_top()?;
             expr = Expr::Comma {
                 left: Box::new(expr),
                 right: Box::new(right),
             };
+        }
+        Ok(expr)
+    }
+
+    /// `//` sits between `,` and `=`/`|=` in jq's precedence table — lower
+    /// than the assignment operators, so `.a |= . // 0` parses as
+    /// `(.a |= .) // 0`, not `.a |= (. // 0)` (issue #155). Right-associative.
+    fn parse_alt_top(&mut self) -> Result<Expr> {
+        let expr = self.parse_assign()?;
+        if self.eat(&Token::Alt) {
+            let right = self.parse_alt_top()?;
+            return Ok(Expr::Alternative {
+                primary: Box::new(expr),
+                fallback: Box::new(right),
+            });
         }
         Ok(expr)
     }
@@ -1596,6 +1611,17 @@ impl Parser {
             Token::UpdateAssign => {
                 self.advance();
                 let update = self.parse_or()?;
+                // `path |= empty` deletes the path and yields the modified
+                // container exactly once. The generic update path emits zero
+                // outputs when the update generator never fires, so rewrite
+                // to `del(path)` at parse time — both eval and JIT then see
+                // the deletion form (issue #155).
+                if matches!(&update, Expr::Empty) {
+                    return Ok(Expr::CallBuiltin {
+                        name: "del".to_string(),
+                        args: vec![expr],
+                    });
+                }
                 Ok(Expr::Update {
                     path_expr: Box::new(expr),
                     update_expr: Box::new(update),
@@ -1740,11 +1766,14 @@ impl Parser {
     }
 
     fn parse_compare(&mut self) -> Result<Expr> {
-        let mut expr = self.parse_alt()?;
+        // `==`/`!=`/`<`/`>` etc. bind tighter than `//`, so the operands
+        // stay below the `//` rung — read parse_add directly. The `//`
+        // operator is handled at parse_alt_top above parse_assign.
+        let mut expr = self.parse_add()?;
         // Check for ?// (alternative destructuring)
         while self.at(&Token::AltDestructure) {
             self.advance();
-            let right = self.parse_alt()?;
+            let right = self.parse_add()?;
             expr = Expr::AlternativeDestructure {
                 alternatives: vec![expr, right],
             };
@@ -1760,23 +1789,11 @@ impl Parser {
                 _ => break,
             };
             self.advance();
-            let right = self.parse_alt()?;
+            let right = self.parse_add()?;
             expr = Expr::BinOp {
                 op,
                 lhs: Box::new(expr),
                 rhs: Box::new(right),
-            };
-        }
-        Ok(expr)
-    }
-
-    fn parse_alt(&mut self) -> Result<Expr> {
-        let mut expr = self.parse_add()?;
-        while self.eat(&Token::Alt) {
-            let right = self.parse_add()?;
-            expr = Expr::Alternative {
-                primary: Box::new(expr),
-                fallback: Box::new(right),
             };
         }
         Ok(expr)
@@ -4072,11 +4089,12 @@ fn optimize_pipe(left: Expr, right: Expr) -> Expr {
                     }
                 }
                 collect_comma(generator, &mut elems);
-                // Only safe when every branch yields exactly one value. An `Empty`
-                // branch contributes nothing to the array, but `x + empty` (or
-                // `empty + x`) yields nothing — the rewrite would silently drop the
-                // whole output.
-                let all_single = elems.iter().all(|e| !matches!(e, Expr::Empty));
+                // Only safe when every branch yields exactly one value. `Empty`
+                // contributes nothing (`x + empty` collapses the whole output) and
+                // multi-valued branches like `range`/`.[]`/`recurse` would stream
+                // every value through the surrounding fold instead of being
+                // collected first (issue #152).
+                let all_single = elems.iter().all(crate::interpreter::is_single_valued_expr);
                 if all_single && elems.len() >= 2 {
                     // Rewrite [a, b, c, ...] | add → a + b + c + ...
                     let mut result = elems.remove(0);

@@ -1819,3 +1819,123 @@ try (.a | ltrimstr("$") | tonumber) catch "err"
 .a | ltrimstr("$") | tonumber
 {"a":"$42"}
 42
+
+# Issue #152: [lit, gen] | add must fold the collected array, not stream
+[1, range(3)] | add
+null
+4
+
+# Issue #152: reverse over a literal+generator list
+[1, range(2)] | reverse
+null
+[1,0,1]
+
+# Issue #152: add with null literal + generator
+[null, range(2)] | add
+null
+1
+
+# Issue #152: min over literal+generator
+[1, range(2)] | min
+null
+0
+
+# Issue #152: sort over literal+generator
+[1, range(2)] | sort
+null
+[0,1,1]
+
+# Issue #152: all over literal+generator
+[1, range(2)] | all
+null
+true
+
+# Issue #155: .a |= . // 0 must keep the path's value (`//` parses outside `|=`)
+.a |= . // 0
+null
+{"a":null}
+
+# Issue #155: .a |= . // 0 keeps falsey existing values too
+.a |= . // 0
+{"a":false}
+{"a":false}
+
+# Issue #155: .a |= empty deletes .a and yields the modified container once
+.a |= empty
+{"a":1}
+{}
+
+# Issue #155: .a |= empty over null yields null (no-op deletion)
+.a |= empty
+null
+null
+
+# Issue #155: .a |= (. // 0) keeps the parenthesised inner-eval semantics
+.a |= (. // 0)
+null
+{"a":0}
+
+# Issue #158: match("a*"; "g") yields a zero-width match right after each non-zero hit
+[ "abc" | match("a*"; "g") ] | length
+null
+4
+
+# Issue #158: same shape with multi-char prefix
+[ "aaa" | match("a*"; "g") ] | length
+null
+2
+
+# Issue #158: scan iterates with the same global semantics
+[ "abcabc" | scan("a*") ] | length
+null
+7
+
+# Issue #158: pure zero-width matches still match jq (no over-emission)
+[ "abc" | scan(".*?") ] | length
+null
+4
+
+# Issue #110: -0 round-trips through identity arithmetic in eval
+. * 1 | tostring
+-0
+"-0"
+
+# Issue #110: -0 stays signed across multiplication that doesn't reach 0
+. * 2 | tostring
+-0
+"-0"
+
+# Issue #110: tonumber on -0 keeps the sign
+tonumber
+-0
+-0
+
+# Issue #110: jq normalises `-0` (Negate of zero) back to +0
+-0 | tostring
+null
+"0"
+
+# Issue #143: scientific input normalises to E+N (case + explicit sign)
+.
+1e10
+1E+10
+
+# Issue #143: scientific input with negative exponent expands to decimal
+tostring
+1.5e-3
+"0.0015"
+
+# Issue #143: very small negative exponents stay scientific
+.
+1e-7
+1E-7
+
+# Issue #143: 1e0 input collapses to integer form
+.
+1e0
+1
+
+# Issue #143: input `+1e10` strips the leading `+` (jq tolerates it)
+.
++1e10
+1E+10

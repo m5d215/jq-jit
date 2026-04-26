@@ -1089,7 +1089,10 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
         Expr::Negate { operand } => {
             let val = eval_one(operand, input, env)?;
             match val {
-                Value::Num(n, repr) => Ok(Value::number_opt(-n, crate::value::Value::negate_repr(repr))),
+                Value::Num(n, repr) => {
+                    let neg = if n == 0.0 { 0.0 } else { -n };
+                    Ok(Value::number_opt(neg, crate::value::Value::negate_repr(repr)))
+                }
                 _ => Err(()),
             }
         }
@@ -2284,7 +2287,13 @@ pub fn eval(
         Expr::Negate { operand } => {
             eval(operand, input, env, &mut |val| {
                 match &val {
-                    Value::Num(n, repr) => cb(Value::number_opt(-n, crate::value::Value::negate_repr(repr.clone()))),
+                    Value::Num(n, repr) => {
+                        // jq normalises `-(0)` back to `+0` (the literal `-0`
+                        // and the `Negate` expr never produce a signed zero —
+                        // only IEEE arithmetic like `0 * -1` does). Issue #110.
+                        let neg = if *n == 0.0 { 0.0 } else { -*n };
+                        cb(Value::number_opt(neg, crate::value::Value::negate_repr(repr.clone())))
+                    }
                     _ => {
                         bail!("{} cannot be negated", crate::runtime::errdesc_pub(&val))
                     }
@@ -3659,7 +3668,7 @@ fn try_eval_key_f64(expr: &Expr, input: &Value) -> Option<f64> {
                 _ => None,
             }
         }
-        Expr::Negate { operand } => try_eval_key_f64(operand, input).map(|v| -v),
+        Expr::Negate { operand } => try_eval_key_f64(operand, input).map(|v| if v == 0.0 { 0.0 } else { -v }),
         Expr::UnaryOp { op, operand } => {
             // Length can work on any type (string→charcount, array→len, object→len, number→fabs)
             if matches!(op, UnaryOp::Length) {
