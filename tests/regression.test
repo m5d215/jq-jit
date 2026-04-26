@@ -1613,3 +1613,19 @@ null
 "あいう" / ""
 null
 ["あ","い","う"]
+
+# Issue #159: utf8bytelength fast-path errors on non-string field instead of
+# collapsing to length's value
+try (.a | utf8bytelength) catch .
+{"a":[1,2,3]}
+"array ([1,2,3]) only strings have UTF-8 byte length"
+
+# Issue #159: utf8bytelength still works on string field
+.a | utf8bytelength
+{"a":"abc"}
+3
+
+# Issue #159: utf8bytelength on number field also errors
+try (.a | utf8bytelength) catch .
+{"a":1}
+"number (1) only strings have UTF-8 byte length"
