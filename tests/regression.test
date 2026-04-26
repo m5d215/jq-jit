@@ -1710,6 +1710,41 @@ try (if (.a + 1) > 2 then "h" else "l" end) catch "err"
 {"a":"x"}
 "err"
 
+# Issue #161: object-remap branches honour total order
+if .a > 1 then {x:1} else {x:2} end
+{"a":"x"}
+{"x":1}
+
+# Issue #161: remap branch with field references picks the correct branch
+if .a > 1 then {x:.b} else {y:.b} end
+{"a":"x","b":2}
+{"x":2}
+
+# Issue #161: merge fast path no longer drops the value silently
+if .a > 1 then . + {x:1} else . end
+{"a":"x"}
+{"a":"x","x":1}
+
+# Issue #161: array-branch fast path follows jq total order
+if .a > 1 then [.a, 1] else [2, .a] end
+{"a":"x"}
+["x",1]
+
+# Issue #161: cond_chain specialized field-output branch
+if .a > 1 then .a else .b end
+{"a":"x","b":2}
+"x"
+
+# Issue #161: cond_chain general (elif) path
+if .a > 1 then "h" elif .a > 0 then "m" else "l" end
+{"a":"x","b":2,"c":3}
+"h"
+
+# Issue #161: cond_chain general path with object remap branches
+if .a > 0 then {x:.a} elif .a > -1 then {y:.b} else {z:.b} end
+{"a":"x","b":2}
+{"x":"x"}
+
 # Issue #162: [.x, .y] | max returns the present value when one is missing
 [.x, .y] | max
 {"x":1}
