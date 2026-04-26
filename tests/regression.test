@@ -1759,3 +1759,18 @@ try ([.x, .y, .x + .y]) catch .
 [.x, .y, .x + .y]
 {"x":null,"y":1}
 [null,1,1]
+
+# Issue #164: string-add chain raises a type error on a non-string head
+try (.a + ": " + (.b | tostring)) catch .
+{"a":1,"b":2}
+"number (1) and string (\": \") cannot be added"
+
+# Issue #164: null head behaves as identity (yields the rest)
+.a + ": " + (.b | tostring)
+{"a":null,"b":1}
+": 1"
+
+# Issue #164: string head still produces a string
+.a + ": " + (.b | tostring)
+{"a":"foo","b":1}
+"foo: 1"

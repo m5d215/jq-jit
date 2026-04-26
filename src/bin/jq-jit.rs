@@ -7320,41 +7320,58 @@ fn real_main() {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
-                            compact_buf.push(b'"');
-                            for &(idx, typ, ai) in &actions {
-                                match typ {
-                                    0 => { compact_buf.extend_from_slice(&lit_bufs[idx]); }
-                                    1 => {
-                                        let (vs, ve) = ranges_buf[idx];
-                                        let val = &raw[vs..ve];
-                                        if val[0] == b'"' && val.len() >= 2 {
-                                            compact_buf.extend_from_slice(&val[1..val.len()-1]);
-                                        } else {
-                                            compact_buf.extend_from_slice(val);
-                                        }
-                                    }
-                                    _ => {
-                                        // FieldArithToString: parse number, apply ops, format
-                                        let (vs, ve) = ranges_buf[idx];
-                                        let val = &raw[vs..ve];
-                                        let s = unsafe { std::str::from_utf8_unchecked(val) };
-                                        if let Ok(mut v) = s.trim().parse::<f64>() {
-                                            for &(ref op, n) in arith_ops_list[ai] {
-                                                v = match op {
-                                                    jq_jit::ir::BinOp::Add => v + n,
-                                                    jq_jit::ir::BinOp::Sub => v - n,
-                                                    jq_jit::ir::BinOp::Mul => v * n,
-                                                    jq_jit::ir::BinOp::Div => v / n,
-                                                    jq_jit::ir::BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
-                                                    _ => v,
-                                                };
-                                            }
-                                            push_jq_number_bytes(&mut compact_buf, v);
-                                        }
+                            // Validate every plain-Field (raw-copy) part is actually a
+                            // string before composing the result. jq's `s + s` requires
+                            // both operands to be strings (null is the additive identity
+                            // and is handled by generic eval); a non-string operand
+                            // raises a type error rather than silently coercing (#164).
+                            let mut needs_generic = false;
+                            for &(idx, typ, _) in &actions {
+                                if typ == 1 {
+                                    let (vs, ve) = ranges_buf[idx];
+                                    if vs >= ve || raw[vs] != b'"' {
+                                        needs_generic = true;
+                                        break;
                                     }
                                 }
                             }
-                            compact_buf.extend_from_slice(b"\"\n");
+                            if needs_generic {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            } else {
+                                compact_buf.push(b'"');
+                                for &(idx, typ, ai) in &actions {
+                                    match typ {
+                                        0 => { compact_buf.extend_from_slice(&lit_bufs[idx]); }
+                                        1 => {
+                                            let (vs, ve) = ranges_buf[idx];
+                                            let val = &raw[vs..ve];
+                                            // val is guaranteed quoted-string here.
+                                            compact_buf.extend_from_slice(&val[1..val.len()-1]);
+                                        }
+                                        _ => {
+                                            // FieldArithToString: parse number, apply ops, format
+                                            let (vs, ve) = ranges_buf[idx];
+                                            let val = &raw[vs..ve];
+                                            let s = unsafe { std::str::from_utf8_unchecked(val) };
+                                            if let Ok(mut v) = s.trim().parse::<f64>() {
+                                                for &(ref op, n) in arith_ops_list[ai] {
+                                                    v = match op {
+                                                        jq_jit::ir::BinOp::Add => v + n,
+                                                        jq_jit::ir::BinOp::Sub => v - n,
+                                                        jq_jit::ir::BinOp::Mul => v * n,
+                                                        jq_jit::ir::BinOp::Div => v / n,
+                                                        jq_jit::ir::BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
+                                                        _ => v,
+                                                    };
+                                                }
+                                                push_jq_number_bytes(&mut compact_buf, v);
+                                            }
+                                        }
+                                    }
+                                }
+                                compact_buf.extend_from_slice(b"\"\n");
+                            }
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -20468,40 +20485,51 @@ fn real_main() {
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
                     if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
-                        compact_buf.push(b'"');
-                        for &(idx, typ, ai) in &actions {
-                            match typ {
-                                0 => { compact_buf.extend_from_slice(&lit_bufs[idx]); }
-                                1 => {
-                                    let (vs, ve) = ranges_buf[idx];
-                                    let val = &raw[vs..ve];
-                                    if val[0] == b'"' && val.len() >= 2 {
-                                        compact_buf.extend_from_slice(&val[1..val.len()-1]);
-                                    } else {
-                                        compact_buf.extend_from_slice(val);
-                                    }
-                                }
-                                _ => {
-                                    let (vs, ve) = ranges_buf[idx];
-                                    let val = &raw[vs..ve];
-                                    let s = unsafe { std::str::from_utf8_unchecked(val) };
-                                    if let Ok(mut v) = s.trim().parse::<f64>() {
-                                        for &(ref op, n) in arith_ops_list[ai] {
-                                            v = match op {
-                                                jq_jit::ir::BinOp::Add => v + n,
-                                                jq_jit::ir::BinOp::Sub => v - n,
-                                                jq_jit::ir::BinOp::Mul => v * n,
-                                                jq_jit::ir::BinOp::Div => v / n,
-                                                jq_jit::ir::BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
-                                                _ => v,
-                                            };
-                                        }
-                                        push_jq_number_bytes(&mut compact_buf, v);
-                                    }
+                        let mut needs_generic = false;
+                        for &(idx, typ, _) in &actions {
+                            if typ == 1 {
+                                let (vs, ve) = ranges_buf[idx];
+                                if vs >= ve || raw[vs] != b'"' {
+                                    needs_generic = true;
+                                    break;
                                 }
                             }
                         }
-                        compact_buf.extend_from_slice(b"\"\n");
+                        if needs_generic {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        } else {
+                            compact_buf.push(b'"');
+                            for &(idx, typ, ai) in &actions {
+                                match typ {
+                                    0 => { compact_buf.extend_from_slice(&lit_bufs[idx]); }
+                                    1 => {
+                                        let (vs, ve) = ranges_buf[idx];
+                                        let val = &raw[vs..ve];
+                                        compact_buf.extend_from_slice(&val[1..val.len()-1]);
+                                    }
+                                    _ => {
+                                        let (vs, ve) = ranges_buf[idx];
+                                        let val = &raw[vs..ve];
+                                        let s = unsafe { std::str::from_utf8_unchecked(val) };
+                                        if let Ok(mut v) = s.trim().parse::<f64>() {
+                                            for &(ref op, n) in arith_ops_list[ai] {
+                                                v = match op {
+                                                    jq_jit::ir::BinOp::Add => v + n,
+                                                    jq_jit::ir::BinOp::Sub => v - n,
+                                                    jq_jit::ir::BinOp::Mul => v * n,
+                                                    jq_jit::ir::BinOp::Div => v / n,
+                                                    jq_jit::ir::BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
+                                                    _ => v,
+                                                };
+                                            }
+                                            push_jq_number_bytes(&mut compact_buf, v);
+                                        }
+                                    }
+                                }
+                            }
+                            compact_buf.extend_from_slice(b"\"\n");
+                        }
                     } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
