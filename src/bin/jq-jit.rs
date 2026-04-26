@@ -8251,6 +8251,14 @@ fn real_main() {
                                 }
                                 BranchOutput::Empty => { /* produce no output */ }
                             }
+                        } else {
+                            // Not all fields present — fall back to generic eval
+                            // so jq's total-order comparison and missing-field
+                            // semantics (`.x` on a missing key is `null`, etc.)
+                            // apply correctly. Without this, the fast path
+                            // silently drops the value (#161, #166).
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);

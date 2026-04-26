@@ -1679,3 +1679,13 @@ null
 [builtins[] | select(test("^(fma|gamma|tgamma|lgamma|lgamma_r|frexp|scalb|scalbln|ldexp|drem|remainder|hypot)/"))] | sort
 null
 ["drem/2","fma/3","frexp/0","gamma/0","hypot/2","ldexp/2","lgamma/0","lgamma_r/0","remainder/2","scalb/2","scalbln/2","tgamma/0"]
+
+# Issue #166: [.x, .y] | sort falls through to generic eval when fields missing
+[.x, .y] | sort
+{}
+[null,null]
+
+# Issue #166: same behaviour with explicit nulls
+[.x, .y] | sort
+{"x":null,"y":null}
+[null,null]
