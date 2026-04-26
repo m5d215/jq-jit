@@ -1598,3 +1598,18 @@ null
 [builtins[] | select(test("leaf|^paths"))] | sort
 null
 ["paths/0","paths/1"]
+
+# Issue #156: string / "" splits per codepoint without empty bookends
+"abc" / ""
+null
+["a","b","c"]
+
+# Issue #156: empty string with empty separator yields empty array
+"" / ""
+null
+[]
+
+# Issue #156: non-ASCII codepoints split correctly
+"あいう" / ""
+null
+["あ","い","う"]

@@ -682,7 +682,27 @@ pub fn rt_div(a: &Value, b: &Value) -> Result<Value> {
             Ok(Value::number(x / y))
         }
         (Value::Str(s), Value::Str(sep)) => {
-            // String division = split
+            // String division = split. Mirror jq's `split(s; sep)`: an empty
+            // separator splits per codepoint without leading/trailing empty
+            // bookends. Rust's `&str::split("")` would insert those bookends,
+            // diverging from jq.
+            if s.is_empty() {
+                return Ok(Value::Arr(Rc::new(Vec::new())));
+            }
+            if sep.is_empty() {
+                let mut parts = Vec::with_capacity(s.len());
+                if s.is_ascii() {
+                    for i in 0..s.len() {
+                        parts.push(Value::from_str(&s.as_str()[i..i + 1]));
+                    }
+                } else {
+                    let mut buf = [0u8; 4];
+                    for c in s.chars() {
+                        parts.push(Value::from_str(c.encode_utf8(&mut buf)));
+                    }
+                }
+                return Ok(Value::Arr(Rc::new(parts)));
+            }
             let parts: Vec<Value> = s.split(sep.as_str())
                 .map(Value::from_str)
                 .collect();
