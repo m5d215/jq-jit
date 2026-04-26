@@ -8280,6 +8280,14 @@ fn real_main() {
                             };
                             compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
                             compact_buf.push(b'\n');
+                        } else {
+                            // Field is missing or not numeric — defer to
+                            // generic eval so jq's total-order comparison
+                            // (null < number, string > number, etc.) applies
+                            // and the conditional resolves to a branch instead
+                            // of being silently dropped (#161).
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -8307,6 +8315,10 @@ fn real_main() {
                             };
                             compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
                             compact_buf.push(b'\n');
+                        } else {
+                            // Non-numeric field — defer to generic eval (#161).
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -8318,6 +8330,11 @@ fn real_main() {
                     use jq_jit::ir::{BinOp, UnaryOp};
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
+                        let bail_to_generic = |compact_buf: &mut Vec<u8>, out: &mut std::io::BufWriter<std::io::StdoutLock<'_>>, any_output_false: &mut bool, had_error: &mut bool| -> Result<(), anyhow::Error> {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, out, compact_buf, any_output_false, had_error);
+                            Ok(())
+                        };
                         let computed: f64 = match unary_op {
                             UnaryOp::Length => {
                                 if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
@@ -8330,7 +8347,7 @@ fn real_main() {
                                             } else {
                                                 match serde_json::from_slice::<String>(val) {
                                                     Ok(s) => s.chars().count() as f64,
-                                                    Err(_) => return Ok(()),
+                                                    Err(_) => return bail_to_generic(&mut compact_buf, &mut out, &mut any_output_false, &mut had_error),
                                                 }
                                             }
                                         }
@@ -8374,9 +8391,9 @@ fn real_main() {
                                             count as f64
                                         }
                                         b'n' => 0.0,
-                                        _ => return Ok(()),
+                                        _ => return bail_to_generic(&mut compact_buf, &mut out, &mut any_output_false, &mut had_error),
                                     }
-                                } else { return Ok(()); }
+                                } else { return bail_to_generic(&mut compact_buf, &mut out, &mut any_output_false, &mut had_error); }
                             }
                             _ => {
                                 // Floor/Ceil/Round/Fabs/Abs — extract numeric value and apply
@@ -8388,7 +8405,7 @@ fn real_main() {
                                         UnaryOp::Fabs | UnaryOp::Abs => v.abs(),
                                         _ => v,
                                     }
-                                } else { return Ok(()); }
+                                } else { return bail_to_generic(&mut compact_buf, &mut out, &mut any_output_false, &mut had_error); }
                             }
                         };
                         let pass = match cmp_op {

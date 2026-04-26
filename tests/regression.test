@@ -1689,3 +1689,23 @@ null
 [.x, .y] | sort
 {"x":null,"y":null}
 [null,null]
+
+# Issue #161: conditional fast-path uses jq's total order on non-numeric .field
+if .a > 1 then "h" else "l" end
+{"a":"x"}
+"h"
+
+# Issue #161: missing field is null, falls into else branch
+if .a > 1 then "h" else "l" end
+{}
+"l"
+
+# Issue #161: explicit null compares as < number
+if .a > 1 then "h" else "l" end
+{"a":null}
+"l"
+
+# Issue #161: arith chain comparison falls through on non-numeric field
+try (if (.a + 1) > 2 then "h" else "l" end) catch "err"
+{"a":"x"}
+"err"
