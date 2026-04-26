@@ -1729,3 +1729,18 @@ null
 [.x, .y] | sort | .[0]
 {"x":null,"y":1}
 null
+
+# Issue #167: index returning null still applies + N as null-identity
+.a | index("x") + 1
+{}
+1
+
+# Issue #167: same when input is null
+.a | index("x") + 1
+null
+1
+
+# Issue #167: index miss inside a string still applies + N
+.a | index("z") + 1
+{"a":"hello"}
+1

@@ -6340,16 +6340,27 @@ fn real_main() {
                                     };
                                     push_jq_number_bytes(&mut compact_buf, result);
                                     compact_buf.push(b'\n');
+                                } else if matches!(fia_op, BinOp::Add) {
+                                    // index returned null; jq's `null + N` is N.
+                                    // For Sub/Mul/Div jq errors — bail to generic.
+                                    push_jq_number_bytes(&mut compact_buf, fia_n);
+                                    compact_buf.push(b'\n');
                                 } else {
-                                    compact_buf.extend_from_slice(b"null\n");
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                 }
                             } else {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             }
+                        } else if matches!(fia_op, BinOp::Add) {
+                            // Field missing → index returns null → `null + N = N` (#167).
+                            push_jq_number_bytes(&mut compact_buf, fia_n);
+                            compact_buf.push(b'\n');
                         } else {
-                            // null field: index produces null, null + N = null
-                            compact_buf.extend_from_slice(b"null\n");
+                            // For Sub/Mul/Div jq raises a type error on null.
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -19471,15 +19482,24 @@ fn real_main() {
                                 };
                                 push_jq_number_bytes(&mut compact_buf, result);
                                 compact_buf.push(b'\n');
+                            } else if matches!(fia_op, BinOp::Add) {
+                                // index returned null; jq's `null + N` is N (#167).
+                                push_jq_number_bytes(&mut compact_buf, fia_n);
+                                compact_buf.push(b'\n');
                             } else {
-                                compact_buf.extend_from_slice(b"null\n");
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             }
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
+                    } else if matches!(fia_op, BinOp::Add) {
+                        push_jq_number_bytes(&mut compact_buf, fia_n);
+                        compact_buf.push(b'\n');
                     } else {
-                        compact_buf.extend_from_slice(b"null\n");
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
