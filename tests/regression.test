@@ -1774,3 +1774,18 @@ try (.a + ": " + (.b | tostring)) catch .
 .a + ": " + (.b | tostring)
 {"a":"foo","b":1}
 "foo: 1"
+
+# Issue #165: split | last | tonumber raises on unparseable segment
+try (.a | split(",") | last | tonumber) catch "err"
+{"a":"x,y,not_a_num"}
+"err"
+
+# Issue #165: split | .[N] | tonumber raises on unparseable segment
+try (.a | split(",") | .[1] | tonumber) catch "err"
+{"a":"a,b,3.14"}
+"err"
+
+# Issue #165: parseable segments still pass through the fast path
+.a | split(",") | last | tonumber
+{"a":"x,y,42"}
+42

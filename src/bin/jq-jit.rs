@@ -3766,9 +3766,16 @@ fn real_main() {
                                 } else {
                                     inner
                                 };
-                                // Output raw bytes as number (no quotes)
-                                compact_buf.extend_from_slice(segment);
-                                compact_buf.push(b'\n');
+                                // Only emit verbatim when the segment parses as a JSON
+                                // number; otherwise bail to generic eval so jq's
+                                // `cannot be parsed as a number` error fires (#165).
+                                if parse_json_num(segment).is_some() {
+                                    compact_buf.extend_from_slice(segment);
+                                    compact_buf.push(b'\n');
+                                } else {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
                             } else {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -3814,8 +3821,17 @@ fn real_main() {
                                     segs
                                 };
                                 if target_idx < segments.len() {
-                                    compact_buf.extend_from_slice(segments[target_idx]);
-                                    compact_buf.push(b'\n');
+                                    let seg = segments[target_idx];
+                                    // Only emit verbatim when the segment parses as a JSON
+                                    // number; otherwise bail to generic eval so jq's
+                                    // `cannot be parsed as a number` error fires (#165).
+                                    if parse_json_num(seg).is_some() {
+                                        compact_buf.extend_from_slice(seg);
+                                        compact_buf.push(b'\n');
+                                    } else {
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    }
                                 } else {
                                     compact_buf.extend_from_slice(b"null\n");
                                 }
@@ -13432,8 +13448,13 @@ fn real_main() {
                             } else {
                                 inner
                             };
-                            compact_buf.extend_from_slice(segment);
-                            compact_buf.push(b'\n');
+                            if parse_json_num(segment).is_some() {
+                                compact_buf.extend_from_slice(segment);
+                                compact_buf.push(b'\n');
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -13480,8 +13501,14 @@ fn real_main() {
                                 segs
                             };
                             if target_idx < segments.len() {
-                                compact_buf.extend_from_slice(segments[target_idx]);
-                                compact_buf.push(b'\n');
+                                let seg = segments[target_idx];
+                                if parse_json_num(seg).is_some() {
+                                    compact_buf.extend_from_slice(seg);
+                                    compact_buf.push(b'\n');
+                                } else {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
                             } else {
                                 compact_buf.extend_from_slice(b"null\n");
                             }
