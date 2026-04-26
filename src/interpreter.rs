@@ -1702,8 +1702,11 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
         Expr::Negate { operand } => {
             let s = simplify_expr(operand);
             if let Expr::Literal(Literal::Num(n, repr)) = &s {
+                // jq normalises `-0` (Negate of zero) back to `+0`. Only IEEE
+                // arithmetic (`0 * -1`, `0 - 0`) lands a signed zero. Issue #110.
+                let new_n = if *n == 0.0 { 0.0 } else { -n };
                 let new_repr = crate::value::Value::negate_repr(repr.clone());
-                Expr::Literal(Literal::Num(-n, new_repr))
+                Expr::Literal(Literal::Num(new_n, new_repr))
             } else {
                 Expr::Negate { operand: Box::new(s) }
             }
@@ -1978,7 +1981,7 @@ fn push_const_json(expr: &crate::ir::Expr, buf: &mut Vec<u8>) -> bool {
         Expr::Literal(Literal::False) => { buf.extend_from_slice(b"false"); true }
         Expr::Literal(Literal::Num(n, Some(raw))) => {
             if crate::value::is_valid_json_number(raw) {
-                buf.extend_from_slice(raw.as_bytes());
+                buf.extend_from_slice(crate::value::canonical_repr_bytes(raw).as_bytes());
             } else {
                 crate::value::push_jq_number_bytes(buf, *n);
             }

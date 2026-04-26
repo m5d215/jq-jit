@@ -9,6 +9,42 @@ use std::process;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[inline]
+/// Returns true if `bytes` contains a JSON number whose lexical form
+/// would normalise differently from jq's canonical output (e.g. `1e10`
+/// → `1E+10`, `+1` → `1`, `1e-5` → `0.00001`). Used to disable raw-byte
+/// passthrough so the canonical form lands on stdout (issues #110, #143).
+fn raw_contains_non_canonical_number(bytes: &[u8]) -> bool {
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                // Skip string contents — a stray `e` inside a string isn't
+                // a number's exponent marker.
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' { i = i.saturating_add(2); continue; }
+                    if bytes[i] == b'"' { i += 1; break; }
+                    i += 1;
+                }
+            }
+            b'+' => return true,
+            b'e' | b'E' => {
+                // Only flag when this `e`/`E` is part of a number — the
+                // immediately preceding byte is a digit or `.`.
+                if i > 0 {
+                    let prev = bytes[i - 1];
+                    if prev.is_ascii_digit() || prev == b'.' {
+                        return true;
+                    }
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    false
+}
+
 fn jqjit_trace_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -2855,9 +2891,14 @@ fn real_main() {
             if use_compact_buf {
                 if !color_output {
                     // Raw passthrough: if result is the unmodified input and bytes are compact,
-                    // copy original bytes directly instead of re-serializing
+                    // copy original bytes directly instead of re-serializing.
+                    // Skip when the bytes contain non-canonical number reprs
+                    // (`1e10` → `1E+10`, leading `+`, etc.) — those need
+                    // normalize_jq_repr (issues #110, #143).
                     if let Some(raw) = raw_bytes {
-                        if std::ptr::eq(result, input) && is_json_compact(raw) {
+                        if std::ptr::eq(result, input) && is_json_compact(raw)
+                            && !raw_contains_non_canonical_number(raw)
+                        {
                             cbuf.extend_from_slice(raw);
                             cbuf.push(b'\n');
                             if cbuf.len() >= 1 << 17 {
@@ -5294,18 +5335,21 @@ fn real_main() {
                         }
                         all_compact && checked > 0
                     } else { false };
-                    if whole_file_compact {
+                    if whole_file_compact && !raw_contains_non_canonical_number(content) {
                         let _ = out.write_all(content);
                         Ok(())
                     } else {
                         json_stream_raw(&input_str, |start, end| {
                             let raw = &input_bytes[start..end];
-                            if is_json_compact(raw) {
+                            if is_json_compact(raw) && !raw_contains_non_canonical_number(raw) {
                                 compact_buf.extend_from_slice(raw);
                                 compact_buf.push(b'\n');
-                            } else {
+                            } else if !raw_contains_non_canonical_number(raw) {
                                 push_json_compact_raw(&mut compact_buf, raw);
                                 compact_buf.push(b'\n');
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                push_compact_line(&mut compact_buf, &v);
                             }
                             if compact_buf.len() >= 1 << 17 {
                                 let _ = out.write_all(&compact_buf);
@@ -5317,8 +5361,13 @@ fn real_main() {
                 } else if filter.is_identity() && use_pretty_buf && !color_output && !exit_status && !seq {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        push_json_pretty_raw(&mut compact_buf, raw, indent_n, tab);
-                        compact_buf.push(b'\n');
+                        if raw_contains_non_canonical_number(raw) {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            push_pretty_line(&mut compact_buf, &v, indent_n, tab);
+                        } else {
+                            push_json_pretty_raw(&mut compact_buf, raw, indent_n, tab);
+                            compact_buf.push(b'\n');
+                        }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
                             compact_buf.clear();
