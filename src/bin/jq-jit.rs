@@ -7969,14 +7969,37 @@ fn real_main() {
                                     BranchOutput::Remap(_) | BranchOutput::Computed(_) => unreachable!(),
                                 }
                             } else if rhs_field.is_some() {
-                                // Fields not both numeric — try type-aware comparison
+                                // Fields not both numeric — try type-aware comparison.
+                                // When one field is missing or null, jq applies the
+                                // total order placing null below every other type;
+                                // the raw-byte `compare_raw_fields` only handles
+                                // num/str pairs, so bail to generic eval for any
+                                // shape it can't decide (#162).
                                 let rf = rhs_field.unwrap();
-                                let pass = if let (Some(r1), Some(r2)) = (
-                                    json_object_get_field_raw(raw, 0, cond_field),
-                                    json_object_get_field_raw(raw, 0, rf),
-                                ) {
-                                    compare_raw_fields(raw, r1, r2, cond_op)
-                                } else { false };
+                                let r1 = json_object_get_field_raw(raw, 0, cond_field);
+                                let r2 = json_object_get_field_raw(raw, 0, rf);
+                                let needs_generic = match (r1, r2) {
+                                    (None, _) | (_, None) => true,
+                                    (Some(a), Some(b)) => {
+                                        let a_byte = raw[a.0];
+                                        let b_byte = raw[b.0];
+                                        // compare_raw_fields handles only number and
+                                        // string types; everything else (null, bool,
+                                        // array, object) goes through generic eval.
+                                        let is_num_or_str = |c: u8| c == b'"' || c == b'-' || c.is_ascii_digit();
+                                        !(is_num_or_str(a_byte) && is_num_or_str(b_byte))
+                                    }
+                                };
+                                if needs_generic {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    if compact_buf.len() >= 1 << 17 {
+                                        let _ = out.write_all(&compact_buf);
+                                        compact_buf.clear();
+                                    }
+                                    return Ok(());
+                                }
+                                let pass = compare_raw_fields(raw, r1.unwrap(), r2.unwrap(), cond_op);
                                 let out_br = if pass { then_out } else { else_output };
                                 match out_br {
                                     BranchOutput::Literal(ref bytes) => {

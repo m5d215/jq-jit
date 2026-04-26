@@ -1709,3 +1709,23 @@ if .a > 1 then "h" else "l" end
 try (if (.a + 1) > 2 then "h" else "l" end) catch "err"
 {"a":"x"}
 "err"
+
+# Issue #162: [.x, .y] | max returns the present value when one is missing
+[.x, .y] | max
+{"x":1}
+1
+
+# Issue #162: [.x, .y] | min places null below every numeric value
+[.x, .y] | min
+{"y":2}
+null
+
+# Issue #162: explicit null still ranks below number
+[.x, .y] | min
+{"x":null,"y":1}
+null
+
+# Issue #162: sort | .[0] matches min
+[.x, .y] | sort | .[0]
+{"x":null,"y":1}
+null
