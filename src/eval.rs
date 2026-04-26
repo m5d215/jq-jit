@@ -2811,7 +2811,18 @@ pub fn eval(
                                     cb(v)
                                 }
                             }
-                            Err(_) => Ok(true), // non-match → empty (like jq)
+                            Err(e) => {
+                                // No match → empty stream. Type errors and
+                                // anything else must propagate so jq's
+                                // `<type> cannot be matched, as it is not a
+                                // string` error fires (#160).
+                                let msg = e.to_string();
+                                if msg.contains("match failed") {
+                                    Ok(true)
+                                } else {
+                                    Err(e)
+                                }
+                            }
                         }
                     })
                 })
@@ -2835,7 +2846,14 @@ pub fn eval(
                                 }
                                 cb(v)
                             }
-                            Err(_) => Ok(true), // non-match → empty (like jq)
+                            Err(e) => {
+                                let msg = e.to_string();
+                                if msg.contains("capture failed") {
+                                    Ok(true)
+                                } else {
+                                    Err(e)
+                                }
+                            }
                         }
                     })
                 })

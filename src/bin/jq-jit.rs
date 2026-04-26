@@ -5795,8 +5795,17 @@ fn real_main() {
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             }
                         } else if is_length_op {
-                            // Length ops: works on any field type
-                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
+                            // Length ops: works on any field type. Bail to generic
+                            // eval when the input root isn't an object (`.a` on a
+                            // number/string is an indexing error, not a missing field)
+                            // or the field value is a boolean (jq raises
+                            // `boolean (X) has no length`) — see #160.
+                            let raw_trim_start = raw.iter().position(|&b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r')).unwrap_or(raw.len());
+                            let root_byte = raw.get(raw_trim_start).copied();
+                            if root_byte != Some(b'{') {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            } else if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
                                 let val = &raw[vs..ve];
                                 match val[0] {
                                     b'"' => {
@@ -5832,6 +5841,12 @@ fn real_main() {
                                         // null: length is 0
                                         compact_buf.push(b'0');
                                         compact_buf.push(b'\n');
+                                    }
+                                    b't' | b'f' => {
+                                        // Boolean: jq errors. Generic eval has the
+                                        // matching wording.
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                     }
                                     _ => {
                                         // Number: length is abs(number)
@@ -7034,8 +7049,11 @@ fn real_main() {
                                     push_jq_number_bytes(&mut compact_buf, n);
                                     compact_buf.push(b'\n');
                                 } else {
-                                    // tonumber on non-numeric string → null in jq-jit
-                                    compact_buf.extend_from_slice(b"null\n");
+                                    // tonumber on a non-numeric string → jq raises
+                                    // `cannot be parsed as a number`. Defer to
+                                    // generic eval so the error fires (#160).
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                 }
                             } else {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;

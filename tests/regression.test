@@ -1789,3 +1789,33 @@ try (.a | split(",") | .[1] | tonumber) catch "err"
 .a | split(",") | last | tonumber
 {"a":"x,y,42"}
 42
+
+# Issue #160: match on non-string field raises
+try (.a | match("x")) catch "err"
+{"a":1}
+"err"
+
+# Issue #160: capture on non-string field raises
+try (.a | capture("(?<n>x)")) catch "err"
+{"a":1}
+"err"
+
+# Issue #160: length on boolean raises
+try (.a | length) catch "err"
+{"a":true}
+"err"
+
+# Issue #160: .field on a non-object root raises
+try (.a | length) catch "err"
+1
+"err"
+
+# Issue #160: ltrimstr | tonumber raises on unparseable string
+try (.a | ltrimstr("$") | tonumber) catch "err"
+{"a":"hello"}
+"err"
+
+# Issue #160: ltrimstr | tonumber still parses when prefix matches
+.a | ltrimstr("$") | tonumber
+{"a":"$42"}
+42
