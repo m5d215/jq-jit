@@ -469,10 +469,20 @@ fn normalize_num_repr(s: &str) -> String {
         // Find position of first significant digit in combined digits
         let all_digits: String = format!("{}{}", int_part, frac_part);
         let digits: Vec<char> = all_digits.chars().collect();
-        let first_sig = digits.iter().position(|c| *c != '0').unwrap_or(0);
+        let first_sig = digits.iter().position(|c| *c != '0').unwrap_or(digits.len());
 
         if first_sig >= digits.len() {
-            return "0".to_string();
+            // All-zero mantissa. Drop the exponent and the leading sign;
+            // preserve fractional shape so `0.0e0` stays `0.0`, not `0`.
+            if frac_part.is_empty() {
+                return "0".to_string();
+            }
+            let mut out = String::with_capacity(2 + frac_part.len());
+            out.push_str("0.");
+            for _ in 0..frac_part.len() {
+                out.push('0');
+            }
+            return out;
         }
 
         // Compute normalized exponent
@@ -2624,13 +2634,14 @@ impl Parser {
             | "exp" | "exp2" | "exp10" | "log" | "log2" | "log10"
             | "cbrt" | "significand" | "exponent" | "logb"
             | "nearbyint" | "trunc" | "rint" | "j0" | "j1"
+            | "gamma" | "tgamma" | "lgamma" | "lgamma_r" | "frexp"
             | "keys" | "keys_unsorted" | "values" | "sort" | "reverse"
             | "unique" | "flatten" | "min" | "max" | "add" | "any" | "all"
             | "transpose" | "to_entries" | "from_entries"
             | "gmtime" | "localtime" | "mktime" | "now" | "abs"
             | "not" | "env" | "builtins" | "input" | "inputs"
             | "debug" | "stderr" | "modulemeta" | "path"
-            | "with_entries" | "recurse" | "recurse_down" | "leaf_paths"
+            | "with_entries" | "recurse" | "recurse_down"
             | "has" | "in" | "contains" | "inside"
             | "getpath" | "setpath" | "delpaths"
             | "to_number" | "to_string" | "type_error"
@@ -2719,47 +2730,13 @@ impl Parser {
                     }),
                 })
             }
-            "leaf_paths" => {
-                // leaf_paths = paths(scalars)
-                // scalars = select(type != "array" and type != "object")
-                let scalars_cond = Expr::BinOp {
-                    op: BinOp::And,
-                    lhs: Box::new(Expr::BinOp {
-                        op: BinOp::Ne,
-                        lhs: Box::new(Expr::UnaryOp { op: UnaryOp::Type, operand: Box::new(Expr::Input) }),
-                        rhs: Box::new(Expr::Literal(Literal::Str("array".to_string()))),
-                    }),
-                    rhs: Box::new(Expr::BinOp {
-                        op: BinOp::Ne,
-                        lhs: Box::new(Expr::UnaryOp { op: UnaryOp::Type, operand: Box::new(Expr::Input) }),
-                        rhs: Box::new(Expr::Literal(Literal::Str("object".to_string()))),
-                    }),
-                };
-                // Same shape as `paths(f)`: filter out the empty root path.
-                Ok(Expr::Pipe {
-                    left: Box::new(Expr::PathExpr {
-                        expr: Box::new(Expr::Pipe {
-                            left: Box::new(Expr::Recurse { input_expr: Box::new(Expr::Input) }),
-                            right: Box::new(Expr::IfThenElse {
-                                cond: Box::new(scalars_cond),
-                                then_branch: Box::new(Expr::Input),
-                                else_branch: Box::new(Expr::Empty),
-                            }),
-                        }),
-                    }),
-                    right: Box::new(Expr::IfThenElse {
-                        cond: Box::new(Expr::BinOp {
-                            op: BinOp::Gt,
-                            lhs: Box::new(Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) }),
-                            rhs: Box::new(Expr::Literal(Literal::Num(0.0, None))),
-                        }),
-                        then_branch: Box::new(Expr::Input),
-                        else_branch: Box::new(Expr::Empty),
-                    }),
-                })
-            }
             "recurse" | "recurse_down" => {
                 Ok(Expr::Recurse { input_expr: Box::new(Expr::Input) })
+            }
+            "gamma" | "tgamma" | "lgamma" | "lgamma_r" | "frexp" => {
+                // libm-backed math builtins not represented as UnaryOp.
+                // Run through CallBuiltin so the runtime dispatches them.
+                Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
             }
             "values" => {
                 // values = select(. != null) - type filter
@@ -3370,8 +3347,8 @@ impl Parser {
                 Ok(Expr::CallBuiltin { name: "halt_error".to_string(), args: vec![code] })
             }
             ("pow", 2) | ("atan2", 2) | ("fma", 3)
-            | ("remainder", 2) | ("hypot", 2) | ("ldexp", 2)
-            | ("scalb", 2) | ("scalbln", 2) => {
+            | ("remainder", 2) | ("drem", 2) | ("hypot", 2)
+            | ("ldexp", 2) | ("scalb", 2) | ("scalbln", 2) => {
                 Ok(Expr::CallBuiltin { name: name.to_string(), args })
             }
             ("nth", 1) | ("nth", 2) => {

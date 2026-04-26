@@ -82,7 +82,7 @@ null
 
 # ---------- PR #27 bug 7: paths(f) skips the empty root path ----------
 # `leaf_paths` was removed from jq-1.8.x; exercise the same invariant via
-# paths(f) instead. jq-jit still defines leaf_paths for compatibility.
+# paths(f) instead.
 
 [paths(type=="string")]
 "hello"
@@ -1159,8 +1159,7 @@ null
 [paths(numbers)]
 {"a":1,"b":{"c":[2,3]}}
 
-# NOTE: leaf_paths was removed in jq 1.8. jq-jit keeps it as a compat alias,
-# which is an intentional deviation from upstream. Not exercised here.
+# NOTE: leaf_paths was removed in jq 1.8 and is not exercised here.
 
 getpath(["a","b"])
 {"a":{"b":42}}

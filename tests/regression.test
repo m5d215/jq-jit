@@ -271,7 +271,7 @@ null
 {"x":1,"y":2,"z":3}
 2
 
-# paths(f) and leaf_paths must drop the root (empty) path just like bare paths
+# paths(f) must drop the root (empty) path just like bare paths
 
 # paths(f) on a scalar yields no paths
 [paths(type == "string")]
@@ -287,11 +287,6 @@ null
 [paths(type == "string")]
 {"a":1,"b":{"c":"x"}}
 [["b","c"]]
-
-# leaf_paths on a scalar yields no paths
-[leaf_paths]
-"hello"
-[]
 
 # [.[] | select(. cmp N)] must respect jq's cross-type ordering, not only numbers
 
@@ -1573,3 +1568,254 @@ null
 [builtins[] | select(. == "exec/1" or . == "exec/2" or . == "execv/1")] | sort
 null
 ["exec/1","exec/2","execv/1"]
+
+# Issue #151: scientific literal with all-zero mantissa parses without panic
+0e0
+null
+0
+
+# Issue #151: all-zero mantissa preserves fractional shape
+0.0e0
+null
+0.0
+
+# Issue #153: -0.0 literal normalises to 0.0 (jq drops the leading minus)
+-0.0
+null
+0.0
+
+# Issue #153: -0.0 | tojson matches jq
+-0.0 | tojson
+null
+"0.0"
+
+# Issue #153: negated all-zero scientific literal
+-0e0
+null
+0
+
+# Issue #154: leaf_paths/0 dropped from builtins to match jq 1.8.1
+[builtins[] | select(test("leaf|^paths"))] | sort
+null
+["paths/0","paths/1"]
+
+# Issue #156: string / "" splits per codepoint without empty bookends
+"abc" / ""
+null
+["a","b","c"]
+
+# Issue #156: empty string with empty separator yields empty array
+"" / ""
+null
+[]
+
+# Issue #156: non-ASCII codepoints split correctly
+"あいう" / ""
+null
+["あ","い","う"]
+
+# Issue #159: utf8bytelength fast-path errors on non-string field instead of
+# collapsing to length's value
+try (.a | utf8bytelength) catch .
+{"a":[1,2,3]}
+"array ([1,2,3]) only strings have UTF-8 byte length"
+
+# Issue #159: utf8bytelength still works on string field
+.a | utf8bytelength
+{"a":"abc"}
+3
+
+# Issue #159: utf8bytelength on number field also errors
+try (.a | utf8bytelength) catch .
+{"a":1}
+"number (1) only strings have UTF-8 byte length"
+
+# Issue #157: exp10 phantom now dispatches to libc-equivalent power
+1.5 | exp10
+null
+31.622776601683793
+
+# Issue #157: gamma alias resolves to tgamma
+5 | gamma
+null
+24
+
+# Issue #157: tgamma matches jq output
+5 | tgamma
+null
+24
+
+# Issue #157: frexp returns [mantissa, exponent]
+1.5 | frexp
+null
+[0.75,1]
+
+# Issue #157: fma(a; b; c) = a * b + c (input ignored)
+fma(2; 3; 4)
+null
+10
+
+# Issue #157: scalb(x; y) = x * 2^y (input ignored)
+null | scalb(1.5; 3)
+null
+12
+
+# Issue #157: ldexp / scalbln integer-exp form
+null | ldexp(1.5; 3)
+null
+12
+
+# Issue #157: drem / remainder IEEE remainder
+null | drem(7; 4)
+null
+-1
+
+# Issue #157: hypot(x; y) = sqrt(x^2 + y^2)
+null | hypot(3; 4)
+null
+5
+
+# Issue #157: builtins now advertises the previously missing names
+[builtins[] | select(test("^(fma|gamma|tgamma|lgamma|lgamma_r|frexp|scalb|scalbln|ldexp|drem|remainder|hypot)/"))] | sort
+null
+["drem/2","fma/3","frexp/0","gamma/0","hypot/2","ldexp/2","lgamma/0","lgamma_r/0","remainder/2","scalb/2","scalbln/2","tgamma/0"]
+
+# Issue #166: [.x, .y] | sort falls through to generic eval when fields missing
+[.x, .y] | sort
+{}
+[null,null]
+
+# Issue #166: same behaviour with explicit nulls
+[.x, .y] | sort
+{"x":null,"y":null}
+[null,null]
+
+# Issue #161: conditional fast-path uses jq's total order on non-numeric .field
+if .a > 1 then "h" else "l" end
+{"a":"x"}
+"h"
+
+# Issue #161: missing field is null, falls into else branch
+if .a > 1 then "h" else "l" end
+{}
+"l"
+
+# Issue #161: explicit null compares as < number
+if .a > 1 then "h" else "l" end
+{"a":null}
+"l"
+
+# Issue #161: arith chain comparison falls through on non-numeric field
+try (if (.a + 1) > 2 then "h" else "l" end) catch "err"
+{"a":"x"}
+"err"
+
+# Issue #162: [.x, .y] | max returns the present value when one is missing
+[.x, .y] | max
+{"x":1}
+1
+
+# Issue #162: [.x, .y] | min places null below every numeric value
+[.x, .y] | min
+{"y":2}
+null
+
+# Issue #162: explicit null still ranks below number
+[.x, .y] | min
+{"x":null,"y":1}
+null
+
+# Issue #162: sort | .[0] matches min
+[.x, .y] | sort | .[0]
+{"x":null,"y":1}
+null
+
+# Issue #167: index returning null still applies + N as null-identity
+.a | index("x") + 1
+{}
+1
+
+# Issue #167: same when input is null
+.a | index("x") + 1
+null
+1
+
+# Issue #167: index miss inside a string still applies + N
+.a | index("z") + 1
+{"a":"hello"}
+1
+
+# Issue #163: computed remap fast-path raises on str + num instead of returning null
+try ({a: .x, b: (.y * 2), c: (.x + .y)}) catch .
+{"x":"a","y":1}
+"string (\"a\") and number (1) cannot be added"
+
+# Issue #163: same coverage for the standalone-array shape
+try ([.x, .y, .x + .y]) catch .
+{"x":"a","y":1}
+"string (\"a\") and number (1) cannot be added"
+
+# Issue #163: null + number still produces the number through the array path
+[.x, .y, .x + .y]
+{"x":null,"y":1}
+[null,1,1]
+
+# Issue #164: string-add chain raises a type error on a non-string head
+try (.a + ": " + (.b | tostring)) catch .
+{"a":1,"b":2}
+"number (1) and string (\": \") cannot be added"
+
+# Issue #164: null head behaves as identity (yields the rest)
+.a + ": " + (.b | tostring)
+{"a":null,"b":1}
+": 1"
+
+# Issue #164: string head still produces a string
+.a + ": " + (.b | tostring)
+{"a":"foo","b":1}
+"foo: 1"
+
+# Issue #165: split | last | tonumber raises on unparseable segment
+try (.a | split(",") | last | tonumber) catch "err"
+{"a":"x,y,not_a_num"}
+"err"
+
+# Issue #165: split | .[N] | tonumber raises on unparseable segment
+try (.a | split(",") | .[1] | tonumber) catch "err"
+{"a":"a,b,3.14"}
+"err"
+
+# Issue #165: parseable segments still pass through the fast path
+.a | split(",") | last | tonumber
+{"a":"x,y,42"}
+42
+
+# Issue #160: match on non-string field raises
+try (.a | match("x")) catch "err"
+{"a":1}
+"err"
+
+# Issue #160: capture on non-string field raises
+try (.a | capture("(?<n>x)")) catch "err"
+{"a":1}
+"err"
+
+# Issue #160: length on boolean raises
+try (.a | length) catch "err"
+{"a":true}
+"err"
+
+# Issue #160: .field on a non-object root raises
+try (.a | length) catch "err"
+1
+"err"
+
+# Issue #160: ltrimstr | tonumber raises on unparseable string
+try (.a | ltrimstr("$") | tonumber) catch "err"
+{"a":"hello"}
+"err"
+
+# Issue #160: ltrimstr | tonumber still parses when prefix matches
+.a | ltrimstr("$") | tonumber
+{"a":"$42"}
+42

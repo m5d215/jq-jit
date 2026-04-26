@@ -4315,11 +4315,15 @@ impl Filter {
     pub fn detect_field_unary_num(&self) -> Option<(String, crate::ir::UnaryOp)> {
         use crate::ir::{Expr, UnaryOp, Literal};
         let expr = self.detect_expr()?;
+        // Utf8ByteLength is intentionally excluded: the raw-byte fast path
+        // would dispatch it through the same code as length and silently
+        // return a non-string-domain value (#159). Generic eval errors on
+        // non-string input correctly.
         let is_supported = |op: &UnaryOp| matches!(op,
             UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Sqrt |
             UnaryOp::Fabs | UnaryOp::Abs | UnaryOp::ToString |
             UnaryOp::AsciiDowncase | UnaryOp::AsciiUpcase |
-            UnaryOp::Length | UnaryOp::Utf8ByteLength | UnaryOp::Explode);
+            UnaryOp::Length | UnaryOp::Explode);
         // Pipe form: .field | op
         if let Expr::Pipe { left, right } = expr {
             if let Expr::Index { expr: base, key } = left.as_ref() {
@@ -9432,8 +9436,11 @@ impl Filter {
     pub fn detect_select_cmp_then_field_unary(&self) -> Option<(String, crate::ir::BinOp, f64, String, crate::ir::UnaryOp)> {
         use crate::ir::{Expr, BinOp, Literal, UnaryOp};
         let expr = self.detect_expr()?;
+        // See `detect_field_unary_num`: Utf8ByteLength must not enter this
+        // fast path because the dispatch would silently use length's value
+        // for non-string inputs (#159).
         let is_supported = |op: &UnaryOp| matches!(op,
-            UnaryOp::Length | UnaryOp::Utf8ByteLength | UnaryOp::ToString |
+            UnaryOp::Length | UnaryOp::ToString |
             UnaryOp::AsciiDowncase | UnaryOp::AsciiUpcase |
             UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Sqrt | UnaryOp::Fabs | UnaryOp::Abs);
         // Form: Pipe(IfThenElse{cond, then: Input, else: Empty}, Pipe(.field, UnaryOp))

@@ -1073,6 +1073,56 @@ fn compare_raw_fields(raw: &[u8], r1: (usize, usize), r2: (usize, usize), op: &j
     } else { false }
 }
 
+/// Return true if `resolved` would raise an error in jq for the given
+/// inputs (e.g. `string + number`). The fast path silently substitutes
+/// `null` for these cases, so callers must defer to generic eval when
+/// this returns true (#163).
+fn resolved_would_error(
+    resolved: &ResolvedRemap,
+    raw: &[u8],
+    ranges: &[(usize, usize)],
+) -> bool {
+    use jq_jit::ir::BinOp;
+    let bytes_of = |idx: usize| {
+        let (vs, ve) = ranges[idx];
+        &raw[vs..ve]
+    };
+    let is_num = |b: &[u8]| parse_json_num(b).is_some();
+    let is_str = |b: &[u8]| b.first() == Some(&b'"');
+    let is_null = |b: &[u8]| b == b"null";
+    let is_arr = |b: &[u8]| b.first() == Some(&b'[');
+    let is_obj = |b: &[u8]| b.first() == Some(&b'{');
+    // For each pair/single, return `true` whenever the raw fast path
+    // can't handle the case correctly — arithmetic with null, type
+    // mismatches, or arr/obj operands. The fast path's shortest correct
+    // domain is num+num (and str+str for Add); everything else bails to
+    // generic eval, where jq's exact semantics apply.
+    let arith_fastpath_ok = |a: &[u8], b: &[u8], op: &BinOp| -> bool {
+        match op {
+            BinOp::Add => (is_num(a) && is_num(b)) || (is_str(a) && is_str(b)),
+            BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => is_num(a) && is_num(b),
+            _ => true,
+        }
+    };
+    let arith_op_with_const_ok = |b: &[u8], op: &BinOp| -> bool {
+        // Constant is always a number, so arithmetic requires the field
+        // to be a number too. (null + N is valid in jq but the fast path
+        // emits "null", so route it through generic eval.)
+        match op {
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => is_num(b),
+            _ => true,
+        }
+    };
+    let _ = (is_arr, is_obj, is_null);
+    match resolved {
+        ResolvedRemap::FieldOpField(i1, op, i2) => !arith_fastpath_ok(bytes_of(*i1), bytes_of(*i2), op),
+        ResolvedRemap::FieldOpConst(i, op, _) => !arith_op_with_const_ok(bytes_of(*i), op),
+        ResolvedRemap::ConstOpField(_, op, i) => !arith_op_with_const_ok(bytes_of(*i), op),
+        ResolvedRemap::FieldArray(items) => items.iter().any(|r| resolved_would_error(r, raw, ranges)),
+        _ => false,
+    }
+}
+
 /// Emit a pre-resolved remap value — no HashMap lookups, just direct index access.
 #[inline]
 fn emit_resolved_value(
@@ -3716,9 +3766,16 @@ fn real_main() {
                                 } else {
                                     inner
                                 };
-                                // Output raw bytes as number (no quotes)
-                                compact_buf.extend_from_slice(segment);
-                                compact_buf.push(b'\n');
+                                // Only emit verbatim when the segment parses as a JSON
+                                // number; otherwise bail to generic eval so jq's
+                                // `cannot be parsed as a number` error fires (#165).
+                                if parse_json_num(segment).is_some() {
+                                    compact_buf.extend_from_slice(segment);
+                                    compact_buf.push(b'\n');
+                                } else {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
                             } else {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -3764,8 +3821,17 @@ fn real_main() {
                                     segs
                                 };
                                 if target_idx < segments.len() {
-                                    compact_buf.extend_from_slice(segments[target_idx]);
-                                    compact_buf.push(b'\n');
+                                    let seg = segments[target_idx];
+                                    // Only emit verbatim when the segment parses as a JSON
+                                    // number; otherwise bail to generic eval so jq's
+                                    // `cannot be parsed as a number` error fires (#165).
+                                    if parse_json_num(seg).is_some() {
+                                        compact_buf.extend_from_slice(seg);
+                                        compact_buf.push(b'\n');
+                                    } else {
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    }
                                 } else {
                                     compact_buf.extend_from_slice(b"null\n");
                                 }
@@ -5327,7 +5393,14 @@ fn real_main() {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
-                            if use_pretty_buf {
+                            // Bail to generic eval whenever any computed cell would
+                            // raise a type error in jq (#163). The fast path can
+                            // only emit num+num and str+str arithmetic; anything
+                            // else gets routed through the generic path.
+                            if resolved.iter().any(|r| resolved_would_error(r, raw, &ranges_buf)) {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            } else if use_pretty_buf {
                                 compact_buf.extend_from_slice(b"[\n");
                                 for (i, res) in resolved.iter().enumerate() {
                                     if i > 0 { compact_buf.extend_from_slice(b",\n"); }
@@ -5497,11 +5570,20 @@ fn real_main() {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
-                            for (i, res) in resolved.iter().enumerate() {
-                                compact_buf.extend_from_slice(&key_prefixes[i]);
-                                emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                            // jq raises a type error for things like `str + num`;
+                            // the raw fast path silently writes `null`, so bail to
+                            // generic eval whenever any computed cell would error
+                            // (#163).
+                            if resolved.iter().any(|r| resolved_would_error(r, raw, &ranges_buf)) {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            } else {
+                                for (i, res) in resolved.iter().enumerate() {
+                                    compact_buf.extend_from_slice(&key_prefixes[i]);
+                                    emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                }
+                                compact_buf.extend_from_slice(obj_close);
                             }
-                            compact_buf.extend_from_slice(obj_close);
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -5531,12 +5613,17 @@ fn real_main() {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
-                            compact_buf.push(b'[');
-                            for (i, res) in resolved.iter().enumerate() {
-                                if i > 0 { compact_buf.push(b','); }
-                                emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                            if resolved.iter().any(|r| resolved_would_error(r, raw, &ranges_buf)) {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            } else {
+                                compact_buf.push(b'[');
+                                for (i, res) in resolved.iter().enumerate() {
+                                    if i > 0 { compact_buf.push(b','); }
+                                    emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                }
+                                compact_buf.extend_from_slice(b"]\n");
                             }
-                            compact_buf.extend_from_slice(b"]\n");
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -5708,8 +5795,17 @@ fn real_main() {
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             }
                         } else if is_length_op {
-                            // Length ops: works on any field type
-                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
+                            // Length ops: works on any field type. Bail to generic
+                            // eval when the input root isn't an object (`.a` on a
+                            // number/string is an indexing error, not a missing field)
+                            // or the field value is a boolean (jq raises
+                            // `boolean (X) has no length`) — see #160.
+                            let raw_trim_start = raw.iter().position(|&b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r')).unwrap_or(raw.len());
+                            let root_byte = raw.get(raw_trim_start).copied();
+                            if root_byte != Some(b'{') {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            } else if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
                                 let val = &raw[vs..ve];
                                 match val[0] {
                                     b'"' => {
@@ -5745,6 +5841,12 @@ fn real_main() {
                                         // null: length is 0
                                         compact_buf.push(b'0');
                                         compact_buf.push(b'\n');
+                                    }
+                                    b't' | b'f' => {
+                                        // Boolean: jq errors. Generic eval has the
+                                        // matching wording.
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                     }
                                     _ => {
                                         // Number: length is abs(number)
@@ -6340,16 +6442,27 @@ fn real_main() {
                                     };
                                     push_jq_number_bytes(&mut compact_buf, result);
                                     compact_buf.push(b'\n');
+                                } else if matches!(fia_op, BinOp::Add) {
+                                    // index returned null; jq's `null + N` is N.
+                                    // For Sub/Mul/Div jq errors — bail to generic.
+                                    push_jq_number_bytes(&mut compact_buf, fia_n);
+                                    compact_buf.push(b'\n');
                                 } else {
-                                    compact_buf.extend_from_slice(b"null\n");
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                 }
                             } else {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             }
+                        } else if matches!(fia_op, BinOp::Add) {
+                            // Field missing → index returns null → `null + N = N` (#167).
+                            push_jq_number_bytes(&mut compact_buf, fia_n);
+                            compact_buf.push(b'\n');
                         } else {
-                            // null field: index produces null, null + N = null
-                            compact_buf.extend_from_slice(b"null\n");
+                            // For Sub/Mul/Div jq raises a type error on null.
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -6936,8 +7049,11 @@ fn real_main() {
                                     push_jq_number_bytes(&mut compact_buf, n);
                                     compact_buf.push(b'\n');
                                 } else {
-                                    // tonumber on non-numeric string → null in jq-jit
-                                    compact_buf.extend_from_slice(b"null\n");
+                                    // tonumber on a non-numeric string → jq raises
+                                    // `cannot be parsed as a number`. Defer to
+                                    // generic eval so the error fires (#160).
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                 }
                             } else {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
@@ -7238,41 +7354,58 @@ fn real_main() {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
-                            compact_buf.push(b'"');
-                            for &(idx, typ, ai) in &actions {
-                                match typ {
-                                    0 => { compact_buf.extend_from_slice(&lit_bufs[idx]); }
-                                    1 => {
-                                        let (vs, ve) = ranges_buf[idx];
-                                        let val = &raw[vs..ve];
-                                        if val[0] == b'"' && val.len() >= 2 {
-                                            compact_buf.extend_from_slice(&val[1..val.len()-1]);
-                                        } else {
-                                            compact_buf.extend_from_slice(val);
-                                        }
-                                    }
-                                    _ => {
-                                        // FieldArithToString: parse number, apply ops, format
-                                        let (vs, ve) = ranges_buf[idx];
-                                        let val = &raw[vs..ve];
-                                        let s = unsafe { std::str::from_utf8_unchecked(val) };
-                                        if let Ok(mut v) = s.trim().parse::<f64>() {
-                                            for &(ref op, n) in arith_ops_list[ai] {
-                                                v = match op {
-                                                    jq_jit::ir::BinOp::Add => v + n,
-                                                    jq_jit::ir::BinOp::Sub => v - n,
-                                                    jq_jit::ir::BinOp::Mul => v * n,
-                                                    jq_jit::ir::BinOp::Div => v / n,
-                                                    jq_jit::ir::BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
-                                                    _ => v,
-                                                };
-                                            }
-                                            push_jq_number_bytes(&mut compact_buf, v);
-                                        }
+                            // Validate every plain-Field (raw-copy) part is actually a
+                            // string before composing the result. jq's `s + s` requires
+                            // both operands to be strings (null is the additive identity
+                            // and is handled by generic eval); a non-string operand
+                            // raises a type error rather than silently coercing (#164).
+                            let mut needs_generic = false;
+                            for &(idx, typ, _) in &actions {
+                                if typ == 1 {
+                                    let (vs, ve) = ranges_buf[idx];
+                                    if vs >= ve || raw[vs] != b'"' {
+                                        needs_generic = true;
+                                        break;
                                     }
                                 }
                             }
-                            compact_buf.extend_from_slice(b"\"\n");
+                            if needs_generic {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            } else {
+                                compact_buf.push(b'"');
+                                for &(idx, typ, ai) in &actions {
+                                    match typ {
+                                        0 => { compact_buf.extend_from_slice(&lit_bufs[idx]); }
+                                        1 => {
+                                            let (vs, ve) = ranges_buf[idx];
+                                            let val = &raw[vs..ve];
+                                            // val is guaranteed quoted-string here.
+                                            compact_buf.extend_from_slice(&val[1..val.len()-1]);
+                                        }
+                                        _ => {
+                                            // FieldArithToString: parse number, apply ops, format
+                                            let (vs, ve) = ranges_buf[idx];
+                                            let val = &raw[vs..ve];
+                                            let s = unsafe { std::str::from_utf8_unchecked(val) };
+                                            if let Ok(mut v) = s.trim().parse::<f64>() {
+                                                for &(ref op, n) in arith_ops_list[ai] {
+                                                    v = match op {
+                                                        jq_jit::ir::BinOp::Add => v + n,
+                                                        jq_jit::ir::BinOp::Sub => v - n,
+                                                        jq_jit::ir::BinOp::Mul => v * n,
+                                                        jq_jit::ir::BinOp::Div => v / n,
+                                                        jq_jit::ir::BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
+                                                        _ => v,
+                                                    };
+                                                }
+                                                push_jq_number_bytes(&mut compact_buf, v);
+                                            }
+                                        }
+                                    }
+                                }
+                                compact_buf.extend_from_slice(b"\"\n");
+                            }
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -7969,14 +8102,37 @@ fn real_main() {
                                     BranchOutput::Remap(_) | BranchOutput::Computed(_) => unreachable!(),
                                 }
                             } else if rhs_field.is_some() {
-                                // Fields not both numeric — try type-aware comparison
+                                // Fields not both numeric — try type-aware comparison.
+                                // When one field is missing or null, jq applies the
+                                // total order placing null below every other type;
+                                // the raw-byte `compare_raw_fields` only handles
+                                // num/str pairs, so bail to generic eval for any
+                                // shape it can't decide (#162).
                                 let rf = rhs_field.unwrap();
-                                let pass = if let (Some(r1), Some(r2)) = (
-                                    json_object_get_field_raw(raw, 0, cond_field),
-                                    json_object_get_field_raw(raw, 0, rf),
-                                ) {
-                                    compare_raw_fields(raw, r1, r2, cond_op)
-                                } else { false };
+                                let r1 = json_object_get_field_raw(raw, 0, cond_field);
+                                let r2 = json_object_get_field_raw(raw, 0, rf);
+                                let needs_generic = match (r1, r2) {
+                                    (None, _) | (_, None) => true,
+                                    (Some(a), Some(b)) => {
+                                        let a_byte = raw[a.0];
+                                        let b_byte = raw[b.0];
+                                        // compare_raw_fields handles only number and
+                                        // string types; everything else (null, bool,
+                                        // array, object) goes through generic eval.
+                                        let is_num_or_str = |c: u8| c == b'"' || c == b'-' || c.is_ascii_digit();
+                                        !(is_num_or_str(a_byte) && is_num_or_str(b_byte))
+                                    }
+                                };
+                                if needs_generic {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    if compact_buf.len() >= 1 << 17 {
+                                        let _ = out.write_all(&compact_buf);
+                                        compact_buf.clear();
+                                    }
+                                    return Ok(());
+                                }
+                                let pass = compare_raw_fields(raw, r1.unwrap(), r2.unwrap(), cond_op);
                                 let out_br = if pass { then_out } else { else_output };
                                 match out_br {
                                     BranchOutput::Literal(ref bytes) => {
@@ -8251,6 +8407,14 @@ fn real_main() {
                                 }
                                 BranchOutput::Empty => { /* produce no output */ }
                             }
+                        } else {
+                            // Not all fields present — fall back to generic eval
+                            // so jq's total-order comparison and missing-field
+                            // semantics (`.x` on a missing key is `null`, etc.)
+                            // apply correctly. Without this, the fast path
+                            // silently drops the value (#161, #166).
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -8272,6 +8436,14 @@ fn real_main() {
                             };
                             compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
                             compact_buf.push(b'\n');
+                        } else {
+                            // Field is missing or not numeric — defer to
+                            // generic eval so jq's total-order comparison
+                            // (null < number, string > number, etc.) applies
+                            // and the conditional resolves to a branch instead
+                            // of being silently dropped (#161).
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -8299,6 +8471,10 @@ fn real_main() {
                             };
                             compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
                             compact_buf.push(b'\n');
+                        } else {
+                            // Non-numeric field — defer to generic eval (#161).
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -8310,6 +8486,11 @@ fn real_main() {
                     use jq_jit::ir::{BinOp, UnaryOp};
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
+                        let bail_to_generic = |compact_buf: &mut Vec<u8>, out: &mut std::io::BufWriter<std::io::StdoutLock<'_>>, any_output_false: &mut bool, had_error: &mut bool| -> Result<(), anyhow::Error> {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, out, compact_buf, any_output_false, had_error);
+                            Ok(())
+                        };
                         let computed: f64 = match unary_op {
                             UnaryOp::Length => {
                                 if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
@@ -8322,7 +8503,7 @@ fn real_main() {
                                             } else {
                                                 match serde_json::from_slice::<String>(val) {
                                                     Ok(s) => s.chars().count() as f64,
-                                                    Err(_) => return Ok(()),
+                                                    Err(_) => return bail_to_generic(&mut compact_buf, &mut out, &mut any_output_false, &mut had_error),
                                                 }
                                             }
                                         }
@@ -8366,9 +8547,9 @@ fn real_main() {
                                             count as f64
                                         }
                                         b'n' => 0.0,
-                                        _ => return Ok(()),
+                                        _ => return bail_to_generic(&mut compact_buf, &mut out, &mut any_output_false, &mut had_error),
                                     }
-                                } else { return Ok(()); }
+                                } else { return bail_to_generic(&mut compact_buf, &mut out, &mut any_output_false, &mut had_error); }
                             }
                             _ => {
                                 // Floor/Ceil/Round/Fabs/Abs — extract numeric value and apply
@@ -8380,7 +8561,7 @@ fn real_main() {
                                         UnaryOp::Fabs | UnaryOp::Abs => v.abs(),
                                         _ => v,
                                     }
-                                } else { return Ok(()); }
+                                } else { return bail_to_generic(&mut compact_buf, &mut out, &mut any_output_false, &mut had_error); }
                             }
                         };
                         let pass = match cmp_op {
@@ -13285,8 +13466,13 @@ fn real_main() {
                             } else {
                                 inner
                             };
-                            compact_buf.extend_from_slice(segment);
-                            compact_buf.push(b'\n');
+                            if parse_json_num(segment).is_some() {
+                                compact_buf.extend_from_slice(segment);
+                                compact_buf.push(b'\n');
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -13333,8 +13519,14 @@ fn real_main() {
                                 segs
                             };
                             if target_idx < segments.len() {
-                                compact_buf.extend_from_slice(segments[target_idx]);
-                                compact_buf.push(b'\n');
+                                let seg = segments[target_idx];
+                                if parse_json_num(seg).is_some() {
+                                    compact_buf.extend_from_slice(seg);
+                                    compact_buf.push(b'\n');
+                                } else {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
                             } else {
                                 compact_buf.extend_from_slice(b"null\n");
                             }
@@ -14798,7 +14990,10 @@ fn real_main() {
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
                     if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
-                        if use_pretty_buf {
+                        if resolved.iter().any(|r| resolved_would_error(r, raw, &ranges_buf)) {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        } else if use_pretty_buf {
                             compact_buf.extend_from_slice(b"[\n");
                             for (i, res) in resolved.iter().enumerate() {
                                 if i > 0 { compact_buf.extend_from_slice(b",\n"); }
@@ -18601,11 +18796,16 @@ fn real_main() {
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
                     if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
-                        for (i, res) in resolved.iter().enumerate() {
-                            compact_buf.extend_from_slice(&key_prefixes[i]);
-                            emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                        if resolved.iter().any(|r| resolved_would_error(r, raw, &ranges_buf)) {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        } else {
+                            for (i, res) in resolved.iter().enumerate() {
+                                compact_buf.extend_from_slice(&key_prefixes[i]);
+                                emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                            }
+                            compact_buf.extend_from_slice(obj_close);
                         }
-                        compact_buf.extend_from_slice(obj_close);
                     } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -18636,12 +18836,17 @@ fn real_main() {
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
                     if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
-                        compact_buf.push(b'[');
-                        for (i, res) in resolved.iter().enumerate() {
-                            if i > 0 { compact_buf.push(b','); }
-                            emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                        if resolved.iter().any(|r| resolved_would_error(r, raw, &ranges_buf)) {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        } else {
+                            compact_buf.push(b'[');
+                            for (i, res) in resolved.iter().enumerate() {
+                                if i > 0 { compact_buf.push(b','); }
+                                emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                            }
+                            compact_buf.extend_from_slice(b"]\n");
                         }
-                        compact_buf.extend_from_slice(b"]\n");
                     } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -19423,15 +19628,24 @@ fn real_main() {
                                 };
                                 push_jq_number_bytes(&mut compact_buf, result);
                                 compact_buf.push(b'\n');
+                            } else if matches!(fia_op, BinOp::Add) {
+                                // index returned null; jq's `null + N` is N (#167).
+                                push_jq_number_bytes(&mut compact_buf, fia_n);
+                                compact_buf.push(b'\n');
                             } else {
-                                compact_buf.extend_from_slice(b"null\n");
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             }
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
+                    } else if matches!(fia_op, BinOp::Add) {
+                        push_jq_number_bytes(&mut compact_buf, fia_n);
+                        compact_buf.push(b'\n');
                     } else {
-                        compact_buf.extend_from_slice(b"null\n");
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
@@ -20316,40 +20530,51 @@ fn real_main() {
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
                     if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
-                        compact_buf.push(b'"');
-                        for &(idx, typ, ai) in &actions {
-                            match typ {
-                                0 => { compact_buf.extend_from_slice(&lit_bufs[idx]); }
-                                1 => {
-                                    let (vs, ve) = ranges_buf[idx];
-                                    let val = &raw[vs..ve];
-                                    if val[0] == b'"' && val.len() >= 2 {
-                                        compact_buf.extend_from_slice(&val[1..val.len()-1]);
-                                    } else {
-                                        compact_buf.extend_from_slice(val);
-                                    }
-                                }
-                                _ => {
-                                    let (vs, ve) = ranges_buf[idx];
-                                    let val = &raw[vs..ve];
-                                    let s = unsafe { std::str::from_utf8_unchecked(val) };
-                                    if let Ok(mut v) = s.trim().parse::<f64>() {
-                                        for &(ref op, n) in arith_ops_list[ai] {
-                                            v = match op {
-                                                jq_jit::ir::BinOp::Add => v + n,
-                                                jq_jit::ir::BinOp::Sub => v - n,
-                                                jq_jit::ir::BinOp::Mul => v * n,
-                                                jq_jit::ir::BinOp::Div => v / n,
-                                                jq_jit::ir::BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
-                                                _ => v,
-                                            };
-                                        }
-                                        push_jq_number_bytes(&mut compact_buf, v);
-                                    }
+                        let mut needs_generic = false;
+                        for &(idx, typ, _) in &actions {
+                            if typ == 1 {
+                                let (vs, ve) = ranges_buf[idx];
+                                if vs >= ve || raw[vs] != b'"' {
+                                    needs_generic = true;
+                                    break;
                                 }
                             }
                         }
-                        compact_buf.extend_from_slice(b"\"\n");
+                        if needs_generic {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        } else {
+                            compact_buf.push(b'"');
+                            for &(idx, typ, ai) in &actions {
+                                match typ {
+                                    0 => { compact_buf.extend_from_slice(&lit_bufs[idx]); }
+                                    1 => {
+                                        let (vs, ve) = ranges_buf[idx];
+                                        let val = &raw[vs..ve];
+                                        compact_buf.extend_from_slice(&val[1..val.len()-1]);
+                                    }
+                                    _ => {
+                                        let (vs, ve) = ranges_buf[idx];
+                                        let val = &raw[vs..ve];
+                                        let s = unsafe { std::str::from_utf8_unchecked(val) };
+                                        if let Ok(mut v) = s.trim().parse::<f64>() {
+                                            for &(ref op, n) in arith_ops_list[ai] {
+                                                v = match op {
+                                                    jq_jit::ir::BinOp::Add => v + n,
+                                                    jq_jit::ir::BinOp::Sub => v - n,
+                                                    jq_jit::ir::BinOp::Mul => v * n,
+                                                    jq_jit::ir::BinOp::Div => v / n,
+                                                    jq_jit::ir::BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
+                                                    _ => v,
+                                                };
+                                            }
+                                            push_jq_number_bytes(&mut compact_buf, v);
+                                        }
+                                    }
+                                }
+                            }
+                            compact_buf.extend_from_slice(b"\"\n");
+                        }
                     } else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);

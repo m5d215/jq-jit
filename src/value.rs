@@ -527,6 +527,12 @@ impl Value {
         let r = repr?;
         if !is_valid_json_number(&r) { return None; }
         let s: &str = &r;
+        // jq normalises negative zero to positive in the literal/eval path,
+        // so the negation must drop (not flip) the leading sign for any
+        // zero-valued repr. `-0.0` literal → `0.0`, `0.0 * -1` → `0.0`.
+        if r.parse::<f64>().map(|n| n == 0.0).unwrap_or(false) {
+            return Some(s.strip_prefix('-').map(Rc::from).unwrap_or_else(|| r.clone()));
+        }
         if let Some(rest) = s.strip_prefix('-') {
             Some(Rc::from(rest))
         } else {
