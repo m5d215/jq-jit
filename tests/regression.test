@@ -1583,3 +1583,18 @@ null
 0.0e0
 null
 0.0
+
+# Issue #153: -0.0 literal normalises to 0.0 (jq drops the leading minus)
+-0.0
+null
+0.0
+
+# Issue #153: -0.0 | tojson matches jq
+-0.0 | tojson
+null
+"0.0"
+
+# Issue #153: negated all-zero scientific literal
+-0e0
+null
+0
