@@ -2878,7 +2878,7 @@ pub fn rt_builtins() -> Value {
         "sort/0", "sort_by/1", "group_by/1", "unique/0", "unique_by/1",
         "reverse/0",
         "to_entries/0", "from_entries/0", "with_entries/1",
-        "paths/0", "paths/1", "leaf_paths/0", "path/1",
+        "paths/0", "paths/1", "path/1",
         "getpath/1", "setpath/2", "delpaths/1",
         "tojson/0", "fromjson/0",
         "ascii_downcase/0", "ascii_upcase/0",

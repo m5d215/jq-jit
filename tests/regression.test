@@ -271,7 +271,7 @@ null
 {"x":1,"y":2,"z":3}
 2
 
-# paths(f) and leaf_paths must drop the root (empty) path just like bare paths
+# paths(f) must drop the root (empty) path just like bare paths
 
 # paths(f) on a scalar yields no paths
 [paths(type == "string")]
@@ -287,11 +287,6 @@ null
 [paths(type == "string")]
 {"a":1,"b":{"c":"x"}}
 [["b","c"]]
-
-# leaf_paths on a scalar yields no paths
-[leaf_paths]
-"hello"
-[]
 
 # [.[] | select(. cmp N)] must respect jq's cross-type ordering, not only numbers
 
@@ -1598,3 +1593,8 @@ null
 -0e0
 null
 0
+
+# Issue #154: leaf_paths/0 dropped from builtins to match jq 1.8.1
+[builtins[] | select(test("leaf|^paths"))] | sort
+null
+["paths/0","paths/1"]
