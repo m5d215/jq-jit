@@ -1744,3 +1744,18 @@ null
 .a | index("z") + 1
 {"a":"hello"}
 1
+
+# Issue #163: computed remap fast-path raises on str + num instead of returning null
+try ({a: .x, b: (.y * 2), c: (.x + .y)}) catch .
+{"x":"a","y":1}
+"string (\"a\") and number (1) cannot be added"
+
+# Issue #163: same coverage for the standalone-array shape
+try ([.x, .y, .x + .y]) catch .
+{"x":"a","y":1}
+"string (\"a\") and number (1) cannot be added"
+
+# Issue #163: null + number still produces the number through the array path
+[.x, .y, .x + .y]
+{"x":null,"y":1}
+[null,1,1]
