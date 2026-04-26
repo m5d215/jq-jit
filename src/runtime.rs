@@ -2341,6 +2341,58 @@ fn with_regex<R>(pattern: &str, f: impl FnOnce(&regex::Regex) -> R) -> Result<R>
     Ok(f(re))
 }
 
+/// Iterate matches with jq/Oniguruma-style global semantics: after a
+/// non-zero-width match ending at `e`, attempt a zero-width match at `e`
+/// before advancing past `e`. The Rust `regex` crate's default `find_iter`
+/// suppresses that zero-width attempt to prevent infinite loops, which makes
+/// `match("a*"; "g")` on `"abc"` emit one fewer match than jq (issue #158).
+///
+/// The walker yields `(start, end)` pairs and re-runs `find_at` on demand —
+/// callers map the spans back to `regex::Match` / `regex::Captures` as
+/// needed (cheap because the spans are already validated).
+fn jq_match_spans(regex: &regex::Regex, s: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut pos: usize = 0;
+    let mut just_emitted_empty_at_end: Option<usize> = None;
+    while pos <= s.len() {
+        let m = match regex.find_at(s, pos) {
+            Some(m) => m,
+            None => break,
+        };
+        let (start, end) = (m.start(), m.end());
+        let is_empty = start == end;
+        if is_empty && just_emitted_empty_at_end == Some(end) {
+            // Already yielded a zero-width match at this position; advance one
+            // codepoint to avoid an infinite loop.
+            let next = next_char_boundary(s, pos);
+            if next == pos { break; }
+            pos = next;
+            just_emitted_empty_at_end = None;
+            continue;
+        }
+        spans.push((start, end));
+        if is_empty {
+            just_emitted_empty_at_end = Some(end);
+            pos = end;
+        } else {
+            just_emitted_empty_at_end = None;
+            pos = end;
+        }
+    }
+    spans
+}
+
+fn next_char_boundary(s: &str, pos: usize) -> usize {
+    if pos >= s.len() { return s.len() + 1; }
+    let bytes = s.as_bytes();
+    // Advance one codepoint by skipping bytes whose top two bits are `10`.
+    let mut p = pos + 1;
+    while p < s.len() && (bytes[p] & 0xC0) == 0x80 {
+        p += 1;
+    }
+    p
+}
+
 /// Parse jq regex flags string and return (pattern_with_inline_flags, is_global).
 /// Supported flags: i (case-insensitive), x (extended), s (dotall/single-line), g (global).
 fn apply_regex_flags(pattern: &str, flags: &Value) -> (String, bool) {
@@ -2447,14 +2499,24 @@ fn rt_match_global(v: &Value, re: &Value) -> Result<Value> {
                 let capture_names: Vec<Option<&str>> = regex.capture_names().skip(1).collect();
                 let num_groups = regex.captures_len();
                 let mut results = Vec::new();
+                let spans = jq_match_spans(regex, s);
                 if num_groups <= 1 {
-                    for m in regex.find_iter(s) {
-                        results.push(build_match_obj(&m, None, &capture_names, s));
+                    for (start, _) in &spans {
+                        if let Some(m) = regex.find_at(s, *start) {
+                            if m.start() == *start {
+                                results.push(build_match_obj(&m, None, &capture_names, s));
+                            }
+                        }
                     }
                 } else {
-                    for caps in regex.captures_iter(s) {
-                        let m = caps.get(0).unwrap();
-                        results.push(build_match_obj(&m, Some(&caps), &capture_names, s));
+                    for (start, _) in &spans {
+                        if let Some(caps) = regex.captures_at(s, *start) {
+                            if let Some(m) = caps.get(0) {
+                                if m.start() == *start {
+                                    results.push(build_match_obj(&m, Some(&caps), &capture_names, s));
+                                }
+                            }
+                        }
                     }
                 }
                 if results.is_empty() {
@@ -2496,7 +2558,11 @@ pub fn rt_capture_global(v: &Value, re: &Value) -> Result<Value> {
         (Value::Str(s), Value::Str(r)) => {
             with_regex(r, |regex| {
                 let mut results: Vec<Value> = Vec::new();
-                for caps in regex.captures_iter(s) {
+                for (start, _) in jq_match_spans(regex, s) {
+                    let caps = match regex.captures_at(s, start) {
+                        Some(c) if c.get(0).map(|m| m.start()) == Some(start) => c,
+                        _ => continue,
+                    };
                     let mut obj = new_objmap();
                     for name in regex.capture_names().flatten() {
                         if let Some(m) = caps.name(name) {
@@ -2519,8 +2585,11 @@ fn rt_scan(v: &Value, re: &Value) -> Result<Value> {
         (Value::Str(s), Value::Str(r)) => {
             with_regex(r, |regex| {
                 let has_captures = regex.captures_len() > 1;
-                if has_captures {
-                    let results: Vec<Value> = regex.captures_iter(s)
+                let spans = jq_match_spans(regex, s);
+                let results: Vec<Value> = if has_captures {
+                    spans.iter()
+                        .filter_map(|(start, _)| regex.captures_at(s, *start)
+                            .filter(|c| c.get(0).map(|m| m.start()) == Some(*start)))
                         .map(|caps| {
                             let groups: Vec<Value> = (1..caps.len())
                                 .map(|i| match caps.get(i) {
@@ -2530,14 +2599,13 @@ fn rt_scan(v: &Value, re: &Value) -> Result<Value> {
                                 .collect();
                             Value::Arr(Rc::new(groups))
                         })
-                        .collect();
-                    Value::Arr(Rc::new(results))
+                        .collect()
                 } else {
-                    let results: Vec<Value> = regex.find_iter(s)
-                        .map(|m| Value::from_str(m.as_str()))
-                        .collect();
-                    Value::Arr(Rc::new(results))
-                }
+                    spans.iter()
+                        .map(|(start, end)| Value::from_str(&s[*start..*end]))
+                        .collect()
+                };
+                Value::Arr(Rc::new(results))
             }).map(Ok)?
         }
         _ => bail!("scan requires string and regex"),

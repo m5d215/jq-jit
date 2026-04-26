@@ -1874,3 +1874,23 @@ null
 .a |= (. // 0)
 null
 {"a":0}
+
+# Issue #158: match("a*"; "g") yields a zero-width match right after each non-zero hit
+[ "abc" | match("a*"; "g") ] | length
+null
+4
+
+# Issue #158: same shape with multi-char prefix
+[ "aaa" | match("a*"; "g") ] | length
+null
+2
+
+# Issue #158: scan iterates with the same global semantics
+[ "abcabc" | scan("a*") ] | length
+null
+7
+
+# Issue #158: pure zero-width matches still match jq (no over-emission)
+[ "abc" | scan(".*?") ] | length
+null
+4
