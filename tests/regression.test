@@ -2025,3 +2025,18 @@ null
 [1, [.b, 3], 4] | flatten
 {"b":[[10,20]]}
 [1,10,20,3,4]
+
+# Issue #223: .a |= reduce range(N) as $x (.; . + $x) must seed acc from .a
+.a |= reduce range(10) as $x (.; . + $x)
+{"a":1}
+{"a":46}
+
+# Issue #223: same with non-zero init
+.a |= reduce range(10) as $x (.; . + $x)
+{"a":10}
+{"a":55}
+
+# Issue #223: literal-init still goes through fused path
+reduce range(10) as $x (0; . + $x)
+null
+45

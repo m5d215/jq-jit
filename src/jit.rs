@@ -1710,9 +1710,16 @@ impl Flattener {
 
                 // Detect fused numeric reduce: reduce range(from;to) as $x (num_init; f64_body)
                 // Keeps everything in f64 variables — zero Value boxing in the loop body.
+                //
+                // init=Input was previously allowed but `to_f64` silently coerces
+                // non-number Values to 0.0, so a string `.` input slipped through
+                // the f64 loop and returned the bare range sum instead of erroring
+                // (#223 type-violation case). Only allow numeric literals — any
+                // dynamic init falls back to the boxed reduce path that surfaces
+                // jq's "X and Y cannot be added" error.
                 let is_fused_range_f64 = if let Expr::Range { from, to, step } = source.as_ref() {
                     is_scalar(from) && is_scalar(to) && step.as_ref().is_none_or(|s| is_scalar(s))
-                        && matches!(init.as_ref(), Expr::Literal(Literal::Num(..)) | Expr::Input)
+                        && matches!(init.as_ref(), Expr::Literal(Literal::Num(..)))
                         && Self::is_pure_f64_expr(update, *var_index)
                 } else { false };
 
@@ -1736,7 +1743,15 @@ impl Flattener {
                         self.emit(JitOp::ToF64Var { dst_var: cur, src: from_val });
                         self.emit(JitOp::ToF64Var { dst_var: to_v, src: to_val });
                         self.emit(JitOp::ToF64Var { dst_var: step_v, src: step_val });
-                        self.emit(JitOp::ToF64Var { dst_var: acc_f64, src: acc_val });
+                        // The MoveToVar at the start of this Reduce arm consumed
+                        // `acc_val` and replaced the slot with Null, so reading
+                        // from it directly would seed the f64 accumulator with 0
+                        // instead of the init expression's value (#223). Re-fetch
+                        // from the accumulator variable we just wrote.
+                        let acc_init = self.alloc_slot();
+                        self.emit(JitOp::GetVar { dst: acc_init, var_index: *acc_index });
+                        self.emit(JitOp::ToF64Var { dst_var: acc_f64, src: acc_init });
+                        self.emit(JitOp::Drop { slot: acc_init });
                         self.emit(JitOp::Drop { slot: from_val });
                         self.emit(JitOp::Drop { slot: to_val });
                         self.emit(JitOp::Drop { slot: step_val });
