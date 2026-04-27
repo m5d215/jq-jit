@@ -2142,3 +2142,8 @@ null
 [127] | implode | length
 null
 1
+
+# Issue #185: regex unknown flag rejected (not silently ignored)
+test("a"; "ix") | not
+"abc"
+false

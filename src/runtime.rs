@@ -147,7 +147,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "indices" | "rindices" => binary_arg(args, rt_indices),
         "test" => {
             if args.len() >= 3 {
-                let (pat, _) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2]);
+                let (pat, _) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2])?;
                 rt_test(&args[0], &Value::from_string(pat))
             } else {
                 binary_arg(args, rt_test)
@@ -155,7 +155,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         }
         "match" => {
             if args.len() >= 3 {
-                let (pat, global) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2]);
+                let (pat, global) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2])?;
                 let re = Value::from_string(pat);
                 if global {
                     rt_match_global(&args[0], &re)
@@ -168,7 +168,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         }
         "capture" => {
             if args.len() >= 3 {
-                let (pat, global) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2]);
+                let (pat, global) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2])?;
                 let re = Value::from_string(pat);
                 if global {
                     rt_capture_global(&args[0], &re)
@@ -181,7 +181,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         }
         "scan" => {
             if args.len() >= 3 {
-                let (pat, _) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2]);
+                let (pat, _) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2])?;
                 rt_scan(&args[0], &Value::from_string(pat))
             } else {
                 binary_arg(args, rt_scan)
@@ -190,7 +190,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "sub" | "gsub" => {
             if args.len() >= 4 {
                 // sub/gsub with flags: input, regex, replacement, flags
-                let (pat, _) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[3]);
+                let (pat, _) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[3])?;
                 rt_sub_gsub(&args[0], &Value::from_string(pat), &args[2], name == "gsub")
             } else if args.len() >= 3 {
                 rt_sub_gsub(&args[0], &args[1], &args[2], name == "gsub")
@@ -1781,7 +1781,7 @@ fn rt_split(v: &Value, sep: &Value) -> Result<Value> {
 fn rt_regex_split(v: &Value, re: &Value, flags: &Value) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
-            let (pat, _global) = apply_regex_flags(r.as_str(), flags);
+            let (pat, _global) = apply_regex_flags(r.as_str(), flags)?;
             with_regex(&pat, |regex| {
                 let parts: Vec<Value> = regex.split(s.as_str())
                     .map(Value::from_str)
@@ -2416,18 +2416,24 @@ fn next_char_boundary(s: &str, pos: usize) -> usize {
 
 /// Parse jq regex flags string and return (pattern_with_inline_flags, is_global).
 /// Supported flags: i (case-insensitive), x (extended), s (dotall/single-line), g (global).
-fn apply_regex_flags(pattern: &str, flags: &Value) -> (String, bool) {
+fn apply_regex_flags(pattern: &str, flags: &Value) -> Result<(String, bool)> {
     let flags_str = match flags {
         Value::Str(s) => s.as_str(),
-        _ => return (pattern.to_string(), false),
+        _ => return Ok((pattern.to_string(), false)),
     };
+    // jq accepts g, i, l, m, n, p, s, x. Any other character — even mixed in
+    // with valid ones — rejects the whole modifier string.
+    if !flags_str.chars().all(|c| matches!(c, 'g' | 'i' | 'l' | 'm' | 'n' | 'p' | 's' | 'x')) {
+        bail!("{} is not a valid modifier string", flags_str);
+    }
     let mut inline = String::new();
     let mut global = false;
     for ch in flags_str.chars() {
         match ch {
             'i' | 'x' | 's' => inline.push(ch),
             'g' => global = true,
-            _ => {} // ignore unknown flags (jq behavior)
+            // l, m, n, p have no inline equivalent in onig — accepted but ignored.
+            _ => {}
         }
     }
     let pat = if inline.is_empty() {
@@ -2435,7 +2441,7 @@ fn apply_regex_flags(pattern: &str, flags: &Value) -> (String, bool) {
     } else {
         format!("(?{}){}", inline, pattern)
     };
-    (pat, global)
+    Ok((pat, global))
 }
 
 fn rt_test(v: &Value, re: &Value) -> Result<Value> {
@@ -2661,7 +2667,7 @@ pub struct SubGsubSegment {
 /// Find regex matches and return segments for capture-aware sub/gsub replacement.
 /// Returns segments alternating: literal, capture_obj, literal, capture_obj, ..., literal.
 pub fn sub_gsub_segments(input: &str, pattern: &str, flags: &Value, global: bool) -> Result<Vec<SubGsubSegment>> {
-    let (pat, flag_global) = apply_regex_flags(pattern, flags);
+    let (pat, flag_global) = apply_regex_flags(pattern, flags)?;
     let is_global = global || flag_global;
     with_regex(&pat, |regex| {
         let mut segments = Vec::new();
