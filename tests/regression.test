@@ -2050,3 +2050,13 @@ null
 .[0]
 null
 null
+
+# Issue #198: .a // .b on object still works
+.a // .b
+{"a":null,"b":2}
+2
+
+# Issue #198: .a // .b returns primary when truthy
+.a // .b
+{"a":1,"b":2}
+1

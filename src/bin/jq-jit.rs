@@ -7958,9 +7958,17 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref prim_field, ref fallback_field)) = field_field_alt {
-                    // .field1 // .field2: try primary, if null/false/missing use fallback
+                    // .field1 // .field2: try primary, if null/false/missing use
+                    // fallback. `//` must not swallow type errors (#198), so non-
+                    // object, non-null inputs flow through the eval path so
+                    // `.field1` surfaces "Cannot index ... with string".
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
+                        if raw.is_empty() || (raw[0] != b'{' && raw != b"null") {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            return Ok(());
+                        }
                         let use_primary = if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, prim_field) {
                             let pval = &raw[vs..ve];
                             if pval != b"null" && pval != b"false" {
@@ -15638,6 +15646,11 @@ fn real_main() {
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
+                    if raw.is_empty() || (raw[0] != b'{' && raw != b"null") {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        return Ok(());
+                    }
                     let use_primary = if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, prim_field) {
                         let pval = &raw[vs..ve];
                         if pval != b"null" && pval != b"false" {
