@@ -2329,16 +2329,19 @@ impl RegexCache {
     }
 }
 
-// Global regex cache (safe: single-threaded)
-struct GlobalRegexCache(std::cell::UnsafeCell<Option<RegexCache>>);
-unsafe impl Sync for GlobalRegexCache {}
-static REGEX_CACHE: GlobalRegexCache = GlobalRegexCache(std::cell::UnsafeCell::new(None));
+// Per-thread regex cache. Each `cargo test` worker keeps its own cache so
+// parallel test runs cannot trample the LRU; the previous global cache was
+// the kind of thing `--test-threads=1` was hiding.
+thread_local! {
+    static REGEX_CACHE: std::cell::RefCell<Option<RegexCache>> = const { std::cell::RefCell::new(None) };
+}
 
 fn with_regex<R>(pattern: &str, f: impl FnOnce(&regex::Regex) -> R) -> Result<R> {
-    let cache = unsafe { &mut *REGEX_CACHE.0.get() };
-    let cache = cache.get_or_insert_with(RegexCache::new);
-    let re = cache.get(pattern)?;
-    Ok(f(re))
+    REGEX_CACHE.with_borrow_mut(|cache| {
+        let cache = cache.get_or_insert_with(RegexCache::new);
+        let re = cache.get(pattern)?;
+        Ok(f(re))
+    })
 }
 
 /// Iterate matches with jq/Oniguruma-style global semantics: after a

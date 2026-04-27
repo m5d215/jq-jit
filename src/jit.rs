@@ -11,13 +11,39 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{Result, bail};
+
+// Process-wide lock guarding the entire JIT path (compile + execute).
+//
+// jq-jit's JIT layer carries non-trivial mutable global state — the error
+// flag/value/message slots, the closure-ops vector, and the reusable JitEnv —
+// none of which are thread-safe. The codegen side embeds the address of
+// `JIT_ERROR_FLAG` directly into JIT'd machine code, so making these
+// thread-locals would require non-trivial codegen changes. Instead, every
+// `JitCompiler` instance acquires this lock for its full lifetime, which
+// transitively covers any `execute_jit*` call routed through that compiler.
+// Two threads that both want to JIT will serialize at `JitCompiler::new`.
+//
+// This is what previously hid behind `--test-threads=1` in CI: parallel test
+// runs were instantiating multiple `JitCompiler`s and racing on the globals,
+// which surfaced as intermittent SIGSEGVs. With the lock held the globals
+// behave as if jq-jit were truly single-threaded, regardless of how many
+// threads `cargo test` spawns.
+static JIT_GLOBAL_LOCK: Mutex<()> = Mutex::new(());
+
+fn jit_global_lock() -> MutexGuard<'static, ()> {
+    // Poison cannot corrupt JIT-allocated memory we care about: a panic
+    // mid-compile leaves the globals in a transient state that the next
+    // compiler reinitialises. Recover the guard rather than aborting.
+    JIT_GLOBAL_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
 
 // Thread-local error storage for JIT runtime functions.
 // When a fallible runtime function encounters an error, it stores the error
 // message here. The CheckError JitOp checks this and branches to catch handlers.
-// Global statics — safe because jq-jit is single-threaded (uses Rc, not Arc).
+// Access is serialised by `JIT_GLOBAL_LOCK` (held by the live `JitCompiler`).
 struct GlobalCell<T>(std::cell::UnsafeCell<T>);
 unsafe impl<T> Sync for GlobalCell<T> {}
 
@@ -6755,19 +6781,21 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             return 0;
         }
         if name == "__env__" {
-            // Cache env object — environment is constant during execution
-            struct EnvCache(std::cell::UnsafeCell<Option<Value>>);
-            unsafe impl Sync for EnvCache {}
-            static ENV_CACHE: EnvCache = EnvCache(std::cell::UnsafeCell::new(None));
-            let cached = &mut *ENV_CACHE.0.get();
-            if cached.is_none() {
-                let mut obj = crate::value::new_objmap();
-                for (k, v) in std::env::vars() {
-                    obj.insert(crate::value::KeyStr::from(k), Value::from_string(v));
-                }
-                *cached = Some(Value::object_from_map(obj));
+            // Cache env object — environment is constant during execution.
+            thread_local! {
+                static ENV_CACHE: RefCell<Option<Value>> = const { RefCell::new(None) };
             }
-            std::ptr::write(dst, cached.as_ref().unwrap().clone());
+            let env_value = ENV_CACHE.with_borrow_mut(|cached| {
+                if cached.is_none() {
+                    let mut obj = crate::value::new_objmap();
+                    for (k, v) in std::env::vars() {
+                        obj.insert(crate::value::KeyStr::from(k), Value::from_string(v));
+                    }
+                    *cached = Some(Value::object_from_map(obj));
+                }
+                cached.as_ref().unwrap().clone()
+            });
+            std::ptr::write(dst, env_value);
             return 0;
         }
         if name == "__each_error__" {
@@ -7804,6 +7832,13 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
 }
 
 pub struct JitCompiler {
+    /// Held for the entire lifetime of this compiler so concurrent threads
+    /// cannot trample the JIT globals (`JIT_ERROR_FLAG`, `JIT_CLOSURE_OPS`,
+    /// `REUSABLE_ENV`, ...). Dropped automatically when the compiler is
+    /// dropped, after every JIT'd function pointer it owns has been
+    /// invalidated. Field order matters — `_lock` is first so it is released
+    /// last, after `module` has freed its mmap'd code pages.
+    _lock: MutexGuard<'static, ()>,
     module: JITModule,
     ctx: cranelift_codegen::Context,
     func_ctx: FunctionBuilderContext,
@@ -7821,6 +7856,9 @@ pub struct JitCompiler {
 
 impl JitCompiler {
     pub fn new() -> Result<Self> {
+        // Acquire the global lock before touching any cranelift or
+        // jq-jit JIT state. See `JIT_GLOBAL_LOCK` for rationale.
+        let _lock = jit_global_lock();
         let mut flag_builder = settings::builder();
         flag_builder.set("opt_level", "speed")?;
         let isa_builder = cranelift_native::builder().map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -7914,6 +7952,7 @@ impl JitCompiler {
         declare_rt_funcs(&mut module, &mut rt_funcs)?;
 
         Ok(JitCompiler {
+            _lock,
             module, ctx: cranelift_codegen::Context::new(),
             func_ctx: FunctionBuilderContext::new(), rt_funcs,
             _string_constants: Vec::new(), _repr_constants: Vec::new(),

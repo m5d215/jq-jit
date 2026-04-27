@@ -2,6 +2,7 @@
 //!
 //! Uses Vec-backed ordered map for objects (optimal for typical small JSON objects).
 
+use std::cell::{RefCell, UnsafeCell};
 use std::fmt;
 use std::rc::Rc;
 
@@ -10,30 +11,39 @@ use anyhow::{Result, bail};
 /// Inline-optimized string for object keys (≤24 bytes stored on stack, no heap alloc).
 pub type KeyStr = compact_str::CompactString;
 
-// Global pool of Vec buffers for ObjMap reuse.
-// Safe because jq-jit is single-threaded (uses Rc, not Arc).
-struct ObjMapPool(std::cell::UnsafeCell<Vec<Vec<(KeyStr, Value)>>>);
-unsafe impl Sync for ObjMapPool {}
-
-static OBJMAP_POOL: ObjMapPool = ObjMapPool(std::cell::UnsafeCell::new(Vec::new()));
+// Per-thread pool of Vec buffers for ObjMap reuse. Each thread keeps its own
+// pool — `cargo test` may run multiple test threads concurrently, and a shared
+// global pool was racy (the previous implementation hid this behind
+// `--test-threads=1` in CI). Thread-locality also matches the runtime's
+// `Rc` / `!Send` discipline.
+//
+// The bare `UnsafeCell` (vs `RefCell`) is a deliberate hot-path optimisation:
+// pool ops are millions-per-bench and `RefCell::borrow_mut`'s flag check
+// shows up as a measurable regression on `field_access` / `array construct`.
+// Safety: each thread has its own cell, and the access patterns inside
+// `pool_get` / `pool_return` / `rc_objmap_pool_*` never re-enter the same
+// pool while a `&mut` is live (drops in `pool_return` only touch the
+// `RC_OBJMAP_POOL` via `pool_value`, which is a different cell).
+thread_local! {
+    static OBJMAP_POOL: UnsafeCell<Vec<Vec<(KeyStr, Value)>>> = const { UnsafeCell::new(Vec::new()) };
+}
 
 const OBJMAP_POOL_MAX: usize = 64;
 
-// Global pool of Rc<ObjMap> to avoid repeated Rc alloc/dealloc.
+// Per-thread pool of Rc<ObjMap> to avoid repeated Rc alloc/dealloc.
 // When an Rc<ObjMap> with refcount=1 is dropped, we clear entries and pool the Rc.
 // On next alloc, we reuse the Rc memory instead of calling malloc.
-struct RcObjMapPool(std::cell::UnsafeCell<Vec<*const ObjMap>>);
-unsafe impl Sync for RcObjMapPool {}
-
-static RC_OBJMAP_POOL: RcObjMapPool = RcObjMapPool(std::cell::UnsafeCell::new(Vec::new()));
+thread_local! {
+    static RC_OBJMAP_POOL: UnsafeCell<Vec<*const ObjMap>> = const { UnsafeCell::new(Vec::new()) };
+}
 
 const RC_OBJMAP_POOL_MAX: usize = 32;
 
 /// Try to recycle an Rc<ObjMap> instead of allocating a new one.
 #[inline]
 pub fn rc_objmap_pool_get(cap: usize) -> Rc<ObjMap> {
-    let pool = unsafe { &mut *RC_OBJMAP_POOL.0.get() };
-    if let Some(raw) = pool.pop() {
+    let popped = RC_OBJMAP_POOL.with(|cell| unsafe { (*cell.get()).pop() });
+    if let Some(raw) = popped {
         // Safety: raw was produced by Rc::into_raw and has refcount=1
         let mut rc = unsafe { Rc::from_raw(raw) };
         let map = Rc::get_mut(&mut rc).unwrap();
@@ -52,8 +62,7 @@ pub fn rc_objmap_pool_return(mut rc: Rc<ObjMap>) -> bool {
     if Rc::strong_count(&rc) != 1 {
         return false;
     }
-    let pool = unsafe { &mut *RC_OBJMAP_POOL.0.get() };
-    if pool.len() >= RC_OBJMAP_POOL_MAX {
+    if RC_OBJMAP_POOL.with(|cell| unsafe { (*cell.get()).len() }) >= RC_OBJMAP_POOL_MAX {
         return false;
     }
     // Clear entries and pool the Vec buffer
@@ -62,19 +71,21 @@ pub fn rc_objmap_pool_return(mut rc: Rc<ObjMap>) -> bool {
     pool_return(old_entries);
     // Pool the Rc itself (prevents deallocation)
     let raw = Rc::into_raw(rc);
-    pool.push(raw);
+    RC_OBJMAP_POOL.with(|cell| unsafe { (*cell.get()).push(raw) });
     true
 }
 
 #[inline]
 fn pool_get(cap: usize) -> Vec<(KeyStr, Value)> {
-    let pool = unsafe { &mut *OBJMAP_POOL.0.get() };
-    if let Some(v) = pool.pop() {
-        if v.capacity() >= cap {
-            return v;
+    OBJMAP_POOL.with(|cell| {
+        let pool = unsafe { &mut *cell.get() };
+        if let Some(v) = pool.pop() {
+            if v.capacity() >= cap {
+                return v;
+            }
         }
-    }
-    Vec::with_capacity(cap)
+        Vec::with_capacity(cap)
+    })
 }
 
 #[inline]
@@ -94,10 +105,12 @@ fn pool_return(mut v: Vec<(KeyStr, Value)>) {
     } else {
         v.clear();
     }
-    let pool = unsafe { &mut *OBJMAP_POOL.0.get() };
-    if pool.len() < OBJMAP_POOL_MAX {
-        pool.push(v);
-    }
+    OBJMAP_POOL.with(|cell| {
+        let pool = unsafe { &mut *cell.get() };
+        if pool.len() < OBJMAP_POOL_MAX {
+            pool.push(v);
+        }
+    });
 }
 
 /// Recycle Rc<ObjMap> from a consumed Value to avoid repeated alloc/dealloc.
@@ -5222,10 +5235,11 @@ fn write_jq_number(w: &mut dyn io::Write, n: f64) -> io::Result<()> {
     write!(w, "{}", n)
 }
 
-// Reusable String buffer for pretty-print output.
-struct PrettyBuf(std::cell::UnsafeCell<String>);
-unsafe impl Sync for PrettyBuf {}
-static PRETTY_BUF: PrettyBuf = PrettyBuf(std::cell::UnsafeCell::new(String::new()));
+// Reusable String buffer for pretty-print output. Per-thread to keep
+// `cargo test` parallel runs honest — see OBJMAP_POOL.
+thread_local! {
+    static PRETTY_BUF: RefCell<String> = const { RefCell::new(String::new()) };
+}
 
 /// Write a Value as pretty JSON + newline, directly to writer.
 /// For scalar values and small containers, uses stack buffer to avoid String allocation.
@@ -5252,12 +5266,13 @@ pub fn write_value_pretty_line_color(w: &mut dyn io::Write, v: &Value, indent: u
             _ => {}
         }
     }
-    // Reuse a global String buffer to avoid per-value allocation
-    let out = unsafe { &mut *PRETTY_BUF.0.get() };
-    out.clear();
-    write_pretty_to_string(out, v, 0, indent, use_tab, sort_keys, color);
-    w.write_all(out.as_bytes())?;
-    w.write_all(b"\n")
+    // Reuse a per-thread String buffer to avoid per-value allocation
+    PRETTY_BUF.with_borrow_mut(|out| {
+        out.clear();
+        write_pretty_to_string(out, v, 0, indent, use_tab, sort_keys, color);
+        w.write_all(out.as_bytes())?;
+        w.write_all(b"\n")
+    })
 }
 
 /// Write a Value as compact JSON directly to an io::Write, using precise repr when available.
