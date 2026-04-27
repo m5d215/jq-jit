@@ -2060,3 +2060,18 @@ null
 .a // .b
 {"a":1,"b":2}
 1
+
+# Issue #199: select(.a < 0) on missing field uses jq's total order (null<N=true)
+select(.a < 0)
+{}
+{}
+
+# Issue #199: select(.a < 0) on object with null field still passes total-order
+select(.a < 0)
+{"a":null}
+{"a":null}
+
+# Issue #199: select(.a > N) on object with non-numeric field
+select(.a > 1)
+{"a":2}
+{"a":2}
