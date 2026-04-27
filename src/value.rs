@@ -5043,6 +5043,7 @@ fn push_json_string(out: &mut String, s: &str) {
             0x08 => b'b' as u16 | 0x100,
             0x0c => b'f' as u16 | 0x100,
             c if c < 0x20 => c as u16,
+            0x7f => 0x7f,
             _ => continue,
         };
         if start < i {
@@ -5165,7 +5166,7 @@ use std::io;
 fn write_json_string(w: &mut dyn io::Write, s: &str) -> io::Result<()> {
     let bytes = s.as_bytes();
     // Find first byte needing escape
-    let first_esc = bytes.iter().position(|&b| b == b'"' || b == b'\\' || b < 0x20);
+    let first_esc = bytes.iter().position(|&b| b == b'"' || b == b'\\' || b < 0x20 || b == 0x7f);
     if first_esc.is_none() {
         // No escapes: write "string" in minimal calls
         if bytes.len() <= 126 {
@@ -5195,7 +5196,7 @@ fn write_json_string(w: &mut dyn io::Write, s: &str) -> io::Result<()> {
             b'\t' => b"\\t",
             0x08 => b"\\b",
             0x0c => b"\\f",
-            c if c < 0x20 => {
+            c if c < 0x20 || c == 0x7f => {
                 if start < i { w.write_all(&bytes[start..i])?; }
                 write!(w, "\\u{:04x}", c)?;
                 start = i + 1;
@@ -5479,7 +5480,7 @@ fn push_compact_value(buf: &mut Vec<u8>, v: &Value) {
             for (i, (k, val)) in o.iter().enumerate() {
                 let kb = k.as_bytes();
                 let klen = kb.len();
-                let key_needs_escape = kb.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20);
+                let key_needs_escape = kb.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20 || b == 0x7f);
                 if !key_needs_escape {
                     // Write ,"key": (or "key": for first) in a single memcpy
                     let prefix = if i > 0 { 1 } else { 0 }; // comma
@@ -5551,7 +5552,7 @@ fn push_json_string_to_vec(buf: &mut Vec<u8>, s: &str) {
     // Ultra-fast path for single-byte strings (common object keys like "x", "y")
     if len == 1 {
         let c = bytes[0];
-        if c >= 0x20 && c != b'"' && c != b'\\' {
+        if c >= 0x20 && c != b'"' && c != b'\\' && c != 0x7f {
             buf.reserve(3);
             unsafe {
                 let dst = buf.as_mut_ptr().add(buf.len());
@@ -5564,7 +5565,7 @@ fn push_json_string_to_vec(buf: &mut Vec<u8>, s: &str) {
         }
     }
     // Fast path: no escapes needed — write "str" in one contiguous block
-    let needs_escape = bytes.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20);
+    let needs_escape = bytes.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20 || b == 0x7f);
     if !needs_escape {
         buf.reserve(len + 2);
         // Safety: we just reserved enough space
@@ -5589,7 +5590,7 @@ fn push_json_string_to_vec(buf: &mut Vec<u8>, s: &str) {
             b'\t' => b't',
             0x08 => b'b',
             0x0c => b'f',
-            c if c < 0x20 => {
+            c if c < 0x20 || c == 0x7f => {
                 if start < i { buf.extend_from_slice(&bytes[start..i]); }
                 let hex = [
                     b'\\', b'u', b'0', b'0',
@@ -5649,7 +5650,7 @@ fn write_compact_buf_inner(v: &Value, buf: &mut [u8], pos: &mut usize) -> bool {
         }
         Value::Str(s) => {
             let bytes = s.as_bytes();
-            let needs_escape = bytes.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20);
+            let needs_escape = bytes.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20 || b == 0x7f);
             if needs_escape { return false; } // fall back to slow path
             if *pos + bytes.len() + 2 > buf.len() { return false; }
             buf[*pos] = b'"';
@@ -5673,7 +5674,7 @@ fn write_compact_buf_inner(v: &Value, buf: &mut [u8], pos: &mut usize) -> bool {
                 if i > 0 { push!(b","); }
                 // Write key
                 let kb = k.as_bytes();
-                let key_escape = kb.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20);
+                let key_escape = kb.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20 || b == 0x7f);
                 if key_escape { return false; }
                 if *pos + kb.len() + 3 > buf.len() { return false; } // "key":
                 buf[*pos] = b'"';

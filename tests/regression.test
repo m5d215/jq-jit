@@ -2137,3 +2137,8 @@ null
 0
 1
 2
+
+# Issue #192: U+007F (DEL) escapes as  in JSON output
+[127] | implode | length
+null
+1
