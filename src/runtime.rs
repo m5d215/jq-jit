@@ -8,6 +8,16 @@ use std::rc::Rc;
 use anyhow::{Result, bail};
 use crate::value::{Value, ObjMap, KeyStr, new_objmap};
 
+// System libm bindings used to match jq's last-digit precision on
+// gamma-family functions, and to obtain logb's f64 return (libm crate
+// only exposes ilogb, which collapses zero/NaN to i32::MIN).
+unsafe extern "C" {
+    fn tgamma(x: f64) -> f64;
+    fn lgamma(x: f64) -> f64;
+    fn lgamma_r(x: f64, sign: *mut i32) -> f64;
+    fn logb(x: f64) -> f64;
+}
+
 /// Dispatch a builtin call by name.
 pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
     match name {
@@ -312,16 +322,17 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             _ => bail!("exp10 requires number"),
         }),
         "gamma" | "tgamma" => unary_op(args, |v| match v {
-            Value::Num(n, _) => Ok(Value::number(libm::tgamma(*n))),
+            Value::Num(n, _) => Ok(Value::number(unsafe { tgamma(*n) })),
             _ => bail!("{} requires number", name),
         }),
         "lgamma" => unary_op(args, |v| match v {
-            Value::Num(n, _) => Ok(Value::number(libm::lgamma(*n))),
+            Value::Num(n, _) => Ok(Value::number(unsafe { lgamma(*n) })),
             _ => bail!("lgamma requires number"),
         }),
         "lgamma_r" => unary_op(args, |v| match v {
             Value::Num(n, _) => {
-                let (r, sign) = libm::lgamma_r(*n);
+                let mut sign: i32 = 0;
+                let r = unsafe { lgamma_r(*n, &mut sign) };
                 Ok(Value::Arr(Rc::new(vec![Value::number(r), Value::number(sign as f64)])))
             }
             _ => bail!("lgamma_r requires number"),
@@ -372,10 +383,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                             *n * 2f64.powi(-e)
                         }
                         "exponent" => libm::ilogb(*n) as f64,
-                        "logb" => {
-                            let e = libm::ilogb(*n);
-                            e as f64
-                        }
+                        "logb" => unsafe { logb(*n) },
                         "nearbyint" => libm::rint(*n),
                         "trunc" => n.trunc(),
                         "rint" => libm::rint(*n),
