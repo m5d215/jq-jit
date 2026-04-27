@@ -1989,3 +1989,8 @@ false
 [.a] | any(. > 0)
 {"a":null}
 false
+
+# Issue #181: env | type used to panic on shutdown when stdin was provided
+env | type
+{}
+"object"
