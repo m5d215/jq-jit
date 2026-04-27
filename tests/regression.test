@@ -2125,3 +2125,8 @@ reverse
 [.a = (1, 2)]
 {"a":1}
 [{"a":1},{"a":2}]
+
+# Issue #187: getpath on null short-circuits any path component
+getpath([{}])
+null
+null

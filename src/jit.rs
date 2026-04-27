@@ -7153,7 +7153,9 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                             let actual = if idx < 0 { (a.len() as i64 + idx) as usize } else { idx as usize };
                             current = a.get(actual).cloned().unwrap_or(Value::Null);
                         }
-                        (Value::Null, _) => { current = Value::Null; }
+                        (Value::Null, Value::Str(_)) | (Value::Null, Value::Num(_, _)) | (Value::Null, Value::Obj(_)) => {
+                            current = Value::Null;
+                        }
                         _ => { current = Value::Null; ok = false; break; }
                     }
                 }

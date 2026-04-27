@@ -2014,9 +2014,9 @@ pub fn rt_getpath(v: &Value, path: &Value) -> Result<Value> {
                         let actual = if idx < 0 { (a.len() as i64 + idx) as usize } else { idx as usize };
                         current = a.get(actual).cloned().unwrap_or(Value::Null);
                     }
-                    // jq allows string or number keys through null (yielding null) but
-                    // still errors on other key types — matches `.[null]` on null.
-                    (Value::Null, Value::Str(_)) | (Value::Null, Value::Num(_, _)) => {
+                    // jq short-circuits getpath on null for string/number/object keys
+                    // (matching `.[k]` on null), but still errors for null/bool/array keys.
+                    (Value::Null, Value::Str(_)) | (Value::Null, Value::Num(_, _)) | (Value::Null, Value::Obj(_)) => {
                         current = Value::Null;
                     }
                     // jq errors on type-incompatible path elements (issue #77).
