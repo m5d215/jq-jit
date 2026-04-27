@@ -8,6 +8,16 @@ use std::rc::Rc;
 use anyhow::{Result, bail};
 use crate::value::{Value, ObjMap, KeyStr, new_objmap};
 
+// System libm bindings used to match jq's last-digit precision on
+// gamma-family functions, and to obtain logb's f64 return (libm crate
+// only exposes ilogb, which collapses zero/NaN to i32::MIN).
+unsafe extern "C" {
+    fn tgamma(x: f64) -> f64;
+    fn lgamma(x: f64) -> f64;
+    fn lgamma_r(x: f64, sign: *mut i32) -> f64;
+    fn logb(x: f64) -> f64;
+}
+
 /// Dispatch a builtin call by name.
 pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
     match name {
@@ -312,16 +322,17 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             _ => bail!("exp10 requires number"),
         }),
         "gamma" | "tgamma" => unary_op(args, |v| match v {
-            Value::Num(n, _) => Ok(Value::number(libm::tgamma(*n))),
+            Value::Num(n, _) => Ok(Value::number(unsafe { tgamma(*n) })),
             _ => bail!("{} requires number", name),
         }),
         "lgamma" => unary_op(args, |v| match v {
-            Value::Num(n, _) => Ok(Value::number(libm::lgamma(*n))),
+            Value::Num(n, _) => Ok(Value::number(unsafe { lgamma(*n) })),
             _ => bail!("lgamma requires number"),
         }),
         "lgamma_r" => unary_op(args, |v| match v {
             Value::Num(n, _) => {
-                let (r, sign) = libm::lgamma_r(*n);
+                let mut sign: i32 = 0;
+                let r = unsafe { lgamma_r(*n, &mut sign) };
                 Ok(Value::Arr(Rc::new(vec![Value::number(r), Value::number(sign as f64)])))
             }
             _ => bail!("lgamma_r requires number"),
@@ -372,10 +383,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                             *n * 2f64.powi(-e)
                         }
                         "exponent" => libm::ilogb(*n) as f64,
-                        "logb" => {
-                            let e = libm::ilogb(*n);
-                            e as f64
-                        }
+                        "logb" => unsafe { logb(*n) },
                         "nearbyint" => libm::rint(*n),
                         "trunc" => n.trunc(),
                         "rint" => libm::rint(*n),
@@ -3051,7 +3059,7 @@ pub fn rt_builtins() -> Value {
     // feature-probing scripts (`builtins | contains(...)`) can find it.
     let builtins = vec![
         "length/0", "utf8bytelength/0", "keys/0", "keys_unsorted/0", "values/0",
-        "has/1", "has/2", "in/1",
+        "has/1", "in/1",
         "contains/1", "inside/1",
         "startswith/1", "endswith/1", "ltrimstr/1", "rtrimstr/1", "trimstr/1",
         "split/1", "split/2", "splits/1", "splits/2", "join/1",
@@ -3073,7 +3081,7 @@ pub fn rt_builtins() -> Value {
         "sin/0", "cos/0", "tan/0", "asin/0", "acos/0", "atan/0",
         "sinh/0", "cosh/0", "tanh/0", "asinh/0", "acosh/0", "atanh/0",
         "atan2/2", "hypot/2",
-        "significand/0", "exponent/0", "logb/0",
+        "significand/0", "logb/0",
         "nearbyint/0", "trunc/0", "rint/0",
         "j0/0", "j1/0", "cbrt/0",
         "gamma/0", "tgamma/0", "lgamma/0", "lgamma_r/0",
@@ -3104,26 +3112,22 @@ pub fn rt_builtins() -> Value {
         "limit/2", "first/0", "first/1", "last/0", "last/1",
         "nth/1", "nth/2",
         "while/2", "until/2", "repeat/1",
-        "recurse/0", "recurse/1", "recurse/2", "recurse_down/0",
+        "recurse/0", "recurse/1", "recurse/2",
         "transpose/0",
         "now/0", "gmtime/0", "localtime/0", "mktime/0",
         "strftime/1", "strflocaltime/1", "strptime/1",
-        "todate/0", "fromdate/0",
+        "todate/0", "fromdate/0", "date/0",
         "fromdateiso8601/0", "todateiso8601/0",
-        "fromisodate/0", "toisodate/0",
         "modulemeta/0", "builtins/0",
         "isempty/1",
         "del/1", "pick/1",
-        "label/1",
         "halt/0", "halt_error/0", "halt_error/1",
         "bsearch/1",
         "walk/1",
         "INDEX/1", "INDEX/2", "IN/1", "IN/2",
         "JOIN/2", "JOIN/3", "JOIN/4",
         "skip/2",
-        "have_decnum/0", "have_sql/0", "have_bom/0",
-        "@base64/0", "@base64d/0", "@uri/0", "@csv/0", "@tsv/0",
-        "@html/0", "@json/0", "@text/0", "@sh/0",
+        "have_decnum/0",
         "exec/1", "exec/2", "execv/1",
         "fromcsv/0", "fromtsv/0", "fromcsvh/0", "fromcsvh/1", "fromtsvh/0", "fromtsvh/1",
         "toboolean/0",

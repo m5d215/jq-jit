@@ -4346,14 +4346,14 @@ fn eval_call_builtin(name: &str, args: &[Expr], input: Value, env: &EnvRef, cb: 
             });
         }
         ("modf", 0) => {
-            // modf returns [fractional_part, integer_part], with both
-            // truncated toward zero (matches libc modf).
+            // modf returns [fractional_part, integer_part]. Use libm::modf
+            // so the fractional part keeps the sign of the input (e.g.
+            // -1.0 → (-0.0, -1.0)) — naive subtraction loses that.
             let n = match &input {
                 Value::Num(n, _) => *n,
                 _ => bail!("modf requires number input"),
             };
-            let int_part = n.trunc();
-            let frac_part = n - int_part;
+            let (frac_part, int_part) = libm::modf(n);
             return cb(Value::Arr(Rc::new(vec![
                 Value::number(frac_part),
                 Value::number(int_part),

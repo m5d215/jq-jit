@@ -1287,13 +1287,10 @@ impl Parser {
         Ok(result)
     }
 
-    fn build_object_destructure_varmap(&mut self, value: Expr, pats: &[(String, Pattern)], var_map: &std::collections::HashMap<String, u16>, body: Expr) -> Result<Expr> {
+    fn build_object_destructure_varmap(&mut self, value: Expr, pats: &[(Expr, Pattern)], var_map: &std::collections::HashMap<String, u16>, body: Expr) -> Result<Expr> {
         let mut result = body;
         for (key, pat) in pats.iter().rev() {
-            let field_expr = Expr::Index {
-                expr: Box::new(value.clone()),
-                key: Box::new(Expr::Literal(Literal::Str(key.clone()))),
-            };
+            let field_expr = obj_pat_field_expr(value.clone(), key.clone());
             result = self.build_pattern_binding_varmap(pat, field_expr, var_map, result)?;
         }
         Ok(result)
@@ -1457,57 +1454,43 @@ impl Parser {
         }
     }
 
-    fn parse_obj_pattern_pair(&mut self) -> Result<(String, Pattern)> {
+    fn parse_obj_pattern_pair(&mut self) -> Result<(Expr, Pattern)> {
         match self.current().clone() {
             Token::Variable(name) => {
                 self.advance();
                 if self.eat(&Token::Colon) {
                     // $var: pattern — key is variable name, bind $var AND destructure
                     let sub_pat = self.parse_pattern()?;
-                    Ok((name.clone(), Pattern::VarAndSub(name, Box::new(sub_pat))))
+                    Ok((Expr::Literal(Literal::Str(name.clone())), Pattern::VarAndSub(name, Box::new(sub_pat))))
                 } else {
                     // $var shorthand — key is variable name, bind to $var
-                    Ok((name.clone(), Pattern::Var(name)))
+                    Ok((Expr::Literal(Literal::Str(name.clone())), Pattern::Var(name)))
                 }
             }
             Token::Ident(key) | Token::Str(key) => {
                 self.advance();
                 self.expect(&Token::Colon)?;
                 let pat = self.parse_pattern()?;
-                Ok((key, pat))
+                Ok((Expr::Literal(Literal::Str(key)), pat))
             }
             Token::LParen => {
-                // Computed key pattern: (expr): $var
+                // Computed key pattern: (expr): $var — defer key evaluation
+                // to runtime so non-literal expressions like `(.x)` work.
                 self.advance();
                 let key_expr = self.parse_pipe()?;
                 self.expect(&Token::RParen)?;
                 self.expect(&Token::Colon)?;
                 let pat = self.parse_pattern()?;
-                // Try to evaluate key as a constant string
-                let key = self.try_eval_const_string(&key_expr)?;
-                Ok((key, pat))
+                Ok((key_expr, pat))
             }
             ref tok if Self::keyword_as_string(tok).is_some() => {
                 let key = Self::keyword_as_string(tok).unwrap().to_string();
                 self.advance();
                 self.expect(&Token::Colon)?;
                 let pat = self.parse_pattern()?;
-                Ok((key, pat))
+                Ok((Expr::Literal(Literal::Str(key)), pat))
             }
             _ => bail!("expected object pattern key, got {:?}", self.current()),
-        }
-    }
-
-    /// Try to evaluate a constant string expression at parse time.
-    fn try_eval_const_string(&self, expr: &Expr) -> Result<String> {
-        match expr {
-            Expr::Literal(Literal::Str(s)) => Ok(s.clone()),
-            Expr::BinOp { op: BinOp::Add, lhs, rhs } => {
-                let l = self.try_eval_const_string(lhs)?;
-                let r = self.try_eval_const_string(rhs)?;
-                Ok(format!("{}{}", l, r))
-            }
-            _ => bail!("cannot evaluate computed key pattern at parse time"),
         }
     }
 
@@ -1526,7 +1509,7 @@ impl Parser {
         Ok(result)
     }
 
-    fn build_object_destructure(&mut self, value: Expr, pats: &[(String, Pattern)], allocs: &[u16], body: Expr) -> Result<Expr> {
+    fn build_object_destructure(&mut self, value: Expr, pats: &[(Expr, Pattern)], allocs: &[u16], body: Expr) -> Result<Expr> {
         // jq's object-pattern destructure is first-wins for repeated variable
         // names in the same pattern (#206). With slot dedup in
         // `alloc_pattern_vars`, all references to `$a` map to one idx — so a
@@ -1560,10 +1543,7 @@ impl Parser {
             if !keep[i] { continue; }
             let count = self.count_pattern_vars(pat);
             let pair_allocs = &allocs[pair_offsets[i]..pair_offsets[i]+count];
-            let field_expr = Expr::Index {
-                expr: Box::new(value.clone()),
-                key: Box::new(Expr::Literal(Literal::Str(key.clone()))),
-            };
+            let field_expr = obj_pat_field_expr(value.clone(), key.clone());
             result = self.build_pattern_binding(pat, field_expr, pair_allocs, result)?;
         }
         Ok(result)
@@ -3849,9 +3829,35 @@ impl Parser {
 enum Pattern {
     Var(String),
     Array(Vec<Pattern>),
-    Object(Vec<(String, Pattern)>),
+    /// Object-pattern destructure. The key is an Expr so computed-key
+    /// patterns like `. as {(.x): $v}` can defer key evaluation to
+    /// runtime; literal keys are stored as `Expr::Literal(Literal::Str)`.
+    Object(Vec<(Expr, Pattern)>),
     /// $var: sub_pattern — binds $var to whole value AND destructures via sub_pattern
     VarAndSub(String, Box<Pattern>),
+}
+
+/// Build the field-lookup expression for an object-pattern pair.
+///
+/// jq evaluates the computed key against the destructured value (not the
+/// outer pipeline input), so we wrap the index in `value | .[key]` for
+/// non-literal keys. Literal-string keys are emitted as a plain index to
+/// keep the compact case fast.
+fn obj_pat_field_expr(value: Expr, key: Expr) -> Expr {
+    if matches!(key, Expr::Literal(Literal::Str(_))) {
+        Expr::Index {
+            expr: Box::new(value),
+            key: Box::new(key),
+        }
+    } else {
+        Expr::Pipe {
+            left: Box::new(value),
+            right: Box::new(Expr::Index {
+                expr: Box::new(Expr::Input),
+                key: Box::new(key),
+            }),
+        }
+    }
 }
 
 /// Remap FuncCall func_ids in an expression tree using a mapping table.

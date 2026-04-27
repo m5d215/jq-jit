@@ -2187,3 +2187,39 @@ null
 [1.5e-10] | .[0] | tojson
 null
 "1.5E-10"
+
+# Issue #191: logb 0 returns -DBL_MAX (jq projects -inf to finite)
+0 | logb
+null
+-1.7976931348623157e+308
+
+# Issue #191: modf preserves sign on -1 fractional part
+-1 | modf | tojson
+null
+"[-0,-1]"
+
+# Issue #191: tgamma matches jq last-digit precision via system libm
+1.5 | tgamma
+null
+0.886226925452758
+
+# Issue #188: phantom builtins (has/2, label/1, have_bom/0, have_sql/0)
+# and format-string entries are no longer advertised
+[builtins[] | select(. == "has/2" or . == "label/1" or . == "have_bom/0" or . == "have_sql/0" or . == "@base64/0" or . == "@csv/0")] | length
+null
+0
+
+# Issue #188: date/0 is a jq-jit extension and now appears in builtins
+builtins | any(. == "date/0")
+null
+true
+
+# Issue #205: computed-key destructure evaluates key at runtime
+. as {(.x): $v} | $v
+{"x":"y","y":1}
+1
+
+# Issue #205: computed key is evaluated against the destructured value
+.[0] as {(.k): $v} | $v
+[{"k":"x","x":42}]
+42
