@@ -2177,3 +2177,8 @@ null
 -1 % 1
 null
 0
+
+# Issue #206: object-pattern destructure with duplicate var is first-wins
+. as {a: $a, b: $a} | $a
+{"a":1,"b":2}
+1
