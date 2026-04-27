@@ -2078,6 +2078,13 @@ fn real_main() {
                 print_usage();
                 process::exit(0);
             }
+            s if s.starts_with("--") => {
+                // Long options that didn't match any arm above. jq exits with
+                // an "Unknown option" usage error rather than letting the flag
+                // slide into the filter slot (#216).
+                eprintln!("jq: Unknown option: {}", s);
+                process::exit(2);
+            }
             s if s.starts_with('-') && s != "-" && filter_str.is_some() => {
                 eprintln!("jq: Unknown option: {}", s);
                 process::exit(2);
