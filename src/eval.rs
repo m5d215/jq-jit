@@ -1628,11 +1628,16 @@ pub fn eval(
                                     };
                                     env.borrow_mut().vars[vi as usize] = old;
                                     if is_true { Ok(true) } else { all_true = false; Ok(false) }
-                                } else if pred_compound {
-                                    // Compound boolean path: single borrow for entire expression
-                                    let result = eval_bool_compound(predicate, &elem, &env.borrow().vars).unwrap();
-                                    if result { Ok(true) } else { all_true = false; Ok(false) }
                                 } else {
+                                    // Compound bool fast path: dummy-probe at line ~1609 may
+                                    // succeed while the actual elem (null, mixed types, …) trips
+                                    // the evaluator and yields None. Fall through to the generic
+                                    // path instead of unwrapping.
+                                    if pred_compound {
+                                        if let Some(result) = eval_bool_compound(predicate, &elem, &env.borrow().vars) {
+                                            return if result { Ok(true) } else { all_true = false; Ok(false) };
+                                        }
+                                    }
                                     let pred_result = eval_one(predicate, &elem, env);
                                     match pred_result {
                                         Ok(v) => {

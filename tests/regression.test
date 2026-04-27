@@ -1974,3 +1974,18 @@ tostring
 .
 +1e10
 1E+10
+
+# Issue #222: [null] | all(. > 0) panicked instead of returning false
+[null] | all(. > 0)
+null
+false
+
+# Issue #222: [.a, .b] | all(. > 0) on null input
+[.a, .b] | all(. > 0)
+null
+false
+
+# Issue #222: [.a] | any(. > 0) over null field
+[.a] | any(. > 0)
+{"a":null}
+false
