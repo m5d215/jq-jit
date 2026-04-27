@@ -602,16 +602,24 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             if let Expr::ObjectConstruct { pairs } = &sl {
                 if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
                     let mut extracted: Vec<(&str, ())> = Vec::with_capacity(pairs.len());
-                    let mut all_literal = true;
-                    for (k, _) in pairs {
+                    let mut all_static = true;
+                    for (k, v) in pairs {
+                        // Key must be a string literal AND value must not
+                        // touch Input. Input-touching values (e.g. `.a`)
+                        // can raise a runtime error against the actual
+                        // input, but folding to a bare integer drops that
+                        // error (same bug class as #172). The sibling
+                        // `[elements] | length` rewrite below already
+                        // honours this; the object form had drifted.
                         if let Expr::Literal(Literal::Str(s)) = k {
+                            if contains_input(v) { all_static = false; break; }
                             extracted.push((s.as_str(), ()));
                         } else {
-                            all_literal = false;
+                            all_static = false;
                             break;
                         }
                     }
-                    if all_literal {
+                    if all_static {
                         let n = normalize_object_pairs(extracted).len();
                         return Expr::Literal(Literal::Num(n as f64, None));
                     }
