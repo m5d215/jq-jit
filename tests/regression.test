@@ -2248,3 +2248,33 @@ true
 .[0] as {(.k): $v} | $v
 [{"k":"x","x":42}]
 42
+
+# Issue #172: Pipe(.field, constant_rhs) preserves lhs runtime error — int rhs
+try (.a | 0) catch "err"
+[]
+"err"
+
+# Issue #172: same for object-construct rhs
+try (.a | {x:1}) catch "err"
+[]
+"err"
+
+# Issue #172: same for array-construct rhs
+try (.a | [1,2]) catch "err"
+[]
+"err"
+
+# Issue #172: same on a number input
+try (.a | 0) catch "err"
+5
+"err"
+
+# Issue #172: object input still folds correctly
+.a | 0
+{"a":42}
+0
+
+# Issue #172: existing beta-reduction `.x | . + 1` is preserved
+.x | . + 1
+{"x":5}
+6
