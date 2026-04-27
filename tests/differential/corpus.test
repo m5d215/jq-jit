@@ -3618,3 +3618,17 @@ null
 
 @base64d
 "////"
+
+# ---------- Issue #190: tojson stdin fast path normalises scientific notation ----------
+
+tojson
+1.5e-10
+
+tojson
+1e1000
+
+tojson
+[1.5e-10, 1e1000, 17.5]
+
+tojson
+{"a": 1.5e-10, "b": 1e1000}

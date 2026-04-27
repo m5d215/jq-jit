@@ -3335,6 +3335,10 @@ pub fn push_json_compact_raw(buf: &mut Vec<u8>, b: &[u8]) {
 
 /// Single-pass tojson: strip whitespace + escape `"` and `\` into a JSON string.
 /// Writes `"<escaped_compact_json>"` to buf (no trailing newline).
+///
+/// Numeric tokens are renormalised through [`normalize_jq_repr`] so the
+/// fast path matches jq 1.8.1's canonical scientific form (uppercase `E`,
+/// explicit `+`/`-` sign — issue #190 items 1 and 2).
 pub fn push_tojson_raw(buf: &mut Vec<u8>, b: &[u8]) {
     buf.push(b'"');
     let mut i = 0;
@@ -3365,6 +3369,28 @@ pub fn push_tojson_raw(buf: &mut Vec<u8>, b: &[u8]) {
                         else { buf.push(b[i]); }
                         i += 1;
                     }
+                }
+            }
+            b'-' | b'0'..=b'9' => {
+                let start = i;
+                if b[i] == b'-' { i += 1; }
+                while i < len && b[i].is_ascii_digit() { i += 1; }
+                if i < len && b[i] == b'.' {
+                    i += 1;
+                    while i < len && b[i].is_ascii_digit() { i += 1; }
+                }
+                if i < len && (b[i] == b'e' || b[i] == b'E') {
+                    i += 1;
+                    if i < len && (b[i] == b'+' || b[i] == b'-') { i += 1; }
+                    while i < len && b[i].is_ascii_digit() { i += 1; }
+                }
+                let num_bytes = &b[start..i];
+                // SAFETY: scanned bytes are ASCII digits/sign/dot/e/E/+/-.
+                let num_str = unsafe { std::str::from_utf8_unchecked(num_bytes) };
+                if let Some(canonical) = normalize_jq_repr(num_str) {
+                    buf.extend_from_slice(canonical.as_bytes());
+                } else {
+                    buf.extend_from_slice(num_bytes);
                 }
             }
             c => { buf.push(c); i += 1; }

@@ -2188,6 +2188,31 @@ null
 null
 "1.5E-10"
 
+# Issue #190: stdin tojson fast path normalises scientific to uppercase E
+tojson
+1.5e-10
+"1.5E-10"
+
+# Issue #190: stdin tojson fast path adds explicit `+` to positive exponent
+tojson
+1e1000
+"1E+1000"
+
+# Issue #190: stdin tojson fast path normalises numbers nested in arrays
+tojson
+[1.5e-10, 1e1000, 17.5]
+"[1.5E-10,1E+1000,17.5]"
+
+# Issue #190: stdin tojson fast path normalises numbers in object values
+tojson
+{"a": 1.5e-10, "b": 1e1000}
+"{\"a\":1.5E-10,\"b\":1E+1000}"
+
+# Issue #190: stdin tojson fast path preserves number-shaped string contents
+tojson
+{"k": "1.5e-10"}
+"{\"k\":\"1.5e-10\"}"
+
 # Issue #191: logb 0 returns -DBL_MAX (jq projects -inf to finite)
 0 | logb
 null
