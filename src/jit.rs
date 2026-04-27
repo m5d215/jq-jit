@@ -1710,9 +1710,16 @@ impl Flattener {
 
                 // Detect fused numeric reduce: reduce range(from;to) as $x (num_init; f64_body)
                 // Keeps everything in f64 variables — zero Value boxing in the loop body.
+                //
+                // init=Input was previously allowed but `to_f64` silently coerces
+                // non-number Values to 0.0, so a string `.` input slipped through
+                // the f64 loop and returned the bare range sum instead of erroring
+                // (#223 type-violation case). Only allow numeric literals — any
+                // dynamic init falls back to the boxed reduce path that surfaces
+                // jq's "X and Y cannot be added" error.
                 let is_fused_range_f64 = if let Expr::Range { from, to, step } = source.as_ref() {
                     is_scalar(from) && is_scalar(to) && step.as_ref().is_none_or(|s| is_scalar(s))
-                        && matches!(init.as_ref(), Expr::Literal(Literal::Num(..)) | Expr::Input)
+                        && matches!(init.as_ref(), Expr::Literal(Literal::Num(..)))
                         && Self::is_pure_f64_expr(update, *var_index)
                 } else { false };
 
@@ -1736,7 +1743,15 @@ impl Flattener {
                         self.emit(JitOp::ToF64Var { dst_var: cur, src: from_val });
                         self.emit(JitOp::ToF64Var { dst_var: to_v, src: to_val });
                         self.emit(JitOp::ToF64Var { dst_var: step_v, src: step_val });
-                        self.emit(JitOp::ToF64Var { dst_var: acc_f64, src: acc_val });
+                        // The MoveToVar at the start of this Reduce arm consumed
+                        // `acc_val` and replaced the slot with Null, so reading
+                        // from it directly would seed the f64 accumulator with 0
+                        // instead of the init expression's value (#223). Re-fetch
+                        // from the accumulator variable we just wrote.
+                        let acc_init = self.alloc_slot();
+                        self.emit(JitOp::GetVar { dst: acc_init, var_index: *acc_index });
+                        self.emit(JitOp::ToF64Var { dst_var: acc_f64, src: acc_init });
+                        self.emit(JitOp::Drop { slot: acc_init });
                         self.emit(JitOp::Drop { slot: from_val });
                         self.emit(JitOp::Drop { slot: to_val });
                         self.emit(JitOp::Drop { slot: step_val });
@@ -2679,6 +2694,39 @@ impl Flattener {
                     let result = self.alloc_slot();
                     self.emit(JitOp::Clone { dst: result, src: input_slot });
 
+                    // map_values / .[]= over a non-iterable used to fall through
+                    // the loop silently and return the original value (#194).
+                    // Branch on the kind first; the "other" arm raises jq's
+                    // "Cannot iterate over X (Y)" error (skipped for `.[]?`).
+                    let kind_var = self.alloc_var();
+                    let iter_lbl = self.alloc_label();
+                    let other_lbl = self.alloc_label();
+                    self.emit(JitOp::GetKind { dst_var: kind_var, src: result });
+                    self.emit(JitOp::BranchKind {
+                        kind_var,
+                        arr_label: iter_lbl,
+                        obj_label: iter_lbl,
+                        other_label: other_lbl,
+                    });
+                    self.emit(JitOp::Label { id: other_lbl });
+                    if !is_each_opt {
+                        let err_slot = self.alloc_slot();
+                        self.emit(JitOp::CallBuiltin {
+                            dst: err_slot,
+                            name: "__each_error__".to_string(),
+                            args: vec![result],
+                        });
+                        self.emit(JitOp::Drop { slot: err_slot });
+                        if let Some((catch_label, error_slot)) = self.try_catch_target {
+                            self.emit(JitOp::CheckError { error_dst: error_slot, catch_label });
+                        } else {
+                            self.emit(JitOp::ReturnError);
+                        }
+                    } else {
+                        self.emit_yield(result);
+                    }
+                    self.emit(JitOp::Label { id: iter_lbl });
+
                     let idx = self.alloc_var();
                     let len = self.alloc_var();
                     let head = self.alloc_label();
@@ -2741,8 +2789,25 @@ impl Flattener {
                     self.emit_propagating(JitOp::CallBuiltin { dst: old_val, name: "getpath".to_string(), args: vec![inp, path_clone] });
                     self.emit(JitOp::Drop { slot: inp });
                     self.emit(JitOp::Drop { slot: path_clone });
-                    // For each output of update_expr applied to old_val
+                    // For the first output of update_expr applied to old_val.
+                    // jq's `path |= F` takes ONLY the first generator value;
+                    // broadcasting was issue #208. Use a flag var to drop
+                    // subsequent yields silently (we can't break out of the
+                    // closure cleanly mid-iteration, but skipping is enough —
+                    // `gen` is bounded for typical updates and the cost of
+                    // generating extra values is just discarded clones).
+                    let first_var = self.alloc_var();
+                    self.emit(JitOp::InitVar { var: first_var });
                     let ok = self.flatten_gen_with_each_output(update_expr, old_val, &|s, new_val| {
+                        let skip_lbl = s.alloc_label();
+                        let take_lbl = s.alloc_label();
+                        let after_lbl = s.alloc_label();
+                        s.emit(JitOp::BranchOnVar { var: first_var, nonzero_label: skip_lbl, zero_label: take_lbl });
+                        s.emit(JitOp::Label { id: skip_lbl });
+                        s.emit(JitOp::Drop { slot: new_val });
+                        s.emit(JitOp::Jump { label: after_lbl });
+                        s.emit(JitOp::Label { id: take_lbl });
+                        s.emit(JitOp::IncVar { var: first_var });
                         let inp3 = s.alloc_slot();
                         s.emit(JitOp::Clone { dst: inp3, src: input_slot });
                         let path_c2 = s.alloc_slot();
@@ -2753,6 +2818,7 @@ impl Flattener {
                         s.emit(JitOp::Drop { slot: path_c2 });
                         s.emit_yield(out);
                         s.emit(JitOp::Drop { slot: out });
+                        s.emit(JitOp::Label { id: after_lbl });
                     });
                     self.emit(JitOp::Drop { slot: old_val });
                     self.emit(JitOp::Drop { slot: path_arr });

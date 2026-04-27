@@ -108,6 +108,19 @@ fn decode_json_string_literal(s: &str) -> Option<String> {
 /// the JSON form carries the type info jq normally reads from the
 /// original jv, so we use it to decide between the unquoted string
 /// branch and the ` (not a string)` branch.
+/// Validate a jq variable name from `--arg` / `--argjson`. Per jq, the binding
+/// must look like `[A-Za-z_][A-Za-z0-9_]*`; numeric or symbolic names are
+/// rejected at the CLI parser so the resulting `$<name>` reference doesn't
+/// later produce confusing filter parse errors (#217).
+fn is_valid_var_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    match bytes.next() {
+        Some(b) if b == b'_' || b.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    bytes.all(|b| b == b'_' || b.is_ascii_alphanumeric())
+}
+
 fn print_jq_error(msg: &str) {
     let line = jq_jit::eval::get_input_line_number();
     if let Some(jq_msg) = msg.strip_prefix("__jqerror__:") {
@@ -1897,6 +1910,7 @@ fn real_main() {
     let mut files: Vec<String> = Vec::new();
     let mut compact = false;
     let mut raw_output = false;
+    let mut raw_output0 = false;
     let mut raw_input = false;
     let mut null_input = false;
     let mut slurp = false;
@@ -1930,8 +1944,9 @@ fn real_main() {
     while i < expanded_args.len() {
         let arg = &expanded_args[i];
         match arg.as_str() {
-            "-c" | "--compact-output" => compact = true,
+            "-c" | "--compact-output" => { compact = true; tab = false; }
             "-r" | "--raw-output" => raw_output = true,
+            "--raw-output0" => { raw_output = true; raw_output0 = true; }
             "-R" | "--raw-input" => raw_input = true,
             "-n" | "--null-input" => null_input = true,
             "-s" | "--slurp" => slurp = true,
@@ -1955,11 +1970,25 @@ fn real_main() {
                 eprintln!("jq: --stream is not yet implemented in jq-jit");
                 process::exit(2);
             }
-            "--tab" => tab = true,
+            "--tab" => { tab = true; compact = false; }
             "--indent" => {
                 i += 1;
                 if i < expanded_args.len() {
-                    indent_n = expanded_args[i].parse().unwrap_or(2);
+                    let parsed: i32 = expanded_args[i].parse().unwrap_or(2);
+                    // jq limits --indent to [-1, 7]; -1 means tab indent (#211).
+                    if !(-1..=7).contains(&parsed) {
+                        eprintln!("jq: --indent takes a number between -1 and 7");
+                        eprintln!("Use jq --help for help with command-line options.");
+                        process::exit(2);
+                    }
+                    // last-wins between -c / --tab / --indent N (#214)
+                    compact = false;
+                    if parsed == -1 {
+                        tab = true;
+                    } else {
+                        tab = false;
+                        indent_n = parsed as usize;
+                    }
                 }
             }
             "-f" | "--from-file" => {
@@ -1985,6 +2014,10 @@ fn real_main() {
             "--arg" => {
                 if i + 2 < expanded_args.len() {
                     let name = expanded_args[i + 1].clone();
+                    if !is_valid_var_name(&name) {
+                        eprintln!("jq: error: arg name `{}` is not a valid identifier", name);
+                        process::exit(2);
+                    }
                     let val = Value::from_str(&expanded_args[i + 2]);
                     arg_vars.push((name, val));
                     i += 2;
@@ -1993,6 +2026,10 @@ fn real_main() {
             "--argjson" => {
                 if i + 2 < expanded_args.len() {
                     let name = expanded_args[i + 1].clone();
+                    if !is_valid_var_name(&name) {
+                        eprintln!("jq: error: arg name `{}` is not a valid identifier", name);
+                        process::exit(2);
+                    }
                     match json_to_value(&expanded_args[i + 2]) {
                         Ok(val) => argjson_vars.push((name, val)),
                         Err(e) => {
@@ -2003,7 +2040,7 @@ fn real_main() {
                     i += 2;
                 }
             }
-            "-L" => {
+            "-L" | "--library-path" => {
                 i += 1;
                 if i < expanded_args.len() {
                     lib_dirs.push(expanded_args[i].clone());
@@ -2070,13 +2107,20 @@ fn real_main() {
                     i += 2;
                 }
             }
-            "--version" => {
+            "-V" | "--version" => {
                 println!("jq-jit-{}", env!("CARGO_PKG_VERSION"));
                 process::exit(0);
             }
             "-h" | "--help" => {
                 print_usage();
                 process::exit(0);
+            }
+            s if s.starts_with("--") => {
+                // Long options that didn't match any arm above. jq exits with
+                // an "Unknown option" usage error rather than letting the flag
+                // slide into the filter slot (#216).
+                eprintln!("jq: Unknown option: {}", s);
+                process::exit(2);
             }
             s if s.starts_with('-') && s != "-" && filter_str.is_some() => {
                 eprintln!("jq: Unknown option: {}", s);
@@ -2169,6 +2213,13 @@ fn real_main() {
     let mut out = io::BufWriter::with_capacity(65536, stdout.lock());
 
     let mut any_output_false = false;
+    // `-e` exit codes need three states (#215):
+    //   0 = no output emitted (-> exit 4)
+    //   1 = last output truthy (-> exit 0)
+    //   2 = last output falsy (-> exit 1)
+    // The existing `any_output_false` bool stays as the closure parameter; we
+    // also maintain this richer state via a Cell captured by closure.
+    let exit_state: std::cell::Cell<u8> = std::cell::Cell::new(0);
 
     let format_value = |v: &Value| -> String {
         if raw_output {
@@ -2512,8 +2563,16 @@ fn real_main() {
     let array_join = if use_raw_fast_paths && !exit_status && field_access.is_none() {
         trace_detect!(filter, detect_array_join)
     } else { None };
-    let literal_output = if use_raw_fast_paths && !exit_status { trace_detect!(filter, detect_literal_output) } else { None };
-    let input_free_output = if use_raw_fast_paths && !exit_status && literal_output.is_none() {
+    // literal_output also emits compact JSON; gated on compact mode (#212).
+    let literal_output = if use_raw_fast_paths && !exit_status
+        && compact && !raw_output && !sort_keys && !color_output {
+        trace_detect!(filter, detect_literal_output)
+    } else { None };
+    // input_free_output emits the value as compact JSON; only enable it when
+    // the user actually asked for compact output (#212). Pretty / tab / indent
+    // paths must go through the formatter so spacing matches jq's defaults.
+    let input_free_output = if use_raw_fast_paths && !exit_status && literal_output.is_none()
+        && compact && !raw_output && !sort_keys && !color_output {
         trace_detect!(filter, detect_input_free_output)
     } else { None };
     let array_fields_format = if use_raw_fast_paths && !exit_status && field_access.is_none() {
@@ -2875,8 +2934,13 @@ fn real_main() {
                 *had_error = true;
                 return Ok(true);
             }
-            if exit_status && !result.is_true() {
-                *any_false = true;
+            if exit_status {
+                if !result.is_true() {
+                    *any_false = true;
+                    exit_state.set(2);
+                } else {
+                    exit_state.set(1);
+                }
             }
             // RFC 7464 JSON Text Sequences: every output value is preceded
             // by an RS (0x1e) byte. The trailing LF is already produced by
@@ -2939,7 +3003,11 @@ fn real_main() {
                 let _ = write_value_pretty_line_color(out, result, indent_n, tab, sort_keys, color_output);
             } else {
                 let formatted = format_value(result);
-                let _ = writeln!(out, "{}", formatted);
+                let _ = out.write_all(formatted.as_bytes());
+                // --raw-output0 (#210): use NUL as record separator so the
+                // stream is xargs -0 -friendly. -r alone keeps the newline.
+                let term: u8 = if raw_output0 { 0 } else { b'\n' };
+                let _ = out.write_all(&[term]);
             }
             Ok(true)
         });
@@ -3015,6 +3083,34 @@ fn real_main() {
             jq_jit::eval::set_inputs_queue(inputs_values);
         }
         process_input(&Value::Null, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+        jq_jit::eval::clear_inputs_queue();
+    } else if filter.uses_inputs() && files.is_empty() && !slurp {
+        // The filter calls `input` / `inputs`; share one cursor between the
+        // per-document loop and the builtin so each `input` consumes the next
+        // remaining stdin value (#196). Pre-load everything into the inputs
+        // queue, then drain the queue while both sites pull through the same
+        // `read_next_input`.
+        let mut inputs_values: Vec<Value> = Vec::new();
+        if raw_input {
+            let mut buf = String::new();
+            if let Err(e) = io::stdin().lock().read_to_string(&mut buf) {
+                eprintln!("jq: error reading input: {}", e);
+                process::exit(2);
+            }
+            for line in buf.lines() {
+                inputs_values.push(Value::from_str(line));
+            }
+        } else {
+            let input_str = stdin_data.unwrap_or_default();
+            if let Err(e) = json_stream(&input_str, |v| { inputs_values.push(v); Ok(()) }) {
+                eprintln!("jq: error (at <stdin>:0): {}", e);
+                process::exit(2);
+            }
+        }
+        jq_jit::eval::set_inputs_queue(inputs_values);
+        while let Some(v) = jq_jit::eval::read_next_input() {
+            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+        }
         jq_jit::eval::clear_inputs_queue();
     } else if files.is_empty() {
         // Read from stdin
@@ -7467,8 +7563,18 @@ fn real_main() {
                     })
                 } else if let Some((ref field, ref op, threshold)) = select_cmp {
                     use jq_jit::ir::BinOp;
+                    // select(.field cmp N) must surface jq's "Cannot index ... with
+                    // string" error for non-object inputs (#199). null is also
+                    // routed through eval because jq's total-order treats `null`
+                    // as smaller than any number, so `select(.a < 0)` on null
+                    // outputs `null` rather than nothing — the raw path skips it.
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
+                        if raw.is_empty() || raw[0] != b'{' {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            return Ok(());
+                        }
                         if let Some(val) = json_object_get_num(raw, 0, field) {
                             let pass = match op {
                                 BinOp::Gt => val > threshold,
@@ -7486,13 +7592,25 @@ fn real_main() {
                                     compact_buf.clear();
                                 }
                             }
+                            return Ok(());
                         }
+                        // Non-numeric or missing field: fall through to eval so jq's
+                        // total-order rules drive the comparison (null<N=true, etc.).
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         Ok(())
                     })
                 } else if let Some((ref field, is_eq)) = select_field_null {
-                    // select(.field == null) or select(.field != null) — raw byte
+                    // select(.field == null) or select(.field != null) — raw byte.
+                    // Non-object inputs route through eval so the type error from
+                    // `.field` surfaces (#199 sibling).
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
+                        if raw.is_empty() || raw[0] != b'{' {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            return Ok(());
+                        }
                         let is_null = if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
                             &raw[vs..ve] == b"null"
                         } else {
@@ -7958,9 +8076,17 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref prim_field, ref fallback_field)) = field_field_alt {
-                    // .field1 // .field2: try primary, if null/false/missing use fallback
+                    // .field1 // .field2: try primary, if null/false/missing use
+                    // fallback. `//` must not swallow type errors (#198), so non-
+                    // object, non-null inputs flow through the eval path so
+                    // `.field1` surfaces "Cannot index ... with string".
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
+                        if raw.is_empty() || (raw[0] != b'{' && raw != b"null") {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            return Ok(());
+                        }
                         let use_primary = if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, prim_field) {
                             let pval = &raw[vs..ve];
                             if pval != b"null" && pval != b"false" {
@@ -15197,10 +15323,19 @@ fn real_main() {
                 })
             } else if let Some((ref field, ref op, threshold)) = select_cmp {
                 // Select fast path: extract field without full parsing, copy raw bytes on match.
+                // Non-object inputs route through eval so the type error from
+                // `.field` surfaces (#199); null also detours because jq's
+                // total order ranks null below any number, so cases like
+                // `select(.a < 0)` on null must yield `null`.
                 use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
+                    if raw.is_empty() || raw[0] != b'{' {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        return Ok(());
+                    }
                     if let Some(val) = json_object_get_num(raw, 0, field) {
                         let pass = match op {
                             BinOp::Gt => val > threshold,
@@ -15218,14 +15353,26 @@ fn real_main() {
                                 compact_buf.clear();
                             }
                         }
+                        return Ok(());
                     }
+                    // Non-numeric or missing field: jq's total-order rules apply
+                    // (null<N=true, etc.); route through eval for correctness.
+                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     Ok(())
                 })
             } else if let Some((ref field, is_eq)) = select_field_null {
-                // select(.field == null) or select(.field != null) — stdin path
+                // select(.field == null) or select(.field != null) — file path.
+                // Non-object inputs route through eval so the type error from
+                // `.field` surfaces (#199 sibling).
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
+                    if raw.is_empty() || raw[0] != b'{' {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        return Ok(());
+                    }
                     let is_null = if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
                         &raw[vs..ve] == b"null"
                     } else {
@@ -15638,6 +15785,11 @@ fn real_main() {
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
+                    if raw.is_empty() || (raw[0] != b'{' && raw != b"null") {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        return Ok(());
+                    }
                     let use_primary = if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, prim_field) {
                         let pval = &raw[vs..ve];
                         if pval != b"null" && pval != b"false" {
@@ -22303,9 +22455,14 @@ fn real_main() {
     if had_error {
         process::exit(5);
     }
-    if exit_status && any_output_false {
-        process::exit(5);
+    if exit_status {
+        match exit_state.get() {
+            0 => process::exit(4), // no output emitted
+            2 => process::exit(1), // last output null/false
+            _ => {}                // last output truthy → 0
+        }
     }
+    let _ = any_output_false; // retained for legacy fast paths that read it
 }
 
 fn print_usage() {

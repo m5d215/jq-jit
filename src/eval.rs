@@ -1079,9 +1079,13 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
             eval_index(&base, &key, false).map_err(|_| ())
         }
         Expr::IndexOpt { expr: base_expr, key: key_expr } => {
+            // `?` yields an *empty* stream on type error, not null. eval_one is
+            // single-value only, so the type-error branch returns Err(()) and
+            // the caller's generator fallback is responsible for producing zero
+            // outputs (#200). Only the success path stays on the scalar route.
             let base = eval_one(base_expr, input, env)?;
             let key = eval_one(key_expr, input, env)?;
-            Ok(eval_index(&base, &key, true).unwrap_or(Value::Null))
+            eval_index(&base, &key, true).map_err(|_| ())
         }
         Expr::Negate { operand } => {
             let val = eval_one(operand, input, env)?;
@@ -1628,11 +1632,16 @@ pub fn eval(
                                     };
                                     env.borrow_mut().vars[vi as usize] = old;
                                     if is_true { Ok(true) } else { all_true = false; Ok(false) }
-                                } else if pred_compound {
-                                    // Compound boolean path: single borrow for entire expression
-                                    let result = eval_bool_compound(predicate, &elem, &env.borrow().vars).unwrap();
-                                    if result { Ok(true) } else { all_true = false; Ok(false) }
                                 } else {
+                                    // Compound bool fast path: dummy-probe at line ~1609 may
+                                    // succeed while the actual elem (null, mixed types, …) trips
+                                    // the evaluator and yields None. Fall through to the generic
+                                    // path instead of unwrapping.
+                                    if pred_compound {
+                                        if let Some(result) = eval_bool_compound(predicate, &elem, &env.borrow().vars) {
+                                            return if result { Ok(true) } else { all_true = false; Ok(false) };
+                                        }
+                                    }
                                     let pred_result = eval_one(predicate, &elem, env);
                                     match pred_result {
                                         Ok(v) => {
@@ -1757,6 +1766,10 @@ pub fn eval(
                 Err(e) => {
                     if e.downcast_ref::<BreakError>().is_some() { return Err(e); }
                     let msg = format!("{}", e);
+                    // halt / halt_error are non-recoverable: jq lets them
+                    // propagate past `try ... catch` so the process exits with
+                    // the requested code (#182).
+                    if msg.starts_with("__halt__:") { return Err(e); }
                     let catch_val = if let Some(json) = msg.strip_prefix("__jqerror__:") {
                         crate::value::json_to_value(json).unwrap_or(Value::from_str(&msg))
                     } else {
@@ -2984,7 +2997,13 @@ pub fn eval(
 
         Expr::Stderr { expr: se } => {
             eval(se, input.clone(), env, &mut |val| {
-                eprint!("{}", crate::value::value_to_json(&val));
+                // jq prints strings raw (no surrounding quotes) and other
+                // values as compact JSON (#189). The filter passes the value
+                // through to `cb` unchanged.
+                match &val {
+                    Value::Str(s) => eprint!("{}", s.as_str()),
+                    _ => eprint!("{}", crate::value::value_to_json(&val)),
+                }
                 cb(input.clone())
             })
         }
@@ -3170,14 +3189,20 @@ pub fn eval_index(base: &Value, key: &Value, optional: bool) -> std::result::Res
                 Err(format!("Cannot index string with number ({})", crate::value::format_jq_number(*n)))
             }
         }
-        (Value::Null, _) => Ok(Value::Null),
+        // Null receiver: only string/number/object keys short-circuit to null;
+        // null/bool/array keys still raise the same type error jq emits on a
+        // non-null base (#193). The keys here mirror what jq's `.[$k]` accepts
+        // before the null short-circuit kicks in.
+        (Value::Null, Value::Str(_)) | (Value::Null, Value::Num(_, _)) | (Value::Null, Value::Obj(_)) => {
+            Ok(Value::Null)
+        }
         _ => {
             if optional { Err("type error".into()) }
             else {
                 let key_desc = match key {
                     Value::Str(s) => format!("string (\"{}\")", s),
                     Value::Num(n, _) => format!("number ({})", crate::value::format_jq_number(*n)),
-                    _ => format!("{} ({})", key.type_name(), crate::value::value_to_json(key)),
+                    _ => key.type_name().to_string(),
                 };
                 Err(format!("Cannot index {} with {}", base.type_name(), key_desc))
             }
@@ -3190,15 +3215,18 @@ fn eval_recurse_expr(step: &Expr, val: &Value, env: &EnvRef, cb: &mut dyn FnMut(
         // Default recurse (.[]): recursive descent into arrays/objects
         eval_recurse_default(val, cb)
     } else {
-        // Custom step: use explicit stack to avoid stack overflow
+        // Custom step: use explicit stack to avoid stack overflow.
+        // Errors raised by `step` must propagate (#195) — jq emits the
+        // already-yielded values AND the type-error to stderr (exit 5).
+        // The previous `let _ = eval(...)` silently dropped them.
         let mut work = vec![val.clone()];
         while let Some(current) = work.pop() {
             if !cb(current.clone())? { return Ok(false); }
             let mut next_vals = Vec::new();
-            let _ = eval(step, current, env, &mut |next| {
+            eval(step, current, env, &mut |next| {
                 next_vals.push(next);
                 Ok(true)
-            });
+            })?;
             // Push in reverse so first output is processed first
             for v in next_vals.into_iter().rev() {
                 work.push(v);
@@ -3433,10 +3461,30 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
         "base64d" => {
             const D: [i8;128] = { let mut t = [-1i8;128]; let c = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"; let mut i=0; while i<c.len() { t[c[i] as usize]=i as i8; i+=1; } t };
             let bs: Vec<u8> = s.bytes().filter(|&b| b!=b'\n'&&b!=b'\r'&&b!=b' ').collect();
+            // jq accepts unpadded base64 of length 2 or 3 (decodes to 1 or 2
+            // bytes) but rejects `len % 4 == 1` with the message
+            // "string (...) trailing base64 byte found" (#186). The previous
+            // loop silently truncated `len % 4 == 1` cases via `if ch.len()<2 { break; }`.
+            if bs.len() % 4 == 1 {
+                bail!("string ({}) trailing base64 byte found", crate::value::value_to_json(val));
+            }
             let mut r = Vec::new();
-            for ch in bs.chunks(4) { if ch.len()<2{break;} let a=D.get(ch[0] as usize).copied().unwrap_or(-1); let b=D.get(ch[1] as usize).copied().unwrap_or(-1); if a<0||b<0{bail!("invalid base64");}
-                r.push(((a as u8)<<2)|((b as u8)>>4)); if ch.len()>2&&ch[2]!=b'=' { let c=D.get(ch[2] as usize).copied().unwrap_or(-1); if c<0{bail!("invalid base64");} r.push(((b as u8)<<4)|((c as u8)>>2));
-                if ch.len()>3&&ch[3]!=b'=' { let d=D.get(ch[3] as usize).copied().unwrap_or(-1); if d<0{bail!("invalid base64");} r.push(((c as u8)<<6)|(d as u8)); } } }
+            for ch in bs.chunks(4) {
+                let a=D.get(ch[0] as usize).copied().unwrap_or(-1);
+                let b=D.get(ch[1] as usize).copied().unwrap_or(-1);
+                if a<0||b<0 { bail!("string ({}) is not valid base64 data", crate::value::value_to_json(val)); }
+                r.push(((a as u8)<<2)|((b as u8)>>4));
+                if ch.len()>2 && ch[2]!=b'=' {
+                    let c=D.get(ch[2] as usize).copied().unwrap_or(-1);
+                    if c<0 { bail!("string ({}) is not valid base64 data", crate::value::value_to_json(val)); }
+                    r.push(((b as u8)<<4)|((c as u8)>>2));
+                    if ch.len()>3 && ch[3]!=b'=' {
+                        let d=D.get(ch[3] as usize).copied().unwrap_or(-1);
+                        if d<0 { bail!("string ({}) is not valid base64 data", crate::value::value_to_json(val)); }
+                        r.push(((c as u8)<<6)|(d as u8));
+                    }
+                }
+            }
             Ok(String::from_utf8_lossy(&r).into_owned())
         }
         _ => bail!("unknown format: @{}", name),
@@ -4094,6 +4142,10 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 Err(e) => {
                     if e.downcast_ref::<BreakError>().is_some() { return Err(e); }
                     let msg = format!("{}", e);
+                    // halt / halt_error are non-recoverable: jq lets them
+                    // propagate past `try ... catch` so the process exits with
+                    // the requested code (#182).
+                    if msg.starts_with("__halt__:") { return Err(e); }
                     let catch_val = if let Some(json) = msg.strip_prefix("__jqerror__:") {
                         crate::value::json_to_value(json).unwrap_or(Value::from_str(&msg))
                     } else {

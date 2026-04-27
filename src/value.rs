@@ -105,7 +105,10 @@ fn pool_return(mut v: Vec<(KeyStr, Value)>) {
     } else {
         v.clear();
     }
-    OBJMAP_POOL.with(|cell| {
+    // try_with: during process shutdown the TLS may already be destroyed
+    // (e.g. an env-derived Rc<ObjMap> dropping after main returns). On
+    // AccessError, fall through and let `v` drop normally.
+    let _ = OBJMAP_POOL.try_with(|cell| {
         let pool = unsafe { &mut *cell.get() };
         if pool.len() < OBJMAP_POOL_MAX {
             pool.push(v);

@@ -1016,16 +1016,25 @@ fn sort_values(sorted: &mut [Value]) {
 }
 
 fn rt_reverse(v: &Value) -> Result<Value> {
+    // jq 1.8.1 defines `reverse` as `[.[length - 1 - range(0; length)]]`. The
+    // shape that falls out:
+    //   - non-empty arrays reverse normally;
+    //   - empty containers (null/""/{}/[]) yield `[]` (range empty -> no
+    //     index fires);
+    //   - everything else errors via the `.[idx]` step (#197).
     match v {
         Value::Arr(a) => {
             let mut reversed = (**a).clone();
             reversed.reverse();
             Ok(Value::Arr(Rc::new(reversed)))
         }
-        Value::Str(s) => {
-            Ok(Value::from_string(s.chars().rev().collect()))
-        }
         Value::Null => Ok(Value::Arr(Rc::new(vec![]))),
+        Value::Str(s) if s.is_empty() => Ok(Value::Arr(Rc::new(vec![]))),
+        Value::Obj(o) if o.is_empty() => Ok(Value::Arr(Rc::new(vec![]))),
+        Value::Str(_) => bail!("Cannot index string with number"),
+        Value::Obj(_) => bail!("Cannot index object with number"),
+        Value::Num(_, _) => bail!("Cannot index number with number"),
+        Value::True | Value::False => bail!("{} ({}) has no length", v.type_name(), crate::value::value_to_json(v)),
         _ => bail!("{} cannot be reversed", v.type_name()),
     }
 }
@@ -1035,6 +1044,15 @@ fn rt_flatten(v: &Value, depth: Option<usize>) -> Result<Value> {
         Value::Arr(a) => {
             let mut result = Vec::new();
             flatten_inner(a, depth.unwrap_or(usize::MAX), &mut result);
+            Ok(Value::Arr(Rc::new(result)))
+        }
+        // jq treats an object's values as the array to flatten, then runs
+        // the same recursive logic on it (#184). `flatten` on `{"a":[1,2]}`
+        // becomes `[[1,2]] | flatten` = `[1,2]`.
+        Value::Obj(o) => {
+            let values: Vec<Value> = o.values().cloned().collect();
+            let mut result = Vec::new();
+            flatten_inner(&values, depth.unwrap_or(usize::MAX), &mut result);
             Ok(Value::Arr(Rc::new(result)))
         }
         _ => bail!("{} is not an array", v.type_name()),

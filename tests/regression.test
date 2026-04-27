@@ -1974,3 +1974,154 @@ tostring
 .
 +1e10
 1E+10
+
+# Issue #222: [null] | all(. > 0) panicked instead of returning false
+[null] | all(. > 0)
+null
+false
+
+# Issue #222: [.a, .b] | all(. > 0) on null input
+[.a, .b] | all(. > 0)
+null
+false
+
+# Issue #222: [.a] | any(. > 0) over null field
+[.a] | any(. > 0)
+{"a":null}
+false
+
+# Issue #181: env | type used to panic on shutdown when stdin was provided
+env | type
+{}
+"object"
+
+# Issue #220: keys | length on object still works (regression marker after
+# parser/simplify rewrites that elided the keys type-check were removed)
+keys | length
+{"a":1,"b":2}
+2
+
+# Issue #220: keys_unsorted | length on array
+keys_unsorted | length
+[10,20,30]
+3
+
+# Issue #220: [1,2,3] | length still rewrites to 3 (input-free elements)
+[1,2,3] | length
+null
+3
+
+# Issue #220: [.a,.b,.c] | length on object — evaluates per-field, not constant
+[.a,.b,.c] | length
+{"a":1,"b":2,"c":3}
+3
+
+# Issue #221: bare flatten is recursive — must unwrap nested .b array
+[1, [.b, 3], 4] | flatten
+{"b":[10,20]}
+[1,10,20,3,4]
+
+# Issue #221: deeper nesting via .b
+[1, [.b, 3], 4] | flatten
+{"b":[[10,20]]}
+[1,10,20,3,4]
+
+# Issue #223: .a |= reduce range(N) as $x (.; . + $x) must seed acc from .a
+.a |= reduce range(10) as $x (.; . + $x)
+{"a":1}
+{"a":46}
+
+# Issue #223: same with non-zero init
+.a |= reduce range(10) as $x (.; . + $x)
+{"a":10}
+{"a":55}
+
+# Issue #223: literal-init still goes through fused path
+reduce range(10) as $x (0; . + $x)
+null
+45
+
+# Issue #193: null receiver still rejects null/bool/array index keys
+.["a"]
+null
+null
+
+# Issue #193: numeric and object index keys still short-circuit on null receiver
+.[0]
+null
+null
+
+# Issue #198: .a // .b on object still works
+.a // .b
+{"a":null,"b":2}
+2
+
+# Issue #198: .a // .b returns primary when truthy
+.a // .b
+{"a":1,"b":2}
+1
+
+# Issue #199: select(.a < 0) on missing field uses jq's total order (null<N=true)
+select(.a < 0)
+{}
+{}
+
+# Issue #199: select(.a < 0) on object with null field still passes total-order
+select(.a < 0)
+{"a":null}
+{"a":null}
+
+# Issue #199: select(.a > N) on object with non-numeric field
+select(.a > 1)
+{"a":2}
+{"a":2}
+
+# Issue #200: .a?.b on non-object yields empty stream (was producing null)
+[.a?.b]
+true
+[]
+
+# Issue #200: .a?.b on object propagates correctly
+.a?.b
+{"a":{"b":2}}
+2
+
+# Issue #194: map_values still works on object
+map_values(. + 1)
+{"a":1,"b":2}
+{"a":2,"b":3}
+
+# Issue #194: map_values on array
+map_values(. + 1)
+[1,2,3]
+[2,3,4]
+
+# Issue #197: empty string reverses to []
+reverse
+""
+[]
+
+# Issue #197: empty object reverses to []
+reverse
+{}
+[]
+
+# Issue #195: recurse(f; cond) propagates errors from f instead of swallowing
+[limit(5; recurse(. + 1))]
+0
+[0,1,2,3,4]
+
+# Issue #208: .a |= (1, 2) takes first output only — does not broadcast
+.a |= (1, 2)
+{"a":1}
+{"a":1}
+
+# Issue #208: .a |= range(3) takes first output only
+.a |= range(3)
+{"a":99}
+{"a":0}
+
+# Issue #208: .a = (1, 2) still broadcasts (= does, |= does not)
+[.a = (1, 2)]
+{"a":1}
+[{"a":1},{"a":2}]

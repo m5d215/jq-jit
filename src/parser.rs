@@ -4058,21 +4058,14 @@ fn name_to_unary_op(name: &str) -> Result<UnaryOp> {
 }
 
 /// Peephole optimization for Pipe(left, right).
-/// - `keys | length` → `length` (same result for arrays and objects)
 /// - `[a, b] | add` → `a + b` (avoid array construction)
 /// - `[a, b, c, ...] | add` → `a + b + c + ...`
+///
+/// `keys | length` / `keys_unsorted | length` → `length` was removed (#220):
+/// the prefix op errors on non-iterable input, while bare `length` happily
+/// returns 0/1/N, so the rewrite swallowed the type error.
 fn optimize_pipe(left: Expr, right: Expr) -> Expr {
     use crate::ir::{UnaryOp, BinOp};
-    // keys | length → length (keys_unsorted | length too)
-    if let Expr::UnaryOp { op: UnaryOp::Length, operand } = &right {
-        if matches!(operand.as_ref(), Expr::Input) {
-            if let Expr::UnaryOp { op: UnaryOp::Keys | UnaryOp::KeysUnsorted, operand: inner } = &left {
-                if matches!(inner.as_ref(), Expr::Input) {
-                    return Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) };
-                }
-            }
-        }
-    }
     // Check for Collect(...) | UnaryOp(Add)
     if let Expr::UnaryOp { op: UnaryOp::Add, operand } = &right {
         if matches!(operand.as_ref(), Expr::Input) {
