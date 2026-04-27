@@ -2508,12 +2508,15 @@ impl Parser {
                 Token::Variable(name) => name,
                 _ => unreachable!(),
             };
-            let var_idx = self.scope.alloc_var(&var_name);
-            let acc_idx = self.scope.alloc_var("__acc__");
 
+            // Parse INIT before binding $var: jq scopes the binding to UPDATE
+            // only, so a stray reference to $var inside INIT is a compile error
+            // (#202).
             self.expect(&Token::LParen)?;
             let init = self.parse_pipe()?;
             self.expect(&Token::Semicolon)?;
+            let var_idx = self.scope.alloc_var(&var_name);
+            let acc_idx = self.scope.alloc_var("__acc__");
             let update = self.parse_pipe()?;
             self.expect(&Token::RParen)?;
 
@@ -2525,15 +2528,18 @@ impl Parser {
                 update: Box::new(update),
             })
         } else {
-            // Destructuring pattern
+            // Destructuring pattern — parse INIT before allocating pattern vars
+            // for the same scoping reason as the simple case above. parse_pattern
+            // is purely syntactic (no var alloc), so we can run it now and
+            // defer alloc_pattern_vars until after INIT.
             let pattern = self.parse_pattern()?;
-            let allocs = self.alloc_pattern_vars(&pattern);
-            let tmp_var = self.scope.alloc_var("__reduce_item__");
-            let acc_idx = self.scope.alloc_var("__acc__");
 
             self.expect(&Token::LParen)?;
             let init = self.parse_pipe()?;
             self.expect(&Token::Semicolon)?;
+            let allocs = self.alloc_pattern_vars(&pattern);
+            let tmp_var = self.scope.alloc_var("__reduce_item__");
+            let acc_idx = self.scope.alloc_var("__acc__");
             let update_raw = self.parse_pipe()?;
             self.expect(&Token::RParen)?;
 
@@ -2566,12 +2572,13 @@ impl Parser {
                 Token::Variable(name) => name,
                 _ => unreachable!(),
             };
-            let var_idx = self.scope.alloc_var(&var_name);
-            let acc_idx = self.scope.alloc_var("__acc__");
 
+            // Parse INIT before binding $var (#202).
             self.expect(&Token::LParen)?;
             let init = self.parse_pipe()?;
             self.expect(&Token::Semicolon)?;
+            let var_idx = self.scope.alloc_var(&var_name);
+            let acc_idx = self.scope.alloc_var("__acc__");
             let update = self.parse_pipe()?;
             let extract = if self.eat(&Token::Semicolon) {
                 Some(Box::new(self.parse_pipe()?))
@@ -2589,15 +2596,15 @@ impl Parser {
                 extract,
             })
         } else {
-            // Destructuring pattern
+            // Destructuring pattern — same INIT-before-bind ordering.
             let pattern = self.parse_pattern()?;
-            let allocs = self.alloc_pattern_vars(&pattern);
-            let tmp_var = self.scope.alloc_var("__foreach_item__");
-            let acc_idx = self.scope.alloc_var("__acc__");
 
             self.expect(&Token::LParen)?;
             let init = self.parse_pipe()?;
             self.expect(&Token::Semicolon)?;
+            let allocs = self.alloc_pattern_vars(&pattern);
+            let tmp_var = self.scope.alloc_var("__foreach_item__");
+            let acc_idx = self.scope.alloc_var("__acc__");
             let update_raw = self.parse_pipe()?;
             let extract_raw = if self.eat(&Token::Semicolon) {
                 Some(self.parse_pipe()?)

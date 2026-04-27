@@ -2162,3 +2162,8 @@ false
 [{(.k): empty}]
 {"a":1}
 []
+
+# Issue #202: $loopvar undefined inside reduce/foreach INIT
+reduce range(3) as $i (0; . + $i)
+null
+3
