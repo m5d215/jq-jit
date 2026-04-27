@@ -1228,7 +1228,12 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                 }
             }
             // Beta-reduction: .x | . + 1 → .x + 1
-            if sl.is_simple_scalar() && sr.is_input_free() {
+            // `sr` must actually reference Input. When it doesn't, the
+            // substitution is a no-op and folding away `sl |` would
+            // silently swallow lhs runtime errors — e.g. `.a | 0` on a
+            // non-object array must raise "Cannot index array with
+            // string a", not collapse to a bare `0` (#172).
+            if sl.is_simple_scalar() && sr.is_input_free() && contains_input(&sr) {
                 return sr.substitute_input(&sl);
             }
             // [gen] | map(f) = [gen] | [.[] | f] → [gen | f]
