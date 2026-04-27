@@ -14,7 +14,7 @@ Passes 100% of the official jq test suite (509/509) while being **8x-180x faster
 - **Streaming JSON parser** for memory-efficient NDJSON processing
 - **Memory-mapped file I/O** — mmap-based file reading with no upfront allocation
 - **Optimized value representation** with compact strings, mimalloc, and inline Cranelift codegen
-- **jqx extensions** — shell command execution (`exec`/`execv`) and CSV/TSV parsing (`fromcsv`/`fromcsvh`)
+- **jqx extensions** — shell command execution (`exec`/`execv`) and CSV/TSV parsing (`fromcsv`/`fromcsvh`/`fromtsv`/`fromtsvh`)
 
 ## Performance
 
@@ -32,7 +32,10 @@ On a 2M-line NDJSON file (typical ETL/data pipeline workload):
 | `.name \| gsub("_"; "-")` | 0.31s | 28.5s | **92x** |
 | `walk(if type == "number" then . + 1 else . end)` | 0.40s | 10.2s | **26x** |
 
-Run `bash bench/run.sh` to benchmark on your machine.
+Numbers above are indicative (representative run, single machine). For
+per-version results across the full filter suite, see
+[`docs/benchmark-history.md`](docs/benchmark-history.md). Run
+`bash bench/run.sh` to benchmark on your own hardware.
 
 ## Installation
 
@@ -58,7 +61,7 @@ Download the tarball for your platform from the [releases page](https://github.c
 
 jq-jit has no runtime C dependencies: parsing, evaluation, and JIT codegen
 are all pure Rust. (Earlier versions linked against `libjq` and `libonig`;
-that dependency was removed in the 1.3.0 line.)
+those dependencies were removed as of 1.3.0.)
 
 ### Build
 
@@ -80,21 +83,33 @@ jq-jit [OPTIONS] <FILTER> [FILE...]
 |------|-------------|
 | `-c`, `--compact-output` | Compact JSON output |
 | `-r`, `--raw-output` | Output strings without quotes |
+| `--raw-output0` | Like `-r`, but terminate each output with NUL instead of newline |
 | `-j`, `--join-output` | No newline after each output |
 | `-R`, `--raw-input` | Treat each input line as a string |
 | `-n`, `--null-input` | Use `null` as input |
 | `-s`, `--slurp` | Collect all inputs into an array |
 | `-S`, `--sort-keys` | Sort object keys |
 | `-e`, `--exit-status` | Exit with 5 if last output is `false`/`null` |
-| `-f`, `--from-file FILE` | Read filter from file |
+| `-C`, `--color-output` | Force ANSI color output |
+| `-M`, `--monochrome-output` | Disable color output |
 | `--tab` | Use tabs for indentation |
-| `--indent N` | Use N spaces for indentation (default: 2) |
+| `--indent N` | Use N spaces for indentation (range -1..=7; -1 means tab; default: 2) |
+| `--unbuffered` | Flush output after each value |
+| `--seq` | Frame each output with `RS` (0x1E) per RFC 7464 |
+| `-f`, `--from-file FILE` | Read filter from file |
+| `-L`, `--library-path DIR` | Add DIR to the module search path (repeatable) |
 | `--arg NAME VALUE` | Set `$NAME` to string VALUE |
 | `--argjson NAME VALUE` | Set `$NAME` to JSON VALUE |
 | `--slurpfile NAME FILE` | Set `$NAME` to array of JSON values from FILE |
 | `--rawfile NAME FILE` | Set `$NAME` to string contents of FILE |
 | `--args` | Remaining arguments are string `$ARGS.positional` |
 | `--jsonargs` | Remaining arguments are JSON `$ARGS.positional` |
+| `-V`, `--version` | Print version and exit |
+| `-h`, `--help` | Print usage and exit |
+
+`-a` / `--ascii-output` and `--stream` are accepted but not yet
+implemented (tracked in #126); jq-jit exits with an explicit error rather
+than falling through silently.
 
 ### Examples
 
@@ -120,7 +135,9 @@ jq-jit -n '$ARGS.positional' --args foo bar baz
 
 ## Extensions (jqx)
 
-jq-jit includes extensions beyond standard jq. These are available on the `jqx` branch.
+jq-jit ships with a small set of extensions beyond standard jq, collectively
+referred to as **jqx**. They are part of the default build on `main` (no
+separate branch or feature flag).
 
 ### Shell Command Execution
 
