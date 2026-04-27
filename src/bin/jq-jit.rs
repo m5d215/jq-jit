@@ -2556,8 +2556,16 @@ fn real_main() {
     let array_join = if use_raw_fast_paths && !exit_status && field_access.is_none() {
         trace_detect!(filter, detect_array_join)
     } else { None };
-    let literal_output = if use_raw_fast_paths && !exit_status { trace_detect!(filter, detect_literal_output) } else { None };
-    let input_free_output = if use_raw_fast_paths && !exit_status && literal_output.is_none() {
+    // literal_output also emits compact JSON; gated on compact mode (#212).
+    let literal_output = if use_raw_fast_paths && !exit_status
+        && compact && !raw_output && !sort_keys && !color_output {
+        trace_detect!(filter, detect_literal_output)
+    } else { None };
+    // input_free_output emits the value as compact JSON; only enable it when
+    // the user actually asked for compact output (#212). Pretty / tab / indent
+    // paths must go through the formatter so spacing matches jq's defaults.
+    let input_free_output = if use_raw_fast_paths && !exit_status && literal_output.is_none()
+        && compact && !raw_output && !sort_keys && !color_output {
         trace_detect!(filter, detect_input_free_output)
     } else { None };
     let array_fields_format = if use_raw_fast_paths && !exit_status && field_access.is_none() {
