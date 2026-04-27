@@ -1961,7 +1961,18 @@ fn real_main() {
             "--indent" => {
                 i += 1;
                 if i < expanded_args.len() {
-                    indent_n = expanded_args[i].parse().unwrap_or(2);
+                    let parsed: i32 = expanded_args[i].parse().unwrap_or(2);
+                    // jq limits --indent to [-1, 7]; -1 means tab indent (#211).
+                    if !(-1..=7).contains(&parsed) {
+                        eprintln!("jq: --indent takes a number between -1 and 7");
+                        eprintln!("Use jq --help for help with command-line options.");
+                        process::exit(2);
+                    }
+                    if parsed == -1 {
+                        tab = true;
+                    } else {
+                        indent_n = parsed as usize;
+                    }
                 }
             }
             "-f" | "--from-file" => {
