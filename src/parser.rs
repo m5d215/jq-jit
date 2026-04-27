@@ -1384,19 +1384,42 @@ impl Parser {
 
     /// Pre-allocate all variables from a pattern before parsing the body.
     fn alloc_pattern_vars(&mut self, pattern: &Pattern) -> Vec<u16> {
+        // For repeated names within a single pattern, share the same slot —
+        // necessary so object-pattern first-wins (#206) and array-pattern
+        // last-wins land on the right binding without false aliasing across
+        // separate names.
+        let mut seen: std::collections::HashMap<String, u16> = std::collections::HashMap::new();
+        self.alloc_pattern_vars_inner(pattern, &mut seen)
+    }
+
+    fn alloc_pattern_vars_inner(&mut self, pattern: &Pattern, seen: &mut std::collections::HashMap<String, u16>) -> Vec<u16> {
         match pattern {
             Pattern::Var(name) => {
-                vec![self.scope.alloc_var(name)]
+                let idx = if let Some(&existing) = seen.get(name) {
+                    existing
+                } else {
+                    let idx = self.scope.alloc_var(name);
+                    seen.insert(name.clone(), idx);
+                    idx
+                };
+                vec![idx]
             }
             Pattern::Array(pats) => {
-                pats.iter().flat_map(|p| self.alloc_pattern_vars(p)).collect()
+                pats.iter().flat_map(|p| self.alloc_pattern_vars_inner(p, seen)).collect()
             }
             Pattern::Object(pats) => {
-                pats.iter().flat_map(|(_, p)| self.alloc_pattern_vars(p)).collect()
+                pats.iter().flat_map(|(_, p)| self.alloc_pattern_vars_inner(p, seen)).collect()
             }
             Pattern::VarAndSub(name, sub) => {
-                let mut vars = vec![self.scope.alloc_var(name)];
-                vars.extend(self.alloc_pattern_vars(sub));
+                let head_idx = if let Some(&existing) = seen.get(name) {
+                    existing
+                } else {
+                    let idx = self.scope.alloc_var(name);
+                    seen.insert(name.clone(), idx);
+                    idx
+                };
+                let mut vars = vec![head_idx];
+                vars.extend(self.alloc_pattern_vars_inner(sub, seen));
                 vars
             }
         }
@@ -1504,16 +1527,44 @@ impl Parser {
     }
 
     fn build_object_destructure(&mut self, value: Expr, pats: &[(String, Pattern)], allocs: &[u16], body: Expr) -> Result<Expr> {
-        let mut result = body;
-        let mut alloc_idx = allocs.len();
-        for (key, pat) in pats.iter().rev() {
+        // jq's object-pattern destructure is first-wins for repeated variable
+        // names in the same pattern (#206). With slot dedup in
+        // `alloc_pattern_vars`, all references to `$a` map to one idx — so a
+        // later pair that only binds already-seen idx would shadow the first.
+        // Pre-scan source-order to mark pairs whose entire binding set is
+        // covered by an earlier pair, then drop them when emitting.
+        let mut pair_offsets: Vec<usize> = Vec::with_capacity(pats.len());
+        let mut acc = 0;
+        for (_, pat) in pats {
+            pair_offsets.push(acc);
+            acc += self.count_pattern_vars(pat);
+        }
+        let mut keep: Vec<bool> = vec![false; pats.len()];
+        let mut bound: std::collections::HashSet<u16> = std::collections::HashSet::new();
+        for (i, (_, pat)) in pats.iter().enumerate() {
             let count = self.count_pattern_vars(pat);
-            alloc_idx -= count;
+            let pair_allocs = &allocs[pair_offsets[i]..pair_offsets[i]+count];
+            if pair_allocs.is_empty() {
+                keep[i] = true;
+                continue;
+            }
+            let has_new = pair_allocs.iter().any(|idx| !bound.contains(idx));
+            if has_new {
+                keep[i] = true;
+                for &idx in pair_allocs { bound.insert(idx); }
+            }
+        }
+
+        let mut result = body;
+        for (i, (key, pat)) in pats.iter().enumerate().rev() {
+            if !keep[i] { continue; }
+            let count = self.count_pattern_vars(pat);
+            let pair_allocs = &allocs[pair_offsets[i]..pair_offsets[i]+count];
             let field_expr = Expr::Index {
                 expr: Box::new(value.clone()),
                 key: Box::new(Expr::Literal(Literal::Str(key.clone()))),
             };
-            result = self.build_pattern_binding(pat, field_expr, &allocs[alloc_idx..alloc_idx+count], result)?;
+            result = self.build_pattern_binding(pat, field_expr, pair_allocs, result)?;
         }
         Ok(result)
     }
@@ -2166,7 +2217,9 @@ impl Parser {
                 self.advance();
                 match self.advance() {
                     Token::Variable(name) => {
-                        let var_idx = self.scope.alloc_var(&name);
+                        // Register label-typed bindings under a sentinel prefix so they
+                        // can only be referenced via `break $name`, never as a bare $name.
+                        let var_idx = self.scope.alloc_var(&format!("\x00label:{}", name));
                         self.expect(&Token::Pipe)?;
                         let body = self.parse_pipe()?;
                         Ok(Expr::Label {
@@ -2182,8 +2235,8 @@ impl Parser {
                 self.advance();
                 match self.advance() {
                     Token::Variable(name) => {
-                        let var_idx = self.scope.lookup_var(&name)
-                            .ok_or_else(|| anyhow::anyhow!("undefined label variable ${}", name))?;
+                        let var_idx = self.scope.lookup_var(&format!("\x00label:{}", name))
+                            .ok_or_else(|| anyhow::anyhow!("${} is not defined", name))?;
                         Ok(Expr::Break {
                             var_index: var_idx,
                             value: Box::new(Expr::Input),
@@ -2506,12 +2559,15 @@ impl Parser {
                 Token::Variable(name) => name,
                 _ => unreachable!(),
             };
-            let var_idx = self.scope.alloc_var(&var_name);
-            let acc_idx = self.scope.alloc_var("__acc__");
 
+            // Parse INIT before binding $var: jq scopes the binding to UPDATE
+            // only, so a stray reference to $var inside INIT is a compile error
+            // (#202).
             self.expect(&Token::LParen)?;
             let init = self.parse_pipe()?;
             self.expect(&Token::Semicolon)?;
+            let var_idx = self.scope.alloc_var(&var_name);
+            let acc_idx = self.scope.alloc_var("__acc__");
             let update = self.parse_pipe()?;
             self.expect(&Token::RParen)?;
 
@@ -2523,15 +2579,18 @@ impl Parser {
                 update: Box::new(update),
             })
         } else {
-            // Destructuring pattern
+            // Destructuring pattern — parse INIT before allocating pattern vars
+            // for the same scoping reason as the simple case above. parse_pattern
+            // is purely syntactic (no var alloc), so we can run it now and
+            // defer alloc_pattern_vars until after INIT.
             let pattern = self.parse_pattern()?;
-            let allocs = self.alloc_pattern_vars(&pattern);
-            let tmp_var = self.scope.alloc_var("__reduce_item__");
-            let acc_idx = self.scope.alloc_var("__acc__");
 
             self.expect(&Token::LParen)?;
             let init = self.parse_pipe()?;
             self.expect(&Token::Semicolon)?;
+            let allocs = self.alloc_pattern_vars(&pattern);
+            let tmp_var = self.scope.alloc_var("__reduce_item__");
+            let acc_idx = self.scope.alloc_var("__acc__");
             let update_raw = self.parse_pipe()?;
             self.expect(&Token::RParen)?;
 
@@ -2564,12 +2623,13 @@ impl Parser {
                 Token::Variable(name) => name,
                 _ => unreachable!(),
             };
-            let var_idx = self.scope.alloc_var(&var_name);
-            let acc_idx = self.scope.alloc_var("__acc__");
 
+            // Parse INIT before binding $var (#202).
             self.expect(&Token::LParen)?;
             let init = self.parse_pipe()?;
             self.expect(&Token::Semicolon)?;
+            let var_idx = self.scope.alloc_var(&var_name);
+            let acc_idx = self.scope.alloc_var("__acc__");
             let update = self.parse_pipe()?;
             let extract = if self.eat(&Token::Semicolon) {
                 Some(Box::new(self.parse_pipe()?))
@@ -2587,15 +2647,15 @@ impl Parser {
                 extract,
             })
         } else {
-            // Destructuring pattern
+            // Destructuring pattern — same INIT-before-bind ordering.
             let pattern = self.parse_pattern()?;
-            let allocs = self.alloc_pattern_vars(&pattern);
-            let tmp_var = self.scope.alloc_var("__foreach_item__");
-            let acc_idx = self.scope.alloc_var("__acc__");
 
             self.expect(&Token::LParen)?;
             let init = self.parse_pipe()?;
             self.expect(&Token::Semicolon)?;
+            let allocs = self.alloc_pattern_vars(&pattern);
+            let tmp_var = self.scope.alloc_var("__foreach_item__");
+            let acc_idx = self.scope.alloc_var("__acc__");
             let update_raw = self.parse_pipe()?;
             let extract_raw = if self.eat(&Token::Semicolon) {
                 Some(self.parse_pipe()?)

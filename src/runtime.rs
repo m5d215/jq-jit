@@ -147,7 +147,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "indices" | "rindices" => binary_arg(args, rt_indices),
         "test" => {
             if args.len() >= 3 {
-                let (pat, _) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2]);
+                let (pat, _) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2])?;
                 rt_test(&args[0], &Value::from_string(pat))
             } else {
                 binary_arg(args, rt_test)
@@ -155,7 +155,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         }
         "match" => {
             if args.len() >= 3 {
-                let (pat, global) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2]);
+                let (pat, global) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2])?;
                 let re = Value::from_string(pat);
                 if global {
                     rt_match_global(&args[0], &re)
@@ -168,7 +168,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         }
         "capture" => {
             if args.len() >= 3 {
-                let (pat, global) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2]);
+                let (pat, global) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2])?;
                 let re = Value::from_string(pat);
                 if global {
                     rt_capture_global(&args[0], &re)
@@ -181,7 +181,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         }
         "scan" => {
             if args.len() >= 3 {
-                let (pat, _) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2]);
+                let (pat, _) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2])?;
                 rt_scan(&args[0], &Value::from_string(pat))
             } else {
                 binary_arg(args, rt_scan)
@@ -190,7 +190,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "sub" | "gsub" => {
             if args.len() >= 4 {
                 // sub/gsub with flags: input, regex, replacement, flags
-                let (pat, _) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[3]);
+                let (pat, _) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[3])?;
                 rt_sub_gsub(&args[0], &Value::from_string(pat), &args[2], name == "gsub")
             } else if args.len() >= 3 {
                 rt_sub_gsub(&args[0], &args[1], &args[2], name == "gsub")
@@ -773,6 +773,23 @@ pub fn rt_div(a: &Value, b: &Value) -> Result<Value> {
             errdesc(b)
         ),
     }
+}
+
+/// jq's `%` semantics for f64 inputs: truncate both operands toward zero,
+/// then take the integer remainder. Returns None when either operand is
+/// non-finite or the divisor truncates to zero (caller decides the fallback).
+/// Generic over `f64` and `&f64` so call sites can pass through whatever
+/// shape they hold without per-site dereferencing.
+#[inline]
+pub fn jq_mod_f64<A: std::borrow::Borrow<f64>, B: std::borrow::Borrow<f64>>(a: A, b: B) -> Option<f64> {
+    let a = *a.borrow();
+    let b = *b.borrow();
+    if !a.is_finite() || !b.is_finite() { return None; }
+    let yi = b as i64;
+    if yi == 0 { return None; }
+    let xi = a as i64;
+    let r = if xi == i64::MIN && yi == -1 { 0 } else { xi % yi };
+    Some(r as f64)
 }
 
 pub fn rt_mod(a: &Value, b: &Value) -> Result<Value> {
@@ -1781,7 +1798,7 @@ fn rt_split(v: &Value, sep: &Value) -> Result<Value> {
 fn rt_regex_split(v: &Value, re: &Value, flags: &Value) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
-            let (pat, _global) = apply_regex_flags(r.as_str(), flags);
+            let (pat, _global) = apply_regex_flags(r.as_str(), flags)?;
             with_regex(&pat, |regex| {
                 let parts: Vec<Value> = regex.split(s.as_str())
                     .map(Value::from_str)
@@ -2014,9 +2031,9 @@ pub fn rt_getpath(v: &Value, path: &Value) -> Result<Value> {
                         let actual = if idx < 0 { (a.len() as i64 + idx) as usize } else { idx as usize };
                         current = a.get(actual).cloned().unwrap_or(Value::Null);
                     }
-                    // jq allows string or number keys through null (yielding null) but
-                    // still errors on other key types — matches `.[null]` on null.
-                    (Value::Null, Value::Str(_)) | (Value::Null, Value::Num(_, _)) => {
+                    // jq short-circuits getpath on null for string/number/object keys
+                    // (matching `.[k]` on null), but still errors for null/bool/array keys.
+                    (Value::Null, Value::Str(_)) | (Value::Null, Value::Num(_, _)) | (Value::Null, Value::Obj(_)) => {
                         current = Value::Null;
                     }
                     // jq errors on type-incompatible path elements (issue #77).
@@ -2105,18 +2122,29 @@ pub fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
                 }
                 // Slice assignment: path element is {start: N, end: N}
                 (_, Value::Obj(slice_spec)) if slice_spec.contains_key("start") && slice_spec.contains_key("end") => {
-                    let start = match slice_spec.get("start") { Some(Value::Num(n, _)) => *n as i64, _ => 0 };
-                    let end = match slice_spec.get("end") { Some(Value::Num(n, _)) => *n as i64, _ => 0 };
+                    // jq applies floor(start) / ceil(end) when consuming a slice path,
+                    // and treats null as the open endpoint (0 for start, len for end).
+                    let len = match v { Value::Arr(a) => a.len() as i64, _ => 0 };
+                    let start = match slice_spec.get("start") {
+                        Some(Value::Num(n, _)) => n.floor() as i64,
+                        _ => 0,
+                    };
+                    let end = match slice_spec.get("end") {
+                        Some(Value::Num(n, _)) => n.ceil() as i64,
+                        Some(Value::Null) | None => len,
+                        _ => 0,
+                    };
                     match v {
                         Value::Arr(a) => {
                             let len = a.len() as i64;
-                            let si = start.max(0).min(len) as usize;
-                            let ei = end.max(0).min(len) as usize;
-                            let ei = ei.max(si);
+                            let si_raw = if start < 0 { (len + start).max(0) } else { start.min(len) };
+                            let ei_raw = if end < 0 { (len + end).max(0) } else { end.min(len) };
+                            let si = si_raw as usize;
+                            let ei = (ei_raw as usize).max(si);
                             let new_val = rt_setpath(&Value::Null, &rest, val)?;
                             let replacement = match &new_val {
                                 Value::Arr(r) => r.as_ref().clone(),
-                                _ => vec![new_val],
+                                _ => bail!("A slice of an array can only be assigned another array"),
                             };
                             let mut result = a[..si].to_vec();
                             result.extend(replacement);
@@ -2128,7 +2156,7 @@ pub fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
                             let new_val = rt_setpath(&Value::Null, &rest, val)?;
                             let replacement = match &new_val {
                                 Value::Arr(r) => r.as_ref().clone(),
-                                _ => vec![new_val],
+                                _ => bail!("A slice of an array can only be assigned another array"),
                             };
                             Ok(Value::Arr(Rc::new(replacement)))
                         }
@@ -2416,18 +2444,24 @@ fn next_char_boundary(s: &str, pos: usize) -> usize {
 
 /// Parse jq regex flags string and return (pattern_with_inline_flags, is_global).
 /// Supported flags: i (case-insensitive), x (extended), s (dotall/single-line), g (global).
-fn apply_regex_flags(pattern: &str, flags: &Value) -> (String, bool) {
+fn apply_regex_flags(pattern: &str, flags: &Value) -> Result<(String, bool)> {
     let flags_str = match flags {
         Value::Str(s) => s.as_str(),
-        _ => return (pattern.to_string(), false),
+        _ => return Ok((pattern.to_string(), false)),
     };
+    // jq accepts g, i, l, m, n, p, s, x. Any other character — even mixed in
+    // with valid ones — rejects the whole modifier string.
+    if !flags_str.chars().all(|c| matches!(c, 'g' | 'i' | 'l' | 'm' | 'n' | 'p' | 's' | 'x')) {
+        bail!("{} is not a valid modifier string", flags_str);
+    }
     let mut inline = String::new();
     let mut global = false;
     for ch in flags_str.chars() {
         match ch {
             'i' | 'x' | 's' => inline.push(ch),
             'g' => global = true,
-            _ => {} // ignore unknown flags (jq behavior)
+            // l, m, n, p have no inline equivalent in onig — accepted but ignored.
+            _ => {}
         }
     }
     let pat = if inline.is_empty() {
@@ -2435,7 +2469,7 @@ fn apply_regex_flags(pattern: &str, flags: &Value) -> (String, bool) {
     } else {
         format!("(?{}){}", inline, pattern)
     };
-    (pat, global)
+    Ok((pat, global))
 }
 
 fn rt_test(v: &Value, re: &Value) -> Result<Value> {
@@ -2661,7 +2695,7 @@ pub struct SubGsubSegment {
 /// Find regex matches and return segments for capture-aware sub/gsub replacement.
 /// Returns segments alternating: literal, capture_obj, literal, capture_obj, ..., literal.
 pub fn sub_gsub_segments(input: &str, pattern: &str, flags: &Value, global: bool) -> Result<Vec<SubGsubSegment>> {
-    let (pat, flag_global) = apply_regex_flags(pattern, flags);
+    let (pat, flag_global) = apply_regex_flags(pattern, flags)?;
     let is_global = global || flag_global;
     with_regex(&pat, |regex| {
         let mut segments = Vec::new();

@@ -866,7 +866,7 @@ fn emit_remap_value(
             let idx = field_idx[f.as_str()];
             let (vs, ve) = ranges[idx];
             if let Some(a) = parse_json_num(&raw[vs..ve]) {
-                let r = match op { BinOp::Add => a + n, BinOp::Sub => a - n, BinOp::Mul => a * n, BinOp::Div => a / n, BinOp::Mod => a % n, _ => unreachable!() };
+                let r = match op { BinOp::Add => a + n, BinOp::Sub => a - n, BinOp::Mul => a * n, BinOp::Div => a / n, BinOp::Mod => jq_jit::runtime::jq_mod_f64(a, n).unwrap_or(f64::NAN), _ => unreachable!() };
                 push_jq_number_bytes(buf, r);
             } else { buf.extend_from_slice(b"null"); }
         }
@@ -876,7 +876,7 @@ fn emit_remap_value(
             let (vs1, ve1) = ranges[idx1];
             let (vs2, ve2) = ranges[idx2];
             if let (Some(a), Some(b)) = (parse_json_num(&raw[vs1..ve1]), parse_json_num(&raw[vs2..ve2])) {
-                let r = match op { BinOp::Add => a + b, BinOp::Sub => a - b, BinOp::Mul => a * b, BinOp::Div => a / b, BinOp::Mod => a % b, _ => unreachable!() };
+                let r = match op { BinOp::Add => a + b, BinOp::Sub => a - b, BinOp::Mul => a * b, BinOp::Div => a / b, BinOp::Mod => jq_jit::runtime::jq_mod_f64(a, b).unwrap_or(f64::NAN), _ => unreachable!() };
                 push_jq_number_bytes(buf, r);
             } else if matches!(op, BinOp::Add) && raw[vs1] == b'"' && raw[vs2] == b'"' {
                 // String concatenation: "hello" + "world" → "helloworld"
@@ -890,7 +890,7 @@ fn emit_remap_value(
             let idx = field_idx[f.as_str()];
             let (vs, ve) = ranges[idx];
             if let Some(b) = parse_json_num(&raw[vs..ve]) {
-                let r = match op { BinOp::Add => n + b, BinOp::Sub => n - b, BinOp::Mul => n * b, BinOp::Div => n / b, BinOp::Mod => n % b, _ => unreachable!() };
+                let r = match op { BinOp::Add => n + b, BinOp::Sub => n - b, BinOp::Mul => n * b, BinOp::Div => n / b, BinOp::Mod => jq_jit::runtime::jq_mod_f64(n, b).unwrap_or(f64::NAN), _ => unreachable!() };
                 push_jq_number_bytes(buf, r);
             } else { buf.extend_from_slice(b"null"); }
         }
@@ -932,7 +932,7 @@ fn emit_remap_value(
             let idx = field_idx[f.as_str()];
             let (vs, ve) = ranges[idx];
             if let Some(a) = parse_json_num(&raw[vs..ve]) {
-                let r = match op { BinOp::Add => a + n, BinOp::Sub => a - n, BinOp::Mul => a * n, BinOp::Div => a / n, BinOp::Mod => a % n, _ => unreachable!() };
+                let r = match op { BinOp::Add => a + n, BinOp::Sub => a - n, BinOp::Mul => a * n, BinOp::Div => a / n, BinOp::Mod => jq_jit::runtime::jq_mod_f64(a, n).unwrap_or(f64::NAN), _ => unreachable!() };
                 buf.push(b'"');
                 push_jq_number_bytes(buf, r);
                 buf.push(b'"');
@@ -993,7 +993,7 @@ fn emit_remap_value(
             let (vs1, ve1) = ranges[idx1];
             let (vs2, ve2) = ranges[idx2];
             if let (Some(a), Some(b)) = (parse_json_num(&raw[vs1..ve1]), parse_json_num(&raw[vs2..ve2])) {
-                let r = match op { BinOp::Add => a + b, BinOp::Sub => a - b, BinOp::Mul => a * b, BinOp::Div => a / b, BinOp::Mod => a % b, _ => unreachable!() };
+                let r = match op { BinOp::Add => a + b, BinOp::Sub => a - b, BinOp::Mul => a * b, BinOp::Div => a / b, BinOp::Mod => jq_jit::runtime::jq_mod_f64(a, b).unwrap_or(f64::NAN), _ => unreachable!() };
                 buf.push(b'"');
                 push_jq_number_bytes(buf, r);
                 buf.push(b'"');
@@ -1093,7 +1093,7 @@ fn eval_arith_raw_unresolved(
                 BinOp::Sub => l - r,
                 BinOp::Mul => l * r,
                 BinOp::Div => l / r,
-                BinOp::Mod => l % r,
+                BinOp::Mod => jq_jit::runtime::jq_mod_f64(l, r).unwrap_or(f64::NAN),
                 _ => return None,
             })
         }
@@ -1189,7 +1189,7 @@ fn emit_resolved_value(
         ResolvedRemap::FieldOpConst(idx, ref op, n) => {
             let (vs, ve) = ranges[idx];
             if let Some(a) = parse_json_num(&raw[vs..ve]) {
-                let r = match op { BinOp::Add => a + n, BinOp::Sub => a - n, BinOp::Mul => a * n, BinOp::Div => a / n, BinOp::Mod => a % n, _ => unreachable!() };
+                let r = match op { BinOp::Add => a + n, BinOp::Sub => a - n, BinOp::Mul => a * n, BinOp::Div => a / n, BinOp::Mod => jq_jit::runtime::jq_mod_f64(a, n).unwrap_or(f64::NAN), _ => unreachable!() };
                 push_jq_number_bytes(buf, r);
             } else { buf.extend_from_slice(b"null"); }
         }
@@ -1197,7 +1197,7 @@ fn emit_resolved_value(
             let (vs1, ve1) = ranges[idx1];
             let (vs2, ve2) = ranges[idx2];
             if let (Some(a), Some(b)) = (parse_json_num(&raw[vs1..ve1]), parse_json_num(&raw[vs2..ve2])) {
-                let r = match op { BinOp::Add => a + b, BinOp::Sub => a - b, BinOp::Mul => a * b, BinOp::Div => a / b, BinOp::Mod => a % b, _ => unreachable!() };
+                let r = match op { BinOp::Add => a + b, BinOp::Sub => a - b, BinOp::Mul => a * b, BinOp::Div => a / b, BinOp::Mod => jq_jit::runtime::jq_mod_f64(a, b).unwrap_or(f64::NAN), _ => unreachable!() };
                 push_jq_number_bytes(buf, r);
             } else if matches!(op, BinOp::Add) && raw[vs1] == b'"' && raw[vs2] == b'"' {
                 buf.push(b'"');
@@ -1209,7 +1209,7 @@ fn emit_resolved_value(
         ResolvedRemap::ConstOpField(n, ref op, idx) => {
             let (vs, ve) = ranges[idx];
             if let Some(b) = parse_json_num(&raw[vs..ve]) {
-                let r = match op { BinOp::Add => n + b, BinOp::Sub => n - b, BinOp::Mul => n * b, BinOp::Div => n / b, BinOp::Mod => n % b, _ => unreachable!() };
+                let r = match op { BinOp::Add => n + b, BinOp::Sub => n - b, BinOp::Mul => n * b, BinOp::Div => n / b, BinOp::Mod => jq_jit::runtime::jq_mod_f64(n, b).unwrap_or(f64::NAN), _ => unreachable!() };
                 push_jq_number_bytes(buf, r);
             } else { buf.extend_from_slice(b"null"); }
         }
@@ -1244,7 +1244,7 @@ fn emit_resolved_value(
         ResolvedRemap::FieldOpConstToString(idx, ref op, n) => {
             let (vs, ve) = ranges[idx];
             if let Some(a) = parse_json_num(&raw[vs..ve]) {
-                let r = match op { BinOp::Add => a + n, BinOp::Sub => a - n, BinOp::Mul => a * n, BinOp::Div => a / n, BinOp::Mod => a % n, _ => unreachable!() };
+                let r = match op { BinOp::Add => a + n, BinOp::Sub => a - n, BinOp::Mul => a * n, BinOp::Div => a / n, BinOp::Mod => jq_jit::runtime::jq_mod_f64(a, n).unwrap_or(f64::NAN), _ => unreachable!() };
                 buf.push(b'"');
                 push_jq_number_bytes(buf, r);
                 buf.push(b'"');
@@ -1404,7 +1404,7 @@ fn emit_resolved_value(
                                     jq_jit::ir::BinOp::Sub => val - n,
                                     jq_jit::ir::BinOp::Mul => val * n,
                                     jq_jit::ir::BinOp::Div => val / n,
-                                    jq_jit::ir::BinOp::Mod => val % n,
+                                    jq_jit::ir::BinOp::Mod => jq_jit::runtime::jq_mod_f64(val, n).unwrap_or(f64::NAN),
                                     _ => val,
                                 };
                             }
@@ -1439,7 +1439,7 @@ fn emit_resolved_value(
                                         jq_jit::ir::BinOp::Sub => val - n,
                                         jq_jit::ir::BinOp::Mul => val * n,
                                         jq_jit::ir::BinOp::Div => val / n,
-                                        jq_jit::ir::BinOp::Mod => val % n,
+                                        jq_jit::ir::BinOp::Mod => jq_jit::runtime::jq_mod_f64(val, n).unwrap_or(f64::NAN),
                                         _ => val,
                                     };
                                 }
@@ -1618,7 +1618,7 @@ fn emit_resolved_value(
             let (vs1, ve1) = ranges[idx1];
             let (vs2, ve2) = ranges[idx2];
             if let (Some(a), Some(b)) = (parse_json_num(&raw[vs1..ve1]), parse_json_num(&raw[vs2..ve2])) {
-                let r = match op { BinOp::Add => a + b, BinOp::Sub => a - b, BinOp::Mul => a * b, BinOp::Div => a / b, BinOp::Mod => a % b, _ => unreachable!() };
+                let r = match op { BinOp::Add => a + b, BinOp::Sub => a - b, BinOp::Mul => a * b, BinOp::Div => a / b, BinOp::Mod => jq_jit::runtime::jq_mod_f64(a, b).unwrap_or(f64::NAN), _ => unreachable!() };
                 buf.push(b'"');
                 push_jq_number_bytes(buf, r);
                 buf.push(b'"');
@@ -1765,7 +1765,7 @@ fn emit_resolved_value(
                                     jq_jit::ir::BinOp::Sub => v - n,
                                     jq_jit::ir::BinOp::Mul => v * n,
                                     jq_jit::ir::BinOp::Div => v / n,
-                                    jq_jit::ir::BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
+                                    jq_jit::ir::BinOp::Mod => jq_jit::runtime::jq_mod_f64(v, n).unwrap_or(f64::NAN),
                                     _ => v,
                                 };
                             }
@@ -1846,7 +1846,7 @@ fn eval_arith_raw(
                 BinOp::Sub => l - r,
                 BinOp::Mul => l * r,
                 BinOp::Div => l / r,
-                BinOp::Mod => l % r,
+                BinOp::Mod => jq_jit::runtime::jq_mod_f64(l, r).unwrap_or(f64::NAN),
                 _ => return None,
             })
         }
@@ -4144,7 +4144,7 @@ fn real_main() {
                                         v = match aop {
                                             BinOp::Add => v + n, BinOp::Sub => v - n,
                                             BinOp::Mul => v * n, BinOp::Div => v / n,
-                                            BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { v } },
+                                            BinOp::Mod => jq_jit::runtime::jq_mod_f64(v, n).unwrap_or(v),
                                             _ => v,
                                         };
                                     }
@@ -5789,7 +5789,7 @@ fn real_main() {
                                 BinOp::Sub => a - b,
                                 BinOp::Mul => a * b,
                                 BinOp::Div => a / b,
-                                BinOp::Mod => a % b,
+                                BinOp::Mod => jq_jit::runtime::jq_mod_f64(a, b).unwrap_or(f64::NAN),
                                 _ => unreachable!(),
                             };
                             if result.is_finite() {
@@ -5818,13 +5818,13 @@ fn real_main() {
                             let inner = match op1 {
                                 BinOp::Add => a + b, BinOp::Sub => a - b,
                                 BinOp::Mul => a * b, BinOp::Div => a / b,
-                                BinOp::Mod => { let r = a % b; if r.is_finite() { r } else { f64::NAN } },
+                                BinOp::Mod => jq_jit::runtime::jq_mod_f64(a, b).unwrap_or(f64::NAN),
                                 _ => unreachable!(),
                             };
                             let result = match op2 {
                                 BinOp::Add => inner + const_val, BinOp::Sub => inner - const_val,
                                 BinOp::Mul => inner * const_val, BinOp::Div => inner / const_val,
-                                BinOp::Mod => { let r = inner % const_val; if r.is_finite() { r } else { f64::NAN } },
+                                BinOp::Mod => jq_jit::runtime::jq_mod_f64(inner, const_val).unwrap_or(f64::NAN),
                                 _ => unreachable!(),
                             };
                             if result.is_finite() {
@@ -5854,7 +5854,7 @@ fn real_main() {
                                 BinOp::Sub => a - b,
                                 BinOp::Mul => a * b,
                                 BinOp::Div => a / b,
-                                BinOp::Mod => a % b,
+                                BinOp::Mod => jq_jit::runtime::jq_mod_f64(a, b).unwrap_or(f64::NAN),
                                 _ => unreachable!(),
                             };
                             if result.is_finite() {
@@ -6079,7 +6079,7 @@ fn real_main() {
                                     BinOp::Sub => v - c,
                                     BinOp::Mul => v * c,
                                     BinOp::Div => v / c,
-                                    BinOp::Mod => { if c.is_finite() && *c != 0.0 { v % c } else { f64::NAN } }
+                                    BinOp::Mod => jq_jit::runtime::jq_mod_f64(v, *c).unwrap_or(f64::NAN),
                                     _ => v,
                                 };
                             }
@@ -6107,7 +6107,7 @@ fn real_main() {
                                 BinOp::Sub => a - b,
                                 BinOp::Mul => a * b,
                                 BinOp::Div => a / b,
-                                BinOp::Mod => a % b,
+                                BinOp::Mod => jq_jit::runtime::jq_mod_f64(a, b).unwrap_or(f64::NAN),
                                 _ => unreachable!(),
                             };
                             let result = if let Some(uop) = uop_opt {
@@ -6143,7 +6143,7 @@ fn real_main() {
                                     BinOp::Sub => result - c,
                                     BinOp::Mul => result * c,
                                     BinOp::Div => result / c,
-                                    BinOp::Mod => result % c,
+                                    BinOp::Mod => jq_jit::runtime::jq_mod_f64(result, c).unwrap_or(f64::NAN),
                                     _ => unreachable!(),
                                 };
                             }
@@ -6172,7 +6172,7 @@ fn real_main() {
                                     BinOp::Sub => result - c,
                                     BinOp::Mul => result * c,
                                     BinOp::Div => result / c,
-                                    BinOp::Mod => result % c,
+                                    BinOp::Mod => jq_jit::runtime::jq_mod_f64(result, c).unwrap_or(f64::NAN),
                                     _ => unreachable!(),
                                 };
                             }
@@ -7182,12 +7182,7 @@ fn real_main() {
                                             jq_jit::ir::BinOp::Sub => n - c,
                                             jq_jit::ir::BinOp::Mul => n * c,
                                             jq_jit::ir::BinOp::Div => n / c,
-                                            jq_jit::ir::BinOp::Mod => {
-                                                if n.fract() == 0.0 && c.fract() == 0.0 && *c != 0.0 {
-                                                    let a = n as i64; let b = *c as i64;
-                                                    if a == i64::MIN && b == -1 { 0.0 } else { (a % b) as f64 }
-                                                } else { n % c }
-                                            }
+                                            jq_jit::ir::BinOp::Mod => jq_jit::runtime::jq_mod_f64(n, *c).unwrap_or(f64::NAN),
                                             _ => n,
                                         };
                                     }
@@ -7540,7 +7535,7 @@ fn real_main() {
                                                         jq_jit::ir::BinOp::Sub => v - n,
                                                         jq_jit::ir::BinOp::Mul => v * n,
                                                         jq_jit::ir::BinOp::Div => v / n,
-                                                        jq_jit::ir::BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
+                                                        jq_jit::ir::BinOp::Mod => jq_jit::runtime::jq_mod_f64(v, n).unwrap_or(f64::NAN),
                                                         _ => v,
                                                     };
                                                 }
@@ -7635,7 +7630,7 @@ fn real_main() {
                                 val = match aop {
                                     BinOp::Add => val + n, BinOp::Sub => val - n,
                                     BinOp::Mul => val * n, BinOp::Div => val / n,
-                                    BinOp::Mod => val % n, _ => val,
+                                    BinOp::Mod => jq_jit::runtime::jq_mod_f64(val, n).unwrap_or(f64::NAN), _ => val,
                                 };
                             }
                             let pass = match cmp_op {
@@ -8498,7 +8493,7 @@ fn real_main() {
                                                 val = match aop {
                                                     BinOp::Add => val + n, BinOp::Sub => val - n,
                                                     BinOp::Mul => val * n, BinOp::Div => val / n,
-                                                    BinOp::Mod => val % n, _ => val,
+                                                    BinOp::Mod => jq_jit::runtime::jq_mod_f64(val, n).unwrap_or(f64::NAN), _ => val,
                                                 };
                                             }
                                             let rhs = match &br.cond_rhs { CondRhs::Const(n) => *n, _ => unreachable!() };
@@ -8525,7 +8520,7 @@ fn real_main() {
                                                 val = match aop {
                                                     BinOp::Add => val + n, BinOp::Sub => val - n,
                                                     BinOp::Mul => val * n, BinOp::Div => val / n,
-                                                    BinOp::Mod => val % n, _ => val,
+                                                    BinOp::Mod => jq_jit::runtime::jq_mod_f64(val, n).unwrap_or(f64::NAN), _ => val,
                                                 };
                                             }
                                             Some(match br.cond_op {
@@ -8649,7 +8644,7 @@ fn real_main() {
                                 val = match aop {
                                     BinOp::Add => val + n, BinOp::Sub => val - n,
                                     BinOp::Mul => val * n, BinOp::Div => val / n,
-                                    BinOp::Mod => val % n, _ => val,
+                                    BinOp::Mod => jq_jit::runtime::jq_mod_f64(val, n).unwrap_or(f64::NAN), _ => val,
                                 };
                             }
                             let pass = match cmp_op {
@@ -9897,7 +9892,7 @@ fn real_main() {
                                                     v = match op {
                                                         BinOp::Add => v + n, BinOp::Sub => v - n,
                                                         BinOp::Mul => v * n, BinOp::Div => v / n,
-                                                        BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
+                                                        BinOp::Mod => jq_jit::runtime::jq_mod_f64(v, n).unwrap_or(f64::NAN),
                                                         _ => v,
                                                     };
                                                 }
@@ -9971,7 +9966,7 @@ fn real_main() {
                                 val = match aop {
                                     BinOp::Add => val + n, BinOp::Sub => val - n,
                                     BinOp::Mul => val * n, BinOp::Div => val / n,
-                                    BinOp::Mod => val % n, _ => val,
+                                    BinOp::Mod => jq_jit::runtime::jq_mod_f64(val, n).unwrap_or(f64::NAN), _ => val,
                                 };
                             }
                             let pass = match cmp_op {
@@ -10403,7 +10398,7 @@ fn real_main() {
                                 val = match aop {
                                     BinOp::Add => val + n, BinOp::Sub => val - n,
                                     BinOp::Mul => val * n, BinOp::Div => val / n,
-                                    BinOp::Mod => if n.is_finite() && *n != 0.0 { val % n } else { val },
+                                    BinOp::Mod => jq_jit::runtime::jq_mod_f64(val, n).unwrap_or(val),
                                     _ => val,
                                 };
                             }
@@ -10479,7 +10474,7 @@ fn real_main() {
                                     };
                                     if pass {
                                         if let RemapExpr::FieldOpConst(_, op, n) = out_rexpr {
-                                            let r = match op { BinOp::Add => val + n, BinOp::Sub => val - n, BinOp::Mul => val * n, BinOp::Div => val / n, BinOp::Mod => val % n, _ => unreachable!() };
+                                            let r = match op { BinOp::Add => val + n, BinOp::Sub => val - n, BinOp::Mul => val * n, BinOp::Div => val / n, BinOp::Mod => jq_jit::runtime::jq_mod_f64(val, n).unwrap_or(f64::NAN), _ => unreachable!() };
                                             push_jq_number_bytes(&mut compact_buf, r);
                                         }
                                         compact_buf.push(b'\n');
@@ -10641,7 +10636,7 @@ fn real_main() {
                                                             jq_jit::ir::BinOp::Sub => v - n,
                                                             jq_jit::ir::BinOp::Mul => v * n,
                                                             jq_jit::ir::BinOp::Div => v / n,
-                                                            jq_jit::ir::BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
+                                                            jq_jit::ir::BinOp::Mod => jq_jit::runtime::jq_mod_f64(v, n).unwrap_or(f64::NAN),
                                                             _ => v,
                                                         };
                                                     }
@@ -11330,7 +11325,7 @@ fn real_main() {
                                                     v = match op {
                                                         jq_jit::ir::BinOp::Add => v + n, jq_jit::ir::BinOp::Sub => v - n,
                                                         jq_jit::ir::BinOp::Mul => v * n, jq_jit::ir::BinOp::Div => v / n,
-                                                        jq_jit::ir::BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
+                                                        jq_jit::ir::BinOp::Mod => jq_jit::runtime::jq_mod_f64(v, n).unwrap_or(f64::NAN),
                                                         _ => v,
                                                     };
                                                 }
@@ -12098,7 +12093,7 @@ fn real_main() {
                                     BinOp::Sub => v - arith_n,
                                     BinOp::Mul => v * arith_n,
                                     BinOp::Div => v / arith_n,
-                                    BinOp::Mod => { let r = v % arith_n; if r.is_finite() { r } else { all_ok = false; return; } },
+                                    BinOp::Mod => match jq_jit::runtime::jq_mod_f64(v, arith_n) { Some(r) => r, None => { all_ok = false; return; } },
                                     _ => { all_ok = false; return; }
                                 };
                                 if !first_elem { compact_buf.push(b','); }
@@ -13942,7 +13937,7 @@ fn real_main() {
                                     v = match aop {
                                         BinOp::Add => v + n, BinOp::Sub => v - n,
                                         BinOp::Mul => v * n, BinOp::Div => v / n,
-                                        BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { v } },
+                                        BinOp::Mod => jq_jit::runtime::jq_mod_f64(v, n).unwrap_or(v),
                                         _ => v,
                                     };
                                 }
@@ -15398,7 +15393,7 @@ fn real_main() {
                             val = match aop {
                                 BinOp::Add => val + n, BinOp::Sub => val - n,
                                 BinOp::Mul => val * n, BinOp::Div => val / n,
-                                BinOp::Mod => val % n, _ => val,
+                                BinOp::Mod => jq_jit::runtime::jq_mod_f64(val, n).unwrap_or(f64::NAN), _ => val,
                             };
                         }
                         let pass = match cmp_op {
@@ -16185,7 +16180,7 @@ fn real_main() {
                                             val = match aop {
                                                 BinOp::Add => val + n, BinOp::Sub => val - n,
                                                 BinOp::Mul => val * n, BinOp::Div => val / n,
-                                                BinOp::Mod => val % n, _ => val,
+                                                BinOp::Mod => jq_jit::runtime::jq_mod_f64(val, n).unwrap_or(f64::NAN), _ => val,
                                             };
                                         }
                                         let rhs = match &br.cond_rhs { CondRhs::Const(n) => *n, _ => unreachable!() };
@@ -16212,7 +16207,7 @@ fn real_main() {
                                             val = match aop {
                                                 BinOp::Add => val + n, BinOp::Sub => val - n,
                                                 BinOp::Mul => val * n, BinOp::Div => val / n,
-                                                BinOp::Mod => val % n, _ => val,
+                                                BinOp::Mod => jq_jit::runtime::jq_mod_f64(val, n).unwrap_or(f64::NAN), _ => val,
                                             };
                                         }
                                         Some(match br.cond_op {
@@ -16332,7 +16327,7 @@ fn real_main() {
                             val = match aop {
                                 BinOp::Add => val + n, BinOp::Sub => val - n,
                                 BinOp::Mul => val * n, BinOp::Div => val / n,
-                                BinOp::Mod => val % n, _ => val,
+                                BinOp::Mod => jq_jit::runtime::jq_mod_f64(val, n).unwrap_or(f64::NAN), _ => val,
                             };
                         }
                         let pass = match cmp_op {
@@ -17539,7 +17534,7 @@ fn real_main() {
                                                 v = match op {
                                                     BinOp::Add => v + n, BinOp::Sub => v - n,
                                                     BinOp::Mul => v * n, BinOp::Div => v / n,
-                                                    BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
+                                                    BinOp::Mod => jq_jit::runtime::jq_mod_f64(v, n).unwrap_or(f64::NAN),
                                                     _ => v,
                                                 };
                                             }
@@ -17616,7 +17611,7 @@ fn real_main() {
                             val = match aop {
                                 BinOp::Add => val + n, BinOp::Sub => val - n,
                                 BinOp::Mul => val * n, BinOp::Div => val / n,
-                                BinOp::Mod => val % n, _ => val,
+                                BinOp::Mod => jq_jit::runtime::jq_mod_f64(val, n).unwrap_or(f64::NAN), _ => val,
                             };
                         }
                         let pass = match cmp_op {
@@ -18036,7 +18031,7 @@ fn real_main() {
                             val = match aop {
                                 BinOp::Add => val + n, BinOp::Sub => val - n,
                                 BinOp::Mul => val * n, BinOp::Div => val / n,
-                                BinOp::Mod => if n.is_finite() && *n != 0.0 { val % n } else { val },
+                                BinOp::Mod => jq_jit::runtime::jq_mod_f64(val, n).unwrap_or(val),
                                 _ => val,
                             };
                         }
@@ -18107,7 +18102,7 @@ fn real_main() {
                                 };
                                 if pass {
                                     if let RemapExpr::FieldOpConst(_, op, n) = out_rexpr {
-                                        let r = match op { BinOp::Add => val + n, BinOp::Sub => val - n, BinOp::Mul => val * n, BinOp::Div => val / n, BinOp::Mod => val % n, _ => unreachable!() };
+                                        let r = match op { BinOp::Add => val + n, BinOp::Sub => val - n, BinOp::Mul => val * n, BinOp::Div => val / n, BinOp::Mod => jq_jit::runtime::jq_mod_f64(val, n).unwrap_or(f64::NAN), _ => unreachable!() };
                                         push_jq_number_bytes(&mut compact_buf, r);
                                     }
                                     compact_buf.push(b'\n');
@@ -18262,7 +18257,7 @@ fn real_main() {
                                                         jq_jit::ir::BinOp::Sub => v - n,
                                                         jq_jit::ir::BinOp::Mul => v * n,
                                                         jq_jit::ir::BinOp::Div => v / n,
-                                                        jq_jit::ir::BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
+                                                        jq_jit::ir::BinOp::Mod => jq_jit::runtime::jq_mod_f64(v, n).unwrap_or(f64::NAN),
                                                         _ => v,
                                                     };
                                                 }
@@ -18930,7 +18925,7 @@ fn real_main() {
                                                 v = match op {
                                                     jq_jit::ir::BinOp::Add => v + n, jq_jit::ir::BinOp::Sub => v - n,
                                                     jq_jit::ir::BinOp::Mul => v * n, jq_jit::ir::BinOp::Div => v / n,
-                                                    jq_jit::ir::BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
+                                                    jq_jit::ir::BinOp::Mod => jq_jit::runtime::jq_mod_f64(v, n).unwrap_or(f64::NAN),
                                                     _ => v,
                                                 };
                                             }
@@ -19233,7 +19228,7 @@ fn real_main() {
                             BinOp::Sub => a - b,
                             BinOp::Mul => a * b,
                             BinOp::Div => if b == 0.0 { f64::NAN } else { a / b },
-                            BinOp::Mod => { let r = a % b; if r.is_finite() { r } else { f64::NAN } },
+                            BinOp::Mod => jq_jit::runtime::jq_mod_f64(a, b).unwrap_or(f64::NAN),
                             _ => unreachable!(),
                         };
                         if result.is_nan() {
@@ -19262,13 +19257,13 @@ fn real_main() {
                         let inner = match op1 {
                             BinOp::Add => a + b, BinOp::Sub => a - b,
                             BinOp::Mul => a * b, BinOp::Div => a / b,
-                            BinOp::Mod => { let r = a % b; if r.is_finite() { r } else { f64::NAN } },
+                            BinOp::Mod => jq_jit::runtime::jq_mod_f64(a, b).unwrap_or(f64::NAN),
                             _ => unreachable!(),
                         };
                         let result = match op2 {
                             BinOp::Add => inner + const_val, BinOp::Sub => inner - const_val,
                             BinOp::Mul => inner * const_val, BinOp::Div => inner / const_val,
-                            BinOp::Mod => { let r = inner % const_val; if r.is_finite() { r } else { f64::NAN } },
+                            BinOp::Mod => jq_jit::runtime::jq_mod_f64(inner, const_val).unwrap_or(f64::NAN),
                             _ => unreachable!(),
                         };
                         if result.is_finite() {
@@ -19298,7 +19293,7 @@ fn real_main() {
                             BinOp::Sub => a - b,
                             BinOp::Mul => a * b,
                             BinOp::Div => a / b,
-                            BinOp::Mod => a % b,
+                            BinOp::Mod => jq_jit::runtime::jq_mod_f64(a, b).unwrap_or(f64::NAN),
                             _ => unreachable!(),
                         };
                         if result.is_finite() {
@@ -19482,7 +19477,7 @@ fn real_main() {
                                 BinOp::Sub => v - c,
                                 BinOp::Mul => v * c,
                                 BinOp::Div => v / c,
-                                BinOp::Mod => { if c.is_finite() && *c != 0.0 { v % c } else { f64::NAN } }
+                                BinOp::Mod => jq_jit::runtime::jq_mod_f64(v, *c).unwrap_or(f64::NAN),
                                 _ => v,
                             };
                         }
@@ -19511,7 +19506,7 @@ fn real_main() {
                             BinOp::Sub => a - b,
                             BinOp::Mul => a * b,
                             BinOp::Div => a / b,
-                            BinOp::Mod => a % b,
+                            BinOp::Mod => jq_jit::runtime::jq_mod_f64(a, b).unwrap_or(f64::NAN),
                             _ => unreachable!(),
                         };
                         let result = if let Some(uop) = uop_opt {
@@ -19548,7 +19543,7 @@ fn real_main() {
                                 BinOp::Sub => result - c,
                                 BinOp::Mul => result * c,
                                 BinOp::Div => result / c,
-                                BinOp::Mod => result % c,
+                                BinOp::Mod => jq_jit::runtime::jq_mod_f64(result, c).unwrap_or(f64::NAN),
                                 _ => unreachable!(),
                             };
                         }
@@ -19578,7 +19573,7 @@ fn real_main() {
                                 BinOp::Sub => result - c,
                                 BinOp::Mul => result * c,
                                 BinOp::Div => result / c,
-                                BinOp::Mod => result % c,
+                                BinOp::Mod => jq_jit::runtime::jq_mod_f64(result, c).unwrap_or(f64::NAN),
                                 _ => unreachable!(),
                             };
                         }
@@ -20586,12 +20581,7 @@ fn real_main() {
                                         jq_jit::ir::BinOp::Sub => n - c,
                                         jq_jit::ir::BinOp::Mul => n * c,
                                         jq_jit::ir::BinOp::Div => n / c,
-                                        jq_jit::ir::BinOp::Mod => {
-                                            if n.fract() == 0.0 && c.fract() == 0.0 && *c != 0.0 {
-                                                let a = n as i64; let b = *c as i64;
-                                                if a == i64::MIN && b == -1 { 0.0 } else { (a % b) as f64 }
-                                            } else { n % c }
-                                        }
+                                        jq_jit::ir::BinOp::Mod => jq_jit::runtime::jq_mod_f64(n, *c).unwrap_or(f64::NAN),
                                         _ => n,
                                     };
                                 }
@@ -20927,7 +20917,7 @@ fn real_main() {
                                                     jq_jit::ir::BinOp::Sub => v - n,
                                                     jq_jit::ir::BinOp::Mul => v * n,
                                                     jq_jit::ir::BinOp::Div => v / n,
-                                                    jq_jit::ir::BinOp::Mod => { let r = v % n; if r.is_finite() { r } else { f64::NAN } },
+                                                    jq_jit::ir::BinOp::Mod => jq_jit::runtime::jq_mod_f64(v, n).unwrap_or(f64::NAN),
                                                     _ => v,
                                                 };
                                             }
@@ -21559,7 +21549,7 @@ fn real_main() {
                                 BinOp::Sub => v - arith_n,
                                 BinOp::Mul => v * arith_n,
                                 BinOp::Div => v / arith_n,
-                                BinOp::Mod => { let r = v % arith_n; if r.is_finite() { r } else { all_ok = false; return; } },
+                                BinOp::Mod => match jq_jit::runtime::jq_mod_f64(v, arith_n) { Some(r) => r, None => { all_ok = false; return; } },
                                 _ => { all_ok = false; return; }
                             };
                             if !first_elem { compact_buf.push(b','); }

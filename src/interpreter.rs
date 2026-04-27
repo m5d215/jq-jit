@@ -142,7 +142,7 @@ impl ArithExpr {
                     BinOp::Sub => l - r,
                     BinOp::Mul => l * r,
                     BinOp::Div => l / r,
-                    BinOp::Mod => l % r,
+                    BinOp::Mod => crate::runtime::jq_mod_f64(l, r).unwrap_or(f64::NAN),
                     _ => unreachable!(),
                 }
             }
@@ -1532,7 +1532,14 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     crate::ir::BinOp::Sub => Some(a - b),
                     crate::ir::BinOp::Mul => Some(a * b),
                     crate::ir::BinOp::Div if *b != 0.0 => Some(a / b),
-                    crate::ir::BinOp::Mod if *b != 0.0 && b.is_finite() => Some(a % b),
+                    crate::ir::BinOp::Mod if a.is_finite() && b.is_finite() => {
+                        // jq truncates both operands to int before %, so 1 % 1.5 = 0.
+                        let yi = *b as i64;
+                        let xi = *a as i64;
+                        if yi == 0 { None }
+                        else if xi == i64::MIN && yi == -1 { Some(0.0) }
+                        else { Some((xi % yi) as f64) }
+                    }
                     _ => None,
                 };
                 if let Some(r) = result {

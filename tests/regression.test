@@ -2125,3 +2125,65 @@ reverse
 [.a = (1, 2)]
 {"a":1}
 [{"a":1},{"a":2}]
+
+# Issue #187: getpath on null short-circuits any path component
+getpath([{}])
+null
+null
+
+# Issue #207: label name accepted only via break, never as bare $name
+label $x | range(3), break $x
+null
+0
+1
+2
+
+# Issue #192: U+007F (DEL) escapes as  in JSON output
+[127] | implode | length
+null
+1
+
+# Issue #185: regex unknown flag rejected (not silently ignored)
+test("a"; "ix") | not
+"abc"
+false
+
+# Issue #209: slice assignment with array RHS still works
+.[0:2] = [9]
+[1,2,3]
+[9,3]
+
+# Issue #203: path(A // B) returns the surviving path
+[path(.a // .b)]
+{"a":null,"b":2}
+[["b"]]
+
+# Issue #201: {(non_string_key): empty} short-circuits silently
+[{(.k): empty}]
+{"a":1}
+[]
+
+# Issue #202: $loopvar undefined inside reduce/foreach INIT
+reduce range(3) as $i (0; . + $i)
+null
+3
+
+# Issue #183: % truncates operands to integer
+3.7 % 2
+null
+1
+
+# Issue #183: -1 % 1 yields 0, not -0
+-1 % 1
+null
+0
+
+# Issue #206: object-pattern destructure with duplicate var is first-wins
+. as {a: $a, b: $a} | $a
+{"a":1,"b":2}
+1
+
+# Issue #190: scientific notation uses uppercase E with explicit sign
+[1.5e-10] | .[0] | tojson
+null
+"1.5E-10"

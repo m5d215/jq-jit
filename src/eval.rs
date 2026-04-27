@@ -3276,11 +3276,14 @@ fn eval_object_construct(pairs: &[(Expr, Expr)], input: Value, env: &EnvRef, cb:
             Ok(v) => v,
             Err(()) => return eval_obj_pairs(pairs, 0, crate::value::new_objmap_with_capacity(pairs.len()), input, env, cb),
         };
-        let ks = object_key_from_value(&kv)?;
+        // Defer validation: if the value generator turns out to be empty, jq
+        // short-circuits without complaining about the key (#201). Pull the
+        // value first; only then check the key type.
         let vv = match eval_one(ve, &input, env) {
             Ok(v) => v,
             Err(()) => return eval_obj_pairs(pairs, 0, crate::value::new_objmap_with_capacity(pairs.len()), input, env, cb),
         };
+        let ks = object_key_from_value(&kv)?;
         obj.insert(ks, vv);
     }
     cb(Value::object_from_map(obj))
@@ -3290,10 +3293,13 @@ fn eval_obj_pairs(pairs: &[(Expr, Expr)], idx: usize, cur: crate::value::ObjMap,
     if idx >= pairs.len() { return cb(Value::object_from_map(cur)); }
     let (ke, ve) = &pairs[idx];
     eval(ke, input.clone(), env, &mut |kv| {
-        let ks = object_key_from_value(&kv)?;
+        // Defer the key-type check until V yields at least one value: jq lets
+        // `{(non_string_key): empty}` short-circuit silently because no
+        // (key, value) pair actually materializes (#201).
         eval(ve, input.clone(), env, &mut |vv| {
+            let ks = object_key_from_value(&kv)?;
             let mut next = cur.clone();
-            next.insert(ks.clone(), vv);
+            next.insert(ks, vv);
             eval_obj_pairs(pairs, idx + 1, next, input.clone(), env, cb)
         })
     })
@@ -4092,7 +4098,12 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
         }
         Expr::Slice { expr: base_expr, from, to } => {
             eval_path(base_expr, input.clone(), env, &mut |bp| {
+                // Type-check the receiver: jq errors on path slicing of non-array/string/null.
                 let base = crate::runtime::rt_getpath(&input, &bp).unwrap_or(Value::Null);
+                match &base {
+                    Value::Arr(_) | Value::Str(_) | Value::Null => {}
+                    other => bail!("Cannot index {} with object", other.type_name()),
+                }
                 let from_val = if let Some(f) = from {
                     let mut v = Value::Null;
                     eval(f, input.clone(), env, &mut |fv| { v = fv; Ok(true) })?; v
@@ -4101,19 +4112,13 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                     let mut v = Value::Null;
                     eval(t, input.clone(), env, &mut |tv| { v = tv; Ok(true) })?; v
                 } else { Value::Null };
-                let len = match &base {
-                    Value::Arr(a) => a.len() as i64,
-                    Value::Str(s) => s.chars().count() as i64,
-                    _ => 0,
-                };
-                let fi = match &from_val { Value::Num(n, _) => { let i = n.floor() as i64; if i < 0 { (len + i).max(0) } else { i.min(len) } }, Value::Null => 0, _ => 0 };
-                let ti = match &to_val { Value::Num(n, _) => { let i = n.ceil() as i64; if i < 0 { (len + i).max(0) } else { i.min(len) } }, Value::Null => len, _ => len };
-                // Return a special path that indicates slicing
+                // jq preserves the literal slice expressions in path output without
+                // clamping to the receiver's actual length. Omitted bounds → null.
                 let mut p = match &bp { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
                 p.push(Value::object_from_map({
                     let mut m = crate::value::new_objmap();
-                    m.insert("start".into(), Value::number(fi as f64));
-                    m.insert("end".into(), Value::number(ti as f64));
+                    m.insert("start".into(), from_val);
+                    m.insert("end".into(), to_val);
                     m
                 }));
                 cb(Value::Arr(Rc::new(p)))
@@ -4172,6 +4177,23 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                     _ => Ok(true),
                 }
             })
+        }
+        Expr::Alternative { primary, fallback } => {
+            // `path(A // B)` — emit paths from A whose values are truthy;
+            // if none, fall through to paths from B.
+            let mut any_truthy = false;
+            let cont = eval_path(primary, input.clone(), env, &mut |bp| {
+                let v = crate::runtime::rt_getpath(&input, &bp).unwrap_or(Value::Null);
+                if v.is_truthy() {
+                    any_truthy = true;
+                    cb(bp)
+                } else {
+                    Ok(true)
+                }
+            })?;
+            if !cont { return Ok(false); }
+            if any_truthy { return Ok(true); }
+            eval_path(fallback, input, env, cb)
         }
         _ => {
             // Non-path-safe expression: evaluate and report error

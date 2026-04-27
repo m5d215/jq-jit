@@ -1514,7 +1514,7 @@ pub fn json_object_update_field_num(b: &[u8], pos: usize, field: &str, op: crate
     // (bytes before value) + (new number) + (bytes after value including closing brace)
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
         if let Some(a) = parse_json_num(&b[val_start..val_end]) {
-            let r = match op { BinOp::Add => a + n, BinOp::Sub => a - n, BinOp::Mul => a * n, BinOp::Div => a / n, BinOp::Mod => { if n == 0.0 || !a.is_finite() { return false; } a % n }, _ => a };
+            let r = match op { BinOp::Add => a + n, BinOp::Sub => a - n, BinOp::Mul => a * n, BinOp::Div => a / n, BinOp::Mod => match crate::runtime::jq_mod_f64(a, n) { Some(v) => v, None => return false }, _ => a };
             if !r.is_finite() { return false; }
             // Find object end by scanning backward for '}' — avoids full re-parse
             let mut obj_end = b.len();
@@ -1548,7 +1548,7 @@ pub fn json_object_update_field_num_chain(
                         v = match op {
                             BinOp::Add => v + n, BinOp::Sub => v - n,
                             BinOp::Mul => v * n, BinOp::Div => v / n,
-                            BinOp::Mod => { if *n == 0.0 || !v.is_finite() { return false; } v % n },
+                            BinOp::Mod => match crate::runtime::jq_mod_f64(v, *n) { Some(r) => r, None => return false },
                             _ => v,
                         };
                     }
@@ -1723,7 +1723,7 @@ pub fn json_object_assign_field_arith(
         BinOp::Sub => src_val - n,
         BinOp::Mul => src_val * n,
         BinOp::Div => src_val / n,
-        BinOp::Mod => { if n == 0.0 || !src_val.is_finite() { return false; } src_val % n },
+        BinOp::Mod => match crate::runtime::jq_mod_f64(src_val, n) { Some(v) => v, None => return false },
         _ => src_val,
     };
     if !r.is_finite() { return false; }
@@ -1762,7 +1762,7 @@ pub fn json_object_assign_two_fields_arith(
         BinOp::Sub => v1 - v2,
         BinOp::Mul => v1 * v2,
         BinOp::Div => v1 / v2,
-        BinOp::Mod => { if v2 == 0.0 || !v1.is_finite() { return false; } v1 % v2 },
+        BinOp::Mod => match crate::runtime::jq_mod_f64(v1, v2) { Some(v) => v, None => return false },
         _ => return false,
     };
     if !r.is_finite() { return false; }
@@ -4795,10 +4795,10 @@ fn format_as_scientific(n: f64) -> String {
     normalize_scientific(&sci)
 }
 
-/// Normalize scientific notation to match jq's format (e.g., e+07 not e+7 for small exponents).
+/// Normalize scientific notation to match jq 1.8.1's format: uppercase `E`,
+/// explicit `+`/`-` sign, two-digit exponent for values below 100.
 fn normalize_scientific(s: &str) -> String {
-    // Split at 'e'
-    if let Some(idx) = s.find('e') {
+    if let Some(idx) = s.find(|c: char| c == 'e' || c == 'E') {
         let mantissa = &s[..idx];
         let exp_str = &s[idx+1..]; // includes sign
         let (sign, digits) = if let Some(rest) = exp_str.strip_prefix('-') {
@@ -4808,12 +4808,11 @@ fn normalize_scientific(s: &str) -> String {
         } else {
             ("+", exp_str)
         };
-        // Parse exponent and re-format with at least 2 digits for < 100
         let exp: i32 = digits.parse().unwrap_or(0);
         if exp.abs() < 100 {
-            format!("{}e{}{:02}", mantissa, sign, exp.abs())
+            format!("{}E{}{:02}", mantissa, sign, exp.abs())
         } else {
-            format!("{}e{}{}", mantissa, sign, exp.abs())
+            format!("{}E{}{}", mantissa, sign, exp.abs())
         }
     } else {
         s.to_string()
@@ -5043,6 +5042,7 @@ fn push_json_string(out: &mut String, s: &str) {
             0x08 => b'b' as u16 | 0x100,
             0x0c => b'f' as u16 | 0x100,
             c if c < 0x20 => c as u16,
+            0x7f => 0x7f,
             _ => continue,
         };
         if start < i {
@@ -5165,7 +5165,7 @@ use std::io;
 fn write_json_string(w: &mut dyn io::Write, s: &str) -> io::Result<()> {
     let bytes = s.as_bytes();
     // Find first byte needing escape
-    let first_esc = bytes.iter().position(|&b| b == b'"' || b == b'\\' || b < 0x20);
+    let first_esc = bytes.iter().position(|&b| b == b'"' || b == b'\\' || b < 0x20 || b == 0x7f);
     if first_esc.is_none() {
         // No escapes: write "string" in minimal calls
         if bytes.len() <= 126 {
@@ -5195,7 +5195,7 @@ fn write_json_string(w: &mut dyn io::Write, s: &str) -> io::Result<()> {
             b'\t' => b"\\t",
             0x08 => b"\\b",
             0x0c => b"\\f",
-            c if c < 0x20 => {
+            c if c < 0x20 || c == 0x7f => {
                 if start < i { w.write_all(&bytes[start..i])?; }
                 write!(w, "\\u{:04x}", c)?;
                 start = i + 1;
@@ -5479,7 +5479,7 @@ fn push_compact_value(buf: &mut Vec<u8>, v: &Value) {
             for (i, (k, val)) in o.iter().enumerate() {
                 let kb = k.as_bytes();
                 let klen = kb.len();
-                let key_needs_escape = kb.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20);
+                let key_needs_escape = kb.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20 || b == 0x7f);
                 if !key_needs_escape {
                     // Write ,"key": (or "key": for first) in a single memcpy
                     let prefix = if i > 0 { 1 } else { 0 }; // comma
@@ -5551,7 +5551,7 @@ fn push_json_string_to_vec(buf: &mut Vec<u8>, s: &str) {
     // Ultra-fast path for single-byte strings (common object keys like "x", "y")
     if len == 1 {
         let c = bytes[0];
-        if c >= 0x20 && c != b'"' && c != b'\\' {
+        if c >= 0x20 && c != b'"' && c != b'\\' && c != 0x7f {
             buf.reserve(3);
             unsafe {
                 let dst = buf.as_mut_ptr().add(buf.len());
@@ -5564,7 +5564,7 @@ fn push_json_string_to_vec(buf: &mut Vec<u8>, s: &str) {
         }
     }
     // Fast path: no escapes needed — write "str" in one contiguous block
-    let needs_escape = bytes.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20);
+    let needs_escape = bytes.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20 || b == 0x7f);
     if !needs_escape {
         buf.reserve(len + 2);
         // Safety: we just reserved enough space
@@ -5589,7 +5589,7 @@ fn push_json_string_to_vec(buf: &mut Vec<u8>, s: &str) {
             b'\t' => b't',
             0x08 => b'b',
             0x0c => b'f',
-            c if c < 0x20 => {
+            c if c < 0x20 || c == 0x7f => {
                 if start < i { buf.extend_from_slice(&bytes[start..i]); }
                 let hex = [
                     b'\\', b'u', b'0', b'0',
@@ -5649,7 +5649,7 @@ fn write_compact_buf_inner(v: &Value, buf: &mut [u8], pos: &mut usize) -> bool {
         }
         Value::Str(s) => {
             let bytes = s.as_bytes();
-            let needs_escape = bytes.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20);
+            let needs_escape = bytes.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20 || b == 0x7f);
             if needs_escape { return false; } // fall back to slow path
             if *pos + bytes.len() + 2 > buf.len() { return false; }
             buf[*pos] = b'"';
@@ -5673,7 +5673,7 @@ fn write_compact_buf_inner(v: &Value, buf: &mut [u8], pos: &mut usize) -> bool {
                 if i > 0 { push!(b","); }
                 // Write key
                 let kb = k.as_bytes();
-                let key_escape = kb.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20);
+                let key_escape = kb.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20 || b == 0x7f);
                 if key_escape { return false; }
                 if *pos + kb.len() + 3 > buf.len() { return false; } // "key":
                 buf[*pos] = b'"';
