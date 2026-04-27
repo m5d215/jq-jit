@@ -2070,7 +2070,7 @@ fn real_main() {
                     i += 2;
                 }
             }
-            "--version" => {
+            "-V" | "--version" => {
                 println!("jq-jit-{}", env!("CARGO_PKG_VERSION"));
                 process::exit(0);
             }
