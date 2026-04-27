@@ -3175,14 +3175,20 @@ pub fn eval_index(base: &Value, key: &Value, optional: bool) -> std::result::Res
                 Err(format!("Cannot index string with number ({})", crate::value::format_jq_number(*n)))
             }
         }
-        (Value::Null, _) => Ok(Value::Null),
+        // Null receiver: only string/number/object keys short-circuit to null;
+        // null/bool/array keys still raise the same type error jq emits on a
+        // non-null base (#193). The keys here mirror what jq's `.[$k]` accepts
+        // before the null short-circuit kicks in.
+        (Value::Null, Value::Str(_)) | (Value::Null, Value::Num(_, _)) | (Value::Null, Value::Obj(_)) => {
+            Ok(Value::Null)
+        }
         _ => {
             if optional { Err("type error".into()) }
             else {
                 let key_desc = match key {
                     Value::Str(s) => format!("string (\"{}\")", s),
                     Value::Num(n, _) => format!("number ({})", crate::value::format_jq_number(*n)),
-                    _ => format!("{} ({})", key.type_name(), crate::value::value_to_json(key)),
+                    _ => key.type_name().to_string(),
                 };
                 Err(format!("Cannot index {} with {}", base.type_name(), key_desc))
             }

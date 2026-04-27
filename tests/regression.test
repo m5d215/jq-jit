@@ -2040,3 +2040,13 @@ null
 reduce range(10) as $x (0; . + $x)
 null
 45
+
+# Issue #193: null receiver still rejects null/bool/array index keys
+.["a"]
+null
+null
+
+# Issue #193: numeric and object index keys still short-circuit on null receiver
+.[0]
+null
+null
