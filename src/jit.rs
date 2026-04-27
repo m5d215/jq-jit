@@ -2789,8 +2789,25 @@ impl Flattener {
                     self.emit_propagating(JitOp::CallBuiltin { dst: old_val, name: "getpath".to_string(), args: vec![inp, path_clone] });
                     self.emit(JitOp::Drop { slot: inp });
                     self.emit(JitOp::Drop { slot: path_clone });
-                    // For each output of update_expr applied to old_val
+                    // For the first output of update_expr applied to old_val.
+                    // jq's `path |= F` takes ONLY the first generator value;
+                    // broadcasting was issue #208. Use a flag var to drop
+                    // subsequent yields silently (we can't break out of the
+                    // closure cleanly mid-iteration, but skipping is enough —
+                    // `gen` is bounded for typical updates and the cost of
+                    // generating extra values is just discarded clones).
+                    let first_var = self.alloc_var();
+                    self.emit(JitOp::InitVar { var: first_var });
                     let ok = self.flatten_gen_with_each_output(update_expr, old_val, &|s, new_val| {
+                        let skip_lbl = s.alloc_label();
+                        let take_lbl = s.alloc_label();
+                        let after_lbl = s.alloc_label();
+                        s.emit(JitOp::BranchOnVar { var: first_var, nonzero_label: skip_lbl, zero_label: take_lbl });
+                        s.emit(JitOp::Label { id: skip_lbl });
+                        s.emit(JitOp::Drop { slot: new_val });
+                        s.emit(JitOp::Jump { label: after_lbl });
+                        s.emit(JitOp::Label { id: take_lbl });
+                        s.emit(JitOp::IncVar { var: first_var });
                         let inp3 = s.alloc_slot();
                         s.emit(JitOp::Clone { dst: inp3, src: input_slot });
                         let path_c2 = s.alloc_slot();
@@ -2801,6 +2818,7 @@ impl Flattener {
                         s.emit(JitOp::Drop { slot: path_c2 });
                         s.emit_yield(out);
                         s.emit(JitOp::Drop { slot: out });
+                        s.emit(JitOp::Label { id: after_lbl });
                     });
                     self.emit(JitOp::Drop { slot: old_val });
                     self.emit(JitOp::Drop { slot: path_arr });

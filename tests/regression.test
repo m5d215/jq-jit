@@ -2110,3 +2110,18 @@ reverse
 [limit(5; recurse(. + 1))]
 0
 [0,1,2,3,4]
+
+# Issue #208: .a |= (1, 2) takes first output only — does not broadcast
+.a |= (1, 2)
+{"a":1}
+{"a":1}
+
+# Issue #208: .a |= range(3) takes first output only
+.a |= range(3)
+{"a":99}
+{"a":0}
+
+# Issue #208: .a = (1, 2) still broadcasts (= does, |= does not)
+[.a = (1, 2)]
+{"a":1}
+[{"a":1},{"a":2}]
