@@ -3276,11 +3276,14 @@ fn eval_object_construct(pairs: &[(Expr, Expr)], input: Value, env: &EnvRef, cb:
             Ok(v) => v,
             Err(()) => return eval_obj_pairs(pairs, 0, crate::value::new_objmap_with_capacity(pairs.len()), input, env, cb),
         };
-        let ks = object_key_from_value(&kv)?;
+        // Defer validation: if the value generator turns out to be empty, jq
+        // short-circuits without complaining about the key (#201). Pull the
+        // value first; only then check the key type.
         let vv = match eval_one(ve, &input, env) {
             Ok(v) => v,
             Err(()) => return eval_obj_pairs(pairs, 0, crate::value::new_objmap_with_capacity(pairs.len()), input, env, cb),
         };
+        let ks = object_key_from_value(&kv)?;
         obj.insert(ks, vv);
     }
     cb(Value::object_from_map(obj))
@@ -3290,10 +3293,13 @@ fn eval_obj_pairs(pairs: &[(Expr, Expr)], idx: usize, cur: crate::value::ObjMap,
     if idx >= pairs.len() { return cb(Value::object_from_map(cur)); }
     let (ke, ve) = &pairs[idx];
     eval(ke, input.clone(), env, &mut |kv| {
-        let ks = object_key_from_value(&kv)?;
+        // Defer the key-type check until V yields at least one value: jq lets
+        // `{(non_string_key): empty}` short-circuit silently because no
+        // (key, value) pair actually materializes (#201).
         eval(ve, input.clone(), env, &mut |vv| {
+            let ks = object_key_from_value(&kv)?;
             let mut next = cur.clone();
-            next.insert(ks.clone(), vv);
+            next.insert(ks, vv);
             eval_obj_pairs(pairs, idx + 1, next, input.clone(), env, cb)
         })
     })

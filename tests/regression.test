@@ -2157,3 +2157,8 @@ false
 [path(.a // .b)]
 {"a":null,"b":2}
 [["b"]]
+
+# Issue #201: {(non_string_key): empty} short-circuits silently
+[{(.k): empty}]
+{"a":1}
+[]
