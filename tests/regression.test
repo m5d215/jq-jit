@@ -2085,3 +2085,13 @@ true
 .a?.b
 {"a":{"b":2}}
 2
+
+# Issue #194: map_values still works on object
+map_values(. + 1)
+{"a":1,"b":2}
+{"a":2,"b":3}
+
+# Issue #194: map_values on array
+map_values(. + 1)
+[1,2,3]
+[2,3,4]

@@ -2694,6 +2694,39 @@ impl Flattener {
                     let result = self.alloc_slot();
                     self.emit(JitOp::Clone { dst: result, src: input_slot });
 
+                    // map_values / .[]= over a non-iterable used to fall through
+                    // the loop silently and return the original value (#194).
+                    // Branch on the kind first; the "other" arm raises jq's
+                    // "Cannot iterate over X (Y)" error (skipped for `.[]?`).
+                    let kind_var = self.alloc_var();
+                    let iter_lbl = self.alloc_label();
+                    let other_lbl = self.alloc_label();
+                    self.emit(JitOp::GetKind { dst_var: kind_var, src: result });
+                    self.emit(JitOp::BranchKind {
+                        kind_var,
+                        arr_label: iter_lbl,
+                        obj_label: iter_lbl,
+                        other_label: other_lbl,
+                    });
+                    self.emit(JitOp::Label { id: other_lbl });
+                    if !is_each_opt {
+                        let err_slot = self.alloc_slot();
+                        self.emit(JitOp::CallBuiltin {
+                            dst: err_slot,
+                            name: "__each_error__".to_string(),
+                            args: vec![result],
+                        });
+                        self.emit(JitOp::Drop { slot: err_slot });
+                        if let Some((catch_label, error_slot)) = self.try_catch_target {
+                            self.emit(JitOp::CheckError { error_dst: error_slot, catch_label });
+                        } else {
+                            self.emit(JitOp::ReturnError);
+                        }
+                    } else {
+                        self.emit_yield(result);
+                    }
+                    self.emit(JitOp::Label { id: iter_lbl });
+
                     let idx = self.alloc_var();
                     let len = self.alloc_var();
                     let head = self.alloc_label();
