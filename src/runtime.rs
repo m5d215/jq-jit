@@ -1046,6 +1046,15 @@ fn rt_flatten(v: &Value, depth: Option<usize>) -> Result<Value> {
             flatten_inner(a, depth.unwrap_or(usize::MAX), &mut result);
             Ok(Value::Arr(Rc::new(result)))
         }
+        // jq treats an object's values as the array to flatten, then runs
+        // the same recursive logic on it (#184). `flatten` on `{"a":[1,2]}`
+        // becomes `[[1,2]] | flatten` = `[1,2]`.
+        Value::Obj(o) => {
+            let values: Vec<Value> = o.values().cloned().collect();
+            let mut result = Vec::new();
+            flatten_inner(&values, depth.unwrap_or(usize::MAX), &mut result);
+            Ok(Value::Arr(Rc::new(result)))
+        }
         _ => bail!("{} is not an array", v.type_name()),
     }
 }
