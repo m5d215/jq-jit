@@ -2003,7 +2003,7 @@ fn real_main() {
                     i += 2;
                 }
             }
-            "-L" => {
+            "-L" | "--library-path" => {
                 i += 1;
                 if i < expanded_args.len() {
                     lib_dirs.push(expanded_args[i].clone());
