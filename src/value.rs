@@ -1514,7 +1514,7 @@ pub fn json_object_update_field_num(b: &[u8], pos: usize, field: &str, op: crate
     // (bytes before value) + (new number) + (bytes after value including closing brace)
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
         if let Some(a) = parse_json_num(&b[val_start..val_end]) {
-            let r = match op { BinOp::Add => a + n, BinOp::Sub => a - n, BinOp::Mul => a * n, BinOp::Div => a / n, BinOp::Mod => { if n == 0.0 || !a.is_finite() { return false; } a % n }, _ => a };
+            let r = match op { BinOp::Add => a + n, BinOp::Sub => a - n, BinOp::Mul => a * n, BinOp::Div => a / n, BinOp::Mod => match crate::runtime::jq_mod_f64(a, n) { Some(v) => v, None => return false }, _ => a };
             if !r.is_finite() { return false; }
             // Find object end by scanning backward for '}' — avoids full re-parse
             let mut obj_end = b.len();
@@ -1548,7 +1548,7 @@ pub fn json_object_update_field_num_chain(
                         v = match op {
                             BinOp::Add => v + n, BinOp::Sub => v - n,
                             BinOp::Mul => v * n, BinOp::Div => v / n,
-                            BinOp::Mod => { if *n == 0.0 || !v.is_finite() { return false; } v % n },
+                            BinOp::Mod => match crate::runtime::jq_mod_f64(v, *n) { Some(r) => r, None => return false },
                             _ => v,
                         };
                     }
@@ -1723,7 +1723,7 @@ pub fn json_object_assign_field_arith(
         BinOp::Sub => src_val - n,
         BinOp::Mul => src_val * n,
         BinOp::Div => src_val / n,
-        BinOp::Mod => { if n == 0.0 || !src_val.is_finite() { return false; } src_val % n },
+        BinOp::Mod => match crate::runtime::jq_mod_f64(src_val, n) { Some(v) => v, None => return false },
         _ => src_val,
     };
     if !r.is_finite() { return false; }
@@ -1762,7 +1762,7 @@ pub fn json_object_assign_two_fields_arith(
         BinOp::Sub => v1 - v2,
         BinOp::Mul => v1 * v2,
         BinOp::Div => v1 / v2,
-        BinOp::Mod => { if v2 == 0.0 || !v1.is_finite() { return false; } v1 % v2 },
+        BinOp::Mod => match crate::runtime::jq_mod_f64(v1, v2) { Some(v) => v, None => return false },
         _ => return false,
     };
     if !r.is_finite() { return false; }

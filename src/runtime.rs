@@ -775,6 +775,23 @@ pub fn rt_div(a: &Value, b: &Value) -> Result<Value> {
     }
 }
 
+/// jq's `%` semantics for f64 inputs: truncate both operands toward zero,
+/// then take the integer remainder. Returns None when either operand is
+/// non-finite or the divisor truncates to zero (caller decides the fallback).
+/// Generic over `f64` and `&f64` so call sites can pass through whatever
+/// shape they hold without per-site dereferencing.
+#[inline]
+pub fn jq_mod_f64<A: std::borrow::Borrow<f64>, B: std::borrow::Borrow<f64>>(a: A, b: B) -> Option<f64> {
+    let a = *a.borrow();
+    let b = *b.borrow();
+    if !a.is_finite() || !b.is_finite() { return None; }
+    let yi = b as i64;
+    if yi == 0 { return None; }
+    let xi = a as i64;
+    let r = if xi == i64::MIN && yi == -1 { 0 } else { xi % yi };
+    Some(r as f64)
+}
+
 pub fn rt_mod(a: &Value, b: &Value) -> Result<Value> {
     match (a, b) {
         (Value::Num(x, _), Value::Num(y, _)) => {

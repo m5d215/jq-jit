@@ -9019,16 +9019,20 @@ impl JitCompiler {
                         b.def_var(vars[*dst_var as usize], bits);
                     }
                     JitOp::F64Rem { dst_var, a_var, b_var: bv } => {
-                        // Inline modulo: a - trunc(a / b) * b
-                        // Matches fmod semantics for non-zero b
+                        // jq's `%` truncates both operands toward zero before the
+                        // remainder, so 3.7 % 2 = 1 and 1 % 1.5 = 0 (#183). We
+                        // compute trunc(a) - trunc(trunc(a)/trunc(b)) * trunc(b)
+                        // to keep the result an integer with the dividend's sign.
                         let a_bits = b.use_var(vars[*a_var as usize]);
                         let b_bits = b.use_var(vars[*bv as usize]);
                         let a_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), a_bits);
                         let b_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), b_bits);
-                        let div = b.ins().fdiv(a_f, b_f);
-                        let trunc = b.ins().trunc(div);
-                        let prod = b.ins().fmul(trunc, b_f);
-                        let rem_f = b.ins().fsub(a_f, prod);
+                        let a_t = b.ins().trunc(a_f);
+                        let b_t = b.ins().trunc(b_f);
+                        let div = b.ins().fdiv(a_t, b_t);
+                        let q = b.ins().trunc(div);
+                        let prod = b.ins().fmul(q, b_t);
+                        let rem_f = b.ins().fsub(a_t, prod);
                         let bits = b.ins().bitcast(ptr_ty, cranelift_codegen::ir::MemFlags::new(), rem_f);
                         b.def_var(vars[*dst_var as usize], bits);
                     }

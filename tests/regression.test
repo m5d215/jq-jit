@@ -2167,3 +2167,13 @@ false
 reduce range(3) as $i (0; . + $i)
 null
 3
+
+# Issue #183: % truncates operands to integer
+3.7 % 2
+null
+1
+
+# Issue #183: -1 % 1 yields 0, not -0
+-1 % 1
+null
+0
