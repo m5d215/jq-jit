@@ -2213,3 +2213,13 @@ null
 builtins | any(. == "date/0")
 null
 true
+
+# Issue #205: computed-key destructure evaluates key at runtime
+. as {(.x): $v} | $v
+{"x":"y","y":1}
+1
+
+# Issue #205: computed key is evaluated against the destructured value
+.[0] as {(.k): $v} | $v
+[{"k":"x","x":42}]
+42
