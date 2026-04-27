@@ -2152,3 +2152,8 @@ false
 .[0:2] = [9]
 [1,2,3]
 [9,3]
+
+# Issue #203: path(A // B) returns the surviving path
+[path(.a // .b)]
+{"a":null,"b":2}
+[["b"]]

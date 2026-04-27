@@ -4172,6 +4172,23 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 }
             })
         }
+        Expr::Alternative { primary, fallback } => {
+            // `path(A // B)` — emit paths from A whose values are truthy;
+            // if none, fall through to paths from B.
+            let mut any_truthy = false;
+            let cont = eval_path(primary, input.clone(), env, &mut |bp| {
+                let v = crate::runtime::rt_getpath(&input, &bp).unwrap_or(Value::Null);
+                if v.is_truthy() {
+                    any_truthy = true;
+                    cb(bp)
+                } else {
+                    Ok(true)
+                }
+            })?;
+            if !cont { return Ok(false); }
+            if any_truthy { return Ok(true); }
+            eval_path(fallback, input, env, cb)
+        }
         _ => {
             // Non-path-safe expression: evaluate and report error
             let mut result_val = Value::Null;
