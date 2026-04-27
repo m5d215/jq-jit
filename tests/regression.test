@@ -2130,3 +2130,10 @@ reverse
 getpath([{}])
 null
 null
+
+# Issue #207: label name accepted only via break, never as bare $name
+label $x | range(3), break $x
+null
+0
+1
+2

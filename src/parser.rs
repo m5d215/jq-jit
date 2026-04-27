@@ -2166,7 +2166,9 @@ impl Parser {
                 self.advance();
                 match self.advance() {
                     Token::Variable(name) => {
-                        let var_idx = self.scope.alloc_var(&name);
+                        // Register label-typed bindings under a sentinel prefix so they
+                        // can only be referenced via `break $name`, never as a bare $name.
+                        let var_idx = self.scope.alloc_var(&format!("\x00label:{}", name));
                         self.expect(&Token::Pipe)?;
                         let body = self.parse_pipe()?;
                         Ok(Expr::Label {
@@ -2182,8 +2184,8 @@ impl Parser {
                 self.advance();
                 match self.advance() {
                     Token::Variable(name) => {
-                        let var_idx = self.scope.lookup_var(&name)
-                            .ok_or_else(|| anyhow::anyhow!("undefined label variable ${}", name))?;
+                        let var_idx = self.scope.lookup_var(&format!("\x00label:{}", name))
+                            .ok_or_else(|| anyhow::anyhow!("${} is not defined", name))?;
                         Ok(Expr::Break {
                             var_index: var_idx,
                             value: Box::new(Expr::Input),
