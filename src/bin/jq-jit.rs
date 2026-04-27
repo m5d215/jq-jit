@@ -108,6 +108,19 @@ fn decode_json_string_literal(s: &str) -> Option<String> {
 /// the JSON form carries the type info jq normally reads from the
 /// original jv, so we use it to decide between the unquoted string
 /// branch and the ` (not a string)` branch.
+/// Validate a jq variable name from `--arg` / `--argjson`. Per jq, the binding
+/// must look like `[A-Za-z_][A-Za-z0-9_]*`; numeric or symbolic names are
+/// rejected at the CLI parser so the resulting `$<name>` reference doesn't
+/// later produce confusing filter parse errors (#217).
+fn is_valid_var_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    match bytes.next() {
+        Some(b) if b == b'_' || b.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    bytes.all(|b| b == b'_' || b.is_ascii_alphanumeric())
+}
+
 fn print_jq_error(msg: &str) {
     let line = jq_jit::eval::get_input_line_number();
     if let Some(jq_msg) = msg.strip_prefix("__jqerror__:") {
@@ -1998,6 +2011,10 @@ fn real_main() {
             "--arg" => {
                 if i + 2 < expanded_args.len() {
                     let name = expanded_args[i + 1].clone();
+                    if !is_valid_var_name(&name) {
+                        eprintln!("jq: error: arg name `{}` is not a valid identifier", name);
+                        process::exit(2);
+                    }
                     let val = Value::from_str(&expanded_args[i + 2]);
                     arg_vars.push((name, val));
                     i += 2;
@@ -2006,6 +2023,10 @@ fn real_main() {
             "--argjson" => {
                 if i + 2 < expanded_args.len() {
                     let name = expanded_args[i + 1].clone();
+                    if !is_valid_var_name(&name) {
+                        eprintln!("jq: error: arg name `{}` is not a valid identifier", name);
+                        process::exit(2);
+                    }
                     match json_to_value(&expanded_args[i + 2]) {
                         Ok(val) => argjson_vars.push((name, val)),
                         Err(e) => {
