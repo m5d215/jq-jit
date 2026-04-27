@@ -1065,7 +1065,21 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                             };
                             if all_single {
                                 if let Some(i) = effective {
-                                    return elems.swap_remove(i);
+                                    // jq evaluates every element when building
+                                    // the array literal, so a non-selected
+                                    // element that references Input may raise
+                                    // and must propagate. Skip the fold when
+                                    // any sibling touches Input — otherwise
+                                    // `[.[0], 0] | .[1]` on a non-indexable
+                                    // input would silently return `0` instead
+                                    // of erroring (#234).
+                                    let any_sibling_touches_input = elems
+                                        .iter()
+                                        .enumerate()
+                                        .any(|(j, e)| j != i && contains_input(e));
+                                    if !any_sibling_touches_input {
+                                        return elems.swap_remove(i);
+                                    }
                                 }
                             }
                             }
