@@ -1766,6 +1766,10 @@ pub fn eval(
                 Err(e) => {
                     if e.downcast_ref::<BreakError>().is_some() { return Err(e); }
                     let msg = format!("{}", e);
+                    // halt / halt_error are non-recoverable: jq lets them
+                    // propagate past `try ... catch` so the process exits with
+                    // the requested code (#182).
+                    if msg.starts_with("__halt__:") { return Err(e); }
                     let catch_val = if let Some(json) = msg.strip_prefix("__jqerror__:") {
                         crate::value::json_to_value(json).unwrap_or(Value::from_str(&msg))
                     } else {
@@ -4112,6 +4116,10 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 Err(e) => {
                     if e.downcast_ref::<BreakError>().is_some() { return Err(e); }
                     let msg = format!("{}", e);
+                    // halt / halt_error are non-recoverable: jq lets them
+                    // propagate past `try ... catch` so the process exits with
+                    // the requested code (#182).
+                    if msg.starts_with("__halt__:") { return Err(e); }
                     let catch_val = if let Some(json) = msg.strip_prefix("__jqerror__:") {
                         crate::value::json_to_value(json).unwrap_or(Value::from_str(&msg))
                     } else {
