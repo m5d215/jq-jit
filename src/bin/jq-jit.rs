@@ -1944,7 +1944,7 @@ fn real_main() {
     while i < expanded_args.len() {
         let arg = &expanded_args[i];
         match arg.as_str() {
-            "-c" | "--compact-output" => compact = true,
+            "-c" | "--compact-output" => { compact = true; tab = false; }
             "-r" | "--raw-output" => raw_output = true,
             "--raw-output0" => { raw_output = true; raw_output0 = true; }
             "-R" | "--raw-input" => raw_input = true,
@@ -1970,7 +1970,7 @@ fn real_main() {
                 eprintln!("jq: --stream is not yet implemented in jq-jit");
                 process::exit(2);
             }
-            "--tab" => tab = true,
+            "--tab" => { tab = true; compact = false; }
             "--indent" => {
                 i += 1;
                 if i < expanded_args.len() {
@@ -1981,9 +1981,12 @@ fn real_main() {
                         eprintln!("Use jq --help for help with command-line options.");
                         process::exit(2);
                     }
+                    // last-wins between -c / --tab / --indent N (#214)
+                    compact = false;
                     if parsed == -1 {
                         tab = true;
                     } else {
+                        tab = false;
                         indent_n = parsed as usize;
                     }
                 }
