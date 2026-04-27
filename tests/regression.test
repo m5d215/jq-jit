@@ -2148,7 +2148,7 @@ test("a"; "ix") | not
 "abc"
 false
 
-# Issue #209: slice assignment requires array RHS
-.[0:1] |= [.]
+# Issue #209: slice assignment with array RHS still works
+.[0:2] = [9]
 [1,2,3]
-[[1],2,3]
+[9,3]

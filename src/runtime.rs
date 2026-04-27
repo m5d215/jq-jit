@@ -2105,14 +2105,25 @@ pub fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
                 }
                 // Slice assignment: path element is {start: N, end: N}
                 (_, Value::Obj(slice_spec)) if slice_spec.contains_key("start") && slice_spec.contains_key("end") => {
-                    let start = match slice_spec.get("start") { Some(Value::Num(n, _)) => *n as i64, _ => 0 };
-                    let end = match slice_spec.get("end") { Some(Value::Num(n, _)) => *n as i64, _ => 0 };
+                    // jq applies floor(start) / ceil(end) when consuming a slice path,
+                    // and treats null as the open endpoint (0 for start, len for end).
+                    let len = match v { Value::Arr(a) => a.len() as i64, _ => 0 };
+                    let start = match slice_spec.get("start") {
+                        Some(Value::Num(n, _)) => n.floor() as i64,
+                        _ => 0,
+                    };
+                    let end = match slice_spec.get("end") {
+                        Some(Value::Num(n, _)) => n.ceil() as i64,
+                        Some(Value::Null) | None => len,
+                        _ => 0,
+                    };
                     match v {
                         Value::Arr(a) => {
                             let len = a.len() as i64;
-                            let si = start.max(0).min(len) as usize;
-                            let ei = end.max(0).min(len) as usize;
-                            let ei = ei.max(si);
+                            let si_raw = if start < 0 { (len + start).max(0) } else { start.min(len) };
+                            let ei_raw = if end < 0 { (len + end).max(0) } else { end.min(len) };
+                            let si = si_raw as usize;
+                            let ei = (ei_raw as usize).max(si);
                             let new_val = rt_setpath(&Value::Null, &rest, val)?;
                             let replacement = match &new_val {
                                 Value::Arr(r) => r.as_ref().clone(),

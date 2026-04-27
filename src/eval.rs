@@ -4092,7 +4092,12 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
         }
         Expr::Slice { expr: base_expr, from, to } => {
             eval_path(base_expr, input.clone(), env, &mut |bp| {
+                // Type-check the receiver: jq errors on path slicing of non-array/string/null.
                 let base = crate::runtime::rt_getpath(&input, &bp).unwrap_or(Value::Null);
+                match &base {
+                    Value::Arr(_) | Value::Str(_) | Value::Null => {}
+                    other => bail!("Cannot index {} with object", other.type_name()),
+                }
                 let from_val = if let Some(f) = from {
                     let mut v = Value::Null;
                     eval(f, input.clone(), env, &mut |fv| { v = fv; Ok(true) })?; v
@@ -4101,19 +4106,13 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                     let mut v = Value::Null;
                     eval(t, input.clone(), env, &mut |tv| { v = tv; Ok(true) })?; v
                 } else { Value::Null };
-                let len = match &base {
-                    Value::Arr(a) => a.len() as i64,
-                    Value::Str(s) => s.chars().count() as i64,
-                    _ => 0,
-                };
-                let fi = match &from_val { Value::Num(n, _) => { let i = n.floor() as i64; if i < 0 { (len + i).max(0) } else { i.min(len) } }, Value::Null => 0, _ => 0 };
-                let ti = match &to_val { Value::Num(n, _) => { let i = n.ceil() as i64; if i < 0 { (len + i).max(0) } else { i.min(len) } }, Value::Null => len, _ => len };
-                // Return a special path that indicates slicing
+                // jq preserves the literal slice expressions in path output without
+                // clamping to the receiver's actual length. Omitted bounds → null.
                 let mut p = match &bp { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
                 p.push(Value::object_from_map({
                     let mut m = crate::value::new_objmap();
-                    m.insert("start".into(), Value::number(fi as f64));
-                    m.insert("end".into(), Value::number(ti as f64));
+                    m.insert("start".into(), from_val);
+                    m.insert("end".into(), to_val);
                     m
                 }));
                 cb(Value::Arr(Rc::new(p)))
