@@ -1994,3 +1994,24 @@ false
 env | type
 {}
 "object"
+
+# Issue #220: keys | length on object still works (regression marker after
+# parser/simplify rewrites that elided the keys type-check were removed)
+keys | length
+{"a":1,"b":2}
+2
+
+# Issue #220: keys_unsorted | length on array
+keys_unsorted | length
+[10,20,30]
+3
+
+# Issue #220: [1,2,3] | length still rewrites to 3 (input-free elements)
+[1,2,3] | length
+null
+3
+
+# Issue #220: [.a,.b,.c] | length on object — evaluates per-field, not constant
+[.a,.b,.c] | length
+{"a":1,"b":2,"c":3}
+3

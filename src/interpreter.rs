@@ -618,70 +618,47 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                 }
             }
             // Semantic: [elements] | length → N (number of elements, if known at compile time)
-            // Only when each element is known to produce exactly one output.
+            // Only safe when no element references Input — otherwise `.a` etc. may
+            // raise a type error against the actual input that the rewrite would skip
+            // (issue #220). `is_input_free` here is too lax (it considers `Expr::Input`
+            // itself free for substitution), so we walk the AST for any Input mention.
             if let Expr::Collect { generator } = &sl {
                 if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
-                    fn is_single_output(e: &Expr) -> bool {
+                    fn mentions_input(e: &Expr) -> bool {
                         match e {
-                            Expr::Input | Expr::Literal(_) | Expr::Negate { .. } => true,
-                            Expr::Index { expr: base, .. } => matches!(base.as_ref(), Expr::Input),
-                            Expr::BinOp { lhs, rhs, .. } => is_single_output(lhs) && is_single_output(rhs),
-                            Expr::UnaryOp { operand, .. } => is_single_output(operand),
-                            Expr::ObjectConstruct { .. } => true,
-                            Expr::Pipe { left, right } => is_single_output(left) && is_single_output(right),
-                            _ => false, // generators, conditionals, etc. may produce 0 or many
+                            Expr::Input => true,
+                            Expr::Literal(_) | Expr::Empty | Expr::Env | Expr::Builtins
+                            | Expr::LoadVar { .. } | Expr::ReadInput | Expr::ReadInputs
+                            | Expr::ModuleMeta | Expr::GenLabel | Expr::Loc { .. } => false,
+                            Expr::BinOp { lhs, rhs, .. } => mentions_input(lhs) || mentions_input(rhs),
+                            Expr::UnaryOp { operand, .. } => mentions_input(operand),
+                            Expr::Index { expr, key } => mentions_input(expr) || mentions_input(key),
+                            Expr::IndexOpt { expr, key } => mentions_input(expr) || mentions_input(key),
+                            Expr::Negate { operand } => mentions_input(operand),
+                            Expr::Comma { left, right } => mentions_input(left) || mentions_input(right),
+                            _ => true, // conservative: any unknown shape may use input
                         }
                     }
-                    fn count_comma_elements(e: &Expr) -> Option<usize> {
+                    fn count_comma_elements_no_input(e: &Expr) -> Option<usize> {
                         match e {
                             Expr::Comma { left, right } => {
-                                Some(count_comma_elements(left)? + count_comma_elements(right)?)
+                                Some(count_comma_elements_no_input(left)? + count_comma_elements_no_input(right)?)
                             }
-                            _ if is_single_output(e) => Some(1),
+                            _ if !mentions_input(e) => Some(1),
                             _ => None,
                         }
                     }
-                    if let Some(n) = count_comma_elements(generator) {
+                    if let Some(n) = count_comma_elements_no_input(generator) {
                         return Expr::Literal(Literal::Num(n as f64, None));
                     }
                 }
             }
-            // Semantic: to_entries | length → length (same count)
-            if matches!(&sl, Expr::UnaryOp { op: UnaryOp::ToEntries, operand } if matches!(operand.as_ref(), Expr::Input)) {
-                if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
-                    return Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) };
-                }
-            }
-            // Semantic: keys | length → length, keys_unsorted | length → length
-            if matches!(&sl, Expr::UnaryOp { op: UnaryOp::Keys | UnaryOp::KeysUnsorted, operand } if matches!(operand.as_ref(), Expr::Input)) {
-                if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
-                    return Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) };
-                }
-            }
-            // Semantic: values | length → length (|values| == |keys| for objects and arrays)
-            if matches!(&sl, Expr::UnaryOp { op: UnaryOp::Values, operand } if matches!(operand.as_ref(), Expr::Input)) {
-                if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
-                    return Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) };
-                }
-            }
-            // Semantic: to_entries | length → length (|entries| == number of keys)
-            if matches!(&sl, Expr::UnaryOp { op: UnaryOp::ToEntries, operand } if matches!(operand.as_ref(), Expr::Input)) {
-                if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
-                    return Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) };
-                }
-            }
-            // Semantic: reverse | length → length (reverse doesn't change length)
-            if matches!(&sl, Expr::UnaryOp { op: UnaryOp::Reverse, operand } if matches!(operand.as_ref(), Expr::Input)) {
-                if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
-                    return Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) };
-                }
-            }
-            // Semantic: sort | length → length (sort doesn't change length)
-            if matches!(&sl, Expr::UnaryOp { op: UnaryOp::Sort, operand } if matches!(operand.as_ref(), Expr::Input)) {
-                if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
-                    return Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) };
-                }
-            }
+            // NOTE: `OP | length → length` rewrites for `to_entries`, `keys`,
+            // `keys_unsorted`, `values`, `reverse`, `sort` were removed (#220).
+            // Each prefix op's type-error contract differs from `length`'s, so the
+            // rewrite would silently turn jq errors (e.g. `null | keys`,
+            // `"x" | reverse`, `1 | sort`) into 0/1/N. The runtime cost saving was
+            // marginal compared to the correctness violation.
             // Semantic: unique | length → unique | length (can't simplify, unique changes length)
             // Semantic: flatten | length — can't simplify, changes length
             // Semantic: keys_unsorted | sort → keys
@@ -5978,26 +5955,12 @@ impl Filter {
         use crate::ir::{Expr, UnaryOp};
         let expr = match self.detect_expr() { Some(e) => e, None => return false };
         // Direct: `length`
-        if matches!(expr, Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
-            return true;
-        }
-        // Pipe form: `to_entries | length`, `keys | length`
-        if let Expr::Pipe { left, right } = expr {
-            if matches!(right.as_ref(), Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
-                if matches!(left.as_ref(), Expr::UnaryOp { op: UnaryOp::ToEntries | UnaryOp::Keys | UnaryOp::KeysUnsorted, .. }) {
-                    return true;
-                }
-            }
-        }
-        // Beta-reduced form: `length(to_entries(.))`, `length(keys(.))`
-        if let Expr::UnaryOp { op: UnaryOp::Length, operand } = expr {
-            if let Expr::UnaryOp { op: UnaryOp::ToEntries | UnaryOp::Keys | UnaryOp::KeysUnsorted, operand: inner } = operand.as_ref() {
-                if matches!(inner.as_ref(), Expr::Input) {
-                    return true;
-                }
-            }
-        }
-        false
+        //
+        // The `to_entries | length` / `keys | length` / `keys_unsorted | length`
+        // shortcuts were removed (#220): each prefix op has a stricter type
+        // contract than `length` (e.g. `null | keys` errors, `null | length` is 0),
+        // so collapsing them changes observable behaviour for non-iterable input.
+        matches!(expr, Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input))
     }
 
     /// Detect `keys` applied directly to input.
