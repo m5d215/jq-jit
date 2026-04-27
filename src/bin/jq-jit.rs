@@ -1897,6 +1897,7 @@ fn real_main() {
     let mut files: Vec<String> = Vec::new();
     let mut compact = false;
     let mut raw_output = false;
+    let mut raw_output0 = false;
     let mut raw_input = false;
     let mut null_input = false;
     let mut slurp = false;
@@ -1932,6 +1933,7 @@ fn real_main() {
         match arg.as_str() {
             "-c" | "--compact-output" => compact = true,
             "-r" | "--raw-output" => raw_output = true,
+            "--raw-output0" => { raw_output = true; raw_output0 = true; }
             "-R" | "--raw-input" => raw_input = true,
             "-n" | "--null-input" => null_input = true,
             "-s" | "--slurp" => slurp = true,
@@ -2946,7 +2948,11 @@ fn real_main() {
                 let _ = write_value_pretty_line_color(out, result, indent_n, tab, sort_keys, color_output);
             } else {
                 let formatted = format_value(result);
-                let _ = writeln!(out, "{}", formatted);
+                let _ = out.write_all(formatted.as_bytes());
+                // --raw-output0 (#210): use NUL as record separator so the
+                // stream is xargs -0 -friendly. -r alone keeps the newline.
+                let term: u8 = if raw_output0 { 0 } else { b'\n' };
+                let _ = out.write_all(&[term]);
             }
             Ok(true)
         });
