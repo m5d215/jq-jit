@@ -40,11 +40,7 @@ jobs:
         run: cargo build --release
 
       - name: Run tests
-        # `--test-threads=1` serialises the per-binary test functions. The
-        # cranelift-backed unit tests in `src/jit.rs` instantiate a fresh
-        # `JitCompiler` each and have surfaced intermittent SIGSEGV on both
-        # Linux and macOS runners when run in parallel. Mirrors ci.yml.
-        run: cargo test --release -- --test-threads=1
+        run: cargo test --release
 
       - name: Package
         run: |

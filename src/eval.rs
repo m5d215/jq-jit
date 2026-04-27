@@ -17,54 +17,51 @@ use crate::value::{Value, KeyStr};
 type GenResult = Result<bool>;
 pub type EnvRef = Rc<RefCell<Env>>;
 
-/// Global inputs queue for `input`/`inputs` builtins.
-/// Pre-populated by CLI before eval/JIT execution.
-/// SAFETY: jq-jit is single-threaded — no concurrent access.
-struct InputsCell(std::cell::UnsafeCell<(Vec<Value>, usize)>);
-unsafe impl Sync for InputsCell {}
-static INPUTS_STATE: InputsCell = InputsCell(std::cell::UnsafeCell::new((Vec::new(), 0)));
+// Per-thread inputs queue for `input`/`inputs` builtins.
+// Pre-populated by CLI before eval/JIT execution. Per-thread to keep
+// `cargo test` parallel runs honest — see `value::OBJMAP_POOL`.
+thread_local! {
+    static INPUTS_STATE: RefCell<(Vec<Value>, usize)> = const { RefCell::new((Vec::new(), 0)) };
+}
 
-/// Current input's 1-indexed line number for `input_line_number`.
-/// The CLI updates this before executing the filter on each input; jq defines
-/// it as the count of `\n` bytes consumed at the point the value was emitted
-/// (not where the value started), which for multi-value lines means every
-/// value on that line sees the same number.
-struct InputLineCell(std::cell::UnsafeCell<u64>);
-unsafe impl Sync for InputLineCell {}
-static INPUT_LINE_STATE: InputLineCell = InputLineCell(std::cell::UnsafeCell::new(0));
+// Per-thread 1-indexed line number for `input_line_number`. The CLI updates
+// it before executing the filter on each input; jq defines it as the count
+// of `\n` bytes consumed at the point the value was emitted (not where the
+// value started), which for multi-value lines means every value on that
+// line sees the same number.
+thread_local! {
+    static INPUT_LINE_STATE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 /// Set the line number reported by `input_line_number` for the current input.
 pub fn set_input_line_number(n: u64) {
-    unsafe { *INPUT_LINE_STATE.0.get() = n; }
+    INPUT_LINE_STATE.with(|c| c.set(n));
 }
 
 /// Read the current line number reported by `input_line_number`.
 pub fn get_input_line_number() -> u64 {
-    unsafe { *INPUT_LINE_STATE.0.get() }
+    INPUT_LINE_STATE.with(|c| c.get())
 }
 
 /// Set the inputs queue for `input`/`inputs` builtins.
 pub fn set_inputs_queue(values: Vec<Value>) {
-    unsafe {
-        let state = &mut *INPUTS_STATE.0.get();
+    INPUTS_STATE.with_borrow_mut(|state| {
         state.0 = values;
         state.1 = 0;
-    }
+    });
 }
 
 /// Clear the inputs queue.
 pub fn clear_inputs_queue() {
-    unsafe {
-        let state = &mut *INPUTS_STATE.0.get();
+    INPUTS_STATE.with_borrow_mut(|state| {
         state.0.clear();
         state.1 = 0;
-    }
+    });
 }
 
 /// Read the next input value. Returns None if exhausted.
 pub fn read_next_input() -> Option<Value> {
-    unsafe {
-        let state = &mut *INPUTS_STATE.0.get();
+    INPUTS_STATE.with_borrow_mut(|state| {
         if state.1 < state.0.len() {
             let idx = state.1;
             state.1 += 1;
@@ -72,7 +69,7 @@ pub fn read_next_input() -> Option<Value> {
         } else {
             None
         }
-    }
+    })
 }
 
 /// Typed error for label/break to avoid string formatting/parsing overhead.
@@ -2946,16 +2943,18 @@ pub fn eval(
         }
 
         Expr::Env => {
-            struct EnvCache(std::cell::UnsafeCell<Option<Value>>);
-            unsafe impl Sync for EnvCache {}
-            static ENV_CACHE: EnvCache = EnvCache(std::cell::UnsafeCell::new(None));
-            let cached = unsafe { &mut *ENV_CACHE.0.get() };
-            if cached.is_none() {
-                let mut obj = crate::value::new_objmap();
-                for (k, v) in std::env::vars() { obj.insert(KeyStr::from(k), Value::from_str(&v)); }
-                *cached = Some(Value::object_from_map(obj));
+            thread_local! {
+                static ENV_CACHE: RefCell<Option<Value>> = const { RefCell::new(None) };
             }
-            cb(cached.as_ref().unwrap().clone())
+            let env_value = ENV_CACHE.with_borrow_mut(|cached| {
+                if cached.is_none() {
+                    let mut obj = crate::value::new_objmap();
+                    for (k, v) in std::env::vars() { obj.insert(KeyStr::from(k), Value::from_str(&v)); }
+                    *cached = Some(Value::object_from_map(obj));
+                }
+                cached.as_ref().unwrap().clone()
+            });
+            cb(env_value)
         }
 
         Expr::Builtins => cb(crate::runtime::rt_builtins()),
