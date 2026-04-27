@@ -2015,3 +2015,13 @@ null
 [.a,.b,.c] | length
 {"a":1,"b":2,"c":3}
 3
+
+# Issue #221: bare flatten is recursive — must unwrap nested .b array
+[1, [.b, 3], 4] | flatten
+{"b":[10,20]}
+[1,10,20,3,4]
+
+# Issue #221: deeper nesting via .b
+[1, [.b, 3], 4] | flatten
+{"b":[[10,20]]}
+[1,10,20,3,4]

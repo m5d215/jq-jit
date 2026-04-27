@@ -973,43 +973,13 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                 }
             }
-            // Semantic: [A, [B, C], D] | flatten → [A, B, C, D]
-            // Unwrap inner Collect elements one level
-            if let Expr::Collect { generator: ref lg } = sl {
-                if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Flatten, operand } if matches!(operand.as_ref(), Expr::Input)) {
-                    fn collect_for_flatten(e: &Expr, out: &mut Vec<Expr>) {
-                        match e {
-                            Expr::Comma { left, right } => {
-                                collect_for_flatten(left, out);
-                                collect_for_flatten(right, out);
-                            }
-                            other => out.push(other.clone()),
-                        }
-                    }
-                    let mut top_elems = Vec::new();
-                    collect_for_flatten(lg, &mut top_elems);
-                    // Check if all elements are Collect (inner arrays) or simple exprs
-                    let has_inner_collect = top_elems.iter().any(|e| matches!(e, Expr::Collect { .. }));
-                    if has_inner_collect {
-                        let mut flat_elems = Vec::new();
-                        for elem in &top_elems {
-                            match elem {
-                                Expr::Collect { generator } => {
-                                    collect_for_flatten(generator, &mut flat_elems);
-                                }
-                                other => flat_elems.push(other.clone()),
-                            }
-                        }
-                        if flat_elems.len() >= 2 {
-                            let mut gen = flat_elems.remove(0);
-                            for e in flat_elems {
-                                gen = Expr::Comma { left: Box::new(gen), right: Box::new(e) };
-                            }
-                            return Expr::Collect { generator: Box::new(gen) };
-                        }
-                    }
-                }
-            }
+            // NOTE: `[A, [B, C], D] | flatten → [A, B, C, D]` rewrite was removed
+            // (#221). Bare `flatten` is recursive in jq 1.8.1, so unwrapping just
+            // one literal level produced wrong results when the inner elements
+            // were themselves arrays (`[1, [.b, 3], 4] | flatten` with `.b=[10,20]`
+            // should yield `[1,10,20,3,4]`, not `[1,[10,20],3,4]`). The old
+            // rewrite couldn't know the runtime shape of `.b`, so it's unsafe
+            // by construction.
             // Semantic: [e0, e1, ...] | .[N] → eN (extract Nth element at compile time)
             // Also handles .[−1] → last element
             if let Expr::Collect { generator: ref lg } = sl {
