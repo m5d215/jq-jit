@@ -3016,6 +3016,34 @@ fn real_main() {
         }
         process_input(&Value::Null, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
         jq_jit::eval::clear_inputs_queue();
+    } else if filter.uses_inputs() && files.is_empty() && !slurp {
+        // The filter calls `input` / `inputs`; share one cursor between the
+        // per-document loop and the builtin so each `input` consumes the next
+        // remaining stdin value (#196). Pre-load everything into the inputs
+        // queue, then drain the queue while both sites pull through the same
+        // `read_next_input`.
+        let mut inputs_values: Vec<Value> = Vec::new();
+        if raw_input {
+            let mut buf = String::new();
+            if let Err(e) = io::stdin().lock().read_to_string(&mut buf) {
+                eprintln!("jq: error reading input: {}", e);
+                process::exit(2);
+            }
+            for line in buf.lines() {
+                inputs_values.push(Value::from_str(line));
+            }
+        } else {
+            let input_str = stdin_data.unwrap_or_default();
+            if let Err(e) = json_stream(&input_str, |v| { inputs_values.push(v); Ok(()) }) {
+                eprintln!("jq: error (at <stdin>:0): {}", e);
+                process::exit(2);
+            }
+        }
+        jq_jit::eval::set_inputs_queue(inputs_values);
+        while let Some(v) = jq_jit::eval::read_next_input() {
+            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+        }
+        jq_jit::eval::clear_inputs_queue();
     } else if files.is_empty() {
         // Read from stdin
         let stdin = io::stdin();
