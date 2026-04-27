@@ -3205,15 +3205,18 @@ fn eval_recurse_expr(step: &Expr, val: &Value, env: &EnvRef, cb: &mut dyn FnMut(
         // Default recurse (.[]): recursive descent into arrays/objects
         eval_recurse_default(val, cb)
     } else {
-        // Custom step: use explicit stack to avoid stack overflow
+        // Custom step: use explicit stack to avoid stack overflow.
+        // Errors raised by `step` must propagate (#195) — jq emits the
+        // already-yielded values AND the type-error to stderr (exit 5).
+        // The previous `let _ = eval(...)` silently dropped them.
         let mut work = vec![val.clone()];
         while let Some(current) = work.pop() {
             if !cb(current.clone())? { return Ok(false); }
             let mut next_vals = Vec::new();
-            let _ = eval(step, current, env, &mut |next| {
+            eval(step, current, env, &mut |next| {
                 next_vals.push(next);
                 Ok(true)
-            });
+            })?;
             // Push in reverse so first output is processed first
             for v in next_vals.into_iter().rev() {
                 work.push(v);
