@@ -2278,3 +2278,23 @@ try (.a | 0) catch "err"
 .x | . + 1
 {"x":5}
 6
+
+# Issue #172: {pairs} | length rewrite preserves runtime error from input-touching value
+try ({a: .a} | length) catch "err"
+[]
+"err"
+
+# Issue #172: literal-only {pairs} | length still folds at compile time
+{a: 1, b: 2} | length
+null
+2
+
+# Issue #172: literal-only {pairs} | length still dedupes
+{a: 1, a: 2} | length
+null
+1
+
+# Issue #172: input-touching {pairs} | length still works at runtime
+{a: .a} | length
+{"a":42}
+1
