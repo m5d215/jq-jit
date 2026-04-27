@@ -2997,7 +2997,13 @@ pub fn eval(
 
         Expr::Stderr { expr: se } => {
             eval(se, input.clone(), env, &mut |val| {
-                eprint!("{}", crate::value::value_to_json(&val));
+                // jq prints strings raw (no surrounding quotes) and other
+                // values as compact JSON (#189). The filter passes the value
+                // through to `cb` unchanged.
+                match &val {
+                    Value::Str(s) => eprint!("{}", s.as_str()),
+                    _ => eprint!("{}", crate::value::value_to_json(&val)),
+                }
                 cb(input.clone())
             })
         }
