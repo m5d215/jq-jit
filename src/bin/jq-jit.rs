@@ -2249,12 +2249,25 @@ fn real_main() {
         let mut s = String::new();
         io::stdin().lock().read_to_string(&mut s).unwrap_or(0);
         if seq {
-            // RFC 7464 input: strip the RS (0x1e) record separators
-            // before they reach the JSON parser. RS is a control char
-            // that would otherwise be illegal mid-input; valid JSON
-            // strings cannot contain it unescaped, so removing every
-            // 0x1e byte is safe and matches jq's --seq input handling.
-            s.retain(|c| c != '\u{1e}');
+            // RFC 7464 application/json-seq: every record begins with an
+            // RS (0x1e) byte. jq treats input that has no RS at all (or is
+            // empty) as "abandoned text" and emits a parse-error notice.
+            // For inputs that *do* contain an RS, anything before the
+            // first RS is silently dropped (jq's behavior), then the
+            // remaining RS bytes are stripped so the JSON parser sees the
+            // record contents back-to-back.
+            if let Some(first_rs) = s.find('\u{1e}') {
+                s.drain(..first_rs);
+                s.retain(|c| c != '\u{1e}');
+            } else {
+                let line = s.bytes().filter(|&b| b == b'\n').count() + 1;
+                let col = s.rfind('\n').map(|i| s.len() - i - 1).unwrap_or(s.len());
+                eprintln!(
+                    "jq: ignoring parse error: Unfinished abandoned text at EOF at line {}, column {}",
+                    line, col
+                );
+                s.clear();
+            }
         }
         Some(s)
     } else {
