@@ -4795,10 +4795,10 @@ fn format_as_scientific(n: f64) -> String {
     normalize_scientific(&sci)
 }
 
-/// Normalize scientific notation to match jq's format (e.g., e+07 not e+7 for small exponents).
+/// Normalize scientific notation to match jq 1.8.1's format: uppercase `E`,
+/// explicit `+`/`-` sign, two-digit exponent for values below 100.
 fn normalize_scientific(s: &str) -> String {
-    // Split at 'e'
-    if let Some(idx) = s.find('e') {
+    if let Some(idx) = s.find(|c: char| c == 'e' || c == 'E') {
         let mantissa = &s[..idx];
         let exp_str = &s[idx+1..]; // includes sign
         let (sign, digits) = if let Some(rest) = exp_str.strip_prefix('-') {
@@ -4808,12 +4808,11 @@ fn normalize_scientific(s: &str) -> String {
         } else {
             ("+", exp_str)
         };
-        // Parse exponent and re-format with at least 2 digits for < 100
         let exp: i32 = digits.parse().unwrap_or(0);
         if exp.abs() < 100 {
-            format!("{}e{}{:02}", mantissa, sign, exp.abs())
+            format!("{}E{}{:02}", mantissa, sign, exp.abs())
         } else {
-            format!("{}e{}{}", mantissa, sign, exp.abs())
+            format!("{}E{}{}", mantissa, sign, exp.abs())
         }
     } else {
         s.to_string()

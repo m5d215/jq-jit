@@ -2182,3 +2182,8 @@ null
 . as {a: $a, b: $a} | $a
 {"a":1,"b":2}
 1
+
+# Issue #190: scientific notation uses uppercase E with explicit sign
+[1.5e-10] | .[0] | tojson
+null
+"1.5E-10"
