@@ -1079,9 +1079,13 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
             eval_index(&base, &key, false).map_err(|_| ())
         }
         Expr::IndexOpt { expr: base_expr, key: key_expr } => {
+            // `?` yields an *empty* stream on type error, not null. eval_one is
+            // single-value only, so the type-error branch returns Err(()) and
+            // the caller's generator fallback is responsible for producing zero
+            // outputs (#200). Only the success path stays on the scalar route.
             let base = eval_one(base_expr, input, env)?;
             let key = eval_one(key_expr, input, env)?;
-            Ok(eval_index(&base, &key, true).unwrap_or(Value::Null))
+            eval_index(&base, &key, true).map_err(|_| ())
         }
         Expr::Negate { operand } => {
             let val = eval_one(operand, input, env)?;

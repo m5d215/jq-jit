@@ -2075,3 +2075,13 @@ select(.a < 0)
 select(.a > 1)
 {"a":2}
 {"a":2}
+
+# Issue #200: .a?.b on non-object yields empty stream (was producing null)
+[.a?.b]
+true
+[]
+
+# Issue #200: .a?.b on object propagates correctly
+.a?.b
+{"a":{"b":2}}
+2
