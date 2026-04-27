@@ -2202,3 +2202,14 @@ null
 1.5 | tgamma
 null
 0.886226925452758
+
+# Issue #188: phantom builtins (has/2, label/1, have_bom/0, have_sql/0)
+# and format-string entries are no longer advertised
+[builtins[] | select(. == "has/2" or . == "label/1" or . == "have_bom/0" or . == "have_sql/0" or . == "@base64/0" or . == "@csv/0")] | length
+null
+0
+
+# Issue #188: date/0 is a jq-jit extension and now appears in builtins
+builtins | any(. == "date/0")
+null
+true
