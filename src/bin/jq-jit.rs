@@ -2213,6 +2213,13 @@ fn real_main() {
     let mut out = io::BufWriter::with_capacity(65536, stdout.lock());
 
     let mut any_output_false = false;
+    // `-e` exit codes need three states (#215):
+    //   0 = no output emitted (-> exit 4)
+    //   1 = last output truthy (-> exit 0)
+    //   2 = last output falsy (-> exit 1)
+    // The existing `any_output_false` bool stays as the closure parameter; we
+    // also maintain this richer state via a Cell captured by closure.
+    let exit_state: std::cell::Cell<u8> = std::cell::Cell::new(0);
 
     let format_value = |v: &Value| -> String {
         if raw_output {
@@ -2927,8 +2934,13 @@ fn real_main() {
                 *had_error = true;
                 return Ok(true);
             }
-            if exit_status && !result.is_true() {
-                *any_false = true;
+            if exit_status {
+                if !result.is_true() {
+                    *any_false = true;
+                    exit_state.set(2);
+                } else {
+                    exit_state.set(1);
+                }
             }
             // RFC 7464 JSON Text Sequences: every output value is preceded
             // by an RS (0x1e) byte. The trailing LF is already produced by
@@ -22443,9 +22455,14 @@ fn real_main() {
     if had_error {
         process::exit(5);
     }
-    if exit_status && any_output_false {
-        process::exit(5);
+    if exit_status {
+        match exit_state.get() {
+            0 => process::exit(4), // no output emitted
+            2 => process::exit(1), // last output null/false
+            _ => {}                // last output truthy → 0
+        }
     }
+    let _ = any_output_false; // retained for legacy fast paths that read it
 }
 
 fn print_usage() {
