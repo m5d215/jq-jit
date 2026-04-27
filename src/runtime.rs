@@ -1016,16 +1016,25 @@ fn sort_values(sorted: &mut [Value]) {
 }
 
 fn rt_reverse(v: &Value) -> Result<Value> {
+    // jq 1.8.1 defines `reverse` as `[.[length - 1 - range(0; length)]]`. The
+    // shape that falls out:
+    //   - non-empty arrays reverse normally;
+    //   - empty containers (null/""/{}/[]) yield `[]` (range empty -> no
+    //     index fires);
+    //   - everything else errors via the `.[idx]` step (#197).
     match v {
         Value::Arr(a) => {
             let mut reversed = (**a).clone();
             reversed.reverse();
             Ok(Value::Arr(Rc::new(reversed)))
         }
-        Value::Str(s) => {
-            Ok(Value::from_string(s.chars().rev().collect()))
-        }
         Value::Null => Ok(Value::Arr(Rc::new(vec![]))),
+        Value::Str(s) if s.is_empty() => Ok(Value::Arr(Rc::new(vec![]))),
+        Value::Obj(o) if o.is_empty() => Ok(Value::Arr(Rc::new(vec![]))),
+        Value::Str(_) => bail!("Cannot index string with number"),
+        Value::Obj(_) => bail!("Cannot index object with number"),
+        Value::Num(_, _) => bail!("Cannot index number with number"),
+        Value::True | Value::False => bail!("{} ({}) has no length", v.type_name(), crate::value::value_to_json(v)),
         _ => bail!("{} cannot be reversed", v.type_name()),
     }
 }

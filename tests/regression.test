@@ -2095,3 +2095,13 @@ map_values(. + 1)
 map_values(. + 1)
 [1,2,3]
 [2,3,4]
+
+# Issue #197: empty string reverses to []
+reverse
+""
+[]
+
+# Issue #197: empty object reverses to []
+reverse
+{}
+[]
