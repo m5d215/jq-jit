@@ -2147,3 +2147,8 @@ null
 test("a"; "ix") | not
 "abc"
 false
+
+# Issue #209: slice assignment requires array RHS
+.[0:1] |= [.]
+[1,2,3]
+[[1],2,3]

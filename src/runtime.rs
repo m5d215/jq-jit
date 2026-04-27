@@ -2116,7 +2116,7 @@ pub fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
                             let new_val = rt_setpath(&Value::Null, &rest, val)?;
                             let replacement = match &new_val {
                                 Value::Arr(r) => r.as_ref().clone(),
-                                _ => vec![new_val],
+                                _ => bail!("A slice of an array can only be assigned another array"),
                             };
                             let mut result = a[..si].to_vec();
                             result.extend(replacement);
@@ -2128,7 +2128,7 @@ pub fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
                             let new_val = rt_setpath(&Value::Null, &rest, val)?;
                             let replacement = match &new_val {
                                 Value::Arr(r) => r.as_ref().clone(),
-                                _ => vec![new_val],
+                                _ => bail!("A slice of an array can only be assigned another array"),
                             };
                             Ok(Value::Arr(Rc::new(replacement)))
                         }
