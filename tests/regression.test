@@ -4847,3 +4847,38 @@ if (.x | floor) > 3 then "big" else "small" end
 [ (if (.x | length) > 3 then "long" else "short" end)? ]
 "plain"
 []
+
+# Issue #251: strfunc_cmp_branch_lit apply-site uses RawApplyOutcome (#83
+# Phase B). Test variant reuses apply_field_test_raw; startswith/endswith/
+# contains reuse apply_field_str_builtin_raw. Fixes pre-existing #83-class
+# divergences (silently emitted nothing for non-string/non-object/escape-
+# bearing string instead of routing through generic for jq's right error).
+if (.x | startswith("he")) then "match" else "no" end
+{"x":"hello"}
+"match"
+
+if (.x | endswith("rld")) then "match" else "no" end
+{"x":"world"}
+"match"
+
+if (.x | contains("ell")) then "match" else "no" end
+{"x":"hello"}
+"match"
+
+if (.x | test("^h")) then "match" else "no" end
+{"x":"hello"}
+"match"
+
+if (.x | startswith("xx")) then "match" else "no" end
+{"x":"hello"}
+"no"
+
+# Non-string field — generic raises type error, ? swallows.
+[ (if (.x | startswith("he")) then "match" else "no" end)? ]
+{"x":42}
+[]
+
+# Non-object input — generic raises indexing error.
+[ (if (.x | startswith("he")) then "match" else "no" end)? ]
+"plain"
+[]

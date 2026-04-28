@@ -8221,77 +8221,68 @@ fn real_main() {
                     })
                 } else if let Some((ref field, ref strfunc, ref t_bytes, ref f_bytes)) = strfunc_cmp_branch_lit {
                     use jq_jit::interpreter::StrFuncCond;
-                    // Pre-compile regex if needed
-                    let re_compiled = match strfunc {
-                        StrFuncCond::Test(pattern, flags) => {
-                            let mut pat = pattern.clone();
-                            if let Some(f) = flags {
-                                if f.contains('x') {
-                                    pat = pat.replace(" ", "").replace("\t", "").replace("\n", "");
-                                }
-                                if f.contains('i') {
-                                    pat = format!("(?i){}", pat);
-                                }
+                    // Pre-compile regex if needed (Test variant only).
+                    let test_re = if let StrFuncCond::Test(pattern, flags) = strfunc {
+                        let mut pat = pattern.clone();
+                        if let Some(f) = flags {
+                            if f.contains('x') {
+                                pat = pat.replace(" ", "").replace("\t", "").replace("\n", "");
                             }
-                            Some(regex::Regex::new(&pat).ok())
+                            if f.contains('i') {
+                                pat = format!("(?i){}", pat);
+                            }
                         }
-                        _ => None,
+                        regex::Regex::new(&pat).ok()
+                    } else {
+                        None
                     };
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
-                            let val = &raw[vs..ve];
-                            if val[0] != b'"' { return Ok(()); }
-                            let inner = &val[1..ve-vs-1];
-                            let pass = match strfunc {
-                                StrFuncCond::Test(_, _) => {
-                                    if let Some(Some(ref re)) = re_compiled {
-                                        if !inner.contains(&b'\\') {
-                                            // ASCII fast path — search raw bytes
-                                            if let Ok(s) = std::str::from_utf8(inner) {
-                                                re.is_match(s)
-                                            } else { false }
-                                        } else {
-                                            match serde_json::from_slice::<String>(val) {
-                                                Ok(s) => re.is_match(&s),
-                                                Err(_) => false,
-                                            }
-                                        }
-                                    } else { false }
+                        let outcome = match strfunc {
+                            StrFuncCond::Test(_, _) => {
+                                if let Some(ref re) = test_re {
+                                    apply_field_test_raw(raw, field, re, |verdict| {
+                                        let bytes = if verdict == b"true" { t_bytes } else { f_bytes };
+                                        compact_buf.extend_from_slice(bytes);
+                                        compact_buf.push(b'\n');
+                                    })
+                                } else {
+                                    RawApplyOutcome::Bail
                                 }
-                                StrFuncCond::Startswith(prefix) => {
-                                    if !inner.contains(&b'\\') {
-                                        inner.starts_with(prefix.as_bytes())
+                            }
+                            StrFuncCond::Startswith(prefix) => {
+                                apply_field_str_builtin_raw(raw, field, |inner| {
+                                    let pass = inner.starts_with(prefix.as_bytes());
+                                    compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
+                                    compact_buf.push(b'\n');
+                                    RawApplyOutcome::Emit
+                                })
+                            }
+                            StrFuncCond::Endswith(suffix) => {
+                                apply_field_str_builtin_raw(raw, field, |inner| {
+                                    let pass = inner.ends_with(suffix.as_bytes());
+                                    compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
+                                    compact_buf.push(b'\n');
+                                    RawApplyOutcome::Emit
+                                })
+                            }
+                            StrFuncCond::Contains(needle) => {
+                                apply_field_str_builtin_raw(raw, field, |inner| {
+                                    let n = needle.as_bytes();
+                                    let pass = if n.is_empty() {
+                                        true
                                     } else {
-                                        match serde_json::from_slice::<String>(val) {
-                                            Ok(s) => s.starts_with(prefix.as_str()),
-                                            Err(_) => false,
-                                        }
-                                    }
-                                }
-                                StrFuncCond::Endswith(suffix) => {
-                                    if !inner.contains(&b'\\') {
-                                        inner.ends_with(suffix.as_bytes())
-                                    } else {
-                                        match serde_json::from_slice::<String>(val) {
-                                            Ok(s) => s.ends_with(suffix.as_str()),
-                                            Err(_) => false,
-                                        }
-                                    }
-                                }
-                                StrFuncCond::Contains(needle) => {
-                                    if !inner.contains(&b'\\') {
-                                        inner.windows(needle.len()).any(|w| w == needle.as_bytes())
-                                    } else {
-                                        match serde_json::from_slice::<String>(val) {
-                                            Ok(s) => s.contains(needle.as_str()),
-                                            Err(_) => false,
-                                        }
-                                    }
-                                }
-                            };
-                            compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
-                            compact_buf.push(b'\n');
+                                        inner.windows(n.len()).any(|w| w == n)
+                                    };
+                                    compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
+                                    compact_buf.push(b'\n');
+                                    RawApplyOutcome::Emit
+                                })
+                            }
+                        };
+                        if let RawApplyOutcome::Bail = outcome {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -15675,49 +15666,60 @@ fn real_main() {
                 })
             } else if let Some((ref field, ref strfunc, ref t_bytes, ref f_bytes)) = strfunc_cmp_branch_lit {
                 use jq_jit::interpreter::StrFuncCond;
-                let re_compiled = match strfunc {
-                    StrFuncCond::Test(pattern, flags) => {
-                        let mut pat = pattern.clone();
-                        if let Some(f) = flags {
-                            if f.contains('x') { pat = pat.replace(" ", "").replace("\t", "").replace("\n", ""); }
-                            if f.contains('i') { pat = format!("(?i){}", pat); }
-                        }
-                        Some(regex::Regex::new(&pat).ok())
+                let test_re = if let StrFuncCond::Test(pattern, flags) = strfunc {
+                    let mut pat = pattern.clone();
+                    if let Some(f) = flags {
+                        if f.contains('x') { pat = pat.replace(" ", "").replace("\t", "").replace("\n", ""); }
+                        if f.contains('i') { pat = format!("(?i){}", pat); }
                     }
-                    _ => None,
+                    regex::Regex::new(&pat).ok()
+                } else {
+                    None
                 };
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
-                        let val = &raw[vs..ve];
-                        if val[0] != b'"' { return Ok(()); }
-                        let inner = &val[1..ve-vs-1];
-                        let pass = match strfunc {
-                            StrFuncCond::Test(_, _) => {
-                                if let Some(Some(ref re)) = re_compiled {
-                                    if !inner.contains(&b'\\') {
-                                        if let Ok(s) = std::str::from_utf8(inner) { re.is_match(s) } else { false }
-                                    } else {
-                                        match serde_json::from_slice::<String>(val) { Ok(s) => re.is_match(&s), Err(_) => false }
-                                    }
-                                } else { false }
+                    let outcome = match strfunc {
+                        StrFuncCond::Test(_, _) => {
+                            if let Some(ref re) = test_re {
+                                apply_field_test_raw(raw, field, re, |verdict| {
+                                    let bytes = if verdict == b"true" { t_bytes } else { f_bytes };
+                                    compact_buf.extend_from_slice(bytes);
+                                    compact_buf.push(b'\n');
+                                })
+                            } else {
+                                RawApplyOutcome::Bail
                             }
-                            StrFuncCond::Startswith(prefix) => {
-                                if !inner.contains(&b'\\') { inner.starts_with(prefix.as_bytes()) }
-                                else { match serde_json::from_slice::<String>(val) { Ok(s) => s.starts_with(prefix.as_str()), Err(_) => false } }
-                            }
-                            StrFuncCond::Endswith(suffix) => {
-                                if !inner.contains(&b'\\') { inner.ends_with(suffix.as_bytes()) }
-                                else { match serde_json::from_slice::<String>(val) { Ok(s) => s.ends_with(suffix.as_str()), Err(_) => false } }
-                            }
-                            StrFuncCond::Contains(needle) => {
-                                if !inner.contains(&b'\\') { inner.windows(needle.len()).any(|w| w == needle.as_bytes()) }
-                                else { match serde_json::from_slice::<String>(val) { Ok(s) => s.contains(needle.as_str()), Err(_) => false } }
-                            }
-                        };
-                        compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
-                        compact_buf.push(b'\n');
+                        }
+                        StrFuncCond::Startswith(prefix) => {
+                            apply_field_str_builtin_raw(raw, field, |inner| {
+                                let pass = inner.starts_with(prefix.as_bytes());
+                                compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
+                                compact_buf.push(b'\n');
+                                RawApplyOutcome::Emit
+                            })
+                        }
+                        StrFuncCond::Endswith(suffix) => {
+                            apply_field_str_builtin_raw(raw, field, |inner| {
+                                let pass = inner.ends_with(suffix.as_bytes());
+                                compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
+                                compact_buf.push(b'\n');
+                                RawApplyOutcome::Emit
+                            })
+                        }
+                        StrFuncCond::Contains(needle) => {
+                            apply_field_str_builtin_raw(raw, field, |inner| {
+                                let n = needle.as_bytes();
+                                let pass = if n.is_empty() { true } else { inner.windows(n.len()).any(|w| w == n) };
+                                compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
+                                compact_buf.push(b'\n');
+                                RawApplyOutcome::Emit
+                            })
+                        }
+                    };
+                    if let RawApplyOutcome::Bail = outcome {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
