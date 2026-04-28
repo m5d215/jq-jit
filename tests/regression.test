@@ -5138,3 +5138,45 @@ to_entries[] | "\(.key)=\(.value)"
 to_entries[] | "\(.key)=\(.value)"
 {"x":{ "y" : 1 }}
 "x={\"y\":1}"
+
+# Issue #251: if_ff_cmp_{fields,computed,remaps} apply-sites use
+# RawApplyOutcome (#83 Phase B). Predicate goes through
+# `apply_field_field_cmp_raw` (verdict-pattern); body fetches the chosen
+# field set and emits. Bail covers non-object input, missing/non-numeric
+# cmp fields, and missing body fields — all routed through the generic
+# path (which honors jq's cross-type ordering and null left-identity).
+
+# fields variant: then-branch
+if .a > .b then .x else .y end
+{"a":3,"b":2,"x":"yes","y":"no"}
+"yes"
+
+# fields variant: else-branch
+if .a > .b then .x else .y end
+{"a":1,"b":2,"x":"yes","y":"no"}
+"no"
+
+# computed variant: arithmetic on then-branch
+if .a > .b then {x: (.p + .q)} else {x: (.p - .q)} end
+{"a":3,"b":2,"p":10,"q":20}
+{"x":30}
+
+# remaps variant: object literal remap
+if .a > .b then {x: .p, y: .q} else {x: .q, y: .p} end
+{"a":3,"b":2,"p":10,"q":20}
+{"x":10,"y":20}
+
+# Cross-type ordering — `"hi" > 3` is true in jq, so generic picks then-branch.
+if .a > .b then .x else .y end
+{"a":"hi","b":3,"x":1,"y":2}
+1
+
+# Null comparison — null is less than any number in jq; generic decides.
+if .a < .b then .x else .y end
+{"a":null,"b":3,"x":1,"y":2}
+1
+
+# Non-object input — generic raises indexing error, ? swallows.
+[ (if .a > .b then .x else .y end)? ]
+"plain"
+[]
