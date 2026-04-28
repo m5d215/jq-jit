@@ -10,9 +10,9 @@
 
 use jq_jit::fast_path::{
     FastPath, FieldAccessPath, RawApplyOutcome, apply_field_access_raw,
-    apply_field_alternative_raw, apply_field_field_alternative_raw, apply_full_object_fields_raw,
-    apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
-    apply_nested_field_access_raw, apply_object_compute_raw,
+    apply_field_alternative_raw, apply_field_field_alternative_raw, apply_field_test_raw,
+    apply_full_object_fields_raw, apply_has_field_raw, apply_has_multi_field_raw,
+    apply_multi_field_access_raw, apply_nested_field_access_raw, apply_object_compute_raw,
 };
 use jq_jit::interpreter::Filter;
 use jq_jit::value::Value;
@@ -793,6 +793,106 @@ fn raw_field_field_alt_non_object_non_null_bails() {
         let mut emitted: Vec<Vec<u8>> = Vec::new();
         let outcome =
             apply_field_field_alternative_raw(raw, "a", "b", |b| emitted.push(b.to_vec()));
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `.field | test("pattern")` — raw scanner only handles quoted strings with
+// no backslash escapes; everything else bails. The helper hands the regex
+// match verdict (`true`/`false`) back through the emit closure.
+
+#[test]
+fn raw_field_test_match_emits_true() {
+    let re = regex::Regex::new(r"^foo").unwrap();
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_field_test_raw(
+        b"{\"x\":\"foobar\"}",
+        "x",
+        &re,
+        |b| emitted.push(b.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![b"true".to_vec()]);
+}
+
+#[test]
+fn raw_field_test_no_match_emits_false() {
+    let re = regex::Regex::new(r"^foo").unwrap();
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_field_test_raw(
+        b"{\"x\":\"barfoo\"}",
+        "x",
+        &re,
+        |b| emitted.push(b.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![b"false".to_vec()]);
+}
+
+#[test]
+fn raw_field_test_field_missing_bails() {
+    let re = regex::Regex::new(r"^foo").unwrap();
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_field_test_raw(
+        b"{\"y\":\"hi\"}",
+        "x",
+        &re,
+        |b| emitted.push(b.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_field_test_non_string_field_bails() {
+    let re = regex::Regex::new(r"^foo").unwrap();
+    for inner in [&b"{\"x\":42}"[..], &b"{\"x\":null}"[..], &b"{\"x\":[1,2]}"[..]] {
+        let mut emitted: Vec<Vec<u8>> = Vec::new();
+        let outcome = apply_field_test_raw(inner, "x", &re, |b| emitted.push(b.to_vec()));
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for non-string field input {:?}, got {:?}",
+            std::str::from_utf8(inner).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
+    }
+}
+
+#[test]
+fn raw_field_test_escaped_string_bails() {
+    // Backslash escapes need decoding; the raw scanner can't, so it bails.
+    let re = regex::Regex::new(r"\n").unwrap();
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_field_test_raw(
+        br#"{"x":"a\nb"}"#,
+        "x",
+        &re,
+        |b| emitted.push(b.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_field_test_non_object_input_bails() {
+    let re = regex::Regex::new(r".*").unwrap();
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut emitted: Vec<Vec<u8>> = Vec::new();
+        let outcome = apply_field_test_raw(raw, "x", &re, |b| emitted.push(b.to_vec()));
         assert!(
             matches!(outcome, RawApplyOutcome::Bail),
             "expected Bail for input {:?}, got {:?}",

@@ -274,6 +274,57 @@ where
     RawApplyOutcome::Emit
 }
 
+/// Apply the `.field | test("pattern"; flags)` raw-byte fast path on a
+/// single JSON record.
+///
+/// The raw scanner can only run the regex over a quoted-string field with
+/// **no backslash escapes** (decoding escapes would defeat the
+/// no-materialise contract); everything else bails:
+///
+/// * Object input, field present, value is a quoted string with no `\`
+///   escapes — invokes `emit` with `b"true"` or `b"false"`.
+/// * Field absent, value isn't a quoted string, or the string contains
+///   any backslash escape — returns [`RawApplyOutcome::Bail`] so the
+///   generic path produces jq's verdict (which knows how to decode
+///   escapes and how to raise on non-string inputs).
+/// * Non-object input — returns [`RawApplyOutcome::Bail`] (the field
+///   fetch fails, so this is collapsed into the same Bail branch).
+///
+/// The caller owns the compiled `regex::Regex` so it can be reused
+/// across the input stream.
+pub fn apply_field_test_raw<E>(
+    raw: &[u8],
+    field: &str,
+    re: &regex::Regex,
+    mut emit: E,
+) -> RawApplyOutcome
+where
+    E: FnMut(&[u8]),
+{
+    let (vs, ve) = match json_object_get_field_raw(raw, 0, field) {
+        Some(r) => r,
+        None => return RawApplyOutcome::Bail,
+    };
+    let val = &raw[vs..ve];
+    // Only handle the no-escape ASCII-or-UTF-8 quoted-string fast lane.
+    // Anything else (non-string, escaped string, missing trailing quote)
+    // bails — the generic path can decode escapes and raise the right
+    // error for non-strings.
+    if val.len() < 2 || val[0] != b'"' || val[val.len() - 1] != b'"'
+        || val[1..val.len() - 1].contains(&b'\\')
+    {
+        return RawApplyOutcome::Bail;
+    }
+    let content = &val[1..val.len() - 1];
+    let content_str = unsafe { std::str::from_utf8_unchecked(content) };
+    if re.is_match(content_str) {
+        emit(b"true");
+    } else {
+        emit(b"false");
+    }
+    RawApplyOutcome::Emit
+}
+
 /// Apply the `.field // fallback` raw-byte fast path on a single JSON
 /// record.
 ///
