@@ -35,7 +35,7 @@ use jq_jit::fast_path::{
     apply_obj_merge_lit_raw, apply_select_nested_cmp_raw, apply_select_num_str_raw,
     apply_select_arith_cmp_raw, apply_select_cmp_raw,
     apply_select_field_null_raw, apply_select_str_raw, apply_select_str_test_raw,
-    apply_two_field_binop_const_raw,
+    apply_to_entries_each_interp_raw, apply_two_field_binop_const_raw,
 };
 use jq_jit::interpreter::{ArithExpr, CmpVal, Filter, MathUnary};
 use jq_jit::ir::{BinOp, UnaryOp};
@@ -5657,4 +5657,122 @@ fn raw_del_fields_non_object_bails() {
             outcome,
         );
     }
+}
+
+fn te_interp_key_eq_value() -> Vec<(bool, String)> {
+    vec![
+        (false, "key".to_string()),
+        (true, "=".to_string()),
+        (false, "value".to_string()),
+    ]
+}
+
+#[test]
+fn raw_to_entries_each_interp_object_emits() {
+    let parts = te_interp_key_eq_value();
+    let mut buf = Vec::new();
+    let outcome = apply_to_entries_each_interp_raw(b"{\"a\":1,\"b\":\"x\"}", &parts, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"\"a=1\"\n\"b=x\"\n");
+}
+
+#[test]
+fn raw_to_entries_each_interp_empty_object_emits_nothing() {
+    let parts = te_interp_key_eq_value();
+    let mut buf = Vec::new();
+    let outcome = apply_to_entries_each_interp_raw(b"{}", &parts, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_to_entries_each_interp_non_object_bails() {
+    let parts = te_interp_key_eq_value();
+    for raw in [b"[1,2]".as_slice(), b"42".as_slice(), b"null".as_slice(), b"\"s\"".as_slice()] {
+        let mut buf = Vec::new();
+        let outcome = apply_to_entries_each_interp_raw(raw, &parts, &mut buf);
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for non-object input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert!(buf.is_empty(), "buf should be untouched on Bail");
+    }
+}
+
+#[test]
+fn raw_to_entries_each_interp_non_canonical_number_bails() {
+    let parts = te_interp_key_eq_value();
+    let mut buf = Vec::new();
+    let outcome = apply_to_entries_each_interp_raw(b"{\"x\":1e10}", &parts, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_to_entries_each_interp_leading_plus_number_bails() {
+    let parts = te_interp_key_eq_value();
+    let mut buf = Vec::new();
+    let outcome = apply_to_entries_each_interp_raw(b"{\"x\":+5}", &parts, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_to_entries_each_interp_nested_array_value_bails() {
+    let parts = te_interp_key_eq_value();
+    let mut buf = Vec::new();
+    let outcome = apply_to_entries_each_interp_raw(b"{\"x\":[1,2]}", &parts, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_to_entries_each_interp_nested_object_value_bails() {
+    let parts = te_interp_key_eq_value();
+    let mut buf = Vec::new();
+    let outcome = apply_to_entries_each_interp_raw(b"{\"x\":{\"y\":1}}", &parts, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_to_entries_each_interp_escaped_value_string_bails() {
+    let parts = te_interp_key_eq_value();
+    let mut buf = Vec::new();
+    let outcome = apply_to_entries_each_interp_raw(b"{\"x\":\"a\\u00e9\"}", &parts, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_to_entries_each_interp_escaped_key_bails() {
+    let parts = te_interp_key_eq_value();
+    let mut buf = Vec::new();
+    let outcome = apply_to_entries_each_interp_raw(b"{\"a\\nb\":1}", &parts, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_to_entries_each_interp_bool_null_values_emit() {
+    let parts = te_interp_key_eq_value();
+    let mut buf = Vec::new();
+    let outcome = apply_to_entries_each_interp_raw(
+        b"{\"a\":true,\"b\":false,\"c\":null}",
+        &parts,
+        &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"\"a=true\"\n\"b=false\"\n\"c=null\"\n");
+}
+
+#[test]
+fn raw_to_entries_each_interp_preserves_existing_buf_on_bail() {
+    let parts = te_interp_key_eq_value();
+    let mut buf = b"prefix-".to_vec();
+    let outcome = apply_to_entries_each_interp_raw(b"{\"x\":1e10}", &parts, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert_eq!(buf.as_slice(), b"prefix-");
 }

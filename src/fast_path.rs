@@ -79,7 +79,7 @@ use crate::value::{
     json_object_update_field_str_concat, json_object_update_field_str_map,
     json_object_update_field_test, json_object_update_field_tostring,
     json_object_update_field_trim, json_type_byte, json_value_length, parse_json_num,
-    push_jq_number_bytes,
+    push_jq_number_bytes, skip_json_value,
 };
 
 /// A fast path whose type-dispatch obligations are encoded in its
@@ -1369,6 +1369,178 @@ pub fn apply_remap_to_entries_raw(
         buf.push(b'}');
     }
     buf.extend_from_slice(b"]\n");
+    RawApplyOutcome::Emit
+}
+
+/// Apply the `to_entries[] | "\(.key)SEP\(.value)..."` raw-byte fast
+/// path. Iterates kv pairs of the input object and emits one
+/// interpolated string (with surrounding quotes and trailing `\n`)
+/// per entry.
+///
+/// `interp_parts` is the parsed interpolation: `(is_lit, content)`
+/// pairs where `is_lit=true` means literal text and `is_lit=false`
+/// means a reference to either `"key"` or `"value"`.
+///
+/// Bail discipline (truncates `buf` back to its entry-checkpoint on
+/// any per-entry violation, leaving caller state untouched):
+/// - Non-object input → Bail. jq accepts `to_entries` on arrays, so
+///   the slow path handles that.
+/// - Empty object → Emit (no output, matches jq).
+/// - Per entry, key bytes containing `\` → Bail. jq normalizes
+///   `\u00XX` etc. to the actual character; copying the JSON-quoted
+///   form would diverge.
+/// - Per entry, value (computed via `skip_json_value`):
+///   * Quoted string containing `\` → Bail (same escape-norm reason).
+///   * Number containing non-canonical bytes (`+`, `e`/`E` after
+///     digit/`.`) → Bail. jq normalizes `1e10`→`1E+10` and `+5`→`5`.
+///   * Array/object → Bail. jq compacts whitespace inside; raw bytes
+///     can preserve internal whitespace.
+///   * Bool/null/canonical-number/escape-free string → Emit.
+pub fn apply_to_entries_each_interp_raw(
+    raw: &[u8],
+    interp_parts: &[(bool, String)],
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if raw.is_empty() || raw[0] != b'{' {
+        return RawApplyOutcome::Bail;
+    }
+    let entries_checkpoint = buf.len();
+    let mut i = 1usize;
+    while i < raw.len() && matches!(raw[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < raw.len() && raw[i] == b'}' {
+        return RawApplyOutcome::Emit;
+    }
+    loop {
+        if i >= raw.len() || raw[i] != b'"' {
+            buf.truncate(entries_checkpoint);
+            return RawApplyOutcome::Bail;
+        }
+        let ks = i + 1;
+        i += 1;
+        while i < raw.len() {
+            match raw[i] {
+                b'"' => break,
+                b'\\' => { i = i.saturating_add(2); continue; }
+                _ => i += 1,
+            }
+        }
+        if i >= raw.len() {
+            buf.truncate(entries_checkpoint);
+            return RawApplyOutcome::Bail;
+        }
+        let ke = i;
+        i += 1;
+        while i < raw.len() && matches!(raw[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= raw.len() || raw[i] != b':' {
+            buf.truncate(entries_checkpoint);
+            return RawApplyOutcome::Bail;
+        }
+        i += 1;
+        while i < raw.len() && matches!(raw[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        let vs = i;
+        i = match skip_json_value(raw, i) {
+            Ok(e) => e,
+            Err(_) => {
+                buf.truncate(entries_checkpoint);
+                return RawApplyOutcome::Bail;
+            }
+        };
+        let ve = i;
+        let key_bytes = &raw[ks..ke];
+        let val_bytes = &raw[vs..ve];
+        if key_bytes.contains(&b'\\') {
+            buf.truncate(entries_checkpoint);
+            return RawApplyOutcome::Bail;
+        }
+        if val_bytes.is_empty() {
+            buf.truncate(entries_checkpoint);
+            return RawApplyOutcome::Bail;
+        }
+        let v0 = val_bytes[0];
+        match v0 {
+            b'"' => {
+                let inner_end = val_bytes.len().saturating_sub(1);
+                if val_bytes[1..inner_end].contains(&b'\\') {
+                    buf.truncate(entries_checkpoint);
+                    return RawApplyOutcome::Bail;
+                }
+            }
+            b'[' | b'{' => {
+                buf.truncate(entries_checkpoint);
+                return RawApplyOutcome::Bail;
+            }
+            b't' | b'f' | b'n' => {}
+            b'+' => {
+                buf.truncate(entries_checkpoint);
+                return RawApplyOutcome::Bail;
+            }
+            b'-' | b'0'..=b'9' => {
+                let mut idx = 0;
+                while idx < val_bytes.len() {
+                    let b = val_bytes[idx];
+                    if b == b'+' {
+                        buf.truncate(entries_checkpoint);
+                        return RawApplyOutcome::Bail;
+                    }
+                    if (b == b'e' || b == b'E') && idx > 0 {
+                        let prev = val_bytes[idx - 1];
+                        if prev.is_ascii_digit() || prev == b'.' {
+                            buf.truncate(entries_checkpoint);
+                            return RawApplyOutcome::Bail;
+                        }
+                    }
+                    idx += 1;
+                }
+            }
+            _ => {
+                buf.truncate(entries_checkpoint);
+                return RawApplyOutcome::Bail;
+            }
+        }
+        buf.push(b'"');
+        for (is_lit, content) in interp_parts {
+            if *is_lit {
+                for &b in content.as_bytes() {
+                    match b {
+                        b'"' => buf.extend_from_slice(b"\\\""),
+                        b'\\' => buf.extend_from_slice(b"\\\\"),
+                        _ => buf.push(b),
+                    }
+                }
+            } else if content == "key" {
+                for &b in key_bytes {
+                    match b {
+                        b'"' => buf.extend_from_slice(b"\\\""),
+                        b'\\' => buf.extend_from_slice(b"\\\\"),
+                        _ => buf.push(b),
+                    }
+                }
+            } else if v0 == b'"' {
+                buf.extend_from_slice(&val_bytes[1..val_bytes.len() - 1]);
+            } else {
+                for &b in val_bytes {
+                    match b {
+                        b'"' => buf.extend_from_slice(b"\\\""),
+                        b'\\' => buf.extend_from_slice(b"\\\\"),
+                        _ => buf.push(b),
+                    }
+                }
+            }
+        }
+        buf.extend_from_slice(b"\"\n");
+        while i < raw.len() && matches!(raw[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= raw.len() {
+            buf.truncate(entries_checkpoint);
+            return RawApplyOutcome::Bail;
+        }
+        if raw[i] == b'}' { break; }
+        if raw[i] != b',' {
+            buf.truncate(entries_checkpoint);
+            return RawApplyOutcome::Bail;
+        }
+        i += 1;
+        while i < raw.len() && matches!(raw[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
     RawApplyOutcome::Emit
 }
 
