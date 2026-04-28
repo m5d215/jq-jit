@@ -11,7 +11,7 @@
 use jq_jit::fast_path::{
     FastPath, FieldAccessPath, RawApplyOutcome, apply_array_field_access_raw,
     apply_field_access_raw, apply_has_field_raw, apply_has_multi_field_raw,
-    apply_multi_field_access_raw, apply_nested_field_access_raw,
+    apply_multi_field_access_raw, apply_nested_field_access_raw, apply_object_compute_raw,
 };
 use jq_jit::interpreter::Filter;
 use jq_jit::value::Value;
@@ -576,4 +576,82 @@ fn raw_has_multi_field_non_object_input_bails() {
             assert!(emitted.is_empty());
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Object-compute (`{a: .x + 1, b: .y * 2}` / `[.x + 1, .y * 2]` / standalone-
+// array variants). The helper exposes a two-stage Bail: outer for non-object
+// or partially-missing inputs, inner for the per-cell type-error check (#163,
+// e.g. `str + num`). Both must invoke neither `bail_check` nor `emit` once
+// they decide to bail.
+
+#[test]
+fn raw_object_compute_full_object_invokes_emit_after_inner_check() {
+    let mut ranges_buf = vec![(0usize, 0usize); 2];
+    let mut bail_calls = 0usize;
+    let mut emit_calls = 0usize;
+    let outcome = apply_object_compute_raw(
+        b"{\"a\":1,\"b\":2}",
+        &["a", "b"],
+        &mut ranges_buf,
+        |_, _| { bail_calls += 1; false }, // inner check passes
+        |_, _| { emit_calls += 1; },
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(bail_calls, 1, "bail_check must run exactly once on outer success");
+    assert_eq!(emit_calls, 1, "emit must run exactly once when both checks pass");
+}
+
+#[test]
+fn raw_object_compute_outer_bail_skips_inner_and_emit() {
+    // Non-object input — outer bail at fields_raw_buf, neither closure runs.
+    let mut ranges_buf = vec![(0usize, 0usize); 2];
+    let mut bail_calls = 0usize;
+    let mut emit_calls = 0usize;
+    let outcome = apply_object_compute_raw(
+        b"42",
+        &["a", "b"],
+        &mut ranges_buf,
+        |_, _| { bail_calls += 1; false },
+        |_, _| { emit_calls += 1; },
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert_eq!(bail_calls, 0, "outer bail must skip the inner check");
+    assert_eq!(emit_calls, 0, "outer bail must skip emit");
+}
+
+#[test]
+fn raw_object_compute_inner_bail_skips_emit() {
+    // Outer succeeds, inner says "would error" — bail without emitting.
+    let mut ranges_buf = vec![(0usize, 0usize); 2];
+    let mut emit_calls = 0usize;
+    let outcome = apply_object_compute_raw(
+        b"{\"a\":1,\"b\":2}",
+        &["a", "b"],
+        &mut ranges_buf,
+        |_, _| true, // inner says bail
+        |_, _| { emit_calls += 1; },
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert_eq!(emit_calls, 0, "inner bail must skip emit");
+}
+
+#[test]
+fn raw_object_compute_partial_object_outer_bails() {
+    // Object missing one field — `json_object_get_fields_raw_buf` returns
+    // false, so it's an outer bail (jq emits a mix of values and nulls,
+    // generic produces it).
+    let mut ranges_buf = vec![(0usize, 0usize); 2];
+    let mut bail_calls = 0usize;
+    let mut emit_calls = 0usize;
+    let outcome = apply_object_compute_raw(
+        b"{\"a\":1}",
+        &["a", "b"],
+        &mut ranges_buf,
+        |_, _| { bail_calls += 1; false },
+        |_, _| { emit_calls += 1; },
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert_eq!(bail_calls, 0);
+    assert_eq!(emit_calls, 0);
 }
