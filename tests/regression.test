@@ -5180,3 +5180,40 @@ if .a < .b then .x else .y end
 [ (if .a > .b then .x else .y end)? ]
 "plain"
 []
+
+# Issue #251: select_regex_value (`select(.field | test("re")) | output`)
+# apply-site uses RawApplyOutcome (#83 Phase B). Predicate goes through
+# `apply_field_test_raw` which Bails on missing field, non-string field,
+# escaped string content, or non-object input — all of which jq raises
+# errors on. Fixes the pre-existing #83 silent-skip bug where these
+# inputs produced no output instead of the generic-path error.
+
+# Happy path — match emits computed output.
+select(.x | test("h")) | .y + 1
+{"x":"hello","y":42}
+43
+
+# No match — silent (select empty).
+[ select(.x | test("h")) | .y ]
+{"x":"world","y":42}
+[]
+
+# Non-object input — generic raises indexing error, ? swallows.
+[ (select(.x | test("h")) | .y)? ]
+"plain"
+[]
+
+# Missing predicate field — generic raises "null cannot be matched", ? swallows.
+[ (select(.x | test("h")) | .y)? ]
+{"y":42}
+[]
+
+# Non-string predicate field — generic raises "number cannot be matched", ? swallows.
+[ (select(.x | test("h")) | .y)? ]
+{"x":1,"y":42}
+[]
+
+# Match but missing body field — body fetch Bails to generic, which yields null.
+select(.x | test("h")) | .y
+{"x":"hello"}
+null

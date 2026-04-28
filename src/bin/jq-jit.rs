@@ -7543,7 +7543,10 @@ fn real_main() {
                         })
                     }
                 } else if let Some((ref rv_field, ref rv_pattern, ref rv_flags, ref rv_rexpr)) = select_regex_value {
-                    // select(.field | test("regex")) | value — regex test then emit value
+                    // Predicate via apply_field_test_raw (Bails on missing
+                    // field, non-string field, escaped string, non-object
+                    // input — all of which jq raises errors on); body fetches
+                    // remap fields and emits resolved value.
                     let re_pattern = if let Some(flags) = rv_flags {
                         let mut prefix = String::from("(?");
                         for c in flags.chars() {
@@ -7556,7 +7559,6 @@ fn real_main() {
                         rv_pattern.clone()
                     };
                     if let Ok(re) = regex::Regex::new(&re_pattern) {
-                        // Collect all needed fields
                         let mut all_fields: Vec<String> = Vec::new();
                         let mut field_idx = std::collections::HashMap::new();
                         let ensure_field = |f: &str, all: &mut Vec<String>, idx: &mut std::collections::HashMap<String, usize>| {
@@ -7565,24 +7567,41 @@ fn real_main() {
                         ensure_field(rv_field.as_str(), &mut all_fields, &mut field_idx);
                         for f in remap_expr_fields(rv_rexpr) { ensure_field(f, &mut all_fields, &mut field_idx); }
                         let resolved = resolve_one_remap(rv_rexpr, &field_idx);
-                        let cond_idx = field_idx[rv_field.as_str()];
                         let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
                         let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                         json_stream_raw(&input_str, |start, end| {
                             let raw = &input_bytes[start..end];
-                            if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
-                                let (vs, ve) = ranges_buf[cond_idx];
-                                let val = &raw[vs..ve];
-                                if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                                    && !val[1..val.len()-1].contains(&b'\\')
-                                {
-                                    let content = unsafe { std::str::from_utf8_unchecked(&val[1..val.len()-1]) };
-                                    if re.is_match(content) {
-                                        emit_resolved_value(&mut compact_buf, &resolved, raw, &ranges_buf);
-                                        compact_buf.push(b'\n');
-                                    }
+                            let mut matched: Option<bool> = None;
+                            let outcome = apply_field_test_raw(raw, rv_field.as_str(), &re, |verdict| {
+                                matched = Some(verdict == b"true");
+                            });
+                            if let RawApplyOutcome::Bail = outcome {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                if compact_buf.len() >= 1 << 17 {
+                                    let _ = out.write_all(&compact_buf);
+                                    compact_buf.clear();
                                 }
+                                return Ok(());
                             }
+                            if matched != Some(true) {
+                                if compact_buf.len() >= 1 << 17 {
+                                    let _ = out.write_all(&compact_buf);
+                                    compact_buf.clear();
+                                }
+                                return Ok(());
+                            }
+                            if !json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                if compact_buf.len() >= 1 << 17 {
+                                    let _ = out.write_all(&compact_buf);
+                                    compact_buf.clear();
+                                }
+                                return Ok(());
+                            }
+                            emit_resolved_value(&mut compact_buf, &resolved, raw, &ranges_buf);
+                            compact_buf.push(b'\n');
                             if compact_buf.len() >= 1 << 17 {
                                 let _ = out.write_all(&compact_buf);
                                 compact_buf.clear();
@@ -14805,24 +14824,41 @@ fn real_main() {
                     ensure_field4(rv_field.as_str(), &mut all_fields, &mut field_idx);
                     for f in remap_expr_fields(rv_rexpr) { ensure_field4(f, &mut all_fields, &mut field_idx); }
                     let resolved = resolve_one_remap(rv_rexpr, &field_idx);
-                    let cond_idx = field_idx[rv_field.as_str()];
                     let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
                     let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                     json_stream_raw(content, |start, end| {
                         let raw = &content_bytes[start..end];
-                        if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
-                            let (vs, ve) = ranges_buf[cond_idx];
-                            let val = &raw[vs..ve];
-                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                                && !val[1..val.len()-1].contains(&b'\\')
-                            {
-                                let content_str = unsafe { std::str::from_utf8_unchecked(&val[1..val.len()-1]) };
-                                if re.is_match(content_str) {
-                                    emit_resolved_value(&mut compact_buf, &resolved, raw, &ranges_buf);
-                                    compact_buf.push(b'\n');
-                                }
+                        let mut matched: Option<bool> = None;
+                        let outcome = apply_field_test_raw(raw, rv_field.as_str(), &re, |verdict| {
+                            matched = Some(verdict == b"true");
+                        });
+                        if let RawApplyOutcome::Bail = outcome {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            if compact_buf.len() >= 1 << 17 {
+                                let _ = out.write_all(&compact_buf);
+                                compact_buf.clear();
                             }
+                            return Ok(());
                         }
+                        if matched != Some(true) {
+                            if compact_buf.len() >= 1 << 17 {
+                                let _ = out.write_all(&compact_buf);
+                                compact_buf.clear();
+                            }
+                            return Ok(());
+                        }
+                        if !json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            if compact_buf.len() >= 1 << 17 {
+                                let _ = out.write_all(&compact_buf);
+                                compact_buf.clear();
+                            }
+                            return Ok(());
+                        }
+                        emit_resolved_value(&mut compact_buf, &resolved, raw, &ranges_buf);
+                        compact_buf.push(b'\n');
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
                             compact_buf.clear();
