@@ -7556,6 +7556,20 @@ fn real_main() {
                     use jq_jit::interpreter::{BranchOutput, CondRhs};
                     use jq_jit::ir::BinOp;
 
+                    // Bail discipline (#83 / issue #251): cond_chain is the
+                    // most specialized fast path in this dispatcher — the
+                    // single-branch and multi-branch shapes diverge enough
+                    // that a single helper-boundary signature would require
+                    // moving `BranchOutput` resolution + `emit_resolved_value`
+                    // into `fast_path.rs` along with a flotilla of typed
+                    // parameters. Instead the discipline is implemented
+                    // inline: every numeric/cross-type compare miss, every
+                    // arity mismatch, and every unhandled value shape sets a
+                    // `needs_generic` flag (or returns directly) that routes
+                    // to `process_input` → `Filter::execute_cb`. Maintainers
+                    // touching this block must keep that invariant: when in
+                    // doubt about a new edge case, prefer routing to generic
+                    // — `Filter::execute_cb` is authoritative.
                     // Specialized path: single-branch with lazy output fetch (no remap outputs)
                     if branches.len() == 1 && !matches!(branches[0].output, BranchOutput::Remap(_) | BranchOutput::Computed(_)) && !matches!(else_output, BranchOutput::Remap(_) | BranchOutput::Computed(_)) {
                         let br = &branches[0];
@@ -14669,6 +14683,11 @@ fn real_main() {
                 use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
 
+                // Bail discipline (#83 / issue #251): see the matching
+                // comment on the stdin cond_chain apply-site for the
+                // rationale; this block follows the same inline-bail
+                // pattern (every miss routes to `process_input` →
+                // generic eval).
                 // Specialized path: single-branch with lazy output fetch (no remap outputs)
                 if branches.len() == 1 && !matches!(branches[0].output, BranchOutput::Remap(_) | BranchOutput::Computed(_)) && !matches!(else_output, BranchOutput::Remap(_) | BranchOutput::Computed(_)) {
                     let br = &branches[0];
