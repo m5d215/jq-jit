@@ -3224,3 +3224,70 @@ null
 
 (.x | split("") | reverse | join(""))?
 [1,2,3]
+
+# #83 Phase B: .x | <string-builtin>(arg) apply-site uses RawApplyOutcome::Bail.
+# Happy paths covering all 9 fused builtins.
+.x | startswith("ab")
+{"x":"abcdef"}
+true
+
+.x | endswith("ef")
+{"x":"abcdef"}
+true
+
+.x | ltrimstr("ab")
+{"x":"abcdef"}
+"cdef"
+
+.x | rtrimstr("ef")
+{"x":"abcdef"}
+"abcd"
+
+.x | split(",")
+{"x":"a,b,c"}
+["a","b","c"]
+
+.x | index("c")
+{"x":"abc"}
+2
+
+.x | rindex("c")
+{"x":"abcabc"}
+5
+
+.x | indices("a")
+{"x":"banana"}
+[1,3,5]
+
+.x | contains("an")
+{"x":"banana"}
+true
+
+# Field absent under `?` bails to generic; jq raises null|<builtin>; `?` swallows.
+(.x | startswith("a"))?
+{"y":"hi"}
+
+# Non-string field under `?`
+(.x | startswith("a"))?
+{"x":42}
+
+(.x | endswith("a"))?
+{"x":null}
+
+(.x | ltrimstr("a"))?
+{"x":[1,2,3]}
+
+# Escape-bearing string: bail to generic; jq decodes correctly.
+.x | startswith("a")
+{"x":"a\nb"}
+true
+
+# Non-object input under `?`
+(.x | contains("a"))?
+42
+
+(.x | split(","))?
+"hi"
+
+(.x | endswith("a"))?
+[1,2,3]

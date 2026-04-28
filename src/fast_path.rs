@@ -670,6 +670,47 @@ where
     on_string(&val[1..val.len() - 1])
 }
 
+/// Apply the `.field | <string-builtin>(arg)` raw-byte fast path on a
+/// single JSON record. The detector (`detect_field_str_builtin`) fuses
+/// nine string builtins under one shape — `startswith`, `endswith`,
+/// `ltrimstr`, `rtrimstr`, `split`, `index`, `rindex`, `indices`,
+/// `contains` — all of which share the same input contract: an object
+/// with a quoted-string field whose content has no `\` escapes.
+///
+/// The helper handles only the structural type-guard and hands the
+/// inner bytes (without quotes) to the closure. The closure dispatches
+/// on builtin name and emits the appropriate output. If the closure
+/// encounters an unknown builtin name (defensive fallback) it returns
+/// [`RawApplyOutcome::Bail`] to delegate to the generic path.
+///
+/// Bail discipline:
+/// * Field absent — [`RawApplyOutcome::Bail`].
+/// * Value isn't a quoted string, or contains any backslash escape —
+///   [`RawApplyOutcome::Bail`] (the generic path decodes escapes and
+///   raises type errors).
+/// * Non-object input — [`RawApplyOutcome::Bail`].
+/// * Closure returns [`RawApplyOutcome::Bail`] — the helper propagates.
+pub fn apply_field_str_builtin_raw<E>(
+    raw: &[u8],
+    field: &str,
+    on_string: E,
+) -> RawApplyOutcome
+where
+    E: FnOnce(&[u8]) -> RawApplyOutcome,
+{
+    let (vs, ve) = match json_object_get_field_raw(raw, 0, field) {
+        Some(r) => r,
+        None => return RawApplyOutcome::Bail,
+    };
+    let val = &raw[vs..ve];
+    if val.len() < 2 || val[0] != b'"' || val[val.len() - 1] != b'"'
+        || val[1..val.len() - 1].contains(&b'\\')
+    {
+        return RawApplyOutcome::Bail;
+    }
+    on_string(&val[1..val.len() - 1])
+}
+
 /// Apply the `.field // fallback` raw-byte fast path on a single JSON
 /// record.
 ///
