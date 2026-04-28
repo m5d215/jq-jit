@@ -153,8 +153,8 @@ use jq_jit::fast_path::{
     apply_first_each_select_type_raw,
     apply_field_cmp_val_raw, apply_null_branch_lit_raw,
     apply_obj_assign_two_fields_arith_raw, apply_obj_merge_computed_raw,
-    apply_obj_merge_lit_raw, apply_select_nested_cmp_raw, apply_select_num_str_raw,
-    apply_two_field_binop_const_raw, apply_with_entries_del_raw,
+    apply_obj_merge_lit_raw, apply_remap_to_entries_raw, apply_select_nested_cmp_raw,
+    apply_select_num_str_raw, apply_two_field_binop_const_raw, apply_with_entries_del_raw,
     apply_with_entries_key_str_raw, apply_with_entries_select_raw,
     apply_with_entries_tostring_raw, apply_with_entries_type_raw,
     apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
@@ -11827,39 +11827,13 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some(ref rte_pairs) = remap_to_entries {
-                    // {k1:.f1, k2:.f2} | to_entries → emit entries array from raw fields
-                    let rte_src: Vec<&str> = rte_pairs.iter().map(|(_, src)| src.as_str()).collect();
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        // Extract all source field values
-                        let mut vals: Vec<Option<(usize, usize)>> = Vec::with_capacity(rte_src.len());
-                        for src in &rte_src {
-                            vals.push(json_object_get_field_raw(raw, 0, src));
+                        let outcome = apply_remap_to_entries_raw(raw, rte_pairs, &mut compact_buf);
+                        if let RawApplyOutcome::Bail = outcome {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
-                        compact_buf.push(b'[');
-                        let mut first = true;
-                        for (i, (out_key, _)) in rte_pairs.iter().enumerate() {
-                            if !first { compact_buf.push(b','); }
-                            first = false;
-                            compact_buf.extend_from_slice(b"{\"key\":");
-                            // Write key as JSON string
-                            compact_buf.push(b'"');
-                            for &b in out_key.as_bytes() {
-                                match b {
-                                    b'"' => compact_buf.extend_from_slice(b"\\\""),
-                                    b'\\' => compact_buf.extend_from_slice(b"\\\\"),
-                                    _ => compact_buf.push(b),
-                                }
-                            }
-                            compact_buf.extend_from_slice(b"\",\"value\":");
-                            if let Some((vs, ve)) = vals[i] {
-                                compact_buf.extend_from_slice(&raw[vs..ve]);
-                            } else {
-                                compact_buf.extend_from_slice(b"null");
-                            }
-                            compact_buf.push(b'}');
-                        }
-                        compact_buf.extend_from_slice(b"]\n");
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
                             compact_buf.clear();
@@ -20493,36 +20467,13 @@ fn real_main() {
                 })
             } else if let Some(ref rte_pairs) = remap_to_entries {
                 let content_bytes = content.as_bytes();
-                let rte_src: Vec<&str> = rte_pairs.iter().map(|(_, src)| src.as_str()).collect();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    let mut vals: Vec<Option<(usize, usize)>> = Vec::with_capacity(rte_src.len());
-                    for src in &rte_src {
-                        vals.push(json_object_get_field_raw(raw, 0, src));
+                    let outcome = apply_remap_to_entries_raw(raw, rte_pairs, &mut compact_buf);
+                    if let RawApplyOutcome::Bail = outcome {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
-                    compact_buf.push(b'[');
-                    let mut first = true;
-                    for (i, (out_key, _)) in rte_pairs.iter().enumerate() {
-                        if !first { compact_buf.push(b','); }
-                        first = false;
-                        compact_buf.extend_from_slice(b"{\"key\":");
-                        compact_buf.push(b'"');
-                        for &b in out_key.as_bytes() {
-                            match b {
-                                b'"' => compact_buf.extend_from_slice(b"\\\""),
-                                b'\\' => compact_buf.extend_from_slice(b"\\\\"),
-                                _ => compact_buf.push(b),
-                            }
-                        }
-                        compact_buf.extend_from_slice(b"\",\"value\":");
-                        if let Some((vs, ve)) = vals[i] {
-                            compact_buf.extend_from_slice(&raw[vs..ve]);
-                        } else {
-                            compact_buf.extend_from_slice(b"null");
-                        }
-                        compact_buf.push(b'}');
-                    }
-                    compact_buf.extend_from_slice(b"]\n");
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
                         compact_buf.clear();
