@@ -3875,3 +3875,52 @@ select(.x | startswith("a"))
 [ (.x |= ascii_upcase)? ]
 [1,2,3]
 []
+
+# #83 Phase B: split_first / split_last / trim / slice / str_map / str_concat
+# updates use RawApplyOutcome::Bail.
+.x |= split("/") | .x |= .[0]
+{"x":"a/b/c"}
+{"x":"a"}
+
+.x |= split("/") | .x |= .[-1]
+{"x":"a/b/c"}
+{"x":"c"}
+
+.x |= ltrimstr("ab")
+{"x":"abcabc"}
+{"x":"cabc"}
+
+.x |= rtrimstr("bc")
+{"x":"abcabc"}
+{"x":"abca"}
+
+.x |= .[1:4]
+{"x":"abcdef"}
+{"x":"bcd"}
+
+.x |= "<" + . + ">"
+{"x":"hi"}
+{"x":"<hi>"}
+
+# Non-string field under `?`
+[ (.x |= ltrimstr("a"))? ]
+{"x":42}
+[]
+
+# null is sliceable in jq — slice of null is null.
+[ (.x |= .[0:2])? ]
+{"x":null}
+[{"x":null}]
+
+# Non-object input under `?`
+[ (.x |= ltrimstr("a"))? ]
+42
+[]
+
+[ (.x |= .[0:2])? ]
+"hi"
+[]
+
+[ (.x |= "<" + . + ">")? ]
+[1,2,3]
+[]

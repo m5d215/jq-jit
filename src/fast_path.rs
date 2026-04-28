@@ -69,8 +69,11 @@ use crate::value::{
     json_object_get_nested_field_raw, json_object_get_num, json_object_get_two_nums,
     json_object_has_all_keys, json_object_has_any_key, json_object_has_key,
     json_object_update_field_case, json_object_update_field_gsub,
-    json_object_update_field_length, json_object_update_field_test,
-    json_object_update_field_tostring,
+    json_object_update_field_length, json_object_update_field_slice,
+    json_object_update_field_split_first, json_object_update_field_split_last,
+    json_object_update_field_str_concat, json_object_update_field_str_map,
+    json_object_update_field_test, json_object_update_field_tostring,
+    json_object_update_field_trim,
 };
 
 /// A fast path whose type-dispatch obligations are encoded in its
@@ -1154,6 +1157,118 @@ pub fn apply_field_update_case_raw(
     buf: &mut Vec<u8>,
 ) -> RawApplyOutcome {
     if json_object_update_field_case(raw, 0, field, is_upcase, buf) {
+        RawApplyOutcome::Emit
+    } else {
+        RawApplyOutcome::Bail
+    }
+}
+
+/// Apply the `.field |= split("sep") | .[0]` raw-byte update fast path
+/// on a single JSON record (drop everything after the first `sep`,
+/// keeping the prefix as the new field value).
+///
+/// Bails on non-object input, missing/non-string field. The generic
+/// path handles other shapes and any escape-decode quirks.
+pub fn apply_field_update_split_first_raw(
+    raw: &[u8],
+    field: &str,
+    sep: &str,
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if json_object_update_field_split_first(raw, 0, field, sep, buf) {
+        RawApplyOutcome::Emit
+    } else {
+        RawApplyOutcome::Bail
+    }
+}
+
+/// Apply the `.field |= split("sep") | .[-1]` raw-byte update fast path
+/// (keep everything after the last `sep`).
+///
+/// Bails on non-object input, missing/non-string field.
+pub fn apply_field_update_split_last_raw(
+    raw: &[u8],
+    field: &str,
+    sep: &str,
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if json_object_update_field_split_last(raw, 0, field, sep, buf) {
+        RawApplyOutcome::Emit
+    } else {
+        RawApplyOutcome::Bail
+    }
+}
+
+/// Apply the `.field |= ltrimstr/rtrimstr("s")` raw-byte update fast
+/// path. `is_rtrim` selects between left- and right-trim.
+///
+/// Bails on non-object input, missing/non-string field.
+pub fn apply_field_update_trim_raw(
+    raw: &[u8],
+    field: &str,
+    trim_str: &str,
+    is_rtrim: bool,
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if json_object_update_field_trim(raw, 0, field, trim_str, is_rtrim, buf) {
+        RawApplyOutcome::Emit
+    } else {
+        RawApplyOutcome::Bail
+    }
+}
+
+/// Apply the `.field |= .[from:to]` raw-byte update fast path.
+///
+/// Bails on non-object input, missing/non-string field; the generic
+/// path handles arrays and other types.
+pub fn apply_field_update_slice_raw(
+    raw: &[u8],
+    field: &str,
+    from: Option<i64>,
+    to: Option<i64>,
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if json_object_update_field_slice(raw, 0, field, from, to, buf) {
+        RawApplyOutcome::Emit
+    } else {
+        RawApplyOutcome::Bail
+    }
+}
+
+/// Apply the fused `.field |= if . == "cond" then THEN else ELSE end`
+/// raw-byte update fast path (`json_object_update_field_str_map`).
+/// `cond_str` is the literal-string condition; `then_json` / `else_json`
+/// are pre-encoded JSON values.
+///
+/// Bails on non-object input, missing/non-string field.
+pub fn apply_field_update_str_map_raw(
+    raw: &[u8],
+    field: &str,
+    cond_str: &[u8],
+    then_json: &[u8],
+    else_json: &[u8],
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if json_object_update_field_str_map(raw, 0, field, cond_str, then_json, else_json, buf) {
+        RawApplyOutcome::Emit
+    } else {
+        RawApplyOutcome::Bail
+    }
+}
+
+/// Apply the fused `.field |= "PREFIX" + . + "SUFFIX"` raw-byte update
+/// fast path. `prefix` and `suffix` are JSON-escaped strings (without
+/// surrounding quotes).
+///
+/// Bails on non-object input, missing/non-string field.
+pub fn apply_field_update_str_concat_raw(
+    raw: &[u8],
+    field: &str,
+    prefix: &[u8],
+    suffix: &[u8],
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if json_object_update_field_str_concat(raw, 0, field, prefix, suffix, buf) {
         RawApplyOutcome::Emit
     } else {
         RawApplyOutcome::Bail
