@@ -2991,6 +2991,14 @@ fn real_main() {
         jqjit_trace_fast_path(fallback, &filter_text);
     }
 
+    // `projection_fields` is a parse-time optimization, not a raw-byte fast
+    // path: when no raw apply-site matched, we ask the filter which top-level
+    // object fields it actually reads, and steer parsing to skip the rest.
+    // The resulting `Value` still flows through `process_input` →
+    // `Filter::execute_cb`, so the generic interpreter is authoritative for
+    // every observable behaviour. There is no separate raw-emit branch that
+    // could disagree, so no `RawApplyOutcome::Bail` discipline is needed —
+    // this apply-site is intentionally outside the #83 contract (issue #251).
     let projection_fields: Option<Vec<String>> = if !has_raw_fast_path && !slurp && !raw_input {
         filter.needed_input_fields()
     } else { None };
