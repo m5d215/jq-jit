@@ -5982,32 +5982,19 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref f1, ref op, ref f2)) = field_binop_tostring {
-                    use jq_jit::ir::BinOp;
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if let Some((a, b)) = json_object_get_two_nums(raw, 0, f1, f2) {
-                            let result = match op {
-                                BinOp::Add => a + b,
-                                BinOp::Sub => a - b,
-                                BinOp::Mul => a * b,
-                                BinOp::Div => a / b,
-                                BinOp::Mod => jq_jit::runtime::jq_mod_f64(a, b).unwrap_or(f64::NAN),
-                                _ => unreachable!(),
-                            };
-                            if result.is_finite() {
-                                compact_buf.push(b'"');
-                                let i = result as i64;
-                                if i as f64 == result {
-                                    compact_buf.extend_from_slice(itoa::Buffer::new().format(i).as_bytes());
-                                } else {
-                                    compact_buf.extend_from_slice(ryu::Buffer::new().format(result).as_bytes());
-                                }
-                                compact_buf.extend_from_slice(b"\"\n");
+                        let outcome = apply_field_binop_raw(raw, f1, f2, *op, |result| {
+                            compact_buf.push(b'"');
+                            let i = result as i64;
+                            if i as f64 == result {
+                                compact_buf.extend_from_slice(itoa::Buffer::new().format(i).as_bytes());
                             } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                compact_buf.extend_from_slice(ryu::Buffer::new().format(result).as_bytes());
                             }
-                        } else {
+                            compact_buf.extend_from_slice(b"\"\n");
+                        });
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -6287,22 +6274,9 @@ fn real_main() {
                     })
                 } else if let Some((ref field, ref ops)) = field_arith_tostring {
                     // .field arith_chain | tostring — arithmetic then format as string
-                    use jq_jit::ir::BinOp;
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if let Some(n) = json_object_get_num(raw, 0, field) {
-                            let mut result = n;
-                            for &(ref op, c) in ops.iter() {
-                                result = match op {
-                                    BinOp::Add => result + c,
-                                    BinOp::Sub => result - c,
-                                    BinOp::Mul => result * c,
-                                    BinOp::Div => result / c,
-                                    BinOp::Mod => jq_jit::runtime::jq_mod_f64(result, c).unwrap_or(f64::NAN),
-                                    _ => unreachable!(),
-                                };
-                            }
-                            // Output as quoted string
+                        let outcome = apply_field_arith_chain_raw(raw, field, ops, |result| {
                             compact_buf.push(b'"');
                             let i = result as i64;
                             if i as f64 == result {
@@ -6311,7 +6285,8 @@ fn real_main() {
                                 compact_buf.extend_from_slice(ryu::Buffer::new().format(result).as_bytes());
                             }
                             compact_buf.extend_from_slice(b"\"\n");
-                        } else {
+                        });
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -19180,33 +19155,20 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some((ref f1, ref op, ref f2)) = field_binop_tostring {
-                use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if let Some((a, b)) = json_object_get_two_nums(raw, 0, f1, f2) {
-                        let result = match op {
-                            BinOp::Add => a + b,
-                            BinOp::Sub => a - b,
-                            BinOp::Mul => a * b,
-                            BinOp::Div => a / b,
-                            BinOp::Mod => jq_jit::runtime::jq_mod_f64(a, b).unwrap_or(f64::NAN),
-                            _ => unreachable!(),
-                        };
-                        if result.is_finite() {
-                            compact_buf.push(b'"');
-                            let i = result as i64;
-                            if i as f64 == result {
-                                compact_buf.extend_from_slice(itoa::Buffer::new().format(i).as_bytes());
-                            } else {
-                                compact_buf.extend_from_slice(ryu::Buffer::new().format(result).as_bytes());
-                            }
-                            compact_buf.extend_from_slice(b"\"\n");
+                    let outcome = apply_field_binop_raw(raw, f1, f2, *op, |result| {
+                        compact_buf.push(b'"');
+                        let i = result as i64;
+                        if i as f64 == result {
+                            compact_buf.extend_from_slice(itoa::Buffer::new().format(i).as_bytes());
                         } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            compact_buf.extend_from_slice(ryu::Buffer::new().format(result).as_bytes());
                         }
-                    } else {
+                        compact_buf.extend_from_slice(b"\"\n");
+                    });
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
@@ -19446,23 +19408,11 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some((ref field, ref ops)) = field_arith_tostring {
-                // .field arith_chain | tostring — stdin path
-                use jq_jit::ir::BinOp;
+                // .field arith_chain | tostring (file-mode)
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if let Some(n) = json_object_get_num(raw, 0, field) {
-                        let mut result = n;
-                        for &(ref op, c) in ops.iter() {
-                            result = match op {
-                                BinOp::Add => result + c,
-                                BinOp::Sub => result - c,
-                                BinOp::Mul => result * c,
-                                BinOp::Div => result / c,
-                                BinOp::Mod => jq_jit::runtime::jq_mod_f64(result, c).unwrap_or(f64::NAN),
-                                _ => unreachable!(),
-                            };
-                        }
+                    let outcome = apply_field_arith_chain_raw(raw, field, ops, |result| {
                         compact_buf.push(b'"');
                         let i = result as i64;
                         if i as f64 == result {
@@ -19471,7 +19421,8 @@ fn real_main() {
                             compact_buf.extend_from_slice(ryu::Buffer::new().format(result).as_bytes());
                         }
                         compact_buf.extend_from_slice(b"\"\n");
-                    } else {
+                    });
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }

@@ -4012,3 +4012,49 @@ true
 .x | ascii_downcase | gsub("a"; "X")
 {"x":"a\nb"}
 "X\nb"
+
+# Issue #251: field_binop_tostring apply-site uses RawApplyOutcome (#83 Phase B,
+# reusing apply_field_binop_raw — same Bail on missing/non-numeric/non-finite).
+(.x + .y) | tostring
+{"x":3,"y":4}
+"7"
+
+(.x * .y) | tostring
+{"x":2.5,"y":4}
+"10"
+
+# `?`-wrapped: missing field — generic resolves missing as null; null + 3 = 3.
+[ ((.x + .y) | tostring)? ]
+{"x":3}
+["3"]
+
+# `?`-wrapped: non-numeric field — generic raises type error, `?` swallows.
+[ ((.x + .y) | tostring)? ]
+{"x":3,"y":"hi"}
+[]
+
+# `?`-wrapped: non-object input — generic raises indexing error.
+[ ((.x + .y) | tostring)? ]
+"plain"
+[]
+
+# `?`-wrapped: div-by-zero — helper Bails on non-finite, generic raises.
+[ ((.x / .y) | tostring)? ]
+{"x":1,"y":0}
+[]
+
+# Issue #251: field_arith_chain_tostring apply-site uses RawApplyOutcome
+# (#83 Phase B, reusing apply_field_arith_chain_raw).
+((.x + 1) * 2) | tostring
+{"x":3}
+"8"
+
+# `?`-wrapped: non-numeric field — generic raises, ? swallows.
+[ (((.x + 1) * 2) | tostring)? ]
+{"x":"hi"}
+[]
+
+# `?`-wrapped: non-object input — generic raises indexing error.
+[ (((.x + 1) * 2) | tostring)? ]
+"plain"
+[]
