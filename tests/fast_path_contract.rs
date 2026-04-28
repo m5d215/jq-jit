@@ -30,6 +30,7 @@ use jq_jit::fast_path::{
     apply_numeric_expr_raw, apply_obj_assign_field_arith_raw,
     apply_collect_each_select_type_raw, apply_each_type_filter_raw,
     apply_first_each_select_type_raw,
+    apply_null_branch_lit_raw,
     apply_obj_assign_two_fields_arith_raw, apply_obj_merge_computed_raw,
     apply_obj_merge_lit_raw, apply_select_nested_cmp_raw, apply_select_num_str_raw,
     apply_select_arith_cmp_raw, apply_select_cmp_raw,
@@ -3013,6 +3014,74 @@ fn raw_first_each_select_type_unknown_type_bails() {
     let mut buf = Vec::new();
     let outcome = apply_first_each_select_type_raw(b"[1,2]", "unknown", &mut buf);
     assert!(matches!(outcome, RawApplyOutcome::Bail));
+}
+
+// ---------------------------------------------------------------------------
+// `if .field == null then T else F end` — null branch literal. Bails on
+// non-object input.
+
+#[test]
+fn raw_null_branch_lit_eq_null_present_field() {
+    let mut buf = Vec::new();
+    let outcome = apply_null_branch_lit_raw(
+        b"{\"x\":42}", "x", true, b"\"yes\"", b"\"no\"", &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"\"no\"\n");
+}
+
+#[test]
+fn raw_null_branch_lit_eq_null_missing_field() {
+    // jq: missing field is null
+    let mut buf = Vec::new();
+    let outcome = apply_null_branch_lit_raw(
+        b"{\"y\":1}", "x", true, b"\"yes\"", b"\"no\"", &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"\"yes\"\n");
+}
+
+#[test]
+fn raw_null_branch_lit_eq_null_explicit_null() {
+    let mut buf = Vec::new();
+    let outcome = apply_null_branch_lit_raw(
+        b"{\"x\":null}", "x", true, b"\"yes\"", b"\"no\"", &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"\"yes\"\n");
+}
+
+#[test]
+fn raw_null_branch_lit_ne_null_inverted() {
+    let mut buf = Vec::new();
+    let outcome = apply_null_branch_lit_raw(
+        b"{\"x\":null}", "x", false, b"\"yes\"", b"\"no\"", &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"\"no\"\n");
+    let mut buf2 = Vec::new();
+    let outcome2 = apply_null_branch_lit_raw(
+        b"{\"x\":42}", "x", false, b"\"yes\"", b"\"no\"", &mut buf2,
+    );
+    assert!(matches!(outcome2, RawApplyOutcome::Emit));
+    assert_eq!(buf2, b"\"yes\"\n");
+}
+
+#[test]
+fn raw_null_branch_lit_non_object_bails() {
+    // Pre-existing #83-class divergence: non-object root silently emitted T
+    // (treating as field-missing → null) instead of jq's `Cannot index <type>`.
+    for raw in [b"42".as_slice(), b"\"hi\"".as_slice(), b"null".as_slice(), b"[1,2]".as_slice()] {
+        let mut buf = Vec::new();
+        let outcome = apply_null_branch_lit_raw(
+            raw, "x", true, b"\"yes\"", b"\"no\"", &mut buf,
+        );
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "raw={:?}", std::str::from_utf8(raw).unwrap(),
+        );
+        assert!(buf.is_empty());
+    }
 }
 
 // ---------------------------------------------------------------------------

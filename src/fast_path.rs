@@ -1197,6 +1197,43 @@ pub fn apply_is_length_raw(raw: &[u8], buf: &mut Vec<u8>) -> RawApplyOutcome {
     }
 }
 
+/// Apply the `if .field == null then T else F end` (or `!= null`)
+/// raw-byte fast path on a single JSON record. Both branches are
+/// pre-encoded byte literals.
+///
+/// `is_eq_null = true` selects `== null` (T when field is null or
+/// missing); `false` selects `!= null` (T when field is present and
+/// non-null).
+///
+/// Bail discipline:
+/// * Non-object input — Bail (jq's `Cannot index <type> with "<field>"`
+///   surfaces via the generic path; the prior fast path silently
+///   treated non-object input as "field missing → null", emitting the
+///   wrong branch — a #83-class divergence).
+///
+/// On Emit, writes `t_bytes` or `f_bytes` (whichever the predicate
+/// selects) followed by a trailing `\n` directly to `buf`.
+pub fn apply_null_branch_lit_raw(
+    raw: &[u8],
+    field: &str,
+    is_eq_null: bool,
+    t_bytes: &[u8],
+    f_bytes: &[u8],
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if raw.is_empty() || raw[0] != b'{' {
+        return RawApplyOutcome::Bail;
+    }
+    let is_null = match json_object_get_field_raw(raw, 0, field) {
+        Some((vs, ve)) => ve - vs == 4 && &raw[vs..ve] == b"null",
+        None => true, // missing field is null in jq
+    };
+    let pass = if is_eq_null { is_null } else { !is_null };
+    buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
+    buf.push(b'\n');
+    RawApplyOutcome::Emit
+}
+
 /// Apply the `select(.x.y.z <cmp> N)` raw-byte fast path on a single
 /// JSON record. Walks the nested field path, then runs a numeric
 /// comparison against a compile-time constant; emits the input

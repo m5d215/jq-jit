@@ -151,6 +151,7 @@ use jq_jit::fast_path::{
     apply_is_type_raw, apply_numeric_expr_raw, apply_obj_assign_field_arith_raw,
     apply_collect_each_select_type_raw, apply_each_type_filter_raw,
     apply_first_each_select_type_raw,
+    apply_null_branch_lit_raw,
     apply_obj_assign_two_fields_arith_raw, apply_obj_merge_computed_raw,
     apply_obj_merge_lit_raw, apply_select_nested_cmp_raw, apply_select_num_str_raw,
     apply_two_field_binop_const_raw,
@@ -8155,24 +8156,13 @@ fn real_main() {
                     })
                     } // end general path
                 } else if let Some((ref field, ref op, threshold, ref t_bytes, ref f_bytes)) = cmp_branch_lit {
-                    use jq_jit::ir::BinOp;
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if let Some(val) = json_object_get_num(raw, 0, field) {
-                            let pass = match op {
-                                BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
-                                BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
-                                BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
-                                _ => false,
-                            };
+                        let outcome = apply_field_const_cmp_raw(raw, field, *op, threshold, |pass| {
                             compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
                             compact_buf.push(b'\n');
-                        } else {
-                            // Field is missing or not numeric — defer to
-                            // generic eval so jq's total-order comparison
-                            // (null < number, string > number, etc.) applies
-                            // and the conditional resolves to a branch instead
-                            // of being silently dropped (#161).
+                        });
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -8392,13 +8382,13 @@ fn real_main() {
                 } else if let Some((ref field, is_eq_null, ref t_bytes, ref f_bytes)) = null_branch_lit {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        let is_null = match json_object_get_field_raw(raw, 0, field) {
-                            Some((vs, ve)) => ve - vs == 4 && &raw[vs..ve] == b"null",
-                            None => true, // missing field is null
-                        };
-                        let pass = if is_eq_null { is_null } else { !is_null };
-                        compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
-                        compact_buf.push(b'\n');
+                        let outcome = apply_null_branch_lit_raw(
+                            raw, field, is_eq_null, t_bytes, f_bytes, &mut compact_buf,
+                        );
+                        if let RawApplyOutcome::Bail = outcome {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
                             compact_buf.clear();
@@ -15697,22 +15687,14 @@ fn real_main() {
                 })
                 } // end general path
             } else if let Some((ref field, ref op, threshold, ref t_bytes, ref f_bytes)) = cmp_branch_lit {
-                use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if let Some(val) = json_object_get_num(raw, 0, field) {
-                        let pass = match op {
-                            BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
-                            BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
-                            BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
-                            _ => false,
-                        };
+                    let outcome = apply_field_const_cmp_raw(raw, field, *op, threshold, |pass| {
                         compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
                         compact_buf.push(b'\n');
-                    } else {
-                        // Field missing or non-numeric — bail to generic eval so
-                        // jq's total order picks the branch (#161).
+                    });
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
@@ -15906,13 +15888,13 @@ fn real_main() {
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    let is_null = match json_object_get_field_raw(raw, 0, field) {
-                        Some((vs, ve)) => ve - vs == 4 && &raw[vs..ve] == b"null",
-                        None => true,
-                    };
-                    let pass = if is_eq_null { is_null } else { !is_null };
-                    compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
-                    compact_buf.push(b'\n');
+                    let outcome = apply_null_branch_lit_raw(
+                        raw, field, is_eq_null, t_bytes, f_bytes, &mut compact_buf,
+                    );
+                    if let RawApplyOutcome::Bail = outcome {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
                         compact_buf.clear();
