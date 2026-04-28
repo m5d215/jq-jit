@@ -5336,3 +5336,32 @@ select((.x | test("^hel")) and (.n > 10))
 [ (select((.x | startswith("hel")) and (.n > 10)))? ]
 "plain"
 []
+
+# Issue #251: is_keys apply-site uses RawApplyOutcome (#83 Phase B).
+# Helper layers a per-stream cache around `keys`; Bails on non-object
+# / non-array (jq's `keys` works on arrays too — generic emits indices).
+
+# Happy object — sorted key list.
+keys
+{"b":1,"a":2,"c":3}
+["a","b","c"]
+
+# Empty object — empty array.
+keys
+{}
+[]
+
+# Array — generic supports `keys` on arrays (returns indices).
+keys
+[10,20,30]
+[0,1,2]
+
+# String — jq raises "string has no keys"; ? swallows.
+[ keys? ]
+"x"
+[]
+
+# Number — jq raises; ? swallows.
+[ keys? ]
+42
+[]
