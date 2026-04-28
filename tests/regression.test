@@ -3442,3 +3442,52 @@ false
 
 (.x > .y)?
 [1,2,3]
+
+# #83 Phase B: .field <cmp> N apply-site uses RawApplyOutcome::Bail.
+.x > 3
+{"x":5}
+true
+
+.x < 3
+{"x":5}
+false
+
+.x == 5
+{"x":5}
+true
+
+.x != 5
+{"x":5}
+false
+
+# Field missing: bail to generic; jq's `null > 3` is false (null orders
+# below everything in jq's mixed-type ordering).
+.x > 3
+{"y":1}
+false
+
+# null == N is false in jq.
+.x == 5
+{"y":1}
+false
+
+# Non-numeric field: bail; jq orders string > number.
+.x > 3
+{"x":"hi"}
+true
+
+# null input: bail; jq's `.x | (.x == N)` on null treats . as null;
+# `null == 5` is false (no raise).
+.x == 5
+null
+false
+
+# Non-object input under `?`: jq raises "Cannot index <type>".
+(.x > 3)?
+42
+
+(.x > 3)?
+"hi"
+
+(.x > 3)?
+[1,2,3]

@@ -140,13 +140,13 @@ use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json
 use jq_jit::interpreter::Filter;
 use jq_jit::fast_path::{
     apply_field_access_raw, apply_field_alternative_raw, apply_field_arith_chain_raw,
-    apply_field_binop_raw, apply_field_field_alternative_raw, apply_field_field_cmp_raw,
-    apply_field_format_raw, apply_field_gsub_raw, apply_field_ltrimstr_tonumber_raw,
-    apply_field_match_raw, apply_field_scan_raw, apply_field_str_builtin_raw,
-    apply_field_str_concat_raw, apply_field_str_reverse_raw, apply_field_test_raw,
-    apply_full_object_fields_raw, apply_has_field_raw, apply_has_multi_field_raw,
-    apply_multi_field_access_raw, apply_nested_field_access_raw, apply_object_compute_raw,
-    RawApplyOutcome,
+    apply_field_binop_raw, apply_field_const_cmp_raw, apply_field_field_alternative_raw,
+    apply_field_field_cmp_raw, apply_field_format_raw, apply_field_gsub_raw,
+    apply_field_ltrimstr_tonumber_raw, apply_field_match_raw, apply_field_scan_raw,
+    apply_field_str_builtin_raw, apply_field_str_concat_raw, apply_field_str_reverse_raw,
+    apply_field_test_raw, apply_full_object_fields_raw, apply_has_field_raw,
+    apply_has_multi_field_raw, apply_multi_field_access_raw, apply_nested_field_access_raw,
+    apply_object_compute_raw, RawApplyOutcome,
 };
 
 fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -6324,18 +6324,12 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref field, ref cmp_op, cval)) = field_const_cmp {
-                    use jq_jit::ir::BinOp;
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if let Some(n) = json_object_get_num(raw, 0, field) {
-                            let result = match cmp_op {
-                                BinOp::Gt => n > cval, BinOp::Lt => n < cval,
-                                BinOp::Ge => n >= cval, BinOp::Le => n <= cval,
-                                BinOp::Eq => n == cval, BinOp::Ne => n != cval,
-                                _ => unreachable!(),
-                            };
+                        let outcome = apply_field_const_cmp_raw(raw, field, *cmp_op, cval, |result| {
                             compact_buf.extend_from_slice(if result { b"true\n" } else { b"false\n" });
-                        } else {
+                        });
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -19572,19 +19566,13 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some((ref field, ref cmp_op, cval)) = field_const_cmp {
-                use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if let Some(n) = json_object_get_num(raw, 0, field) {
-                        let result = match cmp_op {
-                            BinOp::Gt => n > cval, BinOp::Lt => n < cval,
-                            BinOp::Ge => n >= cval, BinOp::Le => n <= cval,
-                            BinOp::Eq => n == cval, BinOp::Ne => n != cval,
-                            _ => unreachable!(),
-                        };
+                    let outcome = apply_field_const_cmp_raw(raw, field, *cmp_op, cval, |result| {
                         compact_buf.extend_from_slice(if result { b"true\n" } else { b"false\n" });
-                    } else {
+                    });
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }

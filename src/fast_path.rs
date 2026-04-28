@@ -763,6 +763,45 @@ where
     RawApplyOutcome::Emit
 }
 
+/// Apply the `.field <cmp> <const>` raw-byte numeric-comparison fast
+/// path on a single JSON record (`<cmp>` ∈ Gt/Lt/Ge/Le/Eq/Ne) where
+/// the field resolves to a JSON number and the right-hand side is a
+/// compile-time numeric constant.
+///
+/// Bail discipline mirrors [`apply_field_field_cmp_raw`]:
+/// * Field absent or non-numeric — [`RawApplyOutcome::Bail`].
+/// * Non-comparison op (`Add`/`And`/etc.) — [`RawApplyOutcome::Bail`]
+///   (defensive — the detector should never produce these).
+/// * Non-object input — [`RawApplyOutcome::Bail`].
+///
+/// On success, invokes `emit(result)` with the boolean comparison.
+pub fn apply_field_const_cmp_raw<F>(
+    raw: &[u8],
+    field: &str,
+    cmp_op: BinOp,
+    cval: f64,
+    mut emit: F,
+) -> RawApplyOutcome
+where
+    F: FnMut(bool),
+{
+    let n = match json_object_get_num(raw, 0, field) {
+        Some(n) => n,
+        None => return RawApplyOutcome::Bail,
+    };
+    let result = match cmp_op {
+        BinOp::Gt => n > cval,
+        BinOp::Lt => n < cval,
+        BinOp::Ge => n >= cval,
+        BinOp::Le => n <= cval,
+        BinOp::Eq => n == cval,
+        BinOp::Ne => n != cval,
+        _ => return RawApplyOutcome::Bail,
+    };
+    emit(result);
+    RawApplyOutcome::Emit
+}
+
 /// Apply the `.field <op1> <c1> <op2> <c2> ...` raw-byte arithmetic chain
 /// fast path on a single JSON record (a left-fold of `(BinOp, f64)` pairs
 /// over a single numeric field).
