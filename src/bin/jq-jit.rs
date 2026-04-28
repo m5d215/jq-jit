@@ -136,7 +136,7 @@ fn print_jq_error(msg: &str) {
     }
 }
 
-use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_value_has_duplicate_keys, json_stream_has_duplicate_keys, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, json_object_get_nested_field_raw, parse_json_num, json_value_length, json_object_keys_to_buf_reuse, json_object_extract_keys_only, json_object_keys_unsorted_to_buf, json_object_keys_join_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_type_byte, json_object_del_field, json_object_del_fields, json_object_filter_by_key_str, json_object_merge_literal, json_object_sort_keys, json_object_filter_by_value_type, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_with_entries_select_value_cmp, json_object_set_field_raw, json_object_update_field_num, json_object_update_field_num_chain, json_object_update_field_case, json_object_update_field_gsub, json_object_update_field_split_first, json_object_update_field_split_last, json_object_update_field_trim, json_object_update_field_slice, json_object_update_field_str_map, json_object_update_field_str_concat, json_object_update_field_test, json_object_assign_field_arith, json_object_assign_two_fields_arith, json_object_select_then_update_num, json_object_select_then_update_str_concat, json_object_select_compound_then_update_num, json_object_select_str_then_update_num, json_object_values_tostring, is_json_compact, push_json_compact_raw, push_tojson_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_compact_line_color, push_pretty_line, push_pretty_line_color, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line_color, value_to_json_pretty_color, walk_json_transform_nums, pool_value, skip_json_value};
+use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_value_has_duplicate_keys, json_stream_has_duplicate_keys, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, json_object_get_nested_field_raw, parse_json_num, json_value_length, json_object_keys_to_buf_reuse, json_object_extract_keys_only, json_object_keys_unsorted_to_buf, json_object_keys_join_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_type_byte, json_object_del_field, json_object_del_fields, json_object_filter_by_key_str, json_object_merge_literal, json_object_sort_keys, json_object_filter_by_value_type, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_with_entries_select_value_cmp, json_object_set_field_raw, json_object_update_field_num, json_object_update_field_num_chain, json_object_update_field_split_first, json_object_update_field_split_last, json_object_update_field_trim, json_object_update_field_slice, json_object_update_field_str_map, json_object_update_field_str_concat, json_object_assign_field_arith, json_object_assign_two_fields_arith, json_object_select_then_update_num, json_object_select_then_update_str_concat, json_object_select_compound_then_update_num, json_object_select_str_then_update_num, json_object_values_tostring, is_json_compact, push_json_compact_raw, push_tojson_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_compact_line_color, push_pretty_line, push_pretty_line_color, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line_color, value_to_json_pretty_color, walk_json_transform_nums, pool_value, skip_json_value};
 use jq_jit::interpreter::Filter;
 use jq_jit::fast_path::{
     apply_arith_chain_cmp_raw, apply_field_access_raw, apply_field_alternative_raw,
@@ -148,7 +148,8 @@ use jq_jit::fast_path::{
     apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
     apply_nested_field_access_raw, apply_object_compute_raw, apply_select_arith_cmp_raw,
     apply_select_cmp_raw, apply_select_field_null_raw, apply_select_str_raw,
-    apply_select_str_test_raw, apply_field_update_length_raw, apply_field_update_tostring_raw,
+    apply_select_str_test_raw, apply_field_update_case_raw, apply_field_update_gsub_raw,
+    apply_field_update_length_raw, apply_field_update_test_raw, apply_field_update_tostring_raw,
     RawApplyOutcome,
 };
 
@@ -4922,18 +4923,26 @@ fn real_main() {
                         let raw = &input_bytes[start..end];
                         if use_pretty_buf {
                             tmp.clear();
-                            if json_object_update_field_gsub(raw, 0, gs_field, &re, gs_repl, gs_is_global, &mut tmp) {
-                                push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
-                                compact_buf.push(b'\n');
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            let outcome = apply_field_update_gsub_raw(raw, gs_field, &re, gs_repl, gs_is_global, &mut tmp);
+                            match outcome {
+                                RawApplyOutcome::Emit => {
+                                    push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                                    compact_buf.push(b'\n');
+                                }
+                                RawApplyOutcome::Bail => {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
                             }
-                        } else if !json_object_update_field_gsub(raw, 0, gs_field, &re, gs_repl, gs_is_global, &mut compact_buf) {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         } else {
-                            compact_buf.push(b'\n');
+                            let outcome = apply_field_update_gsub_raw(raw, gs_field, &re, gs_repl, gs_is_global, &mut compact_buf);
+                            match outcome {
+                                RawApplyOutcome::Emit => compact_buf.push(b'\n'),
+                                RawApplyOutcome::Bail => {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                            }
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -5168,18 +5177,26 @@ fn real_main() {
                         let raw = &input_bytes[start..end];
                         if use_pretty_buf {
                             tmp.clear();
-                            if json_object_update_field_test(raw, 0, ut_field, ut_re, &mut tmp) {
-                                push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
-                                compact_buf.push(b'\n');
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            let outcome = apply_field_update_test_raw(raw, ut_field, ut_re, &mut tmp);
+                            match outcome {
+                                RawApplyOutcome::Emit => {
+                                    push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                                    compact_buf.push(b'\n');
+                                }
+                                RawApplyOutcome::Bail => {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
                             }
-                        } else if !json_object_update_field_test(raw, 0, ut_field, ut_re, &mut compact_buf) {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         } else {
-                            compact_buf.push(b'\n');
+                            let outcome = apply_field_update_test_raw(raw, ut_field, ut_re, &mut compact_buf);
+                            match outcome {
+                                RawApplyOutcome::Emit => compact_buf.push(b'\n'),
+                                RawApplyOutcome::Bail => {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                            }
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -5398,20 +5415,28 @@ fn real_main() {
                         let raw = &input_bytes[start..end];
                         if use_pretty_buf {
                             tmp.clear();
-                            if json_object_update_field_case(raw, 0, uc_field, uc_up, &mut tmp) {
-                                let len = tmp.len();
-                                if len > 0 && tmp[len-1] == b'\n' { tmp.truncate(len-1); }
-                                push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
-                                compact_buf.push(b'\n');
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            let outcome = apply_field_update_case_raw(raw, uc_field, uc_up, &mut tmp);
+                            match outcome {
+                                RawApplyOutcome::Emit => {
+                                    let len = tmp.len();
+                                    if len > 0 && tmp[len-1] == b'\n' { tmp.truncate(len-1); }
+                                    push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                                    compact_buf.push(b'\n');
+                                }
+                                RawApplyOutcome::Bail => {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
                             }
-                        } else if !json_object_update_field_case(raw, 0, uc_field, uc_up, &mut compact_buf) {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         } else {
-                            compact_buf.push(b'\n');
+                            let outcome = apply_field_update_case_raw(raw, uc_field, uc_up, &mut compact_buf);
+                            match outcome {
+                                RawApplyOutcome::Emit => compact_buf.push(b'\n'),
+                                RawApplyOutcome::Bail => {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                            }
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -14489,18 +14514,26 @@ fn real_main() {
                     let raw = &content_bytes[start..end];
                     if use_pretty_buf {
                         tmp.clear();
-                        if json_object_update_field_gsub(raw, 0, gs_field, &re, gs_repl, gs_is_global, &mut tmp) {
-                            push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
-                            compact_buf.push(b'\n');
-                        } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        let outcome = apply_field_update_gsub_raw(raw, gs_field, &re, gs_repl, gs_is_global, &mut tmp);
+                        match outcome {
+                            RawApplyOutcome::Emit => {
+                                push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                                compact_buf.push(b'\n');
+                            }
+                            RawApplyOutcome::Bail => {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
                         }
-                    } else if !json_object_update_field_gsub(raw, 0, gs_field, &re, gs_repl, gs_is_global, &mut compact_buf) {
-                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     } else {
-                        compact_buf.push(b'\n');
+                        let outcome = apply_field_update_gsub_raw(raw, gs_field, &re, gs_repl, gs_is_global, &mut compact_buf);
+                        match outcome {
+                            RawApplyOutcome::Emit => compact_buf.push(b'\n'),
+                            RawApplyOutcome::Bail => {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        }
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
@@ -14744,18 +14777,26 @@ fn real_main() {
                     let raw = &content_bytes[start..end];
                     if use_pretty_buf {
                         tmp.clear();
-                        if json_object_update_field_test(raw, 0, ut_field, ut_re, &mut tmp) {
-                            push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
-                            compact_buf.push(b'\n');
-                        } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        let outcome = apply_field_update_test_raw(raw, ut_field, ut_re, &mut tmp);
+                        match outcome {
+                            RawApplyOutcome::Emit => {
+                                push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                                compact_buf.push(b'\n');
+                            }
+                            RawApplyOutcome::Bail => {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
                         }
-                    } else if !json_object_update_field_test(raw, 0, ut_field, ut_re, &mut compact_buf) {
-                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     } else {
-                        compact_buf.push(b'\n');
+                        let outcome = apply_field_update_test_raw(raw, ut_field, ut_re, &mut compact_buf);
+                        match outcome {
+                            RawApplyOutcome::Emit => compact_buf.push(b'\n'),
+                            RawApplyOutcome::Bail => {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        }
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
@@ -14982,20 +15023,28 @@ fn real_main() {
                     let raw = &content_bytes[start..end];
                     if use_pretty_buf {
                         tmp.clear();
-                        if json_object_update_field_case(raw, 0, uc_field, uc_up, &mut tmp) {
-                            let len = tmp.len();
-                            if len > 0 && tmp[len-1] == b'\n' { tmp.truncate(len-1); }
-                            push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
-                            compact_buf.push(b'\n');
-                        } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        let outcome = apply_field_update_case_raw(raw, uc_field, uc_up, &mut tmp);
+                        match outcome {
+                            RawApplyOutcome::Emit => {
+                                let len = tmp.len();
+                                if len > 0 && tmp[len-1] == b'\n' { tmp.truncate(len-1); }
+                                push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                                compact_buf.push(b'\n');
+                            }
+                            RawApplyOutcome::Bail => {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
                         }
-                    } else if !json_object_update_field_case(raw, 0, uc_field, uc_up, &mut compact_buf) {
-                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     } else {
-                        compact_buf.push(b'\n');
+                        let outcome = apply_field_update_case_raw(raw, uc_field, uc_up, &mut compact_buf);
+                        match outcome {
+                            RawApplyOutcome::Emit => compact_buf.push(b'\n'),
+                            RawApplyOutcome::Bail => {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        }
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);

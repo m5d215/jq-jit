@@ -68,7 +68,9 @@ use crate::value::{
     KeyStr, Value, ObjInner, json_object_get_field_raw, json_object_get_fields_raw_buf,
     json_object_get_nested_field_raw, json_object_get_num, json_object_get_two_nums,
     json_object_has_all_keys, json_object_has_any_key, json_object_has_key,
-    json_object_update_field_length, json_object_update_field_tostring,
+    json_object_update_field_case, json_object_update_field_gsub,
+    json_object_update_field_length, json_object_update_field_test,
+    json_object_update_field_tostring,
 };
 
 /// A fast path whose type-dispatch obligations are encoded in its
@@ -1075,6 +1077,83 @@ pub fn apply_field_update_length_raw(raw: &[u8], field: &str, buf: &mut Vec<u8>)
 /// trailing newline).
 pub fn apply_field_update_tostring_raw(raw: &[u8], field: &str, buf: &mut Vec<u8>) -> RawApplyOutcome {
     if json_object_update_field_tostring(raw, 0, field, buf) {
+        RawApplyOutcome::Emit
+    } else {
+        RawApplyOutcome::Bail
+    }
+}
+
+/// Apply the `.field |= test("pattern")` raw-byte update fast path on a
+/// single JSON record, writing the updated object bytes (with `field`
+/// replaced by `true` / `false`) to `buf`.
+///
+/// Bail discipline (driven by the value-side
+/// `json_object_update_field_test`):
+/// * Non-object input — [`RawApplyOutcome::Bail`].
+/// * Field absent or value isn't a JSON string —
+///   [`RawApplyOutcome::Bail`] (jq raises on `null|test` /
+///   `number|test` etc.).
+///
+/// On success, `buf` is appended the updated object bytes.
+pub fn apply_field_update_test_raw(
+    raw: &[u8],
+    field: &str,
+    re: &regex::Regex,
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if json_object_update_field_test(raw, 0, field, re, buf) {
+        RawApplyOutcome::Emit
+    } else {
+        RawApplyOutcome::Bail
+    }
+}
+
+/// Apply the `.field |= sub/gsub("pattern"; "replacement")` raw-byte
+/// update fast path on a single JSON record, writing the updated object
+/// bytes to `buf`.
+///
+/// `is_global` selects between `replace_all` (gsub) and `replace` (sub).
+///
+/// Bail discipline (driven by the value-side
+/// `json_object_update_field_gsub`):
+/// * Non-object input — [`RawApplyOutcome::Bail`].
+/// * Field absent or value isn't a JSON string —
+///   [`RawApplyOutcome::Bail`].
+///
+/// On success, `buf` is appended the updated object bytes.
+pub fn apply_field_update_gsub_raw(
+    raw: &[u8],
+    field: &str,
+    re: &regex::Regex,
+    replacement: &str,
+    is_global: bool,
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if json_object_update_field_gsub(raw, 0, field, re, replacement, is_global, buf) {
+        RawApplyOutcome::Emit
+    } else {
+        RawApplyOutcome::Bail
+    }
+}
+
+/// Apply the `.field |= ascii_downcase / ascii_upcase` raw-byte update
+/// fast path on a single JSON record, writing the updated object bytes
+/// to `buf`. `is_upcase = true` selects upcase.
+///
+/// Bail discipline (driven by the value-side
+/// `json_object_update_field_case`):
+/// * Non-object input — [`RawApplyOutcome::Bail`].
+/// * Field absent or value isn't a JSON string —
+///   [`RawApplyOutcome::Bail`].
+///
+/// On success, `buf` is appended the updated object bytes.
+pub fn apply_field_update_case_raw(
+    raw: &[u8],
+    field: &str,
+    is_upcase: bool,
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if json_object_update_field_case(raw, 0, field, is_upcase, buf) {
         RawApplyOutcome::Emit
     } else {
         RawApplyOutcome::Bail
