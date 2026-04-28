@@ -5090,3 +5090,14 @@ with_entries(.value |= tostring)
 [ ({a:.x, b:.y} | to_entries)? ]
 "plain"
 []
+
+# Issue #251: remap_tojson apply-site uses RawApplyOutcome (#83 Phase B).
+# Helper Bails on non-object input.
+{a:.x, b:.y} | tojson
+{"x":1,"y":"hi"}
+"{\"a\":1,\"b\":\"hi\"}"
+
+# Non-object input — generic raises indexing error.
+[ ({a:.x, b:.y} | tojson)? ]
+"plain"
+[]
