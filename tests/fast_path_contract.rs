@@ -9,8 +9,8 @@
 //!   pilot and returns `None` for filters that aren't yet migrated.
 
 use jq_jit::fast_path::{
-    FastPath, FieldAccessPath, RawApplyOutcome, apply_field_access_raw,
-    apply_multi_field_access_raw, apply_nested_field_access_raw,
+    FastPath, FieldAccessPath, RawApplyOutcome, apply_array_field_access_raw,
+    apply_field_access_raw, apply_multi_field_access_raw, apply_nested_field_access_raw,
 };
 use jq_jit::interpreter::Filter;
 use jq_jit::value::Value;
@@ -375,5 +375,85 @@ fn raw_multi_field_non_object_non_null_input_bails() {
             outcome,
         );
         assert!(emitted.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Array-of-fields collect (`[.a, .b, .c]`) — same Bail shape as multi-field
+// (object with every field present, otherwise Bail). Serialisation is left to
+// the caller's closure so pretty / compact framing stays at the apply-site.
+
+#[test]
+fn raw_array_field_complete_object_invokes_emit_once() {
+    let mut ranges_buf = vec![(0usize, 0usize); 3];
+    let mut calls = 0usize;
+    let mut collected: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_array_field_access_raw(
+        b"{\"a\":1,\"b\":2,\"c\":3}",
+        &["a", "b", "c"],
+        &mut ranges_buf,
+        |ranges, raw| {
+            calls += 1;
+            for (vs, ve) in ranges {
+                collected.push(raw[*vs..*ve].to_vec());
+            }
+        },
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(calls, 1, "emit_array must be invoked exactly once");
+    assert_eq!(collected, vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()]);
+}
+
+#[test]
+fn raw_array_field_partial_object_bails_without_calling_emit() {
+    let mut ranges_buf = vec![(0usize, 0usize); 3];
+    let mut calls = 0usize;
+    let outcome = apply_array_field_access_raw(
+        b"{\"a\":1,\"c\":3}",
+        &["a", "b", "c"],
+        &mut ranges_buf,
+        |_, _| { calls += 1; },
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert_eq!(calls, 0, "Bail must not invoke emit_array");
+}
+
+#[test]
+fn raw_array_field_null_input_bails_without_calling_emit() {
+    let mut ranges_buf = vec![(0usize, 0usize); 2];
+    let mut calls = 0usize;
+    let outcome = apply_array_field_access_raw(
+        b"null",
+        &["a", "b"],
+        &mut ranges_buf,
+        |_, _| { calls += 1; },
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert_eq!(calls, 0);
+}
+
+#[test]
+fn raw_array_field_non_object_non_null_input_bails() {
+    for raw in [
+        b"42".as_slice(),
+        b"\"hello\"".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut ranges_buf = vec![(0usize, 0usize); 2];
+        let mut calls = 0usize;
+        let outcome = apply_array_field_access_raw(
+            raw,
+            &["a", "b"],
+            &mut ranges_buf,
+            |_, _| { calls += 1; },
+        );
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert_eq!(calls, 0);
     }
 }
