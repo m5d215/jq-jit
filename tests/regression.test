@@ -3535,3 +3535,39 @@ false
 
 ((.x * 2) > 8)?
 [1,2,3]
+
+# #83 Phase B: select(.field <cmp> N) apply-site uses RawApplyOutcome::Bail.
+# Predicate fires: emit record unchanged.
+select(.x > 3)
+{"x":5}
+{"x":5}
+
+# Predicate fails: no output.
+[ select(.x > 10) ]
+{"x":5}
+[]
+
+# Field missing: bail to generic; jq's total-order: null < 0 → predicate
+# fires; record emitted.
+select(.x < 0)
+{"y":5}
+{"y":5}
+
+# Non-numeric field: bail to generic; jq orders string > number, so
+# `string > N` fires.
+select(.x > 3)
+{"x":"hi"}
+{"x":"hi"}
+
+# Non-object input under `?`: jq raises "Cannot index <type>".
+[ (select(.x > 3))? ]
+42
+[]
+
+[ (select(.x > 3))? ]
+"hi"
+[]
+
+[ (select(.x > 3))? ]
+[1,2,3]
+[]
