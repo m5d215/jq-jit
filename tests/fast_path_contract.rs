@@ -10,7 +10,8 @@
 
 use jq_jit::fast_path::{
     FastPath, FieldAccessPath, RawApplyOutcome, apply_array_field_access_raw,
-    apply_field_access_raw, apply_multi_field_access_raw, apply_nested_field_access_raw,
+    apply_field_access_raw, apply_has_field_raw, apply_has_multi_field_raw,
+    apply_multi_field_access_raw, apply_nested_field_access_raw,
 };
 use jq_jit::interpreter::Filter;
 use jq_jit::value::Value;
@@ -455,5 +456,124 @@ fn raw_array_field_non_object_non_null_input_bails() {
             outcome,
         );
         assert_eq!(calls, 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// has("x") / has("x") and|or has("y") — emit a literal `true` / `false` for
+// object inputs; bail to generic for any non-object input so jq's
+// type-sensitive `has(IDX)` semantics (arrays accept indices, others error)
+// surface correctly.
+
+#[test]
+fn raw_has_field_present_emits_true() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_has_field_raw(b"{\"x\":1,\"y\":2}", "x", |b| emitted.push(b.to_vec()));
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![b"true".to_vec()]);
+}
+
+#[test]
+fn raw_has_field_absent_emits_false() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_has_field_raw(b"{\"y\":2}", "x", |b| emitted.push(b.to_vec()));
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![b"false".to_vec()]);
+}
+
+#[test]
+fn raw_has_field_non_object_input_bails() {
+    for raw in [
+        b"null".as_slice(),
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut emitted: Vec<Vec<u8>> = Vec::new();
+        let outcome = apply_has_field_raw(raw, "x", |b| emitted.push(b.to_vec()));
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
+    }
+}
+
+#[test]
+fn raw_has_multi_field_and_returns_true_when_all_present() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_has_multi_field_raw(
+        b"{\"a\":1,\"b\":2,\"c\":3}",
+        &["a", "b"],
+        true,
+        |b| emitted.push(b.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![b"true".to_vec()]);
+}
+
+#[test]
+fn raw_has_multi_field_and_returns_false_when_one_missing() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_has_multi_field_raw(
+        b"{\"a\":1}",
+        &["a", "b"],
+        true,
+        |b| emitted.push(b.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![b"false".to_vec()]);
+}
+
+#[test]
+fn raw_has_multi_field_or_returns_true_when_any_present() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_has_multi_field_raw(
+        b"{\"a\":1}",
+        &["a", "b"],
+        false,
+        |b| emitted.push(b.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![b"true".to_vec()]);
+}
+
+#[test]
+fn raw_has_multi_field_or_returns_false_when_all_missing() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_has_multi_field_raw(
+        b"{\"c\":3}",
+        &["a", "b"],
+        false,
+        |b| emitted.push(b.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![b"false".to_vec()]);
+}
+
+#[test]
+fn raw_has_multi_field_non_object_input_bails() {
+    for is_and in [true, false] {
+        for raw in [
+            b"null".as_slice(),
+            b"42".as_slice(),
+            b"\"hi\"".as_slice(),
+            b"[1,2,3]".as_slice(),
+        ] {
+            let mut emitted: Vec<Vec<u8>> = Vec::new();
+            let outcome =
+                apply_has_multi_field_raw(raw, &["a", "b"], is_and, |b| emitted.push(b.to_vec()));
+            assert!(
+                matches!(outcome, RawApplyOutcome::Bail),
+                "expected Bail for input {:?} (is_and={}), got {:?}",
+                std::str::from_utf8(raw).unwrap(),
+                is_and,
+                outcome,
+            );
+            assert!(emitted.is_empty());
+        }
     }
 }
