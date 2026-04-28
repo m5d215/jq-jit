@@ -8520,19 +8520,13 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref f1, ref cmp_op, ref f2, ref t_bytes, ref f_bytes)) = field_field_cmp_branch {
-                    use jq_jit::ir::BinOp;
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if let Some((v1, v2)) = json_object_get_two_nums(raw, 0, f1, f2) {
-                            let pass = match cmp_op {
-                                BinOp::Gt => v1 > v2, BinOp::Lt => v1 < v2,
-                                BinOp::Ge => v1 >= v2, BinOp::Le => v1 <= v2,
-                                BinOp::Eq => v1 == v2, BinOp::Ne => v1 != v2,
-                                _ => false,
-                            };
+                        let outcome = apply_field_field_cmp_raw(raw, f1, f2, *cmp_op, |pass| {
                             compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
                             compact_buf.push(b'\n');
-                        } else {
+                        });
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -16188,20 +16182,14 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some((ref f1, ref cmp_op, ref f2, ref t_bytes, ref f_bytes)) = field_field_cmp_branch {
-                use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if let Some((v1, v2)) = json_object_get_two_nums(raw, 0, f1, f2) {
-                        let pass = match cmp_op {
-                            BinOp::Gt => v1 > v2, BinOp::Lt => v1 < v2,
-                            BinOp::Ge => v1 >= v2, BinOp::Le => v1 <= v2,
-                            BinOp::Eq => v1 == v2, BinOp::Ne => v1 != v2,
-                            _ => false,
-                        };
+                    let outcome = apply_field_field_cmp_raw(raw, f1, f2, *cmp_op, |pass| {
                         compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
                         compact_buf.push(b'\n');
-                    } else {
+                    });
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }

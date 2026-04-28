@@ -4405,3 +4405,32 @@ true
 [ ((.x > 0) and (.y > 0))? ]
 42
 []
+
+# Issue #251: field_field_cmp_branch apply-site uses RawApplyOutcome (#83
+# Phase B, reusing apply_field_field_cmp_raw — same Bail discipline).
+if .x > .y then "a" else "b" end
+{"x":3,"y":2}
+"a"
+
+if .x == .y then 1 else 0 end
+{"x":5,"y":5}
+1
+
+if .x <= .y then "yes" else "no" end
+{"x":2,"y":3}
+"yes"
+
+# Non-numeric field — helper Bails, generic uses cross-type ordering ("hi" > 3 = true).
+if .x > .y then "a" else "b" end
+{"x":3,"y":"hi"}
+"b"
+
+# `?`-wrapped: non-object input — generic raises.
+[ (if .x > .y then "a" else "b" end)? ]
+"plain"
+[]
+
+# Missing field — generic resolves null comparisons (null < anything = true).
+if .x > .y then "a" else "b" end
+{"x":5}
+"a"
