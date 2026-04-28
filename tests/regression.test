@@ -4610,3 +4610,46 @@ select((.n > 0) and (.s | test("^h.l")))
 # behaviour directly; once select_mixed_compound is migrated under issue
 # #251, additional regression cases can verify the helper at the apply-site
 # entry too.
+
+# Issue #251: each_type_filter / collect_each_select_type / first_each_select_type
+# apply-sites use RawApplyOutcome (#83 Phase B). All three wrap json_each_value_cb
+# and Bail on non-iterable input or unrecognised type name.
+.[] | strings
+[1,"a",2,"b",null]
+"a"
+"b"
+
+.[] | numbers
+{"a":1,"b":"hi","c":3}
+1
+3
+
+[.[] | select(type == "string")]
+[1,"a",2,"b"]
+["a","b"]
+
+[.[] | select(type == "number")]
+[1,"a",2,"b"]
+[1,2]
+
+first(.[] | select(type == "string"))
+[1,"a",2,"b"]
+"a"
+
+# No match — first(...) emits nothing (empty stream).
+[ (first(.[] | select(type == "string")))? ]
+[1,2,3]
+[]
+
+# Non-iterable input — generic raises `Cannot iterate over <type>`, ? swallows.
+[ (.[] | strings)? ]
+42
+[]
+
+[ ([.[] | select(type == "string")])? ]
+42
+[]
+
+[ (first(.[] | select(type == "string")))? ]
+"plain"
+[]

@@ -66,8 +66,8 @@ use crate::interpreter::{ArithExpr, MathUnary};
 use crate::ir::{BinOp, UnaryOp};
 use crate::runtime::jq_mod_f64;
 use crate::value::{
-    KeyStr, Value, ObjInner, json_object_assign_field_arith, json_object_assign_two_fields_arith,
-    json_object_del_field, json_object_del_fields,
+    KeyStr, Value, ObjInner, json_each_value_cb, json_object_assign_field_arith,
+    json_object_assign_two_fields_arith, json_object_del_field, json_object_del_fields,
     json_object_get_field_raw, json_object_get_fields_raw_buf, json_object_merge_literal,
     json_object_get_nested_field_raw, json_object_get_num, json_object_get_two_nums,
     json_object_has_all_keys, json_object_has_any_key, json_object_has_key,
@@ -935,6 +935,128 @@ pub fn apply_obj_merge_computed_raw(
     } else {
         RawApplyOutcome::Bail
     }
+}
+
+/// Test whether a JSON value's first byte indicates the given jq
+/// type name. Returns None for unrecognised type names so callers
+/// can Bail on detector regression.
+#[inline]
+fn type_byte_matches(type_name: &str, b: u8) -> Option<bool> {
+    Some(match type_name {
+        "string" => b == b'"',
+        "number" => b == b'-' || b.is_ascii_digit(),
+        "boolean" => b == b't' || b == b'f',
+        "null" => b == b'n',
+        "object" => b == b'{',
+        "array" => b == b'[',
+        _ => return None,
+    })
+}
+
+/// Apply the `.[] | <type>s` raw-byte fast path on a single JSON
+/// record (where `<type>s` is one of jq's type-filter built-ins —
+/// `strings`/`numbers`/`booleans`/`nulls`/`objects`/`arrays`).
+/// Iterates each element of the input array/object and emits the
+/// element bytes (with a trailing `\n`) for every element whose
+/// first byte indicates the given type.
+///
+/// Bail discipline:
+/// * Unrecognised type name (defensive) — Bail.
+/// * Non-iterable input (`json_each_value_cb` returns false) —
+///   Bail so jq's `Cannot iterate over <type>` error surfaces.
+///
+/// The helper writes element-bytes-plus-`\n` directly to `buf` for
+/// every match. On a passing iterable, returns `Emit` even if no
+/// element matched (no output is the correct `select` semantics for
+/// no-match).
+pub fn apply_each_type_filter_raw(
+    raw: &[u8],
+    type_name: &str,
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if type_byte_matches(type_name, b'\0').is_none() {
+        return RawApplyOutcome::Bail;
+    }
+    let ok = json_each_value_cb(raw, 0, |vs, ve| {
+        let val = &raw[vs..ve];
+        if val.is_empty() { return; }
+        if matches!(type_byte_matches(type_name, val[0]), Some(true)) {
+            buf.extend_from_slice(val);
+            buf.push(b'\n');
+        }
+    });
+    if ok { RawApplyOutcome::Emit } else { RawApplyOutcome::Bail }
+}
+
+/// Apply the `[.[] | select(type == "<type>")]` raw-byte fast path
+/// on a single JSON record. Collects elements of the matching type
+/// into a single JSON array and emits the array with a trailing `\n`.
+///
+/// Bail discipline matches [`apply_each_type_filter_raw`]:
+/// unrecognised type → Bail; non-iterable input → Bail. The helper
+/// truncates `buf` back to its pre-call length on Bail so the caller
+/// doesn't need to manage the partial-write rollback itself.
+pub fn apply_collect_each_select_type_raw(
+    raw: &[u8],
+    type_name: &str,
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if type_byte_matches(type_name, b'\0').is_none() {
+        return RawApplyOutcome::Bail;
+    }
+    let save_len = buf.len();
+    buf.push(b'[');
+    let mut first_elem = true;
+    let ok = json_each_value_cb(raw, 0, |vs, ve| {
+        let val = &raw[vs..ve];
+        if val.is_empty() { return; }
+        if matches!(type_byte_matches(type_name, val[0]), Some(true)) {
+            if !first_elem { buf.push(b','); }
+            first_elem = false;
+            buf.extend_from_slice(val);
+        }
+    });
+    if ok {
+        buf.extend_from_slice(b"]\n");
+        RawApplyOutcome::Emit
+    } else {
+        buf.truncate(save_len);
+        RawApplyOutcome::Bail
+    }
+}
+
+/// Apply the `first(.[] | select(type == "<type>"))` raw-byte fast
+/// path on a single JSON record. Emits the first element of the
+/// matching type with a trailing `\n`. If no element matches, emits
+/// nothing (returns `Emit` — that's jq's behaviour for `first` on an
+/// empty stream — no output, no error).
+///
+/// Bail discipline matches [`apply_each_type_filter_raw`].
+pub fn apply_first_each_select_type_raw(
+    raw: &[u8],
+    type_name: &str,
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if type_byte_matches(type_name, b'\0').is_none() {
+        return RawApplyOutcome::Bail;
+    }
+    let mut found_range: Option<(usize, usize)> = None;
+    let ok = json_each_value_cb(raw, 0, |vs, ve| {
+        if found_range.is_some() { return; }
+        let val = &raw[vs..ve];
+        if val.is_empty() { return; }
+        if matches!(type_byte_matches(type_name, val[0]), Some(true)) {
+            found_range = Some((vs, ve));
+        }
+    });
+    if !ok {
+        return RawApplyOutcome::Bail;
+    }
+    if let Some((vs, ve)) = found_range {
+        buf.extend_from_slice(&raw[vs..ve]);
+        buf.push(b'\n');
+    }
+    RawApplyOutcome::Emit
 }
 
 /// Apply the `. + {k1: v1, k2: v2, ...}` raw-byte object-merge fast
