@@ -1074,6 +1074,117 @@ pub fn apply_is_length_raw(raw: &[u8], buf: &mut Vec<u8>) -> RawApplyOutcome {
     }
 }
 
+/// Apply the `select((.numfield <cmp> N) and (.strfield <op_str> arg))`
+/// raw-byte fast path on a single JSON record. Combines a numeric
+/// comparison on one field with a string predicate
+/// (`startswith`/`endswith`/`contains`/`test`/`eq`) on another.
+///
+/// `select` semantics: emit the input record unchanged on a passing
+/// conjunction; emit nothing on a failing predicate. The helper
+/// passes the raw bytes to `emit_match` only when both predicates
+/// pass.
+///
+/// Bail discipline:
+/// * Non-object input — [`RawApplyOutcome::Bail`] (jq raises
+///   `Cannot index <type>`).
+/// * Numeric field absent or non-numeric — Bail (so jq's cross-type
+///   ordering / type error surfaces via the generic path).
+/// * String field absent, non-string, or escape-bearing — Bail (raw
+///   scanner can't decode escapes; for non-strings jq raises a type
+///   error from the string predicate).
+/// * `num_op` is non-comparison (`Add`/`And`/etc.) — Bail (defensive).
+/// * `str_op` is not a known string op (`startswith`/`endswith`/
+///   `contains`/`test`/`eq`) — Bail (defensive).
+/// * `str_op == "test"` with `str_re` is `None` — Bail (regex
+///   compilation failed; generic path will raise the right error).
+///
+/// On a passing predicate, calls `emit_match(raw)` so the caller
+/// emits the matching record. On a failing predicate, returns
+/// `RawApplyOutcome::Emit` without invoking the closure.
+pub fn apply_select_num_str_raw<F>(
+    raw: &[u8],
+    num_field: &str,
+    num_op: BinOp,
+    num_threshold: f64,
+    str_field: &str,
+    str_op: &str,
+    str_arg: &[u8],
+    str_re: Option<&regex::Regex>,
+    mut emit_match: F,
+) -> RawApplyOutcome
+where
+    F: FnMut(&[u8]),
+{
+    if raw.is_empty() || raw[0] != b'{' {
+        return RawApplyOutcome::Bail;
+    }
+    if !matches!(
+        num_op,
+        BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne,
+    ) {
+        return RawApplyOutcome::Bail;
+    }
+    let known_str_op = matches!(str_op, "startswith" | "endswith" | "contains" | "test" | "eq");
+    if !known_str_op {
+        return RawApplyOutcome::Bail;
+    }
+    if str_op == "test" && str_re.is_none() {
+        return RawApplyOutcome::Bail;
+    }
+    let n = match json_object_get_num(raw, 0, num_field) {
+        Some(v) => v,
+        None => return RawApplyOutcome::Bail,
+    };
+    let num_pass = match num_op {
+        BinOp::Gt => n > num_threshold,
+        BinOp::Lt => n < num_threshold,
+        BinOp::Ge => n >= num_threshold,
+        BinOp::Le => n <= num_threshold,
+        BinOp::Eq => n == num_threshold,
+        BinOp::Ne => n != num_threshold,
+        _ => unreachable!(),
+    };
+    if !num_pass {
+        return RawApplyOutcome::Emit;
+    }
+    let (vs, ve) = match json_object_get_field_raw(raw, 0, str_field) {
+        Some(r) => r,
+        None => return RawApplyOutcome::Bail,
+    };
+    let val = &raw[vs..ve];
+    if val.len() < 2 || val[0] != b'"' || val[val.len() - 1] != b'"' {
+        return RawApplyOutcome::Bail;
+    }
+    let inner = &val[1..val.len() - 1];
+    if str_op == "test" {
+        if inner.contains(&b'\\') {
+            return RawApplyOutcome::Bail;
+        }
+    }
+    let str_pass = match str_op {
+        "startswith" => inner.starts_with(str_arg),
+        "endswith" => inner.ends_with(str_arg),
+        "contains" => {
+            if str_arg.len() <= inner.len() {
+                memchr::memmem::find(inner, str_arg).is_some()
+            } else {
+                false
+            }
+        }
+        "test" => {
+            let re = str_re.unwrap();
+            let s = unsafe { std::str::from_utf8_unchecked(inner) };
+            re.is_match(s)
+        }
+        "eq" => inner == str_arg,
+        _ => unreachable!(),
+    };
+    if str_pass {
+        emit_match(raw);
+    }
+    RawApplyOutcome::Emit
+}
+
 /// Apply the `(.x cmp1 N1) <conjunct> (.y cmp2 N2) <conjunct> ...`
 /// raw-byte compound numeric-comparison fast path on a single JSON
 /// record. Each comparison is a `<field> <cmp> <const>` predicate
