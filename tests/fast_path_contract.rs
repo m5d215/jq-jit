@@ -29,7 +29,7 @@ use jq_jit::fast_path::{
     apply_field_update_trim_raw, apply_is_length_raw, apply_is_type_raw,
     apply_numeric_expr_raw, apply_obj_assign_field_arith_raw,
     apply_obj_assign_two_fields_arith_raw, apply_obj_merge_computed_raw,
-    apply_obj_merge_lit_raw,
+    apply_obj_merge_lit_raw, apply_select_num_str_raw,
     apply_select_arith_cmp_raw, apply_select_cmp_raw,
     apply_select_field_null_raw, apply_select_str_raw, apply_select_str_test_raw,
     apply_two_field_binop_const_raw,
@@ -2894,6 +2894,166 @@ fn raw_is_length_boolean_bails() {
         let outcome = apply_is_length_raw(raw, &mut buf);
         assert!(matches!(outcome, RawApplyOutcome::Bail), "raw={:?}", std::str::from_utf8(raw).unwrap());
         assert!(buf.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `select((.numfield cmp N) and (.strfield op_str arg))` — numeric+string
+// compound predicate. Bails on non-object/missing-or-non-numeric/non-string/
+// escape-bearing-with-test/unknown-op.
+
+#[test]
+fn raw_select_num_str_emits_match_startswith() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_num_str_raw(
+        b"{\"n\":5,\"s\":\"hello\"}", "n", BinOp::Gt, 0.0, "s", "startswith", b"he", None,
+        |raw| emitted.push(raw.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![b"{\"n\":5,\"s\":\"hello\"}".to_vec()]);
+}
+
+#[test]
+fn raw_select_num_str_no_emit_on_num_fail() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_num_str_raw(
+        b"{\"n\":-1,\"s\":\"hello\"}", "n", BinOp::Gt, 0.0, "s", "startswith", b"he", None,
+        |raw| emitted.push(raw.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_num_str_no_emit_on_str_fail() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_num_str_raw(
+        b"{\"n\":5,\"s\":\"world\"}", "n", BinOp::Gt, 0.0, "s", "startswith", b"he", None,
+        |raw| emitted.push(raw.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_num_str_contains_eq_endswith() {
+    for (op, arg, expected) in [
+        ("contains", &b"ell"[..], true),
+        ("endswith", &b"llo"[..], true),
+        ("eq", &b"hello"[..], true),
+        ("eq", &b"world"[..], false),
+    ] {
+        let mut emitted: Vec<Vec<u8>> = Vec::new();
+        let outcome = apply_select_num_str_raw(
+            b"{\"n\":5,\"s\":\"hello\"}", "n", BinOp::Gt, 0.0, "s", op, arg, None,
+            |raw| emitted.push(raw.to_vec()),
+        );
+        assert!(matches!(outcome, RawApplyOutcome::Emit));
+        assert_eq!(emitted.len(), if expected { 1 } else { 0 }, "op={} arg={:?}", op, std::str::from_utf8(arg).unwrap());
+    }
+}
+
+#[test]
+fn raw_select_num_str_test_with_regex() {
+    let re = regex::Regex::new("^h.l").unwrap();
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_num_str_raw(
+        b"{\"n\":5,\"s\":\"hello\"}", "n", BinOp::Gt, 0.0, "s", "test", b"^h.l", Some(&re),
+        |raw| emitted.push(raw.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted.len(), 1);
+}
+
+#[test]
+fn raw_select_num_str_test_without_regex_bails() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_num_str_raw(
+        b"{\"n\":5,\"s\":\"hello\"}", "n", BinOp::Gt, 0.0, "s", "test", b"^h.l", None,
+        |raw| emitted.push(raw.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_num_str_num_field_missing_bails() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_num_str_raw(
+        b"{\"s\":\"hello\"}", "n", BinOp::Gt, 0.0, "s", "startswith", b"he", None,
+        |raw| emitted.push(raw.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_num_str_str_field_missing_bails() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_num_str_raw(
+        b"{\"n\":5}", "n", BinOp::Gt, 0.0, "s", "startswith", b"he", None,
+        |raw| emitted.push(raw.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_num_str_str_field_non_string_bails() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_num_str_raw(
+        b"{\"n\":5,\"s\":42}", "n", BinOp::Gt, 0.0, "s", "startswith", b"he", None,
+        |raw| emitted.push(raw.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_num_str_test_escape_bearing_string_bails() {
+    let re = regex::Regex::new("a").unwrap();
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_num_str_raw(
+        br#"{"n":5,"s":"a\nb"}"#, "n", BinOp::Gt, 0.0, "s", "test", b"a", Some(&re),
+        |raw| emitted.push(raw.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_num_str_unknown_str_op_bails() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_num_str_raw(
+        b"{\"n\":5,\"s\":\"hello\"}", "n", BinOp::Gt, 0.0, "s", "unknown", b"he", None,
+        |raw| emitted.push(raw.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_num_str_non_cmp_op_bails() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_num_str_raw(
+        b"{\"n\":5,\"s\":\"hello\"}", "n", BinOp::Add, 0.0, "s", "startswith", b"he", None,
+        |raw| emitted.push(raw.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+}
+
+#[test]
+fn raw_select_num_str_non_object_input_bails() {
+    for raw in [b"42".as_slice(), b"\"hi\"".as_slice(), b"null".as_slice(), b"[1,2]".as_slice()] {
+        let mut emitted: Vec<Vec<u8>> = Vec::new();
+        let outcome = apply_select_num_str_raw(
+            raw, "n", BinOp::Gt, 0.0, "s", "startswith", b"he", None,
+            |raw| emitted.push(raw.to_vec()),
+        );
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "raw={:?}", std::str::from_utf8(raw).unwrap(),
+        );
     }
 }
 

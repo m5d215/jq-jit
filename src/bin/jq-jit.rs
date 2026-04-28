@@ -150,7 +150,7 @@ use jq_jit::fast_path::{
     apply_field_unary_num_raw, apply_full_object_fields_raw, apply_is_length_raw,
     apply_is_type_raw, apply_numeric_expr_raw, apply_obj_assign_field_arith_raw,
     apply_obj_assign_two_fields_arith_raw, apply_obj_merge_computed_raw,
-    apply_obj_merge_lit_raw, apply_two_field_binop_const_raw,
+    apply_obj_merge_lit_raw, apply_select_num_str_raw, apply_two_field_binop_const_raw,
     apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
     apply_nested_field_access_raw, apply_object_compute_raw, apply_select_arith_cmp_raw,
     apply_select_cmp_raw, apply_select_field_null_raw, apply_select_str_raw,
@@ -8948,46 +8948,17 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref nf, ref nop, nth, ref sf, ref sop, ref sarg)) = select_num_str {
-                    use jq_jit::ir::BinOp;
-                    let re = if sop == "test" { Some(regex::Regex::new(sarg).ok()).flatten() } else { None };
+                    let re = if sop == "test" { regex::Regex::new(sarg).ok() } else { None };
                     let sarg_bytes = sarg.as_bytes();
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        let num_pass = if let Some(val) = json_object_get_num(raw, 0, nf) {
-                            match nop {
-                                BinOp::Gt => val > nth, BinOp::Lt => val < nth,
-                                BinOp::Ge => val >= nth, BinOp::Le => val <= nth,
-                                BinOp::Eq => val == nth, BinOp::Ne => val != nth,
-                                _ => false,
-                            }
-                        } else { false };
-                        if num_pass {
-                            let str_pass = if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sf) {
-                                let fval = &raw[vs..ve];
-                                if fval.len() >= 2 && fval[0] == b'"' {
-                                    let inner = &fval[1..fval.len()-1];
-                                    match sop.as_str() {
-                                        "startswith" => inner.starts_with(sarg_bytes),
-                                        "endswith" => inner.ends_with(sarg_bytes),
-                                        "contains" => {
-                                            if sarg_bytes.len() <= inner.len() {
-                                                memchr::memmem::find(inner, sarg_bytes).is_some()
-                                            } else { false }
-                                        }
-                                        "test" => {
-                                            if let Some(ref r) = re {
-                                                let s = unsafe { std::str::from_utf8_unchecked(inner) };
-                                                r.is_match(s)
-                                            } else { false }
-                                        }
-                                        "eq" => inner == sarg_bytes,
-                                        _ => false,
-                                    }
-                                } else { false }
-                            } else { false };
-                            if str_pass {
-                                emit_raw_ln!(&mut compact_buf, raw);
-                            }
+                        let outcome = apply_select_num_str_raw(
+                            raw, nf, *nop, nth, sf, sop, sarg_bytes, re.as_ref(),
+                            |bytes| { emit_raw_ln!(&mut compact_buf, bytes); },
+                        );
+                        if let RawApplyOutcome::Bail = outcome {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -16592,43 +16563,18 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some((ref nf, ref nop, nth, ref sf, ref sop, ref sarg)) = select_num_str {
-                use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
-                let re = if sop == "test" { Some(regex::Regex::new(sarg).ok()).flatten() } else { None };
+                let re = if sop == "test" { regex::Regex::new(sarg).ok() } else { None };
                 let sarg_bytes = sarg.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    let num_pass = if let Some(val) = json_object_get_num(raw, 0, nf) {
-                        match nop {
-                            BinOp::Gt => val > nth, BinOp::Lt => val < nth,
-                            BinOp::Ge => val >= nth, BinOp::Le => val <= nth,
-                            BinOp::Eq => val == nth, BinOp::Ne => val != nth,
-                            _ => false,
-                        }
-                    } else { false };
-                    if num_pass {
-                        let str_pass = if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sf) {
-                            let fval = &raw[vs..ve];
-                            if fval.len() >= 2 && fval[0] == b'"' {
-                                let inner = &fval[1..fval.len()-1];
-                                match sop.as_str() {
-                                    "startswith" => inner.starts_with(sarg_bytes),
-                                    "endswith" => inner.ends_with(sarg_bytes),
-                                    "contains" => memchr::memmem::find(inner, sarg_bytes).is_some(),
-                                    "test" => {
-                                        if let Some(ref r) = re {
-                                            let s = unsafe { std::str::from_utf8_unchecked(inner) };
-                                            r.is_match(s)
-                                        } else { false }
-                                    }
-                                    "eq" => inner == sarg_bytes,
-                                    _ => false,
-                                }
-                            } else { false }
-                        } else { false };
-                        if str_pass {
-                            emit_raw_ln!(&mut compact_buf, raw);
-                        }
+                    let outcome = apply_select_num_str_raw(
+                        raw, nf, *nop, nth, sf, sop, sarg_bytes, re.as_ref(),
+                        |bytes| { emit_raw_ln!(&mut compact_buf, bytes); },
+                    );
+                    if let RawApplyOutcome::Bail = outcome {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);

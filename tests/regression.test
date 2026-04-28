@@ -4564,3 +4564,49 @@ length
 [ (. + {sum: (.x + .y)})? ]
 "plain"
 []
+
+# Issue #251: select_num_str apply-site uses RawApplyOutcome (#83 Phase B).
+# Helper Bails on non-object/missing-or-non-numeric/non-string/escape-bearing-
+# with-test/unknown-op, so jq's error semantics surface.
+select((.n > 0) and (.s | startswith("he")))
+{"n":5,"s":"hello"}
+{"n":5,"s":"hello"}
+
+select((.n > 0) and (.s | endswith("llo")))
+{"n":5,"s":"hello"}
+{"n":5,"s":"hello"}
+
+select((.n > 0) and (.s | contains("ell")))
+{"n":5,"s":"hello"}
+{"n":5,"s":"hello"}
+
+select((.n > 0) and (.s | test("^h.l")))
+{"n":5,"s":"hello"}
+{"n":5,"s":"hello"}
+
+# Numeric predicate fails — no output (select semantics).
+[ (select((.n > 0) and (.s | startswith("he"))))? ]
+{"n":-1,"s":"hello"}
+[]
+
+# String predicate fails — no output.
+[ (select((.n > 0) and (.s | startswith("he"))))? ]
+{"n":5,"s":"world"}
+[]
+
+# Non-string field for str predicate — generic raises type error, ? swallows.
+[ (select((.n > 0) and (.s | startswith("he"))))? ]
+{"n":5,"s":42}
+[]
+
+# Non-object input — generic raises indexing error.
+[ (select((.n > 0) and (.s | startswith("he"))))? ]
+"plain"
+[]
+
+# NOTE: select_num_str is currently shadowed by select_mixed_compound for
+# user-facing filters (mixed_compound's detector matches the same shape and
+# fires earlier in the dispatch chain). The contract tests pin the helper's
+# behaviour directly; once select_mixed_compound is migrated under issue
+# #251, additional regression cases can verify the helper at the apply-site
+# entry too.
