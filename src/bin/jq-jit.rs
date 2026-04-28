@@ -136,7 +136,7 @@ fn print_jq_error(msg: &str) {
     }
 }
 
-use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, json_object_get_nested_field_raw, parse_json_num, json_value_length, json_object_keys_to_buf_reuse, json_object_extract_keys_only, json_object_keys_unsorted_to_buf, json_object_keys_join_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_type_byte, json_object_del_field, json_object_del_fields, json_object_filter_by_key_str, json_object_merge_literal, json_object_sort_keys, json_object_filter_by_value_type, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_with_entries_select_value_cmp, json_object_set_field_raw, json_object_update_field_num, json_object_update_field_num_chain, json_object_update_field_case, json_object_update_field_gsub, json_object_update_field_split_first, json_object_update_field_split_last, json_object_update_field_trim, json_object_update_field_slice, json_object_update_field_str_map, json_object_update_field_str_concat, json_object_update_field_length, json_object_update_field_tostring, json_object_update_field_test, json_object_assign_field_arith, json_object_assign_two_fields_arith, json_object_select_then_update_num, json_object_select_then_update_str_concat, json_object_select_compound_then_update_num, json_object_select_str_then_update_num, json_object_values_tostring, is_json_compact, push_json_compact_raw, push_tojson_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_compact_line_color, push_pretty_line, push_pretty_line_color, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line_color, value_to_json_pretty_color, walk_json_transform_nums, pool_value, skip_json_value};
+use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_value_has_duplicate_keys, json_stream_has_duplicate_keys, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, json_object_get_nested_field_raw, parse_json_num, json_value_length, json_object_keys_to_buf_reuse, json_object_extract_keys_only, json_object_keys_unsorted_to_buf, json_object_keys_join_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_type_byte, json_object_del_field, json_object_del_fields, json_object_filter_by_key_str, json_object_merge_literal, json_object_sort_keys, json_object_filter_by_value_type, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_with_entries_select_value_cmp, json_object_set_field_raw, json_object_update_field_num, json_object_update_field_num_chain, json_object_update_field_case, json_object_update_field_gsub, json_object_update_field_split_first, json_object_update_field_split_last, json_object_update_field_trim, json_object_update_field_slice, json_object_update_field_str_map, json_object_update_field_str_concat, json_object_update_field_length, json_object_update_field_tostring, json_object_update_field_test, json_object_assign_field_arith, json_object_assign_two_fields_arith, json_object_select_then_update_num, json_object_select_then_update_str_concat, json_object_select_compound_then_update_num, json_object_select_str_then_update_num, json_object_values_tostring, is_json_compact, push_json_compact_raw, push_tojson_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_compact_line_color, push_pretty_line, push_pretty_line_color, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line_color, value_to_json_pretty_color, walk_json_transform_nums, pool_value, skip_json_value};
 use jq_jit::interpreter::Filter;
 
 fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -2305,9 +2305,31 @@ fn real_main() {
     let use_pretty_buf = !compact && !raw_output && !sort_keys && !join_output && !tab;
     // Helper macro: emit raw JSON bytes to buffer with trailing newline,
     // handling compact vs pretty output.
+    //
+    // Inputs with duplicate object keys (#233) take the Value-level path so
+    // `parse_json_object`'s last-wins dedup canonicalises them. The raw-byte
+    // emitters below copy or recompact bytes verbatim, so they would
+    // otherwise preserve the duplicates jq would have collapsed.
     macro_rules! emit_raw_ln {
         ($buf:expr, $raw:expr) => {
-            if use_pretty_buf {
+            if json_value_has_duplicate_keys($raw) {
+                if let Ok(v) = json_to_value(unsafe { std::str::from_utf8_unchecked($raw) }) {
+                    if use_pretty_buf {
+                        push_pretty_line($buf, &v, 2, false);
+                    } else {
+                        push_compact_line($buf, &v);
+                    }
+                } else if use_pretty_buf {
+                    push_json_pretty_raw($buf, $raw, 2, false);
+                    $buf.push(b'\n');
+                } else if is_json_compact($raw) {
+                    $buf.extend_from_slice($raw);
+                    $buf.push(b'\n');
+                } else {
+                    push_json_compact_raw($buf, $raw);
+                    $buf.push(b'\n');
+                }
+            } else if use_pretty_buf {
                 push_json_pretty_raw($buf, $raw, 2, false);
                 $buf.push(b'\n');
             } else if is_json_compact($raw) {
@@ -5444,13 +5466,22 @@ fn real_main() {
                         }
                         all_compact && checked > 0
                     } else { false };
-                    if whole_file_compact && !raw_contains_non_canonical_number(content) {
+                    // Whole-file shortcut: only safe when no value in the stream has
+                    // duplicate object keys. jq dedupes those last-wins at parse time
+                    // (#233); copying bytes through preserves them.
+                    let stream_clean = whole_file_compact
+                        && !raw_contains_non_canonical_number(content)
+                        && !json_stream_has_duplicate_keys(content);
+                    if stream_clean {
                         let _ = out.write_all(content);
                         Ok(())
                     } else {
                         json_stream_raw(&input_str, |start, end| {
                             let raw = &input_bytes[start..end];
-                            if is_json_compact(raw) && !raw_contains_non_canonical_number(raw) {
+                            if json_value_has_duplicate_keys(raw) {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                push_compact_line(&mut compact_buf, &v);
+                            } else if is_json_compact(raw) && !raw_contains_non_canonical_number(raw) {
                                 compact_buf.extend_from_slice(raw);
                                 compact_buf.push(b'\n');
                             } else if !raw_contains_non_canonical_number(raw) {
@@ -5470,7 +5501,7 @@ fn real_main() {
                 } else if filter.is_identity() && use_pretty_buf && !color_output && !exit_status && !seq {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if raw_contains_non_canonical_number(raw) {
+                        if json_value_has_duplicate_keys(raw) || raw_contains_non_canonical_number(raw) {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             push_pretty_line(&mut compact_buf, &v, indent_n, tab);
                         } else {
