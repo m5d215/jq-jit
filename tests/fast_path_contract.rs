@@ -17,8 +17,8 @@ use jq_jit::fast_path::{
     apply_field_str_concat_raw, apply_field_str_reverse_raw, apply_field_test_raw,
     apply_full_object_fields_raw, apply_has_field_raw, apply_has_multi_field_raw,
     apply_multi_field_access_raw, apply_nested_field_access_raw, apply_object_compute_raw,
-    apply_select_arith_cmp_raw, apply_select_cmp_raw, apply_select_field_null_raw,
-    apply_select_str_raw, apply_select_str_test_raw,
+    apply_field_update_length_raw, apply_select_arith_cmp_raw, apply_select_cmp_raw,
+    apply_select_field_null_raw, apply_select_str_raw, apply_select_str_test_raw,
 };
 use jq_jit::interpreter::Filter;
 use jq_jit::ir::BinOp;
@@ -2938,5 +2938,75 @@ fn raw_select_str_test_non_object_input_bails() {
             outcome,
         );
         assert!(seen.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `.field |= length` — string-length update fast path. Only commits when the
+// field value is a JSON string; everything else bails so the generic path can
+// apply jq's polymorphic length (array length, object key count, abs(number),
+// 0 for null).
+
+#[test]
+fn raw_field_update_length_emits_string_codepoint_count() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_update_length_raw(b"{\"x\":\"hello\"}", "x", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"{\"x\":5}");
+}
+
+#[test]
+fn raw_field_update_length_counts_codepoints_not_bytes() {
+    // 3 multi-byte chars (UTF-8 = 9 bytes), but length is 3.
+    let mut buf = Vec::new();
+    let outcome = apply_field_update_length_raw(
+        "{\"x\":\"あいう\"}".as_bytes(),
+        "x",
+        &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), "{\"x\":3}".as_bytes());
+}
+
+#[test]
+fn raw_field_update_length_field_missing_bails() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_update_length_raw(b"{\"y\":\"hi\"}", "x", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+}
+
+#[test]
+fn raw_field_update_length_non_string_field_bails() {
+    // jq's length on non-strings: array→len, object→key-count,
+    // number→abs, null→0. The fast path bails so generic produces the
+    // right verdict.
+    for inner in [&b"{\"x\":42}"[..], &b"{\"x\":null}"[..], &b"{\"x\":[1,2]}"[..]] {
+        let mut buf = Vec::new();
+        let outcome = apply_field_update_length_raw(inner, "x", &mut buf);
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for non-string field input {:?}, got {:?}",
+            std::str::from_utf8(inner).unwrap(),
+            outcome,
+        );
+    }
+}
+
+#[test]
+fn raw_field_update_length_non_object_input_bails() {
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut buf = Vec::new();
+        let outcome = apply_field_update_length_raw(raw, "x", &mut buf);
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for field_update_length input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
     }
 }
