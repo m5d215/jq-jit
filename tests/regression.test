@@ -3737,3 +3737,45 @@ select(.x | startswith("a"))
 [ (select(.x | contains("h")))? ]
 [1,2,3]
 []
+
+# #83 Phase B: .field |= length apply-site uses RawApplyOutcome::Bail.
+# String field: codepoint count.
+.x |= length
+{"x":"hello"}
+{"x":5}
+
+# Multi-byte string: codepoint count, not byte count.
+.x |= length
+{"x":"あいう"}
+{"x":3}
+
+# Field absent: bail to generic; jq's null|length = 0.
+.x |= length
+{"y":1}
+{"y":1,"x":0}
+
+# Non-string field: bail to generic; jq's polymorphic length applies.
+.x |= length
+{"x":[1,2,3]}
+{"x":3}
+
+.x |= length
+{"x":42}
+{"x":42}
+
+.x |= length
+{"x":null}
+{"x":0}
+
+# Non-object input under `?`
+[ (.x |= length)? ]
+42
+[]
+
+[ (.x |= length)? ]
+"hi"
+[]
+
+[ (.x |= length)? ]
+[1,2,3]
+[]
