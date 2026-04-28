@@ -30,14 +30,14 @@ use jq_jit::fast_path::{
     apply_numeric_expr_raw, apply_obj_assign_field_arith_raw,
     apply_collect_each_select_type_raw, apply_each_type_filter_raw,
     apply_first_each_select_type_raw,
-    apply_null_branch_lit_raw,
+    apply_field_cmp_val_raw, apply_null_branch_lit_raw,
     apply_obj_assign_two_fields_arith_raw, apply_obj_merge_computed_raw,
     apply_obj_merge_lit_raw, apply_select_nested_cmp_raw, apply_select_num_str_raw,
     apply_select_arith_cmp_raw, apply_select_cmp_raw,
     apply_select_field_null_raw, apply_select_str_raw, apply_select_str_test_raw,
     apply_two_field_binop_const_raw,
 };
-use jq_jit::interpreter::{ArithExpr, Filter, MathUnary};
+use jq_jit::interpreter::{ArithExpr, CmpVal, Filter, MathUnary};
 use jq_jit::ir::{BinOp, UnaryOp};
 use jq_jit::value::Value;
 
@@ -3014,6 +3014,101 @@ fn raw_first_each_select_type_unknown_type_bails() {
     let mut buf = Vec::new();
     let outcome = apply_first_each_select_type_raw(b"[1,2]", "unknown", &mut buf);
     assert!(matches!(outcome, RawApplyOutcome::Bail));
+}
+
+// ---------------------------------------------------------------------------
+// `apply_field_cmp_val_raw` — generic `.field cmp <num|str>` predicate
+// reporting bool via emit closure. Bails on non-object/missing/wrong-type/
+// escape-bearing-string/non-cmp-op.
+
+#[test]
+fn raw_field_cmp_val_numeric() {
+    let mut emitted: Vec<bool> = Vec::new();
+    let outcome = apply_field_cmp_val_raw(
+        b"{\"x\":5}", "x", BinOp::Gt, &CmpVal::Num(3.0), |b| emitted.push(b),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![true]);
+}
+
+#[test]
+fn raw_field_cmp_val_string_eq() {
+    let mut emitted: Vec<bool> = Vec::new();
+    let outcome = apply_field_cmp_val_raw(
+        b"{\"x\":\"hi\"}", "x", BinOp::Eq, &CmpVal::Str("hi".to_string()), |b| emitted.push(b),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![true]);
+}
+
+#[test]
+fn raw_field_cmp_val_string_lt() {
+    let mut emitted: Vec<bool> = Vec::new();
+    let outcome = apply_field_cmp_val_raw(
+        b"{\"x\":\"abc\"}", "x", BinOp::Lt, &CmpVal::Str("abd".to_string()), |b| emitted.push(b),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![true]);
+}
+
+#[test]
+fn raw_field_cmp_val_field_missing_bails() {
+    let mut emitted: Vec<bool> = Vec::new();
+    let outcome = apply_field_cmp_val_raw(
+        b"{\"y\":1}", "x", BinOp::Gt, &CmpVal::Num(3.0), |b| emitted.push(b),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_field_cmp_val_num_field_non_numeric_bails() {
+    let mut emitted: Vec<bool> = Vec::new();
+    let outcome = apply_field_cmp_val_raw(
+        b"{\"x\":\"hi\"}", "x", BinOp::Gt, &CmpVal::Num(3.0), |b| emitted.push(b),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+}
+
+#[test]
+fn raw_field_cmp_val_str_field_non_string_bails() {
+    let mut emitted: Vec<bool> = Vec::new();
+    let outcome = apply_field_cmp_val_raw(
+        b"{\"x\":42}", "x", BinOp::Eq, &CmpVal::Str("42".to_string()), |b| emitted.push(b),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+}
+
+#[test]
+fn raw_field_cmp_val_str_field_escape_bearing_bails() {
+    let mut emitted: Vec<bool> = Vec::new();
+    let outcome = apply_field_cmp_val_raw(
+        br#"{"x":"a\nb"}"#, "x", BinOp::Eq, &CmpVal::Str("a".to_string()), |b| emitted.push(b),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+}
+
+#[test]
+fn raw_field_cmp_val_non_cmp_op_bails() {
+    let mut emitted: Vec<bool> = Vec::new();
+    let outcome = apply_field_cmp_val_raw(
+        b"{\"x\":5}", "x", BinOp::Add, &CmpVal::Num(3.0), |b| emitted.push(b),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+}
+
+#[test]
+fn raw_field_cmp_val_non_object_input_bails() {
+    for raw in [b"42".as_slice(), b"\"hi\"".as_slice(), b"null".as_slice(), b"[1]".as_slice()] {
+        let mut emitted: Vec<bool> = Vec::new();
+        let outcome = apply_field_cmp_val_raw(
+            raw, "x", BinOp::Gt, &CmpVal::Num(3.0), |b| emitted.push(b),
+        );
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "raw={:?}", std::str::from_utf8(raw).unwrap(),
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

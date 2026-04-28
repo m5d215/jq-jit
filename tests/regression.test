@@ -4882,3 +4882,27 @@ if (.x | startswith("xx")) then "match" else "no" end
 [ (if (.x | startswith("he")) then "match" else "no" end)? ]
 "plain"
 []
+
+# Issue #251: cmp_branch_merge apply-site uses RawApplyOutcome (#83 Phase B,
+# uses new apply_field_cmp_val_raw helper for the predicate). Shape:
+# `if .field op val then {literal}+. else . end` (or `.+{literal}`).
+if .x > 0 then {marked:true} + . else . end
+{"x":5,"y":1}
+{"marked":true,"x":5,"y":1}
+
+if .x > 0 then . + {marked:true} else . end
+{"x":5,"y":1}
+{"x":5,"y":1,"marked":true}
+
+if .x > 0 then {marked:true} + . else . end
+{"x":-1,"y":1}
+{"x":-1,"y":1}
+
+if .name == "alice" then {role:"admin"} + . else . end
+{"name":"alice","age":30}
+{"role":"admin","name":"alice","age":30}
+
+# Non-object input — generic raises indexing error.
+[ (if .x > 0 then {m:true} + . else . end)? ]
+"plain"
+[]

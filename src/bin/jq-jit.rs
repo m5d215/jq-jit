@@ -151,7 +151,7 @@ use jq_jit::fast_path::{
     apply_is_type_raw, apply_numeric_expr_raw, apply_obj_assign_field_arith_raw,
     apply_collect_each_select_type_raw, apply_each_type_filter_raw,
     apply_first_each_select_type_raw,
-    apply_null_branch_lit_raw,
+    apply_field_cmp_val_raw, apply_null_branch_lit_raw,
     apply_obj_assign_two_fields_arith_raw, apply_obj_merge_computed_raw,
     apply_obj_merge_lit_raw, apply_select_nested_cmp_raw, apply_select_num_str_raw,
     apply_two_field_binop_const_raw,
@@ -8307,10 +8307,8 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref field, ref op, ref cmp_val, ref merge_pairs, is_prepend)) = cmp_branch_merge {
-                    // if .field op val then {literal} +/. . else . end
-                    use jq_jit::ir::BinOp;
-                    use jq_jit::interpreter::CmpVal;
-                    // Build merge suffix/prefix: ,"key1":val1,"key2":val2}  or  {"key1":val1,"key2":val2,
+                    // if .field op val then {literal} +/. . else . end — predicate
+                    // resolved via apply_field_cmp_val_raw; merge body stays inline.
                     let mut merge_bytes = Vec::with_capacity(64);
                     if is_prepend {
                         merge_bytes.push(b'{');
@@ -8335,51 +8333,20 @@ fn real_main() {
                     }
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        // pass = None means the input also needs jq's total-order
-                        // semantics; bail to generic eval so we don't silently drop
-                        // the value or pick the wrong branch (#161).
-                        let pass: Option<bool> = match cmp_val {
-                            CmpVal::Num(threshold) => {
-                                json_object_get_num(raw, 0, field).map(|val| match op {
-                                    BinOp::Gt => val > *threshold, BinOp::Lt => val < *threshold,
-                                    BinOp::Ge => val >= *threshold, BinOp::Le => val <= *threshold,
-                                    BinOp::Eq => val == *threshold, BinOp::Ne => val != *threshold,
-                                    _ => false,
-                                })
+                        let mut verdict: Option<bool> = None;
+                        let outcome = apply_field_cmp_val_raw(raw, field, *op, cmp_val, |pass| {
+                            verdict = Some(pass);
+                        });
+                        if let RawApplyOutcome::Bail = outcome {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            if compact_buf.len() >= 1 << 17 {
+                                let _ = out.write_all(&compact_buf);
+                                compact_buf.clear();
                             }
-                            CmpVal::Str(ref s) => {
-                                match json_object_get_field_raw(raw, 0, field) {
-                                    Some((vs, ve)) => {
-                                        let vb = &raw[vs..ve];
-                                        if vb.len() >= 2 && vb[0] == b'"' && vb[vb.len()-1] == b'"' && !vb[1..vb.len()-1].contains(&b'\\') {
-                                            let inner = &vb[1..vb.len()-1];
-                                            Some(match op {
-                                                BinOp::Eq => inner == s.as_bytes(),
-                                                BinOp::Ne => inner != s.as_bytes(),
-                                                BinOp::Gt => inner > s.as_bytes(),
-                                                BinOp::Lt => inner < s.as_bytes(),
-                                                BinOp::Ge => inner >= s.as_bytes(),
-                                                BinOp::Le => inner <= s.as_bytes(),
-                                                _ => false,
-                                            })
-                                        } else { None }
-                                    }
-                                    None => None,
-                                }
-                            }
-                        };
-                        let pass = match pass {
-                            Some(p) => p,
-                            None => {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                                if compact_buf.len() >= 1 << 17 {
-                                    let _ = out.write_all(&compact_buf);
-                                    compact_buf.clear();
-                                }
-                                return Ok(());
-                            }
-                        };
+                            return Ok(());
+                        }
+                        let pass = verdict.unwrap_or(false);
                         if pass {
                             let save = compact_buf.len();
                             if is_json_compact(raw) {
@@ -15745,8 +15712,6 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some((ref field, ref op, ref cmp_val, ref merge_pairs, is_prepend)) = cmp_branch_merge {
-                use jq_jit::ir::BinOp;
-                use jq_jit::interpreter::CmpVal;
                 let mut merge_bytes = Vec::with_capacity(64);
                 if is_prepend {
                     merge_bytes.push(b'{');
@@ -15772,50 +15737,20 @@ fn real_main() {
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    // pass = None means the input falls outside what the fast path
-                    // can decide; bail to generic eval (#161).
-                    let pass: Option<bool> = match cmp_val {
-                        CmpVal::Num(threshold) => {
-                            json_object_get_num(raw, 0, field).map(|val| match op {
-                                BinOp::Gt => val > *threshold, BinOp::Lt => val < *threshold,
-                                BinOp::Ge => val >= *threshold, BinOp::Le => val <= *threshold,
-                                BinOp::Eq => val == *threshold, BinOp::Ne => val != *threshold,
-                                _ => false,
-                            })
+                    let mut verdict: Option<bool> = None;
+                    let outcome = apply_field_cmp_val_raw(raw, field, *op, cmp_val, |pass| {
+                        verdict = Some(pass);
+                    });
+                    if let RawApplyOutcome::Bail = outcome {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
                         }
-                        CmpVal::Str(ref s) => {
-                            match json_object_get_field_raw(raw, 0, field) {
-                                Some((vs, ve)) => {
-                                    let vb = &raw[vs..ve];
-                                    if vb.len() >= 2 && vb[0] == b'"' && vb[vb.len()-1] == b'"' && !vb[1..vb.len()-1].contains(&b'\\') {
-                                        let inner = &vb[1..vb.len()-1];
-                                        Some(match op {
-                                            BinOp::Eq => inner == s.as_bytes(),
-                                            BinOp::Ne => inner != s.as_bytes(),
-                                            BinOp::Gt => inner > s.as_bytes(),
-                                            BinOp::Lt => inner < s.as_bytes(),
-                                            BinOp::Ge => inner >= s.as_bytes(),
-                                            BinOp::Le => inner <= s.as_bytes(),
-                                            _ => false,
-                                        })
-                                    } else { None }
-                                }
-                                None => None,
-                            }
-                        }
-                    };
-                    let pass = match pass {
-                        Some(p) => p,
-                        None => {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            if compact_buf.len() >= 1 << 17 {
-                                let _ = out.write_all(&compact_buf);
-                                compact_buf.clear();
-                            }
-                            return Ok(());
-                        }
-                    };
+                        return Ok(());
+                    }
+                    let pass = verdict.unwrap_or(false);
                     if pass {
                         let save = compact_buf.len();
                         if is_json_compact(raw) {

@@ -62,7 +62,7 @@
 
 use anyhow::Result;
 
-use crate::interpreter::{ArithExpr, MathUnary};
+use crate::interpreter::{ArithExpr, CmpVal, MathUnary};
 use crate::ir::{BinOp, UnaryOp};
 use crate::runtime::jq_mod_f64;
 use crate::value::{
@@ -1195,6 +1195,89 @@ pub fn apply_is_length_raw(raw: &[u8], buf: &mut Vec<u8>) -> RawApplyOutcome {
         }
         None => RawApplyOutcome::Bail,
     }
+}
+
+/// Apply a `.field <cmp> <val>` predicate (where `<val>` is either
+/// numeric or a quoted string) and report the boolean verdict via
+/// `emit`. Used by branch fast paths whose predicate shape is more
+/// general than `apply_field_const_cmp_raw` (which is numeric-only)
+/// or `apply_select_str_raw` (which is string-only).
+///
+/// Bail discipline:
+/// * Non-object input — Bail (jq's `Cannot index <type>` surfaces
+///   via the generic path).
+/// * Field absent — Bail (so jq's null comparison or cross-type
+///   ordering applies via the generic path).
+/// * For `CmpVal::Num`: field non-numeric — Bail.
+/// * For `CmpVal::Str`: field non-string or escape-bearing — Bail.
+/// * Non-comparison op (`Add`/`And`/etc.) — Bail (defensive).
+///
+/// On a passing type-guard, invokes `emit(verdict)` with the boolean
+/// result. The string comparison uses byte ordering (jq's lexicographic
+/// string comparison agrees with byte ordering for ASCII; non-ASCII
+/// strings without escapes also agree because UTF-8 byte-ordering
+/// preserves Unicode code-point ordering).
+pub fn apply_field_cmp_val_raw<F>(
+    raw: &[u8],
+    field: &str,
+    cmp_op: BinOp,
+    cmp_val: &CmpVal,
+    mut emit: F,
+) -> RawApplyOutcome
+where
+    F: FnMut(bool),
+{
+    if raw.is_empty() || raw[0] != b'{' {
+        return RawApplyOutcome::Bail;
+    }
+    if !matches!(
+        cmp_op,
+        BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne,
+    ) {
+        return RawApplyOutcome::Bail;
+    }
+    let pass = match cmp_val {
+        CmpVal::Num(threshold) => {
+            let n = match json_object_get_num(raw, 0, field) {
+                Some(v) => v,
+                None => return RawApplyOutcome::Bail,
+            };
+            match cmp_op {
+                BinOp::Gt => n > *threshold,
+                BinOp::Lt => n < *threshold,
+                BinOp::Ge => n >= *threshold,
+                BinOp::Le => n <= *threshold,
+                BinOp::Eq => n == *threshold,
+                BinOp::Ne => n != *threshold,
+                _ => unreachable!(),
+            }
+        }
+        CmpVal::Str(s) => {
+            let (vs, ve) = match json_object_get_field_raw(raw, 0, field) {
+                Some(r) => r,
+                None => return RawApplyOutcome::Bail,
+            };
+            let val = &raw[vs..ve];
+            if val.len() < 2 || val[0] != b'"' || val[val.len() - 1] != b'"'
+                || val[1..val.len() - 1].contains(&b'\\')
+            {
+                return RawApplyOutcome::Bail;
+            }
+            let inner = &val[1..val.len() - 1];
+            let arg = s.as_bytes();
+            match cmp_op {
+                BinOp::Eq => inner == arg,
+                BinOp::Ne => inner != arg,
+                BinOp::Gt => inner > arg,
+                BinOp::Lt => inner < arg,
+                BinOp::Ge => inner >= arg,
+                BinOp::Le => inner <= arg,
+                _ => unreachable!(),
+            }
+        }
+    };
+    emit(pass);
+    RawApplyOutcome::Emit
 }
 
 /// Apply the `if .field == null then T else F end` (or `!= null`)
