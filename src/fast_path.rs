@@ -62,6 +62,8 @@
 
 use anyhow::Result;
 
+use crate::ir::BinOp;
+use crate::runtime::jq_mod_f64;
 use crate::value::{
     KeyStr, Value, ObjInner, json_object_get_field_raw, json_object_get_fields_raw_buf,
     json_object_get_nested_field_raw, json_object_has_all_keys, json_object_has_any_key,
@@ -510,6 +512,71 @@ where
         None
     };
     on_value(val, content)
+}
+
+/// Apply the `.field | ltrimstr("prefix") | tonumber [ | <arith> ]*`
+/// raw-byte fast path on a single JSON record.
+///
+/// Bail discipline matches [`apply_field_test_raw`] for the structural
+/// type-guard (object input + quoted-string field with no `\` escapes),
+/// plus a numeric-parse Bail (#160): if the post-prefix-strip content
+/// can't be parsed as an `f64`, jq raises `... cannot be parsed as a
+/// number`, so the fast path returns [`RawApplyOutcome::Bail`] and lets
+/// the generic path produce the real error.
+///
+/// On success, the helper applies the post-`tonumber` arithmetic chain
+/// `arith_ops` (each `(BinOp, f64)` is folded left over the parsed
+/// number) and invokes `emit` with the final `f64` so the apply-site
+/// owns JSON-number formatting (see `push_jq_number_bytes`).
+///
+/// `arith_ops` may be empty (a bare `ltrimstr | tonumber` chain). Only
+/// the arithmetic ops jq actually emits in this lowering are honoured —
+/// `Add`, `Sub`, `Mul`, `Div`, `Mod`. Comparison/logical ops would
+/// require Boolean output and are not part of the fast path's contract;
+/// any other variant is treated as identity (defensive).
+pub fn apply_field_ltrimstr_tonumber_raw<F>(
+    raw: &[u8],
+    field: &str,
+    prefix: &[u8],
+    arith_ops: &[(BinOp, f64)],
+    mut emit: F,
+) -> RawApplyOutcome
+where
+    F: FnMut(f64),
+{
+    let (vs, ve) = match json_object_get_field_raw(raw, 0, field) {
+        Some(r) => r,
+        None => return RawApplyOutcome::Bail,
+    };
+    let val = &raw[vs..ve];
+    if val.len() < 2 || val[0] != b'"' || val[val.len() - 1] != b'"'
+        || val[1..val.len() - 1].contains(&b'\\')
+    {
+        return RawApplyOutcome::Bail;
+    }
+    let content = &val[1..val.len() - 1];
+    let num_bytes = if content.len() >= prefix.len() && &content[..prefix.len()] == prefix {
+        &content[prefix.len()..]
+    } else {
+        content
+    };
+    let num_str = unsafe { std::str::from_utf8_unchecked(num_bytes) };
+    let mut n: f64 = match fast_float::parse(num_str) {
+        Ok(n) => n,
+        Err(_) => return RawApplyOutcome::Bail,
+    };
+    for (op, c) in arith_ops {
+        n = match op {
+            BinOp::Add => n + c,
+            BinOp::Sub => n - c,
+            BinOp::Mul => n * c,
+            BinOp::Div => n / c,
+            BinOp::Mod => jq_mod_f64(n, *c).unwrap_or(f64::NAN),
+            _ => n,
+        };
+    }
+    emit(n);
+    RawApplyOutcome::Emit
 }
 
 /// Apply the `.field // fallback` raw-byte fast path on a single JSON
