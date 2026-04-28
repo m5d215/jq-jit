@@ -148,7 +148,8 @@ use jq_jit::fast_path::{
     apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
     apply_nested_field_access_raw, apply_object_compute_raw, apply_select_arith_cmp_raw,
     apply_select_cmp_raw, apply_select_field_null_raw, apply_select_str_raw,
-    apply_select_str_test_raw, apply_field_update_case_raw, apply_field_update_gsub_raw,
+    apply_del_field_raw, apply_del_fields_raw, apply_select_str_test_raw,
+    apply_field_update_case_raw, apply_field_update_gsub_raw,
     apply_field_update_length_raw, apply_field_update_slice_raw,
     apply_field_update_split_first_raw, apply_field_update_split_last_raw,
     apply_field_update_str_concat_raw, apply_field_update_str_map_raw,
@@ -11779,18 +11780,26 @@ fn real_main() {
                         let raw = &input_bytes[start..end];
                         if use_pretty_buf {
                             tmp.clear();
-                            if json_object_del_field(raw, 0, df, &mut tmp) {
-                                push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
-                                compact_buf.push(b'\n');
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            let outcome = apply_del_field_raw(raw, df, &mut tmp);
+                            match outcome {
+                                RawApplyOutcome::Emit => {
+                                    push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                                    compact_buf.push(b'\n');
+                                }
+                                RawApplyOutcome::Bail => {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
                             }
-                        } else if json_object_del_field(raw, 0, df, &mut compact_buf) {
-                            compact_buf.push(b'\n');
                         } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            let outcome = apply_del_field_raw(raw, df, &mut compact_buf);
+                            match outcome {
+                                RawApplyOutcome::Emit => compact_buf.push(b'\n'),
+                                RawApplyOutcome::Bail => {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                            }
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -11805,18 +11814,26 @@ fn real_main() {
                         let raw = &input_bytes[start..end];
                         if use_pretty_buf {
                             tmp.clear();
-                            if json_object_del_fields(raw, 0, &df_refs, &mut tmp) {
-                                push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
-                                compact_buf.push(b'\n');
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            let outcome = apply_del_fields_raw(raw, &df_refs, &mut tmp);
+                            match outcome {
+                                RawApplyOutcome::Emit => {
+                                    push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                                    compact_buf.push(b'\n');
+                                }
+                                RawApplyOutcome::Bail => {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
                             }
-                        } else if json_object_del_fields(raw, 0, &df_refs, &mut compact_buf) {
-                            compact_buf.push(b'\n');
                         } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            let outcome = apply_del_fields_raw(raw, &df_refs, &mut compact_buf);
+                            match outcome {
+                                RawApplyOutcome::Emit => compact_buf.push(b'\n'),
+                                RawApplyOutcome::Bail => {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                            }
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -21100,18 +21117,26 @@ fn real_main() {
                     let raw = &content_bytes[start..end];
                     if use_pretty_buf {
                         tmp.clear();
-                        if json_object_del_field(raw, 0, df, &mut tmp) {
-                            push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
-                            compact_buf.push(b'\n');
-                        } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        let outcome = apply_del_field_raw(raw, df, &mut tmp);
+                        match outcome {
+                            RawApplyOutcome::Emit => {
+                                push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                                compact_buf.push(b'\n');
+                            }
+                            RawApplyOutcome::Bail => {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
                         }
-                    } else if json_object_del_field(raw, 0, df, &mut compact_buf) {
-                        compact_buf.push(b'\n');
                     } else {
-                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        let outcome = apply_del_field_raw(raw, df, &mut compact_buf);
+                        match outcome {
+                            RawApplyOutcome::Emit => compact_buf.push(b'\n'),
+                            RawApplyOutcome::Bail => {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        }
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
@@ -21127,18 +21152,26 @@ fn real_main() {
                     let raw = &content_bytes[start..end];
                     if use_pretty_buf {
                         tmp.clear();
-                        if json_object_del_fields(raw, 0, &df_refs, &mut tmp) {
-                            push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
-                            compact_buf.push(b'\n');
-                        } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        let outcome = apply_del_fields_raw(raw, &df_refs, &mut tmp);
+                        match outcome {
+                            RawApplyOutcome::Emit => {
+                                push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                                compact_buf.push(b'\n');
+                            }
+                            RawApplyOutcome::Bail => {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
                         }
-                    } else if json_object_del_fields(raw, 0, &df_refs, &mut compact_buf) {
-                        compact_buf.push(b'\n');
                     } else {
-                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        let outcome = apply_del_fields_raw(raw, &df_refs, &mut compact_buf);
+                        match outcome {
+                            RawApplyOutcome::Emit => compact_buf.push(b'\n'),
+                            RawApplyOutcome::Bail => {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
+                        }
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
