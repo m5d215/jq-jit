@@ -146,7 +146,7 @@ use jq_jit::fast_path::{
     apply_field_gsub_raw, apply_field_ltrimstr_tonumber_raw, apply_field_match_raw,
     apply_field_scan_raw, apply_field_str_builtin_raw, apply_field_str_concat_raw,
     apply_field_binop_const_unary_raw, apply_field_str_reverse_raw, apply_field_test_raw,
-    apply_full_object_fields_raw, apply_two_field_binop_const_raw,
+    apply_field_unary_arith_raw, apply_full_object_fields_raw, apply_two_field_binop_const_raw,
     apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
     apply_nested_field_access_raw, apply_object_compute_raw, apply_select_arith_cmp_raw,
     apply_select_cmp_raw, apply_select_field_null_raw, apply_select_str_raw,
@@ -6146,57 +6146,16 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref field, ref uop, ref arith_steps)) = field_unary_arith {
-                    use jq_jit::ir::{BinOp, UnaryOp};
-                    let is_length = matches!(uop, UnaryOp::Length);
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        let base_val = if is_length {
-                            // Length: get field raw bytes and compute length
-                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
-                                let val = &raw[vs..ve];
-                                match val[0] {
-                                    b'"' => {
-                                        let inner = &val[1..ve-vs-1];
-                                        if !inner.contains(&b'\\') {
-                                            if inner.is_ascii() {
-                                                Some(inner.len() as f64)
-                                            } else {
-                                                Some(unsafe { std::str::from_utf8_unchecked(inner) }.chars().count() as f64)
-                                            }
-                                        } else { None }
-                                    }
-                                    b'[' | b'{' => {
-                                        json_value_length(val, 0).map(|l| l as f64)
-                                    }
-                                    b'n' => Some(0.0), // null length = 0
-                                    _ => json_object_get_num(raw, 0, field).map(|n| n.abs()),
-                                }
-                            } else { Some(0.0) } // missing field = null length = 0
-                        } else {
-                            json_object_get_num(raw, 0, field).map(|n| match uop {
-                                UnaryOp::Floor => n.floor(),
-                                UnaryOp::Ceil => n.ceil(),
-                                UnaryOp::Sqrt => n.sqrt(),
-                                UnaryOp::Fabs | UnaryOp::Abs => n.abs(),
-                                UnaryOp::Round => n.round(),
-                                _ => n,
-                            })
-                        };
-                        if let Some(base) = base_val {
-                            let mut v = base;
-                            for (op, c) in arith_steps {
-                                v = match op {
-                                    BinOp::Add => v + c,
-                                    BinOp::Sub => v - c,
-                                    BinOp::Mul => v * c,
-                                    BinOp::Div => v / c,
-                                    BinOp::Mod => jq_jit::runtime::jq_mod_f64(v, *c).unwrap_or(f64::NAN),
-                                    _ => v,
-                                };
-                            }
-                            push_jq_number_bytes(&mut compact_buf, v);
-                            compact_buf.push(b'\n');
-                        } else {
+                        let outcome = apply_field_unary_arith_raw(
+                            raw, field, *uop, arith_steps,
+                            |result| {
+                                push_jq_number_bytes(&mut compact_buf, result);
+                                compact_buf.push(b'\n');
+                            },
+                        );
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -19258,49 +19217,17 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some((ref field, ref uop, ref arith_steps)) = field_unary_arith {
-                use jq_jit::ir::{BinOp, UnaryOp};
                 let content_bytes = content.as_bytes();
-                let is_length = matches!(uop, UnaryOp::Length);
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    let base_val = if is_length {
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
-                            let val = &raw[vs..ve];
-                            match val[0] {
-                                b'"' => {
-                                    let inner = &val[1..ve-vs-1];
-                                    if !inner.contains(&b'\\') {
-                                        if inner.is_ascii() { Some(inner.len() as f64) }
-                                        else { Some(unsafe { std::str::from_utf8_unchecked(inner) }.chars().count() as f64) }
-                                    } else { None }
-                                }
-                                b'[' | b'{' => json_value_length(val, 0).map(|l| l as f64),
-                                b'n' => Some(0.0),
-                                _ => json_object_get_num(raw, 0, field).map(|n| n.abs()),
-                            }
-                        } else { Some(0.0) }
-                    } else {
-                        json_object_get_num(raw, 0, field).map(|n| match uop {
-                            UnaryOp::Floor => n.floor(), UnaryOp::Ceil => n.ceil(),
-                            UnaryOp::Sqrt => n.sqrt(), UnaryOp::Fabs | UnaryOp::Abs => n.abs(),
-                            UnaryOp::Round => n.round(), _ => n,
-                        })
-                    };
-                    if let Some(base) = base_val {
-                        let mut v = base;
-                        for (op, c) in arith_steps {
-                            v = match op {
-                                BinOp::Add => v + c,
-                                BinOp::Sub => v - c,
-                                BinOp::Mul => v * c,
-                                BinOp::Div => v / c,
-                                BinOp::Mod => jq_jit::runtime::jq_mod_f64(v, *c).unwrap_or(f64::NAN),
-                                _ => v,
-                            };
-                        }
-                        push_jq_number_bytes(&mut compact_buf, v);
-                        compact_buf.push(b'\n');
-                    } else {
+                    let outcome = apply_field_unary_arith_raw(
+                        raw, field, *uop, arith_steps,
+                        |result| {
+                            push_jq_number_bytes(&mut compact_buf, result);
+                            compact_buf.push(b'\n');
+                        },
+                    );
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }

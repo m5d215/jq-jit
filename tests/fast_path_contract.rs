@@ -23,7 +23,7 @@ use jq_jit::fast_path::{
     apply_field_update_split_first_raw, apply_field_update_split_last_raw,
     apply_field_update_str_concat_raw, apply_field_update_str_map_raw,
     apply_field_update_test_raw, apply_field_update_tostring_raw,
-    apply_field_binop_const_unary_raw,
+    apply_field_binop_const_unary_raw, apply_field_unary_arith_raw,
     apply_field_update_trim_raw, apply_select_arith_cmp_raw, apply_select_cmp_raw,
     apply_select_field_null_raw, apply_select_str_raw, apply_select_str_test_raw,
     apply_two_field_binop_const_raw,
@@ -2522,6 +2522,162 @@ fn raw_field_binop_const_unary_non_object_input_bails() {
         let mut emitted: Vec<f64> = Vec::new();
         let outcome = apply_field_binop_const_unary_raw(
             raw, "x", BinOp::Add, 1.0, None, false, |n| emitted.push(n),
+        );
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `(.field | <unary>) <op1> <c1> ...` — unary then arith chain. Helper Bails
+// on non-object / unsupported unary / non-numeric-for-numeric-unary /
+// escape-bearing string for length / non-finite final.
+
+#[test]
+fn raw_field_unary_arith_length_string() {
+    // (.x | length) + 5 with x="abc" → 3 + 5 = 8
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_unary_arith_raw(
+        b"{\"x\":\"abc\"}", "x", UnaryOp::Length, &[(BinOp::Add, 5.0)],
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![8.0]);
+}
+
+#[test]
+fn raw_field_unary_arith_length_array() {
+    // (.x | length) * 2 with x=[1,2,3] → 3 * 2 = 6
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_unary_arith_raw(
+        b"{\"x\":[1,2,3]}", "x", UnaryOp::Length, &[(BinOp::Mul, 2.0)],
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![6.0]);
+}
+
+#[test]
+fn raw_field_unary_arith_length_null_value() {
+    // jq: `null | length = 0`. (.x | length) + 1 with x=null → 1
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_unary_arith_raw(
+        b"{\"x\":null}", "x", UnaryOp::Length, &[(BinOp::Add, 1.0)],
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![1.0]);
+}
+
+#[test]
+fn raw_field_unary_arith_length_missing_field_is_zero() {
+    // jq: missing field is null, null | length = 0. (.x | length) + 7 → 7
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_unary_arith_raw(
+        b"{\"y\":1}", "x", UnaryOp::Length, &[(BinOp::Add, 7.0)],
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![7.0]);
+}
+
+#[test]
+fn raw_field_unary_arith_length_number_field_uses_abs() {
+    // jq: number | length = abs. (.x | length) + 0 with x=-7 → 7
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_unary_arith_raw(
+        b"{\"x\":-7}", "x", UnaryOp::Length, &[(BinOp::Add, 0.0)],
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![7.0]);
+}
+
+#[test]
+fn raw_field_unary_arith_length_escape_bearing_string_bails() {
+    // Raw scanner can't decode `\n` to count code points correctly.
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_unary_arith_raw(
+        br#"{"x":"a\nb"}"#, "x", UnaryOp::Length, &[(BinOp::Add, 0.0)],
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_field_unary_arith_floor_then_chain() {
+    // (.x | floor) + 1 with x=3.7 → 4
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_unary_arith_raw(
+        b"{\"x\":3.7}", "x", UnaryOp::Floor, &[(BinOp::Add, 1.0)],
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![4.0]);
+}
+
+#[test]
+fn raw_field_unary_arith_numeric_op_non_numeric_field_bails() {
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_unary_arith_raw(
+        b"{\"x\":\"hi\"}", "x", UnaryOp::Floor, &[(BinOp::Add, 1.0)],
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_field_unary_arith_unsupported_unary_bails() {
+    for uop in [UnaryOp::ToString, UnaryOp::Type, UnaryOp::Explode] {
+        let mut emitted: Vec<f64> = Vec::new();
+        let outcome = apply_field_unary_arith_raw(
+            b"{\"x\":1}", "x", uop, &[(BinOp::Add, 0.0)], |n| emitted.push(n),
+        );
+        assert!(matches!(outcome, RawApplyOutcome::Bail), "uop={:?}", uop);
+    }
+}
+
+#[test]
+fn raw_field_unary_arith_non_arith_step_bails() {
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_unary_arith_raw(
+        b"{\"x\":1}", "x", UnaryOp::Abs, &[(BinOp::Eq, 1.0)], |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+}
+
+#[test]
+fn raw_field_unary_arith_div_by_zero_bails() {
+    // ((.x | abs) / 0) → inf → Bail (was emitting saturated 1.797e+308 pre-fix)
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_unary_arith_raw(
+        b"{\"x\":4}", "x", UnaryOp::Abs, &[(BinOp::Div, 0.0)], |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_field_unary_arith_non_object_input_bails() {
+    // Pre-existing #83-class bug: prior fast path returned `0` for length on
+    // non-object roots instead of jq's `Cannot index <type>` error.
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut emitted: Vec<f64> = Vec::new();
+        let outcome = apply_field_unary_arith_raw(
+            raw, "x", UnaryOp::Length, &[(BinOp::Add, 0.0)], |n| emitted.push(n),
         );
         assert!(
             matches!(outcome, RawApplyOutcome::Bail),
