@@ -66,8 +66,8 @@ use crate::ir::BinOp;
 use crate::runtime::jq_mod_f64;
 use crate::value::{
     KeyStr, Value, ObjInner, json_object_get_field_raw, json_object_get_fields_raw_buf,
-    json_object_get_nested_field_raw, json_object_get_two_nums, json_object_has_all_keys,
-    json_object_has_any_key, json_object_has_key,
+    json_object_get_nested_field_raw, json_object_get_num, json_object_get_two_nums,
+    json_object_has_all_keys, json_object_has_any_key, json_object_has_key,
 };
 
 /// A fast path whose type-dispatch obligations are encoded in its
@@ -714,6 +714,54 @@ where
     };
     if !result.is_finite() {
         return RawApplyOutcome::Bail;
+    }
+    emit(result);
+    RawApplyOutcome::Emit
+}
+
+/// Apply the `.field <op1> <c1> <op2> <c2> ...` raw-byte arithmetic chain
+/// fast path on a single JSON record (a left-fold of `(BinOp, f64)` pairs
+/// over a single numeric field).
+///
+/// The detector rejects compile-time div-by-zero / mod-by-zero constants
+/// (`detect_field_arith_chain` in `src/interpreter.rs`), so the chain's
+/// `Div`/`Mod` ops are guaranteed to have a non-zero divisor. The
+/// helper trusts this invariant — non-finite results (e.g. overflow)
+/// are emitted as-is, matching `push_jq_number_bytes`'s saturating
+/// behaviour.
+///
+/// Bail discipline:
+/// * Field absent or non-numeric — [`RawApplyOutcome::Bail`].
+/// * Non-arithmetic op (`Eq`/`And`/etc.) — [`RawApplyOutcome::Bail`]
+///   (defensive — the detector should never produce these).
+/// * Non-object input — [`RawApplyOutcome::Bail`] (number lookup
+///   fails).
+///
+/// On a passing type-guard, invokes `emit(result)` so the apply-site
+/// owns JSON-number formatting.
+pub fn apply_field_arith_chain_raw<F>(
+    raw: &[u8],
+    field: &str,
+    ops: &[(BinOp, f64)],
+    mut emit: F,
+) -> RawApplyOutcome
+where
+    F: FnMut(f64),
+{
+    let n = match json_object_get_num(raw, 0, field) {
+        Some(n) => n,
+        None => return RawApplyOutcome::Bail,
+    };
+    let mut result = n;
+    for (op, c) in ops {
+        result = match op {
+            BinOp::Add => result + c,
+            BinOp::Sub => result - c,
+            BinOp::Mul => result * c,
+            BinOp::Div => result / c,
+            BinOp::Mod => jq_mod_f64(result, *c).unwrap_or(f64::NAN),
+            _ => return RawApplyOutcome::Bail,
+        };
     }
     emit(result);
     RawApplyOutcome::Emit
