@@ -368,6 +368,55 @@ where
     RawApplyOutcome::Emit
 }
 
+/// Apply the `.field | match("pattern"; flags)` raw-byte fast path on a
+/// single JSON record.
+///
+/// Bail discipline matches [`apply_field_test_raw`] (only quoted-string
+/// fields with no backslash escapes are handled by the raw scanner; the
+/// generic path takes everything else, including the type errors jq raises
+/// on non-strings):
+///
+/// * Object input, field present, value is a quoted string with no `\`
+///   escapes — runs `re.captures(content)`. On a match, invokes
+///   `on_match(content, captures)` so the caller can build jq's
+///   `{offset,length,string,captures:[...]}` output bytes. On no match,
+///   `on_match` is **not** called (jq emits no output for a non-match —
+///   `match` is multi-output / 0-arity for "no match").
+/// * Field absent, value isn't a quoted string, or the string contains
+///   any backslash escape — returns [`RawApplyOutcome::Bail`] so the
+///   generic path produces jq's verdict (decoded escapes, type errors).
+/// * Non-object input — returns [`RawApplyOutcome::Bail`] (the field
+///   fetch fails, so this is collapsed into the same Bail branch).
+///
+/// The caller owns the compiled `regex::Regex` and any
+/// `capture_names`-style metadata (typically built once outside the
+/// stream loop) so they can be reused across the input stream.
+pub fn apply_field_match_raw<F>(
+    raw: &[u8],
+    field: &str,
+    re: &regex::Regex,
+    mut on_match: F,
+) -> RawApplyOutcome
+where
+    F: FnMut(&str, &regex::Captures<'_>),
+{
+    let (vs, ve) = match json_object_get_field_raw(raw, 0, field) {
+        Some(r) => r,
+        None => return RawApplyOutcome::Bail,
+    };
+    let val = &raw[vs..ve];
+    if val.len() < 2 || val[0] != b'"' || val[val.len() - 1] != b'"'
+        || val[1..val.len() - 1].contains(&b'\\')
+    {
+        return RawApplyOutcome::Bail;
+    }
+    let content = unsafe { std::str::from_utf8_unchecked(&val[1..val.len() - 1]) };
+    if let Some(caps) = re.captures(content) {
+        on_match(content, &caps);
+    }
+    RawApplyOutcome::Emit
+}
+
 /// Apply the `.field // fallback` raw-byte fast path on a single JSON
 /// record.
 ///
