@@ -3640,3 +3640,50 @@ select(.x * 2 > 8)
 [ (select(.x * 2 > 8))? ]
 [1,2,3]
 []
+
+# #83 Phase B: select(.field <cmp> "value") apply-site uses
+# RawApplyOutcome::Bail.
+# Eq happy path.
+select(.x == "foo")
+{"x":"foo"}
+{"x":"foo"}
+
+# Eq with escape-bearing string field: bail; generic decodes correctly.
+# Field has `a\nb` (escaped newline), expected literal is `"a\nb"`.
+select(.x == "a\nb")
+{"x":"a\nb"}
+{"x":"a\nb"}
+
+# Ne with non-string field: byte compare says ne → emits.
+select(.x != "foo")
+{"x":42}
+{"x":42}
+
+# Ordering on string fields.
+select(.x > "bar")
+{"x":"foo"}
+{"x":"foo"}
+
+# Ordering on non-string field: bail; jq's cross-type ordering says
+# array > string → emits.
+select(.x > "value")
+{"x":[1,2]}
+{"x":[1,2]}
+
+# Field missing: bail to generic; jq's null < "foo" so Lt emits.
+select(.x < "foo")
+{"y":1}
+{"y":1}
+
+# Non-object input under `?`
+[ (select(.x == "foo"))? ]
+42
+[]
+
+[ (select(.x > "bar"))? ]
+"hi"
+[]
+
+[ (select(.x < "foo"))? ]
+[1,2,3]
+[]

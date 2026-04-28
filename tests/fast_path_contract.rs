@@ -18,6 +18,7 @@ use jq_jit::fast_path::{
     apply_full_object_fields_raw, apply_has_field_raw, apply_has_multi_field_raw,
     apply_multi_field_access_raw, apply_nested_field_access_raw, apply_object_compute_raw,
     apply_select_arith_cmp_raw, apply_select_cmp_raw, apply_select_field_null_raw,
+    apply_select_str_raw,
 };
 use jq_jit::interpreter::Filter;
 use jq_jit::ir::BinOp;
@@ -2636,6 +2637,164 @@ fn raw_select_arith_cmp_non_cmp_op_bails() {
         &[(BinOp::Add, 1.0)],
         BinOp::Add,
         5.0,
+        |r| seen.push(r.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(seen.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// `select(.field <cmp> "value")` — string equality / ordering predicate.
+// Eq/Ne can byte-compare on plain strings and non-strings (jq's cross-type
+// equality is "never equal" for non-string vs string, matching the byte
+// comparison result). Ordering ops (Gt/Lt/Ge/Le) require an escape-free
+// quoted string — anything else bails so jq's cross-type ordering applies.
+
+#[test]
+fn raw_select_str_eq_emits_match() {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_str_raw(
+        b"{\"x\":\"foo\"}",
+        "x",
+        BinOp::Eq,
+        "foo",
+        |r| seen.push(r.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(seen, vec![b"{\"x\":\"foo\"}".to_vec()]);
+}
+
+#[test]
+fn raw_select_str_eq_skips_when_different() {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_str_raw(
+        b"{\"x\":\"bar\"}",
+        "x",
+        BinOp::Eq,
+        "foo",
+        |r| seen.push(r.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert!(seen.is_empty());
+}
+
+#[test]
+fn raw_select_str_eq_non_string_field_emits_when_ne() {
+    // Eq on non-string field byte-compares: 42 != "foo" so Ne fires.
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_str_raw(
+        b"{\"x\":42}",
+        "x",
+        BinOp::Ne,
+        "foo",
+        |r| seen.push(r.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(seen, vec![b"{\"x\":42}".to_vec()]);
+}
+
+#[test]
+fn raw_select_str_eq_escape_bearing_string_bails() {
+    // The raw scanner can't safely byte-compare strings with `\` escapes
+    // (they'd compare unequal even when the decoded text matches), so
+    // bail. Build the bytes explicitly to avoid editor-side escape
+    // interpretation.
+    let raw: Vec<u8> = b"{\"x\":\"a\\nb\"}".to_vec();
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome =
+        apply_select_str_raw(&raw, "x", BinOp::Eq, "a\nb", |r| seen.push(r.to_vec()));
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(seen.is_empty());
+}
+
+#[test]
+fn raw_select_str_ordering_emits_on_match() {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_str_raw(
+        b"{\"x\":\"foo\"}",
+        "x",
+        BinOp::Gt,
+        "bar",
+        |r| seen.push(r.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(seen, vec![b"{\"x\":\"foo\"}".to_vec()]);
+}
+
+#[test]
+fn raw_select_str_ordering_non_string_field_bails() {
+    // jq's cross-type ordering: array > string. Bail so generic decides.
+    for inner in [&b"{\"x\":42}"[..], &b"{\"x\":null}"[..], &b"{\"x\":[1]}"[..]] {
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        let outcome =
+            apply_select_str_raw(inner, "x", BinOp::Gt, "bar", |r| seen.push(r.to_vec()));
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for non-string field input {:?}, got {:?}",
+            std::str::from_utf8(inner).unwrap(),
+            outcome,
+        );
+        assert!(seen.is_empty());
+    }
+}
+
+#[test]
+fn raw_select_str_ordering_escape_bearing_field_bails() {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_str_raw(
+        br#"{"x":"a\nb"}"#,
+        "x",
+        BinOp::Gt,
+        "bar",
+        |r| seen.push(r.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(seen.is_empty());
+}
+
+#[test]
+fn raw_select_str_field_missing_bails() {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_str_raw(
+        b"{\"y\":\"foo\"}",
+        "x",
+        BinOp::Eq,
+        "foo",
+        |r| seen.push(r.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(seen.is_empty());
+}
+
+#[test]
+fn raw_select_str_non_object_bails() {
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        let outcome =
+            apply_select_str_raw(raw, "x", BinOp::Eq, "foo", |r| seen.push(r.to_vec()));
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for select_str input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert!(seen.is_empty());
+    }
+}
+
+#[test]
+fn raw_select_str_non_cmp_op_bails() {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_str_raw(
+        b"{\"x\":\"foo\"}",
+        "x",
+        BinOp::Add,
+        "foo",
         |r| seen.push(r.to_vec()),
     );
     assert!(matches!(outcome, RawApplyOutcome::Bail));

@@ -147,7 +147,7 @@ use jq_jit::fast_path::{
     apply_field_str_reverse_raw, apply_field_test_raw, apply_full_object_fields_raw,
     apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
     apply_nested_field_access_raw, apply_object_compute_raw, apply_select_arith_cmp_raw,
-    apply_select_cmp_raw, apply_select_field_null_raw, RawApplyOutcome,
+    apply_select_cmp_raw, apply_select_field_null_raw, apply_select_str_raw, RawApplyOutcome,
 };
 
 fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -7518,43 +7518,18 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref field, ref op, ref val)) = select_str {
-                    use jq_jit::ir::BinOp;
-                    // Build expected JSON string: "value" (with quotes)
-                    let mut expected = Vec::with_capacity(val.len() + 2);
-                    expected.push(b'"');
-                    expected.extend_from_slice(val.as_bytes());
-                    expected.push(b'"');
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
-                            let val_bytes = &raw[vs..ve];
-                            let pass = match op {
-                                BinOp::Eq => val_bytes == expected.as_slice(),
-                                BinOp::Ne => val_bytes != expected.as_slice(),
-                                BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le => {
-                                    // String comparison: extract inner string (without quotes)
-                                    if val_bytes.len() >= 2 && val_bytes[0] == b'"' && val_bytes[val_bytes.len()-1] == b'"'
-                                        && !val_bytes[1..val_bytes.len()-1].contains(&b'\\') {
-                                        let inner = &val_bytes[1..val_bytes.len()-1];
-                                        let cmp = inner.cmp(val.as_bytes());
-                                        match op {
-                                            BinOp::Gt => cmp == std::cmp::Ordering::Greater,
-                                            BinOp::Lt => cmp == std::cmp::Ordering::Less,
-                                            BinOp::Ge => cmp != std::cmp::Ordering::Less,
-                                            BinOp::Le => cmp != std::cmp::Ordering::Greater,
-                                            _ => false,
-                                        }
-                                    } else { false }
-                                }
-                                _ => false,
-                            };
-                            if pass {
-                                emit_raw_ln!(&mut compact_buf, raw);
-                                if compact_buf.len() >= 1 << 17 {
-                                    let _ = out.write_all(&compact_buf);
-                                    compact_buf.clear();
-                                }
-                            }
+                        let outcome = apply_select_str_raw(raw, field, *op, val, |record| {
+                            emit_raw_ln!(&mut compact_buf, record);
+                        });
+                        if let RawApplyOutcome::Bail = outcome {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
                         }
                         Ok(())
                     })
@@ -15219,42 +15194,19 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some((ref field, ref op, ref val)) = select_str {
-                use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
-                let mut expected = Vec::with_capacity(val.len() + 2);
-                expected.push(b'"');
-                expected.extend_from_slice(val.as_bytes());
-                expected.push(b'"');
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
-                        let val_bytes = &raw[vs..ve];
-                        let pass = match op {
-                            BinOp::Eq => val_bytes == expected.as_slice(),
-                            BinOp::Ne => val_bytes != expected.as_slice(),
-                            BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le => {
-                                if val_bytes.len() >= 2 && val_bytes[0] == b'"' && val_bytes[val_bytes.len()-1] == b'"'
-                                    && !val_bytes[1..val_bytes.len()-1].contains(&b'\\') {
-                                    let inner = &val_bytes[1..val_bytes.len()-1];
-                                    let cmp = inner.cmp(val.as_bytes());
-                                    match op {
-                                        BinOp::Gt => cmp == std::cmp::Ordering::Greater,
-                                        BinOp::Lt => cmp == std::cmp::Ordering::Less,
-                                        BinOp::Ge => cmp != std::cmp::Ordering::Less,
-                                        BinOp::Le => cmp != std::cmp::Ordering::Greater,
-                                        _ => false,
-                                    }
-                                } else { false }
-                            }
-                            _ => false,
-                        };
-                        if pass {
-                            emit_raw_ln!(&mut compact_buf, raw);
-                            if compact_buf.len() >= 1 << 17 {
-                                let _ = out.write_all(&compact_buf);
-                                compact_buf.clear();
-                            }
-                        }
+                    let outcome = apply_select_str_raw(raw, field, *op, val, |record| {
+                        emit_raw_ln!(&mut compact_buf, record);
+                    });
+                    if let RawApplyOutcome::Bail = outcome {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
                     }
                     Ok(())
                 })

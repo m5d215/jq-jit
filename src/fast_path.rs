@@ -941,6 +941,92 @@ where
     RawApplyOutcome::Emit
 }
 
+/// Apply the `select(.field <cmp> "value")` raw-byte fast path on a
+/// single JSON record (`<cmp>` ∈ Gt/Lt/Ge/Le/Eq/Ne).
+///
+/// Bail discipline:
+/// * Non-object input — [`RawApplyOutcome::Bail`] (jq raises
+///   `Cannot index <type>`).
+/// * Field absent — [`RawApplyOutcome::Bail`] (jq's `null cmp "x"`
+///   has cross-type-order semantics the raw path can't represent).
+/// * For Eq/Ne: field value is a quoted string with any `\` escape —
+///   [`RawApplyOutcome::Bail`] (raw byte equality would say "no
+///   match" while jq decodes the escape and may match).
+/// * For Gt/Lt/Ge/Le: field value isn't an escape-free quoted string —
+///   [`RawApplyOutcome::Bail`] (jq's cross-type ordering applies, and
+///   the raw scanner can't decode escape-bearing strings).
+/// * Non-comparison op (`Add`/`And`/etc.) — [`RawApplyOutcome::Bail`]
+///   (defensive).
+///
+/// On a passing predicate the helper invokes `emit_match(raw)` with
+/// the original record bytes.
+pub fn apply_select_str_raw<F>(
+    raw: &[u8],
+    field: &str,
+    cmp_op: BinOp,
+    expected: &str,
+    mut emit_match: F,
+) -> RawApplyOutcome
+where
+    F: FnMut(&[u8]),
+{
+    if raw.first() != Some(&b'{') {
+        return RawApplyOutcome::Bail;
+    }
+    let (vs, ve) = match json_object_get_field_raw(raw, 0, field) {
+        Some(r) => r,
+        None => return RawApplyOutcome::Bail,
+    };
+    let val_bytes = &raw[vs..ve];
+    let pass = match cmp_op {
+        BinOp::Eq | BinOp::Ne => {
+            // Eq/Ne can byte-compare directly *unless* the field is an
+            // escape-bearing string — then the raw bytes wouldn't match
+            // a literal that decodes equal.
+            if val_bytes.len() >= 2 && val_bytes[0] == b'"' && val_bytes[val_bytes.len() - 1] == b'"'
+                && val_bytes[1..val_bytes.len() - 1].contains(&b'\\')
+            {
+                return RawApplyOutcome::Bail;
+            }
+            // Build expected JSON: "value"
+            // For non-string field values (numbers, etc.), jq's
+            // cross-type equality says they're never equal to a string,
+            // which matches our byte comparison (val_bytes ≠ "value").
+            let mut want = Vec::with_capacity(expected.len() + 2);
+            want.push(b'"');
+            want.extend_from_slice(expected.as_bytes());
+            want.push(b'"');
+            let eq = val_bytes == want.as_slice();
+            if matches!(cmp_op, BinOp::Eq) { eq } else { !eq }
+        }
+        BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le => {
+            // Ordering only works on string-with-no-escape; everything
+            // else (non-string, escape-bearing) routes through generic
+            // for jq's cross-type ordering rules.
+            if val_bytes.len() < 2 || val_bytes[0] != b'"'
+                || val_bytes[val_bytes.len() - 1] != b'"'
+                || val_bytes[1..val_bytes.len() - 1].contains(&b'\\')
+            {
+                return RawApplyOutcome::Bail;
+            }
+            let inner = &val_bytes[1..val_bytes.len() - 1];
+            let cmp = inner.cmp(expected.as_bytes());
+            match cmp_op {
+                BinOp::Gt => cmp == std::cmp::Ordering::Greater,
+                BinOp::Lt => cmp == std::cmp::Ordering::Less,
+                BinOp::Ge => cmp != std::cmp::Ordering::Less,
+                BinOp::Le => cmp != std::cmp::Ordering::Greater,
+                _ => unreachable!(),
+            }
+        }
+        _ => return RawApplyOutcome::Bail,
+    };
+    if pass {
+        emit_match(raw);
+    }
+    RawApplyOutcome::Emit
+}
+
 /// Apply the `select(.field <arith_chain> <cmp> N)` raw-byte fast path
 /// on a single JSON record.
 ///
