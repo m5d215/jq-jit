@@ -146,8 +146,8 @@ use jq_jit::fast_path::{
     apply_field_scan_raw, apply_field_str_builtin_raw, apply_field_str_concat_raw,
     apply_field_str_reverse_raw, apply_field_test_raw, apply_full_object_fields_raw,
     apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
-    apply_nested_field_access_raw, apply_object_compute_raw, apply_select_cmp_raw,
-    apply_select_field_null_raw, RawApplyOutcome,
+    apply_nested_field_access_raw, apply_object_compute_raw, apply_select_arith_cmp_raw,
+    apply_select_cmp_raw, apply_select_field_null_raw, RawApplyOutcome,
 };
 
 fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -7499,30 +7499,21 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref field, ref arith_ops, ref cmp_op, threshold)) = select_arith_cmp {
-                    use jq_jit::ir::BinOp;
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if let Some(mut val) = json_object_get_num(raw, 0, field) {
-                            for (aop, n) in arith_ops {
-                                val = match aop {
-                                    BinOp::Add => val + n, BinOp::Sub => val - n,
-                                    BinOp::Mul => val * n, BinOp::Div => val / n,
-                                    BinOp::Mod => jq_jit::runtime::jq_mod_f64(val, n).unwrap_or(f64::NAN), _ => val,
-                                };
-                            }
-                            let pass = match cmp_op {
-                                BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
-                                BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
-                                BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
-                                _ => false,
-                            };
-                            if pass {
-                                emit_raw_ln!(&mut compact_buf, raw);
-                                if compact_buf.len() >= 1 << 17 {
-                                    let _ = out.write_all(&compact_buf);
-                                    compact_buf.clear();
-                                }
-                            }
+                        let outcome = apply_select_arith_cmp_raw(
+                            raw, field, arith_ops, *cmp_op, threshold,
+                            |record| {
+                                emit_raw_ln!(&mut compact_buf, record);
+                            },
+                        );
+                        if let RawApplyOutcome::Bail = outcome {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
                         }
                         Ok(())
                     })
@@ -15208,31 +15199,22 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some((ref field, ref arith_ops, ref cmp_op, threshold)) = select_arith_cmp {
-                use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if let Some(mut val) = json_object_get_num(raw, 0, field) {
-                        for (aop, n) in arith_ops {
-                            val = match aop {
-                                BinOp::Add => val + n, BinOp::Sub => val - n,
-                                BinOp::Mul => val * n, BinOp::Div => val / n,
-                                BinOp::Mod => jq_jit::runtime::jq_mod_f64(val, n).unwrap_or(f64::NAN), _ => val,
-                            };
-                        }
-                        let pass = match cmp_op {
-                            BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
-                            BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
-                            BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
-                            _ => false,
-                        };
-                        if pass {
-                            emit_raw_ln!(&mut compact_buf, raw);
-                            if compact_buf.len() >= 1 << 17 {
-                                let _ = out.write_all(&compact_buf);
-                                compact_buf.clear();
-                            }
-                        }
+                    let outcome = apply_select_arith_cmp_raw(
+                        raw, field, arith_ops, *cmp_op, threshold,
+                        |record| {
+                            emit_raw_ln!(&mut compact_buf, record);
+                        },
+                    );
+                    if let RawApplyOutcome::Bail = outcome {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
                     }
                     Ok(())
                 })

@@ -17,7 +17,7 @@ use jq_jit::fast_path::{
     apply_field_str_concat_raw, apply_field_str_reverse_raw, apply_field_test_raw,
     apply_full_object_fields_raw, apply_has_field_raw, apply_has_multi_field_raw,
     apply_multi_field_access_raw, apply_nested_field_access_raw, apply_object_compute_raw,
-    apply_select_cmp_raw, apply_select_field_null_raw,
+    apply_select_arith_cmp_raw, apply_select_cmp_raw, apply_select_field_null_raw,
 };
 use jq_jit::interpreter::Filter;
 use jq_jit::ir::BinOp;
@@ -2510,4 +2510,134 @@ fn raw_select_field_null_non_object_bails_for_type_error() {
         );
         assert!(seen.is_empty());
     }
+}
+
+// ---------------------------------------------------------------------------
+// `select(.field <arith_chain> <cmp> N)` — same Bail discipline as
+// select_cmp plus the arithmetic chain. Fixes silent-skip on non-object
+// (jq raises) and non-numeric field (jq raises for non-add ops).
+
+#[test]
+fn raw_select_arith_cmp_emits_record_when_predicate_fires() {
+    // (5 * 2) > 8 → true
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_arith_cmp_raw(
+        b"{\"x\":5}",
+        "x",
+        &[(BinOp::Mul, 2.0)],
+        BinOp::Gt,
+        8.0,
+        |r| seen.push(r.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(seen, vec![b"{\"x\":5}".to_vec()]);
+}
+
+#[test]
+fn raw_select_arith_cmp_skips_when_predicate_fails() {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_arith_cmp_raw(
+        b"{\"x\":1}",
+        "x",
+        &[(BinOp::Mul, 2.0)],
+        BinOp::Gt,
+        8.0,
+        |r| seen.push(r.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert!(seen.is_empty());
+}
+
+#[test]
+fn raw_select_arith_cmp_non_object_bails_for_type_error() {
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        let outcome = apply_select_arith_cmp_raw(
+            raw,
+            "x",
+            &[(BinOp::Add, 1.0)],
+            BinOp::Gt,
+            5.0,
+            |r| seen.push(r.to_vec()),
+        );
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for select_arith_cmp input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert!(seen.is_empty());
+    }
+}
+
+#[test]
+fn raw_select_arith_cmp_field_missing_bails() {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_arith_cmp_raw(
+        b"{\"y\":5}",
+        "x",
+        &[(BinOp::Add, 1.0)],
+        BinOp::Gt,
+        5.0,
+        |r| seen.push(r.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(seen.is_empty());
+}
+
+#[test]
+fn raw_select_arith_cmp_non_numeric_field_bails() {
+    for inner in [&b"{\"x\":\"hi\"}"[..], &b"{\"x\":null}"[..], &b"{\"x\":[1]}"[..]] {
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        let outcome = apply_select_arith_cmp_raw(
+            inner,
+            "x",
+            &[(BinOp::Add, 1.0)],
+            BinOp::Gt,
+            5.0,
+            |r| seen.push(r.to_vec()),
+        );
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for non-numeric field input {:?}, got {:?}",
+            std::str::from_utf8(inner).unwrap(),
+            outcome,
+        );
+        assert!(seen.is_empty());
+    }
+}
+
+#[test]
+fn raw_select_arith_cmp_non_arith_op_bails() {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_arith_cmp_raw(
+        b"{\"x\":5}",
+        "x",
+        &[(BinOp::Eq, 5.0)],
+        BinOp::Gt,
+        5.0,
+        |r| seen.push(r.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(seen.is_empty());
+}
+
+#[test]
+fn raw_select_arith_cmp_non_cmp_op_bails() {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_arith_cmp_raw(
+        b"{\"x\":5}",
+        "x",
+        &[(BinOp::Add, 1.0)],
+        BinOp::Add,
+        5.0,
+        |r| seen.push(r.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(seen.is_empty());
 }

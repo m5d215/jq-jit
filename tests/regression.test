@@ -3606,3 +3606,37 @@ select(.x != null)
 [ (select(.x == null))? ]
 [1,2,3]
 []
+
+# #83 Phase B: select(.field <arith_chain> <cmp> N) apply-site uses
+# RawApplyOutcome::Bail.
+# Predicate fires after the chain.
+select(.x * 2 > 8)
+{"x":5}
+{"x":5}
+
+[ select(.x * 2 > 8) ]
+{"x":3}
+[]
+
+# Field missing: bail to generic; jq's null + 1 = 1, 1 > 5 = false → no output.
+[ select(.x + 1 > 5) ]
+{"y":5}
+[]
+
+# Non-numeric field under `?`: bail; jq raises (string + 1).
+[ (select(.x + 1 > 5))? ]
+{"x":"hi"}
+[]
+
+# Non-object input under `?`: jq raises.
+[ (select(.x + 1 > 5))? ]
+42
+[]
+
+[ (select(.x * 2 > 8))? ]
+"hi"
+[]
+
+[ (select(.x * 2 > 8))? ]
+[1,2,3]
+[]
