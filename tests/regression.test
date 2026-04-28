@@ -3491,3 +3491,47 @@ false
 
 (.x > 3)?
 [1,2,3]
+
+# #83 Phase B: .field <arith_chain> <cmp> <threshold> apply-site uses
+# RawApplyOutcome::Bail.
+(.x * 2 + 1) == 11
+{"x":5}
+true
+
+(.x * 2) > 8
+{"x":5}
+true
+
+(.x + 3) >= 8
+{"x":5}
+true
+
+# Field missing under `?`: bail to generic; chain on null errors for
+# non-add ops.
+((.x * 2) > 8)?
+{"y":5}
+
+# Non-numeric field: bail to generic; jq's `string * 2` raises but
+# `"hihi" > 8` orders string > number → true.
+((.x * 2) > 8)?
+{"x":"hi"}
+true
+
+# null + 1 raises in jq (number requires real number); `?` swallows.
+# Wait — actually jq: null + 1 == 1, then 1 == 2 → false.
+((.x + 1) == 2)?
+{"x":null}
+false
+
+((.x * 2) > 8)?
+{"x":[1,2]}
+
+# Non-object input under `?`
+((.x * 2) > 8)?
+42
+
+((.x * 2) > 8)?
+"hi"
+
+((.x * 2) > 8)?
+[1,2,3]
