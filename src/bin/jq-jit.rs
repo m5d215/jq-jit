@@ -146,6 +146,7 @@ use jq_jit::fast_path::{
     apply_field_gsub_raw, apply_field_ltrimstr_tonumber_raw, apply_field_match_raw,
     apply_field_scan_raw, apply_field_str_builtin_raw, apply_field_str_concat_raw,
     apply_field_str_reverse_raw, apply_field_test_raw, apply_full_object_fields_raw,
+    apply_two_field_binop_const_raw,
     apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
     apply_nested_field_access_raw, apply_object_compute_raw, apply_select_arith_cmp_raw,
     apply_select_cmp_raw, apply_select_field_null_raw, apply_select_str_raw,
@@ -5948,30 +5949,16 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref f1, ref op1, ref f2, ref op2, const_val)) = two_field_binop_const {
-                    use jq_jit::ir::BinOp;
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if let Some((a, b)) = json_object_get_two_nums(raw, 0, f1, f2) {
-                            let inner = match op1 {
-                                BinOp::Add => a + b, BinOp::Sub => a - b,
-                                BinOp::Mul => a * b, BinOp::Div => a / b,
-                                BinOp::Mod => jq_jit::runtime::jq_mod_f64(a, b).unwrap_or(f64::NAN),
-                                _ => unreachable!(),
-                            };
-                            let result = match op2 {
-                                BinOp::Add => inner + const_val, BinOp::Sub => inner - const_val,
-                                BinOp::Mul => inner * const_val, BinOp::Div => inner / const_val,
-                                BinOp::Mod => jq_jit::runtime::jq_mod_f64(inner, const_val).unwrap_or(f64::NAN),
-                                _ => unreachable!(),
-                            };
-                            if result.is_finite() {
+                        let outcome = apply_two_field_binop_const_raw(
+                            raw, f1, f2, *op1, *op2, const_val,
+                            |result| {
                                 push_jq_number_bytes(&mut compact_buf, result);
                                 compact_buf.push(b'\n');
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            }
-                        } else {
+                            },
+                        );
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -19121,30 +19108,17 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some((ref f1, ref op1, ref f2, ref op2, const_val)) = two_field_binop_const {
-                use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if let Some((a, b)) = json_object_get_two_nums(raw, 0, f1, f2) {
-                        let inner = match op1 {
-                            BinOp::Add => a + b, BinOp::Sub => a - b,
-                            BinOp::Mul => a * b, BinOp::Div => a / b,
-                            BinOp::Mod => jq_jit::runtime::jq_mod_f64(a, b).unwrap_or(f64::NAN),
-                            _ => unreachable!(),
-                        };
-                        let result = match op2 {
-                            BinOp::Add => inner + const_val, BinOp::Sub => inner - const_val,
-                            BinOp::Mul => inner * const_val, BinOp::Div => inner / const_val,
-                            BinOp::Mod => jq_jit::runtime::jq_mod_f64(inner, const_val).unwrap_or(f64::NAN),
-                            _ => unreachable!(),
-                        };
-                        if result.is_finite() {
+                    let outcome = apply_two_field_binop_const_raw(
+                        raw, f1, f2, *op1, *op2, const_val,
+                        |result| {
                             push_jq_number_bytes(&mut compact_buf, result);
                             compact_buf.push(b'\n');
-                        } else {
-                            compact_buf.extend_from_slice(b"null\n");
-                        }
-                    } else {
+                        },
+                    );
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }

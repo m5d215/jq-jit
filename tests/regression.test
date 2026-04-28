@@ -4058,3 +4058,45 @@ true
 [ (((.x + 1) * 2) | tostring)? ]
 "plain"
 []
+
+# Issue #251: two_field_binop_const apply-site uses RawApplyOutcome (#83 Phase B).
+# Helper Bails on missing/non-numeric/non-arith/non-finite/non-object so jq's
+# error semantics surface through `?`. Also fixes a pre-existing #83-class bug
+# where the file-mode apply-site silently emitted `null\n` on non-finite.
+(.x + .y) * 2
+{"x":3,"y":4}
+14
+
+(.x - .y) + 10
+{"x":7,"y":2}
+15
+
+# Missing field — generic resolves missing as null; null + 3 = 3, * 2 = 6.
+[ ((.x + .y) * 2)? ]
+{"x":3}
+[6]
+
+# Non-numeric field — generic raises type error, ? swallows.
+[ ((.x + .y) * 2)? ]
+{"x":3,"y":"hi"}
+[]
+
+# Non-object input — generic raises indexing error, ? swallows.
+[ ((.x + .y) * 2)? ]
+"plain"
+[]
+
+[ ((.x + .y) * 2)? ]
+null
+[]
+
+# Inner div-by-zero — helper Bails on non-finite, generic raises.
+[ ((.x / .y) * 2)? ]
+{"x":1,"y":0}
+[]
+
+# Outer div-by-zero — helper Bails on non-finite (was previously emitting `null`
+# in file mode pre-#83-Phase-B).
+[ ((.x + .y) / 0)? ]
+{"x":3,"y":4}
+[]

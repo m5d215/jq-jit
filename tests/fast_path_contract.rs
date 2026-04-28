@@ -25,6 +25,7 @@ use jq_jit::fast_path::{
     apply_field_update_test_raw, apply_field_update_tostring_raw,
     apply_field_update_trim_raw, apply_select_arith_cmp_raw, apply_select_cmp_raw,
     apply_select_field_null_raw, apply_select_str_raw, apply_select_str_test_raw,
+    apply_two_field_binop_const_raw,
 };
 use jq_jit::interpreter::Filter;
 use jq_jit::ir::BinOp;
@@ -2261,6 +2262,123 @@ fn raw_field_arith_chain_non_object_input_bails() {
         assert!(
             matches!(outcome, RawApplyOutcome::Bail),
             "expected Bail for arith_chain input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `(.x <op1> .y) <op2> <const>` — two-field-and-const arithmetic. Helper
+// Bails on missing / non-numeric / non-arith op / non-finite result /
+// non-object so cross-type and runtime errors route through the generic
+// path.
+
+#[test]
+fn raw_two_field_binop_const_emits_finite_result() {
+    let mut emitted: Vec<f64> = Vec::new();
+    // (3 + 4) * 2 = 14
+    let outcome = apply_two_field_binop_const_raw(
+        b"{\"x\":3,\"y\":4}",
+        "x", "y", BinOp::Add, BinOp::Mul, 2.0,
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![14.0]);
+}
+
+#[test]
+fn raw_two_field_binop_const_field_missing_bails() {
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_two_field_binop_const_raw(
+        b"{\"x\":3}",
+        "x", "y", BinOp::Add, BinOp::Mul, 2.0,
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_two_field_binop_const_non_numeric_field_bails() {
+    for inner in [&b"{\"x\":3,\"y\":\"hi\"}"[..], &b"{\"x\":null,\"y\":4}"[..]] {
+        let mut emitted: Vec<f64> = Vec::new();
+        let outcome = apply_two_field_binop_const_raw(
+            inner, "x", "y", BinOp::Add, BinOp::Mul, 2.0, |n| emitted.push(n),
+        );
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for non-numeric input {:?}, got {:?}",
+            std::str::from_utf8(inner).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
+    }
+}
+
+#[test]
+fn raw_two_field_binop_const_non_arith_op_bails() {
+    for op in [BinOp::Eq, BinOp::Lt, BinOp::And] {
+        let mut emitted: Vec<f64> = Vec::new();
+        // op1 is non-arith
+        let outcome = apply_two_field_binop_const_raw(
+            b"{\"x\":3,\"y\":4}",
+            "x", "y", op, BinOp::Mul, 2.0, |n| emitted.push(n),
+        );
+        assert!(matches!(outcome, RawApplyOutcome::Bail), "op1={:?}", op);
+        // op2 is non-arith
+        let mut emitted2: Vec<f64> = Vec::new();
+        let outcome2 = apply_two_field_binop_const_raw(
+            b"{\"x\":3,\"y\":4}",
+            "x", "y", BinOp::Add, op, 2.0, |n| emitted2.push(n),
+        );
+        assert!(matches!(outcome2, RawApplyOutcome::Bail), "op2={:?}", op);
+    }
+}
+
+#[test]
+fn raw_two_field_binop_const_div_by_zero_bails() {
+    let mut emitted: Vec<f64> = Vec::new();
+    // (1 / 0) * 2 = inf → Bail
+    let outcome = apply_two_field_binop_const_raw(
+        b"{\"x\":1,\"y\":0}",
+        "x", "y", BinOp::Div, BinOp::Mul, 2.0,
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_two_field_binop_const_inner_finite_outer_div_zero_bails() {
+    let mut emitted: Vec<f64> = Vec::new();
+    // (3 + 4) / 0 = inf → Bail
+    let outcome = apply_two_field_binop_const_raw(
+        b"{\"x\":3,\"y\":4}",
+        "x", "y", BinOp::Add, BinOp::Div, 0.0,
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_two_field_binop_const_non_object_input_bails() {
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut emitted: Vec<f64> = Vec::new();
+        let outcome = apply_two_field_binop_const_raw(
+            raw, "x", "y", BinOp::Add, BinOp::Mul, 2.0, |n| emitted.push(n),
+        );
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for two_field_binop_const input {:?}, got {:?}",
             std::str::from_utf8(raw).unwrap(),
             outcome,
         );

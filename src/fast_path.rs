@@ -903,6 +903,63 @@ where
     RawApplyOutcome::Emit
 }
 
+/// Apply the `(.x <op1> .y) <op2> <const>` raw-byte two-field-and-const
+/// arithmetic fast path on a single JSON record. Both `.x` and `.y`
+/// must resolve to JSON numbers; `<op1>` and `<op2>` are arithmetic
+/// (`Add`/`Sub`/`Mul`/`Div`/`Mod`).
+///
+/// Bail discipline:
+/// * Either field absent or non-numeric — [`RawApplyOutcome::Bail`]
+///   so the generic path raises jq's type error.
+/// * Either op is non-arithmetic (`Eq`/`And`/etc.) —
+///   [`RawApplyOutcome::Bail`] (defensive — the detector should never
+///   produce these, but the helper rejects them at the boundary).
+/// * Inner or final result non-finite (div-by-zero / mod-by-zero,
+///   IEEE NaN/∞) — [`RawApplyOutcome::Bail`] so the generic path
+///   raises jq's `/ by zero` etc.
+/// * Non-object input — [`RawApplyOutcome::Bail`].
+///
+/// On success, invokes `emit(result)` so the apply-site owns
+/// JSON-number formatting.
+pub fn apply_two_field_binop_const_raw<F>(
+    raw: &[u8],
+    field_a: &str,
+    field_b: &str,
+    op1: BinOp,
+    op2: BinOp,
+    cval: f64,
+    mut emit: F,
+) -> RawApplyOutcome
+where
+    F: FnMut(f64),
+{
+    let (a, b) = match json_object_get_two_nums(raw, 0, field_a, field_b) {
+        Some(p) => p,
+        None => return RawApplyOutcome::Bail,
+    };
+    let inner = match op1 {
+        BinOp::Add => a + b,
+        BinOp::Sub => a - b,
+        BinOp::Mul => a * b,
+        BinOp::Div => a / b,
+        BinOp::Mod => jq_mod_f64(a, b).unwrap_or(f64::NAN),
+        _ => return RawApplyOutcome::Bail,
+    };
+    let result = match op2 {
+        BinOp::Add => inner + cval,
+        BinOp::Sub => inner - cval,
+        BinOp::Mul => inner * cval,
+        BinOp::Div => inner / cval,
+        BinOp::Mod => jq_mod_f64(inner, cval).unwrap_or(f64::NAN),
+        _ => return RawApplyOutcome::Bail,
+    };
+    if !result.is_finite() {
+        return RawApplyOutcome::Bail;
+    }
+    emit(result);
+    RawApplyOutcome::Emit
+}
+
 /// Apply the `.field <op1> <c1> <op2> <c2> ...` raw-byte arithmetic chain
 /// fast path on a single JSON record (a left-fold of `(BinOp, f64)` pairs
 /// over a single numeric field).
