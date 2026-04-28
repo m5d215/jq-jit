@@ -3957,3 +3957,58 @@ null
 [ (del(.x))? ]
 [1,2,3]
 []
+
+# Issue #251: field_case_test apply-site uses RawApplyOutcome (#83 Phase B).
+# Happy path: object input + plain string field → case-fold then regex test.
+.x | ascii_upcase | test("FOO")
+{"x":"foobar"}
+true
+
+.x | ascii_downcase | test("^bar")
+{"x":"BARbaz"}
+true
+
+# `?`-wrapped non-string field → Bail to generic, jq raises, ? swallows.
+[ (.x | ascii_upcase | test("FOO"))? ]
+{"x":42}
+[]
+
+[ (.x | ascii_upcase | test("FOO"))? ]
+{"x":null}
+[]
+
+# `?`-wrapped non-object input → Bail to generic.
+[ (.x | ascii_upcase | test("FOO"))? ]
+"plain"
+[]
+
+# Escaped string field: raw scanner Bails, generic path decodes the escape
+# and runs the regex against the upcase'd decoded content.
+.x | ascii_upcase | test("A\\nB")
+{"x":"a\nb"}
+true
+
+# Issue #251: field_case_gsub apply-site uses RawApplyOutcome (#83 Phase B).
+.x | ascii_downcase | gsub("a"; "X")
+{"x":"BANANA"}
+"bXnXnX"
+
+.x | ascii_upcase | sub("A"; "X")
+{"x":"banana"}
+"BXNANA"
+
+# `?`-wrapped non-string field → Bail to generic.
+[ (.x | ascii_downcase | gsub("a"; "X"))? ]
+{"x":42}
+[]
+
+# `?`-wrapped non-object input → Bail to generic.
+[ (.x | ascii_downcase | gsub("a"; "X"))? ]
+[1,2,3]
+[]
+
+# Escaped string field: raw scanner Bails, generic path runs the replacement
+# on the decoded content (so the result has the literal newline back, not "\n").
+.x | ascii_downcase | gsub("a"; "X")
+{"x":"a\nb"}
+"X\nb"
