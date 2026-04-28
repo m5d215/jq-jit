@@ -2496,3 +2496,39 @@ true
 # Multi-field under `?` on an array
 .a, .b?
 [1,2,3]
+
+# Issue #83 Phase B: raw [.a, .b] array-collect apply-site bails on partial
+# objects, null, and non-object non-null inputs. The generic path produces the
+# right per-field array (with nulls for missing keys, type errors for non-
+# object non-null inputs).
+
+# Array-collect on a fully-populated object emits the values as an array
+[.a, .b, .c]
+{"a":1,"b":2,"c":3}
+[1,2,3]
+
+# Array-collect on a partially-populated object emits values + nulls
+[.a, .b, .c]
+{"a":1,"c":3}
+[1,null,3]
+
+# Array-collect on null emits an array of nulls
+[.a, .b]
+null
+[null,null]
+
+# Array-collect under `?` on a number — bail then generic raises, `?` swallows
+[.a, .b]?
+42
+
+# Array-collect under `?` on a string
+[.a, .b]?
+"hi"
+
+# Array-collect under `?` on a boolean
+[.a, .b]?
+true
+
+# Array-collect under `?` on an array
+[.a, .b]?
+[1,2,3]
