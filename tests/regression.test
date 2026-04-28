@@ -3359,3 +3359,39 @@ true
 .x + .y
 null
 null
+
+# #83 Phase B: .x <op1> <c1> <op2> <c2> ... arithmetic chain apply-site
+# uses RawApplyOutcome::Bail.
+# Happy path: two-op chain (left-folded by parser).
+(.x + 1) * 2
+{"x":3}
+8
+
+# Three-op left-folded chain.
+.x * 2 + 3 - 1
+{"x":5}
+12
+
+# Field missing under `?`: bail to generic; jq raises null op N for non-add ops.
+(.x * 2 + 1)?
+{"y":1}
+
+# Non-numeric field under `?`
+(.x * 2 + 1)?
+{"x":"hi"}
+
+(.x * 2 + 1)?
+{"x":null}
+
+(.x * 2 + 1)?
+{"x":[1,2]}
+
+# Non-object input under `?`: jq raises "Cannot index <type>".
+(.x * 2 + 1)?
+42
+
+(.x * 2 + 1)?
+"hi"
+
+(.x * 2 + 1)?
+[1,2,3]
