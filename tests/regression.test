@@ -3687,3 +3687,53 @@ select(.x < "foo")
 [ (select(.x < "foo"))? ]
 [1,2,3]
 []
+
+# #83 Phase B: select(.field | startswith/endswith/contains("arg"))
+# apply-site uses RawApplyOutcome::Bail.
+select(.x | startswith("foo"))
+{"x":"foobar"}
+{"x":"foobar"}
+
+select(.x | endswith("bar"))
+{"x":"foobar"}
+{"x":"foobar"}
+
+select(.x | contains("oba"))
+{"x":"foobar"}
+{"x":"foobar"}
+
+[ select(.x | startswith("zzz")) ]
+{"x":"foobar"}
+[]
+
+# Field missing under `?`: bail to generic; jq raises (null|startswith).
+[ (select(.x | startswith("h")))? ]
+{"y":"hi"}
+[]
+
+# Non-string field under `?`: bail; jq raises.
+[ (select(.x | startswith("h")))? ]
+{"x":42}
+[]
+
+[ (select(.x | endswith("h")))? ]
+{"x":null}
+[]
+
+# Escape-bearing string: bail to generic, which decodes correctly.
+select(.x | startswith("a"))
+{"x":"a\nb"}
+{"x":"a\nb"}
+
+# Non-object input under `?`
+[ (select(.x | startswith("h")))? ]
+42
+[]
+
+[ (select(.x | endswith("h")))? ]
+"hi"
+[]
+
+[ (select(.x | contains("h")))? ]
+[1,2,3]
+[]
