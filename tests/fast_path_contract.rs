@@ -28,7 +28,8 @@ use jq_jit::fast_path::{
     apply_field_unary_arith_raw, apply_field_unary_num_raw,
     apply_field_update_trim_raw, apply_is_length_raw, apply_is_type_raw,
     apply_numeric_expr_raw, apply_obj_assign_field_arith_raw,
-    apply_obj_assign_two_fields_arith_raw,
+    apply_obj_assign_two_fields_arith_raw, apply_obj_merge_computed_raw,
+    apply_obj_merge_lit_raw,
     apply_select_arith_cmp_raw, apply_select_cmp_raw,
     apply_select_field_null_raw, apply_select_str_raw, apply_select_str_test_raw,
     apply_two_field_binop_const_raw,
@@ -2536,6 +2537,129 @@ fn raw_field_binop_const_unary_non_object_input_bails() {
         );
         assert!(emitted.is_empty());
     }
+}
+
+// ---------------------------------------------------------------------------
+// `. + {k: v}` — object-merge-literal. Thin wrapper around
+// `json_object_merge_literal`; Bails on non-object input.
+
+#[test]
+fn raw_obj_merge_lit_appends_new_key() {
+    let mut buf = Vec::new();
+    let pairs = vec![("y".to_string(), b"42".to_vec())];
+    let outcome = apply_obj_merge_lit_raw(b"{\"x\":1}", &pairs, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"{\"x\":1,\"y\":42}");
+}
+
+#[test]
+fn raw_obj_merge_lit_replaces_existing_key() {
+    let mut buf = Vec::new();
+    let pairs = vec![("x".to_string(), b"99".to_vec())];
+    let outcome = apply_obj_merge_lit_raw(b"{\"x\":1,\"y\":2}", &pairs, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"{\"x\":99,\"y\":2}");
+}
+
+#[test]
+fn raw_obj_merge_lit_non_object_bails() {
+    for raw in [b"42".as_slice(), b"\"hi\"".as_slice(), b"null".as_slice(), b"[1]".as_slice()] {
+        let mut buf = Vec::new();
+        let pairs = vec![("y".to_string(), b"42".to_vec())];
+        let outcome = apply_obj_merge_lit_raw(raw, &pairs, &mut buf);
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "raw={:?}", std::str::from_utf8(raw).unwrap(),
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `. + {key: <arith>}` — object-merge-computed. Reads numeric fields,
+// evaluates the ArithExpr, formats as JSON-number bytes, merges. Bails on
+// non-object/missing-or-non-numeric/non-finite/buffer-shape mismatch.
+
+#[test]
+fn raw_obj_merge_computed_emits_merged() {
+    // . + {sum: .x + .y} on {"x":3,"y":4} → {"x":3,"y":4,"sum":7}
+    let arith = ArithExpr::BinOp(
+        BinOp::Add,
+        Box::new(ArithExpr::Field(0)),
+        Box::new(ArithExpr::Field(1)),
+    );
+    let nfields = ["x", "y"];
+    let mut vals = vec![0.0; 2];
+    let mut merge_pair = vec![("sum".to_string(), Vec::new())];
+    let mut buf = Vec::new();
+    let outcome = apply_obj_merge_computed_raw(
+        b"{\"x\":3,\"y\":4}", &nfields, &arith, &mut vals, &mut merge_pair, &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"{\"x\":3,\"y\":4,\"sum\":7}");
+}
+
+#[test]
+fn raw_obj_merge_computed_missing_field_bails() {
+    let arith = ArithExpr::Field(0);
+    let nfields = ["x"];
+    let mut vals = vec![0.0; 1];
+    let mut merge_pair = vec![("dbl".to_string(), Vec::new())];
+    let mut buf = Vec::new();
+    let outcome = apply_obj_merge_computed_raw(
+        b"{\"y\":1}", &nfields, &arith, &mut vals, &mut merge_pair, &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_obj_merge_computed_div_by_zero_bails() {
+    let arith = ArithExpr::BinOp(
+        BinOp::Div,
+        Box::new(ArithExpr::Field(0)),
+        Box::new(ArithExpr::Field(1)),
+    );
+    let nfields = ["x", "y"];
+    let mut vals = vec![0.0; 2];
+    let mut merge_pair = vec![("q".to_string(), Vec::new())];
+    let mut buf = Vec::new();
+    let outcome = apply_obj_merge_computed_raw(
+        b"{\"x\":1,\"y\":0}", &nfields, &arith, &mut vals, &mut merge_pair, &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_obj_merge_computed_non_object_bails() {
+    let arith = ArithExpr::Field(0);
+    let nfields = ["x"];
+    for raw in [b"42".as_slice(), b"null".as_slice(), b"[1]".as_slice()] {
+        let mut vals = vec![0.0; 1];
+        let mut merge_pair = vec![("dbl".to_string(), Vec::new())];
+        let mut buf = Vec::new();
+        let outcome = apply_obj_merge_computed_raw(
+            raw, &nfields, &arith, &mut vals, &mut merge_pair, &mut buf,
+        );
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "raw={:?}", std::str::from_utf8(raw).unwrap(),
+        );
+    }
+}
+
+#[test]
+fn raw_obj_merge_computed_buffer_shape_mismatch_bails() {
+    let arith = ArithExpr::Field(0);
+    let nfields = ["x"];
+    let mut vals = vec![0.0; 1];
+    // merge_pair_buf must have exactly 1 element
+    let mut merge_pair: Vec<(String, Vec<u8>)> = vec![];
+    let mut buf = Vec::new();
+    let outcome = apply_obj_merge_computed_raw(
+        b"{\"x\":3}", &nfields, &arith, &mut vals, &mut merge_pair, &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
 }
 
 // ---------------------------------------------------------------------------

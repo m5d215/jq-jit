@@ -149,7 +149,8 @@ use jq_jit::fast_path::{
     apply_field_str_reverse_raw, apply_field_test_raw, apply_field_unary_arith_raw,
     apply_field_unary_num_raw, apply_full_object_fields_raw, apply_is_length_raw,
     apply_is_type_raw, apply_numeric_expr_raw, apply_obj_assign_field_arith_raw,
-    apply_obj_assign_two_fields_arith_raw, apply_two_field_binop_const_raw,
+    apply_obj_assign_two_fields_arith_raw, apply_obj_merge_computed_raw,
+    apply_obj_merge_lit_raw, apply_two_field_binop_const_raw,
     apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
     apply_nested_field_access_raw, apply_object_compute_raw, apply_select_arith_cmp_raw,
     apply_select_cmp_raw, apply_select_field_null_raw, apply_select_str_raw,
@@ -11474,20 +11475,21 @@ fn real_main() {
                     let mut tmp = Vec::new();
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if use_pretty_buf {
+                        let (target_buf, is_pretty) = if use_pretty_buf {
                             tmp.clear();
-                            if json_object_merge_literal(raw, 0, merge_pairs, &mut tmp) {
-                                push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
-                                compact_buf.push(b'\n');
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            }
-                        } else if json_object_merge_literal(raw, 0, merge_pairs, &mut compact_buf) {
-                            compact_buf.push(b'\n');
+                            (&mut tmp, true)
                         } else {
+                            (&mut compact_buf, false)
+                        };
+                        let outcome = apply_obj_merge_lit_raw(raw, merge_pairs, target_buf);
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        } else if is_pretty {
+                            push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                            compact_buf.push(b'\n');
+                        } else {
+                            compact_buf.push(b'\n');
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -11498,43 +11500,27 @@ fn real_main() {
                 } else if let Some((ref out_key, ref nfields, ref arith)) = obj_merge_computed {
                     let mut tmp = Vec::new();
                     let mut merge_pair = vec![(out_key.clone(), Vec::new())];
+                    let nfield_refs: Vec<&str> = nfields.iter().map(|s| s.as_str()).collect();
+                    let mut vals_buf = vec![0.0f64; nfield_refs.len()];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        let nf_count = nfields.len();
-                        let ok = if nf_count == 1 {
-                            if let Some(v) = json_object_get_num(raw, 0, &nfields[0]) {
-                                let result = arith.eval(&[v]);
-                                merge_pair[0].1.clear();
-                                push_jq_number_bytes(&mut merge_pair[0].1, result);
-                                true
-                            } else { false }
-                        } else if nf_count == 2 {
-                            if let Some((a, b)) = json_object_get_two_nums(raw, 0, &nfields[0], &nfields[1]) {
-                                let result = arith.eval(&[a, b]);
-                                merge_pair[0].1.clear();
-                                push_jq_number_bytes(&mut merge_pair[0].1, result);
-                                true
-                            } else { false }
-                        } else { false };
-                        if ok {
-                            if use_pretty_buf {
-                                tmp.clear();
-                                if json_object_merge_literal(raw, 0, &merge_pair, &mut tmp) {
-                                    push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
-                                    compact_buf.push(b'\n');
-                                } else {
-                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                                }
-                            } else if json_object_merge_literal(raw, 0, &merge_pair, &mut compact_buf) {
-                                compact_buf.push(b'\n');
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            }
+                        let (target_buf, is_pretty) = if use_pretty_buf {
+                            tmp.clear();
+                            (&mut tmp, true)
                         } else {
+                            (&mut compact_buf, false)
+                        };
+                        let outcome = apply_obj_merge_computed_raw(
+                            raw, &nfield_refs, arith, &mut vals_buf, &mut merge_pair, target_buf,
+                        );
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        } else if is_pretty {
+                            push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                            compact_buf.push(b'\n');
+                        } else {
+                            compact_buf.push(b'\n');
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -20489,20 +20475,21 @@ fn real_main() {
                 let mut tmp = Vec::new();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if use_pretty_buf {
+                    let (target_buf, is_pretty) = if use_pretty_buf {
                         tmp.clear();
-                        if json_object_merge_literal(raw, 0, merge_pairs, &mut tmp) {
-                            push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
-                            compact_buf.push(b'\n');
-                        } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                        }
-                    } else if json_object_merge_literal(raw, 0, merge_pairs, &mut compact_buf) {
-                        compact_buf.push(b'\n');
+                        (&mut tmp, true)
                     } else {
+                        (&mut compact_buf, false)
+                    };
+                    let outcome = apply_obj_merge_lit_raw(raw, merge_pairs, target_buf);
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    } else if is_pretty {
+                        push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                        compact_buf.push(b'\n');
+                    } else {
+                        compact_buf.push(b'\n');
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
@@ -20514,43 +20501,27 @@ fn real_main() {
                 let content_bytes = content.as_bytes();
                 let mut tmp = Vec::new();
                 let mut merge_pair = vec![(out_key.clone(), Vec::new())];
+                let nfield_refs: Vec<&str> = nfields.iter().map(|s| s.as_str()).collect();
+                let mut vals_buf = vec![0.0f64; nfield_refs.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    let nf_count = nfields.len();
-                    let ok = if nf_count == 1 {
-                        if let Some(v) = json_object_get_num(raw, 0, &nfields[0]) {
-                            let result = arith.eval(&[v]);
-                            merge_pair[0].1.clear();
-                            push_jq_number_bytes(&mut merge_pair[0].1, result);
-                            true
-                        } else { false }
-                    } else if nf_count == 2 {
-                        if let Some((a, b)) = json_object_get_two_nums(raw, 0, &nfields[0], &nfields[1]) {
-                            let result = arith.eval(&[a, b]);
-                            merge_pair[0].1.clear();
-                            push_jq_number_bytes(&mut merge_pair[0].1, result);
-                            true
-                        } else { false }
-                    } else { false };
-                    if ok {
-                        if use_pretty_buf {
-                            tmp.clear();
-                            if json_object_merge_literal(raw, 0, &merge_pair, &mut tmp) {
-                                push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
-                                compact_buf.push(b'\n');
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            }
-                        } else if json_object_merge_literal(raw, 0, &merge_pair, &mut compact_buf) {
-                            compact_buf.push(b'\n');
-                        } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                        }
+                    let (target_buf, is_pretty) = if use_pretty_buf {
+                        tmp.clear();
+                        (&mut tmp, true)
                     } else {
+                        (&mut compact_buf, false)
+                    };
+                    let outcome = apply_obj_merge_computed_raw(
+                        raw, &nfield_refs, arith, &mut vals_buf, &mut merge_pair, target_buf,
+                    );
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    } else if is_pretty {
+                        push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                        compact_buf.push(b'\n');
+                    } else {
+                        compact_buf.push(b'\n');
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
