@@ -2590,3 +2590,50 @@ false
 
 (has("a") or has("b"))?
 "hi"
+
+# Issue #83 Phase B: raw object-compute apply-sites (computed_array,
+# computed_remap, standalone_array) now bail through RawApplyOutcome.
+# Both the outer bail (non-object / missing fields) and the inner bail
+# (#163: per-cell type error like str + num) are explicit at the helper
+# boundary; happy paths still emit the structural array / object.
+
+# computed_array on a fully-populated object emits the computed array
+[.x + 1, .y * 2]
+{"x":3,"y":4}
+[4,8]
+
+# computed_array on a partial object errors via generic (null * 2);
+# wrapping in `?` swallows the error.
+([.x + 1, .y * 2])?
+{"x":3}
+
+# computed_array under `?` on a non-object: outer bail, generic raises, `?` swallows
+[.x + 1, .y * 2]?
+42
+
+# computed_array on str+num triggers the inner bail; jq raises so `?` swallows
+[.x + .y]?
+{"x":"a","y":1}
+
+# computed_remap on a fully-populated object emits the computed object
+{a: .x + 1, b: .y * 2}
+{"x":3,"y":4}
+{"a":4,"b":8}
+
+# computed_remap on str+num triggers the inner bail; `?` swallows
+({a: .x + .y})?
+{"x":"a","y":1}
+
+# computed_remap on partial object (missing field): outer bail -> generic emits null
+{a: .x + 1}
+{}
+{"a":1}
+
+# standalone_array (no key remap) on str+str concatenates
+[.x + .y]
+{"x":"a","y":"b"}
+["ab"]
+
+# standalone_array on str+num triggers inner bail; `?` swallows
+[.x + .y]?
+{"x":"a","y":1}

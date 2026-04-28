@@ -141,7 +141,7 @@ use jq_jit::interpreter::Filter;
 use jq_jit::fast_path::{
     apply_array_field_access_raw, apply_field_access_raw, apply_has_field_raw,
     apply_has_multi_field_raw, apply_multi_field_access_raw, apply_nested_field_access_raw,
-    RawApplyOutcome,
+    apply_object_compute_raw, RawApplyOutcome,
 };
 
 fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -5569,31 +5569,34 @@ fn real_main() {
                     let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
-                            // Bail to generic eval whenever any computed cell would
-                            // raise a type error in jq (#163). The fast path can
-                            // only emit num+num and str+str arithmetic; anything
-                            // else gets routed through the generic path.
-                            if resolved.iter().any(|r| resolved_would_error(r, raw, &ranges_buf)) {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            } else if use_pretty_buf {
-                                compact_buf.extend_from_slice(b"[\n");
-                                for (i, res) in resolved.iter().enumerate() {
-                                    if i > 0 { compact_buf.extend_from_slice(b",\n"); }
-                                    compact_buf.extend_from_slice(b"  ");
-                                    emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                        let outcome = apply_object_compute_raw(
+                            raw,
+                            &field_refs,
+                            &mut ranges_buf,
+                            // Inner bail (#163): bail when any computed cell would raise a
+                            // jq type error (e.g. str + num). The raw scanner only handles
+                            // num+num / str+str arithmetic; everything else goes generic.
+                            |ranges, raw| resolved.iter().any(|r| resolved_would_error(r, raw, ranges)),
+                            |ranges, raw| {
+                                if use_pretty_buf {
+                                    compact_buf.extend_from_slice(b"[\n");
+                                    for (i, res) in resolved.iter().enumerate() {
+                                        if i > 0 { compact_buf.extend_from_slice(b",\n"); }
+                                        compact_buf.extend_from_slice(b"  ");
+                                        emit_resolved_value(&mut compact_buf, res, raw, ranges);
+                                    }
+                                    compact_buf.extend_from_slice(b"\n]\n");
+                                } else {
+                                    compact_buf.push(b'[');
+                                    for (i, res) in resolved.iter().enumerate() {
+                                        if i > 0 { compact_buf.push(b','); }
+                                        emit_resolved_value(&mut compact_buf, res, raw, ranges);
+                                    }
+                                    compact_buf.extend_from_slice(b"]\n");
                                 }
-                                compact_buf.extend_from_slice(b"\n]\n");
-                            } else {
-                                compact_buf.push(b'[');
-                                for (i, res) in resolved.iter().enumerate() {
-                                    if i > 0 { compact_buf.push(b','); }
-                                    emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
-                                }
-                                compact_buf.extend_from_slice(b"]\n");
-                            }
-                        } else {
+                            },
+                        );
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -5753,22 +5756,20 @@ fn real_main() {
                     let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
-                            // jq raises a type error for things like `str + num`;
-                            // the raw fast path silently writes `null`, so bail to
-                            // generic eval whenever any computed cell would error
-                            // (#163).
-                            if resolved.iter().any(|r| resolved_would_error(r, raw, &ranges_buf)) {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            } else {
+                        let outcome = apply_object_compute_raw(
+                            raw,
+                            &field_refs,
+                            &mut ranges_buf,
+                            |ranges, raw| resolved.iter().any(|r| resolved_would_error(r, raw, ranges)),
+                            |ranges, raw| {
                                 for (i, res) in resolved.iter().enumerate() {
                                     compact_buf.extend_from_slice(&key_prefixes[i]);
-                                    emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                    emit_resolved_value(&mut compact_buf, res, raw, ranges);
                                 }
                                 compact_buf.extend_from_slice(obj_close);
-                            }
-                        } else {
+                            },
+                        );
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -5796,19 +5797,21 @@ fn real_main() {
                     let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
-                            if resolved.iter().any(|r| resolved_would_error(r, raw, &ranges_buf)) {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            } else {
+                        let outcome = apply_object_compute_raw(
+                            raw,
+                            &field_refs,
+                            &mut ranges_buf,
+                            |ranges, raw| resolved.iter().any(|r| resolved_would_error(r, raw, ranges)),
+                            |ranges, raw| {
                                 compact_buf.push(b'[');
                                 for (i, res) in resolved.iter().enumerate() {
                                     if i > 0 { compact_buf.push(b','); }
-                                    emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                    emit_resolved_value(&mut compact_buf, res, raw, ranges);
                                 }
                                 compact_buf.extend_from_slice(b"]\n");
-                            }
-                        } else {
+                            },
+                        );
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -15246,27 +15249,31 @@ fn real_main() {
                 let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
-                        if resolved.iter().any(|r| resolved_would_error(r, raw, &ranges_buf)) {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                        } else if use_pretty_buf {
-                            compact_buf.extend_from_slice(b"[\n");
-                            for (i, res) in resolved.iter().enumerate() {
-                                if i > 0 { compact_buf.extend_from_slice(b",\n"); }
-                                compact_buf.extend_from_slice(b"  ");
-                                emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                    let outcome = apply_object_compute_raw(
+                        raw,
+                        &field_refs,
+                        &mut ranges_buf,
+                        |ranges, raw| resolved.iter().any(|r| resolved_would_error(r, raw, ranges)),
+                        |ranges, raw| {
+                            if use_pretty_buf {
+                                compact_buf.extend_from_slice(b"[\n");
+                                for (i, res) in resolved.iter().enumerate() {
+                                    if i > 0 { compact_buf.extend_from_slice(b",\n"); }
+                                    compact_buf.extend_from_slice(b"  ");
+                                    emit_resolved_value(&mut compact_buf, res, raw, ranges);
+                                }
+                                compact_buf.extend_from_slice(b"\n]\n");
+                            } else {
+                                compact_buf.push(b'[');
+                                for (i, res) in resolved.iter().enumerate() {
+                                    if i > 0 { compact_buf.push(b','); }
+                                    emit_resolved_value(&mut compact_buf, res, raw, ranges);
+                                }
+                                compact_buf.extend_from_slice(b"]\n");
                             }
-                            compact_buf.extend_from_slice(b"\n]\n");
-                        } else {
-                            compact_buf.push(b'[');
-                            for (i, res) in resolved.iter().enumerate() {
-                                if i > 0 { compact_buf.push(b','); }
-                                emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
-                            }
-                            compact_buf.extend_from_slice(b"]\n");
-                        }
-                    } else {
+                        },
+                    );
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
@@ -19179,18 +19186,20 @@ fn real_main() {
                 let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
-                        if resolved.iter().any(|r| resolved_would_error(r, raw, &ranges_buf)) {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                        } else {
+                    let outcome = apply_object_compute_raw(
+                        raw,
+                        &field_refs,
+                        &mut ranges_buf,
+                        |ranges, raw| resolved.iter().any(|r| resolved_would_error(r, raw, ranges)),
+                        |ranges, raw| {
                             for (i, res) in resolved.iter().enumerate() {
                                 compact_buf.extend_from_slice(&key_prefixes[i]);
-                                emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                emit_resolved_value(&mut compact_buf, res, raw, ranges);
                             }
                             compact_buf.extend_from_slice(obj_close);
-                        }
-                    } else {
+                        },
+                    );
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
@@ -19219,19 +19228,21 @@ fn real_main() {
                 let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
-                        if resolved.iter().any(|r| resolved_would_error(r, raw, &ranges_buf)) {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                        } else {
+                    let outcome = apply_object_compute_raw(
+                        raw,
+                        &field_refs,
+                        &mut ranges_buf,
+                        |ranges, raw| resolved.iter().any(|r| resolved_would_error(r, raw, ranges)),
+                        |ranges, raw| {
                             compact_buf.push(b'[');
                             for (i, res) in resolved.iter().enumerate() {
                                 if i > 0 { compact_buf.push(b','); }
-                                emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                emit_resolved_value(&mut compact_buf, res, raw, ranges);
                             }
                             compact_buf.extend_from_slice(b"]\n");
-                        }
-                    } else {
+                        },
+                    );
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }

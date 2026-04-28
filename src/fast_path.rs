@@ -230,6 +230,50 @@ where
     }
 }
 
+/// Apply the "object → resolved compute" raw-byte fast path on a single
+/// JSON record.
+///
+/// Used by the apply-sites for `[.x + 1, .y * 2]` (`computed_array` /
+/// `standalone_array`) and `{a: .x + 1, b: .y * 2}` (`computed_remap`),
+/// which all share the same two-stage bail discipline:
+///
+/// 1. **Outer bail** — `json_object_get_fields_raw_buf` fails (input isn't
+///    an object, or some required field is missing). `RawApplyOutcome::Bail`
+///    so the generic path produces jq's per-input verdict.
+/// 2. **Inner bail** — `bail_check` returns `true`. This is the #163 hook:
+///    the raw scanner can only emit `num+num` and `str+str` arithmetic;
+///    anything else (e.g. `str + num`) is a type error in jq, and silently
+///    writing `null` would re-introduce the null-masking bug class. The
+///    apply-site's `bail_check` walks the resolved cells once with the
+///    actual byte ranges and returns `true` if any cell would raise.
+///
+/// When both bails clear, `emit` is invoked with the filled ranges and the
+/// raw input bytes; the apply-site writes the array or object form into its
+/// captured buffer.
+///
+/// `ranges_buf` must have length `>= fields.len()`.
+pub fn apply_object_compute_raw<C, E>(
+    raw: &[u8],
+    fields: &[&str],
+    ranges_buf: &mut [(usize, usize)],
+    bail_check: C,
+    emit: E,
+) -> RawApplyOutcome
+where
+    C: FnOnce(&[(usize, usize)], &[u8]) -> bool,
+    E: FnOnce(&[(usize, usize)], &[u8]),
+{
+    if !json_object_get_fields_raw_buf(raw, 0, fields, ranges_buf) {
+        return RawApplyOutcome::Bail;
+    }
+    let ranges = &ranges_buf[..fields.len()];
+    if bail_check(ranges, raw) {
+        return RawApplyOutcome::Bail;
+    }
+    emit(ranges, raw);
+    RawApplyOutcome::Emit
+}
+
 /// Apply the `has("x")` raw-byte fast path on a single JSON record.
 ///
 /// * Object input — invokes `emit` with `b"true"` if the key is present and
