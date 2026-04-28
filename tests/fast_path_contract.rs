@@ -23,8 +23,8 @@ use jq_jit::fast_path::{
     apply_field_update_split_first_raw, apply_field_update_split_last_raw,
     apply_field_update_str_concat_raw, apply_field_update_str_map_raw,
     apply_field_update_test_raw, apply_field_update_tostring_raw,
-    apply_field_binop_const_unary_raw, apply_field_unary_arith_raw,
-    apply_field_unary_num_raw,
+    apply_field_binop_const_unary_raw, apply_field_index_arith_raw,
+    apply_field_unary_arith_raw, apply_field_unary_num_raw,
     apply_field_update_trim_raw, apply_select_arith_cmp_raw, apply_select_cmp_raw,
     apply_select_field_null_raw, apply_select_str_raw, apply_select_str_test_raw,
     apply_two_field_binop_const_raw,
@@ -2523,6 +2523,164 @@ fn raw_field_binop_const_unary_non_object_input_bails() {
         let mut emitted: Vec<f64> = Vec::new();
         let outcome = apply_field_binop_const_unary_raw(
             raw, "x", BinOp::Add, 1.0, None, false, |n| emitted.push(n),
+        );
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `(.field | index/rindex("str")) <op> <const>` — match position + arith.
+// Helper handles jq's `null + N = N` rule on no-match for Add; Bails on
+// non-object / non-string / escape-bearing string / non-arith op /
+// no-match-with-non-Add-op.
+
+#[test]
+fn raw_field_index_arith_index_first_match_codepoint_pos() {
+    let mut emitted: Vec<f64> = Vec::new();
+    // .x | index("ab") + 5 with x="cabd" → match at byte 1, cp=1, +5 = 6
+    let outcome = apply_field_index_arith_raw(
+        b"{\"x\":\"cabd\"}", "x", b"ab", false, BinOp::Add, 5.0,
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![6.0]);
+}
+
+#[test]
+fn raw_field_index_arith_rindex_last_match() {
+    let mut emitted: Vec<f64> = Vec::new();
+    // .x | rindex("a") + 0 with x="cabad" → last 'a' at byte 3, cp=3
+    let outcome = apply_field_index_arith_raw(
+        b"{\"x\":\"cabad\"}", "x", b"a", true, BinOp::Add, 0.0,
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![3.0]);
+}
+
+#[test]
+fn raw_field_index_arith_no_match_add_emits_n() {
+    let mut emitted: Vec<f64> = Vec::new();
+    // .x | index("zz") + 5 with x="abc" → no match, null+5=5
+    let outcome = apply_field_index_arith_raw(
+        b"{\"x\":\"abc\"}", "x", b"zz", false, BinOp::Add, 5.0,
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![5.0]);
+}
+
+#[test]
+fn raw_field_index_arith_no_match_non_add_bails() {
+    // For Sub/Mul/Div on null, jq raises type error; helper Bails.
+    for op in [BinOp::Sub, BinOp::Mul, BinOp::Div] {
+        let mut emitted: Vec<f64> = Vec::new();
+        let outcome = apply_field_index_arith_raw(
+            b"{\"x\":\"abc\"}", "x", b"zz", false, op, 5.0,
+            |n| emitted.push(n),
+        );
+        assert!(matches!(outcome, RawApplyOutcome::Bail), "op={:?}", op);
+        assert!(emitted.is_empty());
+    }
+}
+
+#[test]
+fn raw_field_index_arith_missing_field_add_emits_n() {
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_index_arith_raw(
+        b"{\"y\":1}", "x", b"ab", false, BinOp::Add, 7.0,
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![7.0]);
+}
+
+#[test]
+fn raw_field_index_arith_missing_field_non_add_bails() {
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_index_arith_raw(
+        b"{\"y\":1}", "x", b"ab", false, BinOp::Sub, 7.0,
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_field_index_arith_non_string_field_bails() {
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_index_arith_raw(
+        b"{\"x\":42}", "x", b"a", false, BinOp::Add, 0.0,
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_field_index_arith_escape_bearing_string_bails() {
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_index_arith_raw(
+        br#"{"x":"a\nb"}"#, "x", b"b", false, BinOp::Add, 0.0,
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_field_index_arith_non_arith_op_bails() {
+    for op in [BinOp::Eq, BinOp::Lt, BinOp::And] {
+        let mut emitted: Vec<f64> = Vec::new();
+        let outcome = apply_field_index_arith_raw(
+            b"{\"x\":\"abc\"}", "x", b"a", false, op, 0.0,
+            |n| emitted.push(n),
+        );
+        assert!(matches!(outcome, RawApplyOutcome::Bail), "op={:?}", op);
+    }
+}
+
+#[test]
+fn raw_field_index_arith_div_by_zero_bails() {
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_index_arith_raw(
+        b"{\"x\":\"abc\"}", "x", b"a", false, BinOp::Div, 0.0,
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_field_index_arith_codepoint_position_for_multibyte() {
+    // .x | index("c") with x="日本cd" → byte position 6, cp position 2
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_index_arith_raw(
+        "{\"x\":\"日本cd\"}".as_bytes(), "x", b"c", false, BinOp::Add, 0.0,
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![2.0]);
+}
+
+#[test]
+fn raw_field_index_arith_non_object_input_bails() {
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut emitted: Vec<f64> = Vec::new();
+        let outcome = apply_field_index_arith_raw(
+            raw, "x", b"a", false, BinOp::Add, 0.0, |n| emitted.push(n),
         );
         assert!(
             matches!(outcome, RawApplyOutcome::Bail),
