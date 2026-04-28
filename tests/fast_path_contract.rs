@@ -24,6 +24,7 @@ use jq_jit::fast_path::{
     apply_field_update_str_concat_raw, apply_field_update_str_map_raw,
     apply_field_update_test_raw, apply_field_update_tostring_raw,
     apply_field_binop_const_unary_raw, apply_field_unary_arith_raw,
+    apply_field_unary_num_raw,
     apply_field_update_trim_raw, apply_select_arith_cmp_raw, apply_select_cmp_raw,
     apply_select_field_null_raw, apply_select_str_raw, apply_select_str_test_raw,
     apply_two_field_binop_const_raw,
@@ -2530,6 +2531,200 @@ fn raw_field_binop_const_unary_non_object_input_bails() {
             outcome,
         );
         assert!(emitted.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `.field | <unary>` — multi-modal: Length/Utf8ByteLength/Explode/AsciiCase/
+// Floor/Ceil/Sqrt/Abs/Fabs/ToString. Helper writes raw output bytes + `\n`
+// directly into the caller buffer on Emit.
+
+#[test]
+fn raw_field_unary_num_explode_ascii() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_unary_num_raw(b"{\"x\":\"abc\"}", "x", UnaryOp::Explode, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"[97,98,99]\n");
+}
+
+#[test]
+fn raw_field_unary_num_explode_non_string_bails() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_unary_num_raw(b"{\"x\":42}", "x", UnaryOp::Explode, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_field_unary_num_explode_escaped_string_bails() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_unary_num_raw(br#"{"x":"a\nb"}"#, "x", UnaryOp::Explode, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_field_unary_num_ascii_downcase() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_unary_num_raw(b"{\"x\":\"ABC\"}", "x", UnaryOp::AsciiDowncase, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"\"abc\"\n");
+}
+
+#[test]
+fn raw_field_unary_num_ascii_upcase() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_unary_num_raw(b"{\"x\":\"abc\"}", "x", UnaryOp::AsciiUpcase, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"\"ABC\"\n");
+}
+
+#[test]
+fn raw_field_unary_num_ascii_case_non_string_bails() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_unary_num_raw(b"{\"x\":42}", "x", UnaryOp::AsciiUpcase, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_field_unary_num_length_string() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_unary_num_raw(b"{\"x\":\"abcd\"}", "x", UnaryOp::Length, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"4\n");
+}
+
+#[test]
+fn raw_field_unary_num_length_array() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_unary_num_raw(b"{\"x\":[1,2,3]}", "x", UnaryOp::Length, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"3\n");
+}
+
+#[test]
+fn raw_field_unary_num_length_null_field() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_unary_num_raw(b"{\"x\":null}", "x", UnaryOp::Length, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"0\n");
+}
+
+#[test]
+fn raw_field_unary_num_length_missing_field_is_zero() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_unary_num_raw(b"{\"y\":1}", "x", UnaryOp::Length, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"0\n");
+}
+
+#[test]
+fn raw_field_unary_num_length_number_is_abs() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_unary_num_raw(b"{\"x\":-7}", "x", UnaryOp::Length, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"7\n");
+}
+
+#[test]
+fn raw_field_unary_num_length_boolean_bails() {
+    // jq: `boolean has no length`
+    let mut buf = Vec::new();
+    let outcome = apply_field_unary_num_raw(b"{\"x\":true}", "x", UnaryOp::Length, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_field_unary_num_length_escaped_string_bails() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_unary_num_raw(br#"{"x":"a\nb"}"#, "x", UnaryOp::Length, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_field_unary_num_utf8_byte_length() {
+    // 4-byte UTF-8 char "🦀" (0xF0 0x9F 0xA6 0x80) → utf8_byte_length=4, length=1
+    let mut buf = Vec::new();
+    let outcome = apply_field_unary_num_raw("{\"x\":\"🦀\"}".as_bytes(), "x", UnaryOp::Utf8ByteLength, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"4\n");
+    let mut buf2 = Vec::new();
+    let outcome2 = apply_field_unary_num_raw("{\"x\":\"🦀\"}".as_bytes(), "x", UnaryOp::Length, &mut buf2);
+    assert!(matches!(outcome2, RawApplyOutcome::Emit));
+    assert_eq!(buf2, b"1\n");
+}
+
+#[test]
+fn raw_field_unary_num_floor() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_unary_num_raw(b"{\"x\":3.7}", "x", UnaryOp::Floor, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"3\n");
+}
+
+#[test]
+fn raw_field_unary_num_floor_non_numeric_bails() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_unary_num_raw(b"{\"x\":\"hi\"}", "x", UnaryOp::Floor, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_field_unary_num_tostring_numeric() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_unary_num_raw(b"{\"x\":42}", "x", UnaryOp::ToString, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"\"42\"\n");
+}
+
+#[test]
+fn raw_field_unary_num_tostring_non_numeric_bails() {
+    // generic path knows `tostring` of strings/arrays/etc
+    for inner in [&b"{\"x\":\"hi\"}"[..], &b"{\"x\":[1,2]}"[..], &b"{\"x\":null}"[..]] {
+        let mut buf = Vec::new();
+        let outcome = apply_field_unary_num_raw(inner, "x", UnaryOp::ToString, &mut buf);
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for tostring on {:?}, got {:?}",
+            std::str::from_utf8(inner).unwrap(), outcome,
+        );
+    }
+}
+
+#[test]
+fn raw_field_unary_num_unsupported_unary_bails() {
+    for uop in [UnaryOp::ToNumber, UnaryOp::Type, UnaryOp::FromJson] {
+        let mut buf = Vec::new();
+        let outcome = apply_field_unary_num_raw(b"{\"x\":1}", "x", uop, &mut buf);
+        assert!(matches!(outcome, RawApplyOutcome::Bail), "uop={:?}", uop);
+    }
+}
+
+#[test]
+fn raw_field_unary_num_non_object_input_bails() {
+    // Was a #83-class divergence: file-mode silently emitted "0" for
+    // length on non-object roots.
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        for uop in [UnaryOp::Length, UnaryOp::Explode, UnaryOp::AsciiDowncase, UnaryOp::Floor, UnaryOp::ToString] {
+            let mut buf = Vec::new();
+            let outcome = apply_field_unary_num_raw(raw, "x", uop, &mut buf);
+            assert!(
+                matches!(outcome, RawApplyOutcome::Bail),
+                "expected Bail for input {:?} with uop {:?}, got {:?}",
+                std::str::from_utf8(raw).unwrap(), uop, outcome,
+            );
+            assert!(buf.is_empty());
+        }
     }
 }
 

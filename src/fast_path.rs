@@ -74,7 +74,7 @@ use crate::value::{
     json_object_update_field_split_first, json_object_update_field_split_last,
     json_object_update_field_str_concat, json_object_update_field_str_map,
     json_object_update_field_test, json_object_update_field_tostring,
-    json_object_update_field_trim, json_value_length,
+    json_object_update_field_trim, json_value_length, push_jq_number_bytes,
 };
 
 /// A fast path whose type-dispatch obligations are encoded in its
@@ -900,6 +900,175 @@ where
         _ => return RawApplyOutcome::Bail,
     };
     emit(result);
+    RawApplyOutcome::Emit
+}
+
+/// Apply the `.field | <unary>` raw-byte multi-modal fast path on a
+/// single JSON record. Output type depends on the unary op:
+///
+/// * `Length` / `Utf8ByteLength` → number (polymorphic — works on
+///   string/array/object/null/number; jq raises on boolean).
+/// * `Explode` → array of code points (string only).
+/// * `AsciiDowncase` / `AsciiUpcase` → string (string only).
+/// * `Floor` / `Ceil` / `Sqrt` / `Fabs` / `Abs` → number (number only).
+/// * `ToString` → string (number only — strings/arrays/objects need
+///   the generic path's `tostring` semantics).
+///
+/// The helper writes the raw output bytes plus a trailing `\n`
+/// directly to `buf` on Emit, matching the field-update helper
+/// pattern (the apply-site doesn't need to format anything itself).
+///
+/// Bail discipline:
+/// * Non-object input — [`RawApplyOutcome::Bail`].
+/// * Field absent and op isn't `Length`/`Utf8ByteLength` — Bail.
+///   (Length on a missing field is `null | length = 0`, which is
+///   safe to emit.)
+/// * Field is a string with backslash escapes — Bail (the raw
+///   scanner can't decode escapes; for `Length` it would miscount
+///   code points, for `Explode`/`AsciiCase` it would emit wrong
+///   bytes).
+/// * Field is non-string for `Explode` / `AsciiDowncase` /
+///   `AsciiUpcase` — Bail (jq raises type error).
+/// * Field is non-numeric for the numeric unary set —
+///   Bail.
+/// * Field is boolean for `Length` — Bail (jq raises
+///   `boolean has no length`).
+/// * `Length` on malformed array/object (parse failure) — Bail.
+/// * `ToString` on non-numeric field — Bail (the generic path
+///   knows how to stringify strings / arrays / objects / null).
+/// * Unsupported unary op (defensive) — Bail.
+///
+/// On Emit, writes the result bytes + `\n` to `buf`. Caller is
+/// responsible for flushing `buf` to output as needed.
+pub fn apply_field_unary_num_raw(
+    raw: &[u8],
+    field: &str,
+    uop: UnaryOp,
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if raw.is_empty() || raw[0] != b'{' {
+        return RawApplyOutcome::Bail;
+    }
+    match uop {
+        UnaryOp::Explode => {
+            let (vs, ve) = match json_object_get_field_raw(raw, 0, field) {
+                Some(r) => r,
+                None => return RawApplyOutcome::Bail,
+            };
+            let val = &raw[vs..ve];
+            if val.len() < 2 || val[0] != b'"' || val[val.len() - 1] != b'"'
+                || val[1..val.len() - 1].contains(&b'\\')
+            {
+                return RawApplyOutcome::Bail;
+            }
+            let inner = &val[1..val.len() - 1];
+            buf.push(b'[');
+            if inner.is_ascii() {
+                for (i, &byte) in inner.iter().enumerate() {
+                    if i > 0 { buf.push(b','); }
+                    buf.extend_from_slice(itoa::Buffer::new().format(byte as i64).as_bytes());
+                }
+            } else {
+                let mut first = true;
+                for ch in unsafe { std::str::from_utf8_unchecked(inner) }.chars() {
+                    if !first { buf.push(b','); }
+                    first = false;
+                    buf.extend_from_slice(itoa::Buffer::new().format(ch as i64).as_bytes());
+                }
+            }
+            buf.extend_from_slice(b"]\n");
+        }
+        UnaryOp::AsciiDowncase | UnaryOp::AsciiUpcase => {
+            let (vs, ve) = match json_object_get_field_raw(raw, 0, field) {
+                Some(r) => r,
+                None => return RawApplyOutcome::Bail,
+            };
+            let val = &raw[vs..ve];
+            if val.len() < 2 || val[0] != b'"' || val[val.len() - 1] != b'"'
+                || val[1..val.len() - 1].contains(&b'\\')
+            {
+                return RawApplyOutcome::Bail;
+            }
+            buf.push(b'"');
+            for &byte in &val[1..val.len() - 1] {
+                buf.push(match uop {
+                    UnaryOp::AsciiDowncase => if byte.is_ascii_uppercase() { byte + 32 } else { byte },
+                    UnaryOp::AsciiUpcase => if byte.is_ascii_lowercase() { byte - 32 } else { byte },
+                    _ => unreachable!(),
+                });
+            }
+            buf.extend_from_slice(b"\"\n");
+        }
+        UnaryOp::Length | UnaryOp::Utf8ByteLength => {
+            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
+                let val = &raw[vs..ve];
+                match val[0] {
+                    b'"' => {
+                        let inner = &val[1..val.len() - 1];
+                        if inner.contains(&b'\\') {
+                            return RawApplyOutcome::Bail;
+                        }
+                        let len = if matches!(uop, UnaryOp::Utf8ByteLength) {
+                            inner.len()
+                        } else if inner.is_ascii() {
+                            inner.len()
+                        } else {
+                            unsafe { std::str::from_utf8_unchecked(inner) }.chars().count()
+                        };
+                        push_jq_number_bytes(buf, len as f64);
+                        buf.push(b'\n');
+                    }
+                    b'[' | b'{' => match json_value_length(val, 0) {
+                        Some(len) => {
+                            push_jq_number_bytes(buf, len as f64);
+                            buf.push(b'\n');
+                        }
+                        None => return RawApplyOutcome::Bail,
+                    },
+                    b'n' => buf.extend_from_slice(b"0\n"),
+                    b't' | b'f' => return RawApplyOutcome::Bail,
+                    _ => match json_object_get_num(raw, 0, field) {
+                        Some(n) => {
+                            push_jq_number_bytes(buf, n.abs());
+                            buf.push(b'\n');
+                        }
+                        None => return RawApplyOutcome::Bail,
+                    },
+                }
+            } else {
+                // Object input + missing field: jq's `null | length = 0`.
+                buf.extend_from_slice(b"0\n");
+            }
+        }
+        UnaryOp::ToString => {
+            // Only the numeric-field shape stays in the fast path; strings,
+            // arrays, etc. need the generic path's `tostring` semantics.
+            match json_object_get_num(raw, 0, field) {
+                Some(n) => {
+                    buf.push(b'"');
+                    push_jq_number_bytes(buf, n);
+                    buf.extend_from_slice(b"\"\n");
+                }
+                None => return RawApplyOutcome::Bail,
+            }
+        }
+        UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Sqrt | UnaryOp::Fabs | UnaryOp::Abs => {
+            let n = match json_object_get_num(raw, 0, field) {
+                Some(v) => v,
+                None => return RawApplyOutcome::Bail,
+            };
+            let result = match uop {
+                UnaryOp::Floor => n.floor(),
+                UnaryOp::Ceil => n.ceil(),
+                UnaryOp::Sqrt => n.sqrt(),
+                UnaryOp::Fabs | UnaryOp::Abs => n.abs(),
+                _ => unreachable!(),
+            };
+            push_jq_number_bytes(buf, result);
+            buf.push(b'\n');
+        }
+        _ => return RawApplyOutcome::Bail,
+    }
     RawApplyOutcome::Emit
 }
 

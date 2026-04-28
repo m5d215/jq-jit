@@ -146,7 +146,8 @@ use jq_jit::fast_path::{
     apply_field_gsub_raw, apply_field_ltrimstr_tonumber_raw, apply_field_match_raw,
     apply_field_scan_raw, apply_field_str_builtin_raw, apply_field_str_concat_raw,
     apply_field_binop_const_unary_raw, apply_field_str_reverse_raw, apply_field_test_raw,
-    apply_field_unary_arith_raw, apply_full_object_fields_raw, apply_two_field_binop_const_raw,
+    apply_field_unary_arith_raw, apply_field_unary_num_raw, apply_full_object_fields_raw,
+    apply_two_field_binop_const_raw,
     apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
     apply_nested_field_access_raw, apply_object_compute_raw, apply_select_arith_cmp_raw,
     apply_select_cmp_raw, apply_select_field_null_raw, apply_select_str_raw,
@@ -5992,150 +5993,10 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref field, ref uop)) = field_unary_num {
-                    use jq_jit::ir::UnaryOp;
-                    let is_string_op = matches!(uop, UnaryOp::AsciiDowncase | UnaryOp::AsciiUpcase);
-                    let is_length_op = matches!(uop, UnaryOp::Length | UnaryOp::Utf8ByteLength);
-                    let is_explode = matches!(uop, UnaryOp::Explode);
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if is_explode {
-                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
-                                let val = &raw[vs..ve];
-                                if val.len() >= 2 && val[0] == b'"' && !val[1..val.len()-1].contains(&b'\\') {
-                                    let inner = &val[1..val.len()-1];
-                                    compact_buf.push(b'[');
-                                    if inner.is_ascii() {
-                                        for (i, &byte) in inner.iter().enumerate() {
-                                            if i > 0 { compact_buf.push(b','); }
-                                            compact_buf.extend_from_slice(itoa::Buffer::new().format(byte as i64).as_bytes());
-                                        }
-                                    } else {
-                                        let mut first = true;
-                                        for ch in unsafe { std::str::from_utf8_unchecked(inner) }.chars() {
-                                            if !first { compact_buf.push(b','); }
-                                            first = false;
-                                            compact_buf.extend_from_slice(itoa::Buffer::new().format(ch as i64).as_bytes());
-                                        }
-                                    }
-                                    compact_buf.extend_from_slice(b"]\n");
-                                } else {
-                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                                }
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            }
-                        } else if is_string_op {
-                            // String ops: extract raw field bytes
-                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
-                                let val = &raw[vs..ve];
-                                // Only fast-path for quoted strings without backslash escapes
-                                if val.len() >= 2 && val[0] == b'"' && !val[1..val.len()-1].contains(&b'\\') {
-                                    compact_buf.push(b'"');
-                                    for &byte in &val[1..val.len()-1] {
-                                        compact_buf.push(match uop {
-                                            UnaryOp::AsciiDowncase => if byte >= b'A' && byte <= b'Z' { byte + 32 } else { byte },
-                                            UnaryOp::AsciiUpcase => if byte >= b'a' && byte <= b'z' { byte - 32 } else { byte },
-                                            _ => unreachable!(),
-                                        });
-                                    }
-                                    compact_buf.push(b'"');
-                                    compact_buf.push(b'\n');
-                                } else {
-                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                                }
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            }
-                        } else if is_length_op {
-                            // Length ops: works on any field type. Bail to generic
-                            // eval when the input root isn't an object (`.a` on a
-                            // number/string is an indexing error, not a missing field)
-                            // or the field value is a boolean (jq raises
-                            // `boolean (X) has no length`) — see #160.
-                            let raw_trim_start = raw.iter().position(|&b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r')).unwrap_or(raw.len());
-                            let root_byte = raw.get(raw_trim_start).copied();
-                            if root_byte != Some(b'{') {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            } else if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
-                                let val = &raw[vs..ve];
-                                match val[0] {
-                                    b'"' => {
-                                        // String: count characters or bytes
-                                        let inner = &val[1..ve-vs-1];
-                                        let has_escape = inner.contains(&b'\\');
-                                        if !has_escape {
-                                            let len = if matches!(uop, UnaryOp::Utf8ByteLength) {
-                                                inner.len()
-                                            } else {
-                                                // length: count Unicode chars — ASCII fast path
-                                                if inner.is_ascii() { inner.len() }
-                                                else { unsafe { std::str::from_utf8_unchecked(inner) }.chars().count() }
-                                            };
-                                            push_jq_number_bytes(&mut compact_buf, len as f64);
-                                            compact_buf.push(b'\n');
-                                        } else {
-                                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                                        }
-                                    }
-                                    b'[' | b'{' => {
-                                        // Array/object: count elements using raw byte scanning
-                                        if let Some(len) = json_value_length(val, 0) {
-                                            push_jq_number_bytes(&mut compact_buf, len as f64);
-                                            compact_buf.push(b'\n');
-                                        } else {
-                                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                                        }
-                                    }
-                                    b'n' => {
-                                        // null: length is 0
-                                        compact_buf.push(b'0');
-                                        compact_buf.push(b'\n');
-                                    }
-                                    b't' | b'f' => {
-                                        // Boolean: jq errors. Generic eval has the
-                                        // matching wording.
-                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                                    }
-                                    _ => {
-                                        // Number: length is abs(number)
-                                        if let Some(n) = json_object_get_num(raw, 0, field) {
-                                            push_jq_number_bytes(&mut compact_buf, n.abs());
-                                        } else {
-                                            compact_buf.extend_from_slice(b"null");
-                                        }
-                                        compact_buf.push(b'\n');
-                                    }
-                                }
-                            } else {
-                                // Field not found: .field is null, null | length = 0
-                                compact_buf.extend_from_slice(b"0\n");
-                            }
-                        } else if let Some(n) = json_object_get_num(raw, 0, field) {
-                            if matches!(uop, UnaryOp::ToString) {
-                                compact_buf.push(b'"');
-                                push_jq_number_bytes(&mut compact_buf, n);
-                                compact_buf.push(b'"');
-                                compact_buf.push(b'\n');
-                            } else {
-                                let result = match uop {
-                                    UnaryOp::Floor => n.floor(),
-                                    UnaryOp::Ceil => n.ceil(),
-                                    UnaryOp::Sqrt => n.sqrt(),
-                                    UnaryOp::Fabs | UnaryOp::Abs => n.abs(),
-                                    _ => unreachable!(),
-                                };
-                                push_jq_number_bytes(&mut compact_buf, result);
-                                compact_buf.push(b'\n');
-                            }
-                        } else {
+                        let outcome = apply_field_unary_num_raw(raw, field, *uop, &mut compact_buf);
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -19096,117 +18957,11 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some((ref field, ref uop)) = field_unary_num {
-                use jq_jit::ir::UnaryOp;
-                let is_string_op = matches!(uop, UnaryOp::AsciiDowncase | UnaryOp::AsciiUpcase);
-                let is_length_op = matches!(uop, UnaryOp::Length | UnaryOp::Utf8ByteLength);
-                let is_explode = matches!(uop, UnaryOp::Explode);
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if is_explode {
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
-                            let val = &raw[vs..ve];
-                            if val.len() >= 2 && val[0] == b'"' && !val[1..val.len()-1].contains(&b'\\') {
-                                let inner = &val[1..val.len()-1];
-                                compact_buf.push(b'[');
-                                if inner.is_ascii() {
-                                    for (i, &byte) in inner.iter().enumerate() {
-                                        if i > 0 { compact_buf.push(b','); }
-                                        compact_buf.extend_from_slice(itoa::Buffer::new().format(byte as i64).as_bytes());
-                                    }
-                                } else {
-                                    let mut first = true;
-                                    for ch in unsafe { std::str::from_utf8_unchecked(inner) }.chars() {
-                                        if !first { compact_buf.push(b','); }
-                                        first = false;
-                                        compact_buf.extend_from_slice(itoa::Buffer::new().format(ch as i64).as_bytes());
-                                    }
-                                }
-                                compact_buf.extend_from_slice(b"]\n");
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            }
-                        } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                        }
-                    } else if is_string_op {
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
-                            let val = &raw[vs..ve];
-                            if val.len() >= 2 && val[0] == b'"' && !val[1..val.len()-1].contains(&b'\\') {
-                                compact_buf.push(b'"');
-                                for &byte in &val[1..val.len()-1] {
-                                    compact_buf.push(match uop {
-                                        UnaryOp::AsciiDowncase => if byte >= b'A' && byte <= b'Z' { byte + 32 } else { byte },
-                                        UnaryOp::AsciiUpcase => if byte >= b'a' && byte <= b'z' { byte - 32 } else { byte },
-                                        _ => unreachable!(),
-                                    });
-                                }
-                                compact_buf.push(b'"');
-                                compact_buf.push(b'\n');
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            }
-                        } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                        }
-                    } else if is_length_op {
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
-                            let val = &raw[vs..ve];
-                            match val[0] {
-                                b'"' => {
-                                    let inner = &val[1..ve-vs-1];
-                                    if !inner.contains(&b'\\') {
-                                        let len = if matches!(uop, UnaryOp::Utf8ByteLength) {
-                                            inner.len()
-                                        } else if inner.is_ascii() { inner.len() }
-                                        else { unsafe { std::str::from_utf8_unchecked(inner) }.chars().count() };
-                                        push_jq_number_bytes(&mut compact_buf, len as f64);
-                                        compact_buf.push(b'\n');
-                                    } else {
-                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                                    }
-                                }
-                                b'n' => { compact_buf.extend_from_slice(b"0\n"); }
-                                b'[' | b'{' => {
-                                    if let Some(len) = json_value_length(val, 0) {
-                                        push_jq_number_bytes(&mut compact_buf, len as f64);
-                                        compact_buf.push(b'\n');
-                                    } else {
-                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                                    }
-                                }
-                                _ => {
-                                    if let Some(n) = json_object_get_num(raw, 0, field) {
-                                        push_jq_number_bytes(&mut compact_buf, n.abs());
-                                    } else { compact_buf.extend_from_slice(b"null"); }
-                                    compact_buf.push(b'\n');
-                                }
-                            }
-                        } else { compact_buf.extend_from_slice(b"0\n"); }
-                    } else if let Some(n) = json_object_get_num(raw, 0, field) {
-                        if matches!(uop, UnaryOp::ToString) {
-                            compact_buf.push(b'"');
-                            push_jq_number_bytes(&mut compact_buf, n);
-                            compact_buf.push(b'"');
-                            compact_buf.push(b'\n');
-                        } else {
-                            let result = match uop {
-                                UnaryOp::Floor => n.floor(),
-                                UnaryOp::Ceil => n.ceil(),
-                                UnaryOp::Sqrt => n.sqrt(),
-                                UnaryOp::Fabs | UnaryOp::Abs => n.abs(),
-                                _ => unreachable!(),
-                            };
-                            push_jq_number_bytes(&mut compact_buf, result);
-                            compact_buf.push(b'\n');
-                        }
-                    } else {
+                    let outcome = apply_field_unary_num_raw(raw, field, *uop, &mut compact_buf);
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
