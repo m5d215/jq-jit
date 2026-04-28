@@ -4197,3 +4197,89 @@ null
 [ ((.x | length) + 0)? ]
 "hi"
 []
+
+# Issue #251: field_unary_num apply-site uses RawApplyOutcome (#83 Phase B).
+# Multi-modal helper covering Length/Utf8ByteLength/Explode/AsciiCase/Floor/
+# Ceil/Sqrt/Abs/Fabs/ToString. Also fixes file-mode #83-class bugs:
+# - non-object root silently treated as `null|length=0`
+# - boolean field for length silently emitted `null` instead of jq's
+#   `boolean has no length` error
+.x | length
+{"x":"abcd"}
+4
+
+.x | length
+{"x":[1,2,3]}
+3
+
+.x | length
+{"y":1}
+0
+
+.x | length
+{"x":-7}
+7
+
+.x | utf8bytelength
+{"x":"🦀"}
+4
+
+.x | length
+{"x":"🦀"}
+1
+
+.x | explode
+{"x":"abc"}
+[97,98,99]
+
+.x | ascii_downcase
+{"x":"ABC"}
+"abc"
+
+.x | ascii_upcase
+{"x":"abc"}
+"ABC"
+
+.x | floor
+{"x":3.7}
+3
+
+.x | tostring
+{"x":42}
+"42"
+
+# `?`-wrapped: boolean for length — generic raises `boolean has no length`,
+# ? swallows. Was silently emitting `null` in file-mode pre-#83-Phase-B.
+[ (.x | length)? ]
+{"x":true}
+[]
+
+# `?`-wrapped: non-object input — generic raises `Cannot index <type>`, ?
+# swallows. Was silently emitting `0` in file-mode pre-#83-Phase-B.
+[ (.x | length)? ]
+42
+[]
+
+[ (.x | length)? ]
+"hi"
+[]
+
+# `?`-wrapped: non-numeric for floor — generic raises type error.
+[ (.x | floor)? ]
+{"x":"hi"}
+[]
+
+# `?`-wrapped: non-string for explode — generic raises type error.
+[ (.x | explode)? ]
+{"x":42}
+[]
+
+# Escaped string field: helper Bails (raw scanner can't decode `\n`),
+# generic decodes and emits the right code points.
+.x | explode
+{"x":"a\nb"}
+[97,10,98]
+
+.x | ascii_upcase
+{"x":"a\nb"}
+"A\nB"
