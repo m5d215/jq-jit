@@ -6,7 +6,7 @@
 use std::rc::Rc;
 
 use anyhow::{Result, bail};
-use crate::value::{Value, ObjMap, KeyStr, new_objmap};
+use crate::value::{Value, ObjMap, ObjInner, NumRepr, KeyStr, new_objmap};
 
 // System libm bindings used to match jq's last-digit precision on
 // gamma-family functions, and to obtain logb's f64 return (libm crate
@@ -617,7 +617,7 @@ pub fn rt_add(a: &Value, b: &Value) -> Result<Value> {
             result.extend((**y).iter().cloned());
             Ok(Value::Arr(Rc::new(result)))
         }
-        (Value::Obj(x), Value::Obj(y)) => {
+        (Value::Obj(ObjInner(x)), Value::Obj(ObjInner(y))) => {
             let mut result = (**x).clone();
             for (k, v) in y.iter() {
                 result.insert(k.clone(), v.clone());
@@ -654,7 +654,7 @@ pub fn rt_add_owned(a: Value, b: &Value) -> Result<Value> {
                 }
             }
         }
-        (Value::Obj(x), Value::Obj(y)) => {
+        (Value::Obj(ObjInner(x)), Value::Obj(ObjInner(y))) => {
             match Rc::try_unwrap(x) {
                 Ok(mut map) => {
                     for (k, v) in y.iter() {
@@ -714,7 +714,7 @@ pub fn rt_mul(a: &Value, b: &Value) -> Result<Value> {
                 Ok(Value::from_string(s.as_str().repeat(count)))
             }
         }
-        (Value::Obj(x), Value::Obj(y)) => {
+        (Value::Obj(ObjInner(x)), Value::Obj(ObjInner(y))) => {
             // Object multiplication = recursive merge
             Ok(Value::object_from_map(merge_objects(x, y)))
         }
@@ -730,7 +730,7 @@ fn merge_objects(a: &ObjMap, b: &ObjMap) -> ObjMap {
     let mut result = a.clone();
     for (k, v) in b.iter() {
         if let Some(existing) = result.get(k) {
-            if let (Value::Obj(ea), Value::Obj(eb)) = (existing, v) {
+            if let (Value::Obj(ObjInner(ea)), Value::Obj(ObjInner(eb))) = (existing, v) {
                 result.insert(k.clone(), Value::object_from_map(merge_objects(ea, eb)));
                 continue;
             }
@@ -870,7 +870,7 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Arr(x), Value::Arr(y)) => {
             x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| values_equal(a, b))
         }
-        (Value::Obj(x), Value::Obj(y)) => {
+        (Value::Obj(ObjInner(x)), Value::Obj(ObjInner(y))) => {
             x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|yv| values_equal(v, yv)))
         }
         _ => false,
@@ -928,7 +928,7 @@ pub fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
             }
             x.len().cmp(&y.len())
         }
-        (Value::Obj(x), Value::Obj(y)) => {
+        (Value::Obj(ObjInner(x)), Value::Obj(ObjInner(y))) => {
             // Compare by sorted keys then values
             let mut xkeys: Vec<&KeyStr> = x.keys().collect();
             let mut ykeys: Vec<&KeyStr> = y.keys().collect();
@@ -973,7 +973,7 @@ fn rt_type(v: &Value) -> Result<Value> {
 
 fn rt_keys(v: &Value, sorted: bool) -> Result<Value> {
     match v {
-        Value::Obj(o) => {
+        Value::Obj(ObjInner(o)) => {
             let mut keys: Vec<Value> = o.keys().map(|k| Value::from_str(k)).collect();
             if sorted {
                 keys.sort_by(compare_values);
@@ -990,7 +990,7 @@ fn rt_keys(v: &Value, sorted: bool) -> Result<Value> {
 
 fn rt_values(v: &Value) -> Result<Value> {
     match v {
-        Value::Obj(o) => {
+        Value::Obj(ObjInner(o)) => {
             let vals: Vec<Value> = o.values().cloned().collect();
             Ok(Value::Arr(Rc::new(vals)))
         }
@@ -1055,7 +1055,7 @@ fn rt_reverse(v: &Value) -> Result<Value> {
         }
         Value::Null => Ok(Value::Arr(Rc::new(vec![]))),
         Value::Str(s) if s.is_empty() => Ok(Value::Arr(Rc::new(vec![]))),
-        Value::Obj(o) if o.is_empty() => Ok(Value::Arr(Rc::new(vec![]))),
+        Value::Obj(ObjInner(o)) if o.is_empty() => Ok(Value::Arr(Rc::new(vec![]))),
         Value::Str(_) => bail!("Cannot index string with number"),
         Value::Obj(_) => bail!("Cannot index object with number"),
         Value::Num(_, _) => bail!("Cannot index number with number"),
@@ -1074,7 +1074,7 @@ fn rt_flatten(v: &Value, depth: Option<usize>) -> Result<Value> {
         // jq treats an object's values as the array to flatten, then runs
         // the same recursive logic on it (#184). `flatten` on `{"a":[1,2]}`
         // becomes `[[1,2]] | flatten` = `[1,2]`.
-        Value::Obj(o) => {
+        Value::Obj(ObjInner(o)) => {
             let values: Vec<Value> = o.values().cloned().collect();
             let mut result = Vec::new();
             flatten_inner(&values, depth.unwrap_or(usize::MAX), &mut result);
@@ -1209,7 +1209,7 @@ fn rt_add_all(v: &Value) -> Result<Value> {
                     let mut all_obj = true;
                     for item in a.iter() {
                         match item {
-                            Value::Obj(o) => total += o.len(),
+                            Value::Obj(ObjInner(o)) => total += o.len(),
                             Value::Null => {}
                             _ => { all_obj = false; break; }
                         }
@@ -1220,7 +1220,7 @@ fn rt_add_all(v: &Value) -> Result<Value> {
                         let mut key_index: HashMap<crate::value::KeyStr, usize> = HashMap::with_capacity(total);
                         let mut entries: Vec<(crate::value::KeyStr, Value)> = Vec::with_capacity(total);
                         for item in a.iter() {
-                            if let Value::Obj(o) = item {
+                            if let Value::Obj(ObjInner(o)) = item {
                                 for (k, v) in o.iter() {
                                     if let Some(&idx) = key_index.get(k) {
                                         entries[idx].1 = v.clone();
@@ -1247,7 +1247,7 @@ fn rt_add_all(v: &Value) -> Result<Value> {
             }
             Ok(result)
         }
-        Value::Obj(o) => {
+        Value::Obj(ObjInner(o)) => {
             let mut iter = o.values();
             let Some(first) = iter.next() else { return Ok(Value::Null); };
             let mut result = first.clone();
@@ -1263,7 +1263,7 @@ fn rt_add_all(v: &Value) -> Result<Value> {
 fn rt_any(v: &Value) -> Result<Value> {
     match v {
         Value::Arr(a) => Ok(Value::from_bool(a.iter().any(|v| v.is_true()))),
-        Value::Obj(o) => Ok(Value::from_bool(o.values().any(|v| v.is_true()))),
+        Value::Obj(ObjInner(o)) => Ok(Value::from_bool(o.values().any(|v| v.is_true()))),
         _ => bail!("Cannot iterate over {}", v.type_name()),
     }
 }
@@ -1271,7 +1271,7 @@ fn rt_any(v: &Value) -> Result<Value> {
 fn rt_all(v: &Value) -> Result<Value> {
     match v {
         Value::Arr(a) => Ok(Value::from_bool(a.iter().all(|v| v.is_true()))),
-        Value::Obj(o) => Ok(Value::from_bool(o.values().all(|v| v.is_true()))),
+        Value::Obj(ObjInner(o)) => Ok(Value::from_bool(o.values().all(|v| v.is_true()))),
         _ => bail!("Cannot iterate over {}", v.type_name()),
     }
 }
@@ -1299,7 +1299,7 @@ fn rt_round(v: &Value) -> Result<Value> {
 
 fn rt_fabs(v: &Value) -> Result<Value> {
     match v {
-        Value::Num(n, repr) => {
+        Value::Num(n, NumRepr(repr)) => {
             if *n >= 0.0 { Ok(Value::number_opt(*n, repr.clone())) }
             else { Ok(Value::number(n.abs())) }
         }
@@ -1309,7 +1309,7 @@ fn rt_fabs(v: &Value) -> Result<Value> {
 
 fn rt_abs(v: &Value) -> Result<Value> {
     match v {
-        Value::Num(n, repr) => {
+        Value::Num(n, NumRepr(repr)) => {
             if *n >= 0.0 { Ok(Value::number_opt(*n, repr.clone())) }
             else { Ok(Value::number(n.abs())) }
         }
@@ -1504,7 +1504,7 @@ fn rt_fromjson(v: &Value) -> Result<Value> {
 
 fn rt_to_entries(v: &Value) -> Result<Value> {
     match v {
-        Value::Obj(o) => {
+        Value::Obj(ObjInner(o)) => {
             let entries: Vec<Value> = o.iter().map(|(k, v)| {
                 let mut entry = new_objmap();
                 entry.insert("key".into(), Value::from_str(k));
@@ -1532,7 +1532,7 @@ fn rt_from_entries(v: &Value) -> Result<Value> {
             let mut obj = new_objmap();
             for entry in a.iter() {
                 match entry {
-                    Value::Obj(o) => {
+                    Value::Obj(ObjInner(o)) => {
                         // jq resolves the key via `.key // .key_ // .Key // .name // .Name`
                         // — `//` skips null/false — and errors when the resolved key is
                         // not a string. Matches jq 1.8.1 wording.
@@ -1568,7 +1568,7 @@ fn rt_from_entries(v: &Value) -> Result<Value> {
         }
         // jq's from_entries desugars to `map(...) | add + {}`. On {} the map yields [],
         // add yields null, and null + {} is {} — so empty objects round-trip to {}.
-        Value::Obj(o) if o.is_empty() => Ok(Value::object_from_map(new_objmap())),
+        Value::Obj(ObjInner(o)) if o.is_empty() => Ok(Value::object_from_map(new_objmap())),
         _ => bail!("{} cannot be converted from entries", v.type_name()),
     }
 }
@@ -1611,7 +1611,7 @@ fn rt_not(v: &Value) -> Result<Value> {
 
 fn rt_has(v: &Value, key: &Value) -> Result<Value> {
     match (v, key) {
-        (Value::Obj(o), Value::Str(k)) => Ok(Value::from_bool(o.contains_key(k.as_str()))),
+        (Value::Obj(ObjInner(o)), Value::Str(k)) => Ok(Value::from_bool(o.contains_key(k.as_str()))),
         (Value::Arr(a), Value::Num(n, _)) => {
             if n.is_nan() || n.is_infinite() { return Ok(Value::False); }
             let idx = *n as i64;
@@ -1663,7 +1663,7 @@ fn value_contains(a: &Value, b: &Value) -> bool {
         (Value::Arr(x), Value::Arr(y)) => {
             y.iter().all(|yv| x.iter().any(|xv| value_contains(xv, yv)))
         }
-        (Value::Obj(x), Value::Obj(y)) => {
+        (Value::Obj(ObjInner(x)), Value::Obj(ObjInner(y))) => {
             y.iter().all(|(k, yv)| {
                 x.get(k).is_some_and(|xv| value_contains(xv, yv))
             })
@@ -1829,7 +1829,7 @@ fn rt_join(v: &Value, sep: &Value) -> Result<Value> {
                 match item {
                     Value::Str(sv) => buf.extend_from_slice(sv.as_bytes()),
                     Value::Null => {},
-                    Value::Num(n, repr) => {
+                    Value::Num(n, NumRepr(repr)) => {
                         if let Some(r) = repr.as_ref().filter(|r| crate::value::is_valid_json_number(r)) {
                             buf.extend_from_slice(r.as_bytes());
                         } else {
@@ -1934,7 +1934,7 @@ fn rt_indices_dot_fallback(v: &Value, target: &Value) -> Result<Value> {
         (Value::Null, Value::Str(_)) => Ok(Value::Null),
         (Value::Null, Value::Num(_, _)) => Ok(Value::Null),
         (Value::Null, Value::Obj(_)) => Ok(Value::Null),
-        (Value::Obj(o), Value::Str(k)) => Ok(o.get(k.as_str()).cloned().unwrap_or(Value::Null)),
+        (Value::Obj(ObjInner(o)), Value::Str(k)) => Ok(o.get(k.as_str()).cloned().unwrap_or(Value::Null)),
         _ => bail!("Cannot index {} with {}", v.type_name(), index_err_desc(target)),
     }
 }
@@ -2031,7 +2031,7 @@ pub fn rt_getpath(v: &Value, path: &Value) -> Result<Value> {
             let mut current = v.clone();
             for key in p.iter() {
                 match (&current, key) {
-                    (Value::Obj(o), Value::Str(k)) => {
+                    (Value::Obj(ObjInner(o)), Value::Str(k)) => {
                         current = o.get(k.as_str()).cloned().unwrap_or(Value::Null);
                     }
                     (Value::Arr(a), Value::Num(n, _)) => {
@@ -2079,7 +2079,7 @@ pub fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
             let key = &p[0];
             let rest = Value::Arr(Rc::new(p[1..].to_vec()));
             match (v, key) {
-                (Value::Obj(o), Value::Str(k)) => {
+                (Value::Obj(ObjInner(o)), Value::Str(k)) => {
                     let inner = o.get(k.as_str()).cloned().unwrap_or(Value::Null);
                     let new_inner = rt_setpath(&inner, &rest, val)?;
                     let mut new_obj = (**o).clone();
@@ -2129,7 +2129,7 @@ pub fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
                     bail!("Cannot index array with string (\"{}\")", k);
                 }
                 // Slice assignment: path element is {start: N, end: N}
-                (_, Value::Obj(slice_spec)) if slice_spec.contains_key("start") && slice_spec.contains_key("end") => {
+                (_, Value::Obj(ObjInner(slice_spec))) if slice_spec.contains_key("start") && slice_spec.contains_key("end") => {
                     // jq applies floor(start) / ceil(end) when consuming a slice path,
                     // and treats null as the open endpoint (0 for start, len for end).
                     let len = match v { Value::Arr(a) => a.len() as i64, _ => 0 };
@@ -2202,7 +2202,7 @@ pub fn rt_setpath_mut(v: &mut Value, path: &[Value], val: Value) -> Result<()> {
             if matches!(v, Value::Null) {
                 *v = Value::object_from_map(new_objmap());
             }
-            if let Value::Obj(o) = v {
+            if let Value::Obj(ObjInner(o)) = v {
                 let obj = Rc::make_mut(o);
                 if rest.is_empty() {
                     obj.insert(KeyStr::from(k.as_str()), val);
@@ -2283,7 +2283,7 @@ fn delete_path(v: &Value, path: &Value) -> Result<Value> {
         Value::Arr(p) if p.len() == 1 => {
             match (v, &p[0]) {
                 (Value::Null, _) => Ok(Value::Null),
-                (Value::Obj(o), Value::Str(k)) => {
+                (Value::Obj(ObjInner(o)), Value::Str(k)) => {
                     let mut new_obj = (**o).clone();
                     new_obj.shift_remove(k.as_str());
                     Ok(Value::object_from_map(new_obj))
@@ -2310,7 +2310,7 @@ fn delete_path(v: &Value, path: &Value) -> Result<Value> {
             let rest = Value::Arr(Rc::new(p[1..].to_vec()));
             match (v, key) {
                 (Value::Null, _) => Ok(Value::Null),
-                (Value::Obj(o), Value::Str(k)) => {
+                (Value::Obj(ObjInner(o)), Value::Str(k)) => {
                     if let Some(inner) = o.get(k.as_str()) {
                         let new_inner = delete_path(inner, &rest)?;
                         let mut new_obj = (**o).clone();

@@ -26,7 +26,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-const GUARDED_PATTERN: &str = "Value::Obj(Rc::new";
+const GUARDED_PATTERN: &str = "Value::Obj(ObjInner(Rc::new";
 
 fn scan_src() -> BTreeMap<String, usize> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");

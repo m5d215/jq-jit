@@ -12,7 +12,7 @@ use std::rc::Rc;
 use anyhow::{Result, bail};
 
 use crate::ir::*;
-use crate::value::{Value, KeyStr};
+use crate::value::{Value, ObjInner, NumRepr, KeyStr};
 
 type GenResult = Result<bool>;
 pub type EnvRef = Rc<RefCell<Env>>;
@@ -1090,7 +1090,7 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
         Expr::Negate { operand } => {
             let val = eval_one(operand, input, env)?;
             match val {
-                Value::Num(n, repr) => {
+                Value::Num(n, NumRepr(repr)) => {
                     let neg = if n == 0.0 { 0.0 } else { -n };
                     Ok(Value::number_opt(neg, crate::value::Value::negate_repr(repr)))
                 }
@@ -1789,7 +1789,7 @@ pub fn eval(
                         }
                         Ok(true)
                     }
-                    Value::Obj(o) => {
+                    Value::Obj(ObjInner(o)) => {
                         for v in o.values() {
                             if !cb(v.clone())? { return Ok(false); }
                         }
@@ -1805,7 +1805,7 @@ pub fn eval(
             eval(input_expr, input, env, &mut |container| {
                 match &container {
                     Value::Arr(a) => { for v in a.iter() { if !cb(v.clone())? { return Ok(false); } } Ok(true) }
-                    Value::Obj(o) => { for v in o.values() { if !cb(v.clone())? { return Ok(false); } } Ok(true) }
+                    Value::Obj(ObjInner(o)) => { for v in o.values() { if !cb(v.clone())? { return Ok(false); } } Ok(true) }
                     _ => Ok(true),
                 }
             })
@@ -2082,7 +2082,7 @@ pub fn eval(
                             r
                         };
                         match (&mut acc, rhs_val) {
-                            (Value::Obj(o), Value::Obj(rhs_obj)) => {
+                            (Value::Obj(ObjInner(o)), Value::Obj(ObjInner(rhs_obj))) => {
                                 let obj = Rc::make_mut(o);
                                 for (k, v) in rhs_obj.iter() {
                                     obj.insert(k.clone(), v.clone());
@@ -2297,7 +2297,7 @@ pub fn eval(
         Expr::Negate { operand } => {
             eval(operand, input, env, &mut |val| {
                 match &val {
-                    Value::Num(n, repr) => {
+                    Value::Num(n, NumRepr(repr)) => {
                         // jq normalises `-(0)` back to `+0` (the literal `-0`
                         // and the `Negate` expr never produce a signed zero —
                         // only IEEE arithmetic like `0 * -1` does). Issue #110.
@@ -2360,7 +2360,7 @@ pub fn eval(
 
         Expr::Break { var_index, .. } => {
             let label = env.borrow().get_var(*var_index);
-            if let Value::Num(n, None) = &label {
+            if let Value::Num(n, NumRepr(None)) = &label {
                 return Err(BreakError(*n as u64).into());
             }
             bail!("break: invalid label")
@@ -2602,7 +2602,7 @@ pub fn eval(
 
         Expr::Limit { count, generator } => {
             eval(count, input.clone(), env, &mut |cv| {
-                if let Value::Num(n, None) = &cv {
+                if let Value::Num(n, NumRepr(None)) = &cv {
                     let limit = *n as i64;
                     if limit == 0 { return Ok(true); }
                     if limit < 0 {
@@ -3173,7 +3173,7 @@ pub fn eval_unaryop(op: UnaryOp, val: &Value) -> Result<Value> {
 
 pub fn eval_index(base: &Value, key: &Value, optional: bool) -> std::result::Result<Value, String> {
     match (base, key) {
-        (Value::Obj(o), Value::Str(k)) => Ok(o.get(k.as_str()).cloned().unwrap_or(Value::Null)),
+        (Value::Obj(ObjInner(o)), Value::Str(k)) => Ok(o.get(k.as_str()).cloned().unwrap_or(Value::Null)),
         (Value::Arr(a), Value::Num(n, _)) => {
             if n.is_nan() { return Ok(Value::Null); }
             let idx = *n as i64;
@@ -3240,7 +3240,7 @@ fn eval_recurse_default(val: &Value, cb: &mut dyn FnMut(Value) -> GenResult) -> 
     if !cb(val.clone())? { return Ok(false); }
     match val {
         Value::Arr(a) => { for item in a.iter() { if !stacker::maybe_grow(64 * 1024, 1024 * 1024, || eval_recurse_default(item, cb))? { return Ok(false); } } }
-        Value::Obj(o) => { for v in o.values() { if !stacker::maybe_grow(64 * 1024, 1024 * 1024, || eval_recurse_default(v, cb))? { return Ok(false); } } }
+        Value::Obj(ObjInner(o)) => { for v in o.values() { if !stacker::maybe_grow(64 * 1024, 1024 * 1024, || eval_recurse_default(v, cb))? { return Ok(false); } } }
         _ => {}
     }
     Ok(true)
@@ -3730,7 +3730,7 @@ fn try_eval_key_f64(expr: &Expr, input: &Value) -> Option<f64> {
                     return match v {
                         Value::Str(s) => Some(s.chars().count() as f64),
                         Value::Arr(a) => Some(a.len() as f64),
-                        Value::Obj(o) => Some(o.len() as f64),
+                        Value::Obj(ObjInner(o)) => Some(o.len() as f64),
                         Value::Num(n, _) => Some(n.abs()),
                         Value::Null => Some(0.0),
                         _ => None,
@@ -3753,7 +3753,7 @@ fn try_eval_key_f64(expr: &Expr, input: &Value) -> Option<f64> {
             if !matches!(base.as_ref(), Expr::Input) { return None; }
             if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                 match input {
-                    Value::Obj(o) => match o.get(field.as_str()) {
+                    Value::Obj(ObjInner(o)) => match o.get(field.as_str()) {
                         Some(Value::Num(n, _)) => Some(*n),
                         _ => None,
                     },
@@ -3784,7 +3784,7 @@ fn try_eval_key_value<'a>(expr: &Expr, input: &'a Value) -> Option<&'a Value> {
             if !matches!(base.as_ref(), Expr::Input) { return None; }
             if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                 match input {
-                    Value::Obj(o) => o.get(field.as_str()),
+                    Value::Obj(ObjInner(o)) => o.get(field.as_str()),
                     _ => None,
                 }
             } else { None }
@@ -4013,7 +4013,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 let base = crate::runtime::rt_getpath(&input, &bp).unwrap_or(Value::Null);
                 match &base {
                     Value::Arr(a) => { for i in 0..a.len() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::number(i as f64)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
-                    Value::Obj(o) => { for k in o.keys() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::from_str(k)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
+                    Value::Obj(ObjInner(o)) => { for k in o.keys() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::from_str(k)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
                     _ => {
                         // jq errors `del(.[])` etc. when the current path
                         // points at a non-iterable (issue #54). Silent
@@ -4173,7 +4173,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 let base = crate::runtime::rt_getpath(&input, &bp).unwrap_or(Value::Null);
                 match &base {
                     Value::Arr(a) => { for i in 0..a.len() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::number(i as f64)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
-                    Value::Obj(o) => { for k in o.keys() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::from_str(k)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
+                    Value::Obj(ObjInner(o)) => { for k in o.keys() { let mut p = match &bp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] }; p.push(Value::from_str(k)); if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); } } Ok(true) }
                     _ => Ok(true),
                 }
             })
@@ -4227,7 +4227,7 @@ fn eval_recurse_paths_inner(val: &Value, path: &mut Vec<Value>, cb: &mut dyn FnM
                 path.pop();
             }
         }
-        Value::Obj(o) => {
+        Value::Obj(ObjInner(o)) => {
             for (k, v) in o.iter() {
                 path.push(Value::from_str(k));
                 if !eval_recurse_paths_inner(v, path, cb)? { return Ok(false); }
@@ -4715,7 +4715,7 @@ fn walk_type_guarded_inplace(type_name: &str, then_body: &Expr, mut input: Value
                 Ok(input)
             }
         }
-        Value::Obj(ref mut rc_obj) => {
+        Value::Obj(ObjInner(ref mut rc_obj)) => {
             let obj = Rc::make_mut(rc_obj);
             for (_k, v) in obj.iter_mut() {
                 let taken = std::mem::replace(v, Value::Null);
@@ -4751,7 +4751,7 @@ fn walk_value_cb(f: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value)
             let rebuilt = Value::Arr(Rc::new(new_arr));
             eval(f, rebuilt, env, cb)
         }
-        Value::Obj(ref o) => {
+        Value::Obj(ObjInner(ref o)) => {
             let mut new_obj = crate::value::new_objmap();
             for (k, v) in o.iter() {
                 let mut walked = Vec::new();
@@ -4783,7 +4783,7 @@ fn walk_value_single(f: &Expr, input: Value, env: &EnvRef, out: &mut Vec<Value>)
                 Ok(true)
             })?;
         }
-        Value::Obj(ref o) => {
+        Value::Obj(ObjInner(ref o)) => {
             let mut new_obj = crate::value::new_objmap();
             for (k, v) in o.iter() {
                 let mut walked = Vec::new();

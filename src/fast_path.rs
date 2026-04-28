@@ -62,7 +62,7 @@
 
 use anyhow::Result;
 
-use crate::value::{KeyStr, Value};
+use crate::value::{KeyStr, Value, ObjInner};
 
 /// A fast path whose type-dispatch obligations are encoded in its
 /// `run` signature. See the module docs for the contract.
@@ -97,7 +97,7 @@ impl FastPath for FieldAccessPath {
     fn run(&self, input: &Value) -> Option<Result<Value>> {
         match input {
             Value::Null => Some(Ok(Value::Null)),
-            Value::Obj(obj) => {
+            Value::Obj(ObjInner(obj)) => {
                 let v = obj.get(self.field.as_str()).cloned().unwrap_or(Value::Null);
                 Some(Ok(v))
             }

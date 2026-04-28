@@ -95,7 +95,7 @@ fn pool_return(mut v: Vec<(KeyStr, Value)>) {
     let trivial = v.iter().all(|(k, val)| {
         !k.is_heap_allocated() && match val {
             Value::Null | Value::True | Value::False => true,
-            Value::Num(_, repr) => repr.is_none(),
+            Value::Num(_, NumRepr(repr)) => repr.is_none(),
             Value::Str(s) => !s.is_heap_allocated(),
             _ => false,
         }
@@ -120,7 +120,7 @@ fn pool_return(mut v: Vec<(KeyStr, Value)>) {
 /// Call this instead of letting a Value drop when you know it won't be used again.
 #[inline]
 pub fn pool_value(v: Value) {
-    if let Value::Obj(rc) = v {
+    if let Value::Obj(ObjInner(rc)) = v {
         rc_objmap_pool_return(rc);
     }
 }
@@ -388,16 +388,50 @@ pub const TAG_ARR: u64 = 5;
 pub const TAG_OBJ: u64 = 6;
 pub const TAG_ERROR: u64 = 7;
 
+/// Opaque wrapper around the optional source-repr `Rc<str>` of `Value::Num`.
+///
+/// The inner field is `pub(crate)`, so external crates can name the type
+/// (needed to write the `Value::Num(_, _)` pattern) but cannot construct it
+/// nor access its inner Option. This routes external `Value::Num` construction
+/// through `Value::number` / `Value::number_with_repr` / `Value::number_opt` /
+/// `Value::from_f64`, which preserve the f64↔repr invariant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NumRepr(pub(crate) Option<Rc<str>>);
+
+impl std::ops::Deref for NumRepr {
+    type Target = Option<Rc<str>>;
+    #[inline]
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+
+/// Opaque wrapper around the `Rc<ObjMap>` of `Value::Obj`.
+///
+/// The inner field is `pub(crate)`, so external crates can name the type
+/// (needed to write the `Value::Obj(_)` pattern) but cannot construct it nor
+/// access its inner `Rc<ObjMap>`. This routes external `Value::Obj`
+/// construction through `Value::object_from_pairs` /
+/// `Value::object_from_normalized_pairs` / `Value::object_from_map` /
+/// `Value::from_pairs`, which fold the dedup invariant into construction
+/// instead of leaving it to `ObjMap::push_unique` callers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObjInner(pub(crate) Rc<ObjMap>);
+
+impl std::ops::Deref for ObjInner {
+    type Target = Rc<ObjMap>;
+    #[inline]
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+
 /// A jq value.
 pub enum Value {
     Null,
     False,
     True,
     /// Numeric value. Optional Rc<str> preserves original representation for precision.
-    Num(f64, Option<Rc<str>>),
+    Num(f64, NumRepr),
     Str(KeyStr),
     Arr(Rc<Vec<Value>>),
-    Obj(Rc<ObjMap>),
+    Obj(ObjInner),
     Error(Rc<String>),
 }
 
@@ -407,10 +441,10 @@ impl Clone for Value {
             Value::Null => Value::Null,
             Value::False => Value::False,
             Value::True => Value::True,
-            Value::Num(n, repr) => Value::number_opt(*n, repr.clone()),
+            Value::Num(n, NumRepr(repr)) => Value::number_opt(*n, repr.clone()),
             Value::Str(s) => Value::Str(s.clone()),
             Value::Arr(a) => Value::Arr(Rc::clone(a)),
-            Value::Obj(o) => Value::Obj(Rc::clone(o)),
+            Value::Obj(ObjInner(o)) => Value::Obj(ObjInner(Rc::clone(o))),
             Value::Error(e) => Value::Error(Rc::clone(e)),
         }
     }
@@ -425,7 +459,7 @@ impl PartialEq for Value {
             (Value::Num(a, _), Value::Num(b, _)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Arr(a), Value::Arr(b)) => a == b,
-            (Value::Obj(a), Value::Obj(b)) => a == b,
+            (Value::Obj(ObjInner(a)), Value::Obj(ObjInner(b))) => a == b,
             _ => false,
         }
     }
@@ -433,7 +467,7 @@ impl PartialEq for Value {
 
 impl Value {
     pub fn from_f64(n: f64) -> Self {
-        Value::Num(n, None)
+        Value::Num(n, NumRepr(None))
     }
 
     pub fn from_bool(b: bool) -> Self {
@@ -450,7 +484,7 @@ impl Value {
     }
 
     pub fn from_pairs(pairs: impl IntoIterator<Item = (String, Value)>) -> Self {
-        Value::Obj(Rc::new(pairs.into_iter().map(|(k, v)| (KeyStr::from(k), v)).collect()))
+        Value::Obj(ObjInner(Rc::new(pairs.into_iter().map(|(k, v)| (KeyStr::from(k), v)).collect())))
     }
 
     /// Canonical object factory: dedupes duplicate keys (last value wins,
@@ -471,7 +505,7 @@ impl Value {
         for (k, v) in iter {
             map.insert(k.into(), v);
         }
-        Value::Obj(Rc::new(map))
+        Value::Obj(ObjInner(Rc::new(map)))
     }
 
     /// Bypass variant of [`Value::object_from_pairs`]: trusts the caller to
@@ -497,21 +531,21 @@ impl Value {
             );
             map.push_unique(key, v);
         }
-        Value::Obj(Rc::new(map))
+        Value::Obj(ObjInner(Rc::new(map)))
     }
 
     /// Wrap an existing `ObjMap` that was built with invariant-preserving
     /// operations (`insert` / `push_unique` / JSON parsing). Reuses the
     /// caller's allocation — does not dedupe.
     pub fn object_from_map(map: ObjMap) -> Self {
-        Value::Obj(Rc::new(map))
+        Value::Obj(ObjInner(Rc::new(map)))
     }
 
     /// Numeric factory that drops the repr annotation. Equivalent to
     /// [`Value::from_f64`], named consistently with [`Value::object_from_pairs`].
     #[inline]
     pub fn number(n: f64) -> Self {
-        Value::Num(n, None)
+        Value::Num(n, NumRepr(None))
     }
 
     /// Numeric factory that preserves the original textual representation.
@@ -522,7 +556,7 @@ impl Value {
     /// repr does not carry over misleadingly.
     #[inline]
     pub fn number_with_repr(n: f64, repr: Rc<str>) -> Self {
-        Value::Num(n, Some(repr))
+        Value::Num(n, NumRepr(Some(repr)))
     }
 
     /// Numeric factory that takes an already-built repr option. Convenience
@@ -532,7 +566,7 @@ impl Value {
     /// [`Value::number_with_repr`].
     #[inline]
     pub fn number_opt(n: f64, repr: Option<Rc<str>>) -> Self {
-        Value::Num(n, repr)
+        Value::Num(n, NumRepr(repr))
     }
 
     /// Flip the sign of a numeric repr, preserving the original textual form
@@ -590,7 +624,7 @@ impl Value {
 
     pub fn as_obj(&self) -> Option<&Rc<ObjMap>> {
         match self {
-            Value::Obj(o) => Some(o),
+            Value::Obj(ObjInner(o)) => Some(o),
             _ => None,
         }
     }
@@ -617,7 +651,7 @@ impl Value {
             Value::True | Value::False => {
                 bail!("{} ({}) has no length", self.type_name(), crate::value::value_to_json(self))
             }
-            Value::Num(n, repr) => {
+            Value::Num(n, NumRepr(repr)) => {
                 if *n >= 0.0 { Ok(Value::number_opt(*n, repr.clone())) }
                 else { Ok(Value::number(n.abs())) }
             }
@@ -626,7 +660,7 @@ impl Value {
                 Ok(Value::number(s.chars().count() as f64))
             }
             Value::Arr(a) => Ok(Value::number(a.len() as f64)),
-            Value::Obj(o) => Ok(Value::number(o.len() as f64)),
+            Value::Obj(ObjInner(o)) => Ok(Value::number(o.len() as f64)),
             Value::Error(_) => bail!("error has no length"),
         }
     }
@@ -651,7 +685,7 @@ impl fmt::Debug for Value {
             Value::Num(n, _) => write!(f, "Num({})", n),
             Value::Str(s) => write!(f, "Str({:?})", s.as_str()),
             Value::Arr(a) => write!(f, "Arr({:?})", a.as_ref()),
-            Value::Obj(o) => write!(f, "Obj({:?})", o.as_ref()),
+            Value::Obj(ObjInner(o)) => write!(f, "Obj({:?})", o.as_ref()),
             Value::Error(e) => write!(f, "Error({:?})", e.as_str()),
         }
     }
@@ -4054,7 +4088,7 @@ fn parse_json_object(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize
         map.push_unique(key, val);
         i = skip_ws(b, end);
         if i >= b.len() { bail!("Unterminated object"); }
-        if b[i] == b'}' { return Ok((Value::Obj(rc), i + 1)); }
+        if b[i] == b'}' { return Ok((Value::Obj(ObjInner(rc)), i + 1)); }
         if b[i] != b',' { bail!("Expected ',' or '}}' at position {}", i); }
         i = skip_ws(b, i + 1);
     }
@@ -4875,7 +4909,7 @@ fn push_value_tojson(v: &Value, out: &mut String, depth: usize) {
         Value::Null => out.push_str("null"),
         Value::False => out.push_str("false"),
         Value::True => out.push_str("true"),
-        Value::Num(n, repr) => {
+        Value::Num(n, NumRepr(repr)) => {
             if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r) && repr_is_exact_for_f64(r, *n)) {
                 if let Some(canonical) = normalize_jq_repr(r) {
                     out.push_str(&canonical);
@@ -4895,7 +4929,7 @@ fn push_value_tojson(v: &Value, out: &mut String, depth: usize) {
             }
             out.push(']');
         }
-        Value::Obj(o) => {
+        Value::Obj(ObjInner(o)) => {
             out.push('{');
             for (i, (k, v)) in o.iter().enumerate() {
                 if i > 0 { out.push(','); }
@@ -4951,7 +4985,7 @@ fn value_to_json_depth(v: &Value, depth: usize, precise: bool) -> String {
         Value::Null => "null".to_string(),
         Value::False => "false".to_string(),
         Value::True => "true".to_string(),
-        Value::Num(n, repr) => {
+        Value::Num(n, NumRepr(repr)) => {
             if precise {
                 if let Some(r) = repr {
                     if is_valid_json_number(r) {
@@ -4980,7 +5014,7 @@ fn value_to_json_depth(v: &Value, depth: usize, precise: bool) -> String {
             out.push(']');
             out
         }
-        Value::Obj(o) => {
+        Value::Obj(ObjInner(o)) => {
             let mut out = String::from("{");
             for (i, (k, v)) in o.iter().enumerate() {
                 if i > 0 {
@@ -5112,7 +5146,7 @@ fn write_pretty_to_string_impl<const COLOR: bool>(out: &mut String, v: &Value, d
         Value::Null => { c!(COLOR_NULL); out.push_str("null"); c!(COLOR_RESET); }
         Value::False => { c!(COLOR_FALSE); out.push_str("false"); c!(COLOR_RESET); }
         Value::True => { c!(COLOR_TRUE); out.push_str("true"); c!(COLOR_RESET); }
-        Value::Num(n, repr) => {
+        Value::Num(n, NumRepr(repr)) => {
             c!(COLOR_NUMBER);
             if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r)) {
                 if let Some(canonical) = normalize_jq_repr(r) {
@@ -5128,7 +5162,7 @@ fn write_pretty_to_string_impl<const COLOR: bool>(out: &mut String, v: &Value, d
         Value::Str(s) => { c!(COLOR_STRING); push_json_string(out, s); c!(COLOR_RESET); }
         Value::Error(e) => push_json_string(out, e),
         Value::Arr(a) if a.is_empty() => { c!(COLOR_ARRAY); out.push_str("[]"); c!(COLOR_RESET); }
-        Value::Obj(o) if o.is_empty() => { c!(COLOR_OBJECT); out.push_str("{}"); c!(COLOR_RESET); }
+        Value::Obj(ObjInner(o)) if o.is_empty() => { c!(COLOR_OBJECT); out.push_str("{}"); c!(COLOR_RESET); }
         Value::Arr(a) => {
             let inner_depth = depth + step;
             // Emit `\033[0m` before each newline so terminals that paint
@@ -5144,7 +5178,7 @@ fn write_pretty_to_string_impl<const COLOR: bool>(out: &mut String, v: &Value, d
             push_indent(out, depth, use_tab);
             c!(COLOR_ARRAY); out.push(']'); c!(COLOR_RESET);
         }
-        Value::Obj(o) => {
+        Value::Obj(ObjInner(o)) => {
             let inner_depth = depth + step;
             c!(COLOR_OBJECT); out.push('{'); c!(COLOR_RESET); out.push('\n');
             if sort_keys {
@@ -5291,7 +5325,7 @@ pub fn write_value_pretty_line_color(w: &mut dyn io::Write, v: &Value, indent: u
                 return w.write_all(b"\n");
             }
             Value::Arr(a) if a.is_empty() => return w.write_all(b"[]\n"),
-            Value::Obj(o) if o.is_empty() => return w.write_all(b"{}\n"),
+            Value::Obj(ObjInner(o)) if o.is_empty() => return w.write_all(b"{}\n"),
             _ => {}
         }
     }
@@ -5356,7 +5390,7 @@ fn push_compact_value_color(buf: &mut Vec<u8>, v: &Value) {
         Value::Null => { c!(COLOR_NULL); buf.extend_from_slice(b"null"); c!(COLOR_RESET); }
         Value::False => { c!(COLOR_FALSE); buf.extend_from_slice(b"false"); c!(COLOR_RESET); }
         Value::True => { c!(COLOR_TRUE); buf.extend_from_slice(b"true"); c!(COLOR_RESET); }
-        Value::Num(n, repr) => {
+        Value::Num(n, NumRepr(repr)) => {
             c!(COLOR_NUMBER);
             if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r)) {
                 buf.extend_from_slice(canonical_repr_bytes(r).as_bytes());
@@ -5375,7 +5409,7 @@ fn push_compact_value_color(buf: &mut Vec<u8>, v: &Value) {
             }
             c!(COLOR_ARRAY); buf.push(b']'); c!(COLOR_RESET);
         }
-        Value::Obj(o) => {
+        Value::Obj(ObjInner(o)) => {
             c!(COLOR_OBJECT); buf.push(b'{');
             for (i, (k, val)) in o.iter().enumerate() {
                 if i > 0 { buf.push(b','); }
@@ -5411,7 +5445,7 @@ fn push_pretty_value_impl<const COLOR: bool>(buf: &mut Vec<u8>, v: &Value, depth
         Value::Null => { c!(COLOR_NULL); buf.extend_from_slice(b"null"); c!(COLOR_RESET); }
         Value::False => { c!(COLOR_FALSE); buf.extend_from_slice(b"false"); c!(COLOR_RESET); }
         Value::True => { c!(COLOR_TRUE); buf.extend_from_slice(b"true"); c!(COLOR_RESET); }
-        Value::Num(n, repr) => {
+        Value::Num(n, NumRepr(repr)) => {
             c!(COLOR_NUMBER);
             if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r)) {
                 buf.extend_from_slice(canonical_repr_bytes(r).as_bytes());
@@ -5423,7 +5457,7 @@ fn push_pretty_value_impl<const COLOR: bool>(buf: &mut Vec<u8>, v: &Value, depth
         Value::Str(s) => { c!(COLOR_STRING); push_json_string_to_vec(buf, s.as_str()); c!(COLOR_RESET); }
         Value::Error(e) => push_json_string_to_vec(buf, e.as_str()),
         Value::Arr(a) if a.is_empty() => { c!(COLOR_ARRAY); buf.extend_from_slice(b"[]"); c!(COLOR_RESET); }
-        Value::Obj(o) if o.is_empty() => { c!(COLOR_OBJECT); buf.extend_from_slice(b"{}"); c!(COLOR_RESET); }
+        Value::Obj(ObjInner(o)) if o.is_empty() => { c!(COLOR_OBJECT); buf.extend_from_slice(b"{}"); c!(COLOR_RESET); }
         Value::Arr(a) => {
             let inner = depth + step;
             // Reset color before every newline so terminals that paint
@@ -5439,7 +5473,7 @@ fn push_pretty_value_impl<const COLOR: bool>(buf: &mut Vec<u8>, v: &Value, depth
             push_indent_bytes(buf, depth, use_tab);
             c!(COLOR_ARRAY); buf.push(b']'); c!(COLOR_RESET);
         }
-        Value::Obj(o) => {
+        Value::Obj(ObjInner(o)) => {
             let inner = depth + step;
             c!(COLOR_OBJECT); buf.push(b'{'); c!(COLOR_RESET); buf.push(b'\n');
             for (i, (k, val)) in o.iter().enumerate() {
@@ -5482,7 +5516,7 @@ fn push_compact_value(buf: &mut Vec<u8>, v: &Value) {
         Value::Null => buf.extend_from_slice(b"null"),
         Value::False => buf.extend_from_slice(b"false"),
         Value::True => buf.extend_from_slice(b"true"),
-        Value::Num(n, repr) => {
+        Value::Num(n, NumRepr(repr)) => {
             if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r)) {
                 buf.extend_from_slice(canonical_repr_bytes(r).as_bytes());
             } else {
@@ -5500,7 +5534,7 @@ fn push_compact_value(buf: &mut Vec<u8>, v: &Value) {
             }
             buf.push(b']');
         }
-        Value::Obj(o) => {
+        Value::Obj(ObjInner(o)) => {
             buf.push(b'{');
             for (i, (k, val)) in o.iter().enumerate() {
                 let kb = k.as_bytes();
@@ -5655,7 +5689,7 @@ fn write_compact_buf_inner(v: &Value, buf: &mut [u8], pos: &mut usize) -> bool {
         Value::Null => push!(b"null"),
         Value::False => push!(b"false"),
         Value::True => push!(b"true"),
-        Value::Num(n, repr) => {
+        Value::Num(n, NumRepr(repr)) => {
             if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r)) {
                 let canonical = canonical_repr_bytes(r);
                 push!(canonical.as_bytes());
@@ -5693,7 +5727,7 @@ fn write_compact_buf_inner(v: &Value, buf: &mut [u8], pos: &mut usize) -> bool {
             }
             push!(b"]");
         }
-        Value::Obj(o) => {
+        Value::Obj(ObjInner(o)) => {
             push!(b"{");
             for (i, (k, val)) in o.iter().enumerate() {
                 if i > 0 { push!(b","); }
@@ -5733,7 +5767,7 @@ fn write_value_compact_ext_inner(w: &mut dyn io::Write, v: &Value, sort_keys: bo
         Value::Null => w.write_all(b"null"),
         Value::False => w.write_all(b"false"),
         Value::True => w.write_all(b"true"),
-        Value::Num(n, repr) => {
+        Value::Num(n, NumRepr(repr)) => {
             if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r)) {
                 w.write_all(canonical_repr_bytes(r).as_bytes())
             } else {
@@ -5749,7 +5783,7 @@ fn write_value_compact_ext_inner(w: &mut dyn io::Write, v: &Value, sort_keys: bo
             }
             w.write_all(b"]")
         }
-        Value::Obj(o) => {
+        Value::Obj(ObjInner(o)) => {
             w.write_all(b"{")?;
             if sort_keys {
                 let mut entries: Vec<_> = o.iter().collect();
