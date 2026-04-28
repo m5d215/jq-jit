@@ -11,7 +11,7 @@
 use jq_jit::fast_path::{
     FastPath, FieldAccessPath, RawApplyOutcome, apply_field_access_raw,
     apply_field_alternative_raw, apply_field_field_alternative_raw, apply_field_gsub_raw,
-    apply_field_match_raw, apply_field_test_raw, apply_full_object_fields_raw, apply_has_field_raw,
+    apply_field_match_raw, apply_field_scan_raw, apply_field_test_raw, apply_full_object_fields_raw, apply_has_field_raw,
     apply_has_multi_field_raw, apply_multi_field_access_raw, apply_nested_field_access_raw,
     apply_object_compute_raw,
 };
@@ -1123,6 +1123,145 @@ fn raw_field_match_non_object_input_bails() {
     ] {
         let mut called = 0u32;
         let outcome = apply_field_match_raw(raw, "x", &re, |_, _| {
+            called += 1;
+        });
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert_eq!(called, 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `.field | scan("p")` — same Bail discipline as `field_match`. The helper
+// iterates `re.captures_iter` and invokes the closure once per non-overlapping
+// match (zero invocations for no-match-on-string, still Emit verdict).
+
+#[test]
+fn raw_field_scan_emits_one_per_match() {
+    let re = regex::Regex::new("a").unwrap();
+    let mut hits: Vec<String> = Vec::new();
+    let outcome = apply_field_scan_raw(
+        b"{\"x\":\"banana\"}",
+        "x",
+        &re,
+        |_content, caps| {
+            hits.push(caps.get(0).unwrap().as_str().to_string());
+        },
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(hits, vec!["a".to_string(), "a".to_string(), "a".to_string()]);
+}
+
+#[test]
+fn raw_field_scan_with_capture_groups_yields_all_captures() {
+    // Optional group simulates jq's "unmatched group → null" semantic; the
+    // helper just hands each `Captures` to the apply-site so it can decide.
+    let re = regex::Regex::new("(z)?(a)").unwrap();
+    let mut hits: Vec<(Option<String>, Option<String>)> = Vec::new();
+    let outcome = apply_field_scan_raw(
+        b"{\"x\":\"banana\"}",
+        "x",
+        &re,
+        |_content, caps| {
+            hits.push((
+                caps.get(1).map(|m| m.as_str().to_string()),
+                caps.get(2).map(|m| m.as_str().to_string()),
+            ));
+        },
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(
+        hits,
+        vec![
+            (None, Some("a".to_string())),
+            (None, Some("a".to_string())),
+            (None, Some("a".to_string())),
+        ],
+    );
+}
+
+#[test]
+fn raw_field_scan_no_match_skips_closure() {
+    let re = regex::Regex::new("z").unwrap();
+    let mut called = 0u32;
+    let outcome = apply_field_scan_raw(
+        b"{\"x\":\"banana\"}",
+        "x",
+        &re,
+        |_, _| {
+            called += 1;
+        },
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(called, 0);
+}
+
+#[test]
+fn raw_field_scan_field_missing_bails() {
+    let re = regex::Regex::new("a").unwrap();
+    let mut called = 0u32;
+    let outcome = apply_field_scan_raw(
+        b"{\"y\":\"banana\"}",
+        "x",
+        &re,
+        |_, _| {
+            called += 1;
+        },
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert_eq!(called, 0);
+}
+
+#[test]
+fn raw_field_scan_non_string_field_bails() {
+    let re = regex::Regex::new(r".").unwrap();
+    for inner in [&b"{\"x\":42}"[..], &b"{\"x\":null}"[..], &b"{\"x\":[1,2]}"[..]] {
+        let mut called = 0u32;
+        let outcome = apply_field_scan_raw(inner, "x", &re, |_, _| {
+            called += 1;
+        });
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for non-string field input {:?}, got {:?}",
+            std::str::from_utf8(inner).unwrap(),
+            outcome,
+        );
+        assert_eq!(called, 0);
+    }
+}
+
+#[test]
+fn raw_field_scan_escaped_string_bails() {
+    let re = regex::Regex::new("a").unwrap();
+    let mut called = 0u32;
+    let outcome = apply_field_scan_raw(
+        br#"{"x":"a\nb"}"#,
+        "x",
+        &re,
+        |_, _| {
+            called += 1;
+        },
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert_eq!(called, 0);
+}
+
+#[test]
+fn raw_field_scan_non_object_input_bails() {
+    let re = regex::Regex::new(r".*").unwrap();
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut called = 0u32;
+        let outcome = apply_field_scan_raw(raw, "x", &re, |_, _| {
             called += 1;
         });
         assert!(
