@@ -12,9 +12,10 @@ use jq_jit::fast_path::{
     FastPath, FieldAccessPath, RawApplyOutcome, apply_field_access_raw,
     apply_field_alternative_raw, apply_field_field_alternative_raw, apply_field_format_raw,
     apply_field_gsub_raw, apply_field_ltrimstr_tonumber_raw, apply_field_match_raw,
-    apply_field_scan_raw, apply_field_str_concat_raw, apply_field_test_raw,
-    apply_full_object_fields_raw, apply_has_field_raw, apply_has_multi_field_raw,
-    apply_multi_field_access_raw, apply_nested_field_access_raw, apply_object_compute_raw,
+    apply_field_scan_raw, apply_field_str_concat_raw, apply_field_str_reverse_raw,
+    apply_field_test_raw, apply_full_object_fields_raw, apply_has_field_raw,
+    apply_has_multi_field_raw, apply_multi_field_access_raw, apply_nested_field_access_raw,
+    apply_object_compute_raw,
 };
 use jq_jit::interpreter::Filter;
 use jq_jit::ir::BinOp;
@@ -1590,6 +1591,98 @@ fn raw_field_str_concat_non_object_input_bails() {
         assert!(
             matches!(outcome, RawApplyOutcome::Bail),
             "expected Bail for str_concat input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert_eq!(called, 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `.field | split("") | reverse | join("")` — structural-only Bail at the
+// helper boundary; the closure receives the raw inner bytes (still possibly
+// containing JSON escapes) and decides between ASCII-fast and decode-rebuild
+// strategies, returning its own `RawApplyOutcome` for failures (e.g. invalid
+// UTF-8 after escape decode).
+
+#[test]
+fn raw_field_str_reverse_hands_inner_bytes_to_closure() {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_field_str_reverse_raw(
+        b"{\"x\":\"hello\"}",
+        "x",
+        |inner| {
+            seen.push(inner.to_vec());
+            RawApplyOutcome::Emit
+        },
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(seen, vec![b"hello".to_vec()]);
+}
+
+#[test]
+fn raw_field_str_reverse_propagates_closure_bail_verdict() {
+    // Closure may signal a per-input Bail — e.g. the apply-site cannot
+    // decode an escape-bearing string; the helper must propagate without
+    // emitting anything.
+    let outcome = apply_field_str_reverse_raw(
+        br#"{"x":"a\u00ZZ"}"#,
+        "x",
+        |_| RawApplyOutcome::Bail,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+}
+
+#[test]
+fn raw_field_str_reverse_field_missing_bails_without_invoking_closure() {
+    let mut called = 0u32;
+    let outcome = apply_field_str_reverse_raw(
+        b"{\"y\":\"hi\"}",
+        "x",
+        |_| {
+            called += 1;
+            RawApplyOutcome::Emit
+        },
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert_eq!(called, 0);
+}
+
+#[test]
+fn raw_field_str_reverse_non_string_field_bails_without_invoking_closure() {
+    for inner in [&b"{\"x\":42}"[..], &b"{\"x\":null}"[..], &b"{\"x\":[1,2]}"[..]] {
+        let mut called = 0u32;
+        let outcome = apply_field_str_reverse_raw(inner, "x", |_| {
+            called += 1;
+            RawApplyOutcome::Emit
+        });
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for non-string field input {:?}, got {:?}",
+            std::str::from_utf8(inner).unwrap(),
+            outcome,
+        );
+        assert_eq!(called, 0);
+    }
+}
+
+#[test]
+fn raw_field_str_reverse_non_object_input_bails_without_invoking_closure() {
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut called = 0u32;
+        let outcome = apply_field_str_reverse_raw(raw, "x", |_| {
+            called += 1;
+            RawApplyOutcome::Emit
+        });
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for str_reverse input {:?}, got {:?}",
             std::str::from_utf8(raw).unwrap(),
             outcome,
         );
