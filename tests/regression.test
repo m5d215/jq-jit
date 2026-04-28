@@ -2532,3 +2532,61 @@ true
 # Array-collect under `?` on an array
 [.a, .b]?
 [1,2,3]
+
+# Issue #83 Phase B: raw has("x") and has("a") and/or has("b") apply-sites bail
+# on non-object inputs so jq's type-sensitive has(IDX) semantics surface
+# correctly through the generic path.
+
+# has("x") on object with key
+has("x")
+{"x":1,"y":2}
+true
+
+# has("x") on object without key
+has("x")
+{"y":2}
+false
+
+# has("x") under `?` on a number — bails to generic, jq raises, `?` swallows
+has("x")?
+42
+
+# has("x") under `?` on a string
+has("x")?
+"hi"
+
+# has("x") on null returns false (jq's null-tolerance, not an error to swallow)
+has("x")?
+null
+false
+
+# has("x") on array — array indexing semantics differ; bail lets generic handle
+has("x")?
+[1,2,3]
+
+# has("a") and has("b") returns true when both present
+has("a") and has("b")
+{"a":1,"b":2}
+true
+
+# has("a") and has("b") returns false when one missing
+has("a") and has("b")
+{"a":1}
+false
+
+# has("a") or has("b") returns true when one present
+has("a") or has("b")
+{"a":1}
+true
+
+# has("a") or has("b") returns false when both missing
+has("a") or has("b")
+{"c":3}
+false
+
+# has-multi under `?` on a non-object bails
+(has("a") and has("b"))?
+42
+
+(has("a") or has("b"))?
+"hi"

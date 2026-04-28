@@ -64,7 +64,8 @@ use anyhow::Result;
 
 use crate::value::{
     KeyStr, Value, ObjInner, json_object_get_field_raw, json_object_get_fields_raw_buf,
-    json_object_get_nested_field_raw,
+    json_object_get_nested_field_raw, json_object_has_all_keys, json_object_has_any_key,
+    json_object_has_key,
 };
 
 /// A fast path whose type-dispatch obligations are encoded in its
@@ -226,6 +227,63 @@ where
         // doesn't contain every requested field. The generic path picks the
         // right jq verdict in each case.
         RawApplyOutcome::Bail
+    }
+}
+
+/// Apply the `has("x")` raw-byte fast path on a single JSON record.
+///
+/// * Object input — invokes `emit` with `b"true"` if the key is present and
+///   `b"false"` otherwise.
+/// * Any non-object input — returns [`RawApplyOutcome::Bail`]. jq's
+///   `has(IDX)` is type-sensitive (arrays accept integer indices, strings
+///   error, …); the generic path raises the right verdict.
+pub fn apply_has_field_raw<E>(raw: &[u8], field: &str, mut emit: E) -> RawApplyOutcome
+where
+    E: FnMut(&[u8]),
+{
+    match json_object_has_key(raw, 0, field) {
+        Some(true) => {
+            emit(b"true");
+            RawApplyOutcome::Emit
+        }
+        Some(false) => {
+            emit(b"false");
+            RawApplyOutcome::Emit
+        }
+        None => RawApplyOutcome::Bail,
+    }
+}
+
+/// Apply the multi-key `has("a") and has("b")` / `has("a") or has("b")`
+/// raw-byte fast path on a single JSON record.
+///
+/// `is_and` selects between AND-folding (`all`) and OR-folding (`any`) of
+/// the per-key results. Bail discipline matches [`apply_has_field_raw`]:
+/// non-object inputs route to the generic path.
+pub fn apply_has_multi_field_raw<E>(
+    raw: &[u8],
+    fields: &[&str],
+    is_and: bool,
+    mut emit: E,
+) -> RawApplyOutcome
+where
+    E: FnMut(&[u8]),
+{
+    let result = if is_and {
+        json_object_has_all_keys(raw, 0, fields)
+    } else {
+        json_object_has_any_key(raw, 0, fields)
+    };
+    match result {
+        Some(true) => {
+            emit(b"true");
+            RawApplyOutcome::Emit
+        }
+        Some(false) => {
+            emit(b"false");
+            RawApplyOutcome::Emit
+        }
+        None => RawApplyOutcome::Bail,
     }
 }
 
