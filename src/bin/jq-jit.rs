@@ -136,7 +136,7 @@ fn print_jq_error(msg: &str) {
     }
 }
 
-use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_value_has_duplicate_keys, json_stream_has_duplicate_keys, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, parse_json_num, json_value_length, json_object_keys_to_buf_reuse, json_object_extract_keys_only, json_object_keys_unsorted_to_buf, json_object_keys_join_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_object_del_field, json_object_del_fields, json_object_filter_by_key_str, json_object_merge_literal, json_object_sort_keys, json_object_filter_by_value_type, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_with_entries_select_value_cmp, json_object_set_field_raw, json_object_update_field_num, json_object_update_field_num_chain,json_object_select_then_update_num, json_object_select_then_update_str_concat, json_object_select_compound_then_update_num, json_object_select_str_then_update_num, json_object_values_tostring, is_json_compact, push_json_compact_raw, push_tojson_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_compact_line_color, push_pretty_line, push_pretty_line_color, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line_color, value_to_json_pretty_color, walk_json_transform_nums, pool_value, skip_json_value};
+use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_value_has_duplicate_keys, json_stream_has_duplicate_keys, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, parse_json_num, json_value_length, json_object_keys_to_buf_reuse, json_object_extract_keys_only, json_object_keys_unsorted_to_buf, json_object_keys_join_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_object_del_field, json_object_del_fields, json_object_merge_literal, json_object_sort_keys, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_object_set_field_raw, json_object_update_field_num, json_object_update_field_num_chain,json_object_select_then_update_num, json_object_select_then_update_str_concat, json_object_select_compound_then_update_num, json_object_select_str_then_update_num, is_json_compact, push_json_compact_raw, push_tojson_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_compact_line_color, push_pretty_line, push_pretty_line_color, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line_color, value_to_json_pretty_color, walk_json_transform_nums, pool_value, skip_json_value};
 use jq_jit::interpreter::Filter;
 use jq_jit::fast_path::{
     apply_arith_chain_cmp_raw, apply_field_access_raw, apply_field_alternative_raw,
@@ -154,7 +154,9 @@ use jq_jit::fast_path::{
     apply_field_cmp_val_raw, apply_null_branch_lit_raw,
     apply_obj_assign_two_fields_arith_raw, apply_obj_merge_computed_raw,
     apply_obj_merge_lit_raw, apply_select_nested_cmp_raw, apply_select_num_str_raw,
-    apply_two_field_binop_const_raw,
+    apply_two_field_binop_const_raw, apply_with_entries_del_raw,
+    apply_with_entries_key_str_raw, apply_with_entries_select_raw,
+    apply_with_entries_tostring_raw, apply_with_entries_type_raw,
     apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
     apply_nested_field_access_raw, apply_object_compute_raw, apply_select_arith_cmp_raw,
     apply_select_cmp_raw, apply_select_field_null_raw, apply_select_str_raw,
@@ -11865,7 +11867,6 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref we_op, we_threshold)) = with_entries_select {
-                    // with_entries(select(.value CMP N)) → filter object entries by value
                     use jq_jit::ir::BinOp;
                     let cmp_byte = match we_op {
                         BinOp::Gt => b'>',
@@ -11878,7 +11879,11 @@ fn real_main() {
                     };
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        json_with_entries_select_value_cmp(raw, 0, cmp_byte, we_threshold, &mut compact_buf);
+                        let outcome = apply_with_entries_select_raw(raw, cmp_byte, we_threshold, &mut compact_buf);
+                        if let RawApplyOutcome::Bail = outcome {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
                             compact_buf.clear();
@@ -11886,25 +11891,25 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some(ref wed_keys) = with_entries_del {
-                    // with_entries(select(.key != "name")) → del(.name) equivalent
                     let key_refs: Vec<&str> = wed_keys.iter().map(|s| s.as_str()).collect();
                     let mut tmp = Vec::new();
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if use_pretty_buf {
+                        let (target_buf, is_pretty) = if use_pretty_buf {
                             tmp.clear();
-                            if json_object_del_fields(raw, 0, &key_refs, &mut tmp) {
-                                push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
-                                compact_buf.push(b'\n');
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            }
-                        } else if json_object_del_fields(raw, 0, &key_refs, &mut compact_buf) {
-                            compact_buf.push(b'\n');
+                            (&mut tmp, true)
                         } else {
+                            (&mut compact_buf, false)
+                        };
+                        let outcome = apply_with_entries_del_raw(raw, &key_refs, target_buf);
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        } else if is_pretty {
+                            push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                            compact_buf.push(b'\n');
+                        } else {
+                            compact_buf.push(b'\n');
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -11913,24 +11918,24 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some(ref type_name) = with_entries_type {
-                    // with_entries(select(.value | type == "type_name")) — filter by value type
                     let mut tmp = Vec::new();
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if use_pretty_buf {
+                        let (target_buf, is_pretty) = if use_pretty_buf {
                             tmp.clear();
-                            if json_object_filter_by_value_type(raw, 0, type_name, &mut tmp) {
-                                push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
-                                compact_buf.push(b'\n');
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            }
-                        } else if json_object_filter_by_value_type(raw, 0, type_name, &mut compact_buf) {
-                            compact_buf.push(b'\n');
+                            (&mut tmp, true)
                         } else {
+                            (&mut compact_buf, false)
+                        };
+                        let outcome = apply_with_entries_type_raw(raw, type_name, target_buf);
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        } else if is_pretty {
+                            push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                            compact_buf.push(b'\n');
+                        } else {
+                            compact_buf.push(b'\n');
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -11942,20 +11947,21 @@ fn real_main() {
                     let mut tmp = Vec::new();
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if use_pretty_buf {
+                        let (target_buf, is_pretty) = if use_pretty_buf {
                             tmp.clear();
-                            if json_object_filter_by_key_str(raw, 0, test_op, test_arg, &mut tmp) {
-                                push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
-                                compact_buf.push(b'\n');
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            }
-                        } else if json_object_filter_by_key_str(raw, 0, test_op, test_arg, &mut compact_buf) {
-                            compact_buf.push(b'\n');
+                            (&mut tmp, true)
                         } else {
+                            (&mut compact_buf, false)
+                        };
+                        let outcome = apply_with_entries_key_str_raw(raw, test_op, test_arg, target_buf);
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        } else if is_pretty {
+                            push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                            compact_buf.push(b'\n');
+                        } else {
+                            compact_buf.push(b'\n');
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -11967,20 +11973,21 @@ fn real_main() {
                     let mut tmp = Vec::with_capacity(256);
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if use_pretty_buf {
+                        let (target_buf, is_pretty) = if use_pretty_buf {
                             tmp.clear();
-                            if json_object_values_tostring(raw, 0, &mut tmp) {
-                                push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
-                                compact_buf.push(b'\n');
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            }
-                        } else if json_object_values_tostring(raw, 0, &mut compact_buf) {
-                            compact_buf.push(b'\n');
+                            (&mut tmp, true)
                         } else {
+                            (&mut compact_buf, false)
+                        };
+                        let outcome = apply_with_entries_tostring_raw(raw, target_buf);
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        } else if is_pretty {
+                            push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                            compact_buf.push(b'\n');
+                        } else {
+                            compact_buf.push(b'\n');
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -20536,7 +20543,11 @@ fn real_main() {
                 };
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    json_with_entries_select_value_cmp(raw, 0, cmp_byte, we_threshold, &mut compact_buf);
+                    let outcome = apply_with_entries_select_raw(raw, cmp_byte, we_threshold, &mut compact_buf);
+                    if let RawApplyOutcome::Bail = outcome {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
                         compact_buf.clear();
@@ -20549,20 +20560,21 @@ fn real_main() {
                 let mut tmp = Vec::new();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if use_pretty_buf {
+                    let (target_buf, is_pretty) = if use_pretty_buf {
                         tmp.clear();
-                        if json_object_del_fields(raw, 0, &key_refs, &mut tmp) {
-                            push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
-                            compact_buf.push(b'\n');
-                        } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                        }
-                    } else if json_object_del_fields(raw, 0, &key_refs, &mut compact_buf) {
-                        compact_buf.push(b'\n');
+                        (&mut tmp, true)
                     } else {
+                        (&mut compact_buf, false)
+                    };
+                    let outcome = apply_with_entries_del_raw(raw, &key_refs, target_buf);
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    } else if is_pretty {
+                        push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                        compact_buf.push(b'\n');
+                    } else {
+                        compact_buf.push(b'\n');
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
@@ -20575,20 +20587,21 @@ fn real_main() {
                 let mut tmp = Vec::new();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if use_pretty_buf {
+                    let (target_buf, is_pretty) = if use_pretty_buf {
                         tmp.clear();
-                        if json_object_filter_by_value_type(raw, 0, type_name, &mut tmp) {
-                            push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
-                            compact_buf.push(b'\n');
-                        } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                        }
-                    } else if json_object_filter_by_value_type(raw, 0, type_name, &mut compact_buf) {
-                        compact_buf.push(b'\n');
+                        (&mut tmp, true)
                     } else {
+                        (&mut compact_buf, false)
+                    };
+                    let outcome = apply_with_entries_type_raw(raw, type_name, target_buf);
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    } else if is_pretty {
+                        push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                        compact_buf.push(b'\n');
+                    } else {
+                        compact_buf.push(b'\n');
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
@@ -20601,20 +20614,21 @@ fn real_main() {
                 let mut tmp = Vec::new();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if use_pretty_buf {
+                    let (target_buf, is_pretty) = if use_pretty_buf {
                         tmp.clear();
-                        if json_object_filter_by_key_str(raw, 0, test_op, test_arg, &mut tmp) {
-                            push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
-                            compact_buf.push(b'\n');
-                        } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                        }
-                    } else if json_object_filter_by_key_str(raw, 0, test_op, test_arg, &mut compact_buf) {
-                        compact_buf.push(b'\n');
+                        (&mut tmp, true)
                     } else {
+                        (&mut compact_buf, false)
+                    };
+                    let outcome = apply_with_entries_key_str_raw(raw, test_op, test_arg, target_buf);
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    } else if is_pretty {
+                        push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                        compact_buf.push(b'\n');
+                    } else {
+                        compact_buf.push(b'\n');
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
@@ -20627,24 +20641,21 @@ fn real_main() {
                 let mut tmp = Vec::with_capacity(256);
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if use_pretty_buf {
+                    let (target_buf, is_pretty) = if use_pretty_buf {
                         tmp.clear();
-                        if json_object_values_tostring(raw, 0, &mut tmp) {
-                            push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
-                            compact_buf.push(b'\n');
-                        } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                        }
-                    } else if json_object_values_tostring(raw, 0, &mut compact_buf) {
-                        compact_buf.push(b'\n');
+                        (&mut tmp, true)
                     } else {
+                        (&mut compact_buf, false)
+                    };
+                    let outcome = apply_with_entries_tostring_raw(raw, target_buf);
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                    }
-                    if compact_buf.len() >= 1 << 17 {
-                        let _ = out.write_all(&compact_buf);
-                        compact_buf.clear();
+                    } else if is_pretty {
+                        push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
+                        compact_buf.push(b'\n');
+                    } else {
+                        compact_buf.push(b'\n');
                     }
                     Ok(())
                 })

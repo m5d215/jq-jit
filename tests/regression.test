@@ -5039,3 +5039,37 @@ select(.name | length > 3) | {n: .name}
 [ (select(.name | length > 3) | {n: .name})? ]
 {"name":true}
 []
+
+# Issue #251: with_entries_* family apply-sites use RawApplyOutcome (#83
+# Phase B). Five thin-wrapper helpers added: with_entries_select / del /
+# type / key_str / tostring. All Bail to generic on non-object input
+# (was a #83-class divergence in with_entries_select which previously
+# silently emitted nothing).
+with_entries(select(.value > 5))
+{"a":3,"b":7,"c":10}
+{"b":7,"c":10}
+
+with_entries(select(.key != "name"))
+{"name":"alice","age":30}
+{"age":30}
+
+with_entries(select(.value | type == "string"))
+{"a":1,"b":"hi","c":[1,2]}
+{"b":"hi"}
+
+with_entries(select(.key | startswith("p_")))
+{"p_x":1,"q_y":2,"p_z":3}
+{"p_x":1,"p_z":3}
+
+with_entries(.value |= tostring)
+{"a":1,"b":true}
+{"a":"1","b":"true"}
+
+# Non-object input — generic raises indexing/iteration error.
+[ (with_entries(select(.value > 5)))? ]
+"plain"
+[]
+
+[ (with_entries(.value |= tostring))? ]
+42
+[]

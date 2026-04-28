@@ -68,7 +68,9 @@ use crate::runtime::jq_mod_f64;
 use crate::value::{
     KeyStr, Value, ObjInner, json_each_value_cb, json_object_assign_field_arith,
     json_object_assign_two_fields_arith, json_object_del_field, json_object_del_fields,
+    json_object_filter_by_key_str, json_object_filter_by_value_type,
     json_object_get_field_raw, json_object_get_fields_raw_buf, json_object_merge_literal,
+    json_object_values_tostring, json_with_entries_select_value_cmp,
     json_object_get_nested_field_raw, json_object_get_num, json_object_get_two_nums,
     json_object_has_all_keys, json_object_has_any_key, json_object_has_key,
     json_object_update_field_case, json_object_update_field_gsub,
@@ -1278,6 +1280,103 @@ where
     };
     emit(pass);
     RawApplyOutcome::Emit
+}
+
+/// Apply the `with_entries(select(.value cmp N))` raw-byte fast
+/// path on a single JSON record. Filters object entries by value
+/// against a numeric threshold.
+///
+/// `cmp_byte` is the encoded comparison op:
+/// `b'>'`=Gt, `b'G'`=Ge, `b'<'`=Lt, `b'L'`=Le, `b'='`=Eq, `b'!'`=Ne.
+///
+/// Bail discipline (delegates to `json_with_entries_select_value_cmp`,
+/// which returns `false` on non-object input so the wrapper Bails to
+/// generic). Writes the filtered-object bytes including trailing `\n`
+/// to `buf` on Emit.
+pub fn apply_with_entries_select_raw(
+    raw: &[u8],
+    cmp_byte: u8,
+    threshold: f64,
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if json_with_entries_select_value_cmp(raw, 0, cmp_byte, threshold, buf) {
+        RawApplyOutcome::Emit
+    } else {
+        RawApplyOutcome::Bail
+    }
+}
+
+/// Apply the `with_entries(select(.key != "name"))` raw-byte fast
+/// path — equivalent to `del(.name, ...)` over the listed keys.
+///
+/// Bail discipline (delegates to `json_object_del_fields`): non-object
+/// input → Bail. Writes the rewritten-object bytes to `buf`
+/// (without trailing `\n`).
+pub fn apply_with_entries_del_raw(
+    raw: &[u8],
+    keys: &[&str],
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if json_object_del_fields(raw, 0, keys, buf) {
+        RawApplyOutcome::Emit
+    } else {
+        RawApplyOutcome::Bail
+    }
+}
+
+/// Apply the `with_entries(select(.value | type == "T"))` raw-byte
+/// fast path — filter object entries by value type. `type_name` is
+/// one of `"string"`/`"number"`/`"boolean"`/`"null"`/`"object"`/
+/// `"array"`.
+///
+/// Bail discipline (delegates to `json_object_filter_by_value_type`):
+/// non-object input → Bail. Writes the filtered-object bytes to `buf`.
+pub fn apply_with_entries_type_raw(
+    raw: &[u8],
+    type_name: &str,
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if json_object_filter_by_value_type(raw, 0, type_name, buf) {
+        RawApplyOutcome::Emit
+    } else {
+        RawApplyOutcome::Bail
+    }
+}
+
+/// Apply the `with_entries(select(.key | startswith/endswith/test
+/// (...)))` raw-byte fast path — filter object entries by key
+/// matching a string predicate.
+///
+/// Bail discipline (delegates to `json_object_filter_by_key_str`):
+/// non-object input → Bail. Writes the filtered-object bytes to `buf`.
+pub fn apply_with_entries_key_str_raw(
+    raw: &[u8],
+    test_op: &str,
+    test_arg: &str,
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if json_object_filter_by_key_str(raw, 0, test_op, test_arg, buf) {
+        RawApplyOutcome::Emit
+    } else {
+        RawApplyOutcome::Bail
+    }
+}
+
+/// Apply the `with_entries(.value |= tostring)` raw-byte fast path —
+/// stringify all object values.
+///
+/// Bail discipline (delegates to `json_object_values_tostring`):
+/// non-object input → Bail. Writes the rewritten-object bytes to
+/// `buf`.
+pub fn apply_with_entries_tostring_raw(
+    raw: &[u8],
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if json_object_values_tostring(raw, 0, buf) {
+        RawApplyOutcome::Emit
+    } else {
+        RawApplyOutcome::Bail
+    }
 }
 
 /// Apply the `if .field == null then T else F end` (or `!= null`)
