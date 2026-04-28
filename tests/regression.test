@@ -4793,3 +4793,28 @@ if .x != null then "yes" else "no" end
 [ (if .x == null then "yes" else "no" end)? ]
 42
 []
+
+# Issue #251: arith_cmp_branch_lit apply-site uses RawApplyOutcome (#83
+# Phase B, reuses apply_arith_chain_cmp_raw — same Bail discipline as #264).
+if (.x * 2 + 1) > 10 then "big" else "small" end
+{"x":5}
+"big"
+
+if (.x + 1) > 10 then "big" else "small" end
+{"x":3}
+"small"
+
+# Non-numeric — helper Bails, generic uses cross-type ordering ("hi" * 2 raises).
+[ (if (.x * 2) > 10 then "big" else "small" end)? ]
+{"x":"hi"}
+["big"]
+
+# Non-object input — helper Bails, generic raises indexing error, ? swallows.
+[ (if (.x * 2) > 10 then "big" else "small" end)? ]
+"plain"
+[]
+
+# Div-by-zero — helper Bails, generic raises, ? swallows.
+[ (if (.x / 0) > 10 then "big" else "small" end)? ]
+{"x":4}
+[]

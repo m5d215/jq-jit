@@ -8173,27 +8173,16 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref field, ref arith_ops, ref cmp_op, threshold, ref t_bytes, ref f_bytes)) = arith_cmp_branch_lit {
-                    use jq_jit::ir::BinOp;
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if let Some(mut val) = json_object_get_num(raw, 0, field) {
-                            for (aop, n) in arith_ops {
-                                val = match aop {
-                                    BinOp::Add => val + n, BinOp::Sub => val - n,
-                                    BinOp::Mul => val * n, BinOp::Div => val / n,
-                                    BinOp::Mod => jq_jit::runtime::jq_mod_f64(val, n).unwrap_or(f64::NAN), _ => val,
-                                };
-                            }
-                            let pass = match cmp_op {
-                                BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
-                                BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
-                                BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
-                                _ => false,
-                            };
-                            compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
-                            compact_buf.push(b'\n');
-                        } else {
-                            // Non-numeric field — defer to generic eval (#161).
+                        let outcome = apply_arith_chain_cmp_raw(
+                            raw, field, arith_ops, *cmp_op, threshold,
+                            |pass| {
+                                compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
+                                compact_buf.push(b'\n');
+                            },
+                        );
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -15705,28 +15694,17 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some((ref field, ref arith_ops, ref cmp_op, threshold, ref t_bytes, ref f_bytes)) = arith_cmp_branch_lit {
-                use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if let Some(mut val) = json_object_get_num(raw, 0, field) {
-                        for (aop, n) in arith_ops {
-                            val = match aop {
-                                BinOp::Add => val + n, BinOp::Sub => val - n,
-                                BinOp::Mul => val * n, BinOp::Div => val / n,
-                                BinOp::Mod => jq_jit::runtime::jq_mod_f64(val, n).unwrap_or(f64::NAN), _ => val,
-                            };
-                        }
-                        let pass = match cmp_op {
-                            BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
-                            BinOp::Ge => val >= threshold, BinOp::Le => val <= threshold,
-                            BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
-                            _ => false,
-                        };
-                        compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
-                        compact_buf.push(b'\n');
-                    } else {
-                        // Non-numeric field — bail to generic eval (#161).
+                    let outcome = apply_arith_chain_cmp_raw(
+                        raw, field, arith_ops, *cmp_op, threshold,
+                        |pass| {
+                            compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
+                            compact_buf.push(b'\n');
+                        },
+                    );
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
