@@ -850,6 +850,62 @@ where
     RawApplyOutcome::Emit
 }
 
+/// Apply the `.field <arith_chain> <cmp> <threshold>` raw-byte fast path
+/// on a single JSON record — fold a `(BinOp, f64)` arithmetic chain over
+/// a numeric field, then compare the result against `threshold`.
+///
+/// The detector excludes compile-time div/mod-by-zero constants in the
+/// arithmetic chain (`detect_arith_chain_cmp` in
+/// `src/interpreter.rs`), so the helper trusts the chain's divisors are
+/// non-zero. Non-finite results from overflow are passed through to the
+/// comparison directly (matching the existing apply-site).
+///
+/// Bail discipline mirrors [`apply_field_const_cmp_raw`] plus the chain
+/// helper:
+/// * Field absent or non-numeric — [`RawApplyOutcome::Bail`].
+/// * Non-arithmetic op in the chain or non-comparison `cmp_op`
+///   (defensive) — [`RawApplyOutcome::Bail`].
+/// * Non-object input — [`RawApplyOutcome::Bail`].
+///
+/// On success, invokes `emit(result)` with the boolean comparison.
+pub fn apply_arith_chain_cmp_raw<F>(
+    raw: &[u8],
+    field: &str,
+    arith_ops: &[(BinOp, f64)],
+    cmp_op: BinOp,
+    threshold: f64,
+    mut emit: F,
+) -> RawApplyOutcome
+where
+    F: FnMut(bool),
+{
+    let mut n = match json_object_get_num(raw, 0, field) {
+        Some(v) => v,
+        None => return RawApplyOutcome::Bail,
+    };
+    for (op, c) in arith_ops {
+        n = match op {
+            BinOp::Add => n + c,
+            BinOp::Sub => n - c,
+            BinOp::Mul => n * c,
+            BinOp::Div => n / c,
+            BinOp::Mod => jq_mod_f64(n, *c).unwrap_or(f64::NAN),
+            _ => return RawApplyOutcome::Bail,
+        };
+    }
+    let result = match cmp_op {
+        BinOp::Gt => n > threshold,
+        BinOp::Lt => n < threshold,
+        BinOp::Ge => n >= threshold,
+        BinOp::Le => n <= threshold,
+        BinOp::Eq => n == threshold,
+        BinOp::Ne => n != threshold,
+        _ => return RawApplyOutcome::Bail,
+    };
+    emit(result);
+    RawApplyOutcome::Emit
+}
+
 /// Apply the `.field | <string-builtin>(arg)` raw-byte fast path on a
 /// single JSON record. The detector (`detect_field_str_builtin`) fuses
 /// nine string builtins under one shape — `startswith`, `endswith`,

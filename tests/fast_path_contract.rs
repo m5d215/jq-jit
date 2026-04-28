@@ -9,7 +9,7 @@
 //!   pilot and returns `None` for filters that aren't yet migrated.
 
 use jq_jit::fast_path::{
-    FastPath, FieldAccessPath, RawApplyOutcome, apply_field_access_raw,
+    FastPath, FieldAccessPath, RawApplyOutcome, apply_arith_chain_cmp_raw, apply_field_access_raw,
     apply_field_alternative_raw, apply_field_arith_chain_raw, apply_field_binop_raw,
     apply_field_const_cmp_raw, apply_field_field_alternative_raw, apply_field_field_cmp_raw,
     apply_field_format_raw, apply_field_gsub_raw, apply_field_ltrimstr_tonumber_raw,
@@ -2213,6 +2213,114 @@ fn raw_field_const_cmp_non_object_input_bails() {
         assert!(
             matches!(outcome, RawApplyOutcome::Bail),
             "expected Bail for field_const_cmp input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `.field <arith_chain> <cmp> <threshold>` — fold a `(BinOp, f64)` chain over
+// a numeric field, then compare against `threshold`.
+
+#[test]
+fn raw_arith_chain_cmp_emits_correct_boolean() {
+    // (5 * 2) - 1 == 9 → true
+    let mut emitted: Vec<bool> = Vec::new();
+    let outcome = apply_arith_chain_cmp_raw(
+        b"{\"x\":5}",
+        "x",
+        &[(BinOp::Mul, 2.0), (BinOp::Sub, 1.0)],
+        BinOp::Eq,
+        9.0,
+        |b| emitted.push(b),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![true]);
+}
+
+#[test]
+fn raw_arith_chain_cmp_field_missing_bails() {
+    let mut emitted: Vec<bool> = Vec::new();
+    let outcome = apply_arith_chain_cmp_raw(
+        b"{\"y\":5}",
+        "x",
+        &[(BinOp::Add, 1.0)],
+        BinOp::Eq,
+        6.0,
+        |b| emitted.push(b),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_arith_chain_cmp_non_numeric_field_bails() {
+    let mut emitted: Vec<bool> = Vec::new();
+    let outcome = apply_arith_chain_cmp_raw(
+        b"{\"x\":\"hi\"}",
+        "x",
+        &[(BinOp::Add, 1.0)],
+        BinOp::Eq,
+        2.0,
+        |b| emitted.push(b),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_arith_chain_cmp_non_arith_op_bails() {
+    let mut emitted: Vec<bool> = Vec::new();
+    let outcome = apply_arith_chain_cmp_raw(
+        b"{\"x\":5}",
+        "x",
+        &[(BinOp::Eq, 5.0)],
+        BinOp::Eq,
+        1.0,
+        |b| emitted.push(b),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_arith_chain_cmp_non_cmp_op_bails() {
+    let mut emitted: Vec<bool> = Vec::new();
+    let outcome = apply_arith_chain_cmp_raw(
+        b"{\"x\":5}",
+        "x",
+        &[(BinOp::Add, 1.0)],
+        BinOp::Add,
+        6.0,
+        |b| emitted.push(b),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_arith_chain_cmp_non_object_input_bails() {
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut emitted: Vec<bool> = Vec::new();
+        let outcome = apply_arith_chain_cmp_raw(
+            raw,
+            "x",
+            &[(BinOp::Add, 1.0)],
+            BinOp::Eq,
+            2.0,
+            |b| emitted.push(b),
+        );
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for arith_chain_cmp input {:?}, got {:?}",
             std::str::from_utf8(raw).unwrap(),
             outcome,
         );
