@@ -17,7 +17,7 @@ use jq_jit::fast_path::{
     apply_field_str_concat_raw, apply_field_str_reverse_raw, apply_field_test_raw,
     apply_full_object_fields_raw, apply_has_field_raw, apply_has_multi_field_raw,
     apply_multi_field_access_raw, apply_nested_field_access_raw, apply_object_compute_raw,
-    apply_select_cmp_raw,
+    apply_select_cmp_raw, apply_select_field_null_raw,
 };
 use jq_jit::interpreter::Filter;
 use jq_jit::ir::BinOp;
@@ -2431,4 +2431,83 @@ fn raw_select_cmp_non_cmp_op_bails() {
     );
     assert!(matches!(outcome, RawApplyOutcome::Bail));
     assert!(seen.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// `select(.field == null)` / `select(.field != null)` — null-equality
+// predicate fast path. Missing field counts as null.
+
+#[test]
+fn raw_select_field_null_eq_emits_when_null_or_missing() {
+    for input in [&b"{\"x\":null}"[..], &b"{\"y\":1}"[..]] {
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        let outcome =
+            apply_select_field_null_raw(input, "x", true, |r| seen.push(r.to_vec()));
+        assert!(matches!(outcome, RawApplyOutcome::Emit));
+        assert_eq!(
+            seen,
+            vec![input.to_vec()],
+            "input {:?}",
+            std::str::from_utf8(input).unwrap()
+        );
+    }
+}
+
+#[test]
+fn raw_select_field_null_eq_skips_when_field_present_non_null() {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_field_null_raw(
+        b"{\"x\":1}",
+        "x",
+        true,
+        |r| seen.push(r.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert!(seen.is_empty());
+}
+
+#[test]
+fn raw_select_field_null_ne_emits_when_field_present_non_null() {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_field_null_raw(
+        b"{\"x\":1}",
+        "x",
+        false,
+        |r| seen.push(r.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(seen, vec![b"{\"x\":1}".to_vec()]);
+}
+
+#[test]
+fn raw_select_field_null_ne_skips_when_null_or_missing() {
+    for input in [&b"{\"x\":null}"[..], &b"{\"y\":1}"[..]] {
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        let outcome =
+            apply_select_field_null_raw(input, "x", false, |r| seen.push(r.to_vec()));
+        assert!(matches!(outcome, RawApplyOutcome::Emit));
+        assert!(seen.is_empty());
+    }
+}
+
+#[test]
+fn raw_select_field_null_non_object_bails_for_type_error() {
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        let outcome =
+            apply_select_field_null_raw(raw, "x", true, |r| seen.push(r.to_vec()));
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for select_field_null input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert!(seen.is_empty());
+    }
 }
