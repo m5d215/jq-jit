@@ -2323,3 +2323,33 @@ null
 try ([0, floor] | .[-2]) catch "err"
 null
 "err"
+
+# Issue #190: tojson on negative-exponent scientific input uppercases E with minus sign
+tojson
+1.5e-10
+"1.5E-10"
+
+# Issue #190: tojson on large positive-exponent input uses E+ (item 1/2; item 3 → #236)
+tojson
+1e1000
+"1E+1000"
+
+# Issue #190: tojson on negative-mantissa overflow keeps the sign
+tojson
+-1e1000
+"-1E+1000"
+
+# Issue #190: tojson on three-digit exponent with fractional mantissa
+tojson
+1.5e100
+"1.5E+100"
+
+# Issue #190: 1e-5 expands to decimal form (jq's E threshold)
+tojson
+1e-5
+"0.00001"
+
+# Issue #190: 1e-4 stays decimal (boundary between decimal and scientific)
+tojson
+0.0001
+"0.0001"
