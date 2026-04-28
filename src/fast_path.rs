@@ -941,6 +941,68 @@ where
     RawApplyOutcome::Emit
 }
 
+/// Apply the `select(.field <arith_chain> <cmp> N)` raw-byte fast path
+/// on a single JSON record.
+///
+/// The detector excludes compile-time div/mod-by-zero in the chain
+/// (`detect_select_arith_cmp` in `src/interpreter.rs`); the helper
+/// trusts this.
+///
+/// Bail discipline:
+/// * Non-object input — [`RawApplyOutcome::Bail`] so jq's
+///   `Cannot index <type>` surfaces.
+/// * Field absent or non-numeric — [`RawApplyOutcome::Bail`] so the
+///   generic path produces jq's verdict (the chain may raise on
+///   `string + N`, or silently emit no output on `null + N` ≤ threshold,
+///   but that's not the raw path's call to make).
+/// * Non-arithmetic op in the chain or non-comparison `cmp_op`
+///   (defensive) — [`RawApplyOutcome::Bail`].
+///
+/// On a passing predicate the helper invokes `emit_match(raw)` with
+/// the original record bytes.
+pub fn apply_select_arith_cmp_raw<F>(
+    raw: &[u8],
+    field: &str,
+    arith_ops: &[(BinOp, f64)],
+    cmp_op: BinOp,
+    threshold: f64,
+    mut emit_match: F,
+) -> RawApplyOutcome
+where
+    F: FnMut(&[u8]),
+{
+    if raw.first() != Some(&b'{') {
+        return RawApplyOutcome::Bail;
+    }
+    let mut val = match json_object_get_num(raw, 0, field) {
+        Some(v) => v,
+        None => return RawApplyOutcome::Bail,
+    };
+    for (op, n) in arith_ops {
+        val = match op {
+            BinOp::Add => val + n,
+            BinOp::Sub => val - n,
+            BinOp::Mul => val * n,
+            BinOp::Div => val / n,
+            BinOp::Mod => jq_mod_f64(val, *n).unwrap_or(f64::NAN),
+            _ => return RawApplyOutcome::Bail,
+        };
+    }
+    let pass = match cmp_op {
+        BinOp::Gt => val > threshold,
+        BinOp::Lt => val < threshold,
+        BinOp::Ge => val >= threshold,
+        BinOp::Le => val <= threshold,
+        BinOp::Eq => val == threshold,
+        BinOp::Ne => val != threshold,
+        _ => return RawApplyOutcome::Bail,
+    };
+    if pass {
+        emit_match(raw);
+    }
+    RawApplyOutcome::Emit
+}
+
 /// Apply the `.field <arith_chain> <cmp> <threshold>` raw-byte fast path
 /// on a single JSON record — fold a `(BinOp, f64)` arithmetic chain over
 /// a numeric field, then compare the result against `threshold`.
