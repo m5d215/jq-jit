@@ -4482,3 +4482,48 @@ length
 length
 -7
 7
+
+# Issue #251: obj_assign_field_arith / obj_assign_two_fields_arith apply-sites
+# use RawApplyOutcome (#83 Phase B). Helpers Bail on non-object/missing-or-
+# non-numeric src/non-finite/non-arith op.
+.y = (.x + 1)
+{"x":3,"y":0}
+{"x":3,"y":4}
+
+.z = (.x + .y)
+{"x":3,"y":4,"z":0}
+{"x":3,"y":4,"z":7}
+
+.dest = (.src * 2)
+{"src":7,"dest":0}
+{"src":7,"dest":14}
+
+# Missing src — helper Bails, generic resolves null+1=1.
+[ (.y = (.x + 1))? ]
+{"y":0}
+[{"y":1}]
+
+# Non-numeric src — generic raises type error, ? swallows.
+[ (.y = (.x + 1))? ]
+{"x":"hi","y":0}
+[]
+
+# Div-by-zero — helper Bails, generic raises.
+[ (.y = (.x / 0))? ]
+{"x":3,"y":0}
+[]
+
+# Non-object input — generic raises.
+[ (.y = (.x + 1))? ]
+"plain"
+[]
+
+# Two-field: missing field.
+[ (.z = (.x + .y))? ]
+{"x":3,"z":0}
+[{"x":3,"z":3}]
+
+# Two-field: div-by-zero (.x / .y where y=0).
+[ (.z = (.x / .y))? ]
+{"x":3,"y":0,"z":0}
+[]
