@@ -65,7 +65,8 @@ use anyhow::Result;
 use crate::ir::BinOp;
 use crate::runtime::jq_mod_f64;
 use crate::value::{
-    KeyStr, Value, ObjInner, json_object_get_field_raw, json_object_get_fields_raw_buf,
+    KeyStr, Value, ObjInner, json_object_del_field, json_object_del_fields,
+    json_object_get_field_raw, json_object_get_fields_raw_buf,
     json_object_get_nested_field_raw, json_object_get_num, json_object_get_two_nums,
     json_object_has_all_keys, json_object_has_any_key, json_object_has_key,
     json_object_update_field_case, json_object_update_field_gsub,
@@ -1269,6 +1270,40 @@ pub fn apply_field_update_str_concat_raw(
     buf: &mut Vec<u8>,
 ) -> RawApplyOutcome {
     if json_object_update_field_str_concat(raw, 0, field, prefix, suffix, buf) {
+        RawApplyOutcome::Emit
+    } else {
+        RawApplyOutcome::Bail
+    }
+}
+
+/// Apply the `del(.field)` raw-byte fast path on a single JSON record,
+/// writing the object with `field` removed to `buf`.
+///
+/// Bail discipline:
+/// * Non-object input — [`RawApplyOutcome::Bail`] (`del(.field)` on
+///   `null` returns `null`; on numbers / arrays jq raises).
+///
+/// Field absent emits the input object unchanged (jq's `del(.x)` on
+/// `{}` returns `{}` — no error).
+pub fn apply_del_field_raw(raw: &[u8], field: &str, buf: &mut Vec<u8>) -> RawApplyOutcome {
+    if json_object_del_field(raw, 0, field, buf) {
+        RawApplyOutcome::Emit
+    } else {
+        RawApplyOutcome::Bail
+    }
+}
+
+/// Apply the `del(.a, .b, ...)` raw-byte fast path on a single JSON
+/// record, writing the object with all listed fields removed to `buf`.
+///
+/// Bail discipline mirrors [`apply_del_field_raw`]: non-object input
+/// bails. Missing fields are silently skipped.
+pub fn apply_del_fields_raw(
+    raw: &[u8],
+    fields: &[&str],
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if json_object_del_fields(raw, 0, fields, buf) {
         RawApplyOutcome::Emit
     } else {
         RawApplyOutcome::Bail

@@ -17,10 +17,11 @@ use jq_jit::fast_path::{
     apply_field_str_concat_raw, apply_field_str_reverse_raw, apply_field_test_raw,
     apply_full_object_fields_raw, apply_has_field_raw, apply_has_multi_field_raw,
     apply_multi_field_access_raw, apply_nested_field_access_raw, apply_object_compute_raw,
-    apply_field_update_case_raw, apply_field_update_gsub_raw, apply_field_update_length_raw,
-    apply_field_update_slice_raw, apply_field_update_split_first_raw,
-    apply_field_update_split_last_raw, apply_field_update_str_concat_raw,
-    apply_field_update_str_map_raw, apply_field_update_test_raw, apply_field_update_tostring_raw,
+    apply_del_field_raw, apply_del_fields_raw, apply_field_update_case_raw,
+    apply_field_update_gsub_raw, apply_field_update_length_raw, apply_field_update_slice_raw,
+    apply_field_update_split_first_raw, apply_field_update_split_last_raw,
+    apply_field_update_str_concat_raw, apply_field_update_str_map_raw,
+    apply_field_update_test_raw, apply_field_update_tostring_raw,
     apply_field_update_trim_raw, apply_select_arith_cmp_raw, apply_select_cmp_raw,
     apply_select_field_null_raw, apply_select_str_raw, apply_select_str_test_raw,
 };
@@ -3348,4 +3349,70 @@ fn raw_field_update_str_concat_non_string_field_bails() {
     let outcome =
         apply_field_update_str_concat_raw(b"{\"x\":42}", "x", b"<", b">", &mut buf);
     assert!(matches!(outcome, RawApplyOutcome::Bail));
+}
+
+// ---------------------------------------------------------------------------
+// `del(.field)` / `del(.a, .b, ...)` — field deletion. Object input
+// commits; non-object input bails (jq's `del(.x)` on `null` is `null`,
+// on numbers it raises — both routed through generic).
+
+#[test]
+fn raw_del_field_emits_object_without_field() {
+    let mut buf = Vec::new();
+    let outcome = apply_del_field_raw(b"{\"x\":1,\"y\":2}", "x", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"{\"y\":2}");
+}
+
+#[test]
+fn raw_del_field_field_absent_passthrough() {
+    // jq's `del(.x)` on `{}` returns `{}` — no error.
+    let mut buf = Vec::new();
+    let outcome = apply_del_field_raw(b"{\"y\":2}", "x", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"{\"y\":2}");
+}
+
+#[test]
+fn raw_del_field_non_object_bails() {
+    for raw in [b"42".as_slice(), b"\"hi\"".as_slice(), b"null".as_slice(), b"[1]".as_slice()] {
+        let mut buf = Vec::new();
+        let outcome = apply_del_field_raw(raw, "x", &mut buf);
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for del_field input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+    }
+}
+
+#[test]
+fn raw_del_fields_emits_object_without_fields() {
+    let mut buf = Vec::new();
+    let outcome = apply_del_fields_raw(b"{\"x\":1,\"y\":2,\"z\":3}", &["x", "z"], &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"{\"y\":2}");
+}
+
+#[test]
+fn raw_del_fields_missing_silently_skipped() {
+    let mut buf = Vec::new();
+    let outcome = apply_del_fields_raw(b"{\"y\":2}", &["x", "z"], &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"{\"y\":2}");
+}
+
+#[test]
+fn raw_del_fields_non_object_bails() {
+    for raw in [b"42".as_slice(), b"null".as_slice(), b"[1]".as_slice()] {
+        let mut buf = Vec::new();
+        let outcome = apply_del_fields_raw(raw, &["x"], &mut buf);
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for del_fields input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+    }
 }

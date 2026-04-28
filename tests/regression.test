@@ -3924,3 +3924,36 @@ select(.x | startswith("a"))
 [ (.x |= "<" + . + ">")? ]
 [1,2,3]
 []
+
+# #83 Phase B: del(.field) / del(.a, .b) apply-sites use RawApplyOutcome::Bail.
+del(.x)
+{"x":1,"y":2}
+{"y":2}
+
+# Field absent: passthrough.
+del(.x)
+{"y":2}
+{"y":2}
+
+# Multi-field del.
+del(.x, .z)
+{"x":1,"y":2,"z":3}
+{"y":2}
+
+# Missing fields silently skipped.
+del(.x, .z)
+{"y":2}
+{"y":2}
+
+# Non-object input under `?`: jq's del on null is null; on others raises.
+[ (del(.x))? ]
+null
+[null]
+
+[ (del(.x))? ]
+42
+[]
+
+[ (del(.x))? ]
+[1,2,3]
+[]
