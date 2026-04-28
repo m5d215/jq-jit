@@ -62,7 +62,10 @@
 
 use anyhow::Result;
 
-use crate::value::{KeyStr, Value, ObjInner, json_object_get_field_raw, json_object_get_nested_field_raw};
+use crate::value::{
+    KeyStr, Value, ObjInner, json_object_get_field_raw, json_object_get_fields_raw_buf,
+    json_object_get_nested_field_raw,
+};
 
 /// A fast path whose type-dispatch obligations are encoded in its
 /// `run` signature. See the module docs for the contract.
@@ -181,6 +184,48 @@ where
         // Non-object, non-null: jq raises a type error. Hand off to the
         // generic path; do NOT silently emit `null` (that's #50).
         _ => RawApplyOutcome::Bail,
+    }
+}
+
+/// Apply the multi-field `.a, .b, .c` raw-byte fast path on a single JSON
+/// record.
+///
+/// The fast path can only emit when the input is an object that contains
+/// **every** requested field — those are the only inputs where the right
+/// answer is exactly the sequence of raw byte ranges in `ranges_buf` after
+/// `json_object_get_fields_raw_buf` succeeds. For everything else the helper
+/// returns [`RawApplyOutcome::Bail`]:
+///
+/// * `null` input — jq emits `null` per field. The generic path produces that
+///   sequence; the raw scanner can't because it has no per-field literal to
+///   emit and falls back to bytes copying.
+/// * partially-missing object — jq emits a mix of values and `null`s. Same
+///   reason as above: the raw scanner is all-or-nothing.
+/// * non-object non-null input — jq raises a type error (one per field, but
+///   it stops at the first); the generic path produces the right error.
+///
+/// `ranges_buf` is borrowed from the caller so the apply-site can keep one
+/// allocation hot across the input stream. Its length must be at least
+/// `fields.len()`.
+pub fn apply_multi_field_access_raw<E>(
+    raw: &[u8],
+    fields: &[&str],
+    ranges_buf: &mut [(usize, usize)],
+    mut emit: E,
+) -> RawApplyOutcome
+where
+    E: FnMut(&[u8]),
+{
+    if json_object_get_fields_raw_buf(raw, 0, fields, ranges_buf) {
+        for (vs, ve) in ranges_buf.iter() {
+            emit(&raw[*vs..*ve]);
+        }
+        RawApplyOutcome::Emit
+    } else {
+        // Includes: non-object inputs, malformed JSON, and any object that
+        // doesn't contain every requested field. The generic path picks the
+        // right jq verdict in each case.
+        RawApplyOutcome::Bail
     }
 }
 
