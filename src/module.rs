@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 use anyhow::{Result, bail};
-use crate::value::{Value, KeyStr, new_objmap};
+use crate::value::{Value, ObjInner, KeyStr, new_objmap};
 
 /// Resolve a module name to a file path, searching lib_dirs.
 fn resolve_module(name: &str, lib_dirs: &[String]) -> Result<String> {
@@ -52,7 +52,7 @@ fn parse_module_metadata(content: &str) -> Result<Value> {
         if let Some(semi_pos) = full.find(';') {
             let module_stmt = &full[7..semi_pos].trim();
             // Parse the metadata object
-            if let Ok(Value::Obj(obj)) = parse_simple_object(module_stmt) {
+            if let Ok(Value::Obj(ObjInner(obj))) = parse_simple_object(module_stmt) {
                 for (k, v) in obj.iter() {
                     metadata.insert(k.clone(), v.clone());
                 }

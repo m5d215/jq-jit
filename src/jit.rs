@@ -84,7 +84,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module, FuncId};
 
 use crate::ir::*;
-use crate::value::Value;
+use crate::value::{Value, ObjInner, NumRepr};
 
 const GEN_CONTINUE: i64 = 1;
 const GEN_ERROR: i64 = -1;
@@ -5365,7 +5365,7 @@ extern "C" fn jit_rt_drop(v: *mut Value) {
     unsafe {
         // Fast path: try to pool Rc<ObjMap> instead of deallocating
         let val = std::ptr::read(v);
-        if let Value::Obj(rc) = val {
+        if let Value::Obj(ObjInner(rc)) = val {
             if !crate::value::rc_objmap_pool_return(rc) {
                 // Pool full or refcount > 1, drop normally (rc is consumed above)
             }
@@ -5408,7 +5408,7 @@ extern "C" fn jit_rt_is_truthy(v: *const Value) -> i64 {
 extern "C" fn jit_rt_field_is_truthy(base: *const Value, key_ptr: *const u8, key_len: usize) -> i64 {
     unsafe {
         match &*base {
-            Value::Obj(o) => {
+            Value::Obj(ObjInner(o)) => {
                 let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key_ptr, key_len));
                 match o.get(key) {
                     Some(v) => if v.is_truthy() { 1 } else { 0 },
@@ -5425,7 +5425,7 @@ extern "C" fn jit_rt_field_is_truthy(base: *const Value, key_ptr: *const u8, key
 extern "C" fn jit_rt_field_cmp_num(base: *const Value, key_ptr: *const u8, key_len: usize, rhs: f64, op: i32) -> i64 {
     unsafe {
         let field_val = match &*base {
-            Value::Obj(o) => {
+            Value::Obj(ObjInner(o)) => {
                 let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key_ptr, key_len));
                 match o.get(key) {
                     Some(v) => v,
@@ -5460,7 +5460,7 @@ extern "C" fn jit_rt_field_binop_field(
 ) -> i64 {
     unsafe {
         let obj = match &*base {
-            Value::Obj(o) => o,
+            Value::Obj(ObjInner(o)) => o,
             Value::Null => {
                 // null.field = null, so this is null OP null
                 match crate::eval::eval_binop(binop_from_i32(op), &Value::Null, &Value::Null) {
@@ -5517,7 +5517,7 @@ extern "C" fn jit_rt_field_binop_const(
 ) -> i64 {
     unsafe {
         let obj = match &*base {
-            Value::Obj(o) => o,
+            Value::Obj(ObjInner(o)) => o,
             Value::Null => {
                 let a = Value::Null;
                 let (l, r) = if field_is_lhs != 0 { (&a, &*rhs) } else { (&*rhs, &a) };
@@ -5572,7 +5572,7 @@ extern "C" fn jit_rt_field_binop_const(
 extern "C" fn jit_rt_index_field(dst: *mut Value, base: *const Value, key_ptr: *const u8, key_len: usize) -> i64 {
     unsafe {
         match &*base {
-            Value::Obj(o) => {
+            Value::Obj(ObjInner(o)) => {
                 let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key_ptr, key_len));
                 match o.get(key) {
                     Some(v) => { std::ptr::write(dst, v.clone()); 0 }
@@ -5603,7 +5603,7 @@ extern "C" fn jit_rt_yield_field_ref(
 ) -> i64 {
     unsafe {
         match &*base {
-            Value::Obj(o) => {
+            Value::Obj(ObjInner(o)) => {
                 let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key_ptr, key_len));
                 match o.get(key) {
                     Some(v) => cb(v as *const Value, ctx),
@@ -5649,7 +5649,7 @@ extern "C" fn jit_rt_index(dst: *mut Value, base: *const Value, key: *const Valu
             return 0;
         }
         // Fast path: Object[String]
-        if let (Value::Obj(o), Value::Str(k)) = (&*base, &*key) {
+        if let (Value::Obj(ObjInner(o)), Value::Str(k)) = (&*base, &*key) {
             std::ptr::write(dst, o.get(k.as_str()).cloned().unwrap_or(Value::Null));
             return 0;
         }
@@ -5802,7 +5802,7 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                     Value::number(len as f64)
                 }
                 Value::Arr(a) => Value::number(a.len() as f64),
-                Value::Obj(o) => Value::number(o.len() as f64),
+                Value::Obj(ObjInner(o)) => Value::number(o.len() as f64),
                 Value::Error(_) => Value::number(0.0),
             };
             std::ptr::write(dst, v);
@@ -5825,7 +5825,7 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
         // Fast path: keys (op 2) and keys_unsorted (op 29)
         if op == 2 || op == 29 {
             match &*input {
-                Value::Obj(o) => {
+                Value::Obj(ObjInner(o)) => {
                     let mut keys: Vec<Value> = o.keys().map(|k| Value::from_str(k)).collect();
                     if op == 2 { keys.sort_by(crate::runtime::compare_values); }
                     std::ptr::write(dst, Value::Arr(Rc::new(keys)));
@@ -5842,7 +5842,7 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
         // Fast path: values (op 3)
         if op == 3 {
             match &*input {
-                Value::Obj(o) => {
+                Value::Obj(ObjInner(o)) => {
                     let vals: Vec<Value> = o.values().cloned().collect();
                     std::ptr::write(dst, Value::Arr(Rc::new(vals)));
                     return 0;
@@ -5856,7 +5856,7 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
         }
         // Fast path: to_entries (op 27)
         if op == 27 {
-            if let Value::Obj(o) = &*input {
+            if let Value::Obj(ObjInner(o)) = &*input {
                 let mut entries = Vec::with_capacity(o.len());
                 for (k, v) in o.iter() {
                     let mut entry = crate::value::new_objmap();
@@ -5957,7 +5957,7 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 let mut ok = true;
                 for entry in a.iter() {
                     match entry {
-                        Value::Obj(o) => {
+                        Value::Obj(ObjInner(o)) => {
                             let pick_truthy = |name: &str| -> Option<&Value> {
                                 match o.get(name) {
                                     Some(v) if !matches!(v, Value::Null | Value::False) => Some(v),
@@ -6077,7 +6077,7 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
             return 0;
         }
         // Fast path: inline math ops on numbers — avoids eval_unaryop → call_builtin chain
-        if let Value::Num(n, repr) = &*input {
+        if let Value::Num(n, NumRepr(repr)) = &*input {
             let n = *n;
             // abs/fabs: preserve repr for non-negative numbers
             if (op == 7 || op == 31) && n >= 0.0 {
@@ -6346,7 +6346,7 @@ extern "C" fn jit_rt_kind(v: *const Value) -> i64 {
 }
 extern "C" fn jit_rt_len(v: *const Value) -> i64 {
     unsafe {
-        match &*v { Value::Arr(a) => a.len() as i64, Value::Obj(o) => o.len() as i64, _ => 0 }
+        match &*v { Value::Arr(a) => a.len() as i64, Value::Obj(ObjInner(o)) => o.len() as i64, _ => 0 }
     }
 }
 extern "C" fn jit_rt_array_get(dst: *mut Value, arr: *const Value, idx: i64) {
@@ -6371,7 +6371,7 @@ extern "C" fn jit_rt_take_by_idx(dst: *mut Value, container: *mut Value, idx: i6
                     std::ptr::write(dst, Value::Null);
                 }
             }
-            Value::Obj(rc) => {
+            Value::Obj(ObjInner(rc)) => {
                 let obj = Rc::make_mut(rc);
                 if let Some(v) = obj.get_value_mut_by_index(i) {
                     std::ptr::write(dst, std::mem::replace(v, Value::Null));
@@ -6411,7 +6411,7 @@ extern "C" fn jit_rt_put_by_idx(container: *mut Value, idx: i64, val: *mut Value
                     arr[i] = new_val;
                 }
             }
-            Value::Obj(rc) => {
+            Value::Obj(ObjInner(rc)) => {
                 let obj = Rc::make_mut(rc);
                 if let Some(v) = obj.get_value_mut_by_index(i) {
                     *v = new_val;
@@ -6425,7 +6425,7 @@ extern "C" fn jit_rt_put_by_idx(container: *mut Value, idx: i64, val: *mut Value
 extern "C" fn jit_rt_obj_get_idx(dst: *mut Value, obj: *const Value, idx: i64) {
     unsafe {
         match &*obj {
-            Value::Obj(o) => match o.get_index(idx as usize) {
+            Value::Obj(ObjInner(o)) => match o.get_index(idx as usize) {
                 Some((_, v)) => std::ptr::write(dst, v.clone()),
                 None => std::ptr::write(dst, Value::Null),
             },
@@ -6497,7 +6497,7 @@ extern "C" fn jit_rt_path_extract(element: *mut Value, container: *mut Value, ke
                 }
                 0
             }
-            (Value::Obj(rc_obj), Value::Str(k)) => {
+            (Value::Obj(ObjInner(rc_obj)), Value::Str(k)) => {
                 let obj = Rc::make_mut(rc_obj);
                 if let Some(v) = obj.get_mut(k.as_str()) {
                     std::ptr::write(element, std::mem::replace(v, Value::Null));
@@ -6537,7 +6537,7 @@ extern "C" fn jit_rt_path_insert(container: *mut Value, key: *const Value, val: 
                 arr[idx] = new_val;
                 0
             }
-            (Value::Obj(rc_obj), Value::Str(k)) => {
+            (Value::Obj(ObjInner(rc_obj)), Value::Str(k)) => {
                 let obj = Rc::make_mut(rc_obj);
                 obj.insert(crate::value::KeyStr::from(k.as_str()), new_val);
                 0
@@ -6624,7 +6624,7 @@ extern "C" fn jit_rt_collect_finish(dst: *mut Value, env: *mut JitEnv) {
 
 // Object construction helpers
 extern "C" fn jit_rt_obj_new(dst: *mut Value, cap: usize) {
-    unsafe { std::ptr::write(dst, Value::Obj(crate::value::rc_objmap_pool_get(cap))); }
+    unsafe { std::ptr::write(dst, Value::Obj(ObjInner(crate::value::rc_objmap_pool_get(cap)))); }
 }
 /// Insert key-value pair into object. Takes ownership of both key and val (ptr::read, no clone).
 /// Returns 0 on success, -1 on error (jq errors when the key is not a string).
@@ -6632,7 +6632,7 @@ extern "C" fn jit_rt_obj_insert(obj: *mut Value, key: *mut Value, val: *mut Valu
     unsafe {
         let key_val = std::ptr::read(key);
         let val_val = std::ptr::read(val);
-        if let Value::Obj(o) = &mut *obj {
+        if let Value::Obj(ObjInner(o)) = &mut *obj {
             let k: crate::value::KeyStr = match key_val {
                 Value::Str(s) => s,
                 other => {
@@ -6657,7 +6657,7 @@ extern "C" fn jit_rt_obj_insert(obj: *mut Value, key: *mut Value, val: *mut Valu
 extern "C" fn jit_rt_obj_insert_str_key(obj: *mut Value, key_ptr: *const u8, key_len: usize, val: *mut Value) {
     unsafe {
         let val_val = std::ptr::read(val);
-        if let Value::Obj(o) = &mut *obj {
+        if let Value::Obj(ObjInner(o)) = &mut *obj {
             let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key_ptr, key_len));
             let k = crate::value::KeyStr::from(key);
             Rc::get_mut(o).unwrap_unchecked().insert(k, val_val);
@@ -6669,7 +6669,7 @@ extern "C" fn jit_rt_obj_insert_str_key(obj: *mut Value, key_ptr: *const u8, key
 extern "C" fn jit_rt_obj_push_str_key(obj: *mut Value, key_ptr: *const u8, key_len: usize, val: *mut Value) {
     unsafe {
         let val_val = std::ptr::read(val);
-        if let Value::Obj(o) = &mut *obj {
+        if let Value::Obj(ObjInner(o)) = &mut *obj {
             let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key_ptr, key_len));
             let k = crate::value::KeyStr::from(key);
             Rc::get_mut(o).unwrap_unchecked().push_unique(k, val_val);
@@ -6689,11 +6689,11 @@ extern "C" fn jit_rt_obj_copy_field(
     unsafe {
         let src_field = std::str::from_utf8_unchecked(std::slice::from_raw_parts(src_field_ptr, src_field_len));
         let val = match &*src {
-            Value::Obj(o) => o.get(src_field).cloned().unwrap_or(Value::Null),
+            Value::Obj(ObjInner(o)) => o.get(src_field).cloned().unwrap_or(Value::Null),
             Value::Null => Value::Null,
             _ => Value::Null,
         };
-        if let Value::Obj(o) = &mut *obj {
+        if let Value::Obj(ObjInner(o)) = &mut *obj {
             let obj_key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(obj_key_ptr, obj_key_len));
             let k = crate::value::KeyStr::from(obj_key);
             Rc::get_mut(o).unwrap_unchecked().push_unique(k, val);
@@ -6713,7 +6713,7 @@ extern "C" fn jit_rt_obj_from_fields(
 ) {
     unsafe {
         let pairs = std::slice::from_raw_parts(pair_table, count);
-        if let Value::Obj(src_obj) = &*src {
+        if let Value::Obj(ObjInner(src_obj)) = &*src {
             // General path: single-pass extraction with field-order output
             let mut vals: [std::mem::MaybeUninit<Value>; 16] = std::mem::MaybeUninit::uninit().assume_init();
             let use_heap = count > 16;
@@ -6748,7 +6748,7 @@ extern "C" fn jit_rt_obj_from_fields(
                 };
                 map.push_unique(crate::value::KeyStr::from(name), val);
             }
-            std::ptr::write(dst, Value::Obj(obj));
+            std::ptr::write(dst, Value::Obj(ObjInner(obj)));
         } else {
             // Non-object source: all fields null
             let mut obj = crate::value::rc_objmap_pool_get(count);
@@ -6757,7 +6757,7 @@ extern "C" fn jit_rt_obj_from_fields(
                 let name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(okp, okl));
                 map.push_unique(crate::value::KeyStr::from(name), Value::Null);
             }
-            std::ptr::write(dst, Value::Obj(obj));
+            std::ptr::write(dst, Value::Obj(ObjInner(obj)));
         }
     }
 }
@@ -6798,7 +6798,7 @@ extern "C" fn jit_rt_strbuf_append_val(env: *mut JitEnv, val: *const Value) {
             Value::Null => buf.push_str("null"),
             Value::False => buf.push_str("false"),
             Value::True => buf.push_str("true"),
-            Value::Num(n, repr) => {
+            Value::Num(n, NumRepr(repr)) => {
                 if let Some(r) = repr {
                     buf.push_str(r);
                 } else {
@@ -6892,7 +6892,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                                 stack.push(item.clone());
                             }
                         }
-                        Value::Obj(o) => {
+                        Value::Obj(ObjInner(o)) => {
                             for val in o.values().rev() {
                                 stack.push(val.clone());
                             }
@@ -6916,7 +6916,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                 let mut stack: Vec<(Value, Vec<Value>)> = Vec::new();
                 // Push root's children in reverse order for correct DFS ordering
                 match &args[0] {
-                    Value::Obj(o) => {
+                    Value::Obj(ObjInner(o)) => {
                         for (key, val) in o.iter().rev() {
                             stack.push((val.clone(), vec![Value::from_str(key.as_str())]));
                         }
@@ -6931,7 +6931,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                 while let Some((val, path)) = stack.pop() {
                     results.push(Value::Arr(Rc::new(path.clone())));
                     match &val {
-                        Value::Obj(o) => {
+                        Value::Obj(ObjInner(o)) => {
                             for (key, child) in o.iter().rev() {
                                 let mut p = path.clone();
                                 p.push(Value::from_str(key.as_str()));
@@ -7015,7 +7015,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                         match item {
                             Value::Str(sv) => buf.extend_from_slice(sv.as_bytes()),
                             Value::Null => {},
-                            Value::Num(n, repr) => {
+                            Value::Num(n, NumRepr(repr)) => {
                                 if let Some(r) = repr.as_ref().filter(|r| crate::value::is_valid_json_number(r)) {
                                     buf.extend_from_slice(r.as_bytes());
                                 } else {
@@ -7035,7 +7035,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
         // Fast path: has(key) — avoid dispatch overhead
         if name == "has" && args.len() == 2 {
             let result = match (&args[0], &args[1]) {
-                (Value::Obj(o), Value::Str(k)) => Some(Value::from_bool(o.contains_key(k.as_str()))),
+                (Value::Obj(ObjInner(o)), Value::Str(k)) => Some(Value::from_bool(o.contains_key(k.as_str()))),
                 (Value::Arr(a), Value::Num(n, _)) => {
                     if n.is_nan() || n.is_infinite() { Some(Value::False) }
                     else {
@@ -7053,7 +7053,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
         // Error cases (type mismatch) fall through to runtime for a proper jq error.
         if name == "in" && args.len() == 2 {
             let result = match (&args[1], &args[0]) {
-                (Value::Obj(o), Value::Str(k)) => Some(Value::from_bool(o.contains_key(k.as_str()))),
+                (Value::Obj(ObjInner(o)), Value::Str(k)) => Some(Value::from_bool(o.contains_key(k.as_str()))),
                 (Value::Arr(a), Value::Num(n, _)) => {
                     if n.is_nan() || n.is_infinite() { Some(Value::False) }
                     else {
@@ -7145,7 +7145,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                 let mut ok = true;
                 for key in path.iter() {
                     match (&current, key) {
-                        (Value::Obj(o), Value::Str(k)) => {
+                        (Value::Obj(ObjInner(o)), Value::Str(k)) => {
                             current = o.get(k.as_str()).cloned().unwrap_or(Value::Null);
                         }
                         (Value::Arr(a), Value::Num(n, _)) => {
@@ -7354,7 +7354,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                     }
                     // Recurse into children
                     match val {
-                        Value::Obj(o) => {
+                        Value::Obj(ObjInner(o)) => {
                             for (key, child) in o.iter() {
                                 path.push(Value::from_str(key.as_str()));
                                 paths_dfs_filtered(child, path, results, compiled_filter, filter_expr, env);
