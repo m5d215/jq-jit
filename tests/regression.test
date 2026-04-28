@@ -4935,3 +4935,30 @@ if .name == "alice" then {role:"admin",name:.name} else {role:"guest",name:.name
 [ (if .x > 0 then "p:\(.y)" else "n:\(.y)" end)? ]
 "plain"
 []
+
+# Issue #251: select_compound_remap apply-site uses RawApplyOutcome (#83
+# Phase B, reuses apply_compound_field_cmp_raw from #283). Same pattern as
+# #292. Fixes pre-existing bug where non-numeric field silently dropped
+# the input instead of routing through generic for cross-type ordering.
+select((.x > 0) and (.y > 0)) | {a:.x,b:.y}
+{"x":5,"y":3,"z":99}
+{"a":5,"b":3}
+
+select((.x > 0) or (.y > 100)) | {a:.x}
+{"x":5,"y":1}
+{"a":5}
+
+# Predicate fails — no output.
+[ (select((.x > 0) and (.y > 0)) | {a:.x,b:.y})? ]
+{"x":5,"y":-3}
+[]
+
+# Non-numeric — helper Bails, generic uses cross-type ordering ("hi" > 0 = true).
+select((.x > 0) and (.y > 0)) | {a:.x,b:.y}
+{"x":5,"y":"hi"}
+{"a":5,"b":"hi"}
+
+# Non-object input — generic raises indexing error.
+[ (select((.x > 0) and (.y > 0)) | {a:.x,b:.y})? ]
+"plain"
+[]

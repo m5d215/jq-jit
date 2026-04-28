@@ -8913,100 +8913,57 @@ fn real_main() {
                     })
                 } else if let Some((ref conj, ref cmps, ref remap)) = select_compound_remap {
                     use jq_jit::ir::BinOp;
-                    let is_and = matches!(conj, BinOp::And);
-                    // Lazy path for 2 comparisons on different fields
-                    let two_cmp_lazy = if cmps.len() == 2 && cmps[0].0 != cmps[1].0 {
-                        Some((cmps[0].0.as_str(), cmps[1].0.as_str()))
-                    } else { None };
-                    // Build remap field list (used for lazy fetch on pass)
-                    let remap_fields: Vec<&str> = {
-                        let mut rf = Vec::new();
-                        for (_, f) in remap { if !rf.contains(&f.as_str()) { rf.push(f.as_str()); } }
-                        rf
-                    };
+                    // Pre-deduplicate predicate field names + cmp_spec for the helper.
+                    let mut field_names: Vec<String> = Vec::new();
+                    let mut cmp_field_idx: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                    for (f, _, _) in cmps {
+                        if !cmp_field_idx.contains_key(f) {
+                            cmp_field_idx.insert(f.clone(), field_names.len());
+                            field_names.push(f.clone());
+                        }
+                    }
+                    let cmp_field_refs: Vec<&str> = field_names.iter().map(|s| s.as_str()).collect();
+                    let cmp_spec: Vec<(usize, BinOp, f64)> = cmps.iter().map(|(f, op, n)| (cmp_field_idx[f], *op, *n)).collect();
+                    let mut vals_buf: Vec<f64> = vec![0.0; field_names.len()];
+                    // Remap field list — separate from predicate fields, fetched lazily
+                    // on a passing predicate.
+                    let mut remap_fields: Vec<&str> = Vec::new();
+                    for (_, f) in remap { if !remap_fields.contains(&f.as_str()) { remap_fields.push(f.as_str()); } }
                     let remap_field_map: std::collections::HashMap<&str, usize> =
                         remap_fields.iter().enumerate().map(|(i, f)| (*f, i)).collect();
                     let remap_out_indices: Vec<(&str, usize)> = remap.iter().map(|(k, f)| {
                         (k.as_str(), remap_field_map[f.as_str()])
                     }).collect();
-                    // General path fields
-                    let mut all_fields: Vec<String> = Vec::new();
-                    let mut field_idx = std::collections::HashMap::new();
-                    let ensure_field = |f: &String, all: &mut Vec<String>, idx: &mut std::collections::HashMap<String, usize>| {
-                        if !idx.contains_key(f) { idx.insert(f.clone(), all.len()); all.push(f.clone()); }
-                    };
-                    for (f, _, _) in cmps { ensure_field(f, &mut all_fields, &mut field_idx); }
-                    for (_, f) in remap { ensure_field(f, &mut all_fields, &mut field_idx); }
-                    let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
-                    let cmp_indices: Vec<(usize, BinOp, f64)> = cmps.iter().map(|(f, op, thr)| {
-                        (field_idx[f], *op, *thr)
-                    }).collect();
-                    let gen_remap_indices: Vec<(&str, usize)> = remap.iter().map(|(k, f)| {
-                        (k.as_str(), field_idx[f])
-                    }).collect();
-                    let mut ranges_buf = vec![(0usize, 0usize); std::cmp::max(field_refs.len(), remap_fields.len())];
+                    let mut remap_ranges_buf = vec![(0usize, 0usize); remap_fields.len()];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if let Some((f1, f2)) = two_cmp_lazy {
-                            // Lazy: check comparisons first, extract remap fields only on pass
-                            if let Some((v1, v2)) = json_object_get_two_nums(raw, 0, f1, f2) {
-                                let c1 = match &cmps[0].1 {
-                                    BinOp::Gt => v1 > cmps[0].2, BinOp::Lt => v1 < cmps[0].2,
-                                    BinOp::Ge => v1 >= cmps[0].2, BinOp::Le => v1 <= cmps[0].2,
-                                    BinOp::Eq => v1 == cmps[0].2, BinOp::Ne => v1 != cmps[0].2,
-                                    _ => false,
-                                };
-                                let c2 = match &cmps[1].1 {
-                                    BinOp::Gt => v2 > cmps[1].2, BinOp::Lt => v2 < cmps[1].2,
-                                    BinOp::Ge => v2 >= cmps[1].2, BinOp::Le => v2 <= cmps[1].2,
-                                    BinOp::Eq => v2 == cmps[1].2, BinOp::Ne => v2 != cmps[1].2,
-                                    _ => false,
-                                };
-                                let pass = if is_and { c1 && c2 } else { c1 || c2 };
-                                if pass {
-                                    if json_object_get_fields_raw_buf(raw, 0, &remap_fields, &mut ranges_buf) {
-                                        compact_buf.push(b'{');
-                                        for (i, (key, fidx)) in remap_out_indices.iter().enumerate() {
-                                            if i > 0 { compact_buf.push(b','); }
-                                            compact_buf.push(b'"');
-                                            compact_buf.extend_from_slice(key.as_bytes());
-                                            compact_buf.extend_from_slice(b"\":");
-                                            let (vs, ve) = ranges_buf[*fidx];
-                                            compact_buf.extend_from_slice(&raw[vs..ve]);
-                                        }
-                                        compact_buf.extend_from_slice(b"}\n");
-                                    }
-                                }
-                            }
-                        } else {
-                            if !json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
-                                return Ok(());
-                            }
-                            let check = |idx: usize, op: &BinOp, thr: &f64| -> bool {
-                                let (vs, ve) = ranges_buf[idx];
-                                parse_json_num(&raw[vs..ve]).map_or(false, |val| match op {
-                                    BinOp::Gt => val > *thr, BinOp::Lt => val < *thr,
-                                    BinOp::Ge => val >= *thr, BinOp::Le => val <= *thr,
-                                    BinOp::Eq => val == *thr, BinOp::Ne => val != *thr,
-                                    _ => false,
-                                })
-                            };
-                            let pass = if is_and {
-                                cmp_indices.iter().all(|(idx, op, thr)| check(*idx, op, thr))
-                            } else {
-                                cmp_indices.iter().any(|(idx, op, thr)| check(*idx, op, thr))
-                            };
-                            if pass {
+                        let mut verdict: Option<bool> = None;
+                        let outcome = apply_compound_field_cmp_raw(
+                            raw, &cmp_field_refs, &cmp_spec, *conj, &mut vals_buf,
+                            |pass| { verdict = Some(pass); },
+                        );
+                        if let RawApplyOutcome::Bail = outcome {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            if compact_buf.len() >= 1 << 17 { let _ = out.write_all(&compact_buf); compact_buf.clear(); }
+                            return Ok(());
+                        }
+                        let pass = verdict.unwrap_or(false);
+                        if pass {
+                            if json_object_get_fields_raw_buf(raw, 0, &remap_fields, &mut remap_ranges_buf) {
                                 compact_buf.push(b'{');
-                                for (i, (key, fidx)) in gen_remap_indices.iter().enumerate() {
+                                for (i, (key, fidx)) in remap_out_indices.iter().enumerate() {
                                     if i > 0 { compact_buf.push(b','); }
                                     compact_buf.push(b'"');
                                     compact_buf.extend_from_slice(key.as_bytes());
                                     compact_buf.extend_from_slice(b"\":");
-                                    let (vs, ve) = ranges_buf[*fidx];
+                                    let (vs, ve) = remap_ranges_buf[*fidx];
                                     compact_buf.extend_from_slice(&raw[vs..ve]);
                                 }
                                 compact_buf.extend_from_slice(b"}\n");
+                            } else {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             }
                         }
                         if compact_buf.len() >= 1 << 17 {
@@ -16285,96 +16242,54 @@ fn real_main() {
             } else if let Some((ref conj, ref cmps, ref remap)) = select_compound_remap {
                 use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
-                let is_and = matches!(conj, BinOp::And);
-                let two_cmp_lazy = if cmps.len() == 2 && cmps[0].0 != cmps[1].0 {
-                    Some((cmps[0].0.as_str(), cmps[1].0.as_str()))
-                } else { None };
-                let remap_fields: Vec<&str> = {
-                    let mut rf = Vec::new();
-                    for (_, f) in remap { if !rf.contains(&f.as_str()) { rf.push(f.as_str()); } }
-                    rf
-                };
+                let mut field_names: Vec<String> = Vec::new();
+                let mut cmp_field_idx: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                for (f, _, _) in cmps {
+                    if !cmp_field_idx.contains_key(f) {
+                        cmp_field_idx.insert(f.clone(), field_names.len());
+                        field_names.push(f.clone());
+                    }
+                }
+                let cmp_field_refs: Vec<&str> = field_names.iter().map(|s| s.as_str()).collect();
+                let cmp_spec: Vec<(usize, BinOp, f64)> = cmps.iter().map(|(f, op, n)| (cmp_field_idx[f], *op, *n)).collect();
+                let mut vals_buf: Vec<f64> = vec![0.0; field_names.len()];
+                let mut remap_fields: Vec<&str> = Vec::new();
+                for (_, f) in remap { if !remap_fields.contains(&f.as_str()) { remap_fields.push(f.as_str()); } }
                 let remap_field_map: std::collections::HashMap<&str, usize> =
                     remap_fields.iter().enumerate().map(|(i, f)| (*f, i)).collect();
                 let remap_out_indices: Vec<(&str, usize)> = remap.iter().map(|(k, f)| {
                     (k.as_str(), remap_field_map[f.as_str()])
                 }).collect();
-                let mut all_fields: Vec<String> = Vec::new();
-                let mut field_idx = std::collections::HashMap::new();
-                let ensure_field = |f: &String, all: &mut Vec<String>, idx: &mut std::collections::HashMap<String, usize>| {
-                    if !idx.contains_key(f) { idx.insert(f.clone(), all.len()); all.push(f.clone()); }
-                };
-                for (f, _, _) in cmps { ensure_field(f, &mut all_fields, &mut field_idx); }
-                for (_, f) in remap { ensure_field(f, &mut all_fields, &mut field_idx); }
-                let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
-                let cmp_indices: Vec<(usize, BinOp, f64)> = cmps.iter().map(|(f, op, thr)| {
-                    (field_idx[f], *op, *thr)
-                }).collect();
-                let gen_remap_indices: Vec<(&str, usize)> = remap.iter().map(|(k, f)| {
-                    (k.as_str(), field_idx[f])
-                }).collect();
-                let mut ranges_buf = vec![(0usize, 0usize); std::cmp::max(field_refs.len(), remap_fields.len())];
+                let mut remap_ranges_buf = vec![(0usize, 0usize); remap_fields.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if let Some((f1, f2)) = two_cmp_lazy {
-                        if let Some((v1, v2)) = json_object_get_two_nums(raw, 0, f1, f2) {
-                            let c1 = match &cmps[0].1 {
-                                BinOp::Gt => v1 > cmps[0].2, BinOp::Lt => v1 < cmps[0].2,
-                                BinOp::Ge => v1 >= cmps[0].2, BinOp::Le => v1 <= cmps[0].2,
-                                BinOp::Eq => v1 == cmps[0].2, BinOp::Ne => v1 != cmps[0].2,
-                                _ => false,
-                            };
-                            let c2 = match &cmps[1].1 {
-                                BinOp::Gt => v2 > cmps[1].2, BinOp::Lt => v2 < cmps[1].2,
-                                BinOp::Ge => v2 >= cmps[1].2, BinOp::Le => v2 <= cmps[1].2,
-                                BinOp::Eq => v2 == cmps[1].2, BinOp::Ne => v2 != cmps[1].2,
-                                _ => false,
-                            };
-                            let pass = if is_and { c1 && c2 } else { c1 || c2 };
-                            if pass {
-                                if json_object_get_fields_raw_buf(raw, 0, &remap_fields, &mut ranges_buf) {
-                                    compact_buf.push(b'{');
-                                    for (i, (key, fidx)) in remap_out_indices.iter().enumerate() {
-                                        if i > 0 { compact_buf.push(b','); }
-                                        compact_buf.push(b'"');
-                                        compact_buf.extend_from_slice(key.as_bytes());
-                                        compact_buf.extend_from_slice(b"\":");
-                                        let (vs, ve) = ranges_buf[*fidx];
-                                        compact_buf.extend_from_slice(&raw[vs..ve]);
-                                    }
-                                    compact_buf.extend_from_slice(b"}\n");
-                                }
-                            }
-                        }
-                    } else {
-                        if !json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
-                            return Ok(());
-                        }
-                        let check = |idx: usize, op: &BinOp, thr: &f64| -> bool {
-                            let (vs, ve) = ranges_buf[idx];
-                            parse_json_num(&raw[vs..ve]).map_or(false, |val| match op {
-                                BinOp::Gt => val > *thr, BinOp::Lt => val < *thr,
-                                BinOp::Ge => val >= *thr, BinOp::Le => val <= *thr,
-                                BinOp::Eq => val == *thr, BinOp::Ne => val != *thr,
-                                _ => false,
-                            })
-                        };
-                        let pass = if is_and {
-                            cmp_indices.iter().all(|(idx, op, thr)| check(*idx, op, thr))
-                        } else {
-                            cmp_indices.iter().any(|(idx, op, thr)| check(*idx, op, thr))
-                        };
-                        if pass {
+                    let mut verdict: Option<bool> = None;
+                    let outcome = apply_compound_field_cmp_raw(
+                        raw, &cmp_field_refs, &cmp_spec, *conj, &mut vals_buf,
+                        |pass| { verdict = Some(pass); },
+                    );
+                    if let RawApplyOutcome::Bail = outcome {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        if compact_buf.len() >= 1 << 17 { let _ = out.write_all(&compact_buf); compact_buf.clear(); }
+                        return Ok(());
+                    }
+                    let pass = verdict.unwrap_or(false);
+                    if pass {
+                        if json_object_get_fields_raw_buf(raw, 0, &remap_fields, &mut remap_ranges_buf) {
                             compact_buf.push(b'{');
-                            for (i, (key, fidx)) in gen_remap_indices.iter().enumerate() {
+                            for (i, (key, fidx)) in remap_out_indices.iter().enumerate() {
                                 if i > 0 { compact_buf.push(b','); }
                                 compact_buf.push(b'"');
                                 compact_buf.extend_from_slice(key.as_bytes());
                                 compact_buf.extend_from_slice(b"\":");
-                                let (vs, ve) = ranges_buf[*fidx];
+                                let (vs, ve) = remap_ranges_buf[*fidx];
                                 compact_buf.extend_from_slice(&raw[vs..ve]);
                             }
                             compact_buf.extend_from_slice(b"}\n");
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                     }
                     if compact_buf.len() >= 1 << 17 {
