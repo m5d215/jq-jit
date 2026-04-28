@@ -76,7 +76,8 @@ use crate::value::{
     json_object_update_field_split_first, json_object_update_field_split_last,
     json_object_update_field_str_concat, json_object_update_field_str_map,
     json_object_update_field_test, json_object_update_field_tostring,
-    json_object_update_field_trim, json_type_byte, json_value_length, push_jq_number_bytes,
+    json_object_update_field_trim, json_type_byte, json_value_length, parse_json_num,
+    push_jq_number_bytes,
 };
 
 /// A fast path whose type-dispatch obligations are encoded in its
@@ -1194,6 +1195,64 @@ pub fn apply_is_length_raw(raw: &[u8], buf: &mut Vec<u8>) -> RawApplyOutcome {
         }
         None => RawApplyOutcome::Bail,
     }
+}
+
+/// Apply the `select(.x.y.z <cmp> N)` raw-byte fast path on a single
+/// JSON record. Walks the nested field path, then runs a numeric
+/// comparison against a compile-time constant; emits the input
+/// bytes on a passing predicate (`select` semantics).
+///
+/// Bail discipline:
+/// * Non-object input or any nested step's intermediate value
+///   isn't an object — Bail (jq's `Cannot index <type> with "<key>"`
+///   surfaces via the generic path).
+/// * Leaf value absent or non-numeric — Bail (so jq's cross-type
+///   ordering / type-error on null applies via the generic path).
+/// * Non-comparison op (`Add`/`And`/etc.) — Bail (defensive).
+///
+/// On a passing predicate, calls `emit_match(raw)` so the apply-site
+/// emits the matching record. On a failing predicate, returns
+/// [`RawApplyOutcome::Emit`] without invoking the closure.
+pub fn apply_select_nested_cmp_raw<F>(
+    raw: &[u8],
+    fields: &[&str],
+    cmp_op: BinOp,
+    threshold: f64,
+    mut emit_match: F,
+) -> RawApplyOutcome
+where
+    F: FnMut(&[u8]),
+{
+    if raw.is_empty() || raw[0] != b'{' {
+        return RawApplyOutcome::Bail;
+    }
+    if !matches!(
+        cmp_op,
+        BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne,
+    ) {
+        return RawApplyOutcome::Bail;
+    }
+    let (vs, ve) = match crate::value::json_object_get_nested_field_raw(raw, 0, fields) {
+        Some(r) => r,
+        None => return RawApplyOutcome::Bail,
+    };
+    let val = match parse_json_num(&raw[vs..ve]) {
+        Some(v) => v,
+        None => return RawApplyOutcome::Bail,
+    };
+    let pass = match cmp_op {
+        BinOp::Gt => val > threshold,
+        BinOp::Lt => val < threshold,
+        BinOp::Ge => val >= threshold,
+        BinOp::Le => val <= threshold,
+        BinOp::Eq => val == threshold,
+        BinOp::Ne => val != threshold,
+        _ => unreachable!(),
+    };
+    if pass {
+        emit_match(raw);
+    }
+    RawApplyOutcome::Emit
 }
 
 /// Apply the `select((.numfield <cmp> N) and (.strfield <op_str> arg))`

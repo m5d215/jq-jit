@@ -31,7 +31,7 @@ use jq_jit::fast_path::{
     apply_collect_each_select_type_raw, apply_each_type_filter_raw,
     apply_first_each_select_type_raw,
     apply_obj_assign_two_fields_arith_raw, apply_obj_merge_computed_raw,
-    apply_obj_merge_lit_raw, apply_select_num_str_raw,
+    apply_obj_merge_lit_raw, apply_select_nested_cmp_raw, apply_select_num_str_raw,
     apply_select_arith_cmp_raw, apply_select_cmp_raw,
     apply_select_field_null_raw, apply_select_str_raw, apply_select_str_test_raw,
     apply_two_field_binop_const_raw,
@@ -3013,6 +3013,92 @@ fn raw_first_each_select_type_unknown_type_bails() {
     let mut buf = Vec::new();
     let outcome = apply_first_each_select_type_raw(b"[1,2]", "unknown", &mut buf);
     assert!(matches!(outcome, RawApplyOutcome::Bail));
+}
+
+// ---------------------------------------------------------------------------
+// `select(.x.y.z cmp N)` — nested-field numeric comparison. Bails on
+// non-object/missing-or-non-numeric/non-cmp-op.
+
+#[test]
+fn raw_select_nested_cmp_emits_match() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_nested_cmp_raw(
+        b"{\"a\":{\"b\":{\"c\":5}}}", &["a", "b", "c"], BinOp::Gt, 3.0,
+        |raw| emitted.push(raw.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![b"{\"a\":{\"b\":{\"c\":5}}}".to_vec()]);
+}
+
+#[test]
+fn raw_select_nested_cmp_no_emit_on_predicate_fail() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_nested_cmp_raw(
+        b"{\"a\":{\"b\":{\"c\":1}}}", &["a", "b", "c"], BinOp::Gt, 3.0,
+        |raw| emitted.push(raw.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_nested_cmp_intermediate_non_object_bails() {
+    // .a.b.c on .a being a non-object: jq raises type error.
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_nested_cmp_raw(
+        b"{\"a\":42}", &["a", "b", "c"], BinOp::Gt, 0.0,
+        |raw| emitted.push(raw.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_nested_cmp_leaf_missing_bails() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_nested_cmp_raw(
+        b"{\"a\":{\"b\":{}}}", &["a", "b", "c"], BinOp::Gt, 0.0,
+        |raw| emitted.push(raw.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_nested_cmp_leaf_non_numeric_bails() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_nested_cmp_raw(
+        b"{\"a\":{\"b\":{\"c\":\"hi\"}}}", &["a", "b", "c"], BinOp::Gt, 0.0,
+        |raw| emitted.push(raw.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_nested_cmp_non_cmp_op_bails() {
+    for op in [BinOp::Add, BinOp::Mul, BinOp::And] {
+        let mut emitted: Vec<Vec<u8>> = Vec::new();
+        let outcome = apply_select_nested_cmp_raw(
+            b"{\"a\":{\"b\":{\"c\":5}}}", &["a", "b", "c"], op, 0.0,
+            |raw| emitted.push(raw.to_vec()),
+        );
+        assert!(matches!(outcome, RawApplyOutcome::Bail), "op={:?}", op);
+    }
+}
+
+#[test]
+fn raw_select_nested_cmp_non_object_input_bails() {
+    for raw in [b"42".as_slice(), b"\"hi\"".as_slice(), b"null".as_slice(), b"[1,2]".as_slice()] {
+        let mut emitted: Vec<Vec<u8>> = Vec::new();
+        let outcome = apply_select_nested_cmp_raw(
+            raw, &["a", "b"], BinOp::Gt, 0.0, |raw| emitted.push(raw.to_vec()),
+        );
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "raw={:?}", std::str::from_utf8(raw).unwrap(),
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
