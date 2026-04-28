@@ -4962,3 +4962,29 @@ select((.x > 0) and (.y > 0)) | {a:.x,b:.y}
 [ (select((.x > 0) and (.y > 0)) | {a:.x,b:.y})? ]
 "plain"
 []
+
+# Issue #251: select_compound_field apply-site uses RawApplyOutcome (#83
+# Phase B, reuses apply_compound_field_cmp_raw from #283). Same pattern
+# as #292/#299. Fixes pre-existing cross-type ordering bug.
+select((.x > 0) and (.y > 0)) | .z
+{"x":5,"y":3,"z":"hello"}
+"hello"
+
+select((.x > 0) or (.y > 100)) | .z
+{"x":5,"y":1,"z":42}
+42
+
+# Predicate fails — no output.
+[ (select((.x > 0) and (.y > 0)) | .z)? ]
+{"x":5,"y":-3,"z":"hello"}
+[]
+
+# Non-numeric — helper Bails, generic uses cross-type ordering.
+select((.x > 0) and (.y > 0)) | .z
+{"x":5,"y":"hi","z":"value"}
+"value"
+
+# Non-object input — generic raises indexing error.
+[ (select((.x > 0) and (.y > 0)) | .z)? ]
+"plain"
+[]
