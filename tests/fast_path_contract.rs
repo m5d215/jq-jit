@@ -23,6 +23,7 @@ use jq_jit::fast_path::{
     apply_field_update_split_first_raw, apply_field_update_split_last_raw,
     apply_field_update_str_concat_raw, apply_field_update_str_map_raw,
     apply_field_update_test_raw, apply_field_update_tostring_raw,
+    apply_compound_field_cmp_raw,
     apply_field_binop_const_unary_raw, apply_field_index_arith_raw,
     apply_field_unary_arith_raw, apply_field_unary_num_raw,
     apply_field_update_trim_raw, apply_numeric_expr_raw,
@@ -2532,6 +2533,168 @@ fn raw_field_binop_const_unary_non_object_input_bails() {
             outcome,
         );
         assert!(emitted.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `(.x cmp1 N1) and/or (.y cmp2 N2) ...` — compound numeric predicate.
+// Helper short-circuits AND/OR; Bails on non-object / missing-or-non-numeric
+// field / non-cmp-op / non-and-or conjunct / buffer-mismatch.
+
+#[test]
+fn raw_compound_field_cmp_and_short_circuits() {
+    // (.x > 0) and (.y > 0) with x=5, y=3 → true
+    let mut emitted: Vec<bool> = Vec::new();
+    let fields = ["x", "y"];
+    let spec = vec![(0, BinOp::Gt, 0.0), (1, BinOp::Gt, 0.0)];
+    let mut vals = vec![0.0; 2];
+    let outcome = apply_compound_field_cmp_raw(
+        b"{\"x\":5,\"y\":3}", &fields, &spec, BinOp::And, &mut vals,
+        |b| emitted.push(b),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![true]);
+}
+
+#[test]
+fn raw_compound_field_cmp_and_short_circuit_false() {
+    // (.x > 0) and (.y > 0) with x=5, y=-3 → false (short-circuits at second)
+    let mut emitted: Vec<bool> = Vec::new();
+    let fields = ["x", "y"];
+    let spec = vec![(0, BinOp::Gt, 0.0), (1, BinOp::Gt, 0.0)];
+    let mut vals = vec![0.0; 2];
+    let outcome = apply_compound_field_cmp_raw(
+        b"{\"x\":5,\"y\":-3}", &fields, &spec, BinOp::And, &mut vals,
+        |b| emitted.push(b),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![false]);
+}
+
+#[test]
+fn raw_compound_field_cmp_or_short_circuits_true() {
+    // (.x > 100) or (.y < 0) with x=5, y=-3 → true (second matches)
+    let mut emitted: Vec<bool> = Vec::new();
+    let fields = ["x", "y"];
+    let spec = vec![(0, BinOp::Gt, 100.0), (1, BinOp::Lt, 0.0)];
+    let mut vals = vec![0.0; 2];
+    let outcome = apply_compound_field_cmp_raw(
+        b"{\"x\":5,\"y\":-3}", &fields, &spec, BinOp::Or, &mut vals,
+        |b| emitted.push(b),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![true]);
+}
+
+#[test]
+fn raw_compound_field_cmp_or_all_false() {
+    // (.x > 100) or (.y > 100) with x=5, y=3 → false
+    let mut emitted: Vec<bool> = Vec::new();
+    let fields = ["x", "y"];
+    let spec = vec![(0, BinOp::Gt, 100.0), (1, BinOp::Gt, 100.0)];
+    let mut vals = vec![0.0; 2];
+    let outcome = apply_compound_field_cmp_raw(
+        b"{\"x\":5,\"y\":3}", &fields, &spec, BinOp::Or, &mut vals,
+        |b| emitted.push(b),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![false]);
+}
+
+#[test]
+fn raw_compound_field_cmp_three_fields() {
+    // (.a > 0) and (.b > 0) and (.c > 0) with a=1, b=2, c=3 → true
+    let mut emitted: Vec<bool> = Vec::new();
+    let fields = ["a", "b", "c"];
+    let spec = vec![(0, BinOp::Gt, 0.0), (1, BinOp::Gt, 0.0), (2, BinOp::Gt, 0.0)];
+    let mut vals = vec![0.0; 3];
+    let outcome = apply_compound_field_cmp_raw(
+        b"{\"a\":1,\"b\":2,\"c\":3}", &fields, &spec, BinOp::And, &mut vals,
+        |b| emitted.push(b),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![true]);
+}
+
+#[test]
+fn raw_compound_field_cmp_field_missing_bails() {
+    let mut emitted: Vec<bool> = Vec::new();
+    let fields = ["x", "y"];
+    let spec = vec![(0, BinOp::Gt, 0.0), (1, BinOp::Gt, 0.0)];
+    let mut vals = vec![0.0; 2];
+    let outcome = apply_compound_field_cmp_raw(
+        b"{\"x\":5}", &fields, &spec, BinOp::And, &mut vals,
+        |b| emitted.push(b),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_compound_field_cmp_non_numeric_bails() {
+    let mut emitted: Vec<bool> = Vec::new();
+    let fields = ["x", "y"];
+    let spec = vec![(0, BinOp::Gt, 0.0), (1, BinOp::Gt, 0.0)];
+    let mut vals = vec![0.0; 2];
+    let outcome = apply_compound_field_cmp_raw(
+        b"{\"x\":5,\"y\":\"hi\"}", &fields, &spec, BinOp::And, &mut vals,
+        |b| emitted.push(b),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_compound_field_cmp_non_cmp_op_bails() {
+    for op in [BinOp::Add, BinOp::Mul] {
+        let mut emitted: Vec<bool> = Vec::new();
+        let fields = ["x"];
+        let spec = vec![(0, op, 0.0)];
+        let mut vals = vec![0.0; 1];
+        let outcome = apply_compound_field_cmp_raw(
+            b"{\"x\":5}", &fields, &spec, BinOp::And, &mut vals,
+            |b| emitted.push(b),
+        );
+        assert!(matches!(outcome, RawApplyOutcome::Bail), "op={:?}", op);
+    }
+}
+
+#[test]
+fn raw_compound_field_cmp_non_and_or_conjunct_bails() {
+    for conj in [BinOp::Add, BinOp::Eq] {
+        let mut emitted: Vec<bool> = Vec::new();
+        let fields = ["x"];
+        let spec = vec![(0, BinOp::Gt, 0.0)];
+        let mut vals = vec![0.0; 1];
+        let outcome = apply_compound_field_cmp_raw(
+            b"{\"x\":5}", &fields, &spec, conj, &mut vals, |b| emitted.push(b),
+        );
+        assert!(matches!(outcome, RawApplyOutcome::Bail), "conj={:?}", conj);
+    }
+}
+
+#[test]
+fn raw_compound_field_cmp_non_object_input_bails() {
+    let fields = ["x"];
+    let spec = vec![(0, BinOp::Gt, 0.0)];
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut emitted: Vec<bool> = Vec::new();
+        let mut vals = vec![0.0; 1];
+        let outcome = apply_compound_field_cmp_raw(
+            raw, &fields, &spec, BinOp::And, &mut vals, |b| emitted.push(b),
+        );
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
     }
 }
 

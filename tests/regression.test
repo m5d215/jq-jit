@@ -4371,3 +4371,37 @@ null
 [ ((.x + .y) | sqrt)? ]
 "plain"
 []
+
+# Issue #251: compound_field_cmp apply-site uses RawApplyOutcome (#83 Phase B).
+# Helper Bails on non-object/missing-or-non-numeric/non-cmp-op/non-and-or
+# conjunct/buffer-mismatch.
+(.x > 0) and (.y > 0)
+{"x":5,"y":3}
+true
+
+(.x > 100) or (.y < 0)
+{"x":5,"y":-3}
+true
+
+(.a > 0) and (.b > 0) and (.c > 0)
+{"a":1,"b":2,"c":3}
+true
+
+# Missing field — helper Bails, generic compares null to 0 (false).
+(.x > 0) and (.y > 0)
+{"x":5}
+false
+
+# Non-numeric — helper Bails, generic uses cross-type ordering ("hi" > 0 is true).
+(.x > 0) and (.y > 0)
+{"x":5,"y":"hi"}
+true
+
+# `?`-wrapped: non-object input — generic raises indexing error.
+[ ((.x > 0) and (.y > 0))? ]
+"plain"
+[]
+
+[ ((.x > 0) and (.y > 0))? ]
+42
+[]

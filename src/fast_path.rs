@@ -865,6 +865,85 @@ where
     RawApplyOutcome::Emit
 }
 
+/// Apply the `(.x cmp1 N1) <conjunct> (.y cmp2 N2) <conjunct> ...`
+/// raw-byte compound numeric-comparison fast path on a single JSON
+/// record. Each comparison is a `<field> <cmp> <const>` predicate
+/// against a single numeric field; the predicates are joined by a
+/// single conjunct (`And` for `and`, `Or` for `or`) with short-
+/// circuiting.
+///
+/// Caller passes pre-deduplicated buffers:
+/// * `field_names` — unique field names referenced by the
+///   comparisons (`json_object_get_num` is called once per name).
+/// * `cmp_spec` — `(field_index, cmp_op, threshold)`. The
+///   `field_index` is into `field_names`.
+/// * `vals_buf` — reusable scratch sized to `field_names.len()`.
+///
+/// Bail discipline:
+/// * Non-object input — [`RawApplyOutcome::Bail`].
+/// * Any referenced field absent or non-numeric — Bail.
+/// * Any `cmp_op` is not `Gt`/`Lt`/`Ge`/`Le`/`Eq`/`Ne` — Bail
+///   (defensive — the detector should never produce these).
+/// * `conjunct` is not `And`/`Or` — Bail (defensive).
+/// * Buffer length mismatch — Bail (defensive).
+///
+/// On Emit, invokes `emit(result)` with the boolean conjunction.
+pub fn apply_compound_field_cmp_raw<F>(
+    raw: &[u8],
+    field_names: &[&str],
+    cmp_spec: &[(usize, BinOp, f64)],
+    conjunct: BinOp,
+    vals_buf: &mut [f64],
+    mut emit: F,
+) -> RawApplyOutcome
+where
+    F: FnMut(bool),
+{
+    if raw.is_empty() || raw[0] != b'{' {
+        return RawApplyOutcome::Bail;
+    }
+    let is_and = match conjunct {
+        BinOp::And => true,
+        BinOp::Or => false,
+        _ => return RawApplyOutcome::Bail,
+    };
+    let nf = field_names.len();
+    if vals_buf.len() < nf {
+        return RawApplyOutcome::Bail;
+    }
+    if nf == 2 {
+        match json_object_get_two_nums(raw, 0, field_names[0], field_names[1]) {
+            Some((a, b)) => { vals_buf[0] = a; vals_buf[1] = b; }
+            None => return RawApplyOutcome::Bail,
+        }
+    } else {
+        for (i, fname) in field_names.iter().enumerate() {
+            match json_object_get_num(raw, 0, fname) {
+                Some(n) => vals_buf[i] = n,
+                None => return RawApplyOutcome::Bail,
+            }
+        }
+    }
+    let mut result = is_and;
+    for (idx, op, threshold) in cmp_spec {
+        let v = vals_buf[*idx];
+        let cmp_result = match op {
+            BinOp::Gt => v > *threshold,
+            BinOp::Lt => v < *threshold,
+            BinOp::Ge => v >= *threshold,
+            BinOp::Le => v <= *threshold,
+            BinOp::Eq => v == *threshold,
+            BinOp::Ne => v != *threshold,
+            _ => return RawApplyOutcome::Bail,
+        };
+        if is_and {
+            if !cmp_result { result = false; break; }
+        } else if cmp_result { result = true; break; }
+    }
+    emit(result);
+    RawApplyOutcome::Emit
+}
+
 /// Apply the `.field <cmp> <const>` raw-byte numeric-comparison fast
 /// path on a single JSON record (`<cmp>` ∈ Gt/Lt/Ge/Le/Eq/Ne) where
 /// the field resolves to a JSON number and the right-hand side is a
