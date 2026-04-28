@@ -274,6 +274,95 @@ where
     RawApplyOutcome::Emit
 }
 
+/// Apply the `.field // fallback` raw-byte fast path on a single JSON
+/// record.
+///
+/// `//` (jq's alternative operator) **must not swallow type errors**
+/// (#198): when `.field` itself would raise (i.e. the input isn't an
+/// object and isn't the literal `null`), the alternative fallback does
+/// not apply — jq still raises. The helper enforces this with an outer
+/// type-guard:
+///
+/// * Object input — extract the field. If the value is `null` / `false`
+///   (jq's "false-y" gate for `//`) or the field is absent, invoke
+///   `emit` with `fallback_bytes`. Otherwise `emit` with the field's
+///   raw bytes.
+/// * Literal `null` input — there's no field to extract, so emit
+///   `fallback_bytes`.
+/// * Anything else — return [`RawApplyOutcome::Bail`] so the generic
+///   path raises `Cannot index <type> with "<field>"`.
+pub fn apply_field_alternative_raw<E>(
+    raw: &[u8],
+    field: &str,
+    fallback_bytes: &[u8],
+    mut emit: E,
+) -> RawApplyOutcome
+where
+    E: FnMut(&[u8]),
+{
+    // Outer guard: only object or the literal `null` proceed; non-
+    // object non-null inputs bail so jq's type error surfaces (#198).
+    if raw.is_empty() || (raw.first() != Some(&b'{') && raw != b"null") {
+        return RawApplyOutcome::Bail;
+    }
+    match json_object_get_field_raw(raw, 0, field) {
+        Some((vs, ve)) => {
+            let val = &raw[vs..ve];
+            if val == b"null" || val == b"false" {
+                emit(fallback_bytes);
+            } else {
+                emit(val);
+            }
+        }
+        None => emit(fallback_bytes),
+    }
+    RawApplyOutcome::Emit
+}
+
+/// Apply the `.field1 // .field2` raw-byte fast path on a single JSON
+/// record.
+///
+/// Same outer type-guard as [`apply_field_alternative_raw`]: non-object,
+/// non-null inputs bail so the generic path raises `Cannot index ...`
+/// (#198). When the input is an object (or the literal `null`):
+///
+/// * If `primary_field` is present and its value is **not** `null` or
+///   `false`, `emit` is invoked with the primary's raw bytes.
+/// * Otherwise `emit` is invoked with `fallback_field`'s raw bytes if
+///   present, else with `b"null"` (jq's `null` for missing fallback).
+pub fn apply_field_field_alternative_raw<E>(
+    raw: &[u8],
+    primary_field: &str,
+    fallback_field: &str,
+    mut emit: E,
+) -> RawApplyOutcome
+where
+    E: FnMut(&[u8]),
+{
+    if raw.is_empty() || (raw.first() != Some(&b'{') && raw != b"null") {
+        return RawApplyOutcome::Bail;
+    }
+    let primary_emitted = match json_object_get_field_raw(raw, 0, primary_field) {
+        Some((vs, ve)) => {
+            let pval = &raw[vs..ve];
+            if pval != b"null" && pval != b"false" {
+                emit(pval);
+                true
+            } else {
+                false
+            }
+        }
+        None => false,
+    };
+    if !primary_emitted {
+        match json_object_get_field_raw(raw, 0, fallback_field) {
+            Some((vs, ve)) => emit(&raw[vs..ve]),
+            None => emit(b"null"),
+        }
+    }
+    RawApplyOutcome::Emit
+}
+
 /// Apply the `has("x")` raw-byte fast path on a single JSON record.
 ///
 /// * Object input — invokes `emit` with `b"true"` if the key is present and
