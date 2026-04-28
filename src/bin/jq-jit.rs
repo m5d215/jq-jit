@@ -140,12 +140,13 @@ use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json
 use jq_jit::interpreter::Filter;
 use jq_jit::fast_path::{
     apply_field_access_raw, apply_field_alternative_raw, apply_field_arith_chain_raw,
-    apply_field_binop_raw, apply_field_field_alternative_raw, apply_field_format_raw,
-    apply_field_gsub_raw, apply_field_ltrimstr_tonumber_raw, apply_field_match_raw,
-    apply_field_scan_raw, apply_field_str_builtin_raw, apply_field_str_concat_raw,
-    apply_field_str_reverse_raw, apply_field_test_raw, apply_full_object_fields_raw,
-    apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
-    apply_nested_field_access_raw, apply_object_compute_raw, RawApplyOutcome,
+    apply_field_binop_raw, apply_field_field_alternative_raw, apply_field_field_cmp_raw,
+    apply_field_format_raw, apply_field_gsub_raw, apply_field_ltrimstr_tonumber_raw,
+    apply_field_match_raw, apply_field_scan_raw, apply_field_str_builtin_raw,
+    apply_field_str_concat_raw, apply_field_str_reverse_raw, apply_field_test_raw,
+    apply_full_object_fields_raw, apply_has_field_raw, apply_has_multi_field_raw,
+    apply_multi_field_access_raw, apply_nested_field_access_raw, apply_object_compute_raw,
+    RawApplyOutcome,
 };
 
 fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -6307,18 +6308,12 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref f1, ref cmp_op, ref f2)) = field_field_cmp {
-                    use jq_jit::ir::BinOp;
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if let Some((n1, n2)) = json_object_get_two_nums(raw, 0, f1, f2) {
-                            let result = match cmp_op {
-                                BinOp::Gt => n1 > n2, BinOp::Lt => n1 < n2,
-                                BinOp::Ge => n1 >= n2, BinOp::Le => n1 <= n2,
-                                BinOp::Eq => n1 == n2, BinOp::Ne => n1 != n2,
-                                _ => unreachable!(),
-                            };
+                        let outcome = apply_field_field_cmp_raw(raw, f1, f2, *cmp_op, |result| {
                             compact_buf.extend_from_slice(if result { b"true\n" } else { b"false\n" });
-                        } else {
+                        });
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -19560,19 +19555,13 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some((ref f1, ref cmp_op, ref f2)) = field_field_cmp {
-                use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if let Some((n1, n2)) = json_object_get_two_nums(raw, 0, f1, f2) {
-                        let result = match cmp_op {
-                            BinOp::Gt => n1 > n2, BinOp::Lt => n1 < n2,
-                            BinOp::Ge => n1 >= n2, BinOp::Le => n1 <= n2,
-                            BinOp::Eq => n1 == n2, BinOp::Ne => n1 != n2,
-                            _ => unreachable!(),
-                        };
+                    let outcome = apply_field_field_cmp_raw(raw, f1, f2, *cmp_op, |result| {
                         compact_buf.extend_from_slice(if result { b"true\n" } else { b"false\n" });
-                    } else {
+                    });
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
