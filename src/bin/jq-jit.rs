@@ -154,7 +154,8 @@ use jq_jit::fast_path::{
     apply_field_cmp_val_raw, apply_null_branch_lit_raw,
     apply_obj_assign_two_fields_arith_raw, apply_obj_merge_computed_raw,
     apply_obj_merge_lit_raw, apply_remap_to_entries_raw, apply_remap_tojson_raw,
-    apply_select_string_chain_raw, apply_to_entries_each_interp_raw,
+    apply_select_compound_str_test_raw, apply_select_string_chain_raw,
+    apply_to_entries_each_interp_raw,
     apply_select_nested_cmp_raw, apply_select_num_str_raw, apply_two_field_binop_const_raw,
     apply_with_entries_del_raw,
     apply_with_entries_key_str_raw, apply_with_entries_select_raw,
@@ -7320,32 +7321,16 @@ fn real_main() {
                     })
                 } else if let Some((ref logic_op, ref str_conds)) = select_compound_str_test {
                     use jq_jit::ir::BinOp;
+                    let is_and = matches!(logic_op, BinOp::And);
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        let is_and = matches!(logic_op, BinOp::And);
-                        let mut result = is_and; // true for AND (all must pass), false for OR (any must pass)
-                        for (field, test_name, test_arg) in str_conds {
-                            let pass = if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
-                                let val = &raw[vs..ve];
-                                if val.len() >= 2 && val[0] == b'"' && val[ve-vs-1] == b'"' && !val[1..ve-vs-1].contains(&b'\\') {
-                                    let inner = &val[1..ve-vs-1];
-                                    let arg_bytes = test_arg.as_bytes();
-                                    match test_name.as_str() {
-                                        "startswith" => inner.starts_with(arg_bytes),
-                                        "endswith" => inner.ends_with(arg_bytes),
-                                        "contains" => bytes_contains(inner, arg_bytes),
-                                        _ => false,
-                                    }
-                                } else { false }
-                            } else { false };
-                            if is_and {
-                                if !pass { result = false; break; }
-                            } else {
-                                if pass { result = true; break; }
-                            }
-                        }
-                        if result {
-                            emit_raw_ln!(&mut compact_buf, raw);
+                        let outcome = apply_select_compound_str_test_raw(
+                            raw, is_and, str_conds,
+                            |bytes| { emit_raw_ln!(&mut compact_buf, bytes); },
+                        );
+                        if let RawApplyOutcome::Bail = outcome {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -14552,32 +14537,16 @@ fn real_main() {
             } else if let Some((ref logic_op, ref str_conds)) = select_compound_str_test {
                 use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
+                let is_and = matches!(logic_op, BinOp::And);
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    let is_and = matches!(logic_op, BinOp::And);
-                    let mut result = is_and;
-                    for (field, test_name, test_arg) in str_conds {
-                        let pass = if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
-                            let val = &raw[vs..ve];
-                            if val.len() >= 2 && val[0] == b'"' && val[ve-vs-1] == b'"' && !val[1..ve-vs-1].contains(&b'\\') {
-                                let inner = &val[1..ve-vs-1];
-                                let arg_bytes = test_arg.as_bytes();
-                                match test_name.as_str() {
-                                    "startswith" => inner.starts_with(arg_bytes),
-                                    "endswith" => inner.ends_with(arg_bytes),
-                                    "contains" => bytes_contains(inner, arg_bytes),
-                                    _ => false,
-                                }
-                            } else { false }
-                        } else { false };
-                        if is_and {
-                            if !pass { result = false; break; }
-                        } else {
-                            if pass { result = true; break; }
-                        }
-                    }
-                    if result {
-                        emit_raw_ln!(&mut compact_buf, raw);
+                    let outcome = apply_select_compound_str_test_raw(
+                        raw, is_and, str_conds,
+                        |bytes| { emit_raw_ln!(&mut compact_buf, bytes); },
+                    );
+                    if let RawApplyOutcome::Bail = outcome {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);

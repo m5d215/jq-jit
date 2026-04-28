@@ -34,8 +34,8 @@ use jq_jit::fast_path::{
     apply_obj_assign_two_fields_arith_raw, apply_obj_merge_computed_raw,
     apply_obj_merge_lit_raw, apply_select_nested_cmp_raw, apply_select_num_str_raw,
     apply_select_arith_cmp_raw, apply_select_cmp_raw,
-    apply_select_field_null_raw, apply_select_str_raw,
-    apply_select_str_test_raw, apply_select_string_chain_raw,
+    apply_select_compound_str_test_raw, apply_select_field_null_raw,
+    apply_select_str_raw, apply_select_str_test_raw, apply_select_string_chain_raw,
     apply_to_entries_each_interp_raw, apply_two_field_binop_const_raw,
 };
 use jq_jit::interpreter::{StringChainOp, StringChainTerminal};
@@ -5895,4 +5895,137 @@ fn raw_select_string_chain_split_join_runs() {
     );
     assert!(matches!(outcome, RawApplyOutcome::Emit));
     assert_eq!(emitted.as_slice(), b"{\"x\":\"a-b-c\"}");
+}
+
+fn cs(field: &str, name: &str, arg: &str) -> (String, String, String) {
+    (field.to_string(), name.to_string(), arg.to_string())
+}
+
+#[test]
+fn raw_select_compound_str_test_and_match_emits() {
+    let conds = vec![
+        cs("x", "startswith", "hel"),
+        cs("y", "endswith", "ld"),
+    ];
+    let mut emitted: Vec<u8> = Vec::new();
+    let outcome = apply_select_compound_str_test_raw(
+        b"{\"x\":\"hello\",\"y\":\"world\"}", true, &conds,
+        |bytes| emitted.extend_from_slice(bytes),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted.as_slice(), b"{\"x\":\"hello\",\"y\":\"world\"}");
+}
+
+#[test]
+fn raw_select_compound_str_test_and_first_false_short_circuits() {
+    // First cond evaluates to false → break before second cond (which would
+    // otherwise Bail because field is missing). Verifies short-circuit.
+    let conds = vec![
+        cs("x", "startswith", "zzz"),
+        cs("y", "endswith", "ld"),
+    ];
+    let mut emitted: Vec<u8> = Vec::new();
+    let outcome = apply_select_compound_str_test_raw(
+        b"{\"x\":\"hello\"}", true, &conds,
+        |bytes| emitted.extend_from_slice(bytes),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_compound_str_test_or_first_true_short_circuits() {
+    let conds = vec![
+        cs("x", "startswith", "hel"),
+        cs("y", "endswith", "ld"),  // y missing — would Bail if reached
+    ];
+    let mut emitted: Vec<u8> = Vec::new();
+    let outcome = apply_select_compound_str_test_raw(
+        b"{\"x\":\"hello\"}", false, &conds,
+        |bytes| emitted.extend_from_slice(bytes),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted.as_slice(), b"{\"x\":\"hello\"}");
+}
+
+#[test]
+fn raw_select_compound_str_test_non_object_bails() {
+    let conds = vec![cs("x", "startswith", "h")];
+    let mut emitted: Vec<u8> = Vec::new();
+    for raw in [b"42".as_slice(), b"\"s\"".as_slice(), b"null".as_slice(), b"[1]".as_slice()] {
+        let outcome = apply_select_compound_str_test_raw(
+            raw, true, &conds,
+            |bytes| emitted.extend_from_slice(bytes),
+        );
+        assert!(matches!(outcome, RawApplyOutcome::Bail));
+    }
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_compound_str_test_missing_field_bails() {
+    // AND case: field missing on first cond → Bail (no short-circuit yet).
+    let conds = vec![
+        cs("y", "startswith", "h"),
+        cs("z", "endswith", "z"),
+    ];
+    let mut emitted: Vec<u8> = Vec::new();
+    let outcome = apply_select_compound_str_test_raw(
+        b"{\"x\":1}", true, &conds,
+        |bytes| emitted.extend_from_slice(bytes),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_compound_str_test_or_no_short_circuit_then_error_bails() {
+    // OR with first cond false (no short-circuit), second cond errors → Bail.
+    let conds = vec![
+        cs("x", "startswith", "zzz"),  // false (no short-circuit on OR)
+        cs("y", "endswith", "z"),      // y missing → Bail
+    ];
+    let mut emitted: Vec<u8> = Vec::new();
+    let outcome = apply_select_compound_str_test_raw(
+        b"{\"x\":\"hello\"}", false, &conds,
+        |bytes| emitted.extend_from_slice(bytes),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_compound_str_test_non_string_bails() {
+    let conds = vec![cs("x", "startswith", "h")];
+    let mut emitted: Vec<u8> = Vec::new();
+    let outcome = apply_select_compound_str_test_raw(
+        b"{\"x\":1}", true, &conds,
+        |bytes| emitted.extend_from_slice(bytes),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_compound_str_test_escaped_string_bails() {
+    let conds = vec![cs("x", "contains", "h")];
+    let mut emitted: Vec<u8> = Vec::new();
+    let outcome = apply_select_compound_str_test_raw(
+        b"{\"x\":\"he\\nllo\"}", true, &conds,
+        |bytes| emitted.extend_from_slice(bytes),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_compound_str_test_unsupported_test_bails() {
+    let conds = vec![cs("x", "ascii_downcase", "h")];
+    let mut emitted: Vec<u8> = Vec::new();
+    let outcome = apply_select_compound_str_test_raw(
+        b"{\"x\":\"hello\"}", true, &conds,
+        |bytes| emitted.extend_from_slice(bytes),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
 }
