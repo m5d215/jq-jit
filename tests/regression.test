@@ -4687,3 +4687,39 @@ select(.x | test("foo"))
 select(.x | test("^a"))
 {"x":"a\nb"}
 {"x":"a\nb"}
+
+# Issue #251: select_nested_cmp apply-site uses RawApplyOutcome (#83 Phase B).
+# Helper Bails on non-object input, intermediate non-object, missing/non-numeric
+# leaf, non-cmp op. Fixes pre-existing #83-class divergences.
+select(.a.b.c > 3)
+{"a":{"b":{"c":5}}}
+{"a":{"b":{"c":5}}}
+
+select(.a.b.c == 0)
+{"a":{"b":{"c":0}}}
+{"a":{"b":{"c":0}}}
+
+# Predicate fails — no output (select semantics).
+[ (select(.a.b.c > 3))? ]
+{"a":{"b":{"c":1}}}
+[]
+
+# Intermediate non-object — generic raises type error, ? swallows.
+[ (select(.a.b.c > 3))? ]
+{"a":42}
+[]
+
+# Missing leaf — generic resolves null > 3 = false (no error).
+[ (select(.a.b.c > 3))? ]
+{"a":{"b":{}}}
+[]
+
+# Non-numeric leaf — generic uses cross-type ordering ("hi" > 3 = true).
+select(.a.b.c > 3)
+{"a":{"b":{"c":"hi"}}}
+{"a":{"b":{"c":"hi"}}}
+
+# Non-object input — generic raises indexing error.
+[ (select(.a.b.c > 3))? ]
+"plain"
+[]
