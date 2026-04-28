@@ -140,7 +140,8 @@ use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json
 use jq_jit::interpreter::Filter;
 use jq_jit::fast_path::{
     apply_arith_chain_cmp_raw, apply_field_access_raw, apply_field_alternative_raw,
-    apply_field_arith_chain_raw, apply_field_binop_raw, apply_field_const_cmp_raw,
+    apply_field_arith_chain_raw, apply_field_binop_raw, apply_field_case_gsub_raw,
+    apply_field_case_test_raw, apply_field_const_cmp_raw,
     apply_field_field_alternative_raw, apply_field_field_cmp_raw, apply_field_format_raw,
     apply_field_gsub_raw, apply_field_ltrimstr_tonumber_raw, apply_field_match_raw,
     apply_field_scan_raw, apply_field_str_builtin_raw, apply_field_str_concat_raw,
@@ -6824,26 +6825,9 @@ fn real_main() {
                         let repl = cg_replacement.as_str();
                         json_stream_raw(&input_str, |start, end| {
                             let raw = &input_bytes[start..end];
-                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, cg_field) {
-                                let val = &raw[vs..ve];
-                                if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                                    && !val[1..val.len()-1].contains(&b'\\')
-                                {
-                                    let inner = &val[1..val.len()-1];
-                                    // Case-convert
-                                    let converted: Vec<u8> = inner.iter().map(|&b| {
-                                        if cg_upper {
-                                            if b >= b'a' && b <= b'z' { b - 32 } else { b }
-                                        } else {
-                                            if b >= b'A' && b <= b'Z' { b + 32 } else { b }
-                                        }
-                                    }).collect();
-                                    let content = unsafe { std::str::from_utf8_unchecked(&converted) };
-                                    let result = if cg_global {
-                                        re.replace_all(content, repl)
-                                    } else {
-                                        re.replace(content, repl)
-                                    };
+                            let outcome = apply_field_case_gsub_raw(
+                                raw, cg_field, cg_upper, &re, repl, cg_global,
+                                |result| {
                                     compact_buf.push(b'"');
                                     for &b in result.as_bytes() {
                                         match b {
@@ -6857,11 +6841,9 @@ fn real_main() {
                                         }
                                     }
                                     compact_buf.extend_from_slice(b"\"\n");
-                                } else {
-                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                                }
-                            } else {
+                                },
+                            );
+                            if let RawApplyOutcome::Bail = outcome {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             }
@@ -6884,30 +6866,11 @@ fn real_main() {
                     if let Ok(re) = regex::Regex::new(ct_pattern) {
                         json_stream_raw(&input_str, |start, end| {
                             let raw = &input_bytes[start..end];
-                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, ct_field) {
-                                let val = &raw[vs..ve];
-                                if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                                    && !val[1..val.len()-1].contains(&b'\\')
-                                {
-                                    let inner = &val[1..val.len()-1];
-                                    let converted: Vec<u8> = inner.iter().map(|&b| {
-                                        if ct_upper {
-                                            if b >= b'a' && b <= b'z' { b - 32 } else { b }
-                                        } else {
-                                            if b >= b'A' && b <= b'Z' { b + 32 } else { b }
-                                        }
-                                    }).collect();
-                                    let content = unsafe { std::str::from_utf8_unchecked(&converted) };
-                                    if re.is_match(content) {
-                                        compact_buf.extend_from_slice(b"true\n");
-                                    } else {
-                                        compact_buf.extend_from_slice(b"false\n");
-                                    }
-                                } else {
-                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                                }
-                            } else {
+                            let outcome = apply_field_case_test_raw(raw, ct_field, ct_upper, &re, |bytes| {
+                                compact_buf.extend_from_slice(bytes);
+                                compact_buf.push(b'\n');
+                            });
+                            if let RawApplyOutcome::Bail = outcome {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             }
@@ -20025,25 +19988,9 @@ fn real_main() {
                     let content_bytes = content.as_bytes();
                     json_stream_raw(content, |start, end| {
                         let raw = &content_bytes[start..end];
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, cg_field) {
-                            let val = &raw[vs..ve];
-                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                                && !val[1..val.len()-1].contains(&b'\\')
-                            {
-                                let inner = &val[1..val.len()-1];
-                                let converted: Vec<u8> = inner.iter().map(|&b| {
-                                    if cg_upper {
-                                        if b >= b'a' && b <= b'z' { b - 32 } else { b }
-                                    } else {
-                                        if b >= b'A' && b <= b'Z' { b + 32 } else { b }
-                                    }
-                                }).collect();
-                                let content_str = unsafe { std::str::from_utf8_unchecked(&converted) };
-                                let result = if cg_global {
-                                    re.replace_all(content_str, repl)
-                                } else {
-                                    re.replace(content_str, repl)
-                                };
+                        let outcome = apply_field_case_gsub_raw(
+                            raw, cg_field, cg_upper, &re, repl, cg_global,
+                            |result| {
                                 compact_buf.push(b'"');
                                 for &b in result.as_bytes() {
                                     match b {
@@ -20057,11 +20004,9 @@ fn real_main() {
                                     }
                                 }
                                 compact_buf.extend_from_slice(b"\"\n");
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            }
-                        } else {
+                            },
+                        );
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -20086,30 +20031,11 @@ fn real_main() {
                     let content_bytes = content.as_bytes();
                     json_stream_raw(content, |start, end| {
                         let raw = &content_bytes[start..end];
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, ct_field) {
-                            let val = &raw[vs..ve];
-                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                                && !val[1..val.len()-1].contains(&b'\\')
-                            {
-                                let inner = &val[1..val.len()-1];
-                                let converted: Vec<u8> = inner.iter().map(|&b| {
-                                    if ct_upper {
-                                        if b >= b'a' && b <= b'z' { b - 32 } else { b }
-                                    } else {
-                                        if b >= b'A' && b <= b'Z' { b + 32 } else { b }
-                                    }
-                                }).collect();
-                                let content_str = unsafe { std::str::from_utf8_unchecked(&converted) };
-                                if re.is_match(content_str) {
-                                    compact_buf.extend_from_slice(b"true\n");
-                                } else {
-                                    compact_buf.extend_from_slice(b"false\n");
-                                }
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            }
-                        } else {
+                        let outcome = apply_field_case_test_raw(raw, ct_field, ct_upper, &re, |bytes| {
+                            compact_buf.extend_from_slice(bytes);
+                            compact_buf.push(b'\n');
+                        });
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }

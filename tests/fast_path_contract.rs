@@ -11,7 +11,8 @@
 use jq_jit::fast_path::{
     FastPath, FieldAccessPath, RawApplyOutcome, apply_arith_chain_cmp_raw, apply_field_access_raw,
     apply_field_alternative_raw, apply_field_arith_chain_raw, apply_field_binop_raw,
-    apply_field_const_cmp_raw, apply_field_field_alternative_raw, apply_field_field_cmp_raw,
+    apply_field_case_gsub_raw, apply_field_case_test_raw, apply_field_const_cmp_raw,
+    apply_field_field_alternative_raw, apply_field_field_cmp_raw,
     apply_field_format_raw, apply_field_gsub_raw, apply_field_ltrimstr_tonumber_raw,
     apply_field_match_raw, apply_field_scan_raw, apply_field_str_builtin_raw,
     apply_field_str_concat_raw, apply_field_str_reverse_raw, apply_field_test_raw,
@@ -1019,6 +1020,244 @@ fn raw_field_gsub_non_object_input_bails() {
         let mut emitted: Vec<String> = Vec::new();
         let outcome =
             apply_field_gsub_raw(raw, "x", &re, "X", true, |s| emitted.push(s.to_string()));
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `.field | ascii_downcase|ascii_upcase | test("p")` — case fold then regex
+// test. Same Bail discipline as `apply_field_test_raw`; the case fold is
+// byte-wise ASCII over the un-decoded string content.
+
+#[test]
+fn raw_field_case_test_downcase_match_emits_true() {
+    let re = regex::Regex::new("^foo").unwrap();
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_field_case_test_raw(
+        b"{\"x\":\"FOObar\"}",
+        "x",
+        false,
+        &re,
+        |b| emitted.push(b.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![b"true".to_vec()]);
+}
+
+#[test]
+fn raw_field_case_test_upcase_match_emits_true() {
+    let re = regex::Regex::new("^FOO").unwrap();
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_field_case_test_raw(
+        b"{\"x\":\"foobar\"}",
+        "x",
+        true,
+        &re,
+        |b| emitted.push(b.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![b"true".to_vec()]);
+}
+
+#[test]
+fn raw_field_case_test_no_match_emits_false() {
+    let re = regex::Regex::new("^foo").unwrap();
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_field_case_test_raw(
+        b"{\"x\":\"BARbaz\"}",
+        "x",
+        false,
+        &re,
+        |b| emitted.push(b.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![b"false".to_vec()]);
+}
+
+#[test]
+fn raw_field_case_test_field_missing_bails() {
+    let re = regex::Regex::new("^foo").unwrap();
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_field_case_test_raw(
+        b"{\"y\":\"FOO\"}",
+        "x",
+        false,
+        &re,
+        |b| emitted.push(b.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_field_case_test_non_string_field_bails() {
+    let re = regex::Regex::new(".*").unwrap();
+    for inner in [&b"{\"x\":42}"[..], &b"{\"x\":null}"[..], &b"{\"x\":[1,2]}"[..]] {
+        let mut emitted: Vec<Vec<u8>> = Vec::new();
+        let outcome =
+            apply_field_case_test_raw(inner, "x", false, &re, |b| emitted.push(b.to_vec()));
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for non-string field input {:?}, got {:?}",
+            std::str::from_utf8(inner).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
+    }
+}
+
+#[test]
+fn raw_field_case_test_escaped_string_bails() {
+    let re = regex::Regex::new(".*").unwrap();
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_field_case_test_raw(
+        br#"{"x":"a\nb"}"#,
+        "x",
+        false,
+        &re,
+        |b| emitted.push(b.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_field_case_test_non_object_input_bails() {
+    let re = regex::Regex::new(".*").unwrap();
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut emitted: Vec<Vec<u8>> = Vec::new();
+        let outcome =
+            apply_field_case_test_raw(raw, "x", false, &re, |b| emitted.push(b.to_vec()));
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `.field | ascii_downcase|ascii_upcase | gsub/sub("p"; "r")` — same Bail
+// discipline as `apply_field_gsub_raw`; case fold runs first, then regex
+// replacement on the folded bytes.
+
+#[test]
+fn raw_field_case_gsub_downcase_global_replaces_all() {
+    let re = regex::Regex::new("a").unwrap();
+    let mut emitted: Vec<String> = Vec::new();
+    let outcome = apply_field_case_gsub_raw(
+        b"{\"x\":\"BAnAnA\"}",
+        "x",
+        false,
+        &re,
+        "X",
+        true,
+        |s| emitted.push(s.to_string()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec!["bXnXnX".to_string()]);
+}
+
+#[test]
+fn raw_field_case_gsub_upcase_first_match_only() {
+    let re = regex::Regex::new("A").unwrap();
+    let mut emitted: Vec<String> = Vec::new();
+    let outcome = apply_field_case_gsub_raw(
+        b"{\"x\":\"banana\"}",
+        "x",
+        true,
+        &re,
+        "X",
+        false,
+        |s| emitted.push(s.to_string()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec!["BXNANA".to_string()]);
+}
+
+#[test]
+fn raw_field_case_gsub_no_match_emits_folded_string() {
+    let re = regex::Regex::new("z").unwrap();
+    let mut emitted: Vec<String> = Vec::new();
+    let outcome = apply_field_case_gsub_raw(
+        b"{\"x\":\"BANANA\"}",
+        "x",
+        false,
+        &re,
+        "X",
+        true,
+        |s| emitted.push(s.to_string()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec!["banana".to_string()]);
+}
+
+#[test]
+fn raw_field_case_gsub_field_missing_or_non_string_bails() {
+    let re = regex::Regex::new("a").unwrap();
+    for inner in [
+        &b"{\"y\":\"hi\"}"[..],
+        &b"{\"x\":42}"[..],
+        &b"{\"x\":null}"[..],
+        &b"{\"x\":[1,2,3]}"[..],
+    ] {
+        let mut emitted: Vec<String> = Vec::new();
+        let outcome = apply_field_case_gsub_raw(
+            inner, "x", false, &re, "X", true, |s| emitted.push(s.to_string()),
+        );
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for input {:?}, got {:?}",
+            std::str::from_utf8(inner).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
+    }
+}
+
+#[test]
+fn raw_field_case_gsub_escaped_string_bails() {
+    let re = regex::Regex::new("a").unwrap();
+    let mut emitted: Vec<String> = Vec::new();
+    let outcome = apply_field_case_gsub_raw(
+        br#"{"x":"a\nb"}"#,
+        "x",
+        false,
+        &re,
+        "X",
+        true,
+        |s| emitted.push(s.to_string()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_field_case_gsub_non_object_input_bails() {
+    let re = regex::Regex::new(".*").unwrap();
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut emitted: Vec<String> = Vec::new();
+        let outcome = apply_field_case_gsub_raw(
+            raw, "x", false, &re, "X", true, |s| emitted.push(s.to_string()),
+        );
         assert!(
             matches!(outcome, RawApplyOutcome::Bail),
             "expected Bail for input {:?}, got {:?}",

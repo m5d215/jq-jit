@@ -377,6 +377,100 @@ where
     RawApplyOutcome::Emit
 }
 
+/// Apply the `.field | ascii_downcase|ascii_upcase | test("pattern")`
+/// raw-byte fast path on a single JSON record.
+///
+/// `upper = true` selects `ascii_upcase`, `false` selects `ascii_downcase`.
+/// The case fold is byte-wise ASCII (`a..z` ↔ `A..Z`), matching jq's
+/// behaviour for ASCII characters in the no-escape lane.
+///
+/// Bail discipline matches [`apply_field_test_raw`]. Strings with any `\`
+/// escape Bail because the raw scanner can't decode them, and the case
+/// fold is only safe on bytes the scanner can already see verbatim. Non-
+/// object input or missing field also Bail so the generic path produces
+/// jq's verdict.
+pub fn apply_field_case_test_raw<E>(
+    raw: &[u8],
+    field: &str,
+    upper: bool,
+    re: &regex::Regex,
+    mut emit: E,
+) -> RawApplyOutcome
+where
+    E: FnMut(&[u8]),
+{
+    let (vs, ve) = match json_object_get_field_raw(raw, 0, field) {
+        Some(r) => r,
+        None => return RawApplyOutcome::Bail,
+    };
+    let val = &raw[vs..ve];
+    if val.len() < 2 || val[0] != b'"' || val[val.len() - 1] != b'"'
+        || val[1..val.len() - 1].contains(&b'\\')
+    {
+        return RawApplyOutcome::Bail;
+    }
+    let inner = &val[1..val.len() - 1];
+    let converted: Vec<u8> = inner.iter().map(|&b| {
+        if upper {
+            if b.is_ascii_lowercase() { b - 32 } else { b }
+        } else if b.is_ascii_uppercase() { b + 32 } else { b }
+    }).collect();
+    let content = unsafe { std::str::from_utf8_unchecked(&converted) };
+    if re.is_match(content) {
+        emit(b"true");
+    } else {
+        emit(b"false");
+    }
+    RawApplyOutcome::Emit
+}
+
+/// Apply the `.field | ascii_downcase|ascii_upcase | gsub/sub("pattern";
+/// "replacement"; flags)` raw-byte fast path on a single JSON record.
+///
+/// `upper = true` selects `ascii_upcase`, `false` selects `ascii_downcase`.
+/// `is_global` selects between `replace_all` (gsub) and `replace` (sub).
+///
+/// Bail discipline matches [`apply_field_gsub_raw`]. Only the no-escape
+/// quoted-string lane is handled; everything else returns
+/// [`RawApplyOutcome::Bail`] for the generic path.
+pub fn apply_field_case_gsub_raw<E>(
+    raw: &[u8],
+    field: &str,
+    upper: bool,
+    re: &regex::Regex,
+    replacement: &str,
+    is_global: bool,
+    mut emit: E,
+) -> RawApplyOutcome
+where
+    E: FnMut(&str),
+{
+    let (vs, ve) = match json_object_get_field_raw(raw, 0, field) {
+        Some(r) => r,
+        None => return RawApplyOutcome::Bail,
+    };
+    let val = &raw[vs..ve];
+    if val.len() < 2 || val[0] != b'"' || val[val.len() - 1] != b'"'
+        || val[1..val.len() - 1].contains(&b'\\')
+    {
+        return RawApplyOutcome::Bail;
+    }
+    let inner = &val[1..val.len() - 1];
+    let converted: Vec<u8> = inner.iter().map(|&b| {
+        if upper {
+            if b.is_ascii_lowercase() { b - 32 } else { b }
+        } else if b.is_ascii_uppercase() { b + 32 } else { b }
+    }).collect();
+    let content = unsafe { std::str::from_utf8_unchecked(&converted) };
+    let result = if is_global {
+        re.replace_all(content, replacement)
+    } else {
+        re.replace(content, replacement)
+    };
+    emit(&result);
+    RawApplyOutcome::Emit
+}
+
 /// Apply a single-call `.field | re.captures(content)` raw-byte fast path
 /// on one JSON record. Used by both `match` and `capture` apply-sites:
 /// both run a single `captures()` call (not an iterator), emit one output
