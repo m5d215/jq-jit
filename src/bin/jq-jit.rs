@@ -140,10 +140,10 @@ use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json
 use jq_jit::interpreter::Filter;
 use jq_jit::fast_path::{
     apply_field_access_raw, apply_field_alternative_raw, apply_field_field_alternative_raw,
-    apply_field_gsub_raw, apply_field_match_raw, apply_field_scan_raw, apply_field_test_raw,
-    apply_full_object_fields_raw, apply_has_field_raw, apply_has_multi_field_raw,
-    apply_multi_field_access_raw, apply_nested_field_access_raw, apply_object_compute_raw,
-    RawApplyOutcome,
+    apply_field_format_raw, apply_field_gsub_raw, apply_field_match_raw, apply_field_scan_raw,
+    apply_field_test_raw, apply_full_object_fields_raw, apply_has_field_raw,
+    apply_has_multi_field_raw, apply_multi_field_access_raw, apply_nested_field_access_raw,
+    apply_object_compute_raw, RawApplyOutcome,
 };
 
 fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -7107,53 +7107,45 @@ fn real_main() {
                         })
                     }
                 } else if let Some((ref ff_field, ref ff_format)) = field_format {
-                    // .field | @base64 / @uri / @html — raw byte format
+                    // .field | @text / @json / @base64 / @uri / @html — raw byte format
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, ff_field) {
-                            let val = &raw[vs..ve];
-                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                                && !val[1..val.len()-1].contains(&b'\\')
-                            {
-                                let content = &val[1..val.len()-1];
-                                match ff_format.as_str() {
-                                    "text" => {
-                                        // @text on string: identity — output the JSON string as-is
-                                        compact_buf.extend_from_slice(val);
-                                        compact_buf.push(b'\n');
-                                    }
-                                    "json" => {
-                                        // @json on string: wrap the JSON string value in extra quotes + escape
-                                        push_tojson_raw(&mut compact_buf, val);
-                                        compact_buf.push(b'\n');
-                                    }
-                                    _ => {
-                                        compact_buf.push(b'"');
-                                        match ff_format.as_str() {
-                                            "base64" => base64_encode_to(content, &mut compact_buf),
-                                            "uri" => uri_encode_to(content, &mut compact_buf),
-                                            "html" => html_encode_to(content, &mut compact_buf),
-                                            _ => {}
-                                        }
-                                        compact_buf.extend_from_slice(b"\"\n");
-                                    }
+                        let outcome = apply_field_format_raw(raw, ff_field, |val, content| {
+                            match (ff_format.as_str(), content) {
+                                ("text", Some(_)) => {
+                                    // @text on string: identity — output the JSON string as-is
+                                    compact_buf.extend_from_slice(val);
+                                    compact_buf.push(b'\n');
+                                    RawApplyOutcome::Emit
                                 }
-                            } else {
-                                // Non-string field values (numbers, booleans, null)
-                                match ff_format.as_str() {
-                                    "json" | "text" => {
-                                        // @json/@text on non-string: wrap raw bytes in quotes
-                                        compact_buf.push(b'"');
-                                        compact_buf.extend_from_slice(val);
-                                        compact_buf.extend_from_slice(b"\"\n");
-                                    }
-                                    _ => {
-                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                                    }
+                                ("json", Some(_)) => {
+                                    // @json on string: wrap the JSON string value in extra quotes + escape
+                                    push_tojson_raw(&mut compact_buf, val);
+                                    compact_buf.push(b'\n');
+                                    RawApplyOutcome::Emit
                                 }
+                                (_, Some(content_bytes)) => {
+                                    compact_buf.push(b'"');
+                                    match ff_format.as_str() {
+                                        "base64" => base64_encode_to(content_bytes, &mut compact_buf),
+                                        "uri" => uri_encode_to(content_bytes, &mut compact_buf),
+                                        "html" => html_encode_to(content_bytes, &mut compact_buf),
+                                        _ => {}
+                                    }
+                                    compact_buf.extend_from_slice(b"\"\n");
+                                    RawApplyOutcome::Emit
+                                }
+                                ("json" | "text", None) => {
+                                    // @json/@text on non-string scalars: wrap raw bytes in quotes
+                                    compact_buf.push(b'"');
+                                    compact_buf.extend_from_slice(val);
+                                    compact_buf.extend_from_slice(b"\"\n");
+                                    RawApplyOutcome::Emit
+                                }
+                                _ => RawApplyOutcome::Bail,
                             }
-                        } else {
+                        });
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -20443,47 +20435,39 @@ fn real_main() {
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, ff_field) {
-                        let val = &raw[vs..ve];
-                        if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                            && !val[1..val.len()-1].contains(&b'\\')
-                        {
-                            let content = &val[1..val.len()-1];
-                            match ff_format.as_str() {
-                                "text" => {
-                                    compact_buf.extend_from_slice(val);
-                                    compact_buf.push(b'\n');
-                                }
-                                "json" => {
-                                    push_tojson_raw(&mut compact_buf, val);
-                                    compact_buf.push(b'\n');
-                                }
-                                _ => {
-                                    compact_buf.push(b'"');
-                                    match ff_format.as_str() {
-                                        "base64" => base64_encode_to(content, &mut compact_buf),
-                                        "uri" => uri_encode_to(content, &mut compact_buf),
-                                        "html" => html_encode_to(content, &mut compact_buf),
-                                        _ => {}
-                                    }
-                                    compact_buf.extend_from_slice(b"\"\n");
-                                }
+                    let outcome = apply_field_format_raw(raw, ff_field, |val, content_no_quotes| {
+                        match (ff_format.as_str(), content_no_quotes) {
+                            ("text", Some(_)) => {
+                                compact_buf.extend_from_slice(val);
+                                compact_buf.push(b'\n');
+                                RawApplyOutcome::Emit
                             }
-                        } else {
-                            // Non-string field values (numbers, booleans, null)
-                            match ff_format.as_str() {
-                                "json" | "text" => {
-                                    compact_buf.push(b'"');
-                                    compact_buf.extend_from_slice(val);
-                                    compact_buf.extend_from_slice(b"\"\n");
-                                }
-                                _ => {
-                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                                }
+                            ("json", Some(_)) => {
+                                push_tojson_raw(&mut compact_buf, val);
+                                compact_buf.push(b'\n');
+                                RawApplyOutcome::Emit
                             }
+                            (_, Some(content_bytes)) => {
+                                compact_buf.push(b'"');
+                                match ff_format.as_str() {
+                                    "base64" => base64_encode_to(content_bytes, &mut compact_buf),
+                                    "uri" => uri_encode_to(content_bytes, &mut compact_buf),
+                                    "html" => html_encode_to(content_bytes, &mut compact_buf),
+                                    _ => {}
+                                }
+                                compact_buf.extend_from_slice(b"\"\n");
+                                RawApplyOutcome::Emit
+                            }
+                            ("json" | "text", None) => {
+                                compact_buf.push(b'"');
+                                compact_buf.extend_from_slice(val);
+                                compact_buf.extend_from_slice(b"\"\n");
+                                RawApplyOutcome::Emit
+                            }
+                            _ => RawApplyOutcome::Bail,
                         }
-                    } else {
+                    });
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
