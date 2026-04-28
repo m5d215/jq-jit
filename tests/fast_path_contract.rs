@@ -18,9 +18,11 @@ use jq_jit::fast_path::{
     apply_full_object_fields_raw, apply_has_field_raw, apply_has_multi_field_raw,
     apply_multi_field_access_raw, apply_nested_field_access_raw, apply_object_compute_raw,
     apply_field_update_case_raw, apply_field_update_gsub_raw, apply_field_update_length_raw,
-    apply_field_update_test_raw, apply_field_update_tostring_raw, apply_select_arith_cmp_raw,
-    apply_select_cmp_raw, apply_select_field_null_raw, apply_select_str_raw,
-    apply_select_str_test_raw,
+    apply_field_update_slice_raw, apply_field_update_split_first_raw,
+    apply_field_update_split_last_raw, apply_field_update_str_concat_raw,
+    apply_field_update_str_map_raw, apply_field_update_test_raw, apply_field_update_tostring_raw,
+    apply_field_update_trim_raw, apply_select_arith_cmp_raw, apply_select_cmp_raw,
+    apply_select_field_null_raw, apply_select_str_raw, apply_select_str_test_raw,
 };
 use jq_jit::interpreter::Filter;
 use jq_jit::ir::BinOp;
@@ -3202,4 +3204,148 @@ fn raw_field_update_case_non_object_input_bails() {
         let outcome = apply_field_update_case_raw(raw, "x", false, &mut buf);
         assert!(matches!(outcome, RawApplyOutcome::Bail));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Six more `.field |=` thin-wrappers: split_first / split_last / trim /
+// slice / str_map / str_concat. All share the same Bail discipline:
+// non-object, missing/non-string field.
+
+#[test]
+fn raw_field_update_split_first_emits_prefix() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_update_split_first_raw(b"{\"x\":\"a/b/c\"}", "x", "/", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"{\"x\":\"a\"}");
+}
+
+#[test]
+fn raw_field_update_split_first_non_object_bails() {
+    for raw in [b"42".as_slice(), b"null".as_slice(), b"[1]".as_slice()] {
+        let mut buf = Vec::new();
+        let outcome = apply_field_update_split_first_raw(raw, "x", "/", &mut buf);
+        assert!(matches!(outcome, RawApplyOutcome::Bail));
+    }
+}
+
+#[test]
+fn raw_field_update_split_last_emits_suffix() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_update_split_last_raw(b"{\"x\":\"a/b/c\"}", "x", "/", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"{\"x\":\"c\"}");
+}
+
+#[test]
+fn raw_field_update_split_last_non_string_field_bails() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_update_split_last_raw(b"{\"x\":42}", "x", "/", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+}
+
+#[test]
+fn raw_field_update_trim_ltrim_emits() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_update_trim_raw(b"{\"x\":\"abcabc\"}", "x", "ab", false, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"{\"x\":\"cabc\"}");
+}
+
+#[test]
+fn raw_field_update_trim_rtrim_emits() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_update_trim_raw(b"{\"x\":\"abcabc\"}", "x", "bc", true, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"{\"x\":\"abca\"}");
+}
+
+#[test]
+fn raw_field_update_trim_non_object_bails() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_update_trim_raw(b"42", "x", "ab", false, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+}
+
+#[test]
+fn raw_field_update_slice_emits() {
+    let mut buf = Vec::new();
+    let outcome =
+        apply_field_update_slice_raw(b"{\"x\":\"abcdef\"}", "x", Some(1), Some(4), &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"{\"x\":\"bcd\"}");
+}
+
+#[test]
+fn raw_field_update_slice_non_string_field_bails() {
+    let mut buf = Vec::new();
+    let outcome =
+        apply_field_update_slice_raw(b"{\"x\":[1,2,3]}", "x", Some(1), Some(2), &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+}
+
+#[test]
+fn raw_field_update_str_map_emits_then_branch() {
+    // .x |= if . == "yes" then "Y" else "N" end
+    let mut buf = Vec::new();
+    let outcome = apply_field_update_str_map_raw(
+        b"{\"x\":\"yes\"}",
+        "x",
+        b"yes",
+        b"\"Y\"",
+        b"\"N\"",
+        &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"{\"x\":\"Y\"}");
+}
+
+#[test]
+fn raw_field_update_str_map_emits_else_branch() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_update_str_map_raw(
+        b"{\"x\":\"no\"}",
+        "x",
+        b"yes",
+        b"\"Y\"",
+        b"\"N\"",
+        &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"{\"x\":\"N\"}");
+}
+
+#[test]
+fn raw_field_update_str_map_non_object_bails() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_update_str_map_raw(
+        b"\"yes\"",
+        "x",
+        b"yes",
+        b"\"Y\"",
+        b"\"N\"",
+        &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+}
+
+#[test]
+fn raw_field_update_str_concat_wraps_value() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_update_str_concat_raw(
+        b"{\"x\":\"hi\"}",
+        "x",
+        b"<",
+        b">",
+        &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"{\"x\":\"<hi>\"}");
+}
+
+#[test]
+fn raw_field_update_str_concat_non_string_field_bails() {
+    let mut buf = Vec::new();
+    let outcome =
+        apply_field_update_str_concat_raw(b"{\"x\":42}", "x", b"<", b">", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
 }
