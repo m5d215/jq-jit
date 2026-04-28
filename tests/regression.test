@@ -4906,3 +4906,32 @@ if .name == "alice" then {role:"admin"} + . else . end
 [ (if .x > 0 then {m:true} + . else . end)? ]
 "plain"
 []
+
+# Issue #251: cmp_branch_interp / cmp_branch_remaps apply-sites use
+# RawApplyOutcome (#83 Phase B). cmp_branch_interp reuses
+# apply_field_const_cmp_raw (numeric predicate). cmp_branch_remaps reuses
+# apply_field_cmp_val_raw (numeric or string predicate).
+if .x > 0 then "positive: \(.y)" else "non-positive: \(.y)" end
+{"x":5,"y":"hello"}
+"positive: hello"
+
+if .x > 0 then "positive: \(.y)" else "non-positive: \(.y)" end
+{"x":-1,"y":"hello"}
+"non-positive: hello"
+
+if .x > 0 then {sign:"pos",val:.y} else {sign:"neg",val:.y} end
+{"x":5,"y":42}
+{"sign":"pos","val":42}
+
+if .name == "alice" then {role:"admin",name:.name} else {role:"guest",name:.name} end
+{"name":"alice"}
+{"role":"admin","name":"alice"}
+
+if .name == "alice" then {role:"admin",name:.name} else {role:"guest",name:.name} end
+{"name":"bob"}
+{"role":"guest","name":"bob"}
+
+# Non-object input — helper Bails, generic raises indexing error.
+[ (if .x > 0 then "p:\(.y)" else "n:\(.y)" end)? ]
+"plain"
+[]
