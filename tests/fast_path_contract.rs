@@ -10,9 +10,10 @@
 
 use jq_jit::fast_path::{
     FastPath, FieldAccessPath, RawApplyOutcome, apply_field_access_raw,
-    apply_field_alternative_raw, apply_field_field_alternative_raw, apply_field_test_raw,
-    apply_full_object_fields_raw, apply_has_field_raw, apply_has_multi_field_raw,
-    apply_multi_field_access_raw, apply_nested_field_access_raw, apply_object_compute_raw,
+    apply_field_alternative_raw, apply_field_field_alternative_raw, apply_field_gsub_raw,
+    apply_field_test_raw, apply_full_object_fields_raw, apply_has_field_raw,
+    apply_has_multi_field_raw, apply_multi_field_access_raw, apply_nested_field_access_raw,
+    apply_object_compute_raw,
 };
 use jq_jit::interpreter::Filter;
 use jq_jit::value::Value;
@@ -893,6 +894,120 @@ fn raw_field_test_non_object_input_bails() {
     ] {
         let mut emitted: Vec<Vec<u8>> = Vec::new();
         let outcome = apply_field_test_raw(raw, "x", &re, |b| emitted.push(b.to_vec()));
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `.field | gsub("p"; "r")` / `sub` — same Bail discipline as `field_test`,
+// with the helper handing the regex replacement result back as `&str` so the
+// apply-site owns JSON-escape framing.
+
+#[test]
+fn raw_field_gsub_global_replaces_all_matches() {
+    let re = regex::Regex::new("a").unwrap();
+    let mut emitted: Vec<String> = Vec::new();
+    let outcome = apply_field_gsub_raw(
+        b"{\"x\":\"banana\"}",
+        "x",
+        &re,
+        "X",
+        true,
+        |s| emitted.push(s.to_string()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec!["bXnXnX".to_string()]);
+}
+
+#[test]
+fn raw_field_gsub_non_global_replaces_first_only() {
+    let re = regex::Regex::new("a").unwrap();
+    let mut emitted: Vec<String> = Vec::new();
+    let outcome = apply_field_gsub_raw(
+        b"{\"x\":\"banana\"}",
+        "x",
+        &re,
+        "X",
+        false,
+        |s| emitted.push(s.to_string()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec!["bXnana".to_string()]);
+}
+
+#[test]
+fn raw_field_gsub_no_match_emits_unchanged() {
+    let re = regex::Regex::new("z").unwrap();
+    let mut emitted: Vec<String> = Vec::new();
+    let outcome = apply_field_gsub_raw(
+        b"{\"x\":\"banana\"}",
+        "x",
+        &re,
+        "X",
+        true,
+        |s| emitted.push(s.to_string()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec!["banana".to_string()]);
+}
+
+#[test]
+fn raw_field_gsub_field_missing_or_non_string_bails() {
+    let re = regex::Regex::new("a").unwrap();
+    for inner in [
+        &b"{\"y\":\"hi\"}"[..],
+        &b"{\"x\":42}"[..],
+        &b"{\"x\":null}"[..],
+        &b"{\"x\":[1,2,3]}"[..],
+    ] {
+        let mut emitted: Vec<String> = Vec::new();
+        let outcome =
+            apply_field_gsub_raw(inner, "x", &re, "X", true, |s| emitted.push(s.to_string()));
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for input {:?}, got {:?}",
+            std::str::from_utf8(inner).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
+    }
+}
+
+#[test]
+fn raw_field_gsub_escaped_string_bails() {
+    let re = regex::Regex::new("a").unwrap();
+    let mut emitted: Vec<String> = Vec::new();
+    let outcome = apply_field_gsub_raw(
+        br#"{"x":"a\nb"}"#,
+        "x",
+        &re,
+        "X",
+        true,
+        |s| emitted.push(s.to_string()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_field_gsub_non_object_input_bails() {
+    let re = regex::Regex::new(".*").unwrap();
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut emitted: Vec<String> = Vec::new();
+        let outcome =
+            apply_field_gsub_raw(raw, "x", &re, "X", true, |s| emitted.push(s.to_string()));
         assert!(
             matches!(outcome, RawApplyOutcome::Bail),
             "expected Bail for input {:?}, got {:?}",

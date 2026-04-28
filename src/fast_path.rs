@@ -325,6 +325,49 @@ where
     RawApplyOutcome::Emit
 }
 
+/// Apply the `.field | gsub/sub("pattern"; "replacement"; flags)` raw-byte
+/// fast path on a single JSON record.
+///
+/// Bail discipline matches [`apply_field_test_raw`] (only quoted-string
+/// fields with no backslash escapes are handled by the raw scanner; the
+/// generic path takes everything else, including the type errors jq raises
+/// on non-strings). When the bail clears, `emit` is invoked with the
+/// `Cow<str>` produced by the regex replacement; the caller is responsible
+/// for JSON-escaping the result and writing the surrounding quotes /
+/// trailing newline.
+///
+/// `is_global` selects between `replace_all` (gsub) and `replace` (sub).
+pub fn apply_field_gsub_raw<E>(
+    raw: &[u8],
+    field: &str,
+    re: &regex::Regex,
+    replacement: &str,
+    is_global: bool,
+    mut emit: E,
+) -> RawApplyOutcome
+where
+    E: FnMut(&str),
+{
+    let (vs, ve) = match json_object_get_field_raw(raw, 0, field) {
+        Some(r) => r,
+        None => return RawApplyOutcome::Bail,
+    };
+    let val = &raw[vs..ve];
+    if val.len() < 2 || val[0] != b'"' || val[val.len() - 1] != b'"'
+        || val[1..val.len() - 1].contains(&b'\\')
+    {
+        return RawApplyOutcome::Bail;
+    }
+    let content = unsafe { std::str::from_utf8_unchecked(&val[1..val.len() - 1]) };
+    let result = if is_global {
+        re.replace_all(content, replacement)
+    } else {
+        re.replace(content, replacement)
+    };
+    emit(&result);
+    RawApplyOutcome::Emit
+}
+
 /// Apply the `.field // fallback` raw-byte fast path on a single JSON
 /// record.
 ///

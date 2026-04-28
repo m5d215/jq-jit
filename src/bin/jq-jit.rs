@@ -140,9 +140,9 @@ use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json
 use jq_jit::interpreter::Filter;
 use jq_jit::fast_path::{
     apply_field_access_raw, apply_field_alternative_raw, apply_field_field_alternative_raw,
-    apply_field_test_raw, apply_full_object_fields_raw, apply_has_field_raw,
-    apply_has_multi_field_raw, apply_multi_field_access_raw, apply_nested_field_access_raw,
-    apply_object_compute_raw, RawApplyOutcome,
+    apply_field_gsub_raw, apply_field_test_raw, apply_full_object_fields_raw,
+    apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
+    apply_nested_field_access_raw, apply_object_compute_raw, RawApplyOutcome,
 };
 
 fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -6725,17 +6725,13 @@ fn real_main() {
                         let repl = gs_replacement.as_str();
                         json_stream_raw(&input_str, |start, end| {
                             let raw = &input_bytes[start..end];
-                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, gs_field) {
-                                let val = &raw[vs..ve];
-                                if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                                    && !val[1..val.len()-1].contains(&b'\\')
-                                {
-                                    let content = unsafe { std::str::from_utf8_unchecked(&val[1..val.len()-1]) };
-                                    let result = if gs_global {
-                                        re.replace_all(content, repl)
-                                    } else {
-                                        re.replace(content, repl)
-                                    };
+                            let outcome = apply_field_gsub_raw(
+                                raw,
+                                gs_field,
+                                &re,
+                                repl,
+                                gs_global,
+                                |result| {
                                     compact_buf.push(b'"');
                                     // Escape the result for JSON
                                     for &b in result.as_bytes() {
@@ -6750,11 +6746,9 @@ fn real_main() {
                                         }
                                     }
                                     compact_buf.extend_from_slice(b"\"\n");
-                                } else {
-                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                                }
-                            } else {
+                                },
+                            );
+                            if let RawApplyOutcome::Bail = outcome {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             }
@@ -20091,17 +20085,13 @@ fn real_main() {
                     let content_bytes = content.as_bytes();
                     json_stream_raw(content, |start, end| {
                         let raw = &content_bytes[start..end];
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, gs_field) {
-                            let val = &raw[vs..ve];
-                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                                && !val[1..val.len()-1].contains(&b'\\')
-                            {
-                                let content_str = unsafe { std::str::from_utf8_unchecked(&val[1..val.len()-1]) };
-                                let result = if gs_global {
-                                    re.replace_all(content_str, repl)
-                                } else {
-                                    re.replace(content_str, repl)
-                                };
+                        let outcome = apply_field_gsub_raw(
+                            raw,
+                            gs_field,
+                            &re,
+                            repl,
+                            gs_global,
+                            |result| {
                                 compact_buf.push(b'"');
                                 for &b in result.as_bytes() {
                                     match b {
@@ -20115,11 +20105,9 @@ fn real_main() {
                                     }
                                 }
                                 compact_buf.extend_from_slice(b"\"\n");
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            }
-                        } else {
+                            },
+                        );
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
