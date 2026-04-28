@@ -2841,3 +2841,45 @@ true
 
 (.x | gsub("a"; "X"))?
 [1,2,3]
+
+# #83 Phase B: .x | match("p") apply-site uses RawApplyOutcome::Bail.
+# Happy path emits jq's match-result object via the raw scanner.
+.x | match("f(o+)")
+{"x":"foobar"}
+{"offset":0,"length":3,"string":"foo","captures":[{"offset":1,"length":2,"string":"oo","name":null}]}
+
+# No-match emits no output (jq behavior — single-call match is 0/1 output).
+.x | match("zz")
+{"x":"foobar"}
+
+# Field missing under `?` bails to generic, jq raises (null | match), `?` swallows.
+(.x | match("p"))?
+{"y":"hi"}
+
+# Non-string field under `?`
+(.x | match("p"))?
+{"x":42}
+
+(.x | match("p"))?
+{"x":null}
+
+(.x | match("p"))?
+{"x":[1,2,3]}
+
+# Escape-bearing string: bail to generic, which decodes the escape correctly.
+.x | match("\\n") | .string
+{"x":"a\nb"}
+"\n"
+
+# Non-object input under `?` — generic raises, `?` swallows.
+(.x | match("p"))?
+42
+
+(.x | match("p"))?
+"hi"
+
+(.x | match("p"))?
+null
+
+(.x | match("p"))?
+[1,2,3]

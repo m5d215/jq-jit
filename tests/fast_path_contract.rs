@@ -11,7 +11,7 @@
 use jq_jit::fast_path::{
     FastPath, FieldAccessPath, RawApplyOutcome, apply_field_access_raw,
     apply_field_alternative_raw, apply_field_field_alternative_raw, apply_field_gsub_raw,
-    apply_field_test_raw, apply_full_object_fields_raw, apply_has_field_raw,
+    apply_field_match_raw, apply_field_test_raw, apply_full_object_fields_raw, apply_has_field_raw,
     apply_has_multi_field_raw, apply_multi_field_access_raw, apply_nested_field_access_raw,
     apply_object_compute_raw,
 };
@@ -1015,5 +1015,122 @@ fn raw_field_gsub_non_object_input_bails() {
             outcome,
         );
         assert!(emitted.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `.field | match("p")` — same Bail discipline as `field_test`. The helper
+// hands `(content_str, captures)` back to the apply-site so it can build jq's
+// `{offset,length,string,captures:[...]}` output bytes; on no match the
+// closure is not invoked (jq's `match` emits no output for a non-match).
+
+#[test]
+fn raw_field_match_invokes_closure_on_match() {
+    let re = regex::Regex::new(r"f(o+)").unwrap();
+    let mut hits: Vec<(String, String)> = Vec::new();
+    let outcome = apply_field_match_raw(
+        b"{\"x\":\"foobar\"}",
+        "x",
+        &re,
+        |content, caps| {
+            let m = caps.get(0).unwrap();
+            let g1 = caps.get(1).unwrap();
+            hits.push((content.to_string(), format!("{}|{}", m.as_str(), g1.as_str())));
+        },
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(hits, vec![("foobar".to_string(), "foo|oo".to_string())]);
+}
+
+#[test]
+fn raw_field_match_no_match_skips_closure() {
+    let re = regex::Regex::new(r"^foo").unwrap();
+    let mut called = 0u32;
+    let outcome = apply_field_match_raw(
+        b"{\"x\":\"barfoo\"}",
+        "x",
+        &re,
+        |_, _| {
+            called += 1;
+        },
+    );
+    // Emit verdict (the helper handled the input — jq emits nothing on no
+    // match), but the closure is never invoked.
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(called, 0);
+}
+
+#[test]
+fn raw_field_match_field_missing_bails() {
+    let re = regex::Regex::new(r"^foo").unwrap();
+    let mut called = 0u32;
+    let outcome = apply_field_match_raw(
+        b"{\"y\":\"hi\"}",
+        "x",
+        &re,
+        |_, _| {
+            called += 1;
+        },
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert_eq!(called, 0);
+}
+
+#[test]
+fn raw_field_match_non_string_field_bails() {
+    let re = regex::Regex::new(r".").unwrap();
+    for inner in [&b"{\"x\":42}"[..], &b"{\"x\":null}"[..], &b"{\"x\":[1,2]}"[..]] {
+        let mut called = 0u32;
+        let outcome = apply_field_match_raw(inner, "x", &re, |_, _| {
+            called += 1;
+        });
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for non-string field input {:?}, got {:?}",
+            std::str::from_utf8(inner).unwrap(),
+            outcome,
+        );
+        assert_eq!(called, 0);
+    }
+}
+
+#[test]
+fn raw_field_match_escaped_string_bails() {
+    // Backslash escapes need decoding; the raw scanner can't, so it bails.
+    let re = regex::Regex::new(r"\n").unwrap();
+    let mut called = 0u32;
+    let outcome = apply_field_match_raw(
+        br#"{"x":"a\nb"}"#,
+        "x",
+        &re,
+        |_, _| {
+            called += 1;
+        },
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert_eq!(called, 0);
+}
+
+#[test]
+fn raw_field_match_non_object_input_bails() {
+    let re = regex::Regex::new(r".*").unwrap();
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut called = 0u32;
+        let outcome = apply_field_match_raw(raw, "x", &re, |_, _| {
+            called += 1;
+        });
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert_eq!(called, 0);
     }
 }
