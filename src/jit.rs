@@ -324,7 +324,6 @@ type LabelId = u32;
 enum MutateFn { Reverse, Sort }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 enum JitOp {
     // Value construction
     Clone { dst: SlotId, src: SlotId },
@@ -428,13 +427,9 @@ enum JitOp {
     IsNullOrFalse { dst_var: u32, src: SlotId },
     BranchOnVar { var: u32, nonzero_label: LabelId, zero_label: LabelId },
 
-    // Generic runtime alternative check
-    Alternative { dst: SlotId, primary: SlotId },
-
     // Range loop
     ToF64Var { dst_var: u32, src: SlotId },
     F64Less { dst_var: u32, a_var: u32, b_var: u32 },
-    F64Greater { dst_var: u32, a_var: u32, b_var: u32 },
     F64Add { dst_var: u32, a_var: u32, b_var: u32 },
     F64Sub { dst_var: u32, a_var: u32, b_var: u32 },
     F64Mul { dst_var: u32, a_var: u32, b_var: u32 },
@@ -7696,7 +7691,6 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
             JitOp::IfTruthy { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
             JitOp::FieldIsTruthy { base, .. } | JitOp::FieldCmpNum { base, .. } | JitOp::TypeCmpBranch { src: base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
             JitOp::IsNullOrFalse { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
-            JitOp::Alternative { primary, .. } => { *use_count.entry(*primary).or_insert(0) += 1; }
             JitOp::SetVar { src, .. } | JitOp::MoveToVar { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
             JitOp::PathExtract { container, key, .. } => {
                 *use_count.entry(*container).or_insert(0) += 1;
@@ -7783,7 +7777,6 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 JitOp::IfTruthy { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
                 JitOp::FieldIsTruthy { base, .. } | JitOp::FieldCmpNum { base, .. } | JitOp::TypeCmpBranch { src: base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
                 JitOp::IsNullOrFalse { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
-                JitOp::Alternative { primary, .. } => { *use_count.entry(*primary).or_insert(0) += 1; }
                 JitOp::SetVar { src, .. } | JitOp::MoveToVar { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
                 JitOp::PathExtract { container, key, .. } => {
                     *use_count.entry(*container).or_insert(0) += 1;
@@ -8960,10 +8953,6 @@ impl JitCompiler {
                         b.ins().brif(cmp, label_blocks[*nonzero_label as usize], &[], label_blocks[*zero_label as usize], &[]);
                         terminated = true;
                     }
-                    JitOp::Alternative { .. } => {
-                        // Not used directly in codegen (handled by IsNullOrFalse + BranchOnVar)
-                    }
-
                     // Float/Range ops
                     JitOp::ToF64Var { dst_var, src } => {
                         let s = slot_addr(&mut b, *src);
@@ -8979,15 +8968,6 @@ impl JitCompiler {
                         let a_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), a_bits);
                         let b_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), b_bits);
                         let cmp = b.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::LessThan, a_f, b_f);
-                        let result = b.ins().uextend(ptr_ty, cmp);
-                        b.def_var(vars[*dst_var as usize], result);
-                    }
-                    JitOp::F64Greater { dst_var, a_var, b_var: bv } => {
-                        let a_bits = b.use_var(vars[*a_var as usize]);
-                        let b_bits = b.use_var(vars[*bv as usize]);
-                        let a_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), a_bits);
-                        let b_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), b_bits);
-                        let cmp = b.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::GreaterThan, a_f, b_f);
                         let result = b.ins().uextend(ptr_ty, cmp);
                         b.def_var(vars[*dst_var as usize], result);
                     }
