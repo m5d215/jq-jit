@@ -331,33 +331,37 @@ where
     }
 }
 
-/// Apply the array-of-fields `[.a, .b, .c]` raw-byte fast path on a single
-/// JSON record.
+/// Apply an "all fields required" raw-byte fast path on a single JSON
+/// record.
 ///
-/// Bail discipline mirrors [`apply_multi_field_access_raw`]: the path can
-/// only emit when the input is an object that contains every requested
-/// field. Anything else returns [`RawApplyOutcome::Bail`] and the caller
-/// hands off to the generic path.
+/// Used by every shape that emits a structural form built from the input
+/// object's field values: `[.a, .b, .c]` (`array_field`),
+/// `{a: .x, b: .y}` (`field_remap`), and any future fast path with the
+/// same all-or-nothing fetch semantics. Bail discipline matches
+/// [`apply_multi_field_access_raw`]: emit only when the input is an
+/// object containing every requested field; anything else routes to the
+/// generic path.
 ///
-/// Serialisation is left to the caller: when the fields resolve, the helper
-/// hands the filled `ranges_buf` and the raw input bytes to `emit_array`,
-/// which writes the array form (compact or pretty, with whatever indentation
-/// or nesting handling the apply-site needs) into its captured buffer. This
-/// keeps the helper independent of `use_pretty_buf` / colour flags while
+/// Serialisation is left to the caller: when the fields resolve, the
+/// helper hands the filled `ranges_buf` and the raw input bytes to
+/// `emit_structural`, which writes whatever shape the apply-site wants
+/// (array form, object form, pretty / compact framing, nested-value
+/// pretty-print) into its captured buffer. This keeps the helper
+/// independent of `use_pretty_buf` / colour / per-shape flags while
 /// still naming the commit point at the function boundary.
 ///
 /// `ranges_buf` must have length `>= fields.len()`.
-pub fn apply_array_field_access_raw<E>(
+pub fn apply_full_object_fields_raw<E>(
     raw: &[u8],
     fields: &[&str],
     ranges_buf: &mut [(usize, usize)],
-    emit_array: E,
+    emit_structural: E,
 ) -> RawApplyOutcome
 where
     E: FnOnce(&[(usize, usize)], &[u8]),
 {
     if json_object_get_fields_raw_buf(raw, 0, fields, ranges_buf) {
-        emit_array(&ranges_buf[..fields.len()], raw);
+        emit_structural(&ranges_buf[..fields.len()], raw);
         RawApplyOutcome::Emit
     } else {
         RawApplyOutcome::Bail
