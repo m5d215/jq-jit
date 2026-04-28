@@ -2412,3 +2412,47 @@ null
 .x?
 null
 null
+
+# Issue #83 Phase B: raw .a.b nested apply-site bails on non-object inputs and
+# on intermediate type mismatches, so `(filter)?` on those inputs yields empty
+# (jq's behaviour) instead of leaking null-masking via the raw fast path.
+
+# Nested access on a number under `?`
+.a.b?
+42
+
+# Nested access on a string under `?`
+.a.b?
+"hi"
+
+# Nested access on a boolean under `?`
+.a.b?
+true
+
+# Nested access where the intermediate is a string (type error) under `?`
+.a.b?
+{"a":"hello"}
+
+# Nested access where the intermediate is a number (type error) under `?`
+.a.b?
+{"a":1}
+
+# Fully-resolved nested path still emits the value
+.a.b
+{"a":{"b":42}}
+42
+
+# Missing nested key still emits null (object intermediate)
+.a.b
+{"a":{}}
+null
+
+# Missing top-level key still emits null
+.a.b
+{}
+null
+
+# Null input still emits null for nested access
+.a.b
+null
+null
