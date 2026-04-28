@@ -2378,3 +2378,37 @@ false
 .
 [{"a":1,"a":2},{"b":3,"b":4}]
 [{"a":2},{"b":4}]
+
+# Issue #83 Phase B: raw .field apply-site bails on non-{object,null} inputs.
+# `.x` followed by `?` (or wrapped in try/catch) must produce empty — the
+# silent `null` would re-introduce the #50 null-masking divergence.
+
+# Boolean input under `?`
+.x?
+true
+
+# Number input under `?`
+.x?
+42
+
+# String input under `?`
+.x?
+"hi"
+
+# Array input under `?`
+.x?
+[1,2,3]
+
+# Object input still emits the field value (or null when absent)
+.x?
+{"x":5}
+5
+
+.x?
+{"y":5}
+null
+
+# Null input still emits null (jq semantics: `.x` on null is null)
+.x?
+null
+null
