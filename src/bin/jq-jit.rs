@@ -142,9 +142,9 @@ use jq_jit::fast_path::{
     apply_field_access_raw, apply_field_alternative_raw, apply_field_field_alternative_raw,
     apply_field_format_raw, apply_field_gsub_raw, apply_field_ltrimstr_tonumber_raw,
     apply_field_match_raw, apply_field_scan_raw, apply_field_str_concat_raw,
-    apply_field_test_raw, apply_full_object_fields_raw, apply_has_field_raw,
-    apply_has_multi_field_raw, apply_multi_field_access_raw, apply_nested_field_access_raw,
-    apply_object_compute_raw, RawApplyOutcome,
+    apply_field_str_reverse_raw, apply_field_test_raw, apply_full_object_fields_raw,
+    apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
+    apply_nested_field_access_raw, apply_object_compute_raw, RawApplyOutcome,
 };
 
 fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -3378,35 +3378,30 @@ fn real_main() {
                     // .field | split("") | reverse | join("") — string reversal
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, rev_field) {
-                            let val = &raw[vs..ve];
-                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"' {
-                                let inner = &val[1..val.len()-1];
-                                // Fast path: ASCII-only with no escapes
-                                if !inner.contains(&b'\\') && inner.iter().all(|&b| b < 0x80) {
-                                    compact_buf.push(b'"');
-                                    for &b in inner.iter().rev() {
-                                        compact_buf.push(b);
-                                    }
-                                    compact_buf.extend_from_slice(b"\"\n");
-                                } else {
-                                    // Decode JSON string, reverse chars, re-encode
-                                    let unescaped = json_unescape_bytes(inner);
-                                    if let Ok(s) = std::str::from_utf8(&unescaped) {
-                                        let reversed: String = s.chars().rev().collect();
-                                        compact_buf.push(b'"');
-                                        compact_buf.extend_from_slice(&json_escape_bytes(reversed.as_bytes()));
-                                        compact_buf.extend_from_slice(b"\"\n");
-                                    } else {
-                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                                    }
+                        let outcome = apply_field_str_reverse_raw(raw, rev_field, |inner| {
+                            if !inner.contains(&b'\\') && inner.iter().all(|&b| b < 0x80) {
+                                // ASCII-only no-escape: byte-reverse directly.
+                                compact_buf.push(b'"');
+                                for &b in inner.iter().rev() {
+                                    compact_buf.push(b);
                                 }
+                                compact_buf.extend_from_slice(b"\"\n");
+                                RawApplyOutcome::Emit
                             } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                // General string: decode JSON escapes, reverse chars, re-encode.
+                                let unescaped = json_unescape_bytes(inner);
+                                if let Ok(s) = std::str::from_utf8(&unescaped) {
+                                    let reversed: String = s.chars().rev().collect();
+                                    compact_buf.push(b'"');
+                                    compact_buf.extend_from_slice(&json_escape_bytes(reversed.as_bytes()));
+                                    compact_buf.extend_from_slice(b"\"\n");
+                                    RawApplyOutcome::Emit
+                                } else {
+                                    RawApplyOutcome::Bail
+                                }
                             }
-                        } else {
+                        });
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -13088,33 +13083,28 @@ fn real_main() {
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, rev_field) {
-                        let val = &raw[vs..ve];
-                        if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"' {
-                            let inner = &val[1..val.len()-1];
-                            if !inner.contains(&b'\\') && inner.iter().all(|&b| b < 0x80) {
-                                compact_buf.push(b'"');
-                                for &b in inner.iter().rev() {
-                                    compact_buf.push(b);
-                                }
-                                compact_buf.extend_from_slice(b"\"\n");
-                            } else {
-                                let unescaped = json_unescape_bytes(inner);
-                                if let Ok(s) = std::str::from_utf8(&unescaped) {
-                                    let reversed: String = s.chars().rev().collect();
-                                    compact_buf.push(b'"');
-                                    compact_buf.extend_from_slice(&json_escape_bytes(reversed.as_bytes()));
-                                    compact_buf.extend_from_slice(b"\"\n");
-                                } else {
-                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                                }
+                    let outcome = apply_field_str_reverse_raw(raw, rev_field, |inner| {
+                        if !inner.contains(&b'\\') && inner.iter().all(|&b| b < 0x80) {
+                            compact_buf.push(b'"');
+                            for &b in inner.iter().rev() {
+                                compact_buf.push(b);
                             }
+                            compact_buf.extend_from_slice(b"\"\n");
+                            RawApplyOutcome::Emit
                         } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            let unescaped = json_unescape_bytes(inner);
+                            if let Ok(s) = std::str::from_utf8(&unescaped) {
+                                let reversed: String = s.chars().rev().collect();
+                                compact_buf.push(b'"');
+                                compact_buf.extend_from_slice(&json_escape_bytes(reversed.as_bytes()));
+                                compact_buf.extend_from_slice(b"\"\n");
+                                RawApplyOutcome::Emit
+                            } else {
+                                RawApplyOutcome::Bail
+                            }
                         }
-                    } else {
+                    });
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }

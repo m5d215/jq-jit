@@ -632,6 +632,44 @@ where
     }
 }
 
+/// Apply the `.field | split("") | reverse | join("")` raw-byte fast
+/// path (string reversal) on a single JSON record.
+///
+/// The bail discipline here is *structural-only*: the helper guarantees
+/// the input is an object whose `field` is a quoted string, and hands
+/// the caller the raw inner bytes (still possibly containing JSON
+/// escapes). The caller decides between two emit strategies and signals
+/// the verdict via the closure's return value:
+///
+/// 1. ASCII-only with no `\` escapes — emit reversed bytes directly
+///    (returns [`RawApplyOutcome::Emit`]).
+/// 2. Any other string — decode JSON escapes, reverse Unicode code
+///    points, re-encode (returns [`RawApplyOutcome::Emit`]) — or, if
+///    decode fails (e.g. invalid UTF-8 after escape unescape), return
+///    [`RawApplyOutcome::Bail`] so the generic path handles it.
+///
+/// Helper-side Bail: field absent, value isn't a quoted string, input
+/// isn't an object. (`null` input bails too — `null | split("")`
+/// raises in jq.)
+pub fn apply_field_str_reverse_raw<E>(
+    raw: &[u8],
+    field: &str,
+    on_string: E,
+) -> RawApplyOutcome
+where
+    E: FnOnce(&[u8]) -> RawApplyOutcome,
+{
+    let (vs, ve) = match json_object_get_field_raw(raw, 0, field) {
+        Some(r) => r,
+        None => return RawApplyOutcome::Bail,
+    };
+    let val = &raw[vs..ve];
+    if val.len() < 2 || val[0] != b'"' || val[val.len() - 1] != b'"' {
+        return RawApplyOutcome::Bail;
+    }
+    on_string(&val[1..val.len() - 1])
+}
+
 /// Apply the `.field // fallback` raw-byte fast path on a single JSON
 /// record.
 ///

@@ -3175,3 +3175,52 @@ null
 
 (.x + "_done")?
 [1,2,3]
+
+# #83 Phase B: .x | split("") | reverse | join("") apply-site uses
+# RawApplyOutcome::Bail.
+# ASCII no-escape: byte-reverse fast path.
+.x | split("") | reverse | join("")
+{"x":"hello"}
+"olleh"
+
+# Empty string round-trips cleanly.
+.x | split("") | reverse | join("")
+{"x":""}
+""
+
+# Non-ASCII string: decode + char-reverse + re-encode.
+.x | split("") | reverse | join("")
+{"x":"あいう"}
+"ういあ"
+
+# Escape-bearing string: decode + char-reverse path inside the closure.
+.x | split("") | reverse | join("")
+{"x":"a\nb"}
+"b\na"
+
+# Field absent under `?` bails to generic; jq's null|split raises; `?` swallows.
+(.x | split("") | reverse | join(""))?
+{"y":"hi"}
+
+# Non-string field under `?`
+(.x | split("") | reverse | join(""))?
+{"x":42}
+
+(.x | split("") | reverse | join(""))?
+{"x":null}
+
+(.x | split("") | reverse | join(""))?
+{"x":[1,2,3]}
+
+# Non-object input under `?`
+(.x | split("") | reverse | join(""))?
+42
+
+(.x | split("") | reverse | join(""))?
+"hi"
+
+(.x | split("") | reverse | join(""))?
+null
+
+(.x | split("") | reverse | join(""))?
+[1,2,3]
