@@ -3130,3 +3130,48 @@ null
 
 (.x | ltrimstr("p") | tonumber)?
 [1,2,3]
+
+# #83 Phase B: `.x + "literal"` apply-site uses RawApplyOutcome::Bail.
+# Happy path: present-and-valid string concatenated with literal suffix.
+.x + "_done"
+{"x":"task"}
+"task_done"
+
+# Suffix with characters needing JSON escape.
+.x + "\nB"
+{"x":"A"}
+"A\nB"
+
+# Field absent: jq's `null + "s" == "s"`, so the helper hands `None` to
+# the closure and the apply-site emits `"<suffix>"`.
+.x + "_done"
+{"y":"hi"}
+"_done"
+
+# Non-string field under `?`: closure not invoked; helper bails to generic
+# which raises (number + string), `?` swallows.
+(.x + "_done")?
+{"x":42}
+
+(.x + "_done")?
+{"x":[1,2,3]}
+
+# Escape-bearing string: bail to generic; concat decodes correctly.
+.x + "_done"
+{"x":"a\nb"}
+"a\nb_done"
+
+# null input: helper bails (non-object); generic produces `null + "s" == "s"`.
+.x + "_done"
+null
+"_done"
+
+# Non-object/non-null input: jq raises "Cannot index <type>"; `?` swallows.
+(.x + "_done")?
+42
+
+(.x + "_done")?
+"hi"
+
+(.x + "_done")?
+[1,2,3]
