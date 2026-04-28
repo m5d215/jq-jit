@@ -68,7 +68,7 @@ use crate::runtime::jq_mod_f64;
 use crate::value::{
     KeyStr, Value, ObjInner, json_object_assign_field_arith, json_object_assign_two_fields_arith,
     json_object_del_field, json_object_del_fields,
-    json_object_get_field_raw, json_object_get_fields_raw_buf,
+    json_object_get_field_raw, json_object_get_fields_raw_buf, json_object_merge_literal,
     json_object_get_nested_field_raw, json_object_get_num, json_object_get_two_nums,
     json_object_has_all_keys, json_object_has_any_key, json_object_has_key,
     json_object_update_field_case, json_object_update_field_gsub,
@@ -864,6 +864,100 @@ where
     };
     emit(result);
     RawApplyOutcome::Emit
+}
+
+/// Apply the `. + {key: <arith>}` raw-byte object-merge fast path on
+/// a single JSON record. Reads numeric fields, evaluates the
+/// `ArithExpr`, formats the result as JSON-number bytes, and merges
+/// `{key: <result>}` into the input object.
+///
+/// Caller provides:
+/// * `out_key` — the merge key.
+/// * `nfields` — fields referenced by the arith expression.
+/// * `arith` — the compiled numeric expression.
+/// * `vals_buf` — scratch sized to `nfields.len()`.
+/// * `merge_pair_buf` — single-element scratch (shape:
+///   `[(out_key.clone(), Vec::new())]`); element 0's value is
+///   overwritten each call with the JSON-number bytes.
+///
+/// Bail discipline:
+/// * Non-object input — Bail.
+/// * Any referenced field absent or non-numeric — Bail.
+/// * Non-finite result (div-by-zero / overflow / NaN) — Bail so
+///   `null` / saturating numbers don't leak into the merged object.
+/// * `merge_pair_buf` has wrong shape (defensive) — Bail.
+/// * Underlying `json_object_merge_literal` returning false — Bail.
+///
+/// Writes the merged-object bytes (without trailing `\n`) to `buf` on
+/// Emit.
+pub fn apply_obj_merge_computed_raw(
+    raw: &[u8],
+    nfields: &[&str],
+    arith: &ArithExpr,
+    vals_buf: &mut [f64],
+    merge_pair_buf: &mut [(String, Vec<u8>)],
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if raw.is_empty() || raw[0] != b'{' {
+        return RawApplyOutcome::Bail;
+    }
+    if merge_pair_buf.len() != 1 || vals_buf.len() < nfields.len() {
+        return RawApplyOutcome::Bail;
+    }
+    let nf = nfields.len();
+    let ok = if nf == 1 {
+        match json_object_get_num(raw, 0, nfields[0]) {
+            Some(v) => { vals_buf[0] = v; true }
+            None => false,
+        }
+    } else if nf == 2 {
+        match json_object_get_two_nums(raw, 0, nfields[0], nfields[1]) {
+            Some((a, b)) => { vals_buf[0] = a; vals_buf[1] = b; true }
+            None => false,
+        }
+    } else {
+        // 3+ fields not supported by the existing apply-site; the
+        // detector should never produce this shape, but Bail
+        // defensively rather than emit garbage.
+        false
+    };
+    if !ok {
+        return RawApplyOutcome::Bail;
+    }
+    let result = arith.eval(&vals_buf[..nf]);
+    if !result.is_finite() {
+        return RawApplyOutcome::Bail;
+    }
+    merge_pair_buf[0].1.clear();
+    push_jq_number_bytes(&mut merge_pair_buf[0].1, result);
+    if json_object_merge_literal(raw, 0, merge_pair_buf, buf) {
+        RawApplyOutcome::Emit
+    } else {
+        RawApplyOutcome::Bail
+    }
+}
+
+/// Apply the `. + {k1: v1, k2: v2, ...}` raw-byte object-merge fast
+/// path on a single JSON record. Each `(k, v)` is a literal key-name
+/// + JSON-encoded value-bytes pair (the parser pre-encodes each
+/// branch's JSON value).
+///
+/// Bail discipline: delegates to `json_object_merge_literal`, which
+/// returns `false` on non-object input. The wrapper documents the
+/// structural shape at the helper boundary.
+///
+/// Writes the merged-object bytes (without trailing `\n`) to `buf` on
+/// Emit. Caller appends the newline.
+pub fn apply_obj_merge_lit_raw(
+    raw: &[u8],
+    merge_pairs: &[(String, Vec<u8>)],
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if json_object_merge_literal(raw, 0, merge_pairs, buf) {
+        RawApplyOutcome::Emit
+    } else {
+        RawApplyOutcome::Bail
+    }
 }
 
 /// Apply the `.dest = (.src <op> N)` raw-byte object-assign fast path

@@ -4527,3 +4527,40 @@ length
 [ (.z = (.x / .y))? ]
 {"x":3,"y":0,"z":0}
 []
+
+# Issue #251: obj_merge_lit / obj_merge_computed apply-sites use RawApplyOutcome
+# (#83 Phase B). Helpers Bail on non-object/missing-or-non-numeric/non-finite.
+. + {y:42}
+{"x":1}
+{"x":1,"y":42}
+
+. + {x:99}
+{"x":1,"y":2}
+{"x":99,"y":2}
+
+. + {sum: (.x + .y)}
+{"x":3,"y":4}
+{"x":3,"y":4,"sum":7}
+
+. + {dbl: (.x * 2)}
+{"x":7}
+{"x":7,"dbl":14}
+
+# Missing field — helper Bails, generic resolves null+3=3.
+[ (. + {sum: (.x + .y)})? ]
+{"x":3}
+[{"x":3,"sum":3}]
+
+# Div-by-zero — helper Bails, generic raises.
+[ (. + {q: (.x / .y)})? ]
+{"x":1,"y":0}
+[]
+
+# Non-object input — helper Bails, generic raises.
+[ (. + {y:42})? ]
+"plain"
+[]
+
+[ (. + {sum: (.x + .y)})? ]
+"plain"
+[]
