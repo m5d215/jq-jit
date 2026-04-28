@@ -147,7 +147,7 @@ use jq_jit::fast_path::{
     apply_field_str_reverse_raw, apply_field_test_raw, apply_full_object_fields_raw,
     apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
     apply_nested_field_access_raw, apply_object_compute_raw, apply_select_cmp_raw,
-    RawApplyOutcome,
+    apply_select_field_null_raw, RawApplyOutcome,
 };
 
 fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -7485,23 +7485,16 @@ fn real_main() {
                     // `.field` surfaces (#199 sibling).
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if raw.is_empty() || raw[0] != b'{' {
+                        let outcome = apply_select_field_null_raw(raw, field, is_eq, |record| {
+                            emit_raw_ln!(&mut compact_buf, record);
+                        });
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            return Ok(());
                         }
-                        let is_null = if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
-                            &raw[vs..ve] == b"null"
-                        } else {
-                            true // missing field is null
-                        };
-                        let pass = if is_eq { is_null } else { !is_null };
-                        if pass {
-                            emit_raw_ln!(&mut compact_buf, raw);
-                            if compact_buf.len() >= 1 << 17 {
-                                let _ = out.write_all(&compact_buf);
-                                compact_buf.clear();
-                            }
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
                         }
                         Ok(())
                     })
@@ -15201,23 +15194,16 @@ fn real_main() {
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if raw.is_empty() || raw[0] != b'{' {
+                    let outcome = apply_select_field_null_raw(raw, field, is_eq, |record| {
+                        emit_raw_ln!(&mut compact_buf, record);
+                    });
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                        return Ok(());
                     }
-                    let is_null = if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
-                        &raw[vs..ve] == b"null"
-                    } else {
-                        true
-                    };
-                    let pass = if is_eq { is_null } else { !is_null };
-                    if pass {
-                        emit_raw_ln!(&mut compact_buf, raw);
-                        if compact_buf.len() >= 1 << 17 {
-                            let _ = out.write_all(&compact_buf);
-                            compact_buf.clear();
-                        }
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
                     }
                     Ok(())
                 })

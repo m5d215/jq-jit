@@ -3571,3 +3571,38 @@ select(.x > 3)
 [ (select(.x > 3))? ]
 [1,2,3]
 []
+
+# #83 Phase B: select(.field == null) / select(.field != null) apply-site
+# uses RawApplyOutcome::Bail. Missing field counts as null in the predicate.
+select(.x == null)
+{"x":null}
+{"x":null}
+
+select(.x == null)
+{"y":1}
+{"y":1}
+
+[ select(.x == null) ]
+{"x":1}
+[]
+
+select(.x != null)
+{"x":1}
+{"x":1}
+
+[ select(.x != null) ]
+{"x":null}
+[]
+
+# Non-object input under `?`: jq raises "Cannot index <type>".
+[ (select(.x == null))? ]
+42
+[]
+
+[ (select(.x != null))? ]
+"hi"
+[]
+
+[ (select(.x == null))? ]
+[1,2,3]
+[]

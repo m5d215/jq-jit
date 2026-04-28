@@ -904,6 +904,43 @@ where
     RawApplyOutcome::Emit
 }
 
+/// Apply the `select(.field == null)` / `select(.field != null)` raw-byte
+/// fast path on a single JSON record.
+///
+/// `is_eq = true` corresponds to `== null`; `is_eq = false` to `!= null`.
+/// A missing field counts as null (jq's `null | .x == null` is true).
+///
+/// Bail discipline:
+/// * Non-object input — [`RawApplyOutcome::Bail`] so jq's
+///   `Cannot index <type>` surfaces (#199 sibling).
+///
+/// On a passing type-guard the helper returns
+/// [`RawApplyOutcome::Emit`] regardless of whether the predicate
+/// fires; the closure is invoked only when it does.
+pub fn apply_select_field_null_raw<F>(
+    raw: &[u8],
+    field: &str,
+    is_eq: bool,
+    mut emit_match: F,
+) -> RawApplyOutcome
+where
+    F: FnMut(&[u8]),
+{
+    if raw.first() != Some(&b'{') {
+        return RawApplyOutcome::Bail;
+    }
+    let is_null = if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
+        &raw[vs..ve] == b"null"
+    } else {
+        true
+    };
+    let pass = if is_eq { is_null } else { !is_null };
+    if pass {
+        emit_match(raw);
+    }
+    RawApplyOutcome::Emit
+}
+
 /// Apply the `.field <arith_chain> <cmp> <threshold>` raw-byte fast path
 /// on a single JSON record — fold a `(BinOp, f64)` arithmetic chain over
 /// a numeric field, then compare the result against `threshold`.
