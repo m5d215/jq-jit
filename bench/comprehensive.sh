@@ -147,7 +147,7 @@ bench_ndjson "@tsv (array)"            "-c" '[.name, .x, .y] | @tsv' "$NDJSON_20
 bench_ndjson "gsub"                    "-c" '.name | gsub("_"; "-")' "$NDJSON_200K"
 bench_ndjson "case+gsub"               "-c" '.name | ascii_downcase | gsub("_"; " ")'
 bench_ndjson "case+test"               "-c" '.name | ascii_downcase | test("user")'
-bench_ndjson "ltrim+tonum+arith"       "-c" '.name | ltrimstr("user_") | tonumber | . * 2'
+bench_ndjson "ltrim+tonum+arith"       "-c" '.name | ltrimstr("item_") | tonumber | . * 2'
 
 echo ""
 echo "--- Numeric & math (2M objects) ---"
