@@ -62,7 +62,7 @@
 
 use anyhow::Result;
 
-use crate::value::{KeyStr, Value, ObjInner, json_object_get_field_raw};
+use crate::value::{KeyStr, Value, ObjInner, json_object_get_field_raw, json_object_get_nested_field_raw};
 
 /// A fast path whose type-dispatch obligations are encoded in its
 /// `run` signature. See the module docs for the contract.
@@ -180,6 +180,45 @@ where
         }
         // Non-object, non-null: jq raises a type error. Hand off to the
         // generic path; do NOT silently emit `null` (that's #50).
+        _ => RawApplyOutcome::Bail,
+    }
+}
+
+/// Apply the nested `.a.b.c` raw-byte fast path on a single JSON record.
+///
+/// * Object input, fully-resolvable nested path — invokes `emit` with the
+///   final value's raw bytes.
+/// * Object input, path doesn't resolve cleanly — returns
+///   [`RawApplyOutcome::Bail`]. The cause may be a missing key (jq says
+///   `null`) *or* a non-object intermediate (jq says
+///   `Cannot index <type> with "<field>"`); the raw scanner can't
+///   distinguish, so the caller hands off to the generic path which produces
+///   the correct verdict in either case.
+/// * `null` input — invokes `emit` with `b"null"` (jq semantics: any nested
+///   `.a.b…` on null is null).
+/// * Any other input — returns [`RawApplyOutcome::Bail`] for the same reason
+///   as [`apply_field_access_raw`]: the generic path raises the correct
+///   type-error.
+pub fn apply_nested_field_access_raw<E>(
+    raw: &[u8],
+    fields: &[&str],
+    mut emit: E,
+) -> RawApplyOutcome
+where
+    E: FnMut(&[u8]),
+{
+    match raw.first().copied() {
+        Some(b'{') => match json_object_get_nested_field_raw(raw, 0, fields) {
+            Some((vs, ve)) => {
+                emit(&raw[vs..ve]);
+                RawApplyOutcome::Emit
+            }
+            None => RawApplyOutcome::Bail,
+        },
+        Some(b'n') => {
+            emit(b"null");
+            RawApplyOutcome::Emit
+        }
         _ => RawApplyOutcome::Bail,
     }
 }

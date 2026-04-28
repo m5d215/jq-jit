@@ -8,7 +8,10 @@
 //! - `Filter::try_typed_fast_path` routes `.field` filters through the
 //!   pilot and returns `None` for filters that aren't yet migrated.
 
-use jq_jit::fast_path::{FastPath, FieldAccessPath, RawApplyOutcome, apply_field_access_raw};
+use jq_jit::fast_path::{
+    FastPath, FieldAccessPath, RawApplyOutcome, apply_field_access_raw,
+    apply_nested_field_access_raw,
+};
 use jq_jit::interpreter::Filter;
 use jq_jit::value::Value;
 
@@ -217,5 +220,81 @@ fn raw_field_access_non_object_non_null_bails() {
             emitted,
             std::str::from_utf8(raw).unwrap(),
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Nested field access (`.a.b.c`) — same Bail discipline as the single-field
+// pilot, with one extra wrinkle: when the path doesn't resolve, the helper
+// can't tell apart a missing key (jq → null) from a non-object intermediate
+// (jq → type error). Both cases bail to the generic path.
+
+#[test]
+fn raw_nested_field_full_path_emits_value_bytes() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_nested_field_access_raw(
+        b"{\"a\":{\"b\":42}}",
+        &["a", "b"],
+        |b| emitted.push(b.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![b"42".to_vec()]);
+}
+
+#[test]
+fn raw_nested_field_null_input_emits_null_literal() {
+    // jq: `.a.b` on null is null. Emit the literal directly.
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_nested_field_access_raw(b"null", &["a", "b"], |b| emitted.push(b.to_vec()));
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![b"null".to_vec()]);
+}
+
+#[test]
+fn raw_nested_field_missing_key_bails() {
+    // Top-level key missing — jq produces null, but the raw scanner can't
+    // distinguish this from "intermediate is non-object" (which jq errors on),
+    // so it bails and the generic path picks the right semantics.
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_nested_field_access_raw(b"{}", &["a", "b"], |bytes| {
+        emitted.push(bytes.to_vec())
+    });
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_nested_field_non_object_intermediate_bails() {
+    // `.a.b` on `{"a":"hello"}` — intermediate is string, jq raises a
+    // type error. The helper bails so the generic path raises it.
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_nested_field_access_raw(
+        b"{\"a\":\"hello\"}",
+        &["a", "b"],
+        |bytes| emitted.push(bytes.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_nested_field_non_object_non_null_input_bails() {
+    for raw in [
+        b"42".as_slice(),
+        b"\"hello\"".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut emitted: Vec<Vec<u8>> = Vec::new();
+        let outcome = apply_nested_field_access_raw(raw, &["a", "b"], |bytes| {
+            emitted.push(bytes.to_vec())
+        });
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
     }
 }
