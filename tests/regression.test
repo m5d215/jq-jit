@@ -4653,3 +4653,37 @@ first(.[] | select(type == "string"))
 [ (first(.[] | select(type == "string")))? ]
 "plain"
 []
+
+# Issue #251: select_regex_test apply-site uses RawApplyOutcome (#83 Phase B,
+# reuses apply_field_test_raw — same Bail discipline). Fixes pre-existing
+# divergences: silently emitted nothing on missing/non-string/non-object/
+# escape-bearing string instead of routing to generic for jq's correct
+# error/output.
+select(.x | test("^h"))
+{"x":"hello"}
+{"x":"hello"}
+
+select(.x | test("foo"))
+{"x":"barfoo"}
+{"x":"barfoo"}
+
+# `?`-wrapped: non-string field — generic raises type error, ? swallows.
+[ (select(.x | test("^h")))? ]
+{"x":42}
+[]
+
+# `?`-wrapped: missing field — generic null|test raises type error.
+[ (select(.x | test("^h")))? ]
+{"y":1}
+[]
+
+# `?`-wrapped: non-object input — generic raises indexing error.
+[ (select(.x | test("^h")))? ]
+"plain"
+[]
+
+# Escape-bearing string field: helper Bails, generic decodes the escape and
+# runs the regex against the decoded content.
+select(.x | test("^a"))
+{"x":"a\nb"}
+{"x":"a\nb"}
