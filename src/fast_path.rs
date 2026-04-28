@@ -1027,6 +1027,70 @@ where
     RawApplyOutcome::Emit
 }
 
+/// Apply the `select(.field | startswith/endswith/contains("arg"))`
+/// raw-byte fast path on a single JSON record.
+///
+/// All three jq builtins require string inputs; jq raises
+/// `<builtin>() requires string inputs` on a non-string. The helper
+/// therefore bails on every non-string-no-escape shape so the generic
+/// path can produce the real error.
+///
+/// Bail discipline:
+/// * Non-object input — [`RawApplyOutcome::Bail`].
+/// * Field absent, value isn't a quoted string, or contains any
+///   `\` escape — [`RawApplyOutcome::Bail`].
+/// * Unknown builtin name (defensive — only `startswith`, `endswith`,
+///   `contains` are handled) — [`RawApplyOutcome::Bail`].
+///
+/// On a passing predicate the helper invokes `emit_match(raw)` with
+/// the original record bytes.
+pub fn apply_select_str_test_raw<F>(
+    raw: &[u8],
+    field: &str,
+    builtin: &str,
+    arg: &str,
+    mut emit_match: F,
+) -> RawApplyOutcome
+where
+    F: FnMut(&[u8]),
+{
+    if raw.first() != Some(&b'{') {
+        return RawApplyOutcome::Bail;
+    }
+    let (vs, ve) = match json_object_get_field_raw(raw, 0, field) {
+        Some(r) => r,
+        None => return RawApplyOutcome::Bail,
+    };
+    let val = &raw[vs..ve];
+    if val.len() < 2 || val[0] != b'"' || val[val.len() - 1] != b'"'
+        || val[1..val.len() - 1].contains(&b'\\')
+    {
+        return RawApplyOutcome::Bail;
+    }
+    let inner = &val[1..val.len() - 1];
+    let arg_bytes = arg.as_bytes();
+    let pass = match builtin {
+        "startswith" => inner.starts_with(arg_bytes),
+        "endswith" => inner.ends_with(arg_bytes),
+        "contains" => {
+            if arg_bytes.is_empty() {
+                true
+            } else if arg_bytes.len() == 1 {
+                memchr::memchr(arg_bytes[0], inner).is_some()
+            } else {
+                inner
+                    .windows(arg_bytes.len())
+                    .any(|w| w == arg_bytes)
+            }
+        }
+        _ => return RawApplyOutcome::Bail,
+    };
+    if pass {
+        emit_match(raw);
+    }
+    RawApplyOutcome::Emit
+}
+
 /// Apply the `select(.field <arith_chain> <cmp> N)` raw-byte fast path
 /// on a single JSON record.
 ///

@@ -18,7 +18,7 @@ use jq_jit::fast_path::{
     apply_full_object_fields_raw, apply_has_field_raw, apply_has_multi_field_raw,
     apply_multi_field_access_raw, apply_nested_field_access_raw, apply_object_compute_raw,
     apply_select_arith_cmp_raw, apply_select_cmp_raw, apply_select_field_null_raw,
-    apply_select_str_raw,
+    apply_select_str_raw, apply_select_str_test_raw,
 };
 use jq_jit::interpreter::Filter;
 use jq_jit::ir::BinOp;
@@ -2799,4 +2799,144 @@ fn raw_select_str_non_cmp_op_bails() {
     );
     assert!(matches!(outcome, RawApplyOutcome::Bail));
     assert!(seen.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// `select(.field | startswith/endswith/contains("arg"))` — string-test
+// predicate fast path. jq raises `<builtin>() requires string inputs` on
+// non-string fields, so the helper bails on every non-string-no-escape shape
+// (fixing the silent-skip bug in the old apply-site).
+
+#[test]
+fn raw_select_str_test_startswith_emits_match() {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_str_test_raw(
+        b"{\"x\":\"foobar\"}",
+        "x",
+        "startswith",
+        "foo",
+        |r| seen.push(r.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(seen, vec![b"{\"x\":\"foobar\"}".to_vec()]);
+}
+
+#[test]
+fn raw_select_str_test_endswith_emits_match() {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_str_test_raw(
+        b"{\"x\":\"foobar\"}",
+        "x",
+        "endswith",
+        "bar",
+        |r| seen.push(r.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(seen, vec![b"{\"x\":\"foobar\"}".to_vec()]);
+}
+
+#[test]
+fn raw_select_str_test_contains_emits_match() {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_str_test_raw(
+        b"{\"x\":\"foobar\"}",
+        "x",
+        "contains",
+        "oba",
+        |r| seen.push(r.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(seen, vec![b"{\"x\":\"foobar\"}".to_vec()]);
+}
+
+#[test]
+fn raw_select_str_test_skips_when_predicate_fails() {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_str_test_raw(
+        b"{\"x\":\"foobar\"}",
+        "x",
+        "startswith",
+        "zzz",
+        |r| seen.push(r.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert!(seen.is_empty());
+}
+
+#[test]
+fn raw_select_str_test_unknown_builtin_bails() {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_str_test_raw(
+        b"{\"x\":\"foo\"}",
+        "x",
+        "test",
+        "foo",
+        |r| seen.push(r.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(seen.is_empty());
+}
+
+#[test]
+fn raw_select_str_test_field_missing_bails() {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_str_test_raw(
+        b"{\"y\":\"hi\"}",
+        "x",
+        "startswith",
+        "h",
+        |r| seen.push(r.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(seen.is_empty());
+}
+
+#[test]
+fn raw_select_str_test_non_string_field_bails() {
+    for inner in [&b"{\"x\":42}"[..], &b"{\"x\":null}"[..], &b"{\"x\":[1]}"[..]] {
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        let outcome = apply_select_str_test_raw(inner, "x", "startswith", "h", |r| {
+            seen.push(r.to_vec())
+        });
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for non-string field input {:?}, got {:?}",
+            std::str::from_utf8(inner).unwrap(),
+            outcome,
+        );
+        assert!(seen.is_empty());
+    }
+}
+
+#[test]
+fn raw_select_str_test_escape_bearing_field_bails() {
+    let raw: Vec<u8> = b"{\"x\":\"a\\nb\"}".to_vec();
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_str_test_raw(&raw, "x", "startswith", "a", |r| {
+        seen.push(r.to_vec())
+    });
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(seen.is_empty());
+}
+
+#[test]
+fn raw_select_str_test_non_object_input_bails() {
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        let outcome = apply_select_str_test_raw(raw, "x", "startswith", "h", |r| {
+            seen.push(r.to_vec())
+        });
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for select_str_test input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert!(seen.is_empty());
+    }
 }
