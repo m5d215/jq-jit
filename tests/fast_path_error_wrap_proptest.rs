@@ -111,21 +111,6 @@ fn render(expr: &FilterExpr) -> String {
     }
 }
 
-/// True when `expr` evaluates to a value that does not depend on its input,
-/// i.e. it is a literal or an array/object built entirely from such values.
-/// Used to gate `Pipe(_, b)` generation: when `b` is constant-like, jq-jit's
-/// compile-time fold collapses the pipe and the lhs's runtime error is lost.
-/// That is its own bug class, separate from the fast-path type-leak class
-/// this test exists to detect.
-fn is_const_like(expr: &FilterExpr) -> bool {
-    match expr {
-        FilterExpr::IntLiteral(_) => true,
-        FilterExpr::ArrayConstruct(items) => items.iter().all(is_const_like),
-        FilterExpr::ObjectConstruct(pairs) => pairs.iter().all(|(_, v)| is_const_like(v)),
-        _ => false,
-    }
-}
-
 fn ident_strategy() -> impl Strategy<Value = String> {
     prop::sample::select(IDENT_POOL).prop_map(|s| s.to_string())
 }
@@ -164,15 +149,6 @@ fn filter_strategy() -> impl Strategy<Value = FilterExpr> {
                     0..=3,
                 ).prop_map(FilterExpr::ObjectConstruct),
                 (inner.clone(), inner.clone())
-                    .prop_filter(
-                        "Pipe(_, all-constant-rhs) hits an unrelated \
-                         compile-time fold bug: the rhs is emitted without \
-                         honouring the lhs's runtime error. Exclude until the \
-                         fold learns to preserve errors; tracked separately \
-                         from the fast-path bug class this test exists to \
-                         detect.",
-                        |(_, b)| !is_const_like(b),
-                    )
                     .prop_map(|(a, b)| FilterExpr::Pipe(Box::new(a), Box::new(b))),
                 (inner.clone(), inner.clone(), inner.clone()).prop_map(|(a, b, c)| {
                     FilterExpr::If(Box::new(a), Box::new(b), Box::new(c))
@@ -248,7 +224,21 @@ fn json_strategy() -> impl Strategy<Value = JsonShape> {
     json_leaf().prop_recursive(3, 12, 3, |inner| {
         prop_oneof![
             prop::collection::vec(inner.clone(), 0..=3).prop_map(JsonShape::Arr),
-            prop::collection::vec((ident_strategy(), inner.clone()), 0..=3).prop_map(JsonShape::Obj),
+            // Drop duplicate keys before constructing the object. jq-jit's
+            // input parser keeps every (key, value) pair as written; jq
+            // collapses duplicates last-wins. That divergence is its own
+            // bug class (#233), separate from the fast-path leak this
+            // proptest is meant to detect, so we suppress it at generation
+            // time rather than rediscovering it on every run.
+            prop::collection::vec((ident_strategy(), inner.clone()), 0..=3)
+                .prop_map(|pairs| {
+                    let mut seen = std::collections::HashSet::new();
+                    let dedup = pairs
+                        .into_iter()
+                        .filter(|(k, _)| seen.insert(k.clone()))
+                        .collect();
+                    JsonShape::Obj(dedup)
+                }),
         ]
     })
 }
