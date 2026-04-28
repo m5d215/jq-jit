@@ -149,6 +149,8 @@ use jq_jit::fast_path::{
     apply_field_str_reverse_raw, apply_field_test_raw, apply_field_unary_arith_raw,
     apply_field_unary_num_raw, apply_full_object_fields_raw, apply_is_length_raw,
     apply_is_type_raw, apply_numeric_expr_raw, apply_obj_assign_field_arith_raw,
+    apply_collect_each_select_type_raw, apply_each_type_filter_raw,
+    apply_first_each_select_type_raw,
     apply_obj_assign_two_fields_arith_raw, apply_obj_merge_computed_raw,
     apply_obj_merge_lit_raw, apply_select_num_str_raw, apply_two_field_binop_const_raw,
     apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
@@ -11632,42 +11634,10 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some(ref sel_type) = collect_each_select_type {
-                    // [.[] | select(type == "T")] — collect values of specific type
-                    let type_byte = match sel_type.as_str() {
-                        "string" => Some(b'"'),
-                        "object" => Some(b'{'),
-                        "array" => Some(b'['),
-                        "null" => Some(b'n'),
-                        "boolean" => None, // t or f
-                        "number" => None, // digit, -, or .
-                        _ => None,
-                    };
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        let save_len = compact_buf.len();
-                        compact_buf.push(b'[');
-                        let mut first_elem = true;
-                        let ok = json_each_value_cb(raw, 0, |vs, ve| {
-                            let val = &raw[vs..ve];
-                            if val.is_empty() { return; }
-                            let matches = match sel_type.as_str() {
-                                "number" => val[0] == b'-' || (val[0] >= b'0' && val[0] <= b'9'),
-                                "boolean" => val[0] == b't' || val[0] == b'f',
-                                "null" => val[0] == b'n',
-                                _ => {
-                                    if let Some(tb) = type_byte { val[0] == tb } else { false }
-                                }
-                            };
-                            if matches {
-                                if !first_elem { compact_buf.push(b','); }
-                                first_elem = false;
-                                compact_buf.extend_from_slice(val);
-                            }
-                        });
-                        if ok {
-                            compact_buf.extend_from_slice(b"]\n");
-                        } else {
-                            compact_buf.truncate(save_len);
+                        let outcome = apply_collect_each_select_type_raw(raw, sel_type, &mut compact_buf);
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -11708,41 +11678,12 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some(ref first_type) = first_each_select_type {
-                    // first(.[] | select(type == "T")) — first value of given type
-                    let type_byte = match first_type.as_str() {
-                        "string" => Some(b'"'),
-                        "object" => Some(b'{'),
-                        "array" => Some(b'['),
-                        "null" => Some(b'n'),
-                        _ => None,
-                    };
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        let mut found = false;
-                        let ok = json_each_value_cb(raw, 0, |vs, ve| {
-                            if found { return; }
-                            let val = &raw[vs..ve];
-                            if val.is_empty() { return; }
-                            let matches = match first_type.as_str() {
-                                "number" => val[0] == b'-' || (val[0] >= b'0' && val[0] <= b'9'),
-                                "boolean" => val[0] == b't' || val[0] == b'f',
-                                "null" => val[0] == b'n',
-                                _ => {
-                                    if let Some(tb) = type_byte { val[0] == tb } else { false }
-                                }
-                            };
-                            if matches {
-                                compact_buf.extend_from_slice(val);
-                                compact_buf.push(b'\n');
-                                found = true;
-                            }
-                        });
-                        if !ok || !found {
-                            // If !ok, fallback. If !found, no match → no output (which is correct for first with empty)
-                            if !ok {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            }
+                        let outcome = apply_first_each_select_type_raw(raw, first_type, &mut compact_buf);
+                        if let RawApplyOutcome::Bail = outcome {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -11969,24 +11910,10 @@ fn real_main() {
                         })
                     }
                 } else if let Some(ref type_name) = each_type_filter {
-                    // .[] | strings/numbers/booleans/nulls/arrays/objects
-                    let type_check: Box<dyn Fn(u8) -> bool> = match type_name.as_str() {
-                        "string" => Box::new(|b: u8| b == b'"'),
-                        "number" => Box::new(|b: u8| b == b'-' || b.is_ascii_digit()),
-                        "boolean" => Box::new(|b: u8| b == b't' || b == b'f'),
-                        "null" => Box::new(|b: u8| b == b'n'),
-                        "object" => Box::new(|b: u8| b == b'{'),
-                        "array" => Box::new(|b: u8| b == b'['),
-                        _ => Box::new(|_: u8| false),
-                    };
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if !json_each_value_cb(raw, 0, |vs, ve| {
-                            let val = &raw[vs..ve];
-                            if !val.is_empty() && type_check(val[0]) {
-                                emit_raw_ln!(&mut compact_buf, val);
-                            }
-                        }) {
+                        let outcome = apply_each_type_filter_raw(raw, type_name, &mut compact_buf);
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -20610,41 +20537,11 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some(ref sel_type) = collect_each_select_type {
-                // [.[] | select(type == "T")] — collect values of specific type (stdin)
                 let content_bytes = content.as_bytes();
-                let type_byte = match sel_type.as_str() {
-                    "string" => Some(b'"'),
-                    "object" => Some(b'{'),
-                    "array" => Some(b'['),
-                    "null" => Some(b'n'),
-                    _ => None,
-                };
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    let save_len = compact_buf.len();
-                    compact_buf.push(b'[');
-                    let mut first_elem = true;
-                    let ok = json_each_value_cb(raw, 0, |vs, ve| {
-                        let val = &raw[vs..ve];
-                        if val.is_empty() { return; }
-                        let matches = match sel_type.as_str() {
-                            "number" => val[0] == b'-' || (val[0] >= b'0' && val[0] <= b'9'),
-                            "boolean" => val[0] == b't' || val[0] == b'f',
-                            "null" => val[0] == b'n',
-                            _ => {
-                                if let Some(tb) = type_byte { val[0] == tb } else { false }
-                            }
-                        };
-                        if matches {
-                            if !first_elem { compact_buf.push(b','); }
-                            first_elem = false;
-                            compact_buf.extend_from_slice(val);
-                        }
-                    });
-                    if ok {
-                        compact_buf.extend_from_slice(b"]\n");
-                    } else {
-                        compact_buf.truncate(save_len);
+                    let outcome = apply_collect_each_select_type_raw(raw, sel_type, &mut compact_buf);
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
@@ -20686,37 +20583,11 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some(ref first_type) = first_each_select_type {
-                // first(.[] | select(type == "T")) — first value of given type (stdin)
                 let content_bytes = content.as_bytes();
-                let type_byte = match first_type.as_str() {
-                    "string" => Some(b'"'),
-                    "object" => Some(b'{'),
-                    "array" => Some(b'['),
-                    "null" => Some(b'n'),
-                    _ => None,
-                };
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    let mut found = false;
-                    let ok = json_each_value_cb(raw, 0, |vs, ve| {
-                        if found { return; }
-                        let val = &raw[vs..ve];
-                        if val.is_empty() { return; }
-                        let matches = match first_type.as_str() {
-                            "number" => val[0] == b'-' || (val[0] >= b'0' && val[0] <= b'9'),
-                            "boolean" => val[0] == b't' || val[0] == b'f',
-                            "null" => val[0] == b'n',
-                            _ => {
-                                if let Some(tb) = type_byte { val[0] == tb } else { false }
-                            }
-                        };
-                        if matches {
-                            compact_buf.extend_from_slice(val);
-                            compact_buf.push(b'\n');
-                            found = true;
-                        }
-                    });
-                    if !ok {
+                    let outcome = apply_first_each_select_type_raw(raw, first_type, &mut compact_buf);
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
@@ -20932,25 +20803,11 @@ fn real_main() {
                     })
                 }
             } else if let Some(ref type_name) = each_type_filter {
-                // .[] | strings/numbers/... — file path
                 let content_bytes = content.as_bytes();
-                let type_check: Box<dyn Fn(u8) -> bool> = match type_name.as_str() {
-                    "string" => Box::new(|b: u8| b == b'"'),
-                    "number" => Box::new(|b: u8| b == b'-' || b.is_ascii_digit()),
-                    "boolean" => Box::new(|b: u8| b == b't' || b == b'f'),
-                    "null" => Box::new(|b: u8| b == b'n'),
-                    "object" => Box::new(|b: u8| b == b'{'),
-                    "array" => Box::new(|b: u8| b == b'['),
-                    _ => Box::new(|_: u8| false),
-                };
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if !json_each_value_cb(raw, 0, |vs, ve| {
-                        let val = &raw[vs..ve];
-                        if !val.is_empty() && type_check(val[0]) {
-                            emit_raw_ln!(&mut compact_buf, val);
-                        }
-                    }) {
+                    let outcome = apply_each_type_filter_raw(raw, type_name, &mut compact_buf);
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }

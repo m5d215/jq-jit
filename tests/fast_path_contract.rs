@@ -28,6 +28,8 @@ use jq_jit::fast_path::{
     apply_field_unary_arith_raw, apply_field_unary_num_raw,
     apply_field_update_trim_raw, apply_is_length_raw, apply_is_type_raw,
     apply_numeric_expr_raw, apply_obj_assign_field_arith_raw,
+    apply_collect_each_select_type_raw, apply_each_type_filter_raw,
+    apply_first_each_select_type_raw,
     apply_obj_assign_two_fields_arith_raw, apply_obj_merge_computed_raw,
     apply_obj_merge_lit_raw, apply_select_num_str_raw,
     apply_select_arith_cmp_raw, apply_select_cmp_raw,
@@ -2895,6 +2897,122 @@ fn raw_is_length_boolean_bails() {
         assert!(matches!(outcome, RawApplyOutcome::Bail), "raw={:?}", std::str::from_utf8(raw).unwrap());
         assert!(buf.is_empty());
     }
+}
+
+// ---------------------------------------------------------------------------
+// `.[] | <type>s` — each-element type filter. Bails on non-iterable input
+// or unrecognised type name.
+
+#[test]
+fn raw_each_type_filter_array_strings() {
+    let mut buf = Vec::new();
+    let outcome = apply_each_type_filter_raw(b"[1,\"a\",2,\"b\",null]", "string", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"\"a\"\n\"b\"\n");
+}
+
+#[test]
+fn raw_each_type_filter_object_numbers() {
+    let mut buf = Vec::new();
+    let outcome = apply_each_type_filter_raw(b"{\"a\":1,\"b\":\"hi\",\"c\":3}", "number", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"1\n3\n");
+}
+
+#[test]
+fn raw_each_type_filter_no_match_emits_nothing() {
+    let mut buf = Vec::new();
+    let outcome = apply_each_type_filter_raw(b"[1,2,3]", "string", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_each_type_filter_non_iterable_bails() {
+    for raw in [&b"42"[..], &b"\"hi\""[..], &b"null"[..], &b"true"[..]] {
+        let mut buf = Vec::new();
+        let outcome = apply_each_type_filter_raw(raw, "string", &mut buf);
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "raw={:?}", std::str::from_utf8(raw).unwrap(),
+        );
+    }
+}
+
+#[test]
+fn raw_each_type_filter_unknown_type_bails() {
+    let mut buf = Vec::new();
+    let outcome = apply_each_type_filter_raw(b"[1,2]", "unknown", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+}
+
+// ---------------------------------------------------------------------------
+// `[.[] | select(type == "T")]` — collect elements of given type into array.
+
+#[test]
+fn raw_collect_each_select_type_emits_array() {
+    let mut buf = Vec::new();
+    let outcome = apply_collect_each_select_type_raw(b"[1,\"a\",2,\"b\"]", "string", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"[\"a\",\"b\"]\n");
+}
+
+#[test]
+fn raw_collect_each_select_type_no_match_empty_array() {
+    let mut buf = Vec::new();
+    let outcome = apply_collect_each_select_type_raw(b"[1,2,3]", "string", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"[]\n");
+}
+
+#[test]
+fn raw_collect_each_select_type_truncates_buf_on_bail() {
+    // Caller's buffer should be restored to pre-call state on Bail.
+    let mut buf = Vec::from(&b"prefix"[..]);
+    let outcome = apply_collect_each_select_type_raw(b"42", "string", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert_eq!(buf, b"prefix");
+}
+
+#[test]
+fn raw_collect_each_select_type_unknown_type_bails() {
+    let mut buf = Vec::new();
+    let outcome = apply_collect_each_select_type_raw(b"[1,2]", "unknown", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+}
+
+// ---------------------------------------------------------------------------
+// `first(.[] | select(type == "T"))` — first element of given type.
+
+#[test]
+fn raw_first_each_select_type_emits_first_match() {
+    let mut buf = Vec::new();
+    let outcome = apply_first_each_select_type_raw(b"[1,\"a\",2,\"b\"]", "string", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"\"a\"\n");
+}
+
+#[test]
+fn raw_first_each_select_type_no_match_emits_nothing() {
+    // first(...) on empty stream: no output, no error.
+    let mut buf = Vec::new();
+    let outcome = apply_first_each_select_type_raw(b"[1,2,3]", "string", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_first_each_select_type_non_iterable_bails() {
+    let mut buf = Vec::new();
+    let outcome = apply_first_each_select_type_raw(b"42", "string", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+}
+
+#[test]
+fn raw_first_each_select_type_unknown_type_bails() {
+    let mut buf = Vec::new();
+    let outcome = apply_first_each_select_type_raw(b"[1,2]", "unknown", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
 }
 
 // ---------------------------------------------------------------------------
