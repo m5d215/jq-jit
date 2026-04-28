@@ -145,8 +145,8 @@ use jq_jit::fast_path::{
     apply_field_field_alternative_raw, apply_field_field_cmp_raw, apply_field_format_raw,
     apply_field_gsub_raw, apply_field_ltrimstr_tonumber_raw, apply_field_match_raw,
     apply_field_scan_raw, apply_field_str_builtin_raw, apply_field_str_concat_raw,
-    apply_field_str_reverse_raw, apply_field_test_raw, apply_full_object_fields_raw,
-    apply_two_field_binop_const_raw,
+    apply_field_binop_const_unary_raw, apply_field_str_reverse_raw, apply_field_test_raw,
+    apply_full_object_fields_raw, apply_two_field_binop_const_raw,
     apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
     apply_nested_field_access_raw, apply_object_compute_raw, apply_select_arith_cmp_raw,
     apply_select_cmp_raw, apply_select_field_null_raw, apply_select_str_raw,
@@ -6207,32 +6207,16 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref field, ref bop, cval, ref uop_opt, const_left)) = field_binop_const_unary {
-                    use jq_jit::ir::BinOp;
-                    use jq_jit::ir::UnaryOp;
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if let Some(n) = json_object_get_num(raw, 0, field) {
-                            let (a, b) = if const_left { (cval, n) } else { (n, cval) };
-                            let mid = match bop {
-                                BinOp::Add => a + b,
-                                BinOp::Sub => a - b,
-                                BinOp::Mul => a * b,
-                                BinOp::Div => a / b,
-                                BinOp::Mod => jq_jit::runtime::jq_mod_f64(a, b).unwrap_or(f64::NAN),
-                                _ => unreachable!(),
-                            };
-                            let result = if let Some(uop) = uop_opt {
-                                match uop {
-                                    UnaryOp::Floor => mid.floor(),
-                                    UnaryOp::Ceil => mid.ceil(),
-                                    UnaryOp::Sqrt => mid.sqrt(),
-                                    UnaryOp::Fabs | UnaryOp::Abs => mid.abs(),
-                                    _ => unreachable!(),
-                                }
-                            } else { mid };
-                            push_jq_number_bytes(&mut compact_buf, result);
-                            compact_buf.push(b'\n');
-                        } else {
+                        let outcome = apply_field_binop_const_unary_raw(
+                            raw, field, *bop, cval, *uop_opt, const_left,
+                            |result| {
+                                push_jq_number_bytes(&mut compact_buf, result);
+                                compact_buf.push(b'\n');
+                            },
+                        );
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -19327,33 +19311,17 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some((ref field, ref bop, cval, ref uop_opt, const_left)) = field_binop_const_unary {
-                use jq_jit::ir::BinOp;
-                use jq_jit::ir::UnaryOp;
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if let Some(n) = json_object_get_num(raw, 0, field) {
-                        let (a, b) = if const_left { (cval, n) } else { (n, cval) };
-                        let mid = match bop {
-                            BinOp::Add => a + b,
-                            BinOp::Sub => a - b,
-                            BinOp::Mul => a * b,
-                            BinOp::Div => a / b,
-                            BinOp::Mod => jq_jit::runtime::jq_mod_f64(a, b).unwrap_or(f64::NAN),
-                            _ => unreachable!(),
-                        };
-                        let result = if let Some(uop) = uop_opt {
-                            match uop {
-                                UnaryOp::Floor => mid.floor(),
-                                UnaryOp::Ceil => mid.ceil(),
-                                UnaryOp::Sqrt => mid.sqrt(),
-                                UnaryOp::Fabs | UnaryOp::Abs => mid.abs(),
-                                _ => unreachable!(),
-                            }
-                        } else { mid };
-                        push_jq_number_bytes(&mut compact_buf, result);
-                        compact_buf.push(b'\n');
-                    } else {
+                    let outcome = apply_field_binop_const_unary_raw(
+                        raw, field, *bop, cval, *uop_opt, const_left,
+                        |result| {
+                            push_jq_number_bytes(&mut compact_buf, result);
+                            compact_buf.push(b'\n');
+                        },
+                    );
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }

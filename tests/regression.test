@@ -4100,3 +4100,51 @@ null
 [ ((.x + .y) / 0)? ]
 {"x":3,"y":4}
 []
+
+# Issue #251: field_binop_const_unary apply-site uses RawApplyOutcome (#83
+# Phase B). Helper Bails on missing/non-numeric/non-arith/unsupported-unary/
+# non-finite/non-object. Also fixes a pre-existing #83-class bug where the
+# apply-site silently emitted `1.7976931348623157e+308` for non-finite results
+# (e.g. `.x / 0`) instead of jq's `/ by zero` error.
+(.x + 1) | floor
+{"x":3.7}
+4
+
+(2 - .x) | abs
+{"x":5}
+3
+
+(.x * 0.5) | ceil
+{"x":7}
+4
+
+(.x + 0) | sqrt
+{"x":4}
+2
+
+# `?`-wrapped: missing field — generic resolves missing as null, null + 1 = 1.
+[ ((.x + 1) | floor)? ]
+{"y":3}
+[1]
+
+# `?`-wrapped: non-numeric field — generic raises type error, ? swallows.
+[ ((.x + 1) | floor)? ]
+{"x":"hi"}
+[]
+
+# `?`-wrapped: non-object input — generic raises indexing error.
+[ ((.x + 1) | floor)? ]
+"plain"
+[]
+
+# `?`-wrapped: div-by-zero — helper Bails on non-finite, generic raises (was
+# emitting `1.7976931348623157e+308` pre-#83-Phase-B).
+[ (.x / 0)? ]
+{"x":4}
+[]
+
+# sqrt of negative produces NaN → helper Bails, generic produces null
+# (matching jq's behaviour for sqrt of negative).
+(.x + 0) | sqrt
+{"x":-1}
+null
