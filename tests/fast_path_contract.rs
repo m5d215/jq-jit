@@ -9,7 +9,7 @@
 //!   pilot and returns `None` for filters that aren't yet migrated.
 
 use jq_jit::fast_path::{
-    FastPath, FieldAccessPath, RawApplyOutcome, apply_array_field_access_raw,
+    FastPath, FieldAccessPath, RawApplyOutcome, apply_full_object_fields_raw,
     apply_field_access_raw, apply_has_field_raw, apply_has_multi_field_raw,
     apply_multi_field_access_raw, apply_nested_field_access_raw, apply_object_compute_raw,
 };
@@ -385,11 +385,11 @@ fn raw_multi_field_non_object_non_null_input_bails() {
 // the caller's closure so pretty / compact framing stays at the apply-site.
 
 #[test]
-fn raw_array_field_complete_object_invokes_emit_once() {
+fn raw_full_object_fields_complete_object_invokes_emit_once() {
     let mut ranges_buf = vec![(0usize, 0usize); 3];
     let mut calls = 0usize;
     let mut collected: Vec<Vec<u8>> = Vec::new();
-    let outcome = apply_array_field_access_raw(
+    let outcome = apply_full_object_fields_raw(
         b"{\"a\":1,\"b\":2,\"c\":3}",
         &["a", "b", "c"],
         &mut ranges_buf,
@@ -406,10 +406,10 @@ fn raw_array_field_complete_object_invokes_emit_once() {
 }
 
 #[test]
-fn raw_array_field_partial_object_bails_without_calling_emit() {
+fn raw_full_object_fields_partial_object_bails_without_calling_emit() {
     let mut ranges_buf = vec![(0usize, 0usize); 3];
     let mut calls = 0usize;
-    let outcome = apply_array_field_access_raw(
+    let outcome = apply_full_object_fields_raw(
         b"{\"a\":1,\"c\":3}",
         &["a", "b", "c"],
         &mut ranges_buf,
@@ -420,10 +420,10 @@ fn raw_array_field_partial_object_bails_without_calling_emit() {
 }
 
 #[test]
-fn raw_array_field_null_input_bails_without_calling_emit() {
+fn raw_full_object_fields_null_input_bails_without_calling_emit() {
     let mut ranges_buf = vec![(0usize, 0usize); 2];
     let mut calls = 0usize;
-    let outcome = apply_array_field_access_raw(
+    let outcome = apply_full_object_fields_raw(
         b"null",
         &["a", "b"],
         &mut ranges_buf,
@@ -434,7 +434,7 @@ fn raw_array_field_null_input_bails_without_calling_emit() {
 }
 
 #[test]
-fn raw_array_field_non_object_non_null_input_bails() {
+fn raw_full_object_fields_non_object_non_null_input_bails() {
     for raw in [
         b"42".as_slice(),
         b"\"hello\"".as_slice(),
@@ -443,7 +443,7 @@ fn raw_array_field_non_object_non_null_input_bails() {
     ] {
         let mut ranges_buf = vec![(0usize, 0usize); 2];
         let mut calls = 0usize;
-        let outcome = apply_array_field_access_raw(
+        let outcome = apply_full_object_fields_raw(
             raw,
             &["a", "b"],
             &mut ranges_buf,

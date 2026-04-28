@@ -2637,3 +2637,45 @@ false
 # standalone_array on str+num triggers inner bail; `?` swallows
 [.x + .y]?
 {"x":"a","y":1}
+
+# Issue #83 Phase B: raw field_remap apply-site (`{a: .x, b: .y}` — pure key
+# rename, no arithmetic) now goes through apply_full_object_fields_raw. The
+# bail discipline matches array_field: emit when the input is an object with
+# every required field, otherwise route to the generic path.
+
+# field_remap on a fully-populated object emits the renamed object
+{a: .x, b: .y}
+{"x":1,"y":2}
+{"a":1,"b":2}
+
+# field_remap on partial object: outer bail -> generic emits null for missing
+{a: .x, b: .y}
+{"x":1}
+{"a":1,"b":null}
+
+# field_remap on null: outer bail -> generic emits {a:null, b:null}
+{a: .x, b: .y}
+null
+{"a":null,"b":null}
+
+# field_remap under `?` on a number: outer bail, generic raises, `?` swallows
+({a: .x, b: .y})?
+42
+
+# field_remap under `?` on a string
+({a: .x, b: .y})?
+"hi"
+
+# field_remap under `?` on an array
+({a: .x, b: .y})?
+[1,2,3]
+
+# field_remap with nested object value emits the nested object correctly
+{a: .x}
+{"x":{"nested":1}}
+{"a":{"nested":1}}
+
+# field_remap with nested array value emits the nested array correctly
+{a: .x}
+{"x":[1,2,3]}
+{"a":[1,2,3]}
