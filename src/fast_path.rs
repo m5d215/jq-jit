@@ -1282,6 +1282,50 @@ where
     RawApplyOutcome::Emit
 }
 
+/// Apply the `{k1: .f1, k2: .f2, ...} | to_entries` raw-byte fast
+/// path on a single JSON record. Builds a JSON array of `{"key":
+/// k, "value": v}` entries from the named source fields. Missing
+/// source fields emit `"value": null` (matching jq's `to_entries`
+/// for `null` values).
+///
+/// Bail discipline:
+/// * Non-object input — Bail (jq raises `Cannot index <type> with
+///   "<field>"` for the underlying `.f1` access).
+///
+/// Writes the resulting JSON array bytes plus a trailing `\n` to
+/// `buf` on Emit.
+pub fn apply_remap_to_entries_raw(
+    raw: &[u8],
+    pairs: &[(String, String)],
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if raw.is_empty() || raw[0] != b'{' {
+        return RawApplyOutcome::Bail;
+    }
+    buf.push(b'[');
+    let mut first = true;
+    for (out_key, src) in pairs {
+        if !first { buf.push(b','); }
+        first = false;
+        buf.extend_from_slice(b"{\"key\":\"");
+        for &b in out_key.as_bytes() {
+            match b {
+                b'"' => buf.extend_from_slice(b"\\\""),
+                b'\\' => buf.extend_from_slice(b"\\\\"),
+                _ => buf.push(b),
+            }
+        }
+        buf.extend_from_slice(b"\",\"value\":");
+        match json_object_get_field_raw(raw, 0, src) {
+            Some((vs, ve)) => buf.extend_from_slice(&raw[vs..ve]),
+            None => buf.extend_from_slice(b"null"),
+        }
+        buf.push(b'}');
+    }
+    buf.extend_from_slice(b"]\n");
+    RawApplyOutcome::Emit
+}
+
 /// Apply the `with_entries(select(.value cmp N))` raw-byte fast
 /// path on a single JSON record. Filters object entries by value
 /// against a numeric threshold.

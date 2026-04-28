@@ -5073,3 +5073,20 @@ with_entries(.value |= tostring)
 [ (with_entries(.value |= tostring))? ]
 42
 []
+
+# Issue #251: remap_to_entries apply-site uses RawApplyOutcome (#83 Phase B).
+# Helper Bails on non-object input. Fixes pre-existing bug where non-object
+# silently emitted entries with `null` values instead of jq's indexing error.
+{a:.x, b:.y} | to_entries
+{"x":1,"y":2}
+[{"key":"a","value":1},{"key":"b","value":2}]
+
+# Missing field — null value (matching jq behavior).
+{a:.x, b:.y} | to_entries
+{"x":1}
+[{"key":"a","value":1},{"key":"b","value":null}]
+
+# Non-object input — generic raises indexing error, ? swallows.
+[ ({a:.x, b:.y} | to_entries)? ]
+"plain"
+[]
