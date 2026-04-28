@@ -140,9 +140,9 @@ use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json
 use jq_jit::interpreter::Filter;
 use jq_jit::fast_path::{
     apply_field_access_raw, apply_field_alternative_raw, apply_field_field_alternative_raw,
-    apply_full_object_fields_raw, apply_has_field_raw, apply_has_multi_field_raw,
-    apply_multi_field_access_raw, apply_nested_field_access_raw, apply_object_compute_raw,
-    RawApplyOutcome,
+    apply_field_test_raw, apply_full_object_fields_raw, apply_has_field_raw,
+    apply_has_multi_field_raw, apply_multi_field_access_raw, apply_nested_field_access_raw,
+    apply_object_compute_raw, RawApplyOutcome,
 };
 
 fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -6683,28 +6683,13 @@ fn real_main() {
                     } else {
                         ft_pattern.clone()
                     };
-                    let re = regex::Regex::new(&re_pattern);
-                    if let Ok(re) = re {
+                    if let Ok(re) = regex::Regex::new(&re_pattern) {
                         json_stream_raw(&input_str, |start, end| {
                             let raw = &input_bytes[start..end];
-                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, ft_field) {
-                                let val = &raw[vs..ve];
-                                if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                                    && !val[1..val.len()-1].contains(&b'\\')
-                                {
-                                    let content = &val[1..val.len()-1];
-                                    let content_str = unsafe { std::str::from_utf8_unchecked(content) };
-                                    if re.is_match(content_str) {
-                                        compact_buf.extend_from_slice(b"true\n");
-                                    } else {
-                                        compact_buf.extend_from_slice(b"false\n");
-                                    }
-                                } else {
-                                    // Has escape sequences — fallback
-                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                                }
-                            } else {
+                            let outcome = apply_field_test_raw(raw, ft_field, &re, |bytes| {
+                                emit_raw_ln!(&mut compact_buf, bytes);
+                            });
+                            if let RawApplyOutcome::Bail = outcome {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             }
@@ -20062,28 +20047,14 @@ fn real_main() {
                 } else {
                     ft_pattern.clone()
                 };
-                let re = regex::Regex::new(&re_pattern);
-                if let Ok(re) = re {
+                if let Ok(re) = regex::Regex::new(&re_pattern) {
                     let content_bytes = content.as_bytes();
                     json_stream_raw(content, |start, end| {
                         let raw = &content_bytes[start..end];
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, ft_field) {
-                            let val = &raw[vs..ve];
-                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                                && !val[1..val.len()-1].contains(&b'\\')
-                            {
-                                let content = &val[1..val.len()-1];
-                                let content_str = unsafe { std::str::from_utf8_unchecked(content) };
-                                if re.is_match(content_str) {
-                                    compact_buf.extend_from_slice(b"true\n");
-                                } else {
-                                    compact_buf.extend_from_slice(b"false\n");
-                                }
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            }
-                        } else {
+                        let outcome = apply_field_test_raw(raw, ft_field, &re, |bytes| {
+                            emit_raw_ln!(&mut compact_buf, bytes);
+                        });
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }

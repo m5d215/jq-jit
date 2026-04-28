@@ -2747,3 +2747,50 @@ null
 
 (.a // .b)?
 "hi"
+
+# Issue #83 Phase B: raw .field | test("p"; flags) apply-site now uses
+# RawApplyOutcome. Field absent / non-string field / escape-bearing string /
+# non-object input all bail to generic so jq's correct verdict surfaces.
+
+# Plain regex match emits true
+.x | test("foo")
+{"x":"foobar"}
+true
+
+# Plain regex no-match emits false
+.x | test("foo")
+{"x":"barbaz"}
+false
+
+# Case-insensitive flag
+.x | test("foo"; "i")
+{"x":"FOO"}
+true
+
+# Field absent: bail to generic, jq raises (test on null), `?` swallows
+(.x | test("foo"))?
+{"y":"foobar"}
+
+# Non-string field: bail to generic, jq raises type error; `?` swallows
+(.x | test("foo"))?
+{"x":42}
+
+# Escape-bearing string: bail to generic so escape gets decoded correctly
+.x | test("ab")
+{"x":"a\nb"}
+false
+
+# Escape-bearing string with newline-spanning regex: relies on decoded value
+.x | test("a.b"; "s")
+{"x":"a\nb"}
+true
+
+# Non-object input under `?` bails, jq raises, `?` swallows
+(.x | test("foo"))?
+42
+
+(.x | test("foo"))?
+"hello"
+
+(.x | test("foo"))?
+[1,2,3]
