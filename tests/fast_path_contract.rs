@@ -27,7 +27,8 @@ use jq_jit::fast_path::{
     apply_field_binop_const_unary_raw, apply_field_index_arith_raw,
     apply_field_unary_arith_raw, apply_field_unary_num_raw,
     apply_field_update_trim_raw, apply_is_length_raw, apply_is_type_raw,
-    apply_numeric_expr_raw,
+    apply_numeric_expr_raw, apply_obj_assign_field_arith_raw,
+    apply_obj_assign_two_fields_arith_raw,
     apply_select_arith_cmp_raw, apply_select_cmp_raw,
     apply_select_field_null_raw, apply_select_str_raw, apply_select_str_test_raw,
     apply_two_field_binop_const_raw,
@@ -2534,6 +2535,135 @@ fn raw_field_binop_const_unary_non_object_input_bails() {
             outcome,
         );
         assert!(emitted.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `.dest = (.src op N)` — object-assign single-field arithmetic. Thin
+// wrapper around `json_object_assign_field_arith`. Bails on missing/non-
+// numeric src, non-finite result, or non-arith op.
+
+#[test]
+fn raw_obj_assign_field_arith_emits_rewritten_object() {
+    // .y = (.x + 1) on {"x":3,"y":0} → {"x":3,"y":4}
+    let mut buf = Vec::new();
+    let outcome = apply_obj_assign_field_arith_raw(
+        b"{\"x\":3,\"y\":0}", "y", "x", BinOp::Add, 1.0, &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"{\"x\":3,\"y\":4}");
+}
+
+#[test]
+fn raw_obj_assign_field_arith_missing_src_bails() {
+    let mut buf = Vec::new();
+    let outcome = apply_obj_assign_field_arith_raw(
+        b"{\"y\":0}", "y", "x", BinOp::Add, 1.0, &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_obj_assign_field_arith_non_numeric_src_bails() {
+    let mut buf = Vec::new();
+    let outcome = apply_obj_assign_field_arith_raw(
+        b"{\"x\":\"hi\",\"y\":0}", "y", "x", BinOp::Add, 1.0, &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_obj_assign_field_arith_div_by_zero_bails() {
+    let mut buf = Vec::new();
+    let outcome = apply_obj_assign_field_arith_raw(
+        b"{\"x\":3,\"y\":0}", "y", "x", BinOp::Div, 0.0, &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_obj_assign_field_arith_non_arith_op_bails() {
+    for op in [BinOp::Eq, BinOp::Lt, BinOp::And] {
+        let mut buf = Vec::new();
+        let outcome = apply_obj_assign_field_arith_raw(
+            b"{\"x\":3,\"y\":0}", "y", "x", op, 1.0, &mut buf,
+        );
+        assert!(matches!(outcome, RawApplyOutcome::Bail), "op={:?}", op);
+    }
+}
+
+#[test]
+fn raw_obj_assign_field_arith_non_object_input_bails() {
+    for raw in [b"42".as_slice(), b"\"hi\"".as_slice(), b"null".as_slice(), b"[1,2]".as_slice()] {
+        let mut buf = Vec::new();
+        let outcome = apply_obj_assign_field_arith_raw(
+            raw, "y", "x", BinOp::Add, 1.0, &mut buf,
+        );
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "raw={:?}", std::str::from_utf8(raw).unwrap(),
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `.dest = (.src1 op .src2)` — object-assign two-field arithmetic.
+
+#[test]
+fn raw_obj_assign_two_fields_arith_emits_rewritten() {
+    // .z = (.x + .y) on {"x":3,"y":4,"z":0} → {"x":3,"y":4,"z":7}
+    let mut buf = Vec::new();
+    let outcome = apply_obj_assign_two_fields_arith_raw(
+        b"{\"x\":3,\"y\":4,\"z\":0}", "z", "x", "y", BinOp::Add, &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"{\"x\":3,\"y\":4,\"z\":7}");
+}
+
+#[test]
+fn raw_obj_assign_two_fields_arith_missing_field_bails() {
+    let mut buf = Vec::new();
+    let outcome = apply_obj_assign_two_fields_arith_raw(
+        b"{\"x\":3,\"z\":0}", "z", "x", "y", BinOp::Add, &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_obj_assign_two_fields_arith_div_by_zero_bails() {
+    let mut buf = Vec::new();
+    let outcome = apply_obj_assign_two_fields_arith_raw(
+        b"{\"x\":3,\"y\":0,\"z\":0}", "z", "x", "y", BinOp::Div, &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_obj_assign_two_fields_arith_non_arith_op_bails() {
+    let mut buf = Vec::new();
+    let outcome = apply_obj_assign_two_fields_arith_raw(
+        b"{\"x\":3,\"y\":4,\"z\":0}", "z", "x", "y", BinOp::Eq, &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_obj_assign_two_fields_arith_non_object_input_bails() {
+    for raw in [b"42".as_slice(), b"null".as_slice(), b"[1,2,3]".as_slice()] {
+        let mut buf = Vec::new();
+        let outcome = apply_obj_assign_two_fields_arith_raw(
+            raw, "z", "x", "y", BinOp::Add, &mut buf,
+        );
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "raw={:?}", std::str::from_utf8(raw).unwrap(),
+        );
     }
 }
 

@@ -66,7 +66,8 @@ use crate::interpreter::{ArithExpr, MathUnary};
 use crate::ir::{BinOp, UnaryOp};
 use crate::runtime::jq_mod_f64;
 use crate::value::{
-    KeyStr, Value, ObjInner, json_object_del_field, json_object_del_fields,
+    KeyStr, Value, ObjInner, json_object_assign_field_arith, json_object_assign_two_fields_arith,
+    json_object_del_field, json_object_del_fields,
     json_object_get_field_raw, json_object_get_fields_raw_buf,
     json_object_get_nested_field_raw, json_object_get_num, json_object_get_two_nums,
     json_object_has_all_keys, json_object_has_any_key, json_object_has_key,
@@ -863,6 +864,70 @@ where
     };
     emit(result);
     RawApplyOutcome::Emit
+}
+
+/// Apply the `.dest = (.src <op> N)` raw-byte object-assign fast path
+/// on a single JSON record. Reads `.src`'s numeric value, applies the
+/// arithmetic, and writes the result to `.dest` (creating the field
+/// if absent), preserving the rest of the object's structure.
+///
+/// Bail discipline (delegates to `json_object_assign_field_arith`):
+/// * Non-object input — Bail.
+/// * `.src` absent or non-numeric — Bail (jq raises type error).
+/// * `op` is `Mod` with divisor zero — Bail (jq raises).
+/// * Non-finite arithmetic result — Bail.
+/// * Non-arithmetic op (defensive) — Bail (the underlying call falls
+///   through to a no-op for non-arith ops, but the structural shape
+///   is documented).
+///
+/// Writes the rewritten object bytes (without trailing `\n`) to `buf`
+/// on Emit. Caller appends the newline.
+pub fn apply_obj_assign_field_arith_raw(
+    raw: &[u8],
+    dest_field: &str,
+    src_field: &str,
+    op: BinOp,
+    n: f64,
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+        return RawApplyOutcome::Bail;
+    }
+    if json_object_assign_field_arith(raw, 0, dest_field, src_field, op, n, buf) {
+        RawApplyOutcome::Emit
+    } else {
+        RawApplyOutcome::Bail
+    }
+}
+
+/// Apply the `.dest = (.src1 <op> .src2)` raw-byte object-assign fast
+/// path on a single JSON record. Reads two source fields' numeric
+/// values, applies the arithmetic, and writes the result to `.dest`.
+///
+/// Bail discipline (delegates to `json_object_assign_two_fields_arith`):
+/// * Non-object input — Bail.
+/// * Either source field absent or non-numeric — Bail.
+/// * Non-finite arithmetic result — Bail (div-by-zero etc.).
+/// * Non-arithmetic op — Bail (defensive).
+///
+/// Writes the rewritten object bytes (without trailing `\n`) to `buf`
+/// on Emit.
+pub fn apply_obj_assign_two_fields_arith_raw(
+    raw: &[u8],
+    dest_field: &str,
+    src1_field: &str,
+    src2_field: &str,
+    op: BinOp,
+    buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+        return RawApplyOutcome::Bail;
+    }
+    if json_object_assign_two_fields_arith(raw, 0, dest_field, src1_field, src2_field, op, buf) {
+        RawApplyOutcome::Emit
+    } else {
+        RawApplyOutcome::Bail
+    }
 }
 
 /// Apply the `type` raw-byte fast path on a single JSON record.
