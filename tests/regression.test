@@ -4818,3 +4818,32 @@ if (.x + 1) > 10 then "big" else "small" end
 [ (if (.x / 0) > 10 then "big" else "small" end)? ]
 {"x":4}
 []
+
+# Issue #251: field_unary_cmp_branch_lit apply-site uses RawApplyOutcome
+# (#83 Phase B, reuses apply_field_unary_arith_raw with empty arith chain).
+if (.x | length) > 3 then "long" else "short" end
+{"x":"abcde"}
+"long"
+
+if (.x | length) > 3 then "long" else "short" end
+{"x":"ab"}
+"short"
+
+if (.x | length) > 3 then "long" else "short" end
+{"x":[1,2,3,4,5]}
+"long"
+
+if (.x | floor) > 3 then "big" else "small" end
+{"x":3.7}
+"small"
+
+# Boolean field for length — helper Bails, generic raises
+# `boolean has no length`, ? swallows.
+[ (if (.x | length) > 3 then "long" else "short" end)? ]
+{"x":true}
+[]
+
+# Non-object input — helper Bails, generic raises indexing error.
+[ (if (.x | length) > 3 then "long" else "short" end)? ]
+"plain"
+[]

@@ -8193,95 +8193,26 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref field, ref unary_op, ref cmp_op, threshold, ref t_bytes, ref f_bytes)) = field_unary_cmp_branch_lit {
-                    use jq_jit::ir::{BinOp, UnaryOp};
+                    use jq_jit::ir::BinOp;
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        let bail_to_generic = |compact_buf: &mut Vec<u8>, out: &mut std::io::BufWriter<std::io::StdoutLock<'_>>, any_output_false: &mut bool, had_error: &mut bool| -> Result<(), anyhow::Error> {
+                        let outcome = apply_field_unary_arith_raw(
+                            raw, field, *unary_op, &[],
+                            |computed| {
+                                let pass = match cmp_op {
+                                    BinOp::Gt => computed > threshold, BinOp::Lt => computed < threshold,
+                                    BinOp::Ge => computed >= threshold, BinOp::Le => computed <= threshold,
+                                    BinOp::Eq => computed == threshold, BinOp::Ne => computed != threshold,
+                                    _ => false,
+                                };
+                                compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
+                                compact_buf.push(b'\n');
+                            },
+                        );
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, out, compact_buf, any_output_false, had_error);
-                            Ok(())
-                        };
-                        let computed: f64 = match unary_op {
-                            UnaryOp::Length => {
-                                if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
-                                    let val = &raw[vs..ve];
-                                    match val[0] {
-                                        b'"' => {
-                                            let inner = &val[1..ve-vs-1];
-                                            if !inner.contains(&b'\\') {
-                                                inner.iter().filter(|&&b| (b & 0xC0) != 0x80).count() as f64
-                                            } else {
-                                                match serde_json::from_slice::<String>(val) {
-                                                    Ok(s) => s.chars().count() as f64,
-                                                    Err(_) => return bail_to_generic(&mut compact_buf, &mut out, &mut any_output_false, &mut had_error),
-                                                }
-                                            }
-                                        }
-                                        b'[' => {
-                                            let mut count = 0usize;
-                                            let mut i = 1usize;
-                                            let vlen = ve - vs;
-                                            while i < vlen {
-                                                match val[i] {
-                                                    b' ' | b'\t' | b'\n' | b'\r' => { i += 1; }
-                                                    b']' => break,
-                                                    _ => {
-                                                        count += 1;
-                                                        i = skip_json_value(val, i)?;
-                                                        while i < vlen && (val[i] == b' ' || val[i] == b',' || val[i] == b'\t' || val[i] == b'\n' || val[i] == b'\r') { i += 1; }
-                                                    }
-                                                }
-                                            }
-                                            count as f64
-                                        }
-                                        b'{' => {
-                                            let mut count = 0usize;
-                                            let mut i = 1usize;
-                                            let vlen = ve - vs;
-                                            while i < vlen {
-                                                match val[i] {
-                                                    b' ' | b'\t' | b'\n' | b'\r' => { i += 1; }
-                                                    b'}' => break,
-                                                    b'"' => {
-                                                        count += 1;
-                                                        i = skip_json_value(val, i)?;
-                                                        while i < vlen && val[i] != b':' { i += 1; }
-                                                        i += 1;
-                                                        while i < vlen && (val[i] == b' ' || val[i] == b'\t' || val[i] == b'\n' || val[i] == b'\r') { i += 1; }
-                                                        i = skip_json_value(val, i)?;
-                                                        while i < vlen && (val[i] == b' ' || val[i] == b',' || val[i] == b'\t' || val[i] == b'\n' || val[i] == b'\r') { i += 1; }
-                                                    }
-                                                    _ => { i += 1; }
-                                                }
-                                            }
-                                            count as f64
-                                        }
-                                        b'n' => 0.0,
-                                        _ => return bail_to_generic(&mut compact_buf, &mut out, &mut any_output_false, &mut had_error),
-                                    }
-                                } else { return bail_to_generic(&mut compact_buf, &mut out, &mut any_output_false, &mut had_error); }
-                            }
-                            _ => {
-                                // Floor/Ceil/Round/Fabs/Abs — extract numeric value and apply
-                                if let Some(v) = json_object_get_num(raw, 0, field) {
-                                    match unary_op {
-                                        UnaryOp::Floor => v.floor(),
-                                        UnaryOp::Ceil => v.ceil(),
-                                        UnaryOp::Round => v.round(),
-                                        UnaryOp::Fabs | UnaryOp::Abs => v.abs(),
-                                        _ => v,
-                                    }
-                                } else { return bail_to_generic(&mut compact_buf, &mut out, &mut any_output_false, &mut had_error); }
-                            }
-                        };
-                        let pass = match cmp_op {
-                            BinOp::Gt => computed > threshold, BinOp::Lt => computed < threshold,
-                            BinOp::Ge => computed >= threshold, BinOp::Le => computed <= threshold,
-                            BinOp::Eq => computed == threshold, BinOp::Ne => computed != threshold,
-                            _ => false,
-                        };
-                        compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
-                        compact_buf.push(b'\n');
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
                             compact_buf.clear();
@@ -15715,95 +15646,27 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some((ref field, ref unary_op, ref cmp_op, threshold, ref t_bytes, ref f_bytes)) = field_unary_cmp_branch_lit {
-                use jq_jit::ir::{BinOp, UnaryOp};
+                use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    let bail_to_generic = |compact_buf: &mut Vec<u8>, out: &mut std::io::BufWriter<std::io::StdoutLock<'_>>, any_output_false: &mut bool, had_error: &mut bool| -> Result<(), anyhow::Error> {
+                    let outcome = apply_field_unary_arith_raw(
+                        raw, field, *unary_op, &[],
+                        |computed| {
+                            let pass = match cmp_op {
+                                BinOp::Gt => computed > threshold, BinOp::Lt => computed < threshold,
+                                BinOp::Ge => computed >= threshold, BinOp::Le => computed <= threshold,
+                                BinOp::Eq => computed == threshold, BinOp::Ne => computed != threshold,
+                                _ => false,
+                            };
+                            compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
+                            compact_buf.push(b'\n');
+                        },
+                    );
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                        process_input(&v, None, out, compact_buf, any_output_false, had_error);
-                        Ok(())
-                    };
-                    let computed: f64 = match unary_op {
-                        UnaryOp::Length => {
-                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
-                                let val = &raw[vs..ve];
-                                match val[0] {
-                                    b'"' => {
-                                        let inner = &val[1..ve-vs-1];
-                                        if !inner.contains(&b'\\') {
-                                            inner.iter().filter(|&&b| (b & 0xC0) != 0x80).count() as f64
-                                        } else {
-                                            match serde_json::from_slice::<String>(val) {
-                                                Ok(s) => s.chars().count() as f64,
-                                                Err(_) => return bail_to_generic(&mut compact_buf, &mut out, &mut any_output_false, &mut had_error),
-                                            }
-                                        }
-                                    }
-                                    b'[' => {
-                                        let mut count = 0usize;
-                                        let mut i = 1usize;
-                                        let vlen = ve - vs;
-                                        while i < vlen {
-                                            match val[i] {
-                                                b' ' | b'\t' | b'\n' | b'\r' => { i += 1; }
-                                                b']' => break,
-                                                _ => {
-                                                    count += 1;
-                                                    i = skip_json_value(val, i)?;
-                                                    while i < vlen && (val[i] == b' ' || val[i] == b',' || val[i] == b'\t' || val[i] == b'\n' || val[i] == b'\r') { i += 1; }
-                                                }
-                                            }
-                                        }
-                                        count as f64
-                                    }
-                                    b'{' => {
-                                        let mut count = 0usize;
-                                        let mut i = 1usize;
-                                        let vlen = ve - vs;
-                                        while i < vlen {
-                                            match val[i] {
-                                                b' ' | b'\t' | b'\n' | b'\r' => { i += 1; }
-                                                b'}' => break,
-                                                b'"' => {
-                                                    count += 1;
-                                                    i = skip_json_value(val, i)?;
-                                                    while i < vlen && val[i] != b':' { i += 1; }
-                                                    i += 1;
-                                                    while i < vlen && (val[i] == b' ' || val[i] == b'\t' || val[i] == b'\n' || val[i] == b'\r') { i += 1; }
-                                                    i = skip_json_value(val, i)?;
-                                                    while i < vlen && (val[i] == b' ' || val[i] == b',' || val[i] == b'\t' || val[i] == b'\n' || val[i] == b'\r') { i += 1; }
-                                                }
-                                                _ => { i += 1; }
-                                            }
-                                        }
-                                        count as f64
-                                    }
-                                    b'n' => 0.0,
-                                    _ => return bail_to_generic(&mut compact_buf, &mut out, &mut any_output_false, &mut had_error),
-                                }
-                            } else { return bail_to_generic(&mut compact_buf, &mut out, &mut any_output_false, &mut had_error); }
-                        }
-                        _ => {
-                            if let Some(v) = json_object_get_num(raw, 0, field) {
-                                match unary_op {
-                                    UnaryOp::Floor => v.floor(),
-                                    UnaryOp::Ceil => v.ceil(),
-                                    UnaryOp::Round => v.round(),
-                                    UnaryOp::Fabs | UnaryOp::Abs => v.abs(),
-                                    _ => v,
-                                }
-                            } else { return bail_to_generic(&mut compact_buf, &mut out, &mut any_output_false, &mut had_error); }
-                        }
-                    };
-                    let pass = match cmp_op {
-                        BinOp::Gt => computed > threshold, BinOp::Lt => computed < threshold,
-                        BinOp::Ge => computed >= threshold, BinOp::Le => computed <= threshold,
-                        BinOp::Eq => computed == threshold, BinOp::Ne => computed != threshold,
-                        _ => false,
-                    };
-                    compact_buf.extend_from_slice(if pass { t_bytes } else { f_bytes });
-                    compact_buf.push(b'\n');
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
                         compact_buf.clear();
