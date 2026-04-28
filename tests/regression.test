@@ -2794,3 +2794,50 @@ true
 
 (.x | test("foo"))?
 [1,2,3]
+
+# Issue #83 Phase B: raw .field | gsub/sub("p"; "r"; flags) apply-site uses
+# RawApplyOutcome. Same Bail discipline as field_test (only quoted strings
+# without backslash escapes).
+
+# gsub replaces all matches
+.x | gsub("a"; "X")
+{"x":"banana"}
+"bXnXnX"
+
+# sub replaces first match only
+.x | sub("a"; "X")
+{"x":"banana"}
+"bXnana"
+
+# No match emits unchanged
+.x | gsub("z"; "X")
+{"x":"banana"}
+"banana"
+
+# Case-insensitive flag (only the matched chars are replaced; original case kept elsewhere)
+.x | gsub("a"; "X"; "i")
+{"x":"BAnana"}
+"BXnXnX"
+
+# Field missing under `?` bails to generic, jq raises, `?` swallows
+(.x | gsub("a"; "X"))?
+{"y":"hi"}
+
+# Non-string field under `?`
+(.x | gsub("a"; "X"))?
+{"x":42}
+
+# Escape-bearing string: bail to generic (decodes correctly)
+.x | gsub("ab"; "X")
+{"x":"a\nb"}
+"a\nb"
+
+# Non-object input under `?`
+(.x | gsub("a"; "X"))?
+42
+
+(.x | gsub("a"; "X"))?
+"hi"
+
+(.x | gsub("a"; "X"))?
+[1,2,3]
