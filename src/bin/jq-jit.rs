@@ -153,8 +153,9 @@ use jq_jit::fast_path::{
     apply_first_each_select_type_raw,
     apply_field_cmp_val_raw, apply_null_branch_lit_raw,
     apply_obj_assign_two_fields_arith_raw, apply_obj_merge_computed_raw,
-    apply_obj_merge_lit_raw, apply_remap_to_entries_raw, apply_select_nested_cmp_raw,
-    apply_select_num_str_raw, apply_two_field_binop_const_raw, apply_with_entries_del_raw,
+    apply_obj_merge_lit_raw, apply_remap_to_entries_raw, apply_remap_tojson_raw,
+    apply_select_nested_cmp_raw, apply_select_num_str_raw, apply_two_field_binop_const_raw,
+    apply_with_entries_del_raw,
     apply_with_entries_key_str_raw, apply_with_entries_select_raw,
     apply_with_entries_tostring_raw, apply_with_entries_type_raw,
     apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
@@ -12002,10 +12003,7 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some(ref rt_pairs) = remap_tojson {
-                    // {a:.x,b:.y} | tojson — build inner object then tojson-escape
-                    let input_fields: Vec<&str> = rt_pairs.iter().map(|(_, f)| f.as_str()).collect();
-                    let mut ranges_buf = vec![(0usize, 0usize); input_fields.len()];
-                    // Pre-compute key prefixes for inner object: {"key1":val,"key2":val}
+                    let mut ranges_buf = vec![(0usize, 0usize); rt_pairs.len()];
                     let mut inner_key_prefixes: Vec<Vec<u8>> = Vec::with_capacity(rt_pairs.len());
                     for (i, (out_key, _)) in rt_pairs.iter().enumerate() {
                         let mut prefix = Vec::new();
@@ -12018,15 +12016,11 @@ fn real_main() {
                     let mut inner_buf: Vec<u8> = Vec::with_capacity(256);
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if json_object_get_fields_raw_buf(raw, 0, &input_fields, &mut ranges_buf) {
-                            inner_buf.clear();
-                            for (i, (vs, ve)) in ranges_buf.iter().enumerate() {
-                                inner_buf.extend_from_slice(&inner_key_prefixes[i]);
-                                inner_buf.extend_from_slice(&raw[*vs..*ve]);
-                            }
-                            inner_buf.push(b'}');
-                            push_tojson_raw(&mut compact_buf, &inner_buf);
-                        } else {
+                        let outcome = apply_remap_tojson_raw(
+                            raw, rt_pairs, &inner_key_prefixes, &mut inner_buf,
+                            &mut ranges_buf, &mut compact_buf,
+                        );
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -20663,8 +20657,7 @@ fn real_main() {
                 })
             } else if let Some(ref rt_pairs) = remap_tojson {
                 let content_bytes = content.as_bytes();
-                let input_fields: Vec<&str> = rt_pairs.iter().map(|(_, f)| f.as_str()).collect();
-                let mut ranges_buf = vec![(0usize, 0usize); input_fields.len()];
+                let mut ranges_buf = vec![(0usize, 0usize); rt_pairs.len()];
                 let mut inner_key_prefixes: Vec<Vec<u8>> = Vec::with_capacity(rt_pairs.len());
                 for (i, (out_key, _)) in rt_pairs.iter().enumerate() {
                     let mut prefix = Vec::new();
@@ -20677,15 +20670,11 @@ fn real_main() {
                 let mut inner_buf: Vec<u8> = Vec::with_capacity(256);
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if json_object_get_fields_raw_buf(raw, 0, &input_fields, &mut ranges_buf) {
-                        inner_buf.clear();
-                        for (i, (vs, ve)) in ranges_buf.iter().enumerate() {
-                            inner_buf.extend_from_slice(&inner_key_prefixes[i]);
-                            inner_buf.extend_from_slice(&raw[*vs..*ve]);
-                        }
-                        inner_buf.push(b'}');
-                        push_tojson_raw(&mut compact_buf, &inner_buf);
-                    } else {
+                    let outcome = apply_remap_tojson_raw(
+                        raw, rt_pairs, &inner_key_prefixes, &mut inner_buf,
+                        &mut ranges_buf, &mut compact_buf,
+                    );
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }

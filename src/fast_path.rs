@@ -70,7 +70,7 @@ use crate::value::{
     json_object_assign_two_fields_arith, json_object_del_field, json_object_del_fields,
     json_object_filter_by_key_str, json_object_filter_by_value_type,
     json_object_get_field_raw, json_object_get_fields_raw_buf, json_object_merge_literal,
-    json_object_values_tostring, json_with_entries_select_value_cmp,
+    json_object_values_tostring, json_with_entries_select_value_cmp, push_tojson_raw,
     json_object_get_nested_field_raw, json_object_get_num, json_object_get_two_nums,
     json_object_has_all_keys, json_object_has_any_key, json_object_has_key,
     json_object_update_field_case, json_object_update_field_gsub,
@@ -1279,6 +1279,52 @@ where
         }
     };
     emit(pass);
+    RawApplyOutcome::Emit
+}
+
+/// Apply the `{k1: .f1, k2: .f2, ...} | tojson` raw-byte fast path
+/// on a single JSON record. Builds the inner object from the named
+/// source fields, then emits the JSON-string-escaped representation.
+///
+/// Caller provides:
+/// * `pairs` — `(out_key, src_field)` mapping.
+/// * `inner_key_prefixes` — pre-encoded key prefixes for the inner
+///   object (e.g. `[b"{\"a\":", b",\"b\":"]`); passed in to avoid
+///   re-allocating per record.
+/// * `inner_buf` — scratch buffer for the inner object (cleared
+///   inside the helper).
+/// * `ranges_buf` — scratch sized to `pairs.len()` for the field
+///   range fetch.
+/// * `out_buf` — output buffer for the tojson result (no trailing
+///   `\n`; caller appends).
+///
+/// Bail discipline:
+/// * Non-object input — Bail (jq's `Cannot index <type>` for the
+///   underlying `.f1` access surfaces via the generic path).
+/// * Buffer length mismatch (defensive) — Bail.
+pub fn apply_remap_tojson_raw(
+    raw: &[u8],
+    pairs: &[(String, String)],
+    inner_key_prefixes: &[Vec<u8>],
+    inner_buf: &mut Vec<u8>,
+    ranges_buf: &mut [(usize, usize)],
+    out_buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    let n = pairs.len();
+    if ranges_buf.len() < n || inner_key_prefixes.len() < n {
+        return RawApplyOutcome::Bail;
+    }
+    let input_fields: Vec<&str> = pairs.iter().map(|(_, f)| f.as_str()).collect();
+    if !json_object_get_fields_raw_buf(raw, 0, &input_fields, ranges_buf) {
+        return RawApplyOutcome::Bail;
+    }
+    inner_buf.clear();
+    for (i, (vs, ve)) in ranges_buf[..n].iter().enumerate() {
+        inner_buf.extend_from_slice(&inner_key_prefixes[i]);
+        inner_buf.extend_from_slice(&raw[*vs..*ve]);
+    }
+    inner_buf.push(b'}');
+    push_tojson_raw(out_buf, inner_buf);
     RawApplyOutcome::Emit
 }
 
