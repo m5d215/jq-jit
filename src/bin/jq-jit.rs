@@ -7490,7 +7490,7 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref rt_field, ref rt_pattern, ref rt_flags)) = select_regex_test {
-                    // select(.field | test("regex")) — raw byte regex test, pass through matching lines
+                    // select(.field | test("regex")) — reuses apply_field_test_raw
                     let re_pattern = if let Some(flags) = rt_flags {
                         let mut prefix = String::from("(?");
                         for c in flags.chars() {
@@ -7505,16 +7505,14 @@ fn real_main() {
                     if let Ok(re) = regex::Regex::new(&re_pattern) {
                         json_stream_raw(&input_str, |start, end| {
                             let raw = &input_bytes[start..end];
-                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, rt_field) {
-                                let val = &raw[vs..ve];
-                                if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                                    && !val[1..val.len()-1].contains(&b'\\')
-                                {
-                                    let content = unsafe { std::str::from_utf8_unchecked(&val[1..val.len()-1]) };
-                                    if re.is_match(content) {
-                                        emit_raw_ln!(&mut compact_buf, raw);
-                                    }
+                            let outcome = apply_field_test_raw(raw, rt_field, &re, |verdict| {
+                                if verdict == b"true" {
+                                    emit_raw_ln!(&mut compact_buf, raw);
                                 }
+                            });
+                            if let RawApplyOutcome::Bail = outcome {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             }
                             if compact_buf.len() >= 1 << 17 {
                                 let _ = out.write_all(&compact_buf);
@@ -15096,16 +15094,14 @@ fn real_main() {
                     let content_bytes = content.as_bytes();
                     json_stream_raw(content, |start, end| {
                         let raw = &content_bytes[start..end];
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, rt_field) {
-                            let val = &raw[vs..ve];
-                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                                && !val[1..val.len()-1].contains(&b'\\')
-                            {
-                                let content_str = unsafe { std::str::from_utf8_unchecked(&val[1..val.len()-1]) };
-                                if re.is_match(content_str) {
-                                    emit_raw_ln!(&mut compact_buf, raw);
-                                }
+                        let outcome = apply_field_test_raw(raw, rt_field, &re, |verdict| {
+                            if verdict == b"true" {
+                                emit_raw_ln!(&mut compact_buf, raw);
                             }
+                        });
+                        if let RawApplyOutcome::Bail = outcome {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
