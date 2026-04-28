@@ -11,12 +11,13 @@
 use jq_jit::fast_path::{
     FastPath, FieldAccessPath, RawApplyOutcome, apply_field_access_raw,
     apply_field_alternative_raw, apply_field_field_alternative_raw, apply_field_format_raw,
-    apply_field_gsub_raw, apply_field_match_raw, apply_field_scan_raw, apply_field_test_raw,
-    apply_full_object_fields_raw, apply_has_field_raw,
+    apply_field_gsub_raw, apply_field_ltrimstr_tonumber_raw, apply_field_match_raw,
+    apply_field_scan_raw, apply_field_test_raw, apply_full_object_fields_raw, apply_has_field_raw,
     apply_has_multi_field_raw, apply_multi_field_access_raw, apply_nested_field_access_raw,
     apply_object_compute_raw,
 };
 use jq_jit::interpreter::Filter;
+use jq_jit::ir::BinOp;
 use jq_jit::value::Value;
 
 #[test]
@@ -1382,5 +1383,131 @@ fn raw_field_format_non_object_input_bails_without_invoking_closure() {
             outcome,
         );
         assert_eq!(called, 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `.field | ltrimstr("p") | tonumber [ | <arith> ]*` — same Bail discipline
+// as the regex helpers (object input + quoted-string field with no escapes),
+// plus a numeric-parse Bail (#160) so the generic path produces jq's
+// "Invalid numeric literal" error on non-numeric strings.
+
+#[test]
+fn raw_field_ltrimstr_tonumber_strips_prefix_and_parses() {
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_ltrimstr_tonumber_raw(
+        b"{\"x\":\"id-42\"}",
+        "x",
+        b"id-",
+        &[],
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![42.0]);
+}
+
+#[test]
+fn raw_field_ltrimstr_tonumber_no_prefix_match_keeps_content() {
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_ltrimstr_tonumber_raw(
+        b"{\"x\":\"42\"}",
+        "x",
+        b"id-",
+        &[],
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![42.0]);
+}
+
+#[test]
+fn raw_field_ltrimstr_tonumber_applies_arith_chain() {
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_ltrimstr_tonumber_raw(
+        b"{\"x\":\"10\"}",
+        "x",
+        b"",
+        &[(BinOp::Add, 5.0), (BinOp::Mul, 2.0)],
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![30.0]);
+}
+
+#[test]
+fn raw_field_ltrimstr_tonumber_non_numeric_bails() {
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_ltrimstr_tonumber_raw(
+        b"{\"x\":\"abc\"}",
+        "x",
+        b"",
+        &[],
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_field_ltrimstr_tonumber_field_missing_bails() {
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_ltrimstr_tonumber_raw(
+        b"{\"y\":\"42\"}",
+        "x",
+        b"",
+        &[],
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_field_ltrimstr_tonumber_non_string_field_bails() {
+    for inner in [&b"{\"x\":42}"[..], &b"{\"x\":null}"[..], &b"{\"x\":[1,2]}"[..]] {
+        let mut emitted: Vec<f64> = Vec::new();
+        let outcome = apply_field_ltrimstr_tonumber_raw(inner, "x", b"", &[], |n| emitted.push(n));
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for non-string field input {:?}, got {:?}",
+            std::str::from_utf8(inner).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
+    }
+}
+
+#[test]
+fn raw_field_ltrimstr_tonumber_escaped_string_bails() {
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_ltrimstr_tonumber_raw(
+        br#"{"x":"4\n2"}"#,
+        "x",
+        b"",
+        &[],
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_field_ltrimstr_tonumber_non_object_input_bails() {
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut emitted: Vec<f64> = Vec::new();
+        let outcome = apply_field_ltrimstr_tonumber_raw(raw, "x", b"", &[], |n| emitted.push(n));
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for ltrimstr_tonumber input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
     }
 }

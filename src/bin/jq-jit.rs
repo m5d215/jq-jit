@@ -140,10 +140,11 @@ use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json
 use jq_jit::interpreter::Filter;
 use jq_jit::fast_path::{
     apply_field_access_raw, apply_field_alternative_raw, apply_field_field_alternative_raw,
-    apply_field_format_raw, apply_field_gsub_raw, apply_field_match_raw, apply_field_scan_raw,
-    apply_field_test_raw, apply_full_object_fields_raw, apply_has_field_raw,
-    apply_has_multi_field_raw, apply_multi_field_access_raw, apply_nested_field_access_raw,
-    apply_object_compute_raw, RawApplyOutcome,
+    apply_field_format_raw, apply_field_gsub_raw, apply_field_ltrimstr_tonumber_raw,
+    apply_field_match_raw, apply_field_scan_raw, apply_field_test_raw,
+    apply_full_object_fields_raw, apply_has_field_raw, apply_has_multi_field_raw,
+    apply_multi_field_access_raw, apply_nested_field_access_raw, apply_object_compute_raw,
+    RawApplyOutcome,
 };
 
 fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -7159,43 +7160,14 @@ fn real_main() {
                     let prefix_bytes = lt_prefix.as_bytes();
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, lt_field) {
-                            let val = &raw[vs..ve];
-                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                                && !val[1..val.len()-1].contains(&b'\\')
-                            {
-                                let content = &val[1..val.len()-1];
-                                let num_str = if content.len() >= prefix_bytes.len() && &content[..prefix_bytes.len()] == prefix_bytes {
-                                    &content[prefix_bytes.len()..]
-                                } else {
-                                    content
-                                };
-                                // Parse the remaining string as a number
-                                if let Ok(mut n) = fast_float::parse::<f64, _>(num_str) {
-                                    for (op, c) in lt_arith_ops {
-                                        n = match op {
-                                            jq_jit::ir::BinOp::Add => n + c,
-                                            jq_jit::ir::BinOp::Sub => n - c,
-                                            jq_jit::ir::BinOp::Mul => n * c,
-                                            jq_jit::ir::BinOp::Div => n / c,
-                                            jq_jit::ir::BinOp::Mod => jq_jit::runtime::jq_mod_f64(n, *c).unwrap_or(f64::NAN),
-                                            _ => n,
-                                        };
-                                    }
-                                    push_jq_number_bytes(&mut compact_buf, n);
-                                    compact_buf.push(b'\n');
-                                } else {
-                                    // tonumber on a non-numeric string → jq raises
-                                    // `cannot be parsed as a number`. Defer to
-                                    // generic eval so the error fires (#160).
-                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                                }
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            }
-                        } else {
+                        let outcome = apply_field_ltrimstr_tonumber_raw(
+                            raw, lt_field, prefix_bytes, lt_arith_ops,
+                            |n| {
+                                push_jq_number_bytes(&mut compact_buf, n);
+                                compact_buf.push(b'\n');
+                            },
+                        );
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -20482,38 +20454,14 @@ fn real_main() {
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, lt_field) {
-                        let val = &raw[vs..ve];
-                        if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                            && !val[1..val.len()-1].contains(&b'\\')
-                        {
-                            let content = &val[1..val.len()-1];
-                            let num_str = if content.len() >= prefix_bytes.len() && &content[..prefix_bytes.len()] == prefix_bytes {
-                                &content[prefix_bytes.len()..]
-                            } else {
-                                content
-                            };
-                            if let Ok(mut n) = fast_float::parse::<f64, _>(num_str) {
-                                for (op, c) in lt_arith_ops {
-                                    n = match op {
-                                        jq_jit::ir::BinOp::Add => n + c,
-                                        jq_jit::ir::BinOp::Sub => n - c,
-                                        jq_jit::ir::BinOp::Mul => n * c,
-                                        jq_jit::ir::BinOp::Div => n / c,
-                                        jq_jit::ir::BinOp::Mod => jq_jit::runtime::jq_mod_f64(n, *c).unwrap_or(f64::NAN),
-                                        _ => n,
-                                    };
-                                }
-                                push_jq_number_bytes(&mut compact_buf, n);
-                                compact_buf.push(b'\n');
-                            } else {
-                                compact_buf.extend_from_slice(b"null\n");
-                            }
-                        } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                        }
-                    } else {
+                    let outcome = apply_field_ltrimstr_tonumber_raw(
+                        raw, lt_field, prefix_bytes, lt_arith_ops,
+                        |n| {
+                            push_jq_number_bytes(&mut compact_buf, n);
+                            compact_buf.push(b'\n');
+                        },
+                    );
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }

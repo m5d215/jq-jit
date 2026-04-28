@@ -3080,3 +3080,53 @@ null
 (.x | @base64)?
 null
 "bnVsbA=="
+
+# #83 Phase B: .x | ltrimstr("p") | tonumber [ | <arith> ]* apply-site
+# uses RawApplyOutcome::Bail.
+# Happy path: prefix strip + tonumber + arithmetic chain.
+.x | ltrimstr("id-") | tonumber + 5
+{"x":"id-37"}
+42
+
+# Prefix not present: keep content, parse as number.
+.x | ltrimstr("id-") | tonumber
+{"x":"100"}
+100
+
+# Bare ltrimstr | tonumber (empty arith chain).
+.x | ltrimstr("v") | tonumber
+{"x":"v3.14"}
+3.14
+
+# Non-numeric remainder: bail to generic; jq raises; `?` swallows.
+(.x | ltrimstr("p") | tonumber)?
+{"x":"pabc"}
+
+# Field missing under `?`: bail to generic; jq raises null|tonumber; `?` swallows.
+(.x | ltrimstr("p") | tonumber)?
+{"y":"42"}
+
+# Non-string field under `?`
+(.x | ltrimstr("p") | tonumber)?
+{"x":42}
+
+(.x | ltrimstr("p") | tonumber)?
+{"x":null}
+
+(.x | ltrimstr("p") | tonumber)?
+{"x":[1,2,3]}
+
+# Escape-bearing string: bail to generic, which decodes the escape.
+# After decoding, the content is non-numeric, so jq raises; `?` swallows.
+(.x | ltrimstr("p") | tonumber)?
+{"x":"p4\n2"}
+
+# Non-object input under `?`
+(.x | ltrimstr("p") | tonumber)?
+42
+
+(.x | ltrimstr("p") | tonumber)?
+"hi"
+
+(.x | ltrimstr("p") | tonumber)?
+[1,2,3]
