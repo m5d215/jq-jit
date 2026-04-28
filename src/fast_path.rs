@@ -78,8 +78,9 @@ use crate::value::{
     json_object_update_field_split_first, json_object_update_field_split_last,
     json_object_update_field_str_concat, json_object_update_field_str_map,
     json_object_update_field_test, json_object_update_field_tostring,
-    json_object_update_field_trim, json_type_byte, json_value_length, parse_json_num,
-    push_jq_number_bytes, skip_json_value,
+    json_object_update_field_trim, json_type_byte, json_value_length,
+    json_object_extract_keys_only, json_object_keys_to_buf_reuse, parse_json_num,
+    push_jq_number_bytes, push_json_pretty_raw, skip_json_value,
 };
 
 /// A fast path whose type-dispatch obligations are encoded in its
@@ -1862,6 +1863,103 @@ where
     }
     if result {
         emit_pass(raw);
+    }
+    RawApplyOutcome::Emit
+}
+
+/// Apply the `keys` raw-byte fast path on a single JSON record. Emits
+/// a sorted JSON array literal of the input object's top-level keys.
+///
+/// The helper layers a per-stream key-set cache around the extraction:
+/// when consecutive records share the same (unsorted) key set, the
+/// cached sorted-output bytes are reused without re-sorting. The
+/// caller owns the cache state (`cached_output`, `cached_keys`,
+/// `keys_buf`) plus a scratch `tmp` buffer for pretty-printing.
+///
+/// `use_pretty` selects the formatting branch: when `true` the output
+/// is collected in `tmp` then re-emitted into `out_buf` via
+/// `push_json_pretty_raw` (with a trailing `\n`); when `false` the
+/// raw compact bytes are written directly to `out_buf` and the cache
+/// is captured from the same range. Both branches end with a single
+/// `\n` appended to `out_buf`.
+///
+/// Bail discipline (delegates to `json_object_keys_to_buf_reuse`):
+/// - Non-object input → Bail. jq's `keys` works on arrays too
+///   (returns indices), strings/numbers raise — the generic path
+///   handles both correctly.
+/// - Malformed input (escaped key boundary, unmatched braces, etc.)
+///   → Bail.
+pub fn apply_is_keys_raw(
+    raw: &[u8],
+    cached_output: &mut Vec<u8>,
+    cached_keys: &mut Vec<Vec<u8>>,
+    keys_buf: &mut Vec<(usize, usize)>,
+    tmp: &mut Vec<u8>,
+    use_pretty: bool,
+    out_buf: &mut Vec<u8>,
+) -> RawApplyOutcome {
+    // Try cached permutation: if the unsorted key set matches the cache,
+    // reuse the previously-sorted output bytes without re-sorting.
+    if !cached_keys.is_empty() {
+        if let Some(extracted) = json_object_extract_keys_only(raw, 0, keys_buf) {
+            if extracted == cached_keys.len() {
+                let mut same = true;
+                for (i, (ks, ke)) in keys_buf.iter().enumerate() {
+                    if &raw[*ks..*ke] != cached_keys[i].as_slice() {
+                        same = false;
+                        break;
+                    }
+                }
+                if same {
+                    if use_pretty {
+                        push_json_pretty_raw(out_buf, cached_output, 2, false);
+                    } else {
+                        out_buf.extend_from_slice(cached_output);
+                    }
+                    out_buf.push(b'\n');
+                    return RawApplyOutcome::Emit;
+                }
+            }
+        }
+    }
+    // Full path: extract + sort + emit. On non-object / malformed input,
+    // `json_object_keys_to_buf_reuse` returns false → Bail.
+    if use_pretty {
+        tmp.clear();
+        if !json_object_keys_to_buf_reuse(raw, 0, tmp, keys_buf) {
+            return RawApplyOutcome::Bail;
+        }
+        let len = tmp.len();
+        if len > 0 && tmp[len - 1] == b'\n' {
+            tmp.truncate(len - 1);
+        }
+        if cached_keys.is_empty() {
+            *cached_output = tmp.clone();
+            let mut unsorted: Vec<(usize, usize)> = Vec::new();
+            if json_object_extract_keys_only(raw, 0, &mut unsorted).is_some() {
+                *cached_keys = unsorted.iter().map(|(s, e)| raw[*s..*e].to_vec()).collect();
+            }
+        }
+        push_json_pretty_raw(out_buf, tmp, 2, false);
+        out_buf.push(b'\n');
+    } else {
+        let before = out_buf.len();
+        if !json_object_keys_to_buf_reuse(raw, 0, out_buf, keys_buf) {
+            // The helper truncates internal state on early failure, but
+            // it may have appended partial bytes before discovering a
+            // malformed structure — restore caller state.
+            out_buf.truncate(before);
+            return RawApplyOutcome::Bail;
+        }
+        if cached_keys.is_empty() {
+            let end_pos = out_buf.len();
+            // Output is "[...]\n"; cache the "[...]" portion (strip \n).
+            *cached_output = out_buf[before..end_pos - 1].to_vec();
+            let mut unsorted: Vec<(usize, usize)> = Vec::new();
+            if json_object_extract_keys_only(raw, 0, &mut unsorted).is_some() {
+                *cached_keys = unsorted.iter().map(|(s, e)| raw[*s..*e].to_vec()).collect();
+            }
+        }
     }
     RawApplyOutcome::Emit
 }

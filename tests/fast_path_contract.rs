@@ -33,7 +33,7 @@ use jq_jit::fast_path::{
     apply_field_cmp_val_raw, apply_null_branch_lit_raw,
     apply_obj_assign_two_fields_arith_raw, apply_obj_merge_computed_raw,
     apply_obj_merge_lit_raw, apply_select_nested_cmp_raw, apply_select_num_str_raw,
-    apply_select_arith_cmp_raw, apply_select_cmp_raw,
+    apply_is_keys_raw, apply_select_arith_cmp_raw, apply_select_cmp_raw,
     apply_select_compound_str_test_raw, apply_select_field_null_raw,
     apply_select_mixed_compound_raw, apply_select_str_raw,
     apply_select_str_test_raw, apply_select_string_chain_raw,
@@ -6157,4 +6157,100 @@ fn raw_select_mixed_compound_test_without_regex_bails() {
     );
     assert!(matches!(outcome, RawApplyOutcome::Bail));
     assert!(emitted.is_empty());
+}
+
+fn fresh_keys_state() -> (Vec<u8>, Vec<Vec<u8>>, Vec<(usize, usize)>, Vec<u8>) {
+    (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+}
+
+#[test]
+fn raw_is_keys_object_emits_sorted_compact() {
+    let (mut co, mut ck, mut kb, mut tmp) = fresh_keys_state();
+    let mut buf = Vec::new();
+    let outcome = apply_is_keys_raw(
+        b"{\"b\":1,\"a\":2,\"c\":3}", &mut co, &mut ck, &mut kb, &mut tmp, false, &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"[\"a\",\"b\",\"c\"]\n");
+}
+
+#[test]
+fn raw_is_keys_empty_object_emits_empty_array() {
+    let (mut co, mut ck, mut kb, mut tmp) = fresh_keys_state();
+    let mut buf = Vec::new();
+    let outcome = apply_is_keys_raw(
+        b"{}", &mut co, &mut ck, &mut kb, &mut tmp, false, &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"[]\n");
+}
+
+#[test]
+fn raw_is_keys_non_object_bails() {
+    let (mut co, mut ck, mut kb, mut tmp) = fresh_keys_state();
+    let mut buf = Vec::new();
+    for raw in [b"42".as_slice(), b"\"s\"".as_slice(), b"null".as_slice(), b"[1,2]".as_slice()] {
+        let outcome = apply_is_keys_raw(
+            raw, &mut co, &mut ck, &mut kb, &mut tmp, false, &mut buf,
+        );
+        assert!(matches!(outcome, RawApplyOutcome::Bail));
+    }
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_is_keys_cache_hit_for_same_shape() {
+    let (mut co, mut ck, mut kb, mut tmp) = fresh_keys_state();
+    let mut buf = Vec::new();
+    // First record populates the cache.
+    let o1 = apply_is_keys_raw(
+        b"{\"a\":1,\"b\":2}", &mut co, &mut ck, &mut kb, &mut tmp, false, &mut buf,
+    );
+    assert!(matches!(o1, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"[\"a\",\"b\"]\n");
+    assert!(!ck.is_empty(), "cache should be populated after first record");
+    // Second record with same shape — cache hit, no re-sort.
+    buf.clear();
+    let o2 = apply_is_keys_raw(
+        b"{\"a\":3,\"b\":4}", &mut co, &mut ck, &mut kb, &mut tmp, false, &mut buf,
+    );
+    assert!(matches!(o2, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"[\"a\",\"b\"]\n");
+}
+
+#[test]
+fn raw_is_keys_cache_miss_on_different_shape() {
+    let (mut co, mut ck, mut kb, mut tmp) = fresh_keys_state();
+    let mut buf = Vec::new();
+    let _ = apply_is_keys_raw(
+        b"{\"a\":1,\"b\":2}", &mut co, &mut ck, &mut kb, &mut tmp, false, &mut buf,
+    );
+    buf.clear();
+    let outcome = apply_is_keys_raw(
+        b"{\"x\":1,\"y\":2}", &mut co, &mut ck, &mut kb, &mut tmp, false, &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"[\"x\",\"y\"]\n");
+}
+
+#[test]
+fn raw_is_keys_pretty_branch_emits_indented() {
+    let (mut co, mut ck, mut kb, mut tmp) = fresh_keys_state();
+    let mut buf = Vec::new();
+    let outcome = apply_is_keys_raw(
+        b"{\"a\":1,\"b\":2}", &mut co, &mut ck, &mut kb, &mut tmp, true, &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"[\n  \"a\",\n  \"b\"\n]\n");
+}
+
+#[test]
+fn raw_is_keys_bail_does_not_pollute_buffer() {
+    let (mut co, mut ck, mut kb, mut tmp) = fresh_keys_state();
+    let mut buf = b"prefix-".to_vec();
+    let outcome = apply_is_keys_raw(
+        b"42", &mut co, &mut ck, &mut kb, &mut tmp, false, &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert_eq!(buf.as_slice(), b"prefix-");
 }

@@ -136,7 +136,7 @@ fn print_jq_error(msg: &str) {
     }
 }
 
-use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_value_has_duplicate_keys, json_stream_has_duplicate_keys, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, parse_json_num, json_value_length, json_object_keys_to_buf_reuse, json_object_extract_keys_only, json_object_keys_unsorted_to_buf, json_object_keys_join_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_object_del_field, json_object_del_fields, json_object_merge_literal, json_object_sort_keys, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_object_set_field_raw, json_object_update_field_num, json_object_update_field_num_chain,json_object_select_then_update_num, json_object_select_then_update_str_concat, json_object_select_compound_then_update_num, json_object_select_str_then_update_num, is_json_compact, push_json_compact_raw, push_tojson_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_compact_line_color, push_pretty_line, push_pretty_line_color, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line_color, value_to_json_pretty_color, walk_json_transform_nums, pool_value, skip_json_value};
+use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_value_has_duplicate_keys, json_stream_has_duplicate_keys, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, parse_json_num, json_value_length, json_object_keys_unsorted_to_buf,json_object_keys_join_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_object_del_field, json_object_del_fields, json_object_merge_literal, json_object_sort_keys, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_object_set_field_raw, json_object_update_field_num, json_object_update_field_num_chain,json_object_select_then_update_num, json_object_select_then_update_str_concat, json_object_select_compound_then_update_num, json_object_select_str_then_update_num, is_json_compact, push_json_compact_raw, push_tojson_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_compact_line_color, push_pretty_line, push_pretty_line_color, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line_color, value_to_json_pretty_color, walk_json_transform_nums, pool_value, skip_json_value};
 use jq_jit::interpreter::Filter;
 use jq_jit::fast_path::{
     apply_arith_chain_cmp_raw, apply_field_access_raw, apply_field_alternative_raw,
@@ -153,9 +153,10 @@ use jq_jit::fast_path::{
     apply_first_each_select_type_raw,
     apply_field_cmp_val_raw, apply_null_branch_lit_raw,
     apply_obj_assign_two_fields_arith_raw, apply_obj_merge_computed_raw,
-    apply_obj_merge_lit_raw, apply_remap_to_entries_raw, apply_remap_tojson_raw,
-    apply_select_compound_str_test_raw, apply_select_mixed_compound_raw,
-    apply_select_string_chain_raw, apply_to_entries_each_interp_raw,
+    apply_is_keys_raw, apply_obj_merge_lit_raw, apply_remap_to_entries_raw,
+    apply_remap_tojson_raw, apply_select_compound_str_test_raw,
+    apply_select_mixed_compound_raw, apply_select_string_chain_raw,
+    apply_to_entries_each_interp_raw,
     apply_select_nested_cmp_raw, apply_select_num_str_raw, apply_two_field_binop_const_raw,
     apply_with_entries_del_raw,
     apply_with_entries_key_str_raw, apply_with_entries_select_raw,
@@ -10667,80 +10668,17 @@ fn real_main() {
                 } else if is_keys {
                     let mut tmp = Vec::new();
                     let mut keys_buf: Vec<(usize, usize)> = Vec::new();
-                    // Cache sorted output for identical key sets
                     let mut cached_output: Vec<u8> = Vec::new();
-                    let mut cached_keys: Vec<Vec<u8>> = Vec::new(); // unsorted key bytes
+                    let mut cached_keys: Vec<Vec<u8>> = Vec::new();
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        // Try cached permutation: extract unsorted keys, check if same set
-                        if !cached_keys.is_empty() {
-                            if let Some(extracted) = json_object_extract_keys_only(raw, 0, &mut keys_buf) {
-                                if extracted == cached_keys.len() {
-                                    // Check if all keys match
-                                    let mut same = true;
-                                    for (i, (ks, ke)) in keys_buf.iter().enumerate() {
-                                        if &raw[*ks..*ke] != cached_keys[i].as_slice() {
-                                            same = false;
-                                            break;
-                                        }
-                                    }
-                                    if same {
-                                        if use_pretty_buf {
-                                            // cached_output has no trailing \n
-                                            push_json_pretty_raw(&mut compact_buf, &cached_output, 2, false);
-                                            compact_buf.push(b'\n');
-                                        } else {
-                                            compact_buf.extend_from_slice(&cached_output);
-                                            compact_buf.push(b'\n');
-                                        }
-                                        if compact_buf.len() >= 1 << 17 {
-                                            let _ = out.write_all(&compact_buf);
-                                            compact_buf.clear();
-                                        }
-                                        return Ok(());
-                                    }
-                                }
-                            }
-                        }
-                        // Full path: extract, sort, output
-                        if use_pretty_buf {
-                            tmp.clear();
-                            if json_object_keys_to_buf_reuse(raw, 0, &mut tmp, &mut keys_buf) {
-                                let len = tmp.len();
-                                if len > 0 && tmp[len-1] == b'\n' { tmp.truncate(len-1); }
-                                // Cache for future objects
-                                if cached_keys.is_empty() {
-                                    cached_output = tmp.clone();
-                                    // We need to re-extract unsorted keys for caching
-                                    // keys_buf was sorted in-place, so re-extract
-                                    let mut unsorted: Vec<(usize, usize)> = Vec::new();
-                                    if let Some(_) = json_object_extract_keys_only(raw, 0, &mut unsorted) {
-                                        cached_keys = unsorted.iter().map(|(s, e)| raw[*s..*e].to_vec()).collect();
-                                    }
-                                }
-                                push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
-                                compact_buf.push(b'\n');
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            }
-                        } else {
-                            let before = compact_buf.len();
-                            if json_object_keys_to_buf_reuse(raw, 0, &mut compact_buf, &mut keys_buf) {
-                                // Cache the output (without trailing \n)
-                                if cached_keys.is_empty() {
-                                    let end_pos = compact_buf.len();
-                                    // Output is [...]\n, cache [...] (without \n)
-                                    cached_output = compact_buf[before..end_pos-1].to_vec();
-                                    let mut unsorted: Vec<(usize, usize)> = Vec::new();
-                                    if let Some(_) = json_object_extract_keys_only(raw, 0, &mut unsorted) {
-                                        cached_keys = unsorted.iter().map(|(s, e)| raw[*s..*e].to_vec()).collect();
-                                    }
-                                }
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            }
+                        let outcome = apply_is_keys_raw(
+                            raw, &mut cached_output, &mut cached_keys,
+                            &mut keys_buf, &mut tmp, use_pretty_buf, &mut compact_buf,
+                        );
+                        if let RawApplyOutcome::Bail = outcome {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -19192,66 +19130,13 @@ fn real_main() {
                 let mut cached_keys: Vec<Vec<u8>> = Vec::new();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if !cached_keys.is_empty() {
-                        if let Some(extracted) = json_object_extract_keys_only(raw, 0, &mut keys_buf) {
-                            if extracted == cached_keys.len() {
-                                let mut same = true;
-                                for (i, (ks, ke)) in keys_buf.iter().enumerate() {
-                                    if &raw[*ks..*ke] != cached_keys[i].as_slice() {
-                                        same = false;
-                                        break;
-                                    }
-                                }
-                                if same {
-                                    if use_pretty_buf {
-                                        push_json_pretty_raw(&mut compact_buf, &cached_output, 2, false);
-                                        compact_buf.push(b'\n');
-                                    } else {
-                                        compact_buf.extend_from_slice(&cached_output);
-                                        compact_buf.push(b'\n');
-                                    }
-                                    if compact_buf.len() >= 1 << 17 {
-                                        let _ = out.write_all(&compact_buf);
-                                        compact_buf.clear();
-                                    }
-                                    return Ok(());
-                                }
-                            }
-                        }
-                    }
-                    if use_pretty_buf {
-                        tmp.clear();
-                        if json_object_keys_to_buf_reuse(raw, 0, &mut tmp, &mut keys_buf) {
-                            let len = tmp.len();
-                            if len > 0 && tmp[len-1] == b'\n' { tmp.truncate(len-1); }
-                            if cached_keys.is_empty() {
-                                cached_output = tmp.clone();
-                                let mut unsorted: Vec<(usize, usize)> = Vec::new();
-                                if let Some(_) = json_object_extract_keys_only(raw, 0, &mut unsorted) {
-                                    cached_keys = unsorted.iter().map(|(s, e)| raw[*s..*e].to_vec()).collect();
-                                }
-                            }
-                            push_json_pretty_raw(&mut compact_buf, &tmp, 2, false);
-                            compact_buf.push(b'\n');
-                        } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                        }
-                    } else {
-                        let before = compact_buf.len();
-                        if json_object_keys_to_buf_reuse(raw, 0, &mut compact_buf, &mut keys_buf) {
-                            if cached_keys.is_empty() {
-                                let end_pos = compact_buf.len();
-                                cached_output = compact_buf[before..end_pos-1].to_vec();
-                                let mut unsorted: Vec<(usize, usize)> = Vec::new();
-                                if let Some(_) = json_object_extract_keys_only(raw, 0, &mut unsorted) {
-                                    cached_keys = unsorted.iter().map(|(s, e)| raw[*s..*e].to_vec()).collect();
-                                }
-                            }
-                        } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                        }
+                    let outcome = apply_is_keys_raw(
+                        raw, &mut cached_output, &mut cached_keys,
+                        &mut keys_buf, &mut tmp, use_pretty_buf, &mut compact_buf,
+                    );
+                    if let RawApplyOutcome::Bail = outcome {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
