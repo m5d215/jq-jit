@@ -62,7 +62,7 @@
 
 use anyhow::Result;
 
-use crate::interpreter::{ArithExpr, CmpVal, MathUnary};
+use crate::interpreter::{ArithExpr, CmpVal, MathUnary, StringChainOp, StringChainTerminal};
 use crate::ir::{BinOp, UnaryOp};
 use crate::runtime::jq_mod_f64;
 use crate::value::{
@@ -1540,6 +1540,156 @@ pub fn apply_to_entries_each_interp_raw(
         }
         i += 1;
         while i < raw.len() && matches!(raw[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
+    RawApplyOutcome::Emit
+}
+
+/// Apply the `select(.field | <string-chain> | <terminal>)` raw-byte
+/// fast path. Reads the field, runs an in-place ASCII byte-level
+/// transformation chain (lowercase/uppercase/ltrimstr/rtrimstr/
+/// split-join/split-reverse-join), then evaluates a boolean terminal
+/// (`startswith`/`endswith`/`contains`). On a true verdict invokes
+/// `emit_pass()` with the input record's raw bytes (select passes the
+/// input through unchanged); on a false verdict returns `Emit`
+/// silently with no buffer write (matching `select`'s empty-on-false
+/// semantics).
+///
+/// `tmp_str` is a caller-owned scratch buffer (cleared on entry).
+///
+/// Bail discipline:
+/// - Non-object input → Bail. jq's generic path raises "Cannot index
+///   ... with string" — the in-place implementation previously
+///   silently skipped these inputs (#83-class bug).
+/// - Predicate field absent → Bail. jq's generic raises e.g.
+///   "null cannot be matched"; previously silent.
+/// - Predicate field is non-string → Bail. jq raises e.g. "explode
+///   input must be a string"; previously silent.
+/// - Predicate field is a string containing any backslash escape →
+///   Bail. The raw chain operates on byte slices and cannot decode
+///   `\u00XX`/`\n` etc.; the generic path handles those.
+/// - Unsupported terminal (e.g. `Length`/`Index`/`None`) → Bail
+///   defensively (the detector should not produce these for select,
+///   but the helper guards against them at the type boundary).
+pub fn apply_select_string_chain_raw<F>(
+    raw: &[u8],
+    field: &str,
+    ops: &[StringChainOp],
+    terminal: &StringChainTerminal,
+    tmp_str: &mut Vec<u8>,
+    mut emit_pass: F,
+) -> RawApplyOutcome
+where
+    F: FnMut(&[u8]),
+{
+    if raw.is_empty() || raw[0] != b'{' {
+        return RawApplyOutcome::Bail;
+    }
+    let (vs, ve) = match json_object_get_field_raw(raw, 0, field) {
+        Some(p) => p,
+        None => return RawApplyOutcome::Bail,
+    };
+    let val = &raw[vs..ve];
+    if val.len() < 2 || val[0] != b'"' || val[val.len() - 1] != b'"' {
+        return RawApplyOutcome::Bail;
+    }
+    let inner = &val[1..val.len() - 1];
+    if memchr::memchr(b'\\', inner).is_some() {
+        return RawApplyOutcome::Bail;
+    }
+    tmp_str.clear();
+    tmp_str.extend_from_slice(inner);
+    for op in ops {
+        match op {
+            StringChainOp::AsciiDowncase => tmp_str.make_ascii_lowercase(),
+            StringChainOp::AsciiUpcase => tmp_str.make_ascii_uppercase(),
+            StringChainOp::Ltrimstr(s) => {
+                let sb = s.as_bytes();
+                if tmp_str.starts_with(sb) {
+                    tmp_str.drain(..sb.len());
+                }
+            }
+            StringChainOp::Rtrimstr(s) => {
+                let sb = s.as_bytes();
+                if sb.is_empty() {
+                    tmp_str.clear();
+                } else if tmp_str.ends_with(sb) {
+                    let new_len = tmp_str.len() - sb.len();
+                    tmp_str.truncate(new_len);
+                }
+            }
+            StringChainOp::SplitJoin(sep, rep) => {
+                let sb = sep.as_bytes();
+                let rb = rep.as_bytes();
+                let mut result = Vec::new();
+                let mut pos = 0usize;
+                let mut first = true;
+                while pos <= tmp_str.len() {
+                    let end_pos = if sb.is_empty() {
+                        pos + 1
+                    } else {
+                        tmp_str[pos..]
+                            .windows(sb.len())
+                            .position(|w| w == sb)
+                            .map(|p| pos + p)
+                            .unwrap_or(tmp_str.len())
+                    };
+                    if !first {
+                        result.extend_from_slice(rb);
+                    }
+                    result.extend_from_slice(&tmp_str[pos..end_pos]);
+                    first = false;
+                    if end_pos >= tmp_str.len() {
+                        break;
+                    }
+                    pos = end_pos + sb.len();
+                }
+                *tmp_str = result;
+            }
+            StringChainOp::SplitReverseJoin(sep, rep) => {
+                let sb = sep.as_bytes();
+                let rb = rep.as_bytes();
+                let mut segments: Vec<&[u8]> = Vec::new();
+                let mut pos = 0usize;
+                while pos <= tmp_str.len() {
+                    let end_pos = if sb.is_empty() {
+                        pos + 1
+                    } else {
+                        tmp_str[pos..]
+                            .windows(sb.len())
+                            .position(|w| w == sb)
+                            .map(|p| pos + p)
+                            .unwrap_or(tmp_str.len())
+                    };
+                    segments.push(&tmp_str[pos..end_pos]);
+                    if end_pos >= tmp_str.len() {
+                        break;
+                    }
+                    pos = end_pos + sb.len();
+                }
+                segments.reverse();
+                let mut result = Vec::new();
+                for (i, seg) in segments.iter().enumerate() {
+                    if i > 0 {
+                        result.extend_from_slice(rb);
+                    }
+                    result.extend_from_slice(seg);
+                }
+                *tmp_str = result;
+            }
+        }
+    }
+    let pass = match terminal {
+        StringChainTerminal::Startswith(arg) => tmp_str.starts_with(arg.as_bytes()),
+        StringChainTerminal::Endswith(arg) => tmp_str.ends_with(arg.as_bytes()),
+        StringChainTerminal::Contains(arg) => {
+            let needle = arg.as_bytes();
+            needle.is_empty() || memchr::memmem::find(tmp_str, needle).is_some()
+        }
+        // None / Length / Index — not boolean, defensive Bail.
+        _ => return RawApplyOutcome::Bail,
+    };
+    if pass {
+        emit_pass(raw);
     }
     RawApplyOutcome::Emit
 }

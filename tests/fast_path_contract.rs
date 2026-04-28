@@ -34,9 +34,11 @@ use jq_jit::fast_path::{
     apply_obj_assign_two_fields_arith_raw, apply_obj_merge_computed_raw,
     apply_obj_merge_lit_raw, apply_select_nested_cmp_raw, apply_select_num_str_raw,
     apply_select_arith_cmp_raw, apply_select_cmp_raw,
-    apply_select_field_null_raw, apply_select_str_raw, apply_select_str_test_raw,
+    apply_select_field_null_raw, apply_select_str_raw,
+    apply_select_str_test_raw, apply_select_string_chain_raw,
     apply_to_entries_each_interp_raw, apply_two_field_binop_const_raw,
 };
+use jq_jit::interpreter::{StringChainOp, StringChainTerminal};
 use jq_jit::interpreter::{ArithExpr, CmpVal, Filter, MathUnary};
 use jq_jit::ir::{BinOp, UnaryOp};
 use jq_jit::value::Value;
@@ -5775,4 +5777,122 @@ fn raw_to_entries_each_interp_preserves_existing_buf_on_bail() {
     let outcome = apply_to_entries_each_interp_raw(b"{\"x\":1e10}", &parts, &mut buf);
     assert!(matches!(outcome, RawApplyOutcome::Bail));
     assert_eq!(buf.as_slice(), b"prefix-");
+}
+
+#[test]
+fn raw_select_string_chain_match_emits() {
+    let ops = vec![StringChainOp::AsciiDowncase];
+    let term = StringChainTerminal::Startswith("hel".to_string());
+    let mut tmp = Vec::new();
+    let mut emitted: Vec<u8> = Vec::new();
+    let outcome = apply_select_string_chain_raw(
+        b"{\"x\":\"HELLO\"}", "x", &ops, &term, &mut tmp,
+        |bytes| emitted.extend_from_slice(bytes),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted.as_slice(), b"{\"x\":\"HELLO\"}");
+}
+
+#[test]
+fn raw_select_string_chain_no_match_emits_silently() {
+    let ops = vec![StringChainOp::AsciiDowncase];
+    let term = StringChainTerminal::Startswith("zzz".to_string());
+    let mut tmp = Vec::new();
+    let mut emitted: Vec<u8> = Vec::new();
+    let outcome = apply_select_string_chain_raw(
+        b"{\"x\":\"HELLO\"}", "x", &ops, &term, &mut tmp,
+        |bytes| emitted.extend_from_slice(bytes),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_string_chain_non_object_bails() {
+    let ops: Vec<StringChainOp> = Vec::new();
+    let term = StringChainTerminal::Startswith("x".to_string());
+    let mut tmp = Vec::new();
+    let mut emitted: Vec<u8> = Vec::new();
+    for raw in [b"42".as_slice(), b"\"s\"".as_slice(), b"null".as_slice(), b"[1]".as_slice()] {
+        let outcome = apply_select_string_chain_raw(
+            raw, "x", &ops, &term, &mut tmp,
+            |bytes| emitted.extend_from_slice(bytes),
+        );
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for non-object {:?}",
+            std::str::from_utf8(raw).unwrap(),
+        );
+    }
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_string_chain_missing_field_bails() {
+    let ops: Vec<StringChainOp> = Vec::new();
+    let term = StringChainTerminal::Startswith("x".to_string());
+    let mut tmp = Vec::new();
+    let mut emitted: Vec<u8> = Vec::new();
+    let outcome = apply_select_string_chain_raw(
+        b"{\"y\":1}", "x", &ops, &term, &mut tmp,
+        |bytes| emitted.extend_from_slice(bytes),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_string_chain_non_string_field_bails() {
+    let ops: Vec<StringChainOp> = Vec::new();
+    let term = StringChainTerminal::Startswith("x".to_string());
+    let mut tmp = Vec::new();
+    let mut emitted: Vec<u8> = Vec::new();
+    let outcome = apply_select_string_chain_raw(
+        b"{\"x\":42}", "x", &ops, &term, &mut tmp,
+        |bytes| emitted.extend_from_slice(bytes),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_string_chain_escaped_string_bails() {
+    let ops: Vec<StringChainOp> = Vec::new();
+    let term = StringChainTerminal::Startswith("x".to_string());
+    let mut tmp = Vec::new();
+    let mut emitted: Vec<u8> = Vec::new();
+    let outcome = apply_select_string_chain_raw(
+        b"{\"x\":\"he\\nllo\"}", "x", &ops, &term, &mut tmp,
+        |bytes| emitted.extend_from_slice(bytes),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_string_chain_unsupported_terminal_bails() {
+    let ops: Vec<StringChainOp> = Vec::new();
+    let term = StringChainTerminal::Length;
+    let mut tmp = Vec::new();
+    let mut emitted: Vec<u8> = Vec::new();
+    let outcome = apply_select_string_chain_raw(
+        b"{\"x\":\"hi\"}", "x", &ops, &term, &mut tmp,
+        |bytes| emitted.extend_from_slice(bytes),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_string_chain_split_join_runs() {
+    let ops = vec![StringChainOp::SplitJoin("-".to_string(), "_".to_string())];
+    let term = StringChainTerminal::Startswith("a_".to_string());
+    let mut tmp = Vec::new();
+    let mut emitted: Vec<u8> = Vec::new();
+    let outcome = apply_select_string_chain_raw(
+        b"{\"x\":\"a-b-c\"}", "x", &ops, &term, &mut tmp,
+        |bytes| emitted.extend_from_slice(bytes),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted.as_slice(), b"{\"x\":\"a-b-c\"}");
 }
