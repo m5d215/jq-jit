@@ -1694,6 +1694,78 @@ where
     RawApplyOutcome::Emit
 }
 
+/// Apply the `select((.f1 | startswith/endswith/contains(arg)) AND/OR
+/// (.f2 | ...) AND/OR ...)` raw-byte fast path on a single JSON
+/// record. On a true verdict invokes `emit_pass(raw)` (select passes
+/// the input through unchanged); on a false verdict returns `Emit`
+/// silently with no buffer write.
+///
+/// `is_and = true` for AND-combination, `false` for OR. `str_conds`
+/// is a slice of `(field, test_name, test_arg)` triples where
+/// `test_name` is one of `"startswith"`, `"endswith"`, `"contains"`.
+///
+/// jq's `and`/`or` short-circuit: AND breaks on first false, OR
+/// breaks on first true. The helper reproduces that — once a verdict
+/// is determined by a successfully-evaluated condition, later
+/// conditions (which might error) are not evaluated, matching jq.
+///
+/// Bail discipline (only kicks in for conditions actually evaluated
+/// — short-circuited conditions never trigger Bail):
+/// - Non-object input → Bail. jq raises "Cannot index ..."; previously
+///   silent (#83-class bug).
+/// - Field absent → Bail. jq raises "startswith() requires string
+///   inputs" on `null`; previously silent.
+/// - Field is non-string or string with backslash escapes → Bail.
+/// - Unsupported test name (defensive) → Bail.
+pub fn apply_select_compound_str_test_raw<F>(
+    raw: &[u8],
+    is_and: bool,
+    str_conds: &[(String, String, String)],
+    mut emit_pass: F,
+) -> RawApplyOutcome
+where
+    F: FnMut(&[u8]),
+{
+    if raw.is_empty() || raw[0] != b'{' {
+        return RawApplyOutcome::Bail;
+    }
+    let mut result = is_and;
+    for (field, test_name, test_arg) in str_conds {
+        let (vs, ve) = match json_object_get_field_raw(raw, 0, field) {
+            Some(p) => p,
+            None => return RawApplyOutcome::Bail,
+        };
+        let val = &raw[vs..ve];
+        if val.len() < 2 || val[0] != b'"' || val[val.len() - 1] != b'"'
+            || val[1..val.len() - 1].contains(&b'\\')
+        {
+            return RawApplyOutcome::Bail;
+        }
+        let inner = &val[1..val.len() - 1];
+        let arg_bytes = test_arg.as_bytes();
+        let pass = match test_name.as_str() {
+            "startswith" => inner.starts_with(arg_bytes),
+            "endswith" => inner.ends_with(arg_bytes),
+            "contains" => arg_bytes.is_empty()
+                || memchr::memmem::find(inner, arg_bytes).is_some(),
+            _ => return RawApplyOutcome::Bail,
+        };
+        if is_and {
+            if !pass {
+                result = false;
+                break;
+            }
+        } else if pass {
+            result = true;
+            break;
+        }
+    }
+    if result {
+        emit_pass(raw);
+    }
+    RawApplyOutcome::Emit
+}
+
 /// Apply the `with_entries(select(.value cmp N))` raw-byte fast
 /// path on a single JSON record. Filters object entries by value
 /// against a numeric threshold.

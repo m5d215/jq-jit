@@ -5258,3 +5258,44 @@ select(.x | ltrimstr("p-") | startswith("data"))
 select(.x | contains("oob"))
 {"x":"foobar"}
 {"x":"foobar"}
+
+# Issue #251: select_compound_str_test apply-site uses RawApplyOutcome
+# (#83 Phase B). Helper Bails on non-object, missing field, non-string
+# field, or escaped string content for *evaluated* conditions; matches
+# jq's `and`/`or` short-circuit so a true OR or false AND can break
+# before reaching an error. Fixes the #83-class silent-skip bugs.
+
+# Happy AND.
+select((.x | startswith("hel")) and (.y | startswith("wor")))
+{"x":"hello","y":"world"}
+{"x":"hello","y":"world"}
+
+# AND short-circuits on first false (jq behavior; no error from missing .y).
+[ select((.x | startswith("hel")) and (.y | startswith("wor"))) ]
+{"x":"world"}
+[]
+
+# OR short-circuits on first true; missing .y is never evaluated.
+select((.x | startswith("hel")) or (.y | startswith("wor")))
+{"x":"hello"}
+{"x":"hello"}
+
+# AND with missing second field — generic raises "startswith requires strings".
+[ (select((.x | startswith("hel")) and (.y | startswith("wor"))))? ]
+{"x":"hello"}
+[]
+
+# OR no short-circuit + second cond errors — generic propagates error.
+[ (select((.x | startswith("hel")) or (.y | startswith("wor"))))? ]
+{"x":"world"}
+[]
+
+# Non-object input — generic raises indexing error, ? swallows.
+[ (select((.x | startswith("hel")) and (.y | startswith("wor"))))? ]
+"plain"
+[]
+
+# Non-string field — generic raises, ? swallows.
+[ (select((.x | startswith("hel")) and (.y | startswith("wor"))))? ]
+{"x":1,"y":"world"}
+[]
