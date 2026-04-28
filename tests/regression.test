@@ -2883,3 +2883,61 @@ null
 
 (.x | match("p"))?
 [1,2,3]
+
+# #83 Phase B: .x | scan("p") apply-site uses RawApplyOutcome::Bail.
+# Multi-output happy path emits one value per non-overlapping match.
+[ .x | scan("a") ]
+{"x":"banana"}
+["a","a","a"]
+
+# Capture-groups path emits an array per match.
+[ .x | scan("(a)(n)") ]
+{"x":"banana"}
+[["a","n"],["a","n"]]
+
+# No match emits no output (jq behaviour for scan on a string).
+[ .x | scan("z") ]
+{"x":"banana"}
+[]
+
+# Field missing under `?` bails to generic, jq raises (null | scan), `?` swallows.
+[ (.x | scan("p"))? ]
+{"y":"hi"}
+[]
+
+# Non-string field under `?`
+[ (.x | scan("p"))? ]
+{"x":42}
+[]
+
+[ (.x | scan("p"))? ]
+{"x":null}
+[]
+
+[ (.x | scan("p"))? ]
+{"x":[1,2,3]}
+[]
+
+# Escape-bearing string: bail to generic, which decodes the escape correctly.
+# (`.` does not match `\n` in jq's default regex semantics, so newline
+# splits the input into "a" and "b".)
+[ .x | scan(".") ]
+{"x":"a\nb"}
+["a","b"]
+
+# Non-object input under `?`
+[ (.x | scan("p"))? ]
+42
+[]
+
+[ (.x | scan("p"))? ]
+"hi"
+[]
+
+[ (.x | scan("p"))? ]
+null
+[]
+
+[ (.x | scan("p"))? ]
+[1,2,3]
+[]

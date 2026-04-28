@@ -417,6 +417,50 @@ where
     RawApplyOutcome::Emit
 }
 
+/// Apply the `.field | scan("pattern")` raw-byte fast path on a single
+/// JSON record.
+///
+/// `scan` is a *multi-output* filter: it emits one value per
+/// non-overlapping regex match. Bail discipline matches
+/// [`apply_field_match_raw`] (object input + quoted-string field with no
+/// backslash escapes); on a passing type-guard the helper iterates
+/// `re.captures_iter(content)` and invokes `on_match(content,
+/// captures)` for **each** match. On zero matches the closure is not
+/// called — the helper still returns [`RawApplyOutcome::Emit`] (jq emits
+/// no output for `scan` with no match, and that is the fast path's
+/// intended semantics).
+///
+/// `captures_iter` is used uniformly for both the no-capture-group and
+/// capture-group cases — for a no-group regex, each `Captures` exposes
+/// only group 0 (the full match), so the apply-site can branch on
+/// `caps.len()` to choose between scalar and array output without the
+/// helper needing to know about it.
+pub fn apply_field_scan_raw<F>(
+    raw: &[u8],
+    field: &str,
+    re: &regex::Regex,
+    mut on_match: F,
+) -> RawApplyOutcome
+where
+    F: FnMut(&str, &regex::Captures<'_>),
+{
+    let (vs, ve) = match json_object_get_field_raw(raw, 0, field) {
+        Some(r) => r,
+        None => return RawApplyOutcome::Bail,
+    };
+    let val = &raw[vs..ve];
+    if val.len() < 2 || val[0] != b'"' || val[val.len() - 1] != b'"'
+        || val[1..val.len() - 1].contains(&b'\\')
+    {
+        return RawApplyOutcome::Bail;
+    }
+    let content = unsafe { std::str::from_utf8_unchecked(&val[1..val.len() - 1]) };
+    for caps in re.captures_iter(content) {
+        on_match(content, &caps);
+    }
+    RawApplyOutcome::Emit
+}
+
 /// Apply the `.field // fallback` raw-byte fast path on a single JSON
 /// record.
 ///

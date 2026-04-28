@@ -140,7 +140,7 @@ use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json
 use jq_jit::interpreter::Filter;
 use jq_jit::fast_path::{
     apply_field_access_raw, apply_field_alternative_raw, apply_field_field_alternative_raw,
-    apply_field_gsub_raw, apply_field_match_raw, apply_field_test_raw,
+    apply_field_gsub_raw, apply_field_match_raw, apply_field_scan_raw, apply_field_test_raw,
     apply_full_object_fields_raw, apply_has_field_raw, apply_has_multi_field_raw,
     apply_multi_field_access_raw, apply_nested_field_access_raw, apply_object_compute_raw,
     RawApplyOutcome,
@@ -6888,55 +6888,43 @@ fn real_main() {
                 } else if let Some((ref sc_field, ref sc_pattern)) = field_scan {
                     // .field | scan("regex") — raw byte regex scan, multiple outputs per input
                     if let Ok(re) = regex::Regex::new(sc_pattern) {
-                        let has_captures = re.captures_len() > 1;
                         json_stream_raw(&input_str, |start, end| {
                             let raw = &input_bytes[start..end];
-                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sc_field) {
-                                let val = &raw[vs..ve];
-                                if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                                    && !val[1..val.len()-1].contains(&b'\\')
-                                {
-                                    let content = unsafe { std::str::from_utf8_unchecked(&val[1..val.len()-1]) };
-                                    if has_captures {
-                                        for caps in re.captures_iter(content) {
-                                            compact_buf.push(b'[');
-                                            for i in 1..caps.len() {
-                                                if i > 1 { compact_buf.push(b','); }
-                                                match caps.get(i) {
-                                                    Some(m) => {
-                                                        compact_buf.push(b'"');
-                                                        for &b in m.as_str().as_bytes() {
-                                                            match b {
-                                                                b'"' => compact_buf.extend_from_slice(b"\\\""),
-                                                                b'\\' => compact_buf.extend_from_slice(b"\\\\"),
-                                                                _ => compact_buf.push(b),
-                                                            }
-                                                        }
-                                                        compact_buf.push(b'"');
+                            let outcome = apply_field_scan_raw(raw, sc_field, &re, |_content, caps| {
+                                if caps.len() > 1 {
+                                    compact_buf.push(b'[');
+                                    for i in 1..caps.len() {
+                                        if i > 1 { compact_buf.push(b','); }
+                                        match caps.get(i) {
+                                            Some(m) => {
+                                                compact_buf.push(b'"');
+                                                for &b in m.as_str().as_bytes() {
+                                                    match b {
+                                                        b'"' => compact_buf.extend_from_slice(b"\\\""),
+                                                        b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                                                        _ => compact_buf.push(b),
                                                     }
-                                                    None => compact_buf.extend_from_slice(b"\"\""),
                                                 }
+                                                compact_buf.push(b'"');
                                             }
-                                            compact_buf.extend_from_slice(b"]\n");
-                                        }
-                                    } else {
-                                        for m in re.find_iter(content) {
-                                            compact_buf.push(b'"');
-                                            for &b in m.as_str().as_bytes() {
-                                                match b {
-                                                    b'"' => compact_buf.extend_from_slice(b"\\\""),
-                                                    b'\\' => compact_buf.extend_from_slice(b"\\\\"),
-                                                    _ => compact_buf.push(b),
-                                                }
-                                            }
-                                            compact_buf.extend_from_slice(b"\"\n");
+                                            None => compact_buf.extend_from_slice(b"\"\""),
                                         }
                                     }
+                                    compact_buf.extend_from_slice(b"]\n");
                                 } else {
-                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    let m = caps.get(0).unwrap();
+                                    compact_buf.push(b'"');
+                                    for &b in m.as_str().as_bytes() {
+                                        match b {
+                                            b'"' => compact_buf.extend_from_slice(b"\\\""),
+                                            b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                                            _ => compact_buf.push(b),
+                                        }
+                                    }
+                                    compact_buf.extend_from_slice(b"\"\n");
                                 }
-                            } else {
+                            });
+                            if let RawApplyOutcome::Bail = outcome {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             }
@@ -20240,56 +20228,44 @@ fn real_main() {
             } else if let Some((ref sc_field, ref sc_pattern)) = field_scan {
                 // .field | scan("regex") — raw byte regex scan (stdin)
                 if let Ok(re) = regex::Regex::new(sc_pattern) {
-                    let has_captures = re.captures_len() > 1;
                     let content_bytes = content.as_bytes();
                     json_stream_raw(content, |start, end| {
                         let raw = &content_bytes[start..end];
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sc_field) {
-                            let val = &raw[vs..ve];
-                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                                && !val[1..val.len()-1].contains(&b'\\')
-                            {
-                                let content_str = unsafe { std::str::from_utf8_unchecked(&val[1..val.len()-1]) };
-                                if has_captures {
-                                    for caps in re.captures_iter(content_str) {
-                                        compact_buf.push(b'[');
-                                        for i in 1..caps.len() {
-                                            if i > 1 { compact_buf.push(b','); }
-                                            match caps.get(i) {
-                                                Some(m) => {
-                                                    compact_buf.push(b'"');
-                                                    for &b in m.as_str().as_bytes() {
-                                                        match b {
-                                                            b'"' => compact_buf.extend_from_slice(b"\\\""),
-                                                            b'\\' => compact_buf.extend_from_slice(b"\\\\"),
-                                                            _ => compact_buf.push(b),
-                                                        }
-                                                    }
-                                                    compact_buf.push(b'"');
+                        let outcome = apply_field_scan_raw(raw, sc_field, &re, |_content_str, caps| {
+                            if caps.len() > 1 {
+                                compact_buf.push(b'[');
+                                for i in 1..caps.len() {
+                                    if i > 1 { compact_buf.push(b','); }
+                                    match caps.get(i) {
+                                        Some(m) => {
+                                            compact_buf.push(b'"');
+                                            for &b in m.as_str().as_bytes() {
+                                                match b {
+                                                    b'"' => compact_buf.extend_from_slice(b"\\\""),
+                                                    b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                                                    _ => compact_buf.push(b),
                                                 }
-                                                None => compact_buf.extend_from_slice(b"null"),
                                             }
+                                            compact_buf.push(b'"');
                                         }
-                                        compact_buf.extend_from_slice(b"]\n");
-                                    }
-                                } else {
-                                    for m in re.find_iter(content_str) {
-                                        compact_buf.push(b'"');
-                                        for &b in m.as_str().as_bytes() {
-                                            match b {
-                                                b'"' => compact_buf.extend_from_slice(b"\\\""),
-                                                b'\\' => compact_buf.extend_from_slice(b"\\\\"),
-                                                _ => compact_buf.push(b),
-                                            }
-                                        }
-                                        compact_buf.extend_from_slice(b"\"\n");
+                                        None => compact_buf.extend_from_slice(b"null"),
                                     }
                                 }
+                                compact_buf.extend_from_slice(b"]\n");
                             } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                let m = caps.get(0).unwrap();
+                                compact_buf.push(b'"');
+                                for &b in m.as_str().as_bytes() {
+                                    match b {
+                                        b'"' => compact_buf.extend_from_slice(b"\\\""),
+                                        b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                                        _ => compact_buf.push(b),
+                                    }
+                                }
+                                compact_buf.extend_from_slice(b"\"\n");
                             }
-                        } else {
+                        });
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
