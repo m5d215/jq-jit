@@ -877,8 +877,11 @@ pub fn json_object_get_field_raw(b: &[u8], pos: usize, field: &str) -> Option<(u
     let mut i = pos + 1;
     while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
     if i < b.len() && b[i] == b'}' { return None; }
+    // jq dedupes duplicate input keys last-wins (#233): scan to the end of the
+    // object and return the last match, not the first.
+    let mut last_match: Option<(usize, usize)> = None;
     loop {
-        if i >= b.len() || b[i] != b'"' { return None; }
+        if i >= b.len() || b[i] != b'"' { return last_match; }
         let key_start = i + 1;
         let mut j = key_start;
         while j < b.len() {
@@ -888,19 +891,19 @@ pub fn json_object_get_field_raw(b: &[u8], pos: usize, field: &str) -> Option<(u
             && b[key_start..j] == *field_bytes;
         i = j + 1;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
-        if i >= b.len() || b[i] != b':' { return None; }
+        if i >= b.len() || b[i] != b':' { return last_match; }
         i += 1;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        let val_start = i;
+        let val_end = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return last_match };
         if key_matches {
-            let val_start = i;
-            let val_end = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return None };
-            return Some((val_start, val_end));
+            last_match = Some((val_start, val_end));
         }
-        i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return None };
+        i = val_end;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
-        if i >= b.len() { return None; }
-        if b[i] == b'}' { return None; }
-        if b[i] != b',' { return None; }
+        if i >= b.len() { return last_match; }
+        if b[i] == b'}' { return last_match; }
+        if b[i] != b',' { return last_match; }
         i += 1;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
     }
@@ -3564,6 +3567,151 @@ pub fn is_json_compact(bytes: &[u8]) -> bool {
     true
 }
 
+/// Walk a JSON value at `pos` checking that every nested object has unique
+/// keys. Returns `Some(end_pos)` on success, `None` if a duplicate key is
+/// found anywhere inside the value or if the input is malformed.
+///
+/// Used by [`json_value_has_duplicate_keys`] to route input objects with
+/// duplicate keys (#233) through the Value-level path that dedupes at parse
+/// time. The malformed-input case is folded into `None` too: routing through
+/// the Value path then surfaces the jq-compatible parse error from
+/// [`json_to_value`], which is exactly what the user wants.
+#[inline]
+fn check_value_dedup_clean(b: &[u8], pos: usize) -> Option<usize> {
+    if pos >= b.len() { return None; }
+    let p = skip_ws(b, pos);
+    if p >= b.len() { return None; }
+    match b[p] {
+        b'{' => check_object_dedup_clean(b, p),
+        b'[' => check_array_dedup_clean(b, p),
+        _ => skip_json_value(b, p).ok(),
+    }
+}
+
+fn check_object_dedup_clean(b: &[u8], pos: usize) -> Option<usize> {
+    debug_assert_eq!(b[pos], b'{');
+    let mut i = skip_ws(b, pos + 1);
+    if i < b.len() && b[i] == b'}' { return Some(i + 1); }
+    // Small linear-scan dedup set. Object key counts are typically small;
+    // when we cross a threshold we fall back to a HashSet allocation.
+    let mut keys_small: [(usize, usize); 8] = [(0, 0); 8];
+    let mut keys_small_len: usize = 0;
+    let mut keys_big: Option<std::collections::HashSet<Vec<u8>>> = None;
+    loop {
+        if i >= b.len() || b[i] != b'"' { return None; }
+        let key_start = i + 1;
+        let mut j = key_start;
+        while j < b.len() {
+            match b[j] { b'"' => break, b'\\' => { j += 2; continue }, _ => j += 1 }
+        }
+        if j >= b.len() { return None; }
+        let key_bytes = &b[key_start..j];
+        if let Some(set) = keys_big.as_mut() {
+            if !set.insert(key_bytes.to_vec()) { return None; }
+        } else {
+            for k in 0..keys_small_len {
+                let (ks, ke) = keys_small[k];
+                if (ke - ks) == key_bytes.len() && &b[ks..ke] == key_bytes { return None; }
+            }
+            if keys_small_len < keys_small.len() {
+                keys_small[keys_small_len] = (key_start, j);
+                keys_small_len += 1;
+            } else {
+                let mut set: std::collections::HashSet<Vec<u8>> =
+                    keys_small.iter().map(|&(ks, ke)| b[ks..ke].to_vec()).collect();
+                set.insert(key_bytes.to_vec());
+                keys_big = Some(set);
+            }
+        }
+        i = j + 1;
+        i = skip_ws(b, i);
+        if i >= b.len() || b[i] != b':' { return None; }
+        i = skip_ws(b, i + 1);
+        // Inline the value-shape dispatch: shallow objects with primitive
+        // values dominate input streams in practice, so the recursive
+        // `check_value_dedup_clean` indirection is worth eliding on the
+        // primitive branch. The compiler rarely inlines across separate fns
+        // when one of them has the HashSet allocation in its body.
+        if i >= b.len() { return None; }
+        i = match b[i] {
+            b'{' => check_object_dedup_clean(b, i)?,
+            b'[' => check_array_dedup_clean(b, i)?,
+            _ => skip_json_value(b, i).ok()?,
+        };
+        i = skip_ws(b, i);
+        if i >= b.len() { return None; }
+        if b[i] == b'}' { return Some(i + 1); }
+        if b[i] != b',' { return None; }
+        i = skip_ws(b, i + 1);
+    }
+}
+
+fn check_array_dedup_clean(b: &[u8], pos: usize) -> Option<usize> {
+    debug_assert_eq!(b[pos], b'[');
+    let mut i = skip_ws(b, pos + 1);
+    if i < b.len() && b[i] == b']' { return Some(i + 1); }
+    loop {
+        if i >= b.len() { return None; }
+        // Same primitive-inlining trick as in `check_object_dedup_clean`.
+        i = match b[i] {
+            b'{' => check_object_dedup_clean(b, i)?,
+            b'[' => check_array_dedup_clean(b, i)?,
+            _ => skip_json_value(b, i).ok()?,
+        };
+        i = skip_ws(b, i);
+        if i >= b.len() { return None; }
+        if b[i] == b']' { return Some(i + 1); }
+        if b[i] != b',' { return None; }
+        i = skip_ws(b, i + 1);
+    }
+}
+
+/// True if the JSON value in `bytes` contains an object — at any nesting
+/// depth — with duplicate keys.
+///
+/// Intended as a routing check for raw-byte fast paths: jq dedupes input
+/// objects last-wins at parse time, so any path that copies input bytes
+/// verbatim diverges on duplicate-key inputs (#233). When this returns
+/// `true`, callers should route through the Value-level path
+/// ([`json_to_value`] / [`parse_json_object`]) which handles dedup.
+///
+/// Also returns `true` for malformed input so the caller routes through
+/// [`json_to_value`], whose error message is jq-compatible — better than
+/// having a raw-byte fast path swallow the malformed bytes.
+pub fn json_value_has_duplicate_keys(bytes: &[u8]) -> bool {
+    let p = skip_ws(bytes, 0);
+    if p >= bytes.len() { return false; }
+    // Only objects (and containers that may contain objects) need scanning.
+    match bytes[p] {
+        b'{' => check_object_dedup_clean(bytes, p).is_none(),
+        b'[' => check_array_dedup_clean(bytes, p).is_none(),
+        _ => false,
+    }
+}
+
+/// Stream-level variant of [`json_value_has_duplicate_keys`]: walk every
+/// JSON value in a (possibly NDJSON-style) byte stream and return `true` if
+/// any of them contains an object with duplicate keys.
+///
+/// Used by the whole-file identity shortcut to gate the byte-copy path —
+/// duplicate keys would otherwise survive verbatim and diverge from jq.
+pub fn json_stream_has_duplicate_keys(content: &[u8]) -> bool {
+    let mut pos = 0;
+    if content.len() >= 3 && content[0] == 0xEF && content[1] == 0xBB && content[2] == 0xBF {
+        pos = 3;
+    }
+    pos = skip_ws(content, pos);
+    while pos < content.len() {
+        match check_value_dedup_clean(content, pos) {
+            Some(end) => {
+                pos = skip_ws(content, end);
+            }
+            None => return true,
+        }
+    }
+    false
+}
+
 #[inline(always)]
 fn skip_ws(b: &[u8], mut pos: usize) -> usize {
     while pos < b.len() && matches!(b[pos], b' ' | b'\t' | b'\n' | b'\r') { pos += 1; }
@@ -3675,7 +3823,6 @@ fn parse_json_object_project(b: &[u8], pos: usize, depth: usize, fields: &[&str]
         return Ok((Value::object_from_map(map), i + 1));
     }
     let mut found = 0u64;
-    let all_found: u64 = if n < 64 { (1u64 << n) - 1 } else { u64::MAX };
     loop {
         if i >= b.len() || b[i] != b'"' { bail!("Expected string key at position {}", i); }
         // Scan key bytes directly without creating KeyStr for non-matching keys
@@ -3690,33 +3837,32 @@ fn parse_json_object_project(b: &[u8], pos: usize, depth: usize, fields: &[&str]
         i = skip_ws(b, key_byte_end);
         if i >= b.len() || b[i] != b':' { bail!("Expected ':' at position {}", i); }
         i = skip_ws(b, i + 1);
-        // Compare key bytes against projection fields (avoid KeyStr allocation for non-matches)
+        // Compare key bytes against projection fields (avoid KeyStr allocation for non-matches).
+        // Last-wins on duplicate input keys (#233): always re-match and `insert` to overwrite.
         let mut matched = false;
-        if found != all_found && !has_escape {
+        if !has_escape {
             let key_len = key_end - key_start;
             let key_bytes = &b[key_start..key_end];
             for (fi, &f) in fields.iter().enumerate() {
-                if fi < 64 && (found & (1u64 << fi)) != 0 { continue; }
                 if key_len == f.len() && key_bytes == f.as_bytes() {
                     let key = KeyStr::from(unsafe { std::str::from_utf8_unchecked(key_bytes) });
                     let (val, end) = parse_json_value(b, i, depth + 1)?;
-                    map.push_unique(key, val);
-                    found |= 1u64 << fi;
+                    map.insert(key, val);
+                    found |= 1u64 << fi.min(63);
                     i = end;
                     matched = true;
                     break;
                 }
             }
-        } else if found != all_found {
+        } else {
             // Escaped key: use full parser for correct handling
             let (key, _) = parse_json_key(b, key_start - 1)?;
             let key_str = key.as_str();
             for (fi, &f) in fields.iter().enumerate() {
-                if fi < 64 && (found & (1u64 << fi)) != 0 { continue; }
                 if key_str == f {
                     let (val, end) = parse_json_value(b, i, depth + 1)?;
-                    map.push_unique(key, val);
-                    found |= 1u64 << fi;
+                    map.insert(key, val);
+                    found |= 1u64 << fi.min(63);
                     i = end;
                     matched = true;
                     break;
@@ -3731,18 +3877,6 @@ fn parse_json_object_project(b: &[u8], pos: usize, depth: usize, fields: &[&str]
         if b[i] == b'}' { break; }
         if b[i] != b',' { bail!("Expected ',' or '}}' at position {}", i); }
         i = skip_ws(b, i + 1);
-        if found == all_found {
-            let mut nest = 1u32;
-            while i < b.len() && nest > 0 {
-                match b[i] {
-                    b'{' => { nest += 1; i += 1; }
-                    b'}' => { nest -= 1; if nest == 0 { break; } i += 1; }
-                    b'"' => { i += 1; while i < b.len() { match b[i] { b'"' => { i += 1; break; } b'\\' => i += 2, _ => i += 1 } } }
-                    _ => i += 1,
-                }
-            }
-            break;
-        }
     }
     for (fi, &f) in fields.iter().enumerate() {
         if fi < 64 && (found & (1u64 << fi)) != 0 { continue; }
@@ -4083,9 +4217,10 @@ fn parse_json_object(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize
         if i >= b.len() || b[i] != b':' { bail!("Expected ':' at position {}", i); }
         i = skip_ws(b, i + 1);
         let (val, end) = parse_json_value(b, i, depth + 1)?;
-        // push_unique skips the linear scan for duplicate keys — safe for JSON parsing
-        // where duplicate keys are extremely rare and "first wins" is acceptable
-        map.push_unique(key, val);
+        // jq dedupes duplicate input keys last-wins at parse time (#233).
+        // `insert` updates the value in place when a key reappears, preserving
+        // the position of the first occurrence — matching jq's semantics.
+        map.insert(key, val);
         i = skip_ws(b, end);
         if i >= b.len() { bail!("Unterminated object"); }
         if b[i] == b'}' { return Ok((Value::Obj(ObjInner(rc)), i + 1)); }

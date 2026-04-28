@@ -224,21 +224,12 @@ fn json_strategy() -> impl Strategy<Value = JsonShape> {
     json_leaf().prop_recursive(3, 12, 3, |inner| {
         prop_oneof![
             prop::collection::vec(inner.clone(), 0..=3).prop_map(JsonShape::Arr),
-            // Drop duplicate keys before constructing the object. jq-jit's
-            // input parser keeps every (key, value) pair as written; jq
-            // collapses duplicates last-wins. That divergence is its own
-            // bug class (#233), separate from the fast-path leak this
-            // proptest is meant to detect, so we suppress it at generation
-            // time rather than rediscovering it on every run.
+            // Duplicate keys are now allowed: jq-jit's input parser dedupes
+            // last-wins (#233), so the proptest can exercise the full key
+            // space. The shrinker still chooses minimal collisions when a
+            // failure is duplicate-key-shaped.
             prop::collection::vec((ident_strategy(), inner.clone()), 0..=3)
-                .prop_map(|pairs| {
-                    let mut seen = std::collections::HashSet::new();
-                    let dedup = pairs
-                        .into_iter()
-                        .filter(|(k, _)| seen.insert(k.clone()))
-                        .collect();
-                    JsonShape::Obj(dedup)
-                }),
+                .prop_map(JsonShape::Obj),
         ]
     })
 }

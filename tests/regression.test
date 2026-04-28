@@ -2353,3 +2353,28 @@ tojson
 tojson
 0.0001
 "0.0001"
+
+# Issue #233: input parse dedupes duplicate keys (last-wins, first-position)
+.
+{"x":null,"x":false}
+{"x":false}
+
+# Issue #233: field access returns the last value, not the first
+.x
+{"x":null,"x":false}
+false
+
+# Issue #233: dedup preserves the position of the first occurrence
+.
+{"a":1,"b":2,"a":3}
+{"a":3,"b":2}
+
+# Issue #233: dedup applies to nested objects
+.
+{"x":{"a":1,"a":2}}
+{"x":{"a":2}}
+
+# Issue #233: dedup applies inside arrays
+.
+[{"a":1,"a":2},{"b":3,"b":4}]
+[{"a":2},{"b":4}]
