@@ -464,6 +464,54 @@ where
     RawApplyOutcome::Emit
 }
 
+/// Apply the `.field | @<format>` raw-byte fast path on a single JSON
+/// record. Used by `@text`, `@json`, `@base64`, `@uri`, `@html`.
+///
+/// jq's `@<format>` family doesn't share a single Bail discipline
+/// across formats: `@base64`/`@uri`/`@html` raise on non-string input,
+/// while `@json`/`@text` accept any scalar (and wrap its raw bytes in
+/// quotes for output). The helper therefore handles only the
+/// **structural** type-guard — field present and the value is not an
+/// escape-bearing quoted string — and delegates the
+/// format-specific Emit-vs-Bail decision to the closure via its
+/// returned [`RawApplyOutcome`].
+///
+/// * Object input, field present, value is a quoted string with no `\`
+///   escapes — invokes `on_value(val_with_quotes, Some(content))`.
+/// * Object input, field present, value is a non-string scalar
+///   (number / bool / null / array / object literal) — invokes
+///   `on_value(val_bytes, None)`. The closure decides whether to emit
+///   or to return [`RawApplyOutcome::Bail`] (e.g. `@base64` returns
+///   Bail, `@json` returns Emit after wrapping the raw bytes).
+/// * Field absent, or value is a quoted string with at least one `\`
+///   escape — returns [`RawApplyOutcome::Bail`] without invoking the
+///   closure (the generic path decodes the escape / raises the error).
+/// * Non-object input — returns [`RawApplyOutcome::Bail`] (the field
+///   fetch fails).
+pub fn apply_field_format_raw<F>(
+    raw: &[u8],
+    field: &str,
+    on_value: F,
+) -> RawApplyOutcome
+where
+    F: FnOnce(&[u8], Option<&[u8]>) -> RawApplyOutcome,
+{
+    let (vs, ve) = match json_object_get_field_raw(raw, 0, field) {
+        Some(r) => r,
+        None => return RawApplyOutcome::Bail,
+    };
+    let val = &raw[vs..ve];
+    let content = if val.len() >= 2 && val[0] == b'"' && val[val.len() - 1] == b'"' {
+        if val[1..val.len() - 1].contains(&b'\\') {
+            return RawApplyOutcome::Bail;
+        }
+        Some(&val[1..val.len() - 1])
+    } else {
+        None
+    };
+    on_value(val, content)
+}
+
 /// Apply the `.field // fallback` raw-byte fast path on a single JSON
 /// record.
 ///

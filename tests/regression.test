@@ -2989,3 +2989,94 @@ null
 
 (.x | capture("(?<v>p)"))?
 [1,2,3]
+
+# #83 Phase B: .x | @<format> apply-site uses RawApplyOutcome::Bail for
+# the structural type-guard (field present, no escapes); the closure
+# returns its own verdict for format-specific bails (e.g. @base64 on
+# non-string).
+
+# @text on string: identity output.
+.x | @text
+{"x":"hi"}
+"hi"
+
+# @json on string: extra-quote-and-escape (so it round-trips).
+.x | @json
+{"x":"hi"}
+"\"hi\""
+
+# @base64 on string: encode raw bytes.
+.x | @base64
+{"x":"hi"}
+"aGk="
+
+# @uri on string: percent-encode.
+.x | @uri
+{"x":"a b"}
+"a%20b"
+
+# @html on string: HTML-escape.
+.x | @html
+{"x":"<p>"}
+"&lt;p&gt;"
+
+# @text on number: wraps raw bytes (jq behaviour).
+.x | @text
+{"x":42}
+"42"
+
+# @json on null: wraps raw bytes.
+.x | @json
+{"x":null}
+"null"
+
+# @base64/@uri/@html on non-string scalars: closure returns Bail to the
+# generic path, which stringifies first (jq's @format on non-string is
+# permissive — no error raised).
+(.x | @base64)?
+{"x":42}
+"NDI="
+
+(.x | @uri)?
+{"x":null}
+"null"
+
+(.x | @html)?
+{"x":[1,2,3]}
+"[1,2,3]"
+
+# Field missing on object: helper bails (field absent); generic resolves
+# `.x` to null, then formats `null` per jq's permissive semantics.
+(.x | @text)?
+{"y":"hi"}
+"null"
+
+(.x | @json)?
+{"y":"hi"}
+"null"
+
+(.x | @base64)?
+{"y":"hi"}
+"bnVsbA=="
+
+# Escape-bearing string: bail to generic, which decodes the escape correctly.
+.x | @base64
+{"x":"a\nb"}
+"YQpi"
+
+# Non-object/non-null input: jq raises "Cannot index <type>"; `?` swallows
+# to empty.
+(.x | @text)?
+42
+
+(.x | @json)?
+"hi"
+
+(.x | @uri)?
+[1,2,3]
+
+# null input: `.x` returns null in jq (null is the only non-object that's
+# indexable), so the generic path emits the formatted null.
+(.x | @base64)?
+null
+"bnVsbA=="

@@ -10,8 +10,9 @@
 
 use jq_jit::fast_path::{
     FastPath, FieldAccessPath, RawApplyOutcome, apply_field_access_raw,
-    apply_field_alternative_raw, apply_field_field_alternative_raw, apply_field_gsub_raw,
-    apply_field_match_raw, apply_field_scan_raw, apply_field_test_raw, apply_full_object_fields_raw, apply_has_field_raw,
+    apply_field_alternative_raw, apply_field_field_alternative_raw, apply_field_format_raw,
+    apply_field_gsub_raw, apply_field_match_raw, apply_field_scan_raw, apply_field_test_raw,
+    apply_full_object_fields_raw, apply_has_field_raw,
     apply_has_multi_field_raw, apply_multi_field_access_raw, apply_nested_field_access_raw,
     apply_object_compute_raw,
 };
@@ -1267,6 +1268,116 @@ fn raw_field_scan_non_object_input_bails() {
         assert!(
             matches!(outcome, RawApplyOutcome::Bail),
             "expected Bail for input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert_eq!(called, 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `.field | @<format>` — the helper handles only the *structural* type-guard
+// (field present + non-escape-bearing quoted string check). The
+// format-specific Emit-vs-Bail decision is delegated to the closure via its
+// returned `RawApplyOutcome`. These tests pin the structural surface.
+
+#[test]
+fn raw_field_format_string_value_emits() {
+    let mut seen: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
+    let outcome = apply_field_format_raw(
+        b"{\"x\":\"hi\"}",
+        "x",
+        |val, content| {
+            seen.push((val.to_vec(), content.map(|c| c.to_vec())));
+            RawApplyOutcome::Emit
+        },
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(
+        seen,
+        vec![(b"\"hi\"".to_vec(), Some(b"hi".to_vec()))],
+    );
+}
+
+#[test]
+fn raw_field_format_non_string_scalar_invokes_with_none() {
+    // The helper hands the closure `(val, None)` for non-string scalars; the
+    // closure decides whether to Emit (e.g. @json wraps raw bytes) or Bail
+    // (e.g. @base64 raises on non-string).
+    for (input, expected_val) in [
+        (&b"{\"x\":42}"[..], &b"42"[..]),
+        (&b"{\"x\":null}"[..], &b"null"[..]),
+        (&b"{\"x\":true}"[..], &b"true"[..]),
+    ] {
+        let mut seen: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
+        let outcome = apply_field_format_raw(input, "x", |val, content| {
+            seen.push((val.to_vec(), content.map(|c| c.to_vec())));
+            RawApplyOutcome::Emit
+        });
+        assert!(matches!(outcome, RawApplyOutcome::Emit));
+        assert_eq!(seen, vec![(expected_val.to_vec(), None)]);
+    }
+}
+
+#[test]
+fn raw_field_format_propagates_closure_bail_verdict() {
+    // The closure can choose to Bail even on a structurally-OK input
+    // (this is what `@base64`/`@uri`/`@html` do for non-string values).
+    let outcome = apply_field_format_raw(
+        b"{\"x\":42}",
+        "x",
+        |_, _| RawApplyOutcome::Bail,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+}
+
+#[test]
+fn raw_field_format_field_missing_bails_without_invoking_closure() {
+    let mut called = 0u32;
+    let outcome = apply_field_format_raw(
+        b"{\"y\":\"hi\"}",
+        "x",
+        |_, _| {
+            called += 1;
+            RawApplyOutcome::Emit
+        },
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert_eq!(called, 0);
+}
+
+#[test]
+fn raw_field_format_escaped_string_bails_without_invoking_closure() {
+    let mut called = 0u32;
+    let outcome = apply_field_format_raw(
+        br#"{"x":"a\nb"}"#,
+        "x",
+        |_, _| {
+            called += 1;
+            RawApplyOutcome::Emit
+        },
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert_eq!(called, 0);
+}
+
+#[test]
+fn raw_field_format_non_object_input_bails_without_invoking_closure() {
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut called = 0u32;
+        let outcome = apply_field_format_raw(raw, "x", |_, _| {
+            called += 1;
+            RawApplyOutcome::Emit
+        });
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for format input {:?}, got {:?}",
             std::str::from_utf8(raw).unwrap(),
             outcome,
         );
