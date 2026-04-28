@@ -3779,3 +3779,47 @@ select(.x | startswith("a"))
 [ (.x |= length)? ]
 [1,2,3]
 []
+
+# #83 Phase B: .field |= tostring apply-site uses RawApplyOutcome::Bail.
+# String passthrough.
+.x |= tostring
+{"x":"hi"}
+{"x":"hi"}
+
+# Number → "N".
+.x |= tostring
+{"x":42}
+{"x":"42"}
+
+# Boolean → "true" / "false".
+.x |= tostring
+{"x":true}
+{"x":"true"}
+
+# null → "null".
+.x |= tostring
+{"x":null}
+{"x":"null"}
+
+# Field absent: bail to generic; jq's null|tostring = "null".
+.x |= tostring
+{"y":1}
+{"y":1,"x":"null"}
+
+# Array: bail to generic; jq stringifies recursively.
+.x |= tostring
+{"x":[1,2]}
+{"x":"[1,2]"}
+
+# Non-object input under `?`
+[ (.x |= tostring)? ]
+42
+[]
+
+[ (.x |= tostring)? ]
+"hi"
+[]
+
+[ (.x |= tostring)? ]
+[1,2,3]
+[]

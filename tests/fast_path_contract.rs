@@ -17,8 +17,9 @@ use jq_jit::fast_path::{
     apply_field_str_concat_raw, apply_field_str_reverse_raw, apply_field_test_raw,
     apply_full_object_fields_raw, apply_has_field_raw, apply_has_multi_field_raw,
     apply_multi_field_access_raw, apply_nested_field_access_raw, apply_object_compute_raw,
-    apply_field_update_length_raw, apply_select_arith_cmp_raw, apply_select_cmp_raw,
-    apply_select_field_null_raw, apply_select_str_raw, apply_select_str_test_raw,
+    apply_field_update_length_raw, apply_field_update_tostring_raw, apply_select_arith_cmp_raw,
+    apply_select_cmp_raw, apply_select_field_null_raw, apply_select_str_raw,
+    apply_select_str_test_raw,
 };
 use jq_jit::interpreter::Filter;
 use jq_jit::ir::BinOp;
@@ -3005,6 +3006,61 @@ fn raw_field_update_length_non_object_input_bails() {
         assert!(
             matches!(outcome, RawApplyOutcome::Bail),
             "expected Bail for field_update_length input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `.field |= tostring` — string-coerce update fast path. Strings pass
+// through; numbers / booleans / null are wrapped in quotes. Arrays and
+// objects bail since their stringification needs the recursive JSON encoder.
+
+#[test]
+fn raw_field_update_tostring_string_passthrough() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_update_tostring_raw(b"{\"x\":\"hi\"}", "x", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"{\"x\":\"hi\"}");
+}
+
+#[test]
+fn raw_field_update_tostring_number_wraps_in_quotes() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_update_tostring_raw(b"{\"x\":42}", "x", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"{\"x\":\"42\"}");
+}
+
+#[test]
+fn raw_field_update_tostring_null_wraps_in_quotes() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_update_tostring_raw(b"{\"x\":null}", "x", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"{\"x\":\"null\"}");
+}
+
+#[test]
+fn raw_field_update_tostring_field_missing_bails() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_update_tostring_raw(b"{\"y\":\"hi\"}", "x", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+}
+
+#[test]
+fn raw_field_update_tostring_non_object_input_bails() {
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut buf = Vec::new();
+        let outcome = apply_field_update_tostring_raw(raw, "x", &mut buf);
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for field_update_tostring input {:?}, got {:?}",
             std::str::from_utf8(raw).unwrap(),
             outcome,
         );

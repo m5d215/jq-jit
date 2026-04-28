@@ -68,7 +68,7 @@ use crate::value::{
     KeyStr, Value, ObjInner, json_object_get_field_raw, json_object_get_fields_raw_buf,
     json_object_get_nested_field_raw, json_object_get_num, json_object_get_two_nums,
     json_object_has_all_keys, json_object_has_any_key, json_object_has_key,
-    json_object_update_field_length,
+    json_object_update_field_length, json_object_update_field_tostring,
 };
 
 /// A fast path whose type-dispatch obligations are encoded in its
@@ -1048,6 +1048,33 @@ where
 /// compact output).
 pub fn apply_field_update_length_raw(raw: &[u8], field: &str, buf: &mut Vec<u8>) -> RawApplyOutcome {
     if json_object_update_field_length(raw, 0, field, buf) {
+        RawApplyOutcome::Emit
+    } else {
+        RawApplyOutcome::Bail
+    }
+}
+
+/// Apply the `.field |= tostring` raw-byte update fast path on a single
+/// JSON record, writing the updated object bytes to `buf`.
+///
+/// jq's `tostring` is identity on strings and JSON-stringifies every
+/// other type (numbers → `"42"`, booleans → `"true"`, `null` → `"null"`,
+/// arrays/objects → their pretty/compact JSON representation). The
+/// underlying value-side function handles strings + scalars; arrays and
+/// objects bail to generic since stringifying them requires the full
+/// recursive JSON encoder.
+///
+/// Bail discipline:
+/// * Non-object input — [`RawApplyOutcome::Bail`].
+/// * Field absent — [`RawApplyOutcome::Bail`].
+/// * Field value is an array or object literal —
+///   [`RawApplyOutcome::Bail`] (generic does the recursive
+///   stringification).
+///
+/// On success, `buf` is appended the updated object bytes (without a
+/// trailing newline).
+pub fn apply_field_update_tostring_raw(raw: &[u8], field: &str, buf: &mut Vec<u8>) -> RawApplyOutcome {
+    if json_object_update_field_tostring(raw, 0, field, buf) {
         RawApplyOutcome::Emit
     } else {
         RawApplyOutcome::Bail
