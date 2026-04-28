@@ -26,7 +26,8 @@ use jq_jit::fast_path::{
     apply_compound_field_cmp_raw,
     apply_field_binop_const_unary_raw, apply_field_index_arith_raw,
     apply_field_unary_arith_raw, apply_field_unary_num_raw,
-    apply_field_update_trim_raw, apply_numeric_expr_raw,
+    apply_field_update_trim_raw, apply_is_length_raw, apply_is_type_raw,
+    apply_numeric_expr_raw,
     apply_select_arith_cmp_raw, apply_select_cmp_raw,
     apply_select_field_null_raw, apply_select_str_raw, apply_select_str_test_raw,
     apply_two_field_binop_const_raw,
@@ -2533,6 +2534,112 @@ fn raw_field_binop_const_unary_non_object_input_bails() {
             outcome,
         );
         assert!(emitted.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `type` — no-Bail helper. The output is uniquely determined by the first
+// byte of the parsed JSON value, with no type-error case in jq.
+
+#[test]
+fn raw_is_type_object() {
+    let mut buf = Vec::new();
+    let outcome = apply_is_type_raw(b"{\"x\":1}", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"\"object\"\n");
+}
+
+#[test]
+fn raw_is_type_each_kind() {
+    for (raw, expected) in [
+        (&b"[1,2]"[..], &b"\"array\"\n"[..]),
+        (&b"\"hi\""[..], &b"\"string\"\n"[..]),
+        (&b"true"[..], &b"\"boolean\"\n"[..]),
+        (&b"false"[..], &b"\"boolean\"\n"[..]),
+        (&b"null"[..], &b"\"null\"\n"[..]),
+        (&b"42"[..], &b"\"number\"\n"[..]),
+        (&b"-3.14"[..], &b"\"number\"\n"[..]),
+    ] {
+        let mut buf = Vec::new();
+        let outcome = apply_is_type_raw(raw, &mut buf);
+        assert!(matches!(outcome, RawApplyOutcome::Emit));
+        assert_eq!(buf, expected, "input={:?}", std::str::from_utf8(raw).unwrap());
+    }
+}
+
+#[test]
+fn raw_is_type_empty_input_bails() {
+    let mut buf = Vec::new();
+    let outcome = apply_is_type_raw(b"", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(buf.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// `length` — polymorphic. The raw scanner only handles container/null lengths
+// directly; strings and numbers Bail to the generic path (which has the
+// unicode-aware string-length and abs-of-number paths). Booleans Bail too —
+// jq raises `boolean has no length` and the generic path produces it.
+
+#[test]
+fn raw_is_length_array() {
+    let mut buf = Vec::new();
+    let outcome = apply_is_length_raw(b"[1,2,3]", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"3\n");
+}
+
+#[test]
+fn raw_is_length_array_empty() {
+    let mut buf = Vec::new();
+    let outcome = apply_is_length_raw(b"[]", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"0\n");
+}
+
+#[test]
+fn raw_is_length_object() {
+    let mut buf = Vec::new();
+    let outcome = apply_is_length_raw(b"{\"a\":1,\"b\":2}", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"2\n");
+}
+
+#[test]
+fn raw_is_length_null_is_zero() {
+    let mut buf = Vec::new();
+    let outcome = apply_is_length_raw(b"null", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf, b"0\n");
+}
+
+#[test]
+fn raw_is_length_string_bails() {
+    // The raw scanner punts on strings (`json_value_length` only handles
+    // containers + null); generic path counts unicode code points.
+    let mut buf = Vec::new();
+    let outcome = apply_is_length_raw(b"\"hello\"", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_is_length_number_bails() {
+    // Same — generic path produces `abs(n)` for number length.
+    let mut buf = Vec::new();
+    let outcome = apply_is_length_raw(b"-7", &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn raw_is_length_boolean_bails() {
+    // jq: `boolean (true) has no length`
+    for raw in [&b"true"[..], &b"false"[..]] {
+        let mut buf = Vec::new();
+        let outcome = apply_is_length_raw(raw, &mut buf);
+        assert!(matches!(outcome, RawApplyOutcome::Bail), "raw={:?}", std::str::from_utf8(raw).unwrap());
+        assert!(buf.is_empty());
     }
 }
 

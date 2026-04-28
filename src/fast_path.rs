@@ -75,7 +75,7 @@ use crate::value::{
     json_object_update_field_split_first, json_object_update_field_split_last,
     json_object_update_field_str_concat, json_object_update_field_str_map,
     json_object_update_field_test, json_object_update_field_tostring,
-    json_object_update_field_trim, json_value_length, push_jq_number_bytes,
+    json_object_update_field_trim, json_type_byte, json_value_length, push_jq_number_bytes,
 };
 
 /// A fast path whose type-dispatch obligations are encoded in its
@@ -863,6 +863,56 @@ where
     };
     emit(result);
     RawApplyOutcome::Emit
+}
+
+/// Apply the `type` raw-byte fast path on a single JSON record.
+///
+/// jq's `type` returns the static type name (`"object"` / `"array"` /
+/// `"string"` / `"boolean"` / `"null"` / `"number"`) of the input.
+/// The output is determined entirely by the first byte of the parsed
+/// JSON value, which `json_stream_raw` guarantees is one of the
+/// valid JSON-value starts.
+///
+/// **No-Bail helper.** Unlike most apply helpers in this module, this
+/// one never returns [`RawApplyOutcome::Bail`] for well-formed input
+/// — the first byte uniquely determines the output, and there is no
+/// type-error case for `type` in jq. The structural shape is pinned
+/// here so a future reader doesn't add a Bail branch and accidentally
+/// route some input through the generic path with a different
+/// behaviour.
+///
+/// Writes the type-name bytes (with surrounding `"` quotes) plus a
+/// trailing newline to `buf`.
+pub fn apply_is_type_raw(raw: &[u8], buf: &mut Vec<u8>) -> RawApplyOutcome {
+    if raw.is_empty() {
+        return RawApplyOutcome::Bail;
+    }
+    buf.extend_from_slice(json_type_byte(raw[0]));
+    buf.push(b'\n');
+    RawApplyOutcome::Emit
+}
+
+/// Apply the `length` raw-byte fast path on a single JSON record.
+///
+/// The raw scanner only handles container and null lengths directly:
+/// * Object — number of keys.
+/// * Array — number of elements.
+/// * Null — `0`.
+///
+/// Strings, numbers, booleans, and any malformed input return
+/// [`RawApplyOutcome::Bail`] so the generic path produces jq's
+/// verdict (unicode-aware string length, `abs(n)` for numbers,
+/// `boolean has no length` error). Adding fast-path support for
+/// strings/numbers is a separate optimisation.
+pub fn apply_is_length_raw(raw: &[u8], buf: &mut Vec<u8>) -> RawApplyOutcome {
+    match json_value_length(raw, 0) {
+        Some(len) => {
+            push_jq_number_bytes(buf, len as f64);
+            buf.push(b'\n');
+            RawApplyOutcome::Emit
+        }
+        None => RawApplyOutcome::Bail,
+    }
 }
 
 /// Apply the `(.x cmp1 N1) <conjunct> (.y cmp2 N2) <conjunct> ...`

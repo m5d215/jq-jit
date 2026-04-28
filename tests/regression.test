@@ -4434,3 +4434,51 @@ if .x > .y then "a" else "b" end
 if .x > .y then "a" else "b" end
 {"x":5}
 "a"
+
+# Issue #251: is_type / is_length apply-sites use RawApplyOutcome (#83 Phase B).
+# `is_type` is a no-Bail helper (output is uniquely determined by the first
+# byte of the JSON value). `is_length` Bails for strings/numbers/booleans
+# so the generic path handles them.
+type
+{"a":1}
+"object"
+
+type
+[1,2]
+"array"
+
+type
+"hi"
+"string"
+
+type
+42
+"number"
+
+type
+true
+"boolean"
+
+type
+null
+"null"
+
+length
+[1,2,3]
+3
+
+length
+{"a":1,"b":2}
+2
+
+length
+null
+0
+
+length
+"hello"
+5
+
+length
+-7
+7
