@@ -2679,3 +2679,71 @@ null
 {a: .x}
 {"x":[1,2,3]}
 {"a":[1,2,3]}
+
+# Issue #83 Phase B: raw .field // fallback and .field // .other apply-sites
+# now route their #198 type-error guard through RawApplyOutcome::Bail. `//`
+# must never swallow type errors -- a non-object non-null input bails so the
+# generic path raises `Cannot index ... with string`.
+
+# .field // literal emits the value when present and truthy
+.x // 99
+{"x":42}
+42
+
+# .field // literal emits fallback when value is null
+.x // 99
+{"x":null}
+99
+
+# .field // literal emits fallback when value is false
+.x // 99
+{"x":false}
+99
+
+# .field // literal emits fallback when key is missing
+.x // 99
+{"y":1}
+99
+
+# .field // literal on null input emits fallback (no field to extract)
+.x // 99
+null
+99
+
+# .field // literal under `?` on a number bails to generic, generic raises
+(.x // 99)?
+42
+
+# .field // literal under `?` on a string
+(.x // 99)?
+"hi"
+
+# .field // literal under `?` on a boolean
+(.x // 99)?
+true
+
+# .field // literal under `?` on an array
+(.x // 99)?
+[1,2,3]
+
+# .field1 // .field2 emits primary when truthy
+.a // .b
+{"a":1,"b":2}
+1
+
+# .field1 // .field2 emits fallback when primary is null
+.a // .b
+{"a":null,"b":2}
+2
+
+# .field1 // .field2 emits null when both missing
+.a // .b
+{"c":3}
+null
+
+# .field1 // .field2 under `?` on a non-object bails
+(.a // .b)?
+42
+
+(.a // .b)?
+"hi"

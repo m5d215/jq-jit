@@ -9,9 +9,10 @@
 //!   pilot and returns `None` for filters that aren't yet migrated.
 
 use jq_jit::fast_path::{
-    FastPath, FieldAccessPath, RawApplyOutcome, apply_full_object_fields_raw,
-    apply_field_access_raw, apply_has_field_raw, apply_has_multi_field_raw,
-    apply_multi_field_access_raw, apply_nested_field_access_raw, apply_object_compute_raw,
+    FastPath, FieldAccessPath, RawApplyOutcome, apply_field_access_raw,
+    apply_field_alternative_raw, apply_field_field_alternative_raw, apply_full_object_fields_raw,
+    apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
+    apply_nested_field_access_raw, apply_object_compute_raw,
 };
 use jq_jit::interpreter::Filter;
 use jq_jit::value::Value;
@@ -654,4 +655,150 @@ fn raw_object_compute_partial_object_outer_bails() {
     assert!(matches!(outcome, RawApplyOutcome::Bail));
     assert_eq!(bail_calls, 0);
     assert_eq!(emit_calls, 0);
+}
+
+// ---------------------------------------------------------------------------
+// `.field // fallback` and `.field // .other` — `//` MUST NOT swallow type
+// errors (#198). Both helpers Bail for non-object non-null inputs so the
+// generic path raises `Cannot index ... with string`. On object / null they
+// emit per jq's `//` falsey gate (`null` / `false` -> fallback).
+
+#[test]
+fn raw_field_alt_present_truthy_emits_value() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_field_alternative_raw(
+        b"{\"x\":42}",
+        "x",
+        b"\"fallback\"",
+        |b| emitted.push(b.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![b"42".to_vec()]);
+}
+
+#[test]
+fn raw_field_alt_present_falsey_emits_fallback() {
+    for falsey in [&b"null"[..], &b"false"[..]] {
+        let raw = format!("{{\"x\":{}}}", std::str::from_utf8(falsey).unwrap());
+        let mut emitted: Vec<Vec<u8>> = Vec::new();
+        let outcome = apply_field_alternative_raw(
+            raw.as_bytes(),
+            "x",
+            b"99",
+            |b| emitted.push(b.to_vec()),
+        );
+        assert!(matches!(outcome, RawApplyOutcome::Emit));
+        assert_eq!(
+            emitted,
+            vec![b"99".to_vec()],
+            "input {} (field is falsey) must emit fallback",
+            raw,
+        );
+    }
+}
+
+#[test]
+fn raw_field_alt_missing_emits_fallback() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_field_alternative_raw(
+        b"{\"y\":1}",
+        "x",
+        b"\"missing\"",
+        |b| emitted.push(b.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![b"\"missing\"".to_vec()]);
+}
+
+#[test]
+fn raw_field_alt_null_input_emits_fallback() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_field_alternative_raw(
+        b"null",
+        "x",
+        b"77",
+        |b| emitted.push(b.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![b"77".to_vec()]);
+}
+
+#[test]
+fn raw_field_alt_non_object_non_null_bails() {
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut emitted: Vec<Vec<u8>> = Vec::new();
+        let outcome = apply_field_alternative_raw(raw, "x", b"99", |b| emitted.push(b.to_vec()));
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
+    }
+}
+
+#[test]
+fn raw_field_field_alt_primary_truthy_emits_primary() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_field_field_alternative_raw(
+        b"{\"a\":1,\"b\":2}",
+        "a",
+        "b",
+        |bytes| emitted.push(bytes.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![b"1".to_vec()]);
+}
+
+#[test]
+fn raw_field_field_alt_primary_falsey_emits_fallback_value() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_field_field_alternative_raw(
+        b"{\"a\":null,\"b\":2}",
+        "a",
+        "b",
+        |bytes| emitted.push(bytes.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![b"2".to_vec()]);
+}
+
+#[test]
+fn raw_field_field_alt_both_missing_emits_null_literal() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_field_field_alternative_raw(
+        b"{\"c\":3}",
+        "a",
+        "b",
+        |bytes| emitted.push(bytes.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![b"null".to_vec()]);
+}
+
+#[test]
+fn raw_field_field_alt_non_object_non_null_bails() {
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut emitted: Vec<Vec<u8>> = Vec::new();
+        let outcome =
+            apply_field_field_alternative_raw(raw, "a", "b", |b| emitted.push(b.to_vec()));
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
+    }
 }
