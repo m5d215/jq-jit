@@ -368,8 +368,13 @@ where
     RawApplyOutcome::Emit
 }
 
-/// Apply the `.field | match("pattern"; flags)` raw-byte fast path on a
-/// single JSON record.
+/// Apply a single-call `.field | re.captures(content)` raw-byte fast path
+/// on one JSON record. Used by both `match` and `capture` apply-sites:
+/// both run a single `captures()` call (not an iterator), emit one output
+/// on a successful match, and emit nothing on a non-match — the only
+/// difference is the bytes the apply-site builds in `on_match` (`match`
+/// emits `{offset,length,string,captures:[...]}`, `capture` emits an
+/// object keyed by the named groups).
 ///
 /// Bail discipline matches [`apply_field_test_raw`] (only quoted-string
 /// fields with no backslash escapes are handled by the raw scanner; the
@@ -378,10 +383,8 @@ where
 ///
 /// * Object input, field present, value is a quoted string with no `\`
 ///   escapes — runs `re.captures(content)`. On a match, invokes
-///   `on_match(content, captures)` so the caller can build jq's
-///   `{offset,length,string,captures:[...]}` output bytes. On no match,
-///   `on_match` is **not** called (jq emits no output for a non-match —
-///   `match` is multi-output / 0-arity for "no match").
+///   `on_match(content, captures)` so the caller can build jq's output
+///   bytes. On no match, `on_match` is **not** called.
 /// * Field absent, value isn't a quoted string, or the string contains
 ///   any backslash escape — returns [`RawApplyOutcome::Bail`] so the
 ///   generic path produces jq's verdict (decoded escapes, type errors).
