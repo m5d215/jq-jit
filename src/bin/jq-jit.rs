@@ -8960,50 +8960,31 @@ fn real_main() {
                     })
                 } else if let Some((ref conj, ref cmps)) = select_compound {
                     use jq_jit::ir::BinOp;
-                    let is_and = matches!(conj, BinOp::And);
-                    // Specialized path for exactly 2 comparisons on different fields: use get_two_nums
-                    let two_field = if cmps.len() == 2 && cmps[0].0 != cmps[1].0 {
-                        Some((cmps[0].0.as_str(), cmps[1].0.as_str()))
-                    } else { None };
+                    // Pre-deduplicate field names + cmp_spec for the helper.
+                    let mut field_names: Vec<String> = Vec::new();
+                    let mut field_idx: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                    for (f, _, _) in cmps {
+                        if !field_idx.contains_key(f) {
+                            field_idx.insert(f.clone(), field_names.len());
+                            field_names.push(f.clone());
+                        }
+                    }
+                    let field_refs: Vec<&str> = field_names.iter().map(|s| s.as_str()).collect();
+                    let cmp_spec: Vec<(usize, BinOp, f64)> = cmps.iter().map(|(f, op, n)| (field_idx[f], *op, *n)).collect();
+                    let mut vals_buf: Vec<f64> = vec![0.0; field_names.len()];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        let pass = if let Some((f1, f2)) = two_field {
-                            if let Some((v1, v2)) = json_object_get_two_nums(raw, 0, f1, f2) {
-                                let c1 = match &cmps[0].1 {
-                                    BinOp::Gt => v1 > cmps[0].2, BinOp::Lt => v1 < cmps[0].2,
-                                    BinOp::Ge => v1 >= cmps[0].2, BinOp::Le => v1 <= cmps[0].2,
-                                    BinOp::Eq => v1 == cmps[0].2, BinOp::Ne => v1 != cmps[0].2,
-                                    _ => false,
-                                };
-                                let c2 = match &cmps[1].1 {
-                                    BinOp::Gt => v2 > cmps[1].2, BinOp::Lt => v2 < cmps[1].2,
-                                    BinOp::Ge => v2 >= cmps[1].2, BinOp::Le => v2 <= cmps[1].2,
-                                    BinOp::Eq => v2 == cmps[1].2, BinOp::Ne => v2 != cmps[1].2,
-                                    _ => false,
-                                };
-                                if is_and { c1 && c2 } else { c1 || c2 }
-                            } else { false }
-                        } else if is_and {
-                            cmps.iter().all(|(field, op, threshold)| {
-                                json_object_get_num(raw, 0, field).map_or(false, |val| match op {
-                                    BinOp::Gt => val > *threshold, BinOp::Lt => val < *threshold,
-                                    BinOp::Ge => val >= *threshold, BinOp::Le => val <= *threshold,
-                                    BinOp::Eq => val == *threshold, BinOp::Ne => val != *threshold,
-                                    _ => false,
-                                })
-                            })
-                        } else {
-                            cmps.iter().any(|(field, op, threshold)| {
-                                json_object_get_num(raw, 0, field).map_or(false, |val| match op {
-                                    BinOp::Gt => val > *threshold, BinOp::Lt => val < *threshold,
-                                    BinOp::Ge => val >= *threshold, BinOp::Le => val <= *threshold,
-                                    BinOp::Eq => val == *threshold, BinOp::Ne => val != *threshold,
-                                    _ => false,
-                                })
-                            })
-                        };
-                        if pass {
-                            emit_raw_ln!(&mut compact_buf, raw);
+                        let outcome = apply_compound_field_cmp_raw(
+                            raw, &field_refs, &cmp_spec, *conj, &mut vals_buf,
+                            |pass| {
+                                if pass {
+                                    emit_raw_ln!(&mut compact_buf, raw);
+                                }
+                            },
+                        );
+                        if let RawApplyOutcome::Bail = outcome {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -16491,49 +16472,30 @@ fn real_main() {
             } else if let Some((ref conj, ref cmps)) = select_compound {
                 use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
-                let is_and = matches!(conj, BinOp::And);
-                let two_field = if cmps.len() == 2 && cmps[0].0 != cmps[1].0 {
-                    Some((cmps[0].0.as_str(), cmps[1].0.as_str()))
-                } else { None };
+                let mut field_names: Vec<String> = Vec::new();
+                let mut field_idx: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                for (f, _, _) in cmps {
+                    if !field_idx.contains_key(f) {
+                        field_idx.insert(f.clone(), field_names.len());
+                        field_names.push(f.clone());
+                    }
+                }
+                let field_refs: Vec<&str> = field_names.iter().map(|s| s.as_str()).collect();
+                let cmp_spec: Vec<(usize, BinOp, f64)> = cmps.iter().map(|(f, op, n)| (field_idx[f], *op, *n)).collect();
+                let mut vals_buf: Vec<f64> = vec![0.0; field_names.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    let pass = if let Some((f1, f2)) = two_field {
-                        if let Some((v1, v2)) = json_object_get_two_nums(raw, 0, f1, f2) {
-                            let c1 = match &cmps[0].1 {
-                                BinOp::Gt => v1 > cmps[0].2, BinOp::Lt => v1 < cmps[0].2,
-                                BinOp::Ge => v1 >= cmps[0].2, BinOp::Le => v1 <= cmps[0].2,
-                                BinOp::Eq => v1 == cmps[0].2, BinOp::Ne => v1 != cmps[0].2,
-                                _ => false,
-                            };
-                            let c2 = match &cmps[1].1 {
-                                BinOp::Gt => v2 > cmps[1].2, BinOp::Lt => v2 < cmps[1].2,
-                                BinOp::Ge => v2 >= cmps[1].2, BinOp::Le => v2 <= cmps[1].2,
-                                BinOp::Eq => v2 == cmps[1].2, BinOp::Ne => v2 != cmps[1].2,
-                                _ => false,
-                            };
-                            if is_and { c1 && c2 } else { c1 || c2 }
-                        } else { false }
-                    } else if is_and {
-                        cmps.iter().all(|(field, op, threshold)| {
-                            json_object_get_num(raw, 0, field).map_or(false, |val| match op {
-                                BinOp::Gt => val > *threshold, BinOp::Lt => val < *threshold,
-                                BinOp::Ge => val >= *threshold, BinOp::Le => val <= *threshold,
-                                BinOp::Eq => val == *threshold, BinOp::Ne => val != *threshold,
-                                _ => false,
-                            })
-                        })
-                    } else {
-                        cmps.iter().any(|(field, op, threshold)| {
-                            json_object_get_num(raw, 0, field).map_or(false, |val| match op {
-                                BinOp::Gt => val > *threshold, BinOp::Lt => val < *threshold,
-                                BinOp::Ge => val >= *threshold, BinOp::Le => val <= *threshold,
-                                BinOp::Eq => val == *threshold, BinOp::Ne => val != *threshold,
-                                _ => false,
-                            })
-                        })
-                    };
-                    if pass {
-                        emit_raw_ln!(&mut compact_buf, raw);
+                    let outcome = apply_compound_field_cmp_raw(
+                        raw, &field_refs, &cmp_spec, *conj, &mut vals_buf,
+                        |pass| {
+                            if pass {
+                                emit_raw_ln!(&mut compact_buf, raw);
+                            }
+                        },
+                    );
+                    if let RawApplyOutcome::Bail = outcome {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
