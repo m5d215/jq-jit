@@ -154,7 +154,7 @@ use jq_jit::fast_path::{
     apply_field_cmp_val_raw, apply_null_branch_lit_raw,
     apply_obj_assign_two_fields_arith_raw, apply_obj_merge_computed_raw,
     apply_obj_merge_lit_raw, apply_remap_to_entries_raw, apply_remap_tojson_raw,
-    apply_to_entries_each_interp_raw,
+    apply_select_string_chain_raw, apply_to_entries_each_interp_raw,
     apply_select_nested_cmp_raw, apply_select_num_str_raw, apply_two_field_binop_const_raw,
     apply_with_entries_del_raw,
     apply_with_entries_key_str_raw, apply_with_entries_select_raw,
@@ -7301,100 +7301,16 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref sc_field, ref sc_ops, ref sc_terminal)) = select_string_chain {
-                    // select(.field | ascii_downcase | startswith("str")) etc.
-                    use jq_jit::interpreter::{StringChainOp, StringChainTerminal};
                     let mut tmp_str: Vec<u8> = Vec::new();
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sc_field) {
-                            let val = &raw[vs..ve];
-                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                                && memchr::memchr(b'\\', &val[1..val.len()-1]).is_none()
-                            {
-                                tmp_str.clear();
-                                tmp_str.extend_from_slice(&val[1..val.len()-1]);
-                                // Apply string ops
-                                for op in sc_ops.iter() {
-                                    match op {
-                                        StringChainOp::AsciiDowncase => {
-                                            tmp_str.make_ascii_lowercase();
-                                        }
-                                        StringChainOp::AsciiUpcase => {
-                                            tmp_str.make_ascii_uppercase();
-                                        }
-                                        StringChainOp::Ltrimstr(ref s) => {
-                                            let sb = s.as_bytes();
-                                            if tmp_str.starts_with(sb) {
-                                                tmp_str.drain(..sb.len());
-                                            }
-                                        }
-                                        StringChainOp::Rtrimstr(ref s) => {
-                                            let sb = s.as_bytes();
-                                            if sb.is_empty() {
-                                                tmp_str.clear();
-                                            } else if tmp_str.ends_with(sb) {
-                                                let new_len = tmp_str.len() - sb.len();
-                                                tmp_str.truncate(new_len);
-                                            }
-                                        }
-                                        StringChainOp::SplitJoin(ref sep, ref rep) => {
-                                            let sb = sep.as_bytes();
-                                            let rb = rep.as_bytes();
-                                            let mut result = Vec::new();
-                                            let mut pos = 0;
-                                            let mut first = true;
-                                            while pos <= tmp_str.len() {
-                                                let end_pos = if sb.is_empty() { pos + 1 } else {
-                                                    tmp_str[pos..].windows(sb.len()).position(|w| w == sb)
-                                                        .map(|p| pos + p).unwrap_or(tmp_str.len())
-                                                };
-                                                if !first { result.extend_from_slice(rb); }
-                                                result.extend_from_slice(&tmp_str[pos..end_pos]);
-                                                first = false;
-                                                if end_pos >= tmp_str.len() { break; }
-                                                pos = end_pos + sb.len();
-                                            }
-                                            tmp_str = result;
-                                        }
-                                        StringChainOp::SplitReverseJoin(ref sep, ref rep) => {
-                                            let sb = sep.as_bytes();
-                                            let rb = rep.as_bytes();
-                                            let mut segments: Vec<&[u8]> = Vec::new();
-                                            let mut pos = 0;
-                                            while pos <= tmp_str.len() {
-                                                let end_pos = tmp_str[pos..].windows(sb.len()).position(|w| w == sb)
-                                                    .map(|p| pos + p).unwrap_or(tmp_str.len());
-                                                segments.push(&tmp_str[pos..end_pos]);
-                                                if end_pos >= tmp_str.len() { break; }
-                                                pos = end_pos + sb.len();
-                                            }
-                                            segments.reverse();
-                                            let mut result = Vec::new();
-                                            for (i, seg) in segments.iter().enumerate() {
-                                                if i > 0 { result.extend_from_slice(rb); }
-                                                result.extend_from_slice(seg);
-                                            }
-                                            tmp_str = result;
-                                        }
-                                    }
-                                }
-                                // Apply terminal
-                                let pass = match sc_terminal {
-                                    StringChainTerminal::Startswith(ref arg) => {
-                                        tmp_str.starts_with(arg.as_bytes())
-                                    }
-                                    StringChainTerminal::Endswith(ref arg) => {
-                                        tmp_str.ends_with(arg.as_bytes())
-                                    }
-                                    StringChainTerminal::Contains(ref arg) => {
-                                        bytes_contains(&tmp_str, arg.as_bytes())
-                                    }
-                                    _ => false,
-                                };
-                                if pass {
-                                    emit_raw_ln!(&mut compact_buf, raw);
-                                }
-                            }
+                        let outcome = apply_select_string_chain_raw(
+                            raw, sc_field, sc_ops, sc_terminal, &mut tmp_str,
+                            |bytes| { emit_raw_ln!(&mut compact_buf, bytes); },
+                        );
+                        if let RawApplyOutcome::Bail = outcome {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -14615,44 +14531,17 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some((ref sc_field, ref sc_ops, ref sc_terminal)) = select_string_chain {
-                // select(.field | string_chain | terminal) — file path
-                use jq_jit::interpreter::{StringChainOp, StringChainTerminal};
                 let content_bytes = content.as_bytes();
                 let mut tmp_str: Vec<u8> = Vec::new();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sc_field) {
-                        let val = &raw[vs..ve];
-                        if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                            && memchr::memchr(b'\\', &val[1..val.len()-1]).is_none()
-                        {
-                            tmp_str.clear();
-                            tmp_str.extend_from_slice(&val[1..val.len()-1]);
-                            for op in sc_ops.iter() {
-                                match op {
-                                    StringChainOp::AsciiDowncase => tmp_str.make_ascii_lowercase(),
-                                    StringChainOp::AsciiUpcase => tmp_str.make_ascii_uppercase(),
-                                    StringChainOp::Ltrimstr(ref s) => {
-                                        let sb = s.as_bytes();
-                                        if tmp_str.starts_with(sb) { tmp_str.drain(..sb.len()); }
-                                    }
-                                    StringChainOp::Rtrimstr(ref s) => {
-                                        let sb = s.as_bytes();
-                                        if sb.is_empty() {
-                                            tmp_str.clear();
-                                        } else if tmp_str.ends_with(sb) { let l = tmp_str.len() - sb.len(); tmp_str.truncate(l); }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            let pass = match sc_terminal {
-                                StringChainTerminal::Startswith(ref arg) => tmp_str.starts_with(arg.as_bytes()),
-                                StringChainTerminal::Endswith(ref arg) => tmp_str.ends_with(arg.as_bytes()),
-                                StringChainTerminal::Contains(ref arg) => bytes_contains(&tmp_str, arg.as_bytes()),
-                                _ => false,
-                            };
-                            if pass { emit_raw_ln!(&mut compact_buf, raw); }
-                        }
+                    let outcome = apply_select_string_chain_raw(
+                        raw, sc_field, sc_ops, sc_terminal, &mut tmp_str,
+                        |bytes| { emit_raw_ln!(&mut compact_buf, bytes); },
+                    );
+                    if let RawApplyOutcome::Bail = outcome {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);

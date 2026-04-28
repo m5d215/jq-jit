@@ -5217,3 +5217,44 @@ select(.x | test("h")) | .y + 1
 select(.x | test("h")) | .y
 {"x":"hello"}
 null
+
+# Issue #251: select_string_chain apply-site uses RawApplyOutcome (#83 Phase B).
+# Helper Bails on non-object, missing field, non-string field, escaped string,
+# or unsupported terminal — all of which jq raises errors on. Fixes the
+# #83-class silent-skip bugs where non-string predicate inputs produced no
+# output instead of jq's error.
+
+# Happy path — match emits input.
+select(.x | ascii_downcase | startswith("hel"))
+{"x":"HELLO"}
+{"x":"HELLO"}
+
+# No match — silent.
+[ select(.x | ascii_downcase | startswith("zzz")) ]
+{"x":"HELLO"}
+[]
+
+# Non-object input — jq errors, ? swallows.
+[ select(.x | ascii_downcase | startswith("h"))? ]
+"plain"
+[]
+
+# Missing predicate field — jq errors ("explode input must be a string"), ? swallows.
+[ select(.x | ascii_downcase | startswith("h"))? ]
+{"y":1}
+[]
+
+# Non-string predicate field — jq errors, ? swallows.
+[ select(.x | ascii_downcase | startswith("h"))? ]
+{"x":1}
+[]
+
+# ltrimstr chain — match.
+select(.x | ltrimstr("p-") | startswith("data"))
+{"x":"p-data"}
+{"x":"p-data"}
+
+# contains terminal — match.
+select(.x | contains("oob"))
+{"x":"foobar"}
+{"x":"foobar"}
