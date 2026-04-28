@@ -4750,3 +4750,46 @@ select((.x > 0) and (.y > 0))
 [ (select((.x > 0) and (.y > 0)))? ]
 "plain"
 []
+
+# Issue #251: cmp_branch_lit / null_branch_lit apply-sites use RawApplyOutcome
+# (#83 Phase B). cmp_branch_lit reuses apply_field_const_cmp_raw (#263);
+# null_branch_lit gets a new helper. Both fix non-object Bail divergences:
+# null_branch_lit silently emitted the null branch on non-object root instead
+# of jq's `Cannot index <type>` error.
+if .x > 10 then "big" else "small" end
+{"x":42}
+"big"
+
+if .x > 10 then "big" else "small" end
+{"x":5}
+"small"
+
+# Non-numeric — helper Bails, generic uses cross-type ordering ("hi" > 10 = true).
+if .x > 10 then "big" else "small" end
+{"x":"hi"}
+"big"
+
+if .x == null then "yes" else "no" end
+{"x":42}
+"no"
+
+if .x == null then "yes" else "no" end
+{"y":1}
+"yes"
+
+if .x == null then "yes" else "no" end
+{"x":null}
+"yes"
+
+if .x != null then "yes" else "no" end
+{"x":42}
+"yes"
+
+# Non-object input — helper Bails, generic raises indexing error, ? swallows.
+[ (if .x > 10 then "big" else "small" end)? ]
+"plain"
+[]
+
+[ (if .x == null then "yes" else "no" end)? ]
+42
+[]
