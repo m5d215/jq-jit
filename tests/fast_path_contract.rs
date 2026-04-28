@@ -25,11 +25,12 @@ use jq_jit::fast_path::{
     apply_field_update_test_raw, apply_field_update_tostring_raw,
     apply_field_binop_const_unary_raw, apply_field_index_arith_raw,
     apply_field_unary_arith_raw, apply_field_unary_num_raw,
-    apply_field_update_trim_raw, apply_select_arith_cmp_raw, apply_select_cmp_raw,
+    apply_field_update_trim_raw, apply_numeric_expr_raw,
+    apply_select_arith_cmp_raw, apply_select_cmp_raw,
     apply_select_field_null_raw, apply_select_str_raw, apply_select_str_test_raw,
     apply_two_field_binop_const_raw,
 };
-use jq_jit::interpreter::Filter;
+use jq_jit::interpreter::{ArithExpr, Filter, MathUnary};
 use jq_jit::ir::{BinOp, UnaryOp};
 use jq_jit::value::Value;
 
@@ -2532,6 +2533,182 @@ fn raw_field_binop_const_unary_non_object_input_bails() {
         );
         assert!(emitted.is_empty());
     }
+}
+
+// ---------------------------------------------------------------------------
+// `apply_numeric_expr_raw` — generic ArithExpr over named fields, optional
+// trailing math unary. Bails on non-object / missing-or-non-numeric field /
+// non-finite final result / buffer-mismatch.
+
+#[test]
+fn raw_numeric_expr_two_fields_add() {
+    // .x + .y with x=3, y=4
+    let arith = ArithExpr::BinOp(
+        BinOp::Add,
+        Box::new(ArithExpr::Field(0)),
+        Box::new(ArithExpr::Field(1)),
+    );
+    let fields = ["x", "y"];
+    let mut ranges = vec![(0, 0); 2];
+    let mut vals = vec![0.0; 2];
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_numeric_expr_raw(
+        b"{\"x\":3,\"y\":4}", &fields, &arith, None,
+        &mut ranges, &mut vals, |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![7.0]);
+}
+
+#[test]
+fn raw_numeric_expr_three_fields() {
+    // .a * .b + .c with a=2, b=3, c=4 → 10
+    let arith = ArithExpr::BinOp(
+        BinOp::Add,
+        Box::new(ArithExpr::BinOp(
+            BinOp::Mul,
+            Box::new(ArithExpr::Field(0)),
+            Box::new(ArithExpr::Field(1)),
+        )),
+        Box::new(ArithExpr::Field(2)),
+    );
+    let fields = ["a", "b", "c"];
+    let mut ranges = vec![(0, 0); 3];
+    let mut vals = vec![0.0; 3];
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_numeric_expr_raw(
+        b"{\"a\":2,\"b\":3,\"c\":4}", &fields, &arith, None,
+        &mut ranges, &mut vals, |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![10.0]);
+}
+
+#[test]
+fn raw_numeric_expr_with_unary_floor() {
+    // floor((.x + .y) / 2) with x=3, y=4 → floor(3.5) = 3
+    let arith = ArithExpr::BinOp(
+        BinOp::Div,
+        Box::new(ArithExpr::BinOp(
+            BinOp::Add,
+            Box::new(ArithExpr::Field(0)),
+            Box::new(ArithExpr::Field(1)),
+        )),
+        Box::new(ArithExpr::Const(2.0)),
+    );
+    let fields = ["x", "y"];
+    let mut ranges = vec![(0, 0); 2];
+    let mut vals = vec![0.0; 2];
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_numeric_expr_raw(
+        b"{\"x\":3,\"y\":4}", &fields, &arith, Some(MathUnary::Floor),
+        &mut ranges, &mut vals, |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![3.0]);
+}
+
+#[test]
+fn raw_numeric_expr_field_missing_bails() {
+    let arith = ArithExpr::Field(0);
+    let fields = ["x"];
+    let mut ranges = vec![(0, 0); 1];
+    let mut vals = vec![0.0; 1];
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_numeric_expr_raw(
+        b"{\"y\":1}", &fields, &arith, None,
+        &mut ranges, &mut vals, |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_numeric_expr_non_numeric_field_bails() {
+    let arith = ArithExpr::Field(0);
+    let fields = ["x"];
+    let mut ranges = vec![(0, 0); 1];
+    let mut vals = vec![0.0; 1];
+    for inner in [&b"{\"x\":\"hi\"}"[..], &b"{\"x\":null}"[..], &b"{\"x\":[1]}"[..]] {
+        let mut emitted: Vec<f64> = Vec::new();
+        let outcome = apply_numeric_expr_raw(
+            inner, &fields, &arith, None,
+            &mut ranges, &mut vals, |n| emitted.push(n),
+        );
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for non-numeric input {:?}, got {:?}",
+            std::str::from_utf8(inner).unwrap(),
+            outcome,
+        );
+    }
+}
+
+#[test]
+fn raw_numeric_expr_div_by_zero_bails() {
+    // .x / .y with x=1, y=0 → inf → Bail
+    let arith = ArithExpr::BinOp(
+        BinOp::Div,
+        Box::new(ArithExpr::Field(0)),
+        Box::new(ArithExpr::Field(1)),
+    );
+    let fields = ["x", "y"];
+    let mut ranges = vec![(0, 0); 2];
+    let mut vals = vec![0.0; 2];
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_numeric_expr_raw(
+        b"{\"x\":1,\"y\":0}", &fields, &arith, None,
+        &mut ranges, &mut vals, |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_numeric_expr_non_object_input_bails() {
+    let arith = ArithExpr::Field(0);
+    let fields = ["x"];
+    let mut ranges = vec![(0, 0); 1];
+    let mut vals = vec![0.0; 1];
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut emitted: Vec<f64> = Vec::new();
+        let outcome = apply_numeric_expr_raw(
+            raw, &fields, &arith, None,
+            &mut ranges, &mut vals, |n| emitted.push(n),
+        );
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+    }
+}
+
+#[test]
+fn raw_numeric_expr_buffer_too_small_bails() {
+    // Defensive: caller bug
+    let arith = ArithExpr::BinOp(
+        BinOp::Add,
+        Box::new(ArithExpr::Field(0)),
+        Box::new(ArithExpr::Field(1)),
+    );
+    let fields = ["x", "y"];
+    let mut ranges = vec![(0, 0); 1];
+    let mut vals = vec![0.0; 1];
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_numeric_expr_raw(
+        b"{\"x\":3,\"y\":4}", &fields, &arith, None,
+        &mut ranges, &mut vals, |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
 }
 
 // ---------------------------------------------------------------------------
