@@ -5299,3 +5299,40 @@ select((.x | startswith("hel")) or (.y | startswith("wor")))
 [ (select((.x | startswith("hel")) and (.y | startswith("wor"))))? ]
 {"x":1,"y":"world"}
 []
+
+# Issue #251: select_mixed_compound apply-site uses RawApplyOutcome
+# (#83 Phase B). Helper supports mixed `NumCmp` + `StrTest` (with
+# `test` using a pre-compiled regex) conditions, preserving jq's
+# `and`/`or` short-circuit. Bails on non-object, missing fields,
+# non-numeric / non-string, or escaped string for *evaluated* conds.
+# Routes null < N (true in jq) and similar to the generic path.
+
+# Happy AND mixed (str + num).
+select((.x | startswith("hel")) and (.n > 10))
+{"x":"hello","n":42}
+{"x":"hello","n":42}
+
+# AND short-circuits on first false.
+[ select((.x | startswith("hel")) and (.n > 10)) ]
+{"x":"world","n":42}
+[]
+
+# OR short-circuits on first true (skips otherwise-erroring missing .n).
+select((.x | startswith("hel")) or (.n > 10))
+{"x":"hello"}
+{"x":"hello"}
+
+# Generic path: missing field with `<` — null < 10 = true.
+select((.x | startswith("hel")) and (.n < 10))
+{"x":"hello"}
+{"x":"hello"}
+
+# `test` cond — happy path with pre-compiled regex.
+select((.x | test("^hel")) and (.n > 10))
+{"x":"hello","n":42}
+{"x":"hello","n":42}
+
+# Non-object input — ? swallows.
+[ (select((.x | startswith("hel")) and (.n > 10)))? ]
+"plain"
+[]

@@ -62,7 +62,7 @@
 
 use anyhow::Result;
 
-use crate::interpreter::{ArithExpr, CmpVal, MathUnary, StringChainOp, StringChainTerminal};
+use crate::interpreter::{ArithExpr, CmpVal, MathUnary, MixedCond, StringChainOp, StringChainTerminal};
 use crate::ir::{BinOp, UnaryOp};
 use crate::runtime::jq_mod_f64;
 use crate::value::{
@@ -1749,6 +1749,106 @@ where
             "contains" => arg_bytes.is_empty()
                 || memchr::memmem::find(inner, arg_bytes).is_some(),
             _ => return RawApplyOutcome::Bail,
+        };
+        if is_and {
+            if !pass {
+                result = false;
+                break;
+            }
+        } else if pass {
+            result = true;
+            break;
+        }
+    }
+    if result {
+        emit_pass(raw);
+    }
+    RawApplyOutcome::Emit
+}
+
+/// Apply the `select(<cond1> AND/OR <cond2> AND/OR ...)` raw-byte
+/// fast path where each condition is either a numeric comparison
+/// (`MixedCond::NumCmp(field, op, threshold)`) or a string-test
+/// builtin (`MixedCond::StrTest(field, name, arg)` with `name` ∈
+/// `"startswith"`/`"endswith"`/`"contains"`/`"eq"`/`"test"`).
+///
+/// `compiled_re` is a slice parallel to `mixed_conds` holding
+/// pre-compiled `regex::Regex` for `"test"` conditions; entries for
+/// non-test conditions are `None`. The caller compiles once outside
+/// the per-record loop.
+///
+/// jq's `and`/`or` short-circuit is preserved: AND breaks on first
+/// false, OR on first true, so later conditions that would otherwise
+/// error are not evaluated.
+///
+/// Bail discipline (only kicks in for *evaluated* conditions —
+/// short-circuited ones never trigger Bail):
+/// - Non-object input → Bail.
+/// - NumCmp: field absent / non-numeric → Bail. Non-comparison op
+///   (defensive) → Bail.
+/// - StrTest: field absent / non-string / string with `\` escapes →
+///   Bail. `"test"` without a compiled regex (compile failure) →
+///   Bail. Unsupported test name → Bail.
+pub fn apply_select_mixed_compound_raw<F>(
+    raw: &[u8],
+    is_and: bool,
+    mixed_conds: &[MixedCond],
+    compiled_re: &[Option<regex::Regex>],
+    mut emit_pass: F,
+) -> RawApplyOutcome
+where
+    F: FnMut(&[u8]),
+{
+    if raw.is_empty() || raw[0] != b'{' {
+        return RawApplyOutcome::Bail;
+    }
+    let mut result = is_and;
+    for (i, cond) in mixed_conds.iter().enumerate() {
+        let pass = match cond {
+            MixedCond::NumCmp(field, op, threshold) => {
+                let n = match json_object_get_num(raw, 0, field) {
+                    Some(v) => v,
+                    None => return RawApplyOutcome::Bail,
+                };
+                match op {
+                    BinOp::Gt => n > *threshold,
+                    BinOp::Lt => n < *threshold,
+                    BinOp::Ge => n >= *threshold,
+                    BinOp::Le => n <= *threshold,
+                    BinOp::Eq => n == *threshold,
+                    BinOp::Ne => n != *threshold,
+                    _ => return RawApplyOutcome::Bail,
+                }
+            }
+            MixedCond::StrTest(field, test_name, test_arg) => {
+                let (vs, ve) = match json_object_get_field_raw(raw, 0, field) {
+                    Some(p) => p,
+                    None => return RawApplyOutcome::Bail,
+                };
+                let val = &raw[vs..ve];
+                if val.len() < 2 || val[0] != b'"' || val[val.len() - 1] != b'"'
+                    || val[1..val.len() - 1].contains(&b'\\')
+                {
+                    return RawApplyOutcome::Bail;
+                }
+                let inner = &val[1..val.len() - 1];
+                let arg_bytes = test_arg.as_bytes();
+                match test_name.as_str() {
+                    "startswith" => inner.starts_with(arg_bytes),
+                    "endswith" => inner.ends_with(arg_bytes),
+                    "contains" => arg_bytes.is_empty()
+                        || memchr::memmem::find(inner, arg_bytes).is_some(),
+                    "eq" => inner == arg_bytes,
+                    "test" => match compiled_re.get(i).and_then(|r| r.as_ref()) {
+                        Some(re) => {
+                            let s = unsafe { std::str::from_utf8_unchecked(inner) };
+                            re.is_match(s)
+                        }
+                        None => return RawApplyOutcome::Bail,
+                    },
+                    _ => return RawApplyOutcome::Bail,
+                }
+            }
         };
         if is_and {
             if !pass {
