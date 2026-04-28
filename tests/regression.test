@@ -4988,3 +4988,25 @@ select((.x > 0) and (.y > 0)) | .z
 [ (select((.x > 0) and (.y > 0)) | .z)? ]
 "plain"
 []
+
+# Issue #251: select_compound_computed / select_compound_cremap apply-sites use
+# RawApplyOutcome (#83 Phase B, reuse apply_compound_field_cmp_raw from #283).
+select((.x > 0) and (.y > 0)) | (.x + .y)
+{"x":3,"y":4}
+7
+
+select((.x > 0) and (.y > 0)) | {sum: (.x + .y), prod: (.x * .y)}
+{"x":3,"y":4}
+{"sum":7,"prod":12}
+
+select((.x > 0) and (.y > 0)) | (.x + .y)
+{"x":-1,"y":4}
+
+# Non-object input — generic raises indexing error.
+[ (select((.x > 0) and (.y > 0)) | (.x + .y))? ]
+"plain"
+[]
+
+[ (select((.x > 0) and (.y > 0)) | {sum: (.x + .y)})? ]
+"plain"
+[]
