@@ -145,9 +145,9 @@ use jq_jit::fast_path::{
     apply_field_field_alternative_raw, apply_field_field_cmp_raw, apply_field_format_raw,
     apply_field_gsub_raw, apply_field_ltrimstr_tonumber_raw, apply_field_match_raw,
     apply_field_scan_raw, apply_field_str_builtin_raw, apply_field_str_concat_raw,
-    apply_field_binop_const_unary_raw, apply_field_str_reverse_raw, apply_field_test_raw,
-    apply_field_unary_arith_raw, apply_field_unary_num_raw, apply_full_object_fields_raw,
-    apply_two_field_binop_const_raw,
+    apply_field_binop_const_unary_raw, apply_field_index_arith_raw, apply_field_str_reverse_raw,
+    apply_field_test_raw, apply_field_unary_arith_raw, apply_field_unary_num_raw,
+    apply_full_object_fields_raw, apply_two_field_binop_const_raw,
     apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
     apply_nested_field_access_raw, apply_object_compute_raw, apply_select_arith_cmp_raw,
     apply_select_cmp_raw, apply_select_field_null_raw, apply_select_str_raw,
@@ -6420,55 +6420,17 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref fia_field, ref fia_search, fia_is_rindex, fia_op, fia_n)) = field_index_arith {
-                    // .field | index/rindex("str") op N — raw byte
-                    use jq_jit::ir::BinOp;
                     let search_bytes = fia_search.as_bytes();
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, fia_field) {
-                            let val = &raw[vs..ve];
-                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                                && !val[1..val.len()-1].contains(&b'\\')
-                            {
-                                let inner = &val[1..val.len()-1];
-                                let pos = if search_bytes.is_empty() {
-                                    None
-                                } else if fia_is_rindex {
-                                    inner.windows(search_bytes.len()).rposition(|w| w == search_bytes)
-                                } else {
-                                    inner.windows(search_bytes.len()).position(|w| w == search_bytes)
-                                };
-                                if let Some(p) = pos {
-                                    // UTF-8 codepoint position, not byte position
-                                    let cp_pos = inner[..p].iter().filter(|&&b| (b & 0xC0) != 0x80).count() as f64;
-                                    let result = match fia_op {
-                                        BinOp::Add => cp_pos + fia_n,
-                                        BinOp::Sub => cp_pos - fia_n,
-                                        BinOp::Mul => cp_pos * fia_n,
-                                        BinOp::Div => cp_pos / fia_n,
-                                        _ => cp_pos,
-                                    };
-                                    push_jq_number_bytes(&mut compact_buf, result);
-                                    compact_buf.push(b'\n');
-                                } else if matches!(fia_op, BinOp::Add) {
-                                    // index returned null; jq's `null + N` is N.
-                                    // For Sub/Mul/Div jq errors — bail to generic.
-                                    push_jq_number_bytes(&mut compact_buf, fia_n);
-                                    compact_buf.push(b'\n');
-                                } else {
-                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                                }
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            }
-                        } else if matches!(fia_op, BinOp::Add) {
-                            // Field missing → index returns null → `null + N = N` (#167).
-                            push_jq_number_bytes(&mut compact_buf, fia_n);
-                            compact_buf.push(b'\n');
-                        } else {
-                            // For Sub/Mul/Div jq raises a type error on null.
+                        let outcome = apply_field_index_arith_raw(
+                            raw, fia_field, search_bytes, fia_is_rindex, fia_op, fia_n,
+                            |result| {
+                                push_jq_number_bytes(&mut compact_buf, result);
+                                compact_buf.push(b'\n');
+                            },
+                        );
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -19393,52 +19355,18 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some((ref fia_field, ref fia_search, fia_is_rindex, fia_op, fia_n)) = field_index_arith {
-                // .field | index/rindex("str") op N — file path
-                use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
                 let search_bytes = fia_search.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, fia_field) {
-                        let val = &raw[vs..ve];
-                        if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                            && !val[1..val.len()-1].contains(&b'\\')
-                        {
-                            let inner = &val[1..val.len()-1];
-                            let pos = if search_bytes.is_empty() {
-                                None
-                            } else if fia_is_rindex {
-                                inner.windows(search_bytes.len()).rposition(|w| w == search_bytes)
-                            } else {
-                                inner.windows(search_bytes.len()).position(|w| w == search_bytes)
-                            };
-                            if let Some(p) = pos {
-                                let cp_pos = inner[..p].iter().filter(|&&b| (b & 0xC0) != 0x80).count() as f64;
-                                let result = match fia_op {
-                                    BinOp::Add => cp_pos + fia_n,
-                                    BinOp::Sub => cp_pos - fia_n,
-                                    BinOp::Mul => cp_pos * fia_n,
-                                    BinOp::Div => cp_pos / fia_n,
-                                    _ => cp_pos,
-                                };
-                                push_jq_number_bytes(&mut compact_buf, result);
-                                compact_buf.push(b'\n');
-                            } else if matches!(fia_op, BinOp::Add) {
-                                // index returned null; jq's `null + N` is N (#167).
-                                push_jq_number_bytes(&mut compact_buf, fia_n);
-                                compact_buf.push(b'\n');
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            }
-                        } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                        }
-                    } else if matches!(fia_op, BinOp::Add) {
-                        push_jq_number_bytes(&mut compact_buf, fia_n);
-                        compact_buf.push(b'\n');
-                    } else {
+                    let outcome = apply_field_index_arith_raw(
+                        raw, fia_field, search_bytes, fia_is_rindex, fia_op, fia_n,
+                        |result| {
+                            push_jq_number_bytes(&mut compact_buf, result);
+                            compact_buf.push(b'\n');
+                        },
+                    );
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }

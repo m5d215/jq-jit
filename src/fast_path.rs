@@ -903,6 +903,92 @@ where
     RawApplyOutcome::Emit
 }
 
+/// Apply the `(.field | index/rindex("str")) <op> <const>` raw-byte
+/// fast path on a single JSON record.
+///
+/// `is_rindex = true` selects `rindex` (last match) over `index` (first
+/// match). On a successful match, the helper computes the
+/// **codepoint-position** (jq semantics — not byte position) of the
+/// match in the field's UTF-8 content, then folds the arithmetic
+/// `(op, n)` over it. The helper handles the field-missing /
+/// no-match case with jq's `null + N = N` rule for `Add`; for
+/// `Sub`/`Mul`/`Div` jq raises a type error on `null`, so the
+/// helper Bails to let the generic path produce it.
+///
+/// Bail discipline:
+/// * Non-object input — [`RawApplyOutcome::Bail`] (jq raises
+///   `Cannot index <type> with "<field>"`).
+/// * Field absent and `op` isn't `Add` — Bail.
+/// * Field is non-string or escape-bearing string — Bail (the raw
+///   scanner can't decode escapes; for non-strings jq raises a
+///   type error).
+/// * `op` is non-arithmetic (`Eq`/`And`/etc.) — Bail (defensive).
+///
+/// On Emit, invokes `emit(result)` so the apply-site owns
+/// JSON-number formatting.
+pub fn apply_field_index_arith_raw<F>(
+    raw: &[u8],
+    field: &str,
+    search: &[u8],
+    is_rindex: bool,
+    op: BinOp,
+    n: f64,
+    mut emit: F,
+) -> RawApplyOutcome
+where
+    F: FnMut(f64),
+{
+    if raw.is_empty() || raw[0] != b'{' {
+        return RawApplyOutcome::Bail;
+    }
+    if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+        return RawApplyOutcome::Bail;
+    }
+    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
+        let val = &raw[vs..ve];
+        if val.len() < 2 || val[0] != b'"' || val[val.len() - 1] != b'"'
+            || val[1..val.len() - 1].contains(&b'\\')
+        {
+            return RawApplyOutcome::Bail;
+        }
+        let inner = &val[1..val.len() - 1];
+        let pos = if search.is_empty() {
+            None
+        } else if is_rindex {
+            inner.windows(search.len()).rposition(|w| w == search)
+        } else {
+            inner.windows(search.len()).position(|w| w == search)
+        };
+        if let Some(p) = pos {
+            let cp_pos = inner[..p].iter().filter(|&&b| (b & 0xC0) != 0x80).count() as f64;
+            let result = match op {
+                BinOp::Add => cp_pos + n,
+                BinOp::Sub => cp_pos - n,
+                BinOp::Mul => cp_pos * n,
+                BinOp::Div => cp_pos / n,
+                BinOp::Mod => jq_mod_f64(cp_pos, n).unwrap_or(f64::NAN),
+                _ => return RawApplyOutcome::Bail,
+            };
+            if !result.is_finite() {
+                return RawApplyOutcome::Bail;
+            }
+            emit(result);
+        } else if matches!(op, BinOp::Add) {
+            // index returned null; jq's `null + N = N`.
+            emit(n);
+        } else {
+            // For Sub/Mul/Div jq raises on null; Bail to generic.
+            return RawApplyOutcome::Bail;
+        }
+    } else if matches!(op, BinOp::Add) {
+        // Object input + missing field → index returns null → `null + N = N`.
+        emit(n);
+    } else {
+        return RawApplyOutcome::Bail;
+    }
+    RawApplyOutcome::Emit
+}
+
 /// Apply the `.field | <unary>` raw-byte multi-modal fast path on a
 /// single JSON record. Output type depends on the unary op:
 ///

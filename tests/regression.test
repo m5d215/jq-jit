@@ -4283,3 +4283,54 @@ null
 .x | ascii_upcase
 {"x":"a\nb"}
 "A\nB"
+
+# Issue #251: field_index_arith apply-site uses RawApplyOutcome (#83 Phase B).
+# Helper Bails on non-object/non-string/escape-bearing/no-match-non-Add/
+# non-arith op. jq's `null + N = N` rule preserved for missing/no-match Add.
+(.x | index("ab")) + 5
+{"x":"cabd"}
+6
+
+(.x | rindex("a")) + 0
+{"x":"cabad"}
+3
+
+# No match + Add: null + 5 = 5.
+(.x | index("zz")) + 5
+{"x":"abcd"}
+5
+
+# Missing field + Add: null + 7 = 7.
+(.x | index("ab")) + 7
+{"y":1}
+7
+
+# `?`-wrapped: no match + Sub — jq raises null type error, ? swallows.
+[ ((.x | index("zz")) - 5)? ]
+{"x":"abcd"}
+[]
+
+# `?`-wrapped: missing field + Sub.
+[ ((.x | index("ab")) - 5)? ]
+{"y":1}
+[]
+
+# `?`-wrapped: non-string field — generic raises type error.
+[ ((.x | index("ab")) + 5)? ]
+{"x":42}
+[]
+
+# `?`-wrapped: non-object input — generic raises indexing error.
+[ ((.x | index("ab")) + 5)? ]
+"plain"
+[]
+
+# Codepoint (not byte) position for multibyte UTF-8.
+(.x | index("c")) + 0
+{"x":"日本cd"}
+2
+
+# Escaped string field: helper Bails, generic decodes.
+(.x | index("b")) + 0
+{"x":"a\nb"}
+2
