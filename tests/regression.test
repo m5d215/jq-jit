@@ -3395,3 +3395,50 @@ null
 
 (.x * 2 + 1)?
 [1,2,3]
+
+# #83 Phase B: .x <cmp> .y numeric comparison apply-site uses
+# RawApplyOutcome::Bail.
+.x > .y
+{"x":5,"y":3}
+true
+
+.x < .y
+{"x":5,"y":3}
+false
+
+.x == .y
+{"x":2,"y":2}
+true
+
+.x != .y
+{"x":2,"y":2}
+false
+
+# Field missing: bail to generic; jq's `.x == .y` on missing fields is
+# `null == null == true`.
+.x == .y
+{}
+true
+
+# Cross-type equality routes through generic — fast path bails.
+.x == .y
+{"x":"hi","y":"hi"}
+true
+
+.x == .y
+{"x":null,"y":null}
+true
+
+.x == .y
+{"x":1,"y":"1"}
+false
+
+# Non-object input under `?`
+(.x > .y)?
+42
+
+(.x > .y)?
+"hi"
+
+(.x > .y)?
+[1,2,3]

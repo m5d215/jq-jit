@@ -719,6 +719,50 @@ where
     RawApplyOutcome::Emit
 }
 
+/// Apply the `.x <cmp> .y` raw-byte numeric-comparison fast path on a
+/// single JSON record (`<cmp>` ∈ Gt/Lt/Ge/Le/Eq/Ne) where both fields
+/// resolve to JSON numbers.
+///
+/// jq's `==`/`!=` work on every type (`null == null`, `"a" == "a"`),
+/// but this fast path only commits when both fields are numbers; the
+/// generic path handles every other type combination so cross-type
+/// equality (e.g. `null == null`) doesn't silently take the numeric
+/// branch.
+///
+/// Bail discipline:
+/// * Either field absent or non-numeric — [`RawApplyOutcome::Bail`].
+/// * Non-comparison op (`Add`/`And`/etc.) — [`RawApplyOutcome::Bail`]
+///   (defensive — the detector should never produce these).
+/// * Non-object input — [`RawApplyOutcome::Bail`].
+///
+/// On success, invokes `emit(result)` with the boolean comparison.
+pub fn apply_field_field_cmp_raw<F>(
+    raw: &[u8],
+    field_a: &str,
+    field_b: &str,
+    cmp_op: BinOp,
+    mut emit: F,
+) -> RawApplyOutcome
+where
+    F: FnMut(bool),
+{
+    let (a, b) = match json_object_get_two_nums(raw, 0, field_a, field_b) {
+        Some(p) => p,
+        None => return RawApplyOutcome::Bail,
+    };
+    let result = match cmp_op {
+        BinOp::Gt => a > b,
+        BinOp::Lt => a < b,
+        BinOp::Ge => a >= b,
+        BinOp::Le => a <= b,
+        BinOp::Eq => a == b,
+        BinOp::Ne => a != b,
+        _ => return RawApplyOutcome::Bail,
+    };
+    emit(result);
+    RawApplyOutcome::Emit
+}
+
 /// Apply the `.field <op1> <c1> <op2> <c2> ...` raw-byte arithmetic chain
 /// fast path on a single JSON record (a left-fold of `(BinOp, f64)` pairs
 /// over a single numeric field).

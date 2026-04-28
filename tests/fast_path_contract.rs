@@ -11,12 +11,12 @@
 use jq_jit::fast_path::{
     FastPath, FieldAccessPath, RawApplyOutcome, apply_field_access_raw,
     apply_field_alternative_raw, apply_field_arith_chain_raw, apply_field_binop_raw,
-    apply_field_field_alternative_raw, apply_field_format_raw, apply_field_gsub_raw,
-    apply_field_ltrimstr_tonumber_raw, apply_field_match_raw, apply_field_scan_raw,
-    apply_field_str_builtin_raw, apply_field_str_concat_raw, apply_field_str_reverse_raw,
-    apply_field_test_raw, apply_full_object_fields_raw, apply_has_field_raw,
-    apply_has_multi_field_raw, apply_multi_field_access_raw, apply_nested_field_access_raw,
-    apply_object_compute_raw,
+    apply_field_field_alternative_raw, apply_field_field_cmp_raw, apply_field_format_raw,
+    apply_field_gsub_raw, apply_field_ltrimstr_tonumber_raw, apply_field_match_raw,
+    apply_field_scan_raw, apply_field_str_builtin_raw, apply_field_str_concat_raw,
+    apply_field_str_reverse_raw, apply_field_test_raw, apply_full_object_fields_raw,
+    apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
+    apply_nested_field_access_raw, apply_object_compute_raw,
 };
 use jq_jit::interpreter::Filter;
 use jq_jit::ir::BinOp;
@@ -2015,6 +2015,106 @@ fn raw_field_arith_chain_non_object_input_bails() {
         assert!(
             matches!(outcome, RawApplyOutcome::Bail),
             "expected Bail for arith_chain input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `.x <cmp> .y` — numeric comparison fast path. Helper Bails on missing /
+// non-numeric / non-comparison-op / non-object so cross-type equality (e.g.
+// `null == null`) doesn't silently take the numeric branch.
+
+#[test]
+fn raw_field_field_cmp_handles_all_ops() {
+    for (op, expected) in [
+        (BinOp::Gt, true),  // 5 > 3
+        (BinOp::Lt, false),
+        (BinOp::Ge, true),
+        (BinOp::Le, false),
+        (BinOp::Eq, false),
+        (BinOp::Ne, true),
+    ] {
+        let mut emitted: Vec<bool> = Vec::new();
+        let outcome = apply_field_field_cmp_raw(
+            b"{\"x\":5,\"y\":3}",
+            "x",
+            "y",
+            op,
+            |b| emitted.push(b),
+        );
+        assert!(matches!(outcome, RawApplyOutcome::Emit));
+        assert_eq!(emitted, vec![expected], "op={:?}", op);
+    }
+}
+
+#[test]
+fn raw_field_field_cmp_non_cmp_op_bails() {
+    let mut emitted: Vec<bool> = Vec::new();
+    let outcome = apply_field_field_cmp_raw(
+        b"{\"x\":1,\"y\":2}",
+        "x",
+        "y",
+        BinOp::Add,
+        |b| emitted.push(b),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_field_field_cmp_field_missing_bails() {
+    let mut emitted: Vec<bool> = Vec::new();
+    let outcome = apply_field_field_cmp_raw(
+        b"{\"x\":1}",
+        "x",
+        "y",
+        BinOp::Eq,
+        |b| emitted.push(b),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_field_field_cmp_non_numeric_field_bails() {
+    // Both nulls would compare equal in jq, but the helper bails so the
+    // generic path takes over (so the fast path doesn't shadow non-numeric
+    // equality semantics).
+    for inner in [
+        &b"{\"x\":\"a\",\"y\":\"a\"}"[..],
+        &b"{\"x\":null,\"y\":null}"[..],
+        &b"{\"x\":[1],\"y\":[1]}"[..],
+        &b"{\"x\":1,\"y\":\"1\"}"[..],
+    ] {
+        let mut emitted: Vec<bool> = Vec::new();
+        let outcome = apply_field_field_cmp_raw(inner, "x", "y", BinOp::Eq, |b| emitted.push(b));
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for non-numeric field input {:?}, got {:?}",
+            std::str::from_utf8(inner).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
+    }
+}
+
+#[test]
+fn raw_field_field_cmp_non_object_input_bails() {
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut emitted: Vec<bool> = Vec::new();
+        let outcome = apply_field_field_cmp_raw(raw, "x", "y", BinOp::Eq, |b| emitted.push(b));
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for field_field_cmp input {:?}, got {:?}",
             std::str::from_utf8(raw).unwrap(),
             outcome,
         );
