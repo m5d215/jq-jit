@@ -154,8 +154,8 @@ use jq_jit::fast_path::{
     apply_field_cmp_val_raw, apply_null_branch_lit_raw,
     apply_obj_assign_two_fields_arith_raw, apply_obj_merge_computed_raw,
     apply_obj_merge_lit_raw, apply_remap_to_entries_raw, apply_remap_tojson_raw,
-    apply_select_compound_str_test_raw, apply_select_string_chain_raw,
-    apply_to_entries_each_interp_raw,
+    apply_select_compound_str_test_raw, apply_select_mixed_compound_raw,
+    apply_select_string_chain_raw, apply_to_entries_each_interp_raw,
     apply_select_nested_cmp_raw, apply_select_num_str_raw, apply_two_field_binop_const_raw,
     apply_with_entries_del_raw,
     apply_with_entries_key_str_raw, apply_with_entries_select_raw,
@@ -7341,62 +7341,22 @@ fn real_main() {
                 } else if let Some((ref logic_op, ref mixed_conds)) = select_mixed_compound {
                     use jq_jit::ir::BinOp;
                     use jq_jit::interpreter::MixedCond;
-                    // Pre-compile any regex patterns
                     let compiled_re: Vec<Option<regex::Regex>> = mixed_conds.iter().map(|c| {
                         if let MixedCond::StrTest(_, op, arg) = c {
                             if op == "test" { return regex::Regex::new(arg).ok(); }
                         }
                         None
                     }).collect();
+                    let is_and = matches!(logic_op, BinOp::And);
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        let is_and = matches!(logic_op, BinOp::And);
-                        let mut result = is_and;
-                        for (i, cond) in mixed_conds.iter().enumerate() {
-                            let pass = match cond {
-                                MixedCond::NumCmp(field, op, threshold) => {
-                                    if let Some(n) = json_object_get_num(raw, 0, field) {
-                                        match op {
-                                            BinOp::Gt => n > *threshold,
-                                            BinOp::Lt => n < *threshold,
-                                            BinOp::Ge => n >= *threshold,
-                                            BinOp::Le => n <= *threshold,
-                                            BinOp::Eq => n == *threshold,
-                                            BinOp::Ne => n != *threshold,
-                                            _ => false,
-                                        }
-                                    } else { false }
-                                }
-                                MixedCond::StrTest(field, test_name, test_arg) => {
-                                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
-                                        let val = &raw[vs..ve];
-                                        if val.len() >= 2 && val[0] == b'"' && val[ve-vs-1] == b'"' && !val[1..ve-vs-1].contains(&b'\\') {
-                                            let inner = &val[1..ve-vs-1];
-                                            match test_name.as_str() {
-                                                "startswith" => inner.starts_with(test_arg.as_bytes()),
-                                                "endswith" => inner.ends_with(test_arg.as_bytes()),
-                                                "contains" => bytes_contains(inner, test_arg.as_bytes()),
-                                                "eq" => inner == test_arg.as_bytes(),
-                                                "test" => {
-                                                    if let Some(ref re) = compiled_re[i] {
-                                                        let content = unsafe { std::str::from_utf8_unchecked(inner) };
-                                                        re.is_match(content)
-                                                    } else { false }
-                                                }
-                                                _ => false,
-                                            }
-                                        } else { false }
-                                    } else { false }
-                                }
-                            };
-                            if is_and {
-                                if !pass { result = false; break; }
-                            } else {
-                                if pass { result = true; break; }
-                            }
-                        }
-                        if result {
-                            emit_raw_ln!(&mut compact_buf, raw);
+                        let outcome = apply_select_mixed_compound_raw(
+                            raw, is_and, mixed_conds, &compiled_re,
+                            |bytes| { emit_raw_ln!(&mut compact_buf, bytes); },
+                        );
+                        if let RawApplyOutcome::Bail = outcome {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -14564,55 +14524,16 @@ fn real_main() {
                     }
                     None
                 }).collect();
+                let is_and = matches!(logic_op, BinOp::And);
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    let is_and = matches!(logic_op, BinOp::And);
-                    let mut result = is_and;
-                    for (i, cond) in mixed_conds.iter().enumerate() {
-                        let pass = match cond {
-                            MixedCond::NumCmp(field, op, threshold) => {
-                                if let Some(n) = json_object_get_num(raw, 0, field) {
-                                    match op {
-                                        BinOp::Gt => n > *threshold,
-                                        BinOp::Lt => n < *threshold,
-                                        BinOp::Ge => n >= *threshold,
-                                        BinOp::Le => n <= *threshold,
-                                        BinOp::Eq => n == *threshold,
-                                        BinOp::Ne => n != *threshold,
-                                        _ => false,
-                                    }
-                                } else { false }
-                            }
-                            MixedCond::StrTest(field, test_name, test_arg) => {
-                                if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
-                                    let val = &raw[vs..ve];
-                                    if val.len() >= 2 && val[0] == b'"' && val[ve-vs-1] == b'"' && !val[1..ve-vs-1].contains(&b'\\') {
-                                        let inner = &val[1..ve-vs-1];
-                                        match test_name.as_str() {
-                                            "startswith" => inner.starts_with(test_arg.as_bytes()),
-                                            "endswith" => inner.ends_with(test_arg.as_bytes()),
-                                            "contains" => bytes_contains(inner, test_arg.as_bytes()),
-                                            "eq" => inner == test_arg.as_bytes(),
-                                            "test" => {
-                                                if let Some(ref re) = compiled_re[i] {
-                                                    let content = unsafe { std::str::from_utf8_unchecked(inner) };
-                                                    re.is_match(content)
-                                                } else { false }
-                                            }
-                                            _ => false,
-                                        }
-                                    } else { false }
-                                } else { false }
-                            }
-                        };
-                        if is_and {
-                            if !pass { result = false; break; }
-                        } else {
-                            if pass { result = true; break; }
-                        }
-                    }
-                    if result {
-                        emit_raw_ln!(&mut compact_buf, raw);
+                    let outcome = apply_select_mixed_compound_raw(
+                        raw, is_and, mixed_conds, &compiled_re,
+                        |bytes| { emit_raw_ln!(&mut compact_buf, bytes); },
+                    );
+                    if let RawApplyOutcome::Bail = outcome {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);

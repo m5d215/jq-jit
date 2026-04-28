@@ -35,10 +35,11 @@ use jq_jit::fast_path::{
     apply_obj_merge_lit_raw, apply_select_nested_cmp_raw, apply_select_num_str_raw,
     apply_select_arith_cmp_raw, apply_select_cmp_raw,
     apply_select_compound_str_test_raw, apply_select_field_null_raw,
-    apply_select_str_raw, apply_select_str_test_raw, apply_select_string_chain_raw,
+    apply_select_mixed_compound_raw, apply_select_str_raw,
+    apply_select_str_test_raw, apply_select_string_chain_raw,
     apply_to_entries_each_interp_raw, apply_two_field_binop_const_raw,
 };
-use jq_jit::interpreter::{StringChainOp, StringChainTerminal};
+use jq_jit::interpreter::{MixedCond, StringChainOp, StringChainTerminal};
 use jq_jit::interpreter::{ArithExpr, CmpVal, Filter, MathUnary};
 use jq_jit::ir::{BinOp, UnaryOp};
 use jq_jit::value::Value;
@@ -6024,6 +6025,134 @@ fn raw_select_compound_str_test_unsupported_test_bails() {
     let mut emitted: Vec<u8> = Vec::new();
     let outcome = apply_select_compound_str_test_raw(
         b"{\"x\":\"hello\"}", true, &conds,
+        |bytes| emitted.extend_from_slice(bytes),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_mixed_compound_and_match_emits() {
+    let conds = vec![
+        MixedCond::StrTest("x".to_string(), "startswith".to_string(), "hel".to_string()),
+        MixedCond::NumCmp("n".to_string(), BinOp::Gt, 10.0),
+    ];
+    let cre: Vec<Option<regex::Regex>> = conds.iter().map(|_| None).collect();
+    let mut emitted: Vec<u8> = Vec::new();
+    let outcome = apply_select_mixed_compound_raw(
+        b"{\"x\":\"hello\",\"n\":42}", true, &conds, &cre,
+        |bytes| emitted.extend_from_slice(bytes),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted.as_slice(), b"{\"x\":\"hello\",\"n\":42}");
+}
+
+#[test]
+fn raw_select_mixed_compound_and_first_false_short_circuits() {
+    let conds = vec![
+        MixedCond::StrTest("x".to_string(), "startswith".to_string(), "zzz".to_string()),
+        MixedCond::NumCmp("n".to_string(), BinOp::Gt, 10.0),  // n missing — would Bail
+    ];
+    let cre: Vec<Option<regex::Regex>> = conds.iter().map(|_| None).collect();
+    let mut emitted: Vec<u8> = Vec::new();
+    let outcome = apply_select_mixed_compound_raw(
+        b"{\"x\":\"hello\"}", true, &conds, &cre,
+        |bytes| emitted.extend_from_slice(bytes),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_mixed_compound_or_first_true_short_circuits() {
+    let conds = vec![
+        MixedCond::StrTest("x".to_string(), "startswith".to_string(), "hel".to_string()),
+        MixedCond::NumCmp("n".to_string(), BinOp::Gt, 10.0),  // n missing — would Bail
+    ];
+    let cre: Vec<Option<regex::Regex>> = conds.iter().map(|_| None).collect();
+    let mut emitted: Vec<u8> = Vec::new();
+    let outcome = apply_select_mixed_compound_raw(
+        b"{\"x\":\"hello\"}", false, &conds, &cre,
+        |bytes| emitted.extend_from_slice(bytes),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted.as_slice(), b"{\"x\":\"hello\"}");
+}
+
+#[test]
+fn raw_select_mixed_compound_non_object_bails() {
+    let conds = vec![MixedCond::NumCmp("n".to_string(), BinOp::Gt, 10.0)];
+    let cre: Vec<Option<regex::Regex>> = vec![None];
+    let mut emitted: Vec<u8> = Vec::new();
+    for raw in [b"42".as_slice(), b"\"s\"".as_slice(), b"null".as_slice(), b"[1]".as_slice()] {
+        let outcome = apply_select_mixed_compound_raw(
+            raw, true, &conds, &cre,
+            |bytes| emitted.extend_from_slice(bytes),
+        );
+        assert!(matches!(outcome, RawApplyOutcome::Bail));
+    }
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_mixed_compound_num_cmp_missing_field_bails() {
+    let conds = vec![MixedCond::NumCmp("n".to_string(), BinOp::Lt, 10.0)];
+    let cre: Vec<Option<regex::Regex>> = vec![None];
+    let mut emitted: Vec<u8> = Vec::new();
+    let outcome = apply_select_mixed_compound_raw(
+        b"{\"x\":1}", true, &conds, &cre,
+        |bytes| emitted.extend_from_slice(bytes),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_mixed_compound_num_cmp_non_numeric_bails() {
+    let conds = vec![MixedCond::NumCmp("x".to_string(), BinOp::Gt, 10.0)];
+    let cre: Vec<Option<regex::Regex>> = vec![None];
+    let mut emitted: Vec<u8> = Vec::new();
+    let outcome = apply_select_mixed_compound_raw(
+        b"{\"x\":\"hi\"}", true, &conds, &cre,
+        |bytes| emitted.extend_from_slice(bytes),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_mixed_compound_str_test_missing_field_bails() {
+    let conds = vec![MixedCond::StrTest("x".to_string(), "startswith".to_string(), "h".to_string())];
+    let cre: Vec<Option<regex::Regex>> = vec![None];
+    let mut emitted: Vec<u8> = Vec::new();
+    let outcome = apply_select_mixed_compound_raw(
+        b"{\"y\":1}", true, &conds, &cre,
+        |bytes| emitted.extend_from_slice(bytes),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_select_mixed_compound_test_with_regex_runs() {
+    let conds = vec![MixedCond::StrTest("x".to_string(), "test".to_string(), "^hel".to_string())];
+    let cre: Vec<Option<regex::Regex>> = vec![regex::Regex::new("^hel").ok()];
+    let mut emitted: Vec<u8> = Vec::new();
+    let outcome = apply_select_mixed_compound_raw(
+        b"{\"x\":\"hello\"}", true, &conds, &cre,
+        |bytes| emitted.extend_from_slice(bytes),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted.as_slice(), b"{\"x\":\"hello\"}");
+}
+
+#[test]
+fn raw_select_mixed_compound_test_without_regex_bails() {
+    let conds = vec![MixedCond::StrTest("x".to_string(), "test".to_string(), "[".to_string())];
+    let cre: Vec<Option<regex::Regex>> = vec![None];  // compile failed
+    let mut emitted: Vec<u8> = Vec::new();
+    let outcome = apply_select_mixed_compound_raw(
+        b"{\"x\":\"hello\"}", true, &conds, &cre,
         |bytes| emitted.extend_from_slice(bytes),
     );
     assert!(matches!(outcome, RawApplyOutcome::Bail));
