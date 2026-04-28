@@ -17,7 +17,8 @@ use jq_jit::fast_path::{
     apply_field_str_concat_raw, apply_field_str_reverse_raw, apply_field_test_raw,
     apply_full_object_fields_raw, apply_has_field_raw, apply_has_multi_field_raw,
     apply_multi_field_access_raw, apply_nested_field_access_raw, apply_object_compute_raw,
-    apply_field_update_length_raw, apply_field_update_tostring_raw, apply_select_arith_cmp_raw,
+    apply_field_update_case_raw, apply_field_update_gsub_raw, apply_field_update_length_raw,
+    apply_field_update_test_raw, apply_field_update_tostring_raw, apply_select_arith_cmp_raw,
     apply_select_cmp_raw, apply_select_field_null_raw, apply_select_str_raw,
     apply_select_str_test_raw,
 };
@@ -3064,5 +3065,141 @@ fn raw_field_update_tostring_non_object_input_bails() {
             std::str::from_utf8(raw).unwrap(),
             outcome,
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `.field |= test("p")` — boolean-coerce predicate update.
+
+#[test]
+fn raw_field_update_test_emits_match() {
+    let re = regex::Regex::new("^foo").unwrap();
+    let mut buf = Vec::new();
+    let outcome = apply_field_update_test_raw(b"{\"x\":\"foobar\"}", "x", &re, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"{\"x\":true}");
+}
+
+#[test]
+fn raw_field_update_test_emits_false_on_no_match() {
+    let re = regex::Regex::new("^zz").unwrap();
+    let mut buf = Vec::new();
+    let outcome = apply_field_update_test_raw(b"{\"x\":\"foobar\"}", "x", &re, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"{\"x\":false}");
+}
+
+#[test]
+fn raw_field_update_test_non_string_field_bails() {
+    let re = regex::Regex::new(".").unwrap();
+    for inner in [&b"{\"x\":42}"[..], &b"{\"x\":null}"[..], &b"{\"x\":[1]}"[..]] {
+        let mut buf = Vec::new();
+        let outcome = apply_field_update_test_raw(inner, "x", &re, &mut buf);
+        assert!(matches!(outcome, RawApplyOutcome::Bail));
+    }
+}
+
+#[test]
+fn raw_field_update_test_non_object_input_bails() {
+    let re = regex::Regex::new(".").unwrap();
+    for raw in [b"42".as_slice(), b"\"hi\"".as_slice(), b"null".as_slice()] {
+        let mut buf = Vec::new();
+        let outcome = apply_field_update_test_raw(raw, "x", &re, &mut buf);
+        assert!(matches!(outcome, RawApplyOutcome::Bail));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `.field |= sub/gsub("p"; "r")` — regex replacement update.
+
+#[test]
+fn raw_field_update_gsub_global_emits_replaced() {
+    let re = regex::Regex::new("a").unwrap();
+    let mut buf = Vec::new();
+    let outcome = apply_field_update_gsub_raw(
+        b"{\"x\":\"banana\"}",
+        "x",
+        &re,
+        "X",
+        true,
+        &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"{\"x\":\"bXnXnX\"}");
+}
+
+#[test]
+fn raw_field_update_gsub_non_global_replaces_first() {
+    let re = regex::Regex::new("a").unwrap();
+    let mut buf = Vec::new();
+    let outcome = apply_field_update_gsub_raw(
+        b"{\"x\":\"banana\"}",
+        "x",
+        &re,
+        "X",
+        false,
+        &mut buf,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(buf.as_slice(), b"{\"x\":\"bXnana\"}");
+}
+
+#[test]
+fn raw_field_update_gsub_non_string_field_bails() {
+    let re = regex::Regex::new("a").unwrap();
+    for inner in [&b"{\"x\":42}"[..], &b"{\"x\":null}"[..], &b"{\"x\":[1]}"[..]] {
+        let mut buf = Vec::new();
+        let outcome =
+            apply_field_update_gsub_raw(inner, "x", &re, "X", true, &mut buf);
+        assert!(matches!(outcome, RawApplyOutcome::Bail));
+    }
+}
+
+#[test]
+fn raw_field_update_gsub_non_object_input_bails() {
+    let re = regex::Regex::new("a").unwrap();
+    for raw in [b"42".as_slice(), b"\"hi\"".as_slice(), b"null".as_slice()] {
+        let mut buf = Vec::new();
+        let outcome = apply_field_update_gsub_raw(raw, "x", &re, "X", true, &mut buf);
+        assert!(matches!(outcome, RawApplyOutcome::Bail));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `.field |= ascii_downcase / ascii_upcase` — ASCII case update.
+
+#[test]
+fn raw_field_update_case_downcase_emits() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_update_case_raw(b"{\"x\":\"AbC\"}", "x", false, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    let s = std::str::from_utf8(&buf).unwrap();
+    assert!(s.contains("\"x\":\"abc\""), "got: {}", s);
+}
+
+#[test]
+fn raw_field_update_case_upcase_emits() {
+    let mut buf = Vec::new();
+    let outcome = apply_field_update_case_raw(b"{\"x\":\"AbC\"}", "x", true, &mut buf);
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    let s = std::str::from_utf8(&buf).unwrap();
+    assert!(s.contains("\"x\":\"ABC\""), "got: {}", s);
+}
+
+#[test]
+fn raw_field_update_case_non_string_field_bails() {
+    for inner in [&b"{\"x\":42}"[..], &b"{\"x\":null}"[..], &b"{\"x\":[1]}"[..]] {
+        let mut buf = Vec::new();
+        let outcome = apply_field_update_case_raw(inner, "x", false, &mut buf);
+        assert!(matches!(outcome, RawApplyOutcome::Bail));
+    }
+}
+
+#[test]
+fn raw_field_update_case_non_object_input_bails() {
+    for raw in [b"42".as_slice(), b"\"hi\"".as_slice(), b"null".as_slice()] {
+        let mut buf = Vec::new();
+        let outcome = apply_field_update_case_raw(raw, "x", false, &mut buf);
+        assert!(matches!(outcome, RawApplyOutcome::Bail));
     }
 }

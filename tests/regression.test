@@ -3823,3 +3823,55 @@ select(.x | startswith("a"))
 [ (.x |= tostring)? ]
 [1,2,3]
 []
+
+# #83 Phase B: .field |= test/gsub/sub/ascii_<case> apply-sites use
+# RawApplyOutcome::Bail.
+.x |= test("^foo")
+{"x":"foobar"}
+{"x":true}
+
+.x |= test("^zz")
+{"x":"foobar"}
+{"x":false}
+
+.x |= gsub("a"; "X")
+{"x":"banana"}
+{"x":"bXnXnX"}
+
+.x |= sub("a"; "X")
+{"x":"banana"}
+{"x":"bXnana"}
+
+.x |= ascii_downcase
+{"x":"AbC"}
+{"x":"abc"}
+
+.x |= ascii_upcase
+{"x":"AbC"}
+{"x":"ABC"}
+
+# Non-string field: bail to generic.
+[ (.x |= test("^foo"))? ]
+{"x":42}
+[]
+
+[ (.x |= gsub("a"; "X"))? ]
+{"x":null}
+[]
+
+[ (.x |= ascii_downcase)? ]
+{"x":[1,2]}
+[]
+
+# Non-object input under `?`
+[ (.x |= test("^foo"))? ]
+42
+[]
+
+[ (.x |= gsub("a"; "X"))? ]
+"hi"
+[]
+
+[ (.x |= ascii_upcase)? ]
+[1,2,3]
+[]
