@@ -5010,3 +5010,32 @@ select((.x > 0) and (.y > 0)) | (.x + .y)
 [ (select((.x > 0) and (.y > 0)) | {sum: (.x + .y)})? ]
 "plain"
 []
+
+# Issue #251: select_length_cmp_remap apply-site uses RawApplyOutcome (#83
+# Phase B). Reuses apply_field_unary_arith_raw with Length + empty arith
+# chain for the predicate; apply-site emits the remap on a passing predicate.
+# Improvement: prior apply-site only handled string-length; helper supports
+# all jq Length-polymorphism (string, array, object, null, number).
+select(.name | length > 3) | {n: .name, age: .age}
+{"name":"alice","age":30}
+{"n":"alice","age":30}
+
+# Predicate fails — no output (wrapped to make empty stream observable).
+[ (select(.name | length > 3) | {n: .name})? ]
+{"name":"bo"}
+[]
+
+# Array length now handled (was Bail-only previously).
+select(.name | length > 3) | {n: .name}
+{"name":[1,2,3,4,5]}
+{"n":[1,2,3,4,5]}
+
+# Non-object input — generic raises indexing error.
+[ (select(.name | length > 3) | {n: .name})? ]
+"plain"
+[]
+
+# Boolean field for length — generic raises `boolean has no length`.
+[ (select(.name | length > 3) | {n: .name})? ]
+{"name":true}
+[]
