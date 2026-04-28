@@ -5101,3 +5101,40 @@ with_entries(.value |= tostring)
 [ ({a:.x, b:.y} | tojson)? ]
 "plain"
 []
+
+# Issue #251: to_entries_each_interp apply-site uses RawApplyOutcome (#83 Phase B).
+# Helper Bails on non-object input, on per-entry escape sequences in keys/strings,
+# on non-canonical numbers, and on nested array/object values, delegating to the
+# generic path which preserves jq's array-as-input semantics and number normalization.
+to_entries[] | "\(.key)=\(.value)"
+{"a":1,"b":"x"}
+"a=1"
+"b=x"
+
+# Empty object — no output.
+[ to_entries[] | "\(.key)=\(.value)" ]
+{}
+[]
+
+# Array input — generic supports `to_entries` over arrays (issue #44).
+to_entries[] | "\(.key)=\(.value)"
+[10,20]
+"0=10"
+"1=20"
+
+# Non-object/non-array — generic raises indexing error, ? swallows.
+[ (to_entries[] | "\(.key)=\(.value)")? ]
+"plain"
+[]
+
+# Bool/null/canonical-number values — fast path emits directly.
+to_entries[] | "\(.key)=\(.value)"
+{"a":true,"b":null,"c":-3.5}
+"a=true"
+"b=null"
+"c=-3.5"
+
+# Nested-object value — Bail to generic so jq's compact serialization wins.
+to_entries[] | "\(.key)=\(.value)"
+{"x":{ "y" : 1 }}
+"x={\"y\":1}"
