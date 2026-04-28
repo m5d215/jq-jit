@@ -62,7 +62,7 @@
 
 use anyhow::Result;
 
-use crate::value::{KeyStr, Value, ObjInner};
+use crate::value::{KeyStr, Value, ObjInner, json_object_get_field_raw};
 
 /// A fast path whose type-dispatch obligations are encoded in its
 /// `run` signature. See the module docs for the contract.
@@ -106,5 +106,80 @@ impl FastPath for FieldAccessPath {
             // here would reintroduce the null-masking bug class (#50).
             _ => None,
         }
+    }
+}
+
+// =============================================================================
+// Raw-byte apply-site contract (#83 Phase B)
+// =============================================================================
+//
+// The CLI in `bin/jq-jit.rs` keeps its raw-byte fast paths (parsing JSON into a
+// `Value` is strictly more expensive than copying bytes — see #83's revert
+// table: `.name` on 2M-line NDJSON is 2.5× slower with `Value` materialisation).
+//
+// What the typed [`FastPath`] contract gives us — a named exit point so a
+// missing type-check is visible at review — is brought to the raw paths via
+// [`RawApplyOutcome`]. Apply-sites no longer commit implicitly inside
+// `match raw[0]` arms; they return an explicit verdict, and the caller routes
+// `Bail` through `process_input` → `Filter::execute_cb`, where the typed probe
+// (Phase A) and generic eval take over.
+
+/// The verdict returned by a raw-byte fast path apply-site for a single JSON
+/// record.
+///
+/// See [`apply_field_access_raw`] for the canonical pilot. New raw fast paths
+/// should follow the same shape: type-guard at entry, emit on match, otherwise
+/// `Bail`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RawApplyOutcome {
+    /// The apply-site has written its output bytes (including any trailing
+    /// newline) to the caller's buffer. The caller can move on to the next
+    /// input record.
+    Emit,
+    /// The apply-site declines: the input shape does not match what this fast
+    /// path can guarantee jq-compatible semantics for. The caller MUST fall
+    /// through to `process_input` → `Filter::execute_cb` so the generic path
+    /// produces the answer. Returning [`Self::Emit`] for an input the fast
+    /// path cannot handle is the bug class #83 is designed to end.
+    Bail,
+}
+
+/// Apply the `.field` raw-byte fast path on a single JSON record.
+///
+/// * Object input — invokes `emit` with the field value's raw bytes (or with
+///   `b"null"` if the field is absent).
+/// * `null` input — invokes `emit` with `b"null"` (jq semantics: `.x` on null
+///   is null).
+/// * Any other input — returns [`RawApplyOutcome::Bail`] so the caller routes
+///   to the generic path, which raises the correct
+///   `Cannot index <type> with "<field>"` error.
+///
+/// The single-closure shape lets the apply-site route every emit through its
+/// dup-key / pretty-print pipeline (e.g. the `emit_raw_ln!` macro in
+/// `bin/jq-jit.rs`) without forcing two simultaneous `&mut` borrows of the
+/// output buffer.
+pub fn apply_field_access_raw<E>(
+    raw: &[u8],
+    field: &str,
+    mut emit: E,
+) -> RawApplyOutcome
+where
+    E: FnMut(&[u8]),
+{
+    match raw.first().copied() {
+        Some(b'{') => {
+            match json_object_get_field_raw(raw, 0, field) {
+                Some((vs, ve)) => emit(&raw[vs..ve]),
+                None => emit(b"null"),
+            }
+            RawApplyOutcome::Emit
+        }
+        Some(b'n') => {
+            emit(b"null");
+            RawApplyOutcome::Emit
+        }
+        // Non-object, non-null: jq raises a type error. Hand off to the
+        // generic path; do NOT silently emit `null` (that's #50).
+        _ => RawApplyOutcome::Bail,
     }
 }

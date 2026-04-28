@@ -8,7 +8,7 @@
 //! - `Filter::try_typed_fast_path` routes `.field` filters through the
 //!   pilot and returns `None` for filters that aren't yet migrated.
 
-use jq_jit::fast_path::{FastPath, FieldAccessPath};
+use jq_jit::fast_path::{FastPath, FieldAccessPath, RawApplyOutcome, apply_field_access_raw};
 use jq_jit::interpreter::Filter;
 use jq_jit::value::Value;
 
@@ -152,5 +152,70 @@ fn execute_cb_field_access_invokes_callback_once() {
     match &seen[0] {
         Value::Num(n, _) => assert_eq!(*n, 7.0),
         v => panic!("expected Num, got {:?}", v),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Raw-byte apply-site contract (#83 Phase B)
+//
+// The CLI keeps its raw-byte fast paths for perf (parsing JSON into Value is
+// 2.5× slower on the `.name` benchmark — see #83's revert table). Phase B's
+// contribution is making the bail decision structurally explicit at the
+// apply-site instead of hiding it inside an inline `match raw[0]` arm.
+// `apply_field_access_raw` is the pilot; these tests pin the verdict surface
+// so a future regression that lets a non-object input slip through (the #50
+// null-masking class) fails CI immediately.
+
+#[test]
+fn raw_field_access_object_emits_value_bytes() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_field_access_raw(b"{\"x\":42,\"y\":7}", "x", |b| emitted.push(b.to_vec()));
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![b"42".to_vec()]);
+}
+
+#[test]
+fn raw_field_access_object_missing_key_emits_null_literal() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_field_access_raw(b"{\"y\":7}", "x", |b| emitted.push(b.to_vec()));
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![b"null".to_vec()]);
+}
+
+#[test]
+fn raw_field_access_null_input_emits_null_literal() {
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_field_access_raw(b"null", "x", |b| emitted.push(b.to_vec()));
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![b"null".to_vec()]);
+}
+
+#[test]
+fn raw_field_access_non_object_non_null_bails() {
+    // The whole point of #83 Phase B: every non-{object,null} input must
+    // return Bail so the caller routes to `process_input` →
+    // `Filter::execute_cb`. Emitting `null` (or anything else) here would
+    // re-introduce the null-masking divergence (#50).
+    for raw in [
+        b"42".as_slice(),
+        b"\"hello\"".as_slice(),
+        b"true".as_slice(),
+        b"false".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut emitted: Vec<Vec<u8>> = Vec::new();
+        let outcome = apply_field_access_raw(raw, "x", |b| emitted.push(b.to_vec()));
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert!(
+            emitted.is_empty(),
+            "Bail must not emit anything (got {:?} for input {:?})",
+            emitted,
+            std::str::from_utf8(raw).unwrap(),
+        );
     }
 }
