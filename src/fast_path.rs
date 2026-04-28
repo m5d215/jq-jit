@@ -62,7 +62,7 @@
 
 use anyhow::Result;
 
-use crate::ir::BinOp;
+use crate::ir::{BinOp, UnaryOp};
 use crate::runtime::jq_mod_f64;
 use crate::value::{
     KeyStr, Value, ObjInner, json_object_del_field, json_object_del_fields,
@@ -899,6 +899,73 @@ where
         BinOp::Ne => n != cval,
         _ => return RawApplyOutcome::Bail,
     };
+    emit(result);
+    RawApplyOutcome::Emit
+}
+
+/// Apply the `.field <op> <const>` (or `<const> <op> .field`) raw-byte
+/// fast path on a single JSON record, optionally followed by a unary
+/// math op (`floor`/`ceil`/`sqrt`/`fabs`/`abs`).
+///
+/// `const_left = true` swaps operands so the constant is on the left
+/// (e.g. `2 - .x`). `uop_opt = None` skips the unary stage.
+///
+/// Bail discipline:
+/// * Field absent or non-numeric — [`RawApplyOutcome::Bail`] so the
+///   generic path raises jq's type error.
+/// * Non-arithmetic op (`Eq`/`And`/etc.) — [`RawApplyOutcome::Bail`]
+///   (defensive — the detector should never produce these).
+/// * Unary op not in the supported math set
+///   (`Floor`/`Ceil`/`Sqrt`/`Fabs`/`Abs`) — [`RawApplyOutcome::Bail`]
+///   (defensive — same reason).
+/// * Final result non-finite (div-by-zero, sqrt of negative, etc.) —
+///   [`RawApplyOutcome::Bail`] so the generic path raises jq's
+///   `/ by zero` etc. Without this guard the fast path silently emits
+///   `Infinity`/`NaN`-formatted bytes (#83-class bug in the prior
+///   apply-site).
+/// * Non-object input — [`RawApplyOutcome::Bail`].
+///
+/// On success, invokes `emit(result)` so the apply-site owns
+/// JSON-number formatting.
+pub fn apply_field_binop_const_unary_raw<F>(
+    raw: &[u8],
+    field: &str,
+    bop: BinOp,
+    cval: f64,
+    uop_opt: Option<UnaryOp>,
+    const_left: bool,
+    mut emit: F,
+) -> RawApplyOutcome
+where
+    F: FnMut(f64),
+{
+    let n = match json_object_get_num(raw, 0, field) {
+        Some(v) => v,
+        None => return RawApplyOutcome::Bail,
+    };
+    let (a, b) = if const_left { (cval, n) } else { (n, cval) };
+    let mid = match bop {
+        BinOp::Add => a + b,
+        BinOp::Sub => a - b,
+        BinOp::Mul => a * b,
+        BinOp::Div => a / b,
+        BinOp::Mod => jq_mod_f64(a, b).unwrap_or(f64::NAN),
+        _ => return RawApplyOutcome::Bail,
+    };
+    let result = if let Some(uop) = uop_opt {
+        match uop {
+            UnaryOp::Floor => mid.floor(),
+            UnaryOp::Ceil => mid.ceil(),
+            UnaryOp::Sqrt => mid.sqrt(),
+            UnaryOp::Fabs | UnaryOp::Abs => mid.abs(),
+            _ => return RawApplyOutcome::Bail,
+        }
+    } else {
+        mid
+    };
+    if !result.is_finite() {
+        return RawApplyOutcome::Bail;
+    }
     emit(result);
     RawApplyOutcome::Emit
 }

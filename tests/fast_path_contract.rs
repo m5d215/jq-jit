@@ -23,12 +23,13 @@ use jq_jit::fast_path::{
     apply_field_update_split_first_raw, apply_field_update_split_last_raw,
     apply_field_update_str_concat_raw, apply_field_update_str_map_raw,
     apply_field_update_test_raw, apply_field_update_tostring_raw,
+    apply_field_binop_const_unary_raw,
     apply_field_update_trim_raw, apply_select_arith_cmp_raw, apply_select_cmp_raw,
     apply_select_field_null_raw, apply_select_str_raw, apply_select_str_test_raw,
     apply_two_field_binop_const_raw,
 };
 use jq_jit::interpreter::Filter;
-use jq_jit::ir::BinOp;
+use jq_jit::ir::{BinOp, UnaryOp};
 use jq_jit::value::Value;
 
 #[test]
@@ -2379,6 +2380,152 @@ fn raw_two_field_binop_const_non_object_input_bails() {
         assert!(
             matches!(outcome, RawApplyOutcome::Bail),
             "expected Bail for two_field_binop_const input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `.field <op> <const> [| unary]` — single-field-with-const arithmetic,
+// optional final unary math op. Helper Bails on missing / non-numeric /
+// non-arith op / unsupported unary / non-finite / non-object so jq's runtime
+// errors (div-by-zero, type errors) surface through the generic path.
+
+#[test]
+fn raw_field_binop_const_unary_no_unary() {
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_binop_const_unary_raw(
+        b"{\"x\":5}", "x", BinOp::Add, 3.0, None, false, |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![8.0]);
+}
+
+#[test]
+fn raw_field_binop_const_unary_const_left_subtraction() {
+    let mut emitted: Vec<f64> = Vec::new();
+    // 2 - .x with x=5 → -3, then abs → 3
+    let outcome = apply_field_binop_const_unary_raw(
+        b"{\"x\":5}", "x", BinOp::Sub, 2.0, Some(UnaryOp::Abs), true,
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![3.0]);
+}
+
+#[test]
+fn raw_field_binop_const_unary_floor_ceil() {
+    let mut floored: Vec<f64> = Vec::new();
+    let outcome = apply_field_binop_const_unary_raw(
+        b"{\"x\":3.7}", "x", BinOp::Add, 0.0, Some(UnaryOp::Floor), false,
+        |n| floored.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(floored, vec![3.0]);
+
+    let mut ceilinged: Vec<f64> = Vec::new();
+    let outcome = apply_field_binop_const_unary_raw(
+        b"{\"x\":3.2}", "x", BinOp::Add, 0.0, Some(UnaryOp::Ceil), false,
+        |n| ceilinged.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(ceilinged, vec![4.0]);
+}
+
+#[test]
+fn raw_field_binop_const_unary_field_missing_bails() {
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_binop_const_unary_raw(
+        b"{\"y\":3}", "x", BinOp::Add, 1.0, None, false, |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_field_binop_const_unary_non_numeric_field_bails() {
+    for inner in [&b"{\"x\":\"hi\"}"[..], &b"{\"x\":null}"[..], &b"{\"x\":[1]}"[..]] {
+        let mut emitted: Vec<f64> = Vec::new();
+        let outcome = apply_field_binop_const_unary_raw(
+            inner, "x", BinOp::Add, 1.0, None, false, |n| emitted.push(n),
+        );
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for non-numeric input {:?}, got {:?}",
+            std::str::from_utf8(inner).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
+    }
+}
+
+#[test]
+fn raw_field_binop_const_unary_non_arith_op_bails() {
+    for op in [BinOp::Eq, BinOp::Lt, BinOp::And] {
+        let mut emitted: Vec<f64> = Vec::new();
+        let outcome = apply_field_binop_const_unary_raw(
+            b"{\"x\":5}", "x", op, 3.0, None, false, |n| emitted.push(n),
+        );
+        assert!(matches!(outcome, RawApplyOutcome::Bail), "op={:?}", op);
+    }
+}
+
+#[test]
+fn raw_field_binop_const_unary_unsupported_unary_bails() {
+    // Detector should never produce these for this shape, but defensive Bail.
+    for uop in [UnaryOp::Length, UnaryOp::ToString, UnaryOp::Type] {
+        let mut emitted: Vec<f64> = Vec::new();
+        let outcome = apply_field_binop_const_unary_raw(
+            b"{\"x\":5}", "x", BinOp::Add, 3.0, Some(uop), false,
+            |n| emitted.push(n),
+        );
+        assert!(matches!(outcome, RawApplyOutcome::Bail), "uop={:?}", uop);
+    }
+}
+
+#[test]
+fn raw_field_binop_const_unary_div_by_zero_bails() {
+    // .x / 0 → inf → Bail (fixes #83-class divergence: prior fast path
+    // emitted "1.7976931348623157e+308" instead of jq's "/ by zero" error).
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_binop_const_unary_raw(
+        b"{\"x\":4}", "x", BinOp::Div, 0.0, None, false, |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_field_binop_const_unary_sqrt_negative_bails() {
+    // (.x + 0) | sqrt with x=-1 → NaN → Bail (generic produces null,
+    // matching jq).
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_binop_const_unary_raw(
+        b"{\"x\":-1}", "x", BinOp::Add, 0.0, Some(UnaryOp::Sqrt), false,
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_field_binop_const_unary_non_object_input_bails() {
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut emitted: Vec<f64> = Vec::new();
+        let outcome = apply_field_binop_const_unary_raw(
+            raw, "x", BinOp::Add, 1.0, None, false, |n| emitted.push(n),
+        );
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for input {:?}, got {:?}",
             std::str::from_utf8(raw).unwrap(),
             outcome,
         );
