@@ -146,7 +146,8 @@ use jq_jit::fast_path::{
     apply_field_scan_raw, apply_field_str_builtin_raw, apply_field_str_concat_raw,
     apply_field_str_reverse_raw, apply_field_test_raw, apply_full_object_fields_raw,
     apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
-    apply_nested_field_access_raw, apply_object_compute_raw, RawApplyOutcome,
+    apply_nested_field_access_raw, apply_object_compute_raw, apply_select_cmp_raw,
+    RawApplyOutcome,
 };
 
 fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -7460,42 +7461,22 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref field, ref op, threshold)) = select_cmp {
-                    use jq_jit::ir::BinOp;
-                    // select(.field cmp N) must surface jq's "Cannot index ... with
-                    // string" error for non-object inputs (#199). null is also
-                    // routed through eval because jq's total-order treats `null`
-                    // as smaller than any number, so `select(.a < 0)` on null
-                    // outputs `null` rather than nothing — the raw path skips it.
+                    // select(.field cmp N): surface jq's "Cannot index ..." for
+                    // non-object inputs (#199). null/missing field route through
+                    // eval so jq's total-order rules drive the comparison.
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if raw.is_empty() || raw[0] != b'{' {
+                        let outcome = apply_select_cmp_raw(raw, field, *op, threshold, |record| {
+                            emit_raw_ln!(&mut compact_buf, record);
+                        });
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            return Ok(());
                         }
-                        if let Some(val) = json_object_get_num(raw, 0, field) {
-                            let pass = match op {
-                                BinOp::Gt => val > threshold,
-                                BinOp::Lt => val < threshold,
-                                BinOp::Ge => val >= threshold,
-                                BinOp::Le => val <= threshold,
-                                BinOp::Eq => val == threshold,
-                                BinOp::Ne => val != threshold,
-                                _ => false,
-                            };
-                            if pass {
-                                emit_raw_ln!(&mut compact_buf, raw);
-                                if compact_buf.len() >= 1 << 17 {
-                                    let _ = out.write_all(&compact_buf);
-                                    compact_buf.clear();
-                                }
-                            }
-                            return Ok(());
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
                         }
-                        // Non-numeric or missing field: fall through to eval so jq's
-                        // total-order rules drive the comparison (null<N=true, etc.).
-                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         Ok(())
                     })
                 } else if let Some((ref field, is_eq)) = select_field_null {
@@ -15195,41 +15176,22 @@ fn real_main() {
             } else if let Some((ref field, ref op, threshold)) = select_cmp {
                 // Select fast path: extract field without full parsing, copy raw bytes on match.
                 // Non-object inputs route through eval so the type error from
-                // `.field` surfaces (#199); null also detours because jq's
-                // total order ranks null below any number, so cases like
-                // `select(.a < 0)` on null must yield `null`.
-                use jq_jit::ir::BinOp;
+                // `.field` surfaces (#199); null/missing field also detour because jq's
+                // total order rules drive the comparison (null<N=true, etc.).
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if raw.is_empty() || raw[0] != b'{' {
+                    let outcome = apply_select_cmp_raw(raw, field, *op, threshold, |record| {
+                        emit_raw_ln!(&mut compact_buf, record);
+                    });
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                        return Ok(());
                     }
-                    if let Some(val) = json_object_get_num(raw, 0, field) {
-                        let pass = match op {
-                            BinOp::Gt => val > threshold,
-                            BinOp::Lt => val < threshold,
-                            BinOp::Ge => val >= threshold,
-                            BinOp::Le => val <= threshold,
-                            BinOp::Eq => val == threshold,
-                            BinOp::Ne => val != threshold,
-                            _ => false,
-                        };
-                        if pass {
-                            emit_raw_ln!(&mut compact_buf, raw);
-                            if compact_buf.len() >= 1 << 17 {
-                                let _ = out.write_all(&compact_buf);
-                                compact_buf.clear();
-                            }
-                        }
-                        return Ok(());
+                    if compact_buf.len() >= 1 << 17 {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
                     }
-                    // Non-numeric or missing field: jq's total-order rules apply
-                    // (null<N=true, etc.); route through eval for correctness.
-                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     Ok(())
                 })
             } else if let Some((ref field, is_eq)) = select_field_null {

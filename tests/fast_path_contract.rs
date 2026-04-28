@@ -17,6 +17,7 @@ use jq_jit::fast_path::{
     apply_field_str_concat_raw, apply_field_str_reverse_raw, apply_field_test_raw,
     apply_full_object_fields_raw, apply_has_field_raw, apply_has_multi_field_raw,
     apply_multi_field_access_raw, apply_nested_field_access_raw, apply_object_compute_raw,
+    apply_select_cmp_raw,
 };
 use jq_jit::interpreter::Filter;
 use jq_jit::ir::BinOp;
@@ -2326,4 +2327,108 @@ fn raw_arith_chain_cmp_non_object_input_bails() {
         );
         assert!(emitted.is_empty());
     }
+}
+
+// ---------------------------------------------------------------------------
+// `select(.field <cmp> N)` — predicate fast path. The helper passes the raw
+// record bytes to the closure when the predicate fires; non-object inputs and
+// non-numeric / missing fields Bail to the generic path so jq's total-order
+// rules and #199 type errors surface.
+
+#[test]
+fn raw_select_cmp_emits_record_when_predicate_fires() {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_cmp_raw(
+        b"{\"x\":5}",
+        "x",
+        BinOp::Gt,
+        3.0,
+        |r| seen.push(r.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(seen, vec![b"{\"x\":5}".to_vec()]);
+}
+
+#[test]
+fn raw_select_cmp_no_output_when_predicate_fails() {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_cmp_raw(
+        b"{\"x\":5}",
+        "x",
+        BinOp::Lt,
+        3.0,
+        |r| seen.push(r.to_vec()),
+    );
+    // Helper still returns Emit (it handled the input — predicate just
+    // didn't fire), but the closure is never invoked.
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert!(seen.is_empty());
+}
+
+#[test]
+fn raw_select_cmp_non_object_bails_for_type_error() {
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        let outcome =
+            apply_select_cmp_raw(raw, "x", BinOp::Eq, 1.0, |r| seen.push(r.to_vec()));
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for select_cmp input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert!(seen.is_empty());
+    }
+}
+
+#[test]
+fn raw_select_cmp_field_missing_bails_for_total_order() {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_cmp_raw(
+        b"{\"y\":5}",
+        "x",
+        BinOp::Lt,
+        0.0,
+        |r| seen.push(r.to_vec()),
+    );
+    // Bails so the generic path applies jq's total-order
+    // (null < 0 == true → emits the record).
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(seen.is_empty());
+}
+
+#[test]
+fn raw_select_cmp_non_numeric_field_bails_for_total_order() {
+    for inner in [&b"{\"x\":\"hi\"}"[..], &b"{\"x\":null}"[..], &b"{\"x\":[1]}"[..]] {
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        let outcome =
+            apply_select_cmp_raw(inner, "x", BinOp::Eq, 1.0, |r| seen.push(r.to_vec()));
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for non-numeric field input {:?}, got {:?}",
+            std::str::from_utf8(inner).unwrap(),
+            outcome,
+        );
+        assert!(seen.is_empty());
+    }
+}
+
+#[test]
+fn raw_select_cmp_non_cmp_op_bails() {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_select_cmp_raw(
+        b"{\"x\":5}",
+        "x",
+        BinOp::Add,
+        1.0,
+        |r| seen.push(r.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(seen.is_empty());
 }

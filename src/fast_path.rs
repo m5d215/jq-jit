@@ -850,6 +850,60 @@ where
     RawApplyOutcome::Emit
 }
 
+/// Apply the `select(.field <cmp> N)` raw-byte fast path on a single
+/// JSON record.
+///
+/// `select` is a *filter* — it emits the input unchanged when the
+/// predicate is true, and emits nothing when it's false. The helper
+/// passes the raw record bytes to `emit_match` only on a passing
+/// comparison; the closure typically writes the record + newline to
+/// the output buffer.
+///
+/// Bail discipline (#199):
+/// * Non-object input — [`RawApplyOutcome::Bail`] so jq's
+///   `Cannot index <type> with "<field>"` surfaces.
+/// * Field absent or non-numeric — [`RawApplyOutcome::Bail`] (the
+///   generic path applies jq's total-order semantics, e.g.
+///   `null < N == true`, which the raw path can't represent without
+///   re-implementing the ordering).
+/// * Non-comparison op (`Add`/`And`/etc.) — [`RawApplyOutcome::Bail`]
+///   (defensive).
+///
+/// On success the helper returns [`RawApplyOutcome::Emit`] regardless
+/// of whether the predicate fired (no output is the right answer
+/// when the predicate is false).
+pub fn apply_select_cmp_raw<F>(
+    raw: &[u8],
+    field: &str,
+    op: BinOp,
+    threshold: f64,
+    mut emit_match: F,
+) -> RawApplyOutcome
+where
+    F: FnMut(&[u8]),
+{
+    if raw.first() != Some(&b'{') {
+        return RawApplyOutcome::Bail;
+    }
+    let val = match json_object_get_num(raw, 0, field) {
+        Some(v) => v,
+        None => return RawApplyOutcome::Bail,
+    };
+    let pass = match op {
+        BinOp::Gt => val > threshold,
+        BinOp::Lt => val < threshold,
+        BinOp::Ge => val >= threshold,
+        BinOp::Le => val <= threshold,
+        BinOp::Eq => val == threshold,
+        BinOp::Ne => val != threshold,
+        _ => return RawApplyOutcome::Bail,
+    };
+    if pass {
+        emit_match(raw);
+    }
+    RawApplyOutcome::Emit
+}
+
 /// Apply the `.field <arith_chain> <cmp> <threshold>` raw-byte fast path
 /// on a single JSON record — fold a `(BinOp, f64)` arithmetic chain over
 /// a numeric field, then compare the result against `threshold`.
