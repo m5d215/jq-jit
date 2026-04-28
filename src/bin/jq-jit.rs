@@ -145,9 +145,10 @@ use jq_jit::fast_path::{
     apply_field_field_alternative_raw, apply_field_field_cmp_raw, apply_field_format_raw,
     apply_field_gsub_raw, apply_field_ltrimstr_tonumber_raw, apply_field_match_raw,
     apply_field_scan_raw, apply_field_str_builtin_raw, apply_field_str_concat_raw,
-    apply_field_binop_const_unary_raw, apply_field_index_arith_raw, apply_field_str_reverse_raw,
-    apply_field_test_raw, apply_field_unary_arith_raw, apply_field_unary_num_raw,
-    apply_full_object_fields_raw, apply_numeric_expr_raw, apply_two_field_binop_const_raw,
+    apply_compound_field_cmp_raw, apply_field_binop_const_unary_raw, apply_field_index_arith_raw,
+    apply_field_str_reverse_raw, apply_field_test_raw, apply_field_unary_arith_raw,
+    apply_field_unary_num_raw, apply_full_object_fields_raw, apply_numeric_expr_raw,
+    apply_two_field_binop_const_raw,
     apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
     apply_nested_field_access_raw, apply_object_compute_raw, apply_select_arith_cmp_raw,
     apply_select_cmp_raw, apply_select_field_null_raw, apply_select_str_raw,
@@ -6190,7 +6191,6 @@ fn real_main() {
                     })
                 } else if let Some((ref conjunct, ref cmps)) = compound_field_cmp {
                     use jq_jit::ir::BinOp;
-                    let is_and = matches!(conjunct, BinOp::And);
                     // Collect unique field names for lookup
                     let mut field_names: Vec<String> = Vec::new();
                     let mut field_idx: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
@@ -6200,41 +6200,18 @@ fn real_main() {
                             field_names.push(f.clone());
                         }
                     }
+                    let field_refs: Vec<&str> = field_names.iter().map(|s| s.as_str()).collect();
                     let cmp_spec: Vec<(usize, BinOp, f64)> = cmps.iter().map(|(f, op, n)| (field_idx[f], *op, *n)).collect();
+                    let mut vals_buf: Vec<f64> = vec![0.0; field_names.len()];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        // Fast path for exactly 2 unique fields
-                        let got = if field_names.len() == 2 {
-                            json_object_get_two_nums(raw, 0, &field_names[0], &field_names[1])
-                                .map(|(a, b)| vec![a, b])
-                        } else {
-                            let mut vals = vec![f64::NAN; field_names.len()];
-                            let mut ok = true;
-                            for (i, fname) in field_names.iter().enumerate() {
-                                if let Some(n) = json_object_get_num(raw, 0, fname) {
-                                    vals[i] = n;
-                                } else { ok = false; break; }
-                            }
-                            if ok { Some(vals) } else { None }
-                        };
-                        if let Some(vals) = got {
-                            let mut result = is_and;
-                            for (idx, op, threshold) in &cmp_spec {
-                                let v = vals[*idx];
-                                let cmp_result = match op {
-                                    BinOp::Gt => v > *threshold, BinOp::Lt => v < *threshold,
-                                    BinOp::Ge => v >= *threshold, BinOp::Le => v <= *threshold,
-                                    BinOp::Eq => v == *threshold, BinOp::Ne => v != *threshold,
-                                    _ => unreachable!(),
-                                };
-                                if is_and {
-                                    if !cmp_result { result = false; break; }
-                                } else {
-                                    if cmp_result { result = true; break; }
-                                }
-                            }
-                            compact_buf.extend_from_slice(if result { b"true\n" } else { b"false\n" });
-                        } else {
+                        let outcome = apply_compound_field_cmp_raw(
+                            raw, &field_refs, &cmp_spec, *conjunct, &mut vals_buf,
+                            |result| {
+                                compact_buf.extend_from_slice(if result { b"true\n" } else { b"false\n" });
+                            },
+                        );
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -19093,7 +19070,6 @@ fn real_main() {
                 })
             } else if let Some((ref conjunct, ref cmps)) = compound_field_cmp {
                 use jq_jit::ir::BinOp;
-                let is_and = matches!(conjunct, BinOp::And);
                 let mut field_names: Vec<String> = Vec::new();
                 let mut field_idx: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
                 for (f, _, _) in cmps {
@@ -19102,41 +19078,19 @@ fn real_main() {
                         field_names.push(f.clone());
                     }
                 }
+                let field_refs: Vec<&str> = field_names.iter().map(|s| s.as_str()).collect();
                 let cmp_spec: Vec<(usize, BinOp, f64)> = cmps.iter().map(|(f, op, n)| (field_idx[f], *op, *n)).collect();
+                let mut vals_buf: Vec<f64> = vec![0.0; field_names.len()];
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    let got = if field_names.len() == 2 {
-                        json_object_get_two_nums(raw, 0, &field_names[0], &field_names[1])
-                            .map(|(a, b)| vec![a, b])
-                    } else {
-                        let mut vals = vec![f64::NAN; field_names.len()];
-                        let mut ok = true;
-                        for (i, fname) in field_names.iter().enumerate() {
-                            if let Some(n) = json_object_get_num(raw, 0, fname) {
-                                vals[i] = n;
-                            } else { ok = false; break; }
-                        }
-                        if ok { Some(vals) } else { None }
-                    };
-                    if let Some(vals) = got {
-                        let mut result = is_and;
-                        for (idx, op, threshold) in &cmp_spec {
-                            let v = vals[*idx];
-                            let cmp_result = match op {
-                                BinOp::Gt => v > *threshold, BinOp::Lt => v < *threshold,
-                                BinOp::Ge => v >= *threshold, BinOp::Le => v <= *threshold,
-                                BinOp::Eq => v == *threshold, BinOp::Ne => v != *threshold,
-                                _ => unreachable!(),
-                            };
-                            if is_and {
-                                if !cmp_result { result = false; break; }
-                            } else {
-                                if cmp_result { result = true; break; }
-                            }
-                        }
-                        compact_buf.extend_from_slice(if result { b"true\n" } else { b"false\n" });
-                    } else {
+                    let outcome = apply_compound_field_cmp_raw(
+                        raw, &field_refs, &cmp_spec, *conjunct, &mut vals_buf,
+                        |result| {
+                            compact_buf.extend_from_slice(if result { b"true\n" } else { b"false\n" });
+                        },
+                    );
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
