@@ -74,7 +74,7 @@ use crate::value::{
     json_object_update_field_split_first, json_object_update_field_split_last,
     json_object_update_field_str_concat, json_object_update_field_str_map,
     json_object_update_field_test, json_object_update_field_tostring,
-    json_object_update_field_trim,
+    json_object_update_field_trim, json_value_length,
 };
 
 /// A fast path whose type-dispatch obligations are encoded in its
@@ -900,6 +900,111 @@ where
         _ => return RawApplyOutcome::Bail,
     };
     emit(result);
+    RawApplyOutcome::Emit
+}
+
+/// Apply the `(.field | <unary>) <op1> <c1> <op2> <c2> ...` raw-byte
+/// fast path on a single JSON record. The unary op is applied to the
+/// field value first, then a left-fold of `(BinOp, f64)` arithmetic
+/// pairs runs on the result.
+///
+/// Supported unary ops:
+/// * `Length` — works on string/array/object/null/number (matches jq's
+///   polymorphic `length`). On a numeric field, evaluates to `abs(n)`
+///   per jq semantics.
+/// * `Floor`/`Ceil`/`Sqrt`/`Fabs`/`Abs`/`Round` — numeric, requires a
+///   number-valued field (Bail otherwise).
+///
+/// Bail discipline:
+/// * Non-object input — [`RawApplyOutcome::Bail`]. The prior fast path
+///   silently emitted `0` when invoked on `(.x | length)` against a
+///   number/string root (a #83-class divergence; jq raises
+///   `Cannot index <type> with "x"`).
+/// * For `Length` on a string field: backslash-escaped strings Bail
+///   (the raw scanner can't decode the escape to count code points).
+/// * For `Length` on an array/object field: malformed value Bails
+///   (`json_value_length` returns None).
+/// * For numeric unary ops on a non-numeric field — Bail.
+/// * Unsupported unary op (defensive — detector should never produce
+///   these for this shape) — Bail.
+/// * Non-arith op in `arith_steps` — Bail (defensive).
+/// * Non-finite final result (div-by-zero / overflow / NaN) — Bail so
+///   the generic path raises jq's `/ by zero` etc.
+///
+/// On success, invokes `emit(result)` so the apply-site owns
+/// JSON-number formatting.
+pub fn apply_field_unary_arith_raw<F>(
+    raw: &[u8],
+    field: &str,
+    uop: UnaryOp,
+    arith_steps: &[(BinOp, f64)],
+    mut emit: F,
+) -> RawApplyOutcome
+where
+    F: FnMut(f64),
+{
+    if raw.is_empty() || raw[0] != b'{' {
+        return RawApplyOutcome::Bail;
+    }
+    let is_length = matches!(uop, UnaryOp::Length);
+    let base = if is_length {
+        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, field) {
+            let val = &raw[vs..ve];
+            match val[0] {
+                b'"' => {
+                    let inner = &val[1..val.len() - 1];
+                    if inner.contains(&b'\\') {
+                        return RawApplyOutcome::Bail;
+                    }
+                    if inner.is_ascii() {
+                        inner.len() as f64
+                    } else {
+                        unsafe { std::str::from_utf8_unchecked(inner) }.chars().count() as f64
+                    }
+                }
+                b'[' | b'{' => match json_value_length(val, 0) {
+                    Some(l) => l as f64,
+                    None => return RawApplyOutcome::Bail,
+                },
+                b'n' => 0.0,
+                _ => match json_object_get_num(raw, 0, field) {
+                    Some(n) => n.abs(),
+                    None => return RawApplyOutcome::Bail,
+                },
+            }
+        } else {
+            // Object input + missing field: jq's `null | length = 0`.
+            0.0
+        }
+    } else {
+        let n = match json_object_get_num(raw, 0, field) {
+            Some(v) => v,
+            None => return RawApplyOutcome::Bail,
+        };
+        match uop {
+            UnaryOp::Floor => n.floor(),
+            UnaryOp::Ceil => n.ceil(),
+            UnaryOp::Sqrt => n.sqrt(),
+            UnaryOp::Fabs | UnaryOp::Abs => n.abs(),
+            UnaryOp::Round => n.round(),
+            _ => return RawApplyOutcome::Bail,
+        }
+    };
+    let mut v = base;
+    for (op, c) in arith_steps {
+        v = match op {
+            BinOp::Add => v + c,
+            BinOp::Sub => v - c,
+            BinOp::Mul => v * c,
+            BinOp::Div => v / c,
+            BinOp::Mod => jq_mod_f64(v, *c).unwrap_or(f64::NAN),
+            _ => return RawApplyOutcome::Bail,
+        };
+    }
+    if !v.is_finite() {
+        return RawApplyOutcome::Bail;
+    }
+    emit(v);
     RawApplyOutcome::Emit
 }
 

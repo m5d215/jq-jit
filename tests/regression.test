@@ -4148,3 +4148,52 @@ null
 (.x + 0) | sqrt
 {"x":-1}
 null
+
+# Issue #251: field_unary_arith apply-site uses RawApplyOutcome (#83 Phase B).
+# Helper Bails on non-object/unsupported-unary/non-numeric-for-numeric-unary/
+# escape-bearing-string-for-length/non-finite. Also fixes a pre-existing
+# #83-class bug where the apply-site silently treated non-object roots as
+# `null|length=0` instead of jq's `Cannot index <type> with "x"` error.
+(.x | length) + 5
+{"x":"abc"}
+8
+
+(.x | length) * 2
+{"x":[1,2,3]}
+6
+
+(.x | length) + 1
+{"x":null}
+1
+
+(.x | length) + 7
+{"y":1}
+7
+
+(.x | length) + 0
+{"x":-7}
+7
+
+(.x | floor) + 1
+{"x":3.7}
+4
+
+# `?`-wrapped: numeric unary on non-numeric field — generic raises, ? swallows.
+[ (((.x | floor) + 1))? ]
+{"x":"hi"}
+[]
+
+# `?`-wrapped: div-by-zero — helper Bails on non-finite, generic raises.
+[ ((.x | abs) / 0)? ]
+{"x":4}
+[]
+
+# `?`-wrapped: non-object input — generic raises `Cannot index <type>` (was
+# silently emitting `0` pre-#83-Phase-B).
+[ ((.x | length) + 0)? ]
+42
+[]
+
+[ ((.x | length) + 0)? ]
+"hi"
+[]
