@@ -141,10 +141,10 @@ use jq_jit::interpreter::Filter;
 use jq_jit::fast_path::{
     apply_field_access_raw, apply_field_alternative_raw, apply_field_field_alternative_raw,
     apply_field_format_raw, apply_field_gsub_raw, apply_field_ltrimstr_tonumber_raw,
-    apply_field_match_raw, apply_field_scan_raw, apply_field_test_raw,
-    apply_full_object_fields_raw, apply_has_field_raw, apply_has_multi_field_raw,
-    apply_multi_field_access_raw, apply_nested_field_access_raw, apply_object_compute_raw,
-    RawApplyOutcome,
+    apply_field_match_raw, apply_field_scan_raw, apply_field_str_concat_raw,
+    apply_field_test_raw, apply_full_object_fields_raw, apply_has_field_raw,
+    apply_has_multi_field_raw, apply_multi_field_access_raw, apply_nested_field_access_raw,
+    apply_object_compute_raw, RawApplyOutcome,
 };
 
 fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -7198,23 +7198,15 @@ fn real_main() {
                     };
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if raw[0] == b'{' {
-                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sc_field) {
-                                let val = &raw[vs..ve];
-                                if val[0] == b'"' && !val[1..ve-vs-1].contains(&b'\\') {
-                                    compact_buf.extend_from_slice(&val[..val.len()-1]);
-                                    compact_buf.extend_from_slice(&suffix_escaped);
-                                    compact_buf.extend_from_slice(b"\"\n");
-                                } else {
-                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                                }
-                            } else {
-                                compact_buf.push(b'"');
-                                compact_buf.extend_from_slice(&suffix_escaped);
-                                compact_buf.extend_from_slice(b"\"\n");
+                        let outcome = apply_field_str_concat_raw(raw, sc_field, |content| {
+                            compact_buf.push(b'"');
+                            if let Some(c) = content {
+                                compact_buf.extend_from_slice(c);
                             }
-                        } else {
+                            compact_buf.extend_from_slice(&suffix_escaped);
+                            compact_buf.extend_from_slice(b"\"\n");
+                        });
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -20496,27 +20488,15 @@ fn real_main() {
                 };
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if raw[0] == b'{' {
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sc_field) {
-                            let val = &raw[vs..ve];
-                            // Only use fast path for simple strings (quoted, no backslash)
-                            if val[0] == b'"' && !val[1..ve-vs-1].contains(&b'\\') {
-                                // Copy everything except trailing quote, append suffix + quote + newline
-                                compact_buf.extend_from_slice(&val[..val.len()-1]);
-                                compact_buf.extend_from_slice(&suffix_escaped);
-                                compact_buf.extend_from_slice(b"\"\n");
-                            } else {
-                                // Fall back for non-string or escaped string values
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                            }
-                        } else {
-                            // Field not found → null + "str" = "str"
-                            compact_buf.push(b'"');
-                            compact_buf.extend_from_slice(&suffix_escaped);
-                            compact_buf.extend_from_slice(b"\"\n");
+                    let outcome = apply_field_str_concat_raw(raw, sc_field, |content| {
+                        compact_buf.push(b'"');
+                        if let Some(c) = content {
+                            compact_buf.extend_from_slice(c);
                         }
-                    } else {
+                        compact_buf.extend_from_slice(&suffix_escaped);
+                        compact_buf.extend_from_slice(b"\"\n");
+                    });
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }

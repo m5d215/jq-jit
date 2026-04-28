@@ -579,6 +579,59 @@ where
     RawApplyOutcome::Emit
 }
 
+/// Apply the `.field + "<literal-suffix>"` raw-byte fast path on a single
+/// JSON record.
+///
+/// jq's `+` on strings concatenates, and `null + "x"` returns `"x"` (jq
+/// treats `null` as a left-identity for most operations), so this fast
+/// path's discipline is not just "string field, otherwise bail":
+///
+/// * Object input, field absent — invokes `on_field(None)`. The
+///   apply-site emits `"<suffix>"` (matching `null + "suffix"` →
+///   `"suffix"`).
+/// * Object input, field present, value is a quoted string with no `\`
+///   escapes — invokes `on_field(Some(content))` where `content` is the
+///   field bytes without the surrounding quotes. The apply-site emits
+///   `"<content><suffix>"`.
+/// * Object input, field present, value is a non-string scalar (number,
+///   bool, array, etc.) — returns [`RawApplyOutcome::Bail`] so the
+///   generic path raises jq's `<type> and string cannot be added`.
+/// * Object input, field present, value is an escape-bearing string —
+///   returns [`RawApplyOutcome::Bail`] (the raw scanner can't decode
+///   escapes safely; the generic path will).
+/// * Non-object input — returns [`RawApplyOutcome::Bail`]. Notably this
+///   includes `null`, even though `null | (.x + "s") == "s"` is jq's
+///   answer; the helper conservatively delegates the lookup-and-fold to
+///   the generic path.
+pub fn apply_field_str_concat_raw<E>(
+    raw: &[u8],
+    field: &str,
+    on_field: E,
+) -> RawApplyOutcome
+where
+    E: FnOnce(Option<&[u8]>),
+{
+    if raw.first() != Some(&b'{') {
+        return RawApplyOutcome::Bail;
+    }
+    match json_object_get_field_raw(raw, 0, field) {
+        None => {
+            on_field(None);
+            RawApplyOutcome::Emit
+        }
+        Some((vs, ve)) => {
+            let val = &raw[vs..ve];
+            if val.len() < 2 || val[0] != b'"' || val[val.len() - 1] != b'"'
+                || val[1..val.len() - 1].contains(&b'\\')
+            {
+                return RawApplyOutcome::Bail;
+            }
+            on_field(Some(&val[1..val.len() - 1]));
+            RawApplyOutcome::Emit
+        }
+    }
+}
+
 /// Apply the `.field // fallback` raw-byte fast path on a single JSON
 /// record.
 ///
