@@ -10,12 +10,12 @@
 
 use jq_jit::fast_path::{
     FastPath, FieldAccessPath, RawApplyOutcome, apply_field_access_raw,
-    apply_field_alternative_raw, apply_field_field_alternative_raw, apply_field_format_raw,
-    apply_field_gsub_raw, apply_field_ltrimstr_tonumber_raw, apply_field_match_raw,
-    apply_field_scan_raw, apply_field_str_builtin_raw, apply_field_str_concat_raw,
-    apply_field_str_reverse_raw, apply_field_test_raw, apply_full_object_fields_raw,
-    apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
-    apply_nested_field_access_raw, apply_object_compute_raw,
+    apply_field_alternative_raw, apply_field_binop_raw, apply_field_field_alternative_raw,
+    apply_field_format_raw, apply_field_gsub_raw, apply_field_ltrimstr_tonumber_raw,
+    apply_field_match_raw, apply_field_scan_raw, apply_field_str_builtin_raw,
+    apply_field_str_concat_raw, apply_field_str_reverse_raw, apply_field_test_raw,
+    apply_full_object_fields_raw, apply_has_field_raw, apply_has_multi_field_raw,
+    apply_multi_field_access_raw, apply_nested_field_access_raw, apply_object_compute_raw,
 };
 use jq_jit::interpreter::Filter;
 use jq_jit::ir::BinOp;
@@ -1791,5 +1791,129 @@ fn raw_field_str_builtin_non_object_input_bails() {
             outcome,
         );
         assert_eq!(called, 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `.x <op> .y` — both fields must be JSON numbers; the helper computes the
+// arithmetic and Bails on missing/non-numeric fields, on a non-arithmetic op
+// (defensive), and on a non-finite result (so the generic path raises jq's
+// `/ by zero` error).
+
+#[test]
+fn raw_field_binop_add_emits_sum() {
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_binop_raw(
+        b"{\"x\":3,\"y\":4}",
+        "x",
+        "y",
+        BinOp::Add,
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![7.0]);
+}
+
+#[test]
+fn raw_field_binop_handles_all_arith_ops() {
+    for (op, expected) in [
+        (BinOp::Add, 13.0),
+        (BinOp::Sub, 7.0),
+        (BinOp::Mul, 30.0),
+        (BinOp::Div, 10.0 / 3.0),
+        (BinOp::Mod, 1.0),
+    ] {
+        let mut emitted: Vec<f64> = Vec::new();
+        let outcome = apply_field_binop_raw(
+            b"{\"x\":10,\"y\":3}",
+            "x",
+            "y",
+            op,
+            |n| emitted.push(n),
+        );
+        assert!(matches!(outcome, RawApplyOutcome::Emit));
+        assert_eq!(emitted, vec![expected], "op={:?}", op);
+    }
+}
+
+#[test]
+fn raw_field_binop_div_by_zero_bails() {
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_binop_raw(
+        b"{\"x\":1,\"y\":0}",
+        "x",
+        "y",
+        BinOp::Div,
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_field_binop_non_arith_op_bails() {
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_binop_raw(
+        b"{\"x\":1,\"y\":2}",
+        "x",
+        "y",
+        BinOp::Eq,
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_field_binop_field_missing_bails() {
+    let mut emitted: Vec<f64> = Vec::new();
+    let outcome = apply_field_binop_raw(
+        b"{\"x\":1}",
+        "x",
+        "y",
+        BinOp::Add,
+        |n| emitted.push(n),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_field_binop_non_numeric_field_bails() {
+    for inner in [
+        &b"{\"x\":\"hi\",\"y\":1}"[..],
+        &b"{\"x\":1,\"y\":null}"[..],
+        &b"{\"x\":[1],\"y\":2}"[..],
+    ] {
+        let mut emitted: Vec<f64> = Vec::new();
+        let outcome = apply_field_binop_raw(inner, "x", "y", BinOp::Add, |n| emitted.push(n));
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for non-numeric field input {:?}, got {:?}",
+            std::str::from_utf8(inner).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
+    }
+}
+
+#[test]
+fn raw_field_binop_non_object_input_bails() {
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut emitted: Vec<f64> = Vec::new();
+        let outcome = apply_field_binop_raw(raw, "x", "y", BinOp::Add, |n| emitted.push(n));
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for binop input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
     }
 }

@@ -66,8 +66,8 @@ use crate::ir::BinOp;
 use crate::runtime::jq_mod_f64;
 use crate::value::{
     KeyStr, Value, ObjInner, json_object_get_field_raw, json_object_get_fields_raw_buf,
-    json_object_get_nested_field_raw, json_object_has_all_keys, json_object_has_any_key,
-    json_object_has_key,
+    json_object_get_nested_field_raw, json_object_get_two_nums, json_object_has_all_keys,
+    json_object_has_any_key, json_object_has_key,
 };
 
 /// A fast path whose type-dispatch obligations are encoded in its
@@ -668,6 +668,55 @@ where
         return RawApplyOutcome::Bail;
     }
     on_string(&val[1..val.len() - 1])
+}
+
+/// Apply the `.x <op> .y` raw-byte arithmetic fast path on a single
+/// JSON record where both `.x` and `.y` resolve to JSON numbers.
+///
+/// Bail discipline:
+/// * Either field is absent, or either value isn't a JSON number —
+///   [`RawApplyOutcome::Bail`] (the generic path raises jq's
+///   `<type> and <type> cannot be added` / similar).
+/// * `op` is anything other than `Add`/`Sub`/`Mul`/`Div`/`Mod` —
+///   [`RawApplyOutcome::Bail`] (the detector should never produce a
+///   non-arithmetic op for this shape, but the helper rejects it
+///   defensively rather than wrap the comparison ops in a coerced
+///   `f64`).
+/// * The arithmetic result is non-finite (div-by-zero, mod-by-zero,
+///   IEEE NaN/∞) — [`RawApplyOutcome::Bail`] so the generic path
+///   produces jq's runtime error (`/ by zero`, etc.).
+/// * Non-object input — [`RawApplyOutcome::Bail`] (number lookup
+///   fails).
+///
+/// On a passing type-guard with a finite result, invokes `emit(n)` so
+/// the apply-site owns JSON-number formatting.
+pub fn apply_field_binop_raw<F>(
+    raw: &[u8],
+    field_a: &str,
+    field_b: &str,
+    op: BinOp,
+    mut emit: F,
+) -> RawApplyOutcome
+where
+    F: FnMut(f64),
+{
+    let (a, b) = match json_object_get_two_nums(raw, 0, field_a, field_b) {
+        Some(p) => p,
+        None => return RawApplyOutcome::Bail,
+    };
+    let result = match op {
+        BinOp::Add => a + b,
+        BinOp::Sub => a - b,
+        BinOp::Mul => a * b,
+        BinOp::Div => a / b,
+        BinOp::Mod => jq_mod_f64(a, b).unwrap_or(f64::NAN),
+        _ => return RawApplyOutcome::Bail,
+    };
+    if !result.is_finite() {
+        return RawApplyOutcome::Bail;
+    }
+    emit(result);
+    RawApplyOutcome::Emit
 }
 
 /// Apply the `.field | <string-builtin>(arg)` raw-byte fast path on a

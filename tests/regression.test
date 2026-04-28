@@ -3291,3 +3291,71 @@ true
 
 (.x | endswith("a"))?
 [1,2,3]
+
+# #83 Phase B: .x <op> .y arithmetic apply-site uses RawApplyOutcome::Bail.
+# Happy path covering all 5 ops.
+.x + .y
+{"x":3,"y":4}
+7
+
+.x - .y
+{"x":10,"y":3}
+7
+
+.x * .y
+{"x":6,"y":7}
+42
+
+.x / .y
+{"x":10,"y":4}
+2.5
+
+.x % .y
+{"x":10,"y":3}
+1
+
+# Div-by-zero: jq raises; bail to generic; `?` swallows.
+(.x / .y)?
+{"x":1,"y":0}
+
+# Mod-by-zero: jq raises; bail to generic; `?` swallows.
+(.x % .y)?
+{"x":5,"y":0}
+
+# Field missing: bail to generic; jq's `null + X == X` holds.
+(.x + .y)?
+{"x":3}
+3
+
+(.x + .y)?
+{"y":4}
+4
+
+# Non-numeric field under `?`: depends on jq's `+` semantics.
+# string + number raises → empty.
+(.x + .y)?
+{"x":"hi","y":1}
+
+# null + 1 == 1 (jq null left-identity).
+.x + .y
+{"x":1,"y":null}
+1
+
+# array + number raises → empty.
+(.x + .y)?
+{"x":[1,2],"y":3}
+
+# Non-object/non-null input under `?`: jq raises "Cannot index <type>".
+(.x + .y)?
+42
+
+(.x + .y)?
+"hi"
+
+(.x + .y)?
+[1,2,3]
+
+# null input: jq returns null (null + null == null).
+.x + .y
+null
+null
