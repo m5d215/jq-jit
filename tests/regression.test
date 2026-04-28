@@ -4334,3 +4334,40 @@ null
 (.x | index("b")) + 0
 {"x":"a\nb"}
 2
+
+# Issue #251: numeric_expr / numeric_expr_unary apply-sites use RawApplyOutcome
+# (#83 Phase B). Helper Bails on non-object/missing-or-non-numeric/non-finite/
+# buffer-mismatch. Also fixes pre-existing #83-class non-finite divergence
+# (was emitting saturated `1.797e+308` for ±Infinity).
+.x + .y * 2
+{"x":3,"y":4}
+11
+
+(.a + .b) * (.c - .d)
+{"a":1,"b":2,"c":5,"d":1}
+12
+
+# Unary trailing op
+(.x + .y) | sqrt
+{"x":2,"y":7}
+3
+
+# `?`-wrapped: non-numeric field — generic raises type error, ? swallows.
+[ ((.x + .y) * 2)? ]
+{"x":3,"y":"hi"}
+[]
+
+# `?`-wrapped: div-by-zero — helper Bails, generic raises.
+[ (.x / .y)? ]
+{"x":1,"y":0}
+[]
+
+# sqrt of negative produces NaN → helper Bails, generic produces null.
+(.x + .y) | sqrt
+{"x":-5,"y":-5}
+null
+
+# `?`-wrapped: non-object input — generic raises.
+[ ((.x + .y) | sqrt)? ]
+"plain"
+[]

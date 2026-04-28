@@ -62,6 +62,7 @@
 
 use anyhow::Result;
 
+use crate::interpreter::{ArithExpr, MathUnary};
 use crate::ir::{BinOp, UnaryOp};
 use crate::runtime::jq_mod_f64;
 use crate::value::{
@@ -1430,6 +1431,94 @@ where
             BinOp::Mod => jq_mod_f64(result, *c).unwrap_or(f64::NAN),
             _ => return RawApplyOutcome::Bail,
         };
+    }
+    emit(result);
+    RawApplyOutcome::Emit
+}
+
+/// Apply a generic `ArithExpr` (a pure numeric expression over named
+/// fields and constants) raw-byte fast path on a single JSON record,
+/// optionally followed by a math unary op (`floor`/`ceil`/`sqrt`/
+/// `fabs`/`round`).
+///
+/// Covers both `detect_numeric_expr` (no unary) and
+/// `detect_numeric_expr_unary`. Caller provides:
+/// * `fields` — list of field names referenced by the expression
+///   (`ArithExpr::Field(idx)` resolves into this slice).
+/// * `arith` — the compiled expression (built by `simplify_expr`).
+/// * `math_op` — `Some(_)` to apply the trailing unary op, `None` to
+///   skip it.
+/// * `ranges_buf` and `vals_buf` — reusable scratch buffers sized
+///   to `fields.len()`. Hoisting them across the input stream avoids
+///   per-record allocation; required for the 3-or-more-fields
+///   path that uses `json_object_get_fields_raw_buf`.
+///
+/// Bail discipline:
+/// * Non-object input — [`RawApplyOutcome::Bail`].
+/// * Any field absent or non-numeric — Bail.
+/// * Buffer length mismatch (caller bug) — Bail (defensive).
+/// * Non-finite final result — Bail so the generic path raises
+///   jq's `/ by zero` etc. (The prior fast path silently emitted
+///   `1.7976931348623157e+308` / `null` for ±Infinity / NaN —
+///   another #83-class divergence the structural Bail closes.)
+///
+/// On Emit, invokes `emit(result)` so the apply-site owns
+/// JSON-number formatting.
+pub fn apply_numeric_expr_raw<F>(
+    raw: &[u8],
+    fields: &[&str],
+    arith: &ArithExpr,
+    math_op: Option<MathUnary>,
+    ranges_buf: &mut [(usize, usize)],
+    vals_buf: &mut [f64],
+    mut emit: F,
+) -> RawApplyOutcome
+where
+    F: FnMut(f64),
+{
+    if raw.is_empty() || raw[0] != b'{' {
+        return RawApplyOutcome::Bail;
+    }
+    let nf = fields.len();
+    if ranges_buf.len() < nf || vals_buf.len() < nf {
+        return RawApplyOutcome::Bail;
+    }
+    let ok = if nf == 1 {
+        match json_object_get_num(raw, 0, fields[0]) {
+            Some(v) => { vals_buf[0] = v; true }
+            None => false,
+        }
+    } else if nf == 2 {
+        match json_object_get_two_nums(raw, 0, fields[0], fields[1]) {
+            Some((a, b)) => { vals_buf[0] = a; vals_buf[1] = b; true }
+            None => false,
+        }
+    } else if json_object_get_fields_raw_buf(raw, 0, fields, ranges_buf) {
+        let mut all_ok = true;
+        for (i, &(s, e)) in ranges_buf[..nf].iter().enumerate() {
+            match fast_float::parse::<f64, _>(unsafe { std::str::from_utf8_unchecked(&raw[s..e]) }) {
+                Ok(n) => vals_buf[i] = n,
+                Err(_) => { all_ok = false; break; }
+            }
+        }
+        all_ok
+    } else {
+        false
+    };
+    if !ok {
+        return RawApplyOutcome::Bail;
+    }
+    let base = arith.eval(&vals_buf[..nf]);
+    let result = match math_op {
+        Some(MathUnary::Sqrt) => base.sqrt(),
+        Some(MathUnary::Floor) => base.floor(),
+        Some(MathUnary::Ceil) => base.ceil(),
+        Some(MathUnary::Fabs) => base.abs(),
+        Some(MathUnary::Round) => base.round(),
+        None => base,
+    };
+    if !result.is_finite() {
+        return RawApplyOutcome::Bail;
     }
     emit(result);
     RawApplyOutcome::Emit
