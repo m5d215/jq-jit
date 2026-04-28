@@ -2456,3 +2456,43 @@ null
 .a.b
 null
 null
+
+# Issue #83 Phase B: raw .a, .b multi-field apply-site bails on partial objects,
+# null input, and non-object non-null input. The generic path fills in the
+# correct per-field semantics (mix of values+nulls, null per field, type error).
+
+# Multi-field on a fully-populated object emits each value
+.a, .b, .c
+{"a":1,"b":2,"c":3}
+1
+2
+3
+
+# Multi-field on a partially-populated object emits values + nulls
+.a, .b, .c
+{"a":1,"c":3}
+1
+null
+3
+
+# Multi-field on null emits one null per field
+.a, .b
+null
+null
+null
+
+# Multi-field under `?` on a number — bail then generic raises, `?` swallows
+.a, .b?
+42
+
+# Multi-field under `?` on a string
+.a, .b?
+"hi"
+
+# Multi-field under `?` on a boolean
+.a, .b?
+true
+
+# Multi-field under `?` on an array
+.a, .b?
+[1,2,3]

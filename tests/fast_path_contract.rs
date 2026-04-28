@@ -10,7 +10,7 @@
 
 use jq_jit::fast_path::{
     FastPath, FieldAccessPath, RawApplyOutcome, apply_field_access_raw,
-    apply_nested_field_access_raw,
+    apply_multi_field_access_raw, apply_nested_field_access_raw,
 };
 use jq_jit::interpreter::Filter;
 use jq_jit::value::Value;
@@ -289,6 +289,85 @@ fn raw_nested_field_non_object_non_null_input_bails() {
         let outcome = apply_nested_field_access_raw(raw, &["a", "b"], |bytes| {
             emitted.push(bytes.to_vec())
         });
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert!(emitted.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-field comma access (`.a, .b, .c`) — fires only on objects that contain
+// every requested field. Anything else bails (null input, partial object,
+// non-object) so jq's per-field semantics (`null` for null input, mix of
+// values/nulls for partial objects, type error for non-object non-null) come
+// from the generic path.
+
+#[test]
+fn raw_multi_field_complete_object_emits_each_field() {
+    let mut ranges_buf = vec![(0usize, 0usize); 3];
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_multi_field_access_raw(
+        b"{\"a\":1,\"b\":2,\"c\":3}",
+        &["a", "b", "c"],
+        &mut ranges_buf,
+        |bytes| emitted.push(bytes.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(emitted, vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()]);
+}
+
+#[test]
+fn raw_multi_field_partial_object_bails() {
+    // jq emits a mix of values and nulls; the raw scanner is all-or-nothing,
+    // so the helper bails to the generic path.
+    let mut ranges_buf = vec![(0usize, 0usize); 3];
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_multi_field_access_raw(
+        b"{\"a\":1,\"c\":3}",
+        &["a", "b", "c"],
+        &mut ranges_buf,
+        |bytes| emitted.push(bytes.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_multi_field_null_input_bails() {
+    // jq emits one `null` per field; the raw scanner bails so the generic
+    // path produces the per-field nulls.
+    let mut ranges_buf = vec![(0usize, 0usize); 2];
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_multi_field_access_raw(
+        b"null",
+        &["a", "b"],
+        &mut ranges_buf,
+        |bytes| emitted.push(bytes.to_vec()),
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert!(emitted.is_empty());
+}
+
+#[test]
+fn raw_multi_field_non_object_non_null_input_bails() {
+    for raw in [
+        b"42".as_slice(),
+        b"\"hello\"".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut ranges_buf = vec![(0usize, 0usize); 2];
+        let mut emitted: Vec<Vec<u8>> = Vec::new();
+        let outcome = apply_multi_field_access_raw(
+            raw,
+            &["a", "b"],
+            &mut ranges_buf,
+            |bytes| emitted.push(bytes.to_vec()),
+        );
         assert!(
             matches!(outcome, RawApplyOutcome::Bail),
             "expected Bail for input {:?}, got {:?}",
