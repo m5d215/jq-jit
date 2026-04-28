@@ -12,10 +12,10 @@ use jq_jit::fast_path::{
     FastPath, FieldAccessPath, RawApplyOutcome, apply_field_access_raw,
     apply_field_alternative_raw, apply_field_field_alternative_raw, apply_field_format_raw,
     apply_field_gsub_raw, apply_field_ltrimstr_tonumber_raw, apply_field_match_raw,
-    apply_field_scan_raw, apply_field_str_concat_raw, apply_field_str_reverse_raw,
-    apply_field_test_raw, apply_full_object_fields_raw, apply_has_field_raw,
-    apply_has_multi_field_raw, apply_multi_field_access_raw, apply_nested_field_access_raw,
-    apply_object_compute_raw,
+    apply_field_scan_raw, apply_field_str_builtin_raw, apply_field_str_concat_raw,
+    apply_field_str_reverse_raw, apply_field_test_raw, apply_full_object_fields_raw,
+    apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
+    apply_nested_field_access_raw, apply_object_compute_raw,
 };
 use jq_jit::interpreter::Filter;
 use jq_jit::ir::BinOp;
@@ -1683,6 +1683,110 @@ fn raw_field_str_reverse_non_object_input_bails_without_invoking_closure() {
         assert!(
             matches!(outcome, RawApplyOutcome::Bail),
             "expected Bail for str_reverse input {:?}, got {:?}",
+            std::str::from_utf8(raw).unwrap(),
+            outcome,
+        );
+        assert_eq!(called, 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `.field | <string-builtin>(arg)` — the helper enforces the structural
+// type-guard (object input + non-escape quoted-string field) and lets the
+// closure dispatch on builtin name. The closure can return Bail for an
+// unknown name (defensive fallback).
+
+#[test]
+fn raw_field_str_builtin_invokes_closure_with_inner_bytes() {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let outcome = apply_field_str_builtin_raw(
+        b"{\"x\":\"banana\"}",
+        "x",
+        |content| {
+            seen.push(content.to_vec());
+            RawApplyOutcome::Emit
+        },
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Emit));
+    assert_eq!(seen, vec![b"banana".to_vec()]);
+}
+
+#[test]
+fn raw_field_str_builtin_propagates_closure_bail_verdict() {
+    // The closure can choose to Bail (e.g. unknown builtin name fallback).
+    let outcome = apply_field_str_builtin_raw(
+        b"{\"x\":\"banana\"}",
+        "x",
+        |_| RawApplyOutcome::Bail,
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+}
+
+#[test]
+fn raw_field_str_builtin_field_missing_bails() {
+    let mut called = 0u32;
+    let outcome = apply_field_str_builtin_raw(
+        b"{\"y\":\"hi\"}",
+        "x",
+        |_| {
+            called += 1;
+            RawApplyOutcome::Emit
+        },
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert_eq!(called, 0);
+}
+
+#[test]
+fn raw_field_str_builtin_non_string_field_bails() {
+    for inner in [&b"{\"x\":42}"[..], &b"{\"x\":null}"[..], &b"{\"x\":[1,2]}"[..]] {
+        let mut called = 0u32;
+        let outcome = apply_field_str_builtin_raw(inner, "x", |_| {
+            called += 1;
+            RawApplyOutcome::Emit
+        });
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for non-string field input {:?}, got {:?}",
+            std::str::from_utf8(inner).unwrap(),
+            outcome,
+        );
+        assert_eq!(called, 0);
+    }
+}
+
+#[test]
+fn raw_field_str_builtin_escaped_string_bails() {
+    let mut called = 0u32;
+    let outcome = apply_field_str_builtin_raw(
+        br#"{"x":"a\nb"}"#,
+        "x",
+        |_| {
+            called += 1;
+            RawApplyOutcome::Emit
+        },
+    );
+    assert!(matches!(outcome, RawApplyOutcome::Bail));
+    assert_eq!(called, 0);
+}
+
+#[test]
+fn raw_field_str_builtin_non_object_input_bails() {
+    for raw in [
+        b"42".as_slice(),
+        b"\"hi\"".as_slice(),
+        b"null".as_slice(),
+        b"true".as_slice(),
+        b"[1,2,3]".as_slice(),
+    ] {
+        let mut called = 0u32;
+        let outcome = apply_field_str_builtin_raw(raw, "x", |_| {
+            called += 1;
+            RawApplyOutcome::Emit
+        });
+        assert!(
+            matches!(outcome, RawApplyOutcome::Bail),
+            "expected Bail for str_builtin input {:?}, got {:?}",
             std::str::from_utf8(raw).unwrap(),
             outcome,
         );

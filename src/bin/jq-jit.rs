@@ -141,10 +141,11 @@ use jq_jit::interpreter::Filter;
 use jq_jit::fast_path::{
     apply_field_access_raw, apply_field_alternative_raw, apply_field_field_alternative_raw,
     apply_field_format_raw, apply_field_gsub_raw, apply_field_ltrimstr_tonumber_raw,
-    apply_field_match_raw, apply_field_scan_raw, apply_field_str_concat_raw,
-    apply_field_str_reverse_raw, apply_field_test_raw, apply_full_object_fields_raw,
-    apply_has_field_raw, apply_has_multi_field_raw, apply_multi_field_access_raw,
-    apply_nested_field_access_raw, apply_object_compute_raw, RawApplyOutcome,
+    apply_field_match_raw, apply_field_scan_raw, apply_field_str_builtin_raw,
+    apply_field_str_concat_raw, apply_field_str_reverse_raw, apply_field_test_raw,
+    apply_full_object_fields_raw, apply_has_field_raw, apply_has_multi_field_raw,
+    apply_multi_field_access_raw, apply_nested_field_access_raw, apply_object_compute_raw,
+    RawApplyOutcome,
 };
 
 fn json_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -6463,142 +6464,135 @@ fn real_main() {
                     let arg_bytes = sb_arg.as_bytes();
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sb_field) {
-                            let val = &raw[vs..ve];
-                            // Only fast-path quoted strings without backslash escapes
-                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                                && !val[1..val.len()-1].contains(&b'\\')
-                            {
-                                let content = &val[1..val.len()-1];
-                                match sb_name.as_str() {
-                                    "startswith" => {
-                                        if content.len() >= arg_bytes.len() && &content[..arg_bytes.len()] == arg_bytes {
-                                            compact_buf.extend_from_slice(b"true\n");
-                                        } else {
-                                            compact_buf.extend_from_slice(b"false\n");
-                                        }
+                        let outcome = apply_field_str_builtin_raw(raw, sb_field, |content| {
+                            match sb_name.as_str() {
+                                "startswith" => {
+                                    if content.len() >= arg_bytes.len() && &content[..arg_bytes.len()] == arg_bytes {
+                                        compact_buf.extend_from_slice(b"true\n");
+                                    } else {
+                                        compact_buf.extend_from_slice(b"false\n");
                                     }
-                                    "endswith" => {
-                                        if content.len() >= arg_bytes.len() && &content[content.len()-arg_bytes.len()..] == arg_bytes {
-                                            compact_buf.extend_from_slice(b"true\n");
-                                        } else {
-                                            compact_buf.extend_from_slice(b"false\n");
-                                        }
+                                    RawApplyOutcome::Emit
+                                }
+                                "endswith" => {
+                                    if content.len() >= arg_bytes.len() && &content[content.len()-arg_bytes.len()..] == arg_bytes {
+                                        compact_buf.extend_from_slice(b"true\n");
+                                    } else {
+                                        compact_buf.extend_from_slice(b"false\n");
                                     }
-                                    "ltrimstr" => {
-                                        compact_buf.push(b'"');
-                                        if content.len() >= arg_bytes.len() && &content[..arg_bytes.len()] == arg_bytes {
-                                            compact_buf.extend_from_slice(&content[arg_bytes.len()..]);
-                                        } else {
-                                            compact_buf.extend_from_slice(content);
-                                        }
-                                        compact_buf.push(b'"');
-                                        compact_buf.push(b'\n');
+                                    RawApplyOutcome::Emit
+                                }
+                                "ltrimstr" => {
+                                    compact_buf.push(b'"');
+                                    if content.len() >= arg_bytes.len() && &content[..arg_bytes.len()] == arg_bytes {
+                                        compact_buf.extend_from_slice(&content[arg_bytes.len()..]);
+                                    } else {
+                                        compact_buf.extend_from_slice(content);
                                     }
-                                    "rtrimstr" => {
-                                        compact_buf.push(b'"');
-                                        if content.len() >= arg_bytes.len() && &content[content.len()-arg_bytes.len()..] == arg_bytes {
-                                            compact_buf.extend_from_slice(&content[..content.len()-arg_bytes.len()]);
-                                        } else {
-                                            compact_buf.extend_from_slice(content);
-                                        }
-                                        compact_buf.push(b'"');
-                                        compact_buf.push(b'\n');
+                                    compact_buf.push(b'"');
+                                    compact_buf.push(b'\n');
+                                    RawApplyOutcome::Emit
+                                }
+                                "rtrimstr" => {
+                                    compact_buf.push(b'"');
+                                    if content.len() >= arg_bytes.len() && &content[content.len()-arg_bytes.len()..] == arg_bytes {
+                                        compact_buf.extend_from_slice(&content[..content.len()-arg_bytes.len()]);
+                                    } else {
+                                        compact_buf.extend_from_slice(content);
                                     }
-                                    "split" => {
-                                        // Raw byte split: split JSON string content by separator,
-                                        // output JSON array directly without Value construction
-                                        compact_buf.push(b'[');
-                                        if arg_bytes.is_empty() {
-                                            // split("") = each byte as separate string
-                                            for (j, &byte) in content.iter().enumerate() {
-                                                if j > 0 { compact_buf.push(b','); }
+                                    compact_buf.push(b'"');
+                                    compact_buf.push(b'\n');
+                                    RawApplyOutcome::Emit
+                                }
+                                "split" => {
+                                    compact_buf.push(b'[');
+                                    if arg_bytes.is_empty() {
+                                        for (j, &byte) in content.iter().enumerate() {
+                                            if j > 0 { compact_buf.push(b','); }
+                                            compact_buf.push(b'"');
+                                            compact_buf.push(byte);
+                                            compact_buf.push(b'"');
+                                        }
+                                    } else {
+                                        let mut pos = 0;
+                                        let mut first = true;
+                                        while pos <= content.len() {
+                                            if !first { compact_buf.push(b','); }
+                                            first = false;
+                                            let next = if pos + arg_bytes.len() <= content.len() {
+                                                content[pos..].windows(arg_bytes.len())
+                                                    .position(|w| w == arg_bytes)
+                                                    .map(|i| pos + i)
+                                            } else { None };
+                                            compact_buf.push(b'"');
+                                            if let Some(found) = next {
+                                                compact_buf.extend_from_slice(&content[pos..found]);
                                                 compact_buf.push(b'"');
-                                                compact_buf.push(byte);
+                                                pos = found + arg_bytes.len();
+                                            } else {
+                                                compact_buf.extend_from_slice(&content[pos..]);
                                                 compact_buf.push(b'"');
+                                                break;
                                             }
-                                        } else {
-                                            let mut pos = 0;
-                                            let mut first = true;
-                                            while pos <= content.len() {
+                                        }
+                                    }
+                                    compact_buf.extend_from_slice(b"]\n");
+                                    RawApplyOutcome::Emit
+                                }
+                                "index" => {
+                                    if arg_bytes.is_empty() {
+                                        compact_buf.extend_from_slice(b"null\n");
+                                    } else if let Some(pos) = content.windows(arg_bytes.len()).position(|w| w == arg_bytes) {
+                                        compact_buf.extend_from_slice(itoa::Buffer::new().format(pos as i64).as_bytes());
+                                        compact_buf.push(b'\n');
+                                    } else {
+                                        compact_buf.extend_from_slice(b"null\n");
+                                    }
+                                    RawApplyOutcome::Emit
+                                }
+                                "rindex" => {
+                                    if arg_bytes.is_empty() {
+                                        compact_buf.extend_from_slice(b"null\n");
+                                    } else if let Some(pos) = content.windows(arg_bytes.len()).rposition(|w| w == arg_bytes) {
+                                        compact_buf.extend_from_slice(itoa::Buffer::new().format(pos as i64).as_bytes());
+                                        compact_buf.push(b'\n');
+                                    } else {
+                                        compact_buf.extend_from_slice(b"null\n");
+                                    }
+                                    RawApplyOutcome::Emit
+                                }
+                                "indices" => {
+                                    compact_buf.push(b'[');
+                                    if !arg_bytes.is_empty() {
+                                        let mut first = true;
+                                        let mut start = 0;
+                                        while start + arg_bytes.len() <= content.len() {
+                                            if let Some(pos) = content[start..].windows(arg_bytes.len()).position(|w| w == arg_bytes) {
                                                 if !first { compact_buf.push(b','); }
                                                 first = false;
-                                                // Find next occurrence of separator
-                                                let next = if pos + arg_bytes.len() <= content.len() {
-                                                    content[pos..].windows(arg_bytes.len())
-                                                        .position(|w| w == arg_bytes)
-                                                        .map(|i| pos + i)
-                                                } else { None };
-                                                compact_buf.push(b'"');
-                                                if let Some(found) = next {
-                                                    compact_buf.extend_from_slice(&content[pos..found]);
-                                                    compact_buf.push(b'"');
-                                                    pos = found + arg_bytes.len();
-                                                } else {
-                                                    compact_buf.extend_from_slice(&content[pos..]);
-                                                    compact_buf.push(b'"');
-                                                    break;
-                                                }
+                                                let abs_pos = start + pos;
+                                                compact_buf.extend_from_slice(itoa::Buffer::new().format(abs_pos as i64).as_bytes());
+                                                start = abs_pos + 1;
+                                            } else {
+                                                break;
                                             }
                                         }
-                                        compact_buf.extend_from_slice(b"]\n");
                                     }
-                                    "index" => {
-                                        if arg_bytes.is_empty() {
-                                            compact_buf.extend_from_slice(b"null\n");
-                                        } else if let Some(pos) = content.windows(arg_bytes.len()).position(|w| w == arg_bytes) {
-                                            compact_buf.extend_from_slice(itoa::Buffer::new().format(pos as i64).as_bytes());
-                                            compact_buf.push(b'\n');
-                                        } else {
-                                            compact_buf.extend_from_slice(b"null\n");
-                                        }
-                                    }
-                                    "rindex" => {
-                                        if arg_bytes.is_empty() {
-                                            compact_buf.extend_from_slice(b"null\n");
-                                        } else if let Some(pos) = content.windows(arg_bytes.len()).rposition(|w| w == arg_bytes) {
-                                            compact_buf.extend_from_slice(itoa::Buffer::new().format(pos as i64).as_bytes());
-                                            compact_buf.push(b'\n');
-                                        } else {
-                                            compact_buf.extend_from_slice(b"null\n");
-                                        }
-                                    }
-                                    "indices" => {
-                                        compact_buf.push(b'[');
-                                        if !arg_bytes.is_empty() {
-                                            let mut first = true;
-                                            let mut start = 0;
-                                            while start + arg_bytes.len() <= content.len() {
-                                                if let Some(pos) = content[start..].windows(arg_bytes.len()).position(|w| w == arg_bytes) {
-                                                    if !first { compact_buf.push(b','); }
-                                                    first = false;
-                                                    let abs_pos = start + pos;
-                                                    compact_buf.extend_from_slice(itoa::Buffer::new().format(abs_pos as i64).as_bytes());
-                                                    start = abs_pos + 1;
-                                                } else {
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        compact_buf.extend_from_slice(b"]\n");
-                                    }
-                                    "contains" => {
-                                        if arg_bytes.is_empty() || content.windows(arg_bytes.len()).any(|w| w == arg_bytes) {
-                                            compact_buf.extend_from_slice(b"true\n");
-                                        } else {
-                                            compact_buf.extend_from_slice(b"false\n");
-                                        }
-                                    }
-                                    _ => {
-                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                                    }
+                                    compact_buf.extend_from_slice(b"]\n");
+                                    RawApplyOutcome::Emit
                                 }
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                "contains" => {
+                                    if arg_bytes.is_empty() || content.windows(arg_bytes.len()).any(|w| w == arg_bytes) {
+                                        compact_buf.extend_from_slice(b"true\n");
+                                    } else {
+                                        compact_buf.extend_from_slice(b"false\n");
+                                    }
+                                    RawApplyOutcome::Emit
+                                }
+                                _ => RawApplyOutcome::Bail,
                             }
-                        } else {
+                        });
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -19749,137 +19743,135 @@ fn real_main() {
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sb_field) {
-                        let val = &raw[vs..ve];
-                        if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                            && !val[1..val.len()-1].contains(&b'\\')
-                        {
-                            let content = &val[1..val.len()-1];
-                            match sb_name.as_str() {
-                                "startswith" => {
-                                    if content.len() >= arg_bytes.len() && &content[..arg_bytes.len()] == arg_bytes {
-                                        compact_buf.extend_from_slice(b"true\n");
-                                    } else {
-                                        compact_buf.extend_from_slice(b"false\n");
-                                    }
+                    let outcome = apply_field_str_builtin_raw(raw, sb_field, |content| {
+                        match sb_name.as_str() {
+                            "startswith" => {
+                                if content.len() >= arg_bytes.len() && &content[..arg_bytes.len()] == arg_bytes {
+                                    compact_buf.extend_from_slice(b"true\n");
+                                } else {
+                                    compact_buf.extend_from_slice(b"false\n");
                                 }
-                                "endswith" => {
-                                    if content.len() >= arg_bytes.len() && &content[content.len()-arg_bytes.len()..] == arg_bytes {
-                                        compact_buf.extend_from_slice(b"true\n");
-                                    } else {
-                                        compact_buf.extend_from_slice(b"false\n");
-                                    }
+                                RawApplyOutcome::Emit
+                            }
+                            "endswith" => {
+                                if content.len() >= arg_bytes.len() && &content[content.len()-arg_bytes.len()..] == arg_bytes {
+                                    compact_buf.extend_from_slice(b"true\n");
+                                } else {
+                                    compact_buf.extend_from_slice(b"false\n");
                                 }
-                                "ltrimstr" => {
-                                    compact_buf.push(b'"');
-                                    if content.len() >= arg_bytes.len() && &content[..arg_bytes.len()] == arg_bytes {
-                                        compact_buf.extend_from_slice(&content[arg_bytes.len()..]);
-                                    } else {
-                                        compact_buf.extend_from_slice(content);
-                                    }
-                                    compact_buf.push(b'"');
-                                    compact_buf.push(b'\n');
+                                RawApplyOutcome::Emit
+                            }
+                            "ltrimstr" => {
+                                compact_buf.push(b'"');
+                                if content.len() >= arg_bytes.len() && &content[..arg_bytes.len()] == arg_bytes {
+                                    compact_buf.extend_from_slice(&content[arg_bytes.len()..]);
+                                } else {
+                                    compact_buf.extend_from_slice(content);
                                 }
-                                "rtrimstr" => {
-                                    compact_buf.push(b'"');
-                                    if content.len() >= arg_bytes.len() && &content[content.len()-arg_bytes.len()..] == arg_bytes {
-                                        compact_buf.extend_from_slice(&content[..content.len()-arg_bytes.len()]);
-                                    } else {
-                                        compact_buf.extend_from_slice(content);
-                                    }
-                                    compact_buf.push(b'"');
-                                    compact_buf.push(b'\n');
+                                compact_buf.push(b'"');
+                                compact_buf.push(b'\n');
+                                RawApplyOutcome::Emit
+                            }
+                            "rtrimstr" => {
+                                compact_buf.push(b'"');
+                                if content.len() >= arg_bytes.len() && &content[content.len()-arg_bytes.len()..] == arg_bytes {
+                                    compact_buf.extend_from_slice(&content[..content.len()-arg_bytes.len()]);
+                                } else {
+                                    compact_buf.extend_from_slice(content);
                                 }
-                                "split" => {
-                                    compact_buf.push(b'[');
-                                    if arg_bytes.is_empty() {
-                                        for (j, &byte) in content.iter().enumerate() {
-                                            if j > 0 { compact_buf.push(b','); }
+                                compact_buf.push(b'"');
+                                compact_buf.push(b'\n');
+                                RawApplyOutcome::Emit
+                            }
+                            "split" => {
+                                compact_buf.push(b'[');
+                                if arg_bytes.is_empty() {
+                                    for (j, &byte) in content.iter().enumerate() {
+                                        if j > 0 { compact_buf.push(b','); }
+                                        compact_buf.push(b'"');
+                                        compact_buf.push(byte);
+                                        compact_buf.push(b'"');
+                                    }
+                                } else {
+                                    let mut pos = 0;
+                                    let mut first = true;
+                                    while pos <= content.len() {
+                                        if !first { compact_buf.push(b','); }
+                                        first = false;
+                                        let next = if pos + arg_bytes.len() <= content.len() {
+                                            content[pos..].windows(arg_bytes.len())
+                                                .position(|w| w == arg_bytes)
+                                                .map(|i| pos + i)
+                                        } else { None };
+                                        compact_buf.push(b'"');
+                                        if let Some(found) = next {
+                                            compact_buf.extend_from_slice(&content[pos..found]);
                                             compact_buf.push(b'"');
-                                            compact_buf.push(byte);
+                                            pos = found + arg_bytes.len();
+                                        } else {
+                                            compact_buf.extend_from_slice(&content[pos..]);
                                             compact_buf.push(b'"');
+                                            break;
                                         }
-                                    } else {
-                                        let mut pos = 0;
-                                        let mut first = true;
-                                        while pos <= content.len() {
+                                    }
+                                }
+                                compact_buf.extend_from_slice(b"]\n");
+                                RawApplyOutcome::Emit
+                            }
+                            "index" => {
+                                if arg_bytes.is_empty() {
+                                    compact_buf.extend_from_slice(b"null\n");
+                                } else if let Some(pos) = content.windows(arg_bytes.len()).position(|w| w == arg_bytes) {
+                                    compact_buf.extend_from_slice(itoa::Buffer::new().format(pos as i64).as_bytes());
+                                    compact_buf.push(b'\n');
+                                } else {
+                                    compact_buf.extend_from_slice(b"null\n");
+                                }
+                                RawApplyOutcome::Emit
+                            }
+                            "rindex" => {
+                                if arg_bytes.is_empty() {
+                                    compact_buf.extend_from_slice(b"null\n");
+                                } else if let Some(pos) = content.windows(arg_bytes.len()).rposition(|w| w == arg_bytes) {
+                                    compact_buf.extend_from_slice(itoa::Buffer::new().format(pos as i64).as_bytes());
+                                    compact_buf.push(b'\n');
+                                } else {
+                                    compact_buf.extend_from_slice(b"null\n");
+                                }
+                                RawApplyOutcome::Emit
+                            }
+                            "indices" => {
+                                compact_buf.push(b'[');
+                                if !arg_bytes.is_empty() {
+                                    let mut first = true;
+                                    let mut start = 0;
+                                    while start + arg_bytes.len() <= content.len() {
+                                        if let Some(pos) = content[start..].windows(arg_bytes.len()).position(|w| w == arg_bytes) {
                                             if !first { compact_buf.push(b','); }
                                             first = false;
-                                            let next = if pos + arg_bytes.len() <= content.len() {
-                                                content[pos..].windows(arg_bytes.len())
-                                                    .position(|w| w == arg_bytes)
-                                                    .map(|i| pos + i)
-                                            } else { None };
-                                            compact_buf.push(b'"');
-                                            if let Some(found) = next {
-                                                compact_buf.extend_from_slice(&content[pos..found]);
-                                                compact_buf.push(b'"');
-                                                pos = found + arg_bytes.len();
-                                            } else {
-                                                compact_buf.extend_from_slice(&content[pos..]);
-                                                compact_buf.push(b'"');
-                                                break;
-                                            }
+                                            let abs_pos = start + pos;
+                                            compact_buf.extend_from_slice(itoa::Buffer::new().format(abs_pos as i64).as_bytes());
+                                            start = abs_pos + 1;
+                                        } else {
+                                            break;
                                         }
                                     }
-                                    compact_buf.extend_from_slice(b"]\n");
                                 }
-                                "index" => {
-                                    if arg_bytes.is_empty() {
-                                        compact_buf.extend_from_slice(b"null\n");
-                                    } else if let Some(pos) = content.windows(arg_bytes.len()).position(|w| w == arg_bytes) {
-                                        compact_buf.extend_from_slice(itoa::Buffer::new().format(pos as i64).as_bytes());
-                                        compact_buf.push(b'\n');
-                                    } else {
-                                        compact_buf.extend_from_slice(b"null\n");
-                                    }
-                                }
-                                "rindex" => {
-                                    if arg_bytes.is_empty() {
-                                        compact_buf.extend_from_slice(b"null\n");
-                                    } else if let Some(pos) = content.windows(arg_bytes.len()).rposition(|w| w == arg_bytes) {
-                                        compact_buf.extend_from_slice(itoa::Buffer::new().format(pos as i64).as_bytes());
-                                        compact_buf.push(b'\n');
-                                    } else {
-                                        compact_buf.extend_from_slice(b"null\n");
-                                    }
-                                }
-                                "indices" => {
-                                    compact_buf.push(b'[');
-                                    if !arg_bytes.is_empty() {
-                                        let mut first = true;
-                                        let mut start = 0;
-                                        while start + arg_bytes.len() <= content.len() {
-                                            if let Some(pos) = content[start..].windows(arg_bytes.len()).position(|w| w == arg_bytes) {
-                                                if !first { compact_buf.push(b','); }
-                                                first = false;
-                                                let abs_pos = start + pos;
-                                                compact_buf.extend_from_slice(itoa::Buffer::new().format(abs_pos as i64).as_bytes());
-                                                start = abs_pos + 1;
-                                            } else {
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    compact_buf.extend_from_slice(b"]\n");
-                                }
-                                "contains" => {
-                                    if arg_bytes.is_empty() || content.windows(arg_bytes.len()).any(|w| w == arg_bytes) {
-                                        compact_buf.extend_from_slice(b"true\n");
-                                    } else {
-                                        compact_buf.extend_from_slice(b"false\n");
-                                    }
-                                }
-                                _ => {
-                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                                }
+                                compact_buf.extend_from_slice(b"]\n");
+                                RawApplyOutcome::Emit
                             }
-                        } else {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            "contains" => {
+                                if arg_bytes.is_empty() || content.windows(arg_bytes.len()).any(|w| w == arg_bytes) {
+                                    compact_buf.extend_from_slice(b"true\n");
+                                } else {
+                                    compact_buf.extend_from_slice(b"false\n");
+                                }
+                                RawApplyOutcome::Emit
+                            }
+                            _ => RawApplyOutcome::Bail,
                         }
-                    } else {
+                    });
+                    if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
