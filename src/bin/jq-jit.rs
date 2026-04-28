@@ -7039,7 +7039,10 @@ fn real_main() {
                         })
                     }
                 } else if let Some((ref fc_field, ref fc_pattern, ref fc_flags)) = field_capture {
-                    // .field | capture("regex") — raw byte regex capture
+                    // .field | capture("regex") — raw byte regex capture.
+                    // Same Bail discipline / single-captures shape as `match`,
+                    // so both share `apply_field_match_raw`; only the emit
+                    // bytes (an object keyed by capture-group name) differ.
                     let re_pattern = if let Some(flags) = fc_flags {
                         let mut prefix = String::from("(?");
                         for c in flags.chars() {
@@ -7068,35 +7071,24 @@ fn real_main() {
                         }
                         json_stream_raw(&input_str, |start, end| {
                             let raw = &input_bytes[start..end];
-                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, fc_field) {
-                                let val = &raw[vs..ve];
-                                if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                                    && !val[1..val.len()-1].contains(&b'\\')
-                                {
-                                    let content = unsafe { std::str::from_utf8_unchecked(&val[1..val.len()-1]) };
-                                    if let Some(caps) = re.captures(content) {
-                                        compact_buf.push(b'{');
-                                        for i in 1..caps.len() {
-                                            compact_buf.extend_from_slice(&key_prefixes[i]);
-                                            if let Some(m) = caps.get(i) {
-                                                for &b in m.as_str().as_bytes() {
-                                                    match b {
-                                                        b'"' => compact_buf.extend_from_slice(b"\\\""),
-                                                        b'\\' => compact_buf.extend_from_slice(b"\\\\"),
-                                                        _ => compact_buf.push(b),
-                                                    }
-                                                }
+                            let outcome = apply_field_match_raw(raw, fc_field, &re, |_content, caps| {
+                                compact_buf.push(b'{');
+                                for i in 1..caps.len() {
+                                    compact_buf.extend_from_slice(&key_prefixes[i]);
+                                    if let Some(m) = caps.get(i) {
+                                        for &b in m.as_str().as_bytes() {
+                                            match b {
+                                                b'"' => compact_buf.extend_from_slice(b"\\\""),
+                                                b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                                                _ => compact_buf.push(b),
                                             }
-                                            compact_buf.push(b'"');
                                         }
-                                        compact_buf.extend_from_slice(b"}\n");
                                     }
-                                    // no match → empty (no output)
-                                } else {
-                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    compact_buf.push(b'"');
                                 }
-                            } else {
+                                compact_buf.extend_from_slice(b"}\n");
+                            });
+                            if let RawApplyOutcome::Bail = outcome {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             }
@@ -20411,34 +20403,24 @@ fn real_main() {
                     let content_bytes = content.as_bytes();
                     json_stream_raw(content, |start, end| {
                         let raw = &content_bytes[start..end];
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, fc_field) {
-                            let val = &raw[vs..ve];
-                            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
-                                && !val[1..val.len()-1].contains(&b'\\')
-                            {
-                                let content_str = unsafe { std::str::from_utf8_unchecked(&val[1..val.len()-1]) };
-                                if let Some(caps) = re.captures(content_str) {
-                                    compact_buf.push(b'{');
-                                    for i in 1..caps.len() {
-                                        compact_buf.extend_from_slice(&key_prefixes[i]);
-                                        if let Some(m) = caps.get(i) {
-                                            for &b in m.as_str().as_bytes() {
-                                                match b {
-                                                    b'"' => compact_buf.extend_from_slice(b"\\\""),
-                                                    b'\\' => compact_buf.extend_from_slice(b"\\\\"),
-                                                    _ => compact_buf.push(b),
-                                                }
-                                            }
+                        let outcome = apply_field_match_raw(raw, fc_field, &re, |_content_str, caps| {
+                            compact_buf.push(b'{');
+                            for i in 1..caps.len() {
+                                compact_buf.extend_from_slice(&key_prefixes[i]);
+                                if let Some(m) = caps.get(i) {
+                                    for &b in m.as_str().as_bytes() {
+                                        match b {
+                                            b'"' => compact_buf.extend_from_slice(b"\\\""),
+                                            b'\\' => compact_buf.extend_from_slice(b"\\\\"),
+                                            _ => compact_buf.push(b),
                                         }
-                                        compact_buf.push(b'"');
                                     }
-                                    compact_buf.extend_from_slice(b"}\n");
                                 }
-                            } else {
-                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                compact_buf.push(b'"');
                             }
-                        } else {
+                            compact_buf.extend_from_slice(b"}\n");
+                        });
+                        if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }

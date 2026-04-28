@@ -2941,3 +2941,51 @@ null
 [ (.x | scan("p"))? ]
 [1,2,3]
 []
+
+# #83 Phase B: .x | capture("p") apply-site reuses apply_field_match_raw
+# (same Bail discipline as match: single re.captures, emit on match,
+# nothing on no-match). Happy path emits jq's named-group object.
+.x | capture("(?<head>[a-z]+)(?<tail>[0-9]+)")
+{"x":"abc123"}
+{"head":"abc","tail":"123"}
+
+# Unnamed groups: capture emits only named groups, so the output is `{}`.
+.x | capture("[a-z]+")
+{"x":"abc"}
+{}
+
+# No match emits no output (jq behaviour for capture on a string).
+.x | capture("z")
+{"x":"abc"}
+
+# Field missing under `?` bails to generic, jq raises (null | capture), `?` swallows.
+(.x | capture("(?<v>p)"))?
+{"y":"hi"}
+
+# Non-string field under `?`
+(.x | capture("(?<v>p)"))?
+{"x":42}
+
+(.x | capture("(?<v>p)"))?
+{"x":null}
+
+(.x | capture("(?<v>p)"))?
+{"x":[1,2,3]}
+
+# Escape-bearing string: bail to generic (decodes the escape correctly).
+.x | capture("(?<a>.)\\n(?<b>.)")
+{"x":"a\nb"}
+{"a":"a","b":"b"}
+
+# Non-object input under `?`
+(.x | capture("(?<v>p)"))?
+42
+
+(.x | capture("(?<v>p)"))?
+"hi"
+
+(.x | capture("(?<v>p)"))?
+null
+
+(.x | capture("(?<v>p)"))?
+[1,2,3]
