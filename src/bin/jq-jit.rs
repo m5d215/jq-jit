@@ -1232,6 +1232,19 @@ fn resolved_would_error(
         ResolvedRemap::FieldSplitIndex(idx, _, _) => str_domain(*idx),
         // -.field errors on non-number; the inline emitter coerces to null.
         ResolvedRemap::FieldNegate(idx) => parse_json_num(bytes_of(*idx)).is_none(),
+        // Compound arithmetic / unary math / arith comparisons. The
+        // inline emitter calls `eval_arith_raw` and emits null on None,
+        // but jq raises (and supports string × number repetition, etc.).
+        // Probe with the same evaluator and bail on None — same family
+        // as #334 / #339.
+        ResolvedRemap::Arith(arith) => eval_arith_raw(arith, raw, ranges).is_none(),
+        ResolvedRemap::ArithToString(arith) => eval_arith_raw(arith, raw, ranges).is_none(),
+        ResolvedRemap::ArithUnary(_, arith) => eval_arith_raw(arith, raw, ranges).is_none(),
+        ResolvedRemap::ArithCmp(arith, _, _) => eval_arith_raw(arith, raw, ranges).is_none(),
+        ResolvedRemap::FieldOpFieldToString(i1, _, i2) => {
+            parse_json_num(bytes_of(*i1)).is_none() || parse_json_num(bytes_of(*i2)).is_none()
+        }
+        ResolvedRemap::FieldOpConstToString(i, _, _) => parse_json_num(bytes_of(*i)).is_none(),
         _ => false,
     }
 }

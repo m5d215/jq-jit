@@ -5576,3 +5576,24 @@ null
 {a: {b: 1, b: 2}}
 null
 {"a":{"b":2}}
+
+# #339: standalone_array's compound-arith / arith-tostring / unary-math
+# / arith-cmp arms emitted null on non-numeric fields. jq instead errors
+# (e.g. `string × number` is repetition, but the `+` after with a number
+# right operand raises). All now bail to the generic interpreter.
+[(.x * 2 + 1)?]
+{"x":"abc"}
+[]
+
+[((.x * 2) | tostring)?]
+{"x":null}
+[]
+
+[(.x | sqrt)?]
+{"x":"abc"}
+[]
+
+# Numeric inputs still fold normally.
+[.x * 2 + 1, .x]
+{"x":1}
+[3,1]
