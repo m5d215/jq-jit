@@ -9840,6 +9840,11 @@ fn real_main() {
                     let mut ranges_buf = vec![(0usize, 0usize); gen_field_refs.len()];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
+                        // Sibling of #359 / #363 / #365: each fused mode
+                        // gates on a numeric select field; bail to generic
+                        // when the gate fails so jq's verdict is preserved
+                        // (#366).
+                        let mut handled = false;
                         match fused_mode {
                             1 => {
                                 // Fused: select field == FieldOpConst field
@@ -9857,6 +9862,7 @@ fn real_main() {
                                         }
                                         compact_buf.push(b'\n');
                                     }
+                                    handled = true;
                                 }
                             }
                             2 => {
@@ -9878,6 +9884,7 @@ fn real_main() {
                                         }
                                         compact_buf.push(b'\n');
                                     }
+                                    handled = true;
                                 }
                             }
                             3 => {
@@ -9896,6 +9903,7 @@ fn real_main() {
                                         }
                                         compact_buf.push(b'\n');
                                     }
+                                    handled = true;
                                 }
                             }
                             _ => {
@@ -9915,8 +9923,13 @@ fn real_main() {
                                         }
                                         compact_buf.push(b'\n');
                                     }
+                                    handled = true;
                                 }
                             }
+                        }
+                        if !handled {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -16973,6 +16986,8 @@ fn real_main() {
                 let mut ranges_buf = vec![(0usize, 0usize); gen_field_refs.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
+                    // Sibling fix to the stdin apply-site above (#366).
+                    let mut handled = false;
                     match fused_mode {
                         1 => {
                             if let Some(val) = json_object_get_num(raw, 0, sel_field) {
@@ -16989,6 +17004,7 @@ fn real_main() {
                                     }
                                     compact_buf.push(b'\n');
                                 }
+                                handled = true;
                             }
                         }
                         2 => {
@@ -17008,6 +17024,7 @@ fn real_main() {
                                     }
                                     compact_buf.push(b'\n');
                                 }
+                                handled = true;
                             }
                         }
                         3 => {
@@ -17025,6 +17042,7 @@ fn real_main() {
                                     }
                                     compact_buf.push(b'\n');
                                 }
+                                handled = true;
                             }
                         }
                         _ => {
@@ -17043,8 +17061,13 @@ fn real_main() {
                                     }
                                     compact_buf.push(b'\n');
                                 }
+                                handled = true;
                             }
                         }
+                    }
+                    if !handled {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);

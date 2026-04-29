@@ -5839,3 +5839,35 @@ null
 (select(.a >= .b)) | ({z: (.a + .b)})
 {"a":1}
 {"z":1}
+
+# #366: select_cmp_then_value silent-skipped on non-object input.
+# `(select(.a < 0)) | (.a + .a)` over `null` → jq evaluates
+# `null < 0` (true), `null + null` (null) and emits `null`; jq-jit
+# emitted nothing. Sibling of #358 / #362 / #364 covering the
+# `select(.f cmp N) | value` shape (4 fused modes).
+(select(.a < 0)) | (.a + .a)
+null
+null
+
+# Mode 1 (FieldOpConst, sel == compute field): non-object now bails.
+[((select(.a < 0)) | (.a + 1))?]
+[]
+[]
+
+# Mode 3 (ConstOpField, sel == compute field): non-object now bails.
+[((select(.a < 0)) | (1 + .a))?]
+[]
+[]
+
+# General mode (compute field differs from sel field): non-object
+# still bails to generic.
+[((select(.a < 0)) | (.b + 1))?]
+[]
+[]
+
+# Object missing the select field: jq evaluates `null < 0` (true)
+# and the compute as `null + null = null`. Fast path bails since
+# the gate fails on missing sel_field; generic emits null.
+(select(.a < 0)) | (.a + .a)
+{}
+null
