@@ -10086,51 +10086,36 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref sff_f1, sff_op, ref sff_f2)) = select_ff_cmp {
-                    // select(.f1 cmp .f2) — field-to-field comparison, output whole object
+                    // select(.f1 cmp .f2) — field-to-field comparison.
+                    // Fast path: object input with both fields present,
+                    // both numeric → numeric compare; both present (any
+                    // types) → compare_raw_fields. Anything else (one
+                    // missing, null input, non-object) → bail to generic
+                    // (#349 / #355).
                     use jq_jit::ir::BinOp;
+                    let cmp_op_to_pass = |v1: f64, v2: f64, op: &BinOp| -> bool {
+                        match op {
+                            BinOp::Gt => v1 > v2, BinOp::Lt => v1 < v2,
+                            BinOp::Ge => v1 >= v2, BinOp::Le => v1 <= v2,
+                            BinOp::Eq => v1 == v2, BinOp::Ne => v1 != v2,
+                            _ => false,
+                        }
+                    };
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        // Object input: existing fast path. Null input:
-                        // both fields resolve to null; run the standard
-                        // compare. Anything else (bool/number/string/
-                        // array): bail to the generic interpreter, which
-                        // raises jq's `Cannot index <type> with string`
-                        // (#349).
-                        let bytes_or_null: &[u8] = b"null";
-                        let null_range = (0usize, 4usize);
-                        let cmp_op_to_pass = |v1: f64, v2: f64| -> bool {
-                            match sff_op {
-                                BinOp::Gt => v1 > v2, BinOp::Lt => v1 < v2,
-                                BinOp::Ge => v1 >= v2, BinOp::Le => v1 <= v2,
-                                BinOp::Eq => v1 == v2, BinOp::Ne => v1 != v2,
-                                _ => false,
+                        let pass_opt = if raw.first() == Some(&b'{') {
+                            if let Some((v1, v2)) = json_object_get_two_nums(raw, 0, sff_f1, sff_f2) {
+                                Some(cmp_op_to_pass(v1, v2, &sff_op))
+                            } else if let (Some(r1), Some(r2)) = (
+                                json_object_get_field_raw(raw, 0, sff_f1),
+                                json_object_get_field_raw(raw, 0, sff_f2),
+                            ) {
+                                Some(compare_raw_fields(raw, r1, r2, &sff_op))
+                            } else {
+                                None
                             }
-                        };
-                        let first = raw.first().copied();
-                        let pass_opt = match first {
-                            Some(b'{') => {
-                                if let Some((v1, v2)) = json_object_get_two_nums(raw, 0, sff_f1, sff_f2) {
-                                    Some(cmp_op_to_pass(v1, v2))
-                                } else if let (Some(r1), Some(r2)) = (
-                                    json_object_get_field_raw(raw, 0, sff_f1),
-                                    json_object_get_field_raw(raw, 0, sff_f2),
-                                ) {
-                                    Some(compare_raw_fields(raw, r1, r2, &sff_op))
-                                } else {
-                                    // Both fields missing. jq emits null
-                                    // for missing-key access, so .f1 and
-                                    // .f2 are both null. Run the cmp on
-                                    // two null spans of `raw`. Use a
-                                    // sentinel buffer instead of `raw`
-                                    // since there's no guaranteed `null`
-                                    // span inside the object bytes.
-                                    Some(compare_raw_fields(bytes_or_null, null_range, null_range, &sff_op))
-                                }
-                            }
-                            Some(b'n') if raw.starts_with(b"null") => {
-                                Some(compare_raw_fields(bytes_or_null, null_range, null_range, &sff_op))
-                            }
-                            _ => None,
+                        } else {
+                            None
                         };
                         match pass_opt {
                             Some(true) => emit_raw_ln!(&mut compact_buf, raw),
@@ -17177,41 +17162,37 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some((ref sff_f1, sff_op, ref sff_f2)) = select_ff_cmp {
-                // select(.f1 cmp .f2) — file path, output whole object.
-                // Mirrors the stdin apply-site discipline (#349): null
-                // input → both fields null; non-object/non-null → bail.
+                // select(.f1 cmp .f2) — file path. Mirrors the stdin
+                // apply-site discipline (#349 / #355): fast-path only
+                // when both fields are present in an object input;
+                // anything else (one missing, null input, non-object)
+                // bails to generic so jq's exact verdict (including
+                // type errors) flows through.
                 use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
+                let cmp_op_to_pass = |v1: f64, v2: f64, op: &BinOp| -> bool {
+                    match op {
+                        BinOp::Gt => v1 > v2, BinOp::Lt => v1 < v2,
+                        BinOp::Ge => v1 >= v2, BinOp::Le => v1 <= v2,
+                        BinOp::Eq => v1 == v2, BinOp::Ne => v1 != v2,
+                        _ => false,
+                    }
+                };
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    let bytes_or_null: &[u8] = b"null";
-                    let null_range = (0usize, 4usize);
-                    let cmp_op_to_pass = |v1: f64, v2: f64| -> bool {
-                        match sff_op {
-                            BinOp::Gt => v1 > v2, BinOp::Lt => v1 < v2,
-                            BinOp::Ge => v1 >= v2, BinOp::Le => v1 <= v2,
-                            BinOp::Eq => v1 == v2, BinOp::Ne => v1 != v2,
-                            _ => false,
+                    let pass_opt = if raw.first() == Some(&b'{') {
+                        if let Some((v1, v2)) = json_object_get_two_nums(raw, 0, sff_f1, sff_f2) {
+                            Some(cmp_op_to_pass(v1, v2, &sff_op))
+                        } else if let (Some(r1), Some(r2)) = (
+                            json_object_get_field_raw(raw, 0, sff_f1),
+                            json_object_get_field_raw(raw, 0, sff_f2),
+                        ) {
+                            Some(compare_raw_fields(raw, r1, r2, &sff_op))
+                        } else {
+                            None
                         }
-                    };
-                    let first = raw.first().copied();
-                    let pass_opt = match first {
-                        Some(b'{') => {
-                            if let Some((v1, v2)) = json_object_get_two_nums(raw, 0, sff_f1, sff_f2) {
-                                Some(cmp_op_to_pass(v1, v2))
-                            } else if let (Some(r1), Some(r2)) = (
-                                json_object_get_field_raw(raw, 0, sff_f1),
-                                json_object_get_field_raw(raw, 0, sff_f2),
-                            ) {
-                                Some(compare_raw_fields(raw, r1, r2, &sff_op))
-                            } else {
-                                Some(compare_raw_fields(bytes_or_null, null_range, null_range, &sff_op))
-                            }
-                        }
-                        Some(b'n') if raw.starts_with(b"null") => {
-                            Some(compare_raw_fields(bytes_or_null, null_range, null_range, &sff_op))
-                        }
-                        _ => None,
+                    } else {
+                        None
                     };
                     match pass_opt {
                         Some(true) => emit_raw_ln!(&mut compact_buf, raw),

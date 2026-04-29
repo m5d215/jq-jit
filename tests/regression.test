@@ -5743,3 +5743,17 @@ null
 [((0 | .a) | (try . catch "x"))?]
 null
 []
+
+# #355: select_ff_cmp asymmetric "one field missing" — earlier #349
+# fix only handled both-present and both-missing; the asymmetric case
+# fell into both-missing and emitted the input. jq's missing-key
+# semantics: missing → null, but the present field's actual value
+# vs null. Now bail to generic for any case the both-present fast
+# path can't handle.
+[select(.c <= .a)]
+{"c":false}
+[]
+
+[select(.c >= .a)]
+{"c":false}
+[{"c":false}]
