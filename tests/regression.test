@@ -5424,3 +5424,26 @@ null
 {a: (.a), b: (.b)}
 {"a":1,"b":2,"a":3}
 {"a":3,"b":2}
+
+# #328: reverse on a number errored unconditionally instead of
+# matching jq's `[.[length-1, length-2 ..0]]` semantics: 0 → [],
+# non-zero (including NaN/fractions) → "Cannot index number with number".
+0 | reverse
+null
+[]
+
+0.0 | reverse
+null
+[]
+
+-0.0 | reverse
+null
+[]
+
+{} | reverse
+null
+[]
+
+"" | reverse
+null
+[]
