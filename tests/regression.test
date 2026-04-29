@@ -6051,3 +6051,31 @@ false
 (select(.a > 0)) | ({a: (.b)})
 {"a":1,"b":2}
 {"a":2}
+
+# #383: select_cmp_then_value general path emitted literal `null`
+# when remap fields were missing. Correct for bare `.b` reads but
+# wrong for arithmetic — jq raises a type error on null-null
+# arithmetic. Bail to generic.
+[((select(.a != 0)) | (.b - .b))?]
+{"a":1}
+[]
+
+# Baseline: arithmetic remap with both fields present stays on
+# the fast path.
+(select(.a != 0)) | (.b - .b)
+{"a":1,"b":7}
+0
+
+# Counter-case: bare-field read on missing field — jq emits null,
+# the post-fix bail routes through generic which also emits null.
+# Same observable behavior; just no longer takes the fast-path
+# null shortcut.
+(select(.a != 0)) | (.b)
+{"a":1}
+null
+
+# Counter-case: ConstOpField NOT against the select field — the
+# `n - .b` shape lands in fused_mode 0 but errors on missing `.b`.
+[((select(.a != 0)) | (5 - .b))?]
+{"a":1}
+[]

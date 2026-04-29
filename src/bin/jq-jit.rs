@@ -9994,7 +9994,14 @@ fn real_main() {
                                 }
                             }
                             _ => {
-                                // General path: extract select field, then output fields
+                                // General path (#383): emitting literal `null`
+                                // when remap fields are missing was wrong for
+                                // arithmetic shapes — jq raises a type error
+                                // (`null - null cannot be subtracted` etc.)
+                                // while the fast path silently emitted `null`.
+                                // Bail to generic on missing fields so the
+                                // verdict matches across all out_rexpr shapes
+                                // (Field → null, FieldOpField → error, etc.).
                                 if let Some(val) = json_object_get_num(raw, 0, sel_field) {
                                     let pass = match sel_op {
                                         BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
@@ -10002,15 +10009,13 @@ fn real_main() {
                                         BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
                                         _ => false,
                                     };
-                                    if pass {
-                                        if json_object_get_fields_raw_buf(raw, 0, &gen_field_refs, &mut ranges_buf) {
-                                            emit_remap_value(&mut compact_buf, out_rexpr, raw, &ranges_buf, &gen_field_idx);
-                                        } else {
-                                            compact_buf.extend_from_slice(b"null");
-                                        }
+                                    if !pass {
+                                        handled = true;
+                                    } else if json_object_get_fields_raw_buf(raw, 0, &gen_field_refs, &mut ranges_buf) {
+                                        emit_remap_value(&mut compact_buf, out_rexpr, raw, &ranges_buf, &gen_field_idx);
                                         compact_buf.push(b'\n');
+                                        handled = true;
                                     }
-                                    handled = true;
                                 }
                             }
                         }
@@ -17195,6 +17200,7 @@ fn real_main() {
                             }
                         }
                         _ => {
+                            // Sibling fix to the stdin apply-site above (#383).
                             if let Some(val) = json_object_get_num(raw, 0, sel_field) {
                                 let pass = match sel_op {
                                     BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
@@ -17202,15 +17208,13 @@ fn real_main() {
                                     BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
                                     _ => false,
                                 };
-                                if pass {
-                                    if json_object_get_fields_raw_buf(raw, 0, &gen_field_refs, &mut ranges_buf) {
-                                        emit_remap_value(&mut compact_buf, out_rexpr, raw, &ranges_buf, &gen_field_idx);
-                                    } else {
-                                        compact_buf.extend_from_slice(b"null");
-                                    }
+                                if !pass {
+                                    handled = true;
+                                } else if json_object_get_fields_raw_buf(raw, 0, &gen_field_refs, &mut ranges_buf) {
+                                    emit_remap_value(&mut compact_buf, out_rexpr, raw, &ranges_buf, &gen_field_idx);
                                     compact_buf.push(b'\n');
+                                    handled = true;
                                 }
-                                handled = true;
                             }
                         }
                     }
