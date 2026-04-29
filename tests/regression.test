@@ -5989,3 +5989,33 @@ null
 ({"a": true}) | (.a or false)
 null
 true
+
+# #377: select_cmp_then_array (`select(.f cmp N) | [remap, ...]`)
+# silently emitted nothing on non-object input. jq raises a type
+# error indexing a non-object with a string key. Wrapped with `?`
+# to convert error → empty list, matching the fix's bail-to-generic
+# routing through `process_input`.
+[((select(.a > 0)) | ([.a,.a]))?]
+false
+[]
+
+# Object with non-numeric `.a`: jq's value-level cmp uses
+# type-ordered comparison (`"x" > 0` is true because str > num),
+# so select passes and the array reads succeed. Pre-fix the fast
+# path skipped because `json_object_get_num` returned `None`.
+(select(.a > 0)) | ([.a,.a])
+{"a":"x"}
+["x","x"]
+
+# Object missing the select field: `.a` is null, `null > 0` is
+# false (null sorts smallest), select rejects and emits nothing.
+# Asserting the bail-to-generic doesn't introduce a spurious row.
+[((select(.a > 0)) | ([.a,.a]))?]
+{"b":1}
+[]
+
+# Baseline: numeric field passes the comparison and the array is
+# emitted unchanged.
+(select(.a > 0)) | ([.a,.a])
+{"a":5}
+[5,5]
