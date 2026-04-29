@@ -385,6 +385,12 @@ fn const_expr_to_json(expr: &crate::ir::Expr) -> Option<Vec<u8>> {
         Expr::Literal(Literal::True) => Some(b"true".to_vec()),
         Expr::Literal(Literal::False) => Some(b"false".to_vec()),
         Expr::ObjectConstruct { pairs } => {
+            // Mirror of `push_const_json`'s ObjectConstruct arm (#324).
+            // Every value — including the ones that will be eliminated
+            // by `normalize_object_pairs` — must be const-foldable;
+            // otherwise an earlier `(key: input-touching)` pair's runtime
+            // error gets silently dropped when a later same-key pair
+            // rebinds the slot (#337).
             let mut extracted: Vec<(&str, &Expr)> = Vec::with_capacity(pairs.len());
             for (k, v) in pairs {
                 if let Expr::Literal(Literal::Str(key)) = k {
@@ -392,6 +398,9 @@ fn const_expr_to_json(expr: &crate::ir::Expr) -> Option<Vec<u8>> {
                 } else {
                     return None;
                 }
+            }
+            for (_, v) in &extracted {
+                const_expr_to_json(v)?;
             }
             let normalized = normalize_object_pairs(extracted);
             let mut buf = Vec::new();
