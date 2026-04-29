@@ -5709,3 +5709,20 @@ null
 [(select(.a > .a))?]
 false
 []
+
+# #351: detect_computed_remap also dedup'd duplicate keys before
+# evaluation, dropping earlier computed pairs' runtime errors. This
+# mirrors the #324 / #337 fixes for push_const_json / const_expr_to_json.
+[({x: (.a - .b), x: (0)})?]
+{"a":null}
+[]
+
+# Unique keys + computed values still classify and fast-path.
+{x: (.a + .b), y: (.a)}
+{"a":1,"b":2}
+{"x":3,"y":1}
+
+# Duplicate-key literals still fold (no computed value involved).
+{x: 1, x: 2}
+null
+{"x":2}
