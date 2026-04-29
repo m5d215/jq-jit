@@ -5757,3 +5757,10 @@ null
 [select(.c >= .a)]
 {"c":false}
 [{"c":false}]
+
+# #358: select_ff_cmp_value silent-skipped on non-object input.
+# `select(.a > .a) | (.a + .a)` over `[]` errored in jq but jq-jit
+# emitted nothing. Now bails to generic so the type error reaches stdout.
+[((select(.a > .a)) | (.a + .a))?]
+[]
+[]
