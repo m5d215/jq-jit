@@ -33,10 +33,6 @@
 //!   re-parse can mask, leading to false-positive shrinks. Restrict
 //!   numeric inputs to integers and let the *filter* introduce
 //!   floating arithmetic when needed.
-//! * Duplicate keys in `{k: v, k: v'}` literals — jq-jit's optimizer
-//!   sometimes drops the earlier value's evaluation when a later one
-//!   will rebind the same key, losing any error it would have raised
-//!   (#324).
 //!
 //! ## Knobs
 //!
@@ -186,21 +182,10 @@ fn filter_strategy() -> impl Strategy<Value = FilterExpr> {
         |inner| {
             prop_oneof![
                 prop::collection::vec(inner.clone(), 0..=3).prop_map(FilterExpr::ArrayConstruct),
-                // Duplicate keys are deduped to last-wins by jq's parser
-                // before evaluation. jq-jit's optimizer occasionally
-                // skips earlier values' evaluation when a later one will
-                // rebind the same key, dropping any errors they would
-                // have raised (#324). To keep that bug class out of the
-                // default-on harness, generate unique keys only — the
-                // single-key case is just last-wins by tautology.
                 prop::collection::vec(
                     (ident_strategy(), inner.clone()),
                     0..=3,
-                ).prop_map(|mut pairs| {
-                    let mut seen = std::collections::HashSet::new();
-                    pairs.retain(|(k, _)| seen.insert(k.clone()));
-                    FilterExpr::ObjectConstruct(pairs)
-                }),
+                ).prop_map(FilterExpr::ObjectConstruct),
                 (inner.clone(), inner.clone())
                     .prop_map(|(a, b)| FilterExpr::Pipe(Box::new(a), Box::new(b))),
                 (inner.clone(), inner.clone())

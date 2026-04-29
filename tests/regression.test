@@ -5474,3 +5474,20 @@ null
 [0, .x[0:3]]
 {"x":"hello"}
 [0,"hel"]
+
+# #324: detect_literal_output's ObjectConstruct fold dedup'd duplicate
+# keys *before* checking that every value was input-free, so an earlier
+# pair like `b: (.[0])` was eliminated and its potential runtime error
+# never fired. Every pair's expression must be const before dedup
+# applies.
+{a: (.[0]), b: (0)}
+[42]
+{"a":42,"b":0}
+
+{a: 1, a: 2}
+null
+{"a":2}
+
+{b: 1, b: (1+1)}
+null
+{"b":2}
