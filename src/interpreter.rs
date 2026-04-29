@@ -3685,16 +3685,31 @@ impl Filter {
             let _ = this; // silence unused
             None
         }
+        // Reject computed remaps with duplicate keys: `normalize_object_pairs`
+        // collapses to last-wins, but jq evaluates every pair in source
+        // order and aborts on the first error. If an earlier pair has a
+        // computed (input-touching) value, that value's runtime error
+        // would be silently elided when the later pair rebinds the same
+        // key. Same family as #324 / #337; here the fold lives in
+        // `detect_computed_remap` rather than `push_const_json` /
+        // `const_expr_to_json`.
+        let has_duplicate_keys = |pairs: &[(String, RemapExpr)]| -> bool {
+            let mut seen = std::collections::HashSet::new();
+            !pairs.iter().all(|(k, _)| seen.insert(k.clone()))
+        };
         // Direct ObjectConstruct
         if let Some((result, has_computed)) = extract_computed_pairs(self, expr) {
-            if has_computed { return Some(normalize_object_pairs(result)); }
-            return None;
+            if !has_computed { return None; }
+            if has_duplicate_keys(&result) { return None; }
+            return Some(normalize_object_pairs(result));
         }
         // {a:.x,b:(.y*2)} + {c:.z} — merged object constructs
         if let Expr::BinOp { op: BinOp::Add, lhs, rhs } = expr {
             if let (Some((mut left, lc)), Some((right, rc))) = (extract_computed_pairs(self, lhs), extract_computed_pairs(self, rhs)) {
                 left.extend(right);
-                if lc || rc { return Some(normalize_object_pairs(left)); }
+                if !(lc || rc) { return None; }
+                if has_duplicate_keys(&left) { return None; }
+                return Some(normalize_object_pairs(left));
             }
         }
         None
