@@ -929,7 +929,14 @@ pub fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
             x.len().cmp(&y.len())
         }
         (Value::Obj(ObjInner(x)), Value::Obj(ObjInner(y))) => {
-            // Compare by sorted keys then values
+            // jq's object ordering: compare the *full* sorted-keys
+            // arrays first, then — only if they're equal — compare
+            // values key by key. The previous implementation
+            // interleaved key and value compares per-position, which
+            // got the simple `{"c":null}` vs `{"c":false}` shape right
+            // but flipped `{"c":null,"y":null}` vs `{"c":false}` (the
+            // shorter object should come first when its keys are a
+            // strict prefix).
             let mut xkeys: Vec<&KeyStr> = x.keys().collect();
             let mut ykeys: Vec<&KeyStr> = y.keys().collect();
             xkeys.sort();
@@ -939,14 +946,20 @@ pub fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
                 if kord != Ordering::Equal {
                     return kord;
                 }
+            }
+            let len_ord = xkeys.len().cmp(&ykeys.len());
+            if len_ord != Ordering::Equal {
+                return len_ord;
+            }
+            for xk in &xkeys {
                 let xv = x.get(xk.as_str()).unwrap();
-                let yv = y.get(yk.as_str()).unwrap();
+                let yv = y.get(xk.as_str()).unwrap();
                 let vord = compare_values(xv, yv);
                 if vord != Ordering::Equal {
                     return vord;
                 }
             }
-            x.len().cmp(&y.len())
+            Ordering::Equal
         }
         _ => Ordering::Equal,
     }

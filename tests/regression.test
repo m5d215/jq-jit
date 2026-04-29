@@ -5628,3 +5628,24 @@ null
 [if .x > 0 then "pos" else "non-pos" end, .x]
 {"x":1}
 ["pos",1]
+
+# #343: object compare interleaved key/value cmp per zip position; jq
+# compares the full sorted-keys array first, then values. The shorter
+# object (whose keys are a strict prefix of the other's) is always
+# less.
+sort
+[{"c":null,"y":null},{"c":false}]
+[{"c":false},{"c":null,"y":null}]
+
+{"c":null,"y":null} < {"c":false}
+null
+false
+
+# Same-shape objects still compare by values.
+sort
+[{"c":null},{"c":false}]
+[{"c":null},{"c":false}]
+
+{"c":null} < {"c":false}
+null
+true
