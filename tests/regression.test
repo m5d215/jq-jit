@@ -5901,3 +5901,30 @@ null
 {a: (.x + 0)}
 {"x":null}
 {"a":0}
+
+# #371: json_object_get_two_nums returned first-match for duplicate
+# input keys; jq dedupes last-wins. For `{"a":5,"a":1,"b":3}` with
+# `select(.a > .b)`, last-wins gives .a=1, 1>3 is false, no output.
+# The fast path used to read the first 5, judge 5>3 true, and emit.
+[(select(.a > .b))?]
+{"a":5,"a":1,"b":3}
+[]
+
+# Reverse ordering — first-wins would skip the record (1>3 false),
+# last-wins emits it (5>3 true).
+select(.a > .b)
+{"a":1,"a":5,"b":3}
+{"a":5,"b":3}
+
+# Same field on both sides routes through the same-field optimization
+# (fall through to json_object_get_num), which already scans to end
+# (#360). Keeps the existing behaviour.
+[(select(.a > .a))?]
+{"a":5,"a":1}
+[]
+
+# Duplicate hits on both fields — last-wins on each side. With
+# last-wins .a=1 and .b=7, `.b > .a` is true and the record passes.
+select(.b > .a)
+{"b":1,"a":5,"a":1,"b":7}
+{"a":1,"b":7}
