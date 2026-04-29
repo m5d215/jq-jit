@@ -3309,6 +3309,11 @@ pub fn json_object_get_two_nums(b: &[u8], pos: usize, field1: &str, field2: &str
     }
     let f1 = field1.as_bytes();
     let f2 = field2.as_bytes();
+    // jq dedupes duplicate input keys last-wins (#233 / #325 / #360):
+    // walk the entire object and overwrite each `val*` slot whenever a
+    // later duplicate arrives. The pre-#371 version exited on the first
+    // match for each field, returning a first-wins read that disagreed
+    // with jq for inputs like `{"a":5,"a":1,"b":3}` (#371).
     let mut val1: Option<f64> = None;
     let mut val2: Option<f64> = None;
     let mut i = pos + 1;
@@ -3322,8 +3327,8 @@ pub fn json_object_get_two_nums(b: &[u8], pos: usize, field1: &str, field2: &str
             match b[j] { b'"' => break, b'\\' => { j += 2; continue }, _ => j += 1 }
         }
         let key_len = j - key_start;
-        let match1 = val1.is_none() && key_len == f1.len() && b[key_start..j] == *f1;
-        let match2 = !match1 && val2.is_none() && key_len == f2.len() && b[key_start..j] == *f2;
+        let match1 = key_len == f1.len() && b[key_start..j] == *f1;
+        let match2 = !match1 && key_len == f2.len() && b[key_start..j] == *f2;
         i = j + 1;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
         if i >= b.len() || b[i] != b':' { return None; }
@@ -3361,15 +3366,20 @@ pub fn json_object_get_two_nums(b: &[u8], pos: usize, field1: &str, field2: &str
                 if neg { -(n as f64) } else { n as f64 }
             };
             if match1 { val1 = Some(val); } else { val2 = Some(val); }
-            if val1.is_some() && val2.is_some() {
-                return Some((val1.unwrap(), val2.unwrap()));
-            }
         } else {
             i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return None };
         }
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
         if i >= b.len() { return None; }
-        if b[i] == b'}' { return None; }
+        // End of object — `val1` / `val2` are now their last-wins
+        // values across the entire scan (#371). Return Some only when
+        // both fields appeared at least once.
+        if b[i] == b'}' {
+            return match (val1, val2) {
+                (Some(a), Some(b)) => Some((a, b)),
+                _ => None,
+            };
+        }
         if b[i] != b',' { return None; }
         i += 1;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
