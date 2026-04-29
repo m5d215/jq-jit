@@ -594,25 +594,26 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                 }
             }
-            // Semantic: {pairs} | length → N (number of keys)
-            // Also: {pairs} | to_entries | ... gets simplified via to_entries | length → constant
-            // Only safe when all keys are literal strings — otherwise we can't know whether two
-            // pairs refer to the same key. After normalization duplicate keys collapse to one,
-            // so the pair count matches jq's output.
+            // Semantic: {pairs} | length → N (number of keys).
+            // Safe only when every value is *single-output* and
+            // *input-free*. A multi-output value (e.g. `range(2)`)
+            // would produce multiple objects, each with its own length;
+            // folding to a bare integer eats both the multiplicity and
+            // any value-time error (#220 / #324 / #333). Same-key
+            // duplicates still collapse via `normalize_object_pairs`,
+            // which is correct *because* every value is single-output —
+            // an earlier pair's runtime error is gone for both
+            // implementations once dedup applies.
             if let Expr::ObjectConstruct { pairs } = &sl {
                 if matches!(&sr, Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
                     let mut extracted: Vec<(&str, ())> = Vec::with_capacity(pairs.len());
                     let mut all_static = true;
                     for (k, v) in pairs {
-                        // Key must be a string literal AND value must not
-                        // touch Input. Input-touching values (e.g. `.a`)
-                        // can raise a runtime error against the actual
-                        // input, but folding to a bare integer drops that
-                        // error (same bug class as #172). The sibling
-                        // `[elements] | length` rewrite below already
-                        // honours this; the object form had drifted.
                         if let Expr::Literal(Literal::Str(s)) = k {
-                            if contains_input(v) { all_static = false; break; }
+                            if contains_input(v) || !expr_is_single_output(v) {
+                                all_static = false;
+                                break;
+                            }
                             extracted.push((s.as_str(), ()));
                         } else {
                             all_static = false;
@@ -1955,6 +1956,41 @@ fn contains_input(expr: &crate::ir::Expr) -> bool {
         Expr::FuncCall { args, .. } => args.iter().any(contains_input),
         Expr::ClosureOp { .. } | Expr::AnyShort { .. } | Expr::AllShort { .. }
         | Expr::AlternativeDestructure { .. } => true, // conservative
+    }
+}
+
+/// Conservative check that an expression yields exactly one output for
+/// any input — the *cardinality* sibling of [`contains_input`]. A
+/// `false` answer is always safe; a `true` answer means the simplifier
+/// can rely on single-output semantics (e.g. when folding
+/// `{pairs} | length` to a numeric literal, or `first(g)` to `g`).
+///
+/// Generators (`,`, `range`, `..`, `each`, `empty`, `foreach`/`reduce`
+/// streams) and anything that recursively contains one return `false`.
+fn expr_is_single_output(e: &crate::ir::Expr) -> bool {
+    use crate::ir::Expr;
+    match e {
+        Expr::Input | Expr::Literal(_) | Expr::Not | Expr::LoadVar { .. } => true,
+        Expr::Index { expr, key } => expr_is_single_output(expr) && expr_is_single_output(key),
+        Expr::BinOp { lhs, rhs, .. } => expr_is_single_output(lhs) && expr_is_single_output(rhs),
+        Expr::UnaryOp { operand, .. } | Expr::Negate { operand } => expr_is_single_output(operand),
+        Expr::Pipe { left, right } => expr_is_single_output(left) && expr_is_single_output(right),
+        Expr::IfThenElse { cond, then_branch, else_branch } => {
+            expr_is_single_output(cond) && expr_is_single_output(then_branch) && expr_is_single_output(else_branch)
+        }
+        Expr::LetBinding { value, body, .. } => expr_is_single_output(value) && expr_is_single_output(body),
+        Expr::CallBuiltin { args, .. } => args.iter().all(expr_is_single_output),
+        Expr::ObjectConstruct { pairs } => pairs.iter().all(|(k, v)| expr_is_single_output(k) && expr_is_single_output(v)),
+        Expr::RegexTest { input_expr, re, flags } => {
+            expr_is_single_output(input_expr) && expr_is_single_output(re) && expr_is_single_output(flags)
+        }
+        Expr::RegexSub { input_expr, re, tostr, flags } | Expr::RegexGsub { input_expr, re, tostr, flags } => {
+            expr_is_single_output(input_expr) && expr_is_single_output(re) && expr_is_single_output(tostr) && expr_is_single_output(flags)
+        }
+        Expr::Update { path_expr, update_expr } => expr_is_single_output(path_expr) && expr_is_single_output(update_expr),
+        Expr::Assign { path_expr, value_expr } => expr_is_single_output(path_expr) && expr_is_single_output(value_expr),
+        Expr::Alternative { primary, fallback } => expr_is_single_output(primary) && expr_is_single_output(fallback),
+        _ => false,
     }
 }
 

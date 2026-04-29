@@ -5530,3 +5530,28 @@ null
 [-.c, .c]
 {"c":42}
 [-42,42]
+
+# #333: simplify_expr's `{pairs} | length → N` fold ignored that
+# generator-valued pairs (range(N), empty, etc.) don't produce one
+# object per pair. The fold now requires every value to be both
+# input-free AND single-output.
+[{a: range(2)} | length]
+null
+[1,1]
+
+[{a: range(0)} | length]
+null
+[]
+
+[{a: empty} | length]
+null
+[]
+
+# Single-output values (literals, arithmetic) still fold to a constant.
+{a: 1, b: 2} | length
+null
+2
+
+{a: 1, a: 2} | length
+null
+1
