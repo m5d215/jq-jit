@@ -5777,3 +5777,37 @@ null
 .x + .y
 {"x":3,"y":4}
 7
+
+# #362: select_cmp_then_field silent-skipped on non-object input.
+# `(select(.a > 0)) | (.a)` over `[]` errored in jq but jq-jit
+# emitted nothing. Sibling of #358 for the single-field shape; now
+# bails to generic when input isn't an object, fields are missing,
+# or the select field isn't numeric.
+[((select(.a > 0)) | (.a))?]
+[]
+[]
+
+# String input also errors — generic interpreter handles it.
+[((select(.a > 0)) | (.b))?]
+"x"
+[]
+
+# Object with non-numeric select field: jq still runs `"x" > 0` (true)
+# and outputs `.a`. Fast path used to silently skip; now bails to
+# generic.
+(select(.a > 0)) | (.a)
+{"a":"x"}
+"x"
+
+# Object with select pass but missing out_field: jq emits null.
+# Fast path used to silently skip; now bails to generic.
+(select(.a > 0)) | (.b)
+{"a":5}
+null
+
+# Duplicate keys in select field: jq dedupes last-wins, so .a is -5
+# (select fails). Fast path now scans to end via the multi-field
+# helper and produces the same verdict.
+[((select(.a > 0)) | (.a))?]
+{"a":5,"a":-5}
+[]

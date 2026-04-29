@@ -9281,25 +9281,53 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref sel_field, ref op, threshold, ref out_field)) = select_cmp_field {
+                    // select(.sel cmp N) | .out — single-field select + field output.
+                    // Fast path requires object input with sel_field present
+                    // *and* numeric, plus out_field present. Anything else
+                    // bails to the generic interpreter so jq's verdict
+                    // (including type errors on non-object input, #362)
+                    // is preserved.
                     use jq_jit::ir::BinOp;
+                    let mut all_fields: Vec<String> = Vec::new();
+                    let mut field_idx = std::collections::HashMap::new();
+                    for f in [sel_field, out_field] {
+                        if !field_idx.contains_key(f) {
+                            field_idx.insert(f.clone(), all_fields.len());
+                            all_fields.push(f.clone());
+                        }
+                    }
+                    let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                    let sel_idx = field_idx[sel_field];
+                    let out_idx = field_idx[out_field];
+                    let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if let Some(val) = json_object_get_num(raw, 0, sel_field) {
-                            let pass = match op {
-                                BinOp::Gt => val > threshold,
-                                BinOp::Lt => val < threshold,
-                                BinOp::Ge => val >= threshold,
-                                BinOp::Le => val <= threshold,
-                                BinOp::Eq => val == threshold,
-                                BinOp::Ne => val != threshold,
-                                _ => false,
-                            };
-                            if pass {
-                                if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
-                                    compact_buf.extend_from_slice(&raw[vs..ve]);
-                                    compact_buf.push(b'\n');
+                        let mut handled = false;
+                        if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                            let r_sel = &ranges_buf[sel_idx];
+                            if r_sel.0 < r_sel.1 {
+                                if let Some(val) = parse_json_num(&raw[r_sel.0..r_sel.1]) {
+                                    let pass = match op {
+                                        BinOp::Gt => val > threshold,
+                                        BinOp::Lt => val < threshold,
+                                        BinOp::Ge => val >= threshold,
+                                        BinOp::Le => val <= threshold,
+                                        BinOp::Eq => val == threshold,
+                                        BinOp::Ne => val != threshold,
+                                        _ => false,
+                                    };
+                                    if pass {
+                                        let r_out = &ranges_buf[out_idx];
+                                        compact_buf.extend_from_slice(&raw[r_out.0..r_out.1]);
+                                        compact_buf.push(b'\n');
+                                    }
+                                    handled = true;
                                 }
                             }
+                        }
+                        if !handled {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -16393,26 +16421,49 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some((ref sel_field, ref op, threshold, ref out_field)) = select_cmp_field {
+                // Sibling fix to the stdin apply-site above.
                 use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
+                let mut all_fields: Vec<String> = Vec::new();
+                let mut field_idx = std::collections::HashMap::new();
+                for f in [sel_field, out_field] {
+                    if !field_idx.contains_key(f) {
+                        field_idx.insert(f.clone(), all_fields.len());
+                        all_fields.push(f.clone());
+                    }
+                }
+                let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+                let sel_idx = field_idx[sel_field];
+                let out_idx = field_idx[out_field];
+                let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if let Some(val) = json_object_get_num(raw, 0, sel_field) {
-                        let pass = match op {
-                            BinOp::Gt => val > threshold,
-                            BinOp::Lt => val < threshold,
-                            BinOp::Ge => val >= threshold,
-                            BinOp::Le => val <= threshold,
-                            BinOp::Eq => val == threshold,
-                            BinOp::Ne => val != threshold,
-                            _ => false,
-                        };
-                        if pass {
-                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
-                                compact_buf.extend_from_slice(&raw[vs..ve]);
-                                compact_buf.push(b'\n');
+                    let mut handled = false;
+                    if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                        let r_sel = &ranges_buf[sel_idx];
+                        if r_sel.0 < r_sel.1 {
+                            if let Some(val) = parse_json_num(&raw[r_sel.0..r_sel.1]) {
+                                let pass = match op {
+                                    BinOp::Gt => val > threshold,
+                                    BinOp::Lt => val < threshold,
+                                    BinOp::Ge => val >= threshold,
+                                    BinOp::Le => val <= threshold,
+                                    BinOp::Eq => val == threshold,
+                                    BinOp::Ne => val != threshold,
+                                    _ => false,
+                                };
+                                if pass {
+                                    let r_out = &ranges_buf[out_idx];
+                                    compact_buf.extend_from_slice(&raw[r_out.0..r_out.1]);
+                                    compact_buf.push(b'\n');
+                                }
+                                handled = true;
                             }
                         }
+                    }
+                    if !handled {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
