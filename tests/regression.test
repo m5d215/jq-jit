@@ -5376,3 +5376,51 @@ null
 [empty] | length
 null
 0
+
+# #325: raw-byte fast paths for keys / length / to_entries / iteration
+# skipped the input-side last-wins-first-position dedup that #233
+# enforced for parse_json_object. `.` (identity-emit) was correct but
+# every value-level path saw the un-deduped object.
+. | keys
+{"b":1,"b":2}
+["b"]
+
+. | keys_unsorted
+{"b":1,"b":2}
+["b"]
+
+. | length
+{"b":1,"b":2}
+1
+
+. | to_entries
+{"b":1,"b":2}
+[{"key":"b","value":2}]
+
+. | .[]
+{"b":1,"b":2}
+2
+
+# Position of the first occurrence is preserved (matches jq).
+. | keys_unsorted
+{"a":1,"b":2,"a":3}
+["a","b"]
+
+. | to_entries
+{"a":1,"b":2,"a":3}
+[{"key":"a","value":3},{"key":"b","value":2}]
+
+[ . | .[] ]
+{"a":1,"b":2,"a":3}
+[3,2]
+
+# `{a: (.a)}` (field_remap fast path) reads each field via
+# json_object_get_fields_raw_buf, which previously short-circuited on
+# the first match — capturing the wrong half of a duplicate-key input.
+{a: (.a)}
+{"a":null,"a":false}
+{"a":false}
+
+{a: (.a), b: (.b)}
+{"a":1,"b":2,"a":3}
+{"a":3,"b":2}

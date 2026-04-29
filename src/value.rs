@@ -950,23 +950,45 @@ pub fn json_object_length(b: &[u8], pos: usize) -> Option<usize> {
     let mut i = pos + 1;
     while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
     if i < b.len() && b[i] == b'}' { return Some(0); }
+    let mut seen: [(usize, usize); 16] = [(0, 0); 16];
+    let mut seen_count: usize = 0;
     let mut count = 0usize;
     loop {
         if i >= b.len() || b[i] != b'"' { return None; }
-        // Skip key string
+        let key_start = i;
         i += 1;
         while i < b.len() {
             match b[i] { b'"' => break, b'\\' => i += 2, _ => i += 1 }
         }
         if i >= b.len() { return None; }
-        i += 1; // past closing quote
+        let key_end = i + 1;
+
+        let key_bytes = &b[key_start + 1 .. key_end - 1];
+        let mut is_dup = false;
+        for j in 0..seen_count {
+            let (ks, ke) = seen[j];
+            if &b[ks + 1 .. ke - 1] == key_bytes { is_dup = true; break; }
+        }
+        if is_dup {
+            // skip — not counted
+        } else if seen_count < seen.len() {
+            seen[seen_count] = (key_start, key_end);
+            seen_count += 1;
+            count += 1;
+        } else {
+            // Object has more than 16 unique keys; fall back to the
+            // allocating dedup helper.
+            let mut pairs: Vec<(usize, usize, usize, usize)> = Vec::new();
+            json_object_dedup_pairs(b, pos, &mut pairs)?;
+            return Some(pairs.len());
+        }
+
+        i = key_end;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
         if i >= b.len() || b[i] != b':' { return None; }
         i += 1;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
-        // Skip value
         i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return None };
-        count += 1;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
         if i >= b.len() { return None; }
         if b[i] == b'}' { return Some(count); }
@@ -1007,6 +1029,76 @@ pub fn json_value_length(b: &[u8], pos: usize) -> Option<usize> {
     }
 }
 
+/// Walk a raw JSON object collecting `(key_range, value_range)` pairs
+/// with last-wins-first-position dedup applied. Each range is a
+/// half-open `(start, end)` byte index pair into `b`; key ranges
+/// include the surrounding quotes.
+///
+/// This matches jq 1.8.x's input parse semantics (the same dedup
+/// `parse_json_object` enforces in-memory, #233). Raw-byte fast paths
+/// over object iteration / keys / length / to_entries skip that
+/// in-memory dedup; routing them through this helper keeps the two
+/// code paths consistent (#325).
+///
+/// Returns the byte index past the closing `}` on success, or `None`
+/// on a malformed object.
+///
+/// Key comparison is byte-level *between the surrounding quotes* —
+/// equivalent to jq's behaviour for keys without escape sequences.
+/// Escape-equivalent keys (e.g. `"a"` vs `"a"`) are not folded;
+/// jq does fold them after unescape. That edge case is uncommon in
+/// real inputs and not currently surfaced by `tests/fuzz_diff.rs`.
+pub fn json_object_dedup_pairs(
+    b: &[u8],
+    pos: usize,
+    pairs: &mut Vec<(usize, usize, usize, usize)>,
+) -> Option<usize> {
+    pairs.clear();
+    if pos >= b.len() || b[pos] != b'{' { return None; }
+    let mut i = pos + 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    if i < b.len() && b[i] == b'}' { return Some(i + 1); }
+    loop {
+        if i >= b.len() || b[i] != b'"' { return None; }
+        let key_start = i;
+        i += 1;
+        while i < b.len() {
+            match b[i] { b'"' => break, b'\\' => i += 2, _ => i += 1 }
+        }
+        if i >= b.len() { return None; }
+        let key_end = i + 1;
+        i = key_end;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() || b[i] != b':' { return None; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        let val_start = i;
+        i = match skip_json_value(b, i) { Ok(e) => e, Err(_) => return None };
+        let val_end = i;
+
+        let key_bytes = &b[key_start + 1 .. key_end - 1];
+        let mut found = false;
+        for entry in pairs.iter_mut() {
+            if &b[entry.0 + 1 .. entry.1 - 1] == key_bytes {
+                entry.2 = val_start;
+                entry.3 = val_end;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            pairs.push((key_start, key_end, val_start, val_end));
+        }
+
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= b.len() { return None; }
+        if b[i] == b'}' { return Some(i + 1); }
+        if b[i] != b',' { return None; }
+        i += 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
+}
+
 /// Extract all keys from a JSON object and write them as a sorted JSON array into buf.
 /// Returns true if successful, false if the input isn't a JSON object.
 pub fn json_object_keys_to_buf(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {
@@ -1024,17 +1116,33 @@ pub fn json_object_keys_to_buf_reuse(b: &[u8], pos: usize, buf: &mut Vec<u8>, ke
         buf.extend_from_slice(b"[]\n");
         return true;
     }
-    // Collect raw key byte ranges
+    let mut seen: [(usize, usize); 16] = [(0, 0); 16];
+    let mut seen_count: usize = 0;
+    let mut had_dup = false;
     loop {
         if i >= b.len() || b[i] != b'"' { return false; }
-        let key_start = i; // include the opening quote
+        let key_start = i;
         i += 1;
         while i < b.len() {
             match b[i] { b'"' => break, b'\\' => i += 2, _ => i += 1 }
         }
         if i >= b.len() { return false; }
-        let key_end = i + 1; // include the closing quote
+        let key_end = i + 1;
+
+        let key_bytes = &b[key_start + 1 .. key_end - 1];
+        let mut is_dup = false;
+        for j in 0..seen_count {
+            let (ks, ke) = seen[j];
+            if &b[ks + 1 .. ke - 1] == key_bytes { is_dup = true; break; }
+        }
+        if is_dup || seen_count >= seen.len() {
+            had_dup = true;
+            break;
+        }
+        seen[seen_count] = (key_start, key_end);
+        seen_count += 1;
         keys.push((key_start, key_end));
+
         i = key_end;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
         if i >= b.len() || b[i] != b':' { return false; }
@@ -1048,7 +1156,16 @@ pub fn json_object_keys_to_buf_reuse(b: &[u8], pos: usize, buf: &mut Vec<u8>, ke
         i += 1;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
     }
-    // Sort keys by their string content (between quotes)
+    if had_dup {
+        keys.clear();
+        let mut pairs: Vec<(usize, usize, usize, usize)> = Vec::new();
+        if json_object_dedup_pairs(b, pos, &mut pairs).is_none() { return false; }
+        for (ks, ke, _, _) in &pairs { keys.push((*ks, *ke)); }
+    }
+    if keys.is_empty() {
+        buf.extend_from_slice(b"[]\n");
+        return true;
+    }
     keys.sort_unstable_by(|a, c| b[a.0+1..a.1-1].cmp(&b[c.0+1..c.1-1]));
     buf.push(b'[');
     for (idx, (ks, ke)) in keys.iter().enumerate() {
@@ -1068,6 +1185,9 @@ pub fn json_object_extract_keys_only(b: &[u8], pos: usize, keys: &mut Vec<(usize
     let mut i = pos + 1;
     while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
     if i < b.len() && b[i] == b'}' { return Some(0); }
+    let mut seen: [(usize, usize); 16] = [(0, 0); 16];
+    let mut seen_count: usize = 0;
+    let mut had_dup = false;
     loop {
         if i >= b.len() || b[i] != b'"' { return None; }
         let key_start = i;
@@ -1075,7 +1195,21 @@ pub fn json_object_extract_keys_only(b: &[u8], pos: usize, keys: &mut Vec<(usize
         while i < b.len() { match b[i] { b'"' => break, b'\\' => i += 2, _ => i += 1 } }
         if i >= b.len() { return None; }
         let key_end = i + 1;
+
+        let key_bytes = &b[key_start + 1 .. key_end - 1];
+        let mut is_dup = false;
+        for j in 0..seen_count {
+            let (ks, ke) = seen[j];
+            if &b[ks + 1 .. ke - 1] == key_bytes { is_dup = true; break; }
+        }
+        if is_dup || seen_count >= seen.len() {
+            had_dup = true;
+            break;
+        }
+        seen[seen_count] = (key_start, key_end);
+        seen_count += 1;
         keys.push((key_start, key_end));
+
         i = key_end;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
         if i >= b.len() || b[i] != b':' { return None; }
@@ -1088,6 +1222,12 @@ pub fn json_object_extract_keys_only(b: &[u8], pos: usize, keys: &mut Vec<(usize
         if b[i] != b',' { return None; }
         i += 1;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    }
+    if had_dup {
+        keys.clear();
+        let mut pairs: Vec<(usize, usize, usize, usize)> = Vec::new();
+        json_object_dedup_pairs(b, pos, &mut pairs)?;
+        for (ks, ke, _, _) in &pairs { keys.push((*ks, *ke)); }
     }
     Some(keys.len())
 }
@@ -1154,6 +1294,9 @@ pub fn json_object_keys_unsorted_to_buf(b: &[u8], pos: usize, buf: &mut Vec<u8>)
         buf.extend_from_slice(b"[]\n");
         return true;
     }
+    let buf_start = buf.len();
+    let mut seen: [(usize, usize); 16] = [(0, 0); 16];
+    let mut seen_count: usize = 0;
     buf.push(b'[');
     let mut first = true;
     loop {
@@ -1163,6 +1306,32 @@ pub fn json_object_keys_unsorted_to_buf(b: &[u8], pos: usize, buf: &mut Vec<u8>)
         while i < b.len() { match b[i] { b'"' => break, b'\\' => i += 2, _ => i += 1 } }
         if i >= b.len() { return false; }
         let key_end = i + 1;
+
+        let key_bytes = &b[key_start + 1 .. key_end - 1];
+        let mut is_dup = false;
+        for j in 0..seen_count {
+            let (ks, ke) = seen[j];
+            if &b[ks + 1 .. ke - 1] == key_bytes { is_dup = true; break; }
+        }
+        if is_dup || seen_count >= seen.len() {
+            buf.truncate(buf_start);
+            let mut pairs: Vec<(usize, usize, usize, usize)> = Vec::new();
+            if json_object_dedup_pairs(b, pos, &mut pairs).is_none() { return false; }
+            if pairs.is_empty() {
+                buf.extend_from_slice(b"[]\n");
+                return true;
+            }
+            buf.push(b'[');
+            for (idx, (ks, ke, _, _)) in pairs.iter().enumerate() {
+                if idx > 0 { buf.push(b','); }
+                buf.extend_from_slice(&b[*ks..*ke]);
+            }
+            buf.extend_from_slice(b"]\n");
+            return true;
+        }
+        seen[seen_count] = (key_start, key_end);
+        seen_count += 1;
+
         if !first { buf.push(b','); }
         first = false;
         buf.extend_from_slice(&b[key_start..key_end]);
@@ -2664,13 +2833,41 @@ pub fn json_each_value_raw(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {
             let mut i = pos + 1;
             while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
             if i < b.len() && b[i] == b'}' { return true; }
+            let buf_start = buf.len();
+            let mut seen: [(usize, usize); 16] = [(0, 0); 16];
+            let mut seen_count: usize = 0;
             loop {
-                // Skip key
                 if i >= b.len() || b[i] != b'"' { return false; }
+                let key_start = i;
                 i += 1;
                 while i < b.len() { match b[i] { b'"' => break, b'\\' => { i += 2; continue }, _ => i += 1 } }
                 if i >= b.len() { return false; }
-                i += 1; // closing quote
+                let key_end = i + 1;
+
+                let key_bytes = &b[key_start + 1 .. key_end - 1];
+                let mut is_dup = false;
+                for j in 0..seen_count {
+                    let (ks, ke) = seen[j];
+                    if &b[ks + 1 .. ke - 1] == key_bytes { is_dup = true; break; }
+                }
+                if is_dup || seen_count >= seen.len() {
+                    // Roll back the streaming emission and fall through
+                    // to the allocating dedup helper. Last-wins-first-position
+                    // dedup may overwrite earlier emissions with later
+                    // values, so we can't keep the partial output.
+                    buf.truncate(buf_start);
+                    let mut pairs: Vec<(usize, usize, usize, usize)> = Vec::new();
+                    if json_object_dedup_pairs(b, pos, &mut pairs).is_none() { return false; }
+                    for (_, _, vs, ve) in &pairs {
+                        buf.extend_from_slice(&b[*vs..*ve]);
+                        buf.push(b'\n');
+                    }
+                    return true;
+                }
+                seen[seen_count] = (key_start, key_end);
+                seen_count += 1;
+
+                i = key_end;
                 while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
                 if i >= b.len() || b[i] != b':' { return false; }
                 i += 1;
@@ -2719,19 +2916,44 @@ pub fn json_each_value_cb(b: &[u8], pos: usize, mut cb: impl FnMut(usize, usize)
             let mut i = pos + 1;
             while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
             if i < b.len() && b[i] == b'}' { return true; }
+            // Stack buffer of (k_start, k_end, v_start, v_end). Dedup
+            // inline; on overflow or first detected duplicate, fall back
+            // to `json_object_dedup_pairs`. The callback is *not*
+            // invoked until we know all pairs are unique (or we have a
+            // deduped list), since callbacks may have non-rollbackable
+            // side effects.
+            let mut stack: [(usize, usize, usize, usize); 16] = [(0, 0, 0, 0); 16];
+            let mut count: usize = 0;
             loop {
                 if i >= b.len() || b[i] != b'"' { return false; }
+                let key_start = i;
                 i += 1;
                 while i < b.len() { match b[i] { b'"' => break, b'\\' => { i += 2; continue }, _ => i += 1 } }
                 if i >= b.len() { return false; }
-                i += 1;
+                let key_end = i + 1;
+
+                let key_bytes = &b[key_start + 1 .. key_end - 1];
+                let mut is_dup = false;
+                for j in 0..count {
+                    let (ks, ke, _, _) = stack[j];
+                    if &b[ks + 1 .. ke - 1] == key_bytes { is_dup = true; break; }
+                }
+                if is_dup || count >= stack.len() {
+                    let mut pairs: Vec<(usize, usize, usize, usize)> = Vec::new();
+                    if json_object_dedup_pairs(b, pos, &mut pairs).is_none() { return false; }
+                    for (_, _, vs, ve) in &pairs { cb(*vs, *ve); }
+                    return true;
+                }
+
+                i = key_end;
                 while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
                 if i >= b.len() || b[i] != b':' { return false; }
                 i += 1;
                 while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
                 let vs = i;
                 i = match skip_json_value(b, i) { Ok(e) => e, Err(_) => return false };
-                cb(vs, i);
+                stack[count] = (key_start, key_end, vs, i);
+                count += 1;
                 while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
                 if i >= b.len() { return false; }
                 if b[i] == b'}' { break; }
@@ -2739,6 +2961,7 @@ pub fn json_each_value_cb(b: &[u8], pos: usize, mut cb: impl FnMut(usize, usize)
                 i += 1;
                 while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
             }
+            for j in 0..count { let (_, _, vs, ve) = stack[j]; cb(vs, ve); }
             true
         }
         b'[' => {
@@ -2772,15 +2995,48 @@ pub fn json_to_entries_raw(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {
         buf.extend_from_slice(b"[]\n");
         return true;
     }
+    let buf_start = buf.len();
+    let mut seen: [(usize, usize); 16] = [(0, 0); 16];
+    let mut seen_count: usize = 0;
     buf.push(b'[');
     let mut first = true;
     loop {
         if i >= b.len() || b[i] != b'"' { return false; }
-        let key_start = i; // includes opening quote
+        let key_start = i;
         i += 1;
         while i < b.len() { match b[i] { b'"' => break, b'\\' => { i += 2; continue }, _ => i += 1 } }
         if i >= b.len() { return false; }
-        let key_end = i + 1; // includes closing quote
+        let key_end = i + 1;
+
+        let key_bytes = &b[key_start + 1 .. key_end - 1];
+        let mut is_dup = false;
+        for j in 0..seen_count {
+            let (ks, ke) = seen[j];
+            if &b[ks + 1 .. ke - 1] == key_bytes { is_dup = true; break; }
+        }
+        if is_dup || seen_count >= seen.len() {
+            buf.truncate(buf_start);
+            let mut pairs: Vec<(usize, usize, usize, usize)> = Vec::new();
+            if json_object_dedup_pairs(b, pos, &mut pairs).is_none() { return false; }
+            if pairs.is_empty() {
+                buf.extend_from_slice(b"[]\n");
+                return true;
+            }
+            buf.push(b'[');
+            for (idx, (ks, ke, vs, ve)) in pairs.iter().enumerate() {
+                if idx > 0 { buf.push(b','); }
+                buf.extend_from_slice(b"{\"key\":");
+                buf.extend_from_slice(&b[*ks..*ke]);
+                buf.extend_from_slice(b",\"value\":");
+                buf.extend_from_slice(&b[*vs..*ve]);
+                buf.push(b'}');
+            }
+            buf.extend_from_slice(b"]\n");
+            return true;
+        }
+        seen[seen_count] = (key_start, key_end);
+        seen_count += 1;
+
         i = key_end;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
         if i >= b.len() || b[i] != b':' { return false; }
@@ -3181,9 +3437,16 @@ pub fn json_object_get_fields_raw_buf(b: &[u8], pos: usize, input_fields: &[&str
     if pos >= b.len() || b[pos] != b'{' { return false; }
     let n = input_fields.len();
     debug_assert!(out.len() >= n);
-    // Track which fields have been found using a bitmask (supports up to 64 fields)
+    // jq dedupes duplicate input keys last-wins (#233 / #325): the
+    // helper cannot exit early on the first match — a later duplicate
+    // may rebind the same key. Walk to the end of the object,
+    // overwriting each `out[idx]` whenever a later match arrives.
+    // The early-exit on `found == n` was removed for #325; the cost
+    // is a slight regression on object-construct fast paths that read
+    // a small subset of fields from larger inputs, but the value-level
+    // path was already this expensive — every call site routes
+    // through here for value-level coverage parity.
     let mut found_mask: u64 = 0;
-    let mut found = 0usize;
     let mut i = pos + 1;
     while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
     if i < b.len() && b[i] == b'}' { return false; }
@@ -3197,7 +3460,7 @@ pub fn json_object_get_fields_raw_buf(b: &[u8], pos: usize, input_fields: &[&str
         let key_len = j - key_start;
         let mut matched_idx = None;
         for (idx, field) in input_fields.iter().enumerate() {
-            if (found_mask >> idx) & 1 == 0 && key_len == field.len() && b[key_start..j] == *field.as_bytes() {
+            if key_len == field.len() && b[key_start..j] == *field.as_bytes() {
                 matched_idx = Some(idx);
                 break;
             }
@@ -3212,15 +3475,15 @@ pub fn json_object_get_fields_raw_buf(b: &[u8], pos: usize, input_fields: &[&str
             let val_end = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return false };
             out[idx] = (val_start, val_end);
             found_mask |= 1u64 << idx;
-            found += 1;
-            if found == n { return true; }
             i = val_end;
         } else {
             i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return false };
         }
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
         if i >= b.len() { return false; }
-        if b[i] == b'}' { return found == n; }
+        if b[i] == b'}' {
+            return found_mask.count_ones() as usize == n;
+        }
         if b[i] != b',' { return false; }
         i += 1;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
