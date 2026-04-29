@@ -30,11 +30,6 @@
 //!   `cannot slice <type>`; jq-jit silently returns `null` (#327,
 //!   same family as #127 / #199). All slice forms stay out of the
 //!   harness until #327 is closed.
-//! * `reverse` on a number — jq evaluates
-//!   `[.[length-1, length-2 ..0]]` which returns `[]` for `length=0`
-//!   and errors otherwise; jq-jit's `reverse` rejects numbers up-front
-//!   (#328). `reverse` stays out of the builtin pool until #328 is
-//!   closed.
 //! * `..` (recurse) — output ordering is grammar-defined and the
 //!   permutations explode the search space without finding new bugs.
 //! * Float literals in input — jq's number printer normalizes
@@ -92,7 +87,7 @@ const IDENT_POOL: &[&str] = &["a", "b", "c", "x", "y"];
 /// the `(int, bool, str, arr, obj)` input distribution below.
 const BUILTIN_UNARY: &[&str] = &[
     "length", "keys", "keys_unsorted", "values", "type",
-    "tostring", "to_entries", "sort", "min", "max",
+    "tostring", "to_entries", "reverse", "sort", "min", "max",
     "floor", "ceil", "fabs", "not", "add", "empty", "any", "all",
     "ascii_downcase", "ascii_upcase", "utf8bytelength",
 ];

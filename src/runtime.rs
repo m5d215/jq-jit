@@ -1056,6 +1056,10 @@ fn rt_reverse(v: &Value) -> Result<Value> {
         Value::Null => Ok(Value::Arr(Rc::new(vec![]))),
         Value::Str(s) if s.is_empty() => Ok(Value::Arr(Rc::new(vec![]))),
         Value::Obj(ObjInner(o)) if o.is_empty() => Ok(Value::Arr(Rc::new(vec![]))),
+        // n == 0.0 covers both +0 and -0; range(0; 0) is empty so the
+        // `[.[length-1, length-2 ..0]]` desugar yields []. Non-zero
+        // (including NaN) errors via the `.[idx]` step (#328).
+        Value::Num(n, _) if *n == 0.0 => Ok(Value::Arr(Rc::new(vec![]))),
         Value::Str(_) => bail!("Cannot index string with number"),
         Value::Obj(_) => bail!("Cannot index object with number"),
         Value::Num(_, _) => bail!("Cannot index number with number"),
