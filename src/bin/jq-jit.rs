@@ -1245,6 +1245,29 @@ fn resolved_would_error(
             parse_json_num(bytes_of(*i1)).is_none() || parse_json_num(bytes_of(*i2)).is_none()
         }
         ResolvedRemap::FieldOpConstToString(i, _, _) => parse_json_num(bytes_of(*i)).is_none(),
+        // `field cmp const` — the inline emitter handles only numeric
+        // fields. For non-numeric, jq still produces a verdict via its
+        // total ordering (`null < false < true < number < string <
+        // array < object`), e.g. `"abc" > 0` is true. Bail to generic
+        // (#341).
+        ResolvedRemap::FieldCmpConst(idx, _, _) => parse_json_num(bytes_of(*idx)).is_none(),
+        // BoolExpr (`cmp1 and/or cmp2`) emits null when any side's
+        // bool eval returns None — which happens whenever an inner
+        // FieldCmpConst hits a non-numeric field. Bail when any
+        // operand would bail.
+        ResolvedRemap::BoolExpr(l, _, r) => {
+            resolved_would_error(l, raw, ranges) || resolved_would_error(r, raw, ranges)
+        }
+        // `if .x cmp N then … else … end`: each branch's `Const` cond
+        // evaluator falls through to `false` when the field isn't a
+        // number, taking the wrong branch (#341). Bail any CondChain
+        // whose Const-branch fields aren't numeric.
+        ResolvedRemap::CondChain(branches, _) => {
+            branches.iter().any(|b| {
+                matches!(b.cond_rhs, ResolvedCondRhs::Const(_))
+                    && parse_json_num(bytes_of(b.cond_field_idx)).is_none()
+            })
+        }
         _ => false,
     }
 }
