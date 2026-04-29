@@ -10160,7 +10160,13 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref sff_f1, ref sff_op, ref sff_f2, ref cremap)) = select_ff_cmp_cremap {
-                    // select(.f1 cmp .f2) | {computed_remap} — field-field comparison + computed remap
+                    // select(.f1 cmp .f2) | {computed_remap} — field-field
+                    // comparison + computed remap. Sibling of #359 / #363:
+                    // fast path requires object input with both select
+                    // fields present and numeric. Anything else (#364)
+                    // bails to the generic interpreter, which preserves
+                    // jq's verdict (e.g. `null.a >= null.a` is true and
+                    // `{a: null.a}` is `{a: null}`).
                     use jq_jit::ir::BinOp;
                     // Collect all unique fields needed (select fields + remap fields)
                     let mut all_fields: Vec<String> = Vec::new();
@@ -10192,6 +10198,7 @@ fn real_main() {
                     let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
+                        let mut handled = false;
                         if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
                             // Parse both comparison fields as numbers
                             let r1 = &ranges_buf[f1_idx];
@@ -10214,8 +10221,13 @@ fn real_main() {
                                         }
                                         compact_buf.extend_from_slice(obj_close);
                                     }
+                                    handled = true;
                                 }
                             }
+                        }
+                        if !handled {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -17271,6 +17283,7 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some((ref sff_f1, ref sff_op, ref sff_f2, ref cremap)) = select_ff_cmp_cremap {
+                // Sibling fix to the stdin apply-site above.
                 use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
                 let mut all_fields: Vec<String> = Vec::new();
@@ -17302,6 +17315,7 @@ fn real_main() {
                 let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
+                    let mut handled = false;
                     if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
                         let r1 = &ranges_buf[f1_idx];
                         let r2 = &ranges_buf[f2_idx];
@@ -17323,8 +17337,13 @@ fn real_main() {
                                     }
                                     compact_buf.extend_from_slice(obj_close);
                                 }
+                                handled = true;
                             }
                         }
+                    }
+                    if !handled {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);

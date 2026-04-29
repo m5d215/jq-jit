@@ -5811,3 +5811,31 @@ null
 [((select(.a > 0)) | (.a))?]
 {"a":5,"a":-5}
 []
+
+# #364: select_ff_cmp_cremap silent-skipped on non-object input.
+# `(select(.a >= .a)) | ({a: (.a)})` over `null` → jq evaluates
+# `null.a >= null.a` (true) and emits `{"a":null}`; jq-jit emitted
+# nothing. Sibling of #358 / #362 for the {computed_remap} output
+# shape after a field-field select.
+(select(.a >= .a)) | ({a: (.a)})
+null
+{"a":null}
+
+# Empty object: `.a` is null on both sides, select passes, emit
+# `{"a":null}`. Fast path bails (helper returns false on missing
+# fields), generic produces the verdict.
+(select(.a >= .a)) | ({a: (.a)})
+{}
+{"a":null}
+
+# Non-object scalar input wraps in `?` to convert error to `[]`.
+[((select(.a >= .a)) | ({a: (.a)}))?]
+5
+[]
+
+# Object with one field missing on the other comparison side:
+# jq treats `.b` as null, so `.a + .b = 1`. Fast path bails since
+# `.b` is absent; generic emits `{"z":1}`.
+(select(.a >= .b)) | ({z: (.a + .b)})
+{"a":1}
+{"z":1}
