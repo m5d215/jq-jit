@@ -26,10 +26,6 @@
 //! * `.[:]` — slice with both endpoints absent. jq treats this as a
 //!   syntax error; jq-jit's parser accepts it. Distinct from the
 //!   runtime fast-path bug class this harness chases.
-//! * `.[N:]` / `.[:N]` on non-array/non-string — jq raises
-//!   `cannot slice <type>`; jq-jit silently returns `null` (#327,
-//!   same family as #127 / #199). All slice forms stay out of the
-//!   harness until #327 is closed.
 //! * `..` (recurse) — output ordering is grammar-defined and the
 //!   permutations explode the search space without finding new bugs.
 //! * Float literals in input — jq's number printer normalizes
@@ -97,6 +93,10 @@ enum FilterExpr {
     Identity,
     Field(String),
     Index(i32),
+    /// Half-open slice. `.[:]` (both endpoints absent) is excluded —
+    /// see module docs.
+    SliceLo(i32, Option<i32>),
+    SliceHi(Option<i32>, i32),
     ArrayConstruct(Vec<FilterExpr>),
     ObjectConstruct(Vec<(String, FilterExpr)>),
     Pipe(Box<FilterExpr>, Box<FilterExpr>),
@@ -117,6 +117,14 @@ fn render(expr: &FilterExpr) -> String {
         FilterExpr::Identity => ".".into(),
         FilterExpr::Field(name) => format!(".{}", name),
         FilterExpr::Index(n) => format!(".[{}]", n),
+        FilterExpr::SliceLo(a, b) => {
+            let hi = b.map(|v| v.to_string()).unwrap_or_default();
+            format!(".[{}:{}]", a, hi)
+        }
+        FilterExpr::SliceHi(a, b) => {
+            let lo = a.map(|v| v.to_string()).unwrap_or_default();
+            format!(".[{}:{}]", lo, b)
+        }
         FilterExpr::ArrayConstruct(items) => {
             if items.is_empty() { return "[]".into(); }
             let parts: Vec<String> = items.iter().map(render).collect();
@@ -161,6 +169,12 @@ fn leaf_strategy() -> impl Strategy<Value = FilterExpr> {
         prop::sample::select(BUILTIN_UNARY).prop_map(FilterExpr::UnaryBuiltin),
         (0u32..5).prop_map(FilterExpr::RangeN),
         (-3i32..=3).prop_map(FilterExpr::IntLiteral),
+        prop_oneof![
+            (-3i32..=3, prop::option::of(-3i32..=3))
+                .prop_map(|(a, b)| FilterExpr::SliceLo(a, b)),
+            (prop::option::of(-3i32..=3), -3i32..=3)
+                .prop_map(|(a, b)| FilterExpr::SliceHi(a, b)),
+        ],
     ]
 }
 
