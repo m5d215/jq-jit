@@ -5447,3 +5447,30 @@ null
 "" | reverse
 null
 []
+
+# #327: standalone_array's FieldSlice fast path emitted null silently
+# when the field value wasn't an ASCII-quoted string. jq slices arrays,
+# returns null for null, and errors on bool/number/object.
+[0, .x[0:]]
+{"x":[1,2,3]}
+[0,[1,2,3]]
+
+[0, (.x[0:])?]
+{"x":false}
+[0]
+
+[0, (.x[0:])?]
+{"x":42}
+[0]
+
+[0, (.x[0:])?]
+{"x":{"a":1}}
+[0]
+
+[0, .x[0:]]
+{"x":null}
+[0,null]
+
+[0, .x[0:3]]
+{"x":"hello"}
+[0,"hel"]

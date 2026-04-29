@@ -1196,12 +1196,28 @@ fn resolved_would_error(
             _ => true,
         }
     };
-    let _ = (is_arr, is_obj, is_null);
+    let _ = (is_arr, is_obj);
     match resolved {
         ResolvedRemap::FieldOpField(i1, op, i2) => !arith_fastpath_ok(bytes_of(*i1), bytes_of(*i2), op),
         ResolvedRemap::FieldOpConst(i, op, _) => !arith_op_with_const_ok(bytes_of(*i), op),
         ResolvedRemap::ConstOpField(_, op, i) => !arith_op_with_const_ok(bytes_of(*i), op),
         ResolvedRemap::FieldArray(items) => items.iter().any(|r| resolved_would_error(r, raw, ranges)),
+        // FieldSlice's inline emitter handles only ASCII-quoted strings;
+        // every other shape lands in its `else` branch and emits null
+        // silently — but jq slices arrays, returns null for null, and
+        // raises `cannot slice <type>` for booleans / numbers / objects
+        // (#327, same family as #127 / #199). Bail on anything that's
+        // not the emitter's narrow domain.
+        ResolvedRemap::FieldSlice(idx, _, _) => {
+            let val = bytes_of(*idx);
+            if is_null(val) { return false; }
+            if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"'
+                && !val[1..val.len()-1].contains(&b'\\')
+            {
+                return false;
+            }
+            true
+        }
         _ => false,
     }
 }
