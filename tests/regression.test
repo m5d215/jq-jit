@@ -5696,3 +5696,16 @@ true
 [.x > .y, .x]
 {"x":"b","y":"a"}
 [true,"b"]
+
+# #349: select(.f1 cmp .f2) silently dropped null and non-object inputs.
+# null: both fields null, comparison is well-defined → emit input.
+# non-object/non-null: jq raises `Cannot index <type> with string`, the
+# fast path now bails to the generic interpreter.
+select(.a >= .a)
+null
+null
+
+# `false | .a` errors in jq; the wrapper `?` catches it to empty.
+[(select(.a > .a))?]
+false
+[]
