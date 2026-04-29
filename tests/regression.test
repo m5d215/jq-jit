@@ -6079,3 +6079,29 @@ null
 [((select(.a != 0)) | (5 - .b))?]
 {"a":1}
 []
+
+# #385: select_cmp_then_value general path called emit_remap_value
+# unconditionally, trusting its inline `b"null"` fallback. Wrong
+# for array operands (jq concatenates / set-differences) and for
+# any other out-of-domain shape. Pre-resolve the rexpr and probe
+# `resolved_would_error` per-iteration; on miss, bail to generic
+# so jq's exact verdict applies.
+(select(.y > -3)) | (.c + .c)
+{"y":0,"c":[]}
+[]
+
+# Array concat with non-empty arrays.
+(select(.y > -3)) | (.c + .c)
+{"y":0,"c":[1,2]}
+[1,2,1,2]
+
+# String concat: was already inside emit_remap_value's domain via
+# the str+str branch; counter-case to ensure we didn't regress it.
+(select(.y > -3)) | (.c + .c)
+{"y":1,"c":"a"}
+"aa"
+
+# Numeric baseline stays on the hot path.
+(select(.y > -3)) | (.c + .c)
+{"y":1,"c":3}
+6

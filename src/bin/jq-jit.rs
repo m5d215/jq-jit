@@ -9924,6 +9924,15 @@ fn real_main() {
                         }
                     }
                     let gen_field_refs: Vec<&str> = gen_all_fields.iter().map(|s| s.as_str()).collect();
+                    // Pre-resolve `out_rexpr` once for the general path so
+                    // each iteration can probe `resolved_would_error` (#385).
+                    // The general arm previously called `emit_remap_value`
+                    // unconditionally and trusted its `b"null"` fallbacks —
+                    // wrong for arr/arr or str/str arithmetic where jq does
+                    // concat, and for any other out-of-domain shape.
+                    let gen_resolved = if fused_mode == 0 {
+                        Some(resolve_one_remap(out_rexpr, &gen_field_idx))
+                    } else { None };
                     let mut ranges_buf = vec![(0usize, 0usize); gen_field_refs.len()];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
@@ -9994,14 +10003,14 @@ fn real_main() {
                                 }
                             }
                             _ => {
-                                // General path (#383): emitting literal `null`
-                                // when remap fields are missing was wrong for
-                                // arithmetic shapes — jq raises a type error
-                                // (`null - null cannot be subtracted` etc.)
-                                // while the fast path silently emitted `null`.
-                                // Bail to generic on missing fields so the
-                                // verdict matches across all out_rexpr shapes
-                                // (Field → null, FieldOpField → error, etc.).
+                                // General path (#383 / #385): only mark
+                                // handled when fields are present *and*
+                                // the resolved remap is in the inline
+                                // emitter's faithful domain. Out-of-domain
+                                // operands (arr/arr, str/str for non-Add,
+                                // type-mismatched arithmetic, etc.) bail
+                                // to `process_input` so jq's exact verdict
+                                // applies.
                                 if let Some(val) = json_object_get_num(raw, 0, sel_field) {
                                     let pass = match sel_op {
                                         BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
@@ -10012,9 +10021,12 @@ fn real_main() {
                                     if !pass {
                                         handled = true;
                                     } else if json_object_get_fields_raw_buf(raw, 0, &gen_field_refs, &mut ranges_buf) {
-                                        emit_remap_value(&mut compact_buf, out_rexpr, raw, &ranges_buf, &gen_field_idx);
-                                        compact_buf.push(b'\n');
-                                        handled = true;
+                                        let res = gen_resolved.as_ref().unwrap();
+                                        if !resolved_would_error(res, raw, &ranges_buf) {
+                                            emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                            compact_buf.push(b'\n');
+                                            handled = true;
+                                        }
                                     }
                                 }
                             }
@@ -17137,6 +17149,10 @@ fn real_main() {
                     }
                 }
                 let gen_field_refs: Vec<&str> = gen_all_fields.iter().map(|s| s.as_str()).collect();
+                // Pre-resolve `out_rexpr` once for the general path (#385).
+                let gen_resolved = if fused_mode == 0 {
+                    Some(resolve_one_remap(out_rexpr, &gen_field_idx))
+                } else { None };
                 let mut ranges_buf = vec![(0usize, 0usize); gen_field_refs.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
@@ -17200,7 +17216,7 @@ fn real_main() {
                             }
                         }
                         _ => {
-                            // Sibling fix to the stdin apply-site above (#383).
+                            // Sibling fix to the stdin apply-site above (#383 / #385).
                             if let Some(val) = json_object_get_num(raw, 0, sel_field) {
                                 let pass = match sel_op {
                                     BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
@@ -17211,9 +17227,12 @@ fn real_main() {
                                 if !pass {
                                     handled = true;
                                 } else if json_object_get_fields_raw_buf(raw, 0, &gen_field_refs, &mut ranges_buf) {
-                                    emit_remap_value(&mut compact_buf, out_rexpr, raw, &ranges_buf, &gen_field_idx);
-                                    compact_buf.push(b'\n');
-                                    handled = true;
+                                    let res = gen_resolved.as_ref().unwrap();
+                                    if !resolved_would_error(res, raw, &ranges_buf) {
+                                        emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                        compact_buf.push(b'\n');
+                                        handled = true;
+                                    }
                                 }
                             }
                         }
