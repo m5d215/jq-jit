@@ -5764,3 +5764,16 @@ null
 [((select(.a > .a)) | (.a + .a))?]
 []
 []
+
+# #360: json_object_get_num returned first-match for duplicate-key
+# inputs; jq dedupes last-wins. For `{"c":0,"c":false}`, .c is false
+# (not numeric), so `0 + .c` errors in jq. The fast path used to read
+# the first 0 and silently emit 0.
+[(0 + .c)?]
+{"c":0,"c":false}
+[]
+
+# Unique keys still take the fast path correctly.
+.x + .y
+{"x":3,"y":4}
+7

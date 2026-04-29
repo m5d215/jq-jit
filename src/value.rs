@@ -802,15 +802,19 @@ where F: FnMut(usize, usize) -> Result<()> {
 /// Returns Some(f64) if the field exists and is numeric, None otherwise.
 /// Used for select fast paths to avoid parsing discarded objects.
 pub fn json_object_get_num(b: &[u8], pos: usize, field: &str) -> Option<f64> {
+    // jq dedupes duplicate input keys last-wins (#233 / #325). Scan to
+    // end of the object and use the LAST matching key's value; if that
+    // value isn't numeric, return None even when an earlier same-key
+    // value was numeric (#360).
     if pos >= b.len() || b[pos] != b'{' { return None; }
     let field_bytes = field.as_bytes();
     let mut i = pos + 1;
-    // Skip whitespace
     while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
     if i < b.len() && b[i] == b'}' { return None; }
+    let mut last_match: Option<f64> = None;
+    let mut last_was_match: bool = false;
     loop {
-        if i >= b.len() || b[i] != b'"' { return None; }
-        // Scan key
+        if i >= b.len() || b[i] != b'"' { return last_match; }
         let key_start = i + 1;
         let mut j = key_start;
         while j < b.len() {
@@ -819,50 +823,52 @@ pub fn json_object_get_num(b: &[u8], pos: usize, field: &str) -> Option<f64> {
         let key_matches = (j - key_start) == field_bytes.len()
             && b[key_start..j] == *field_bytes;
         i = j + 1;
-        // Skip ws + colon
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
-        if i >= b.len() || b[i] != b':' { return None; }
+        if i >= b.len() || b[i] != b':' { return last_match; }
         i += 1;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
         if key_matches {
-            // Parse the numeric value inline
-            if i >= b.len() { return None; }
-            let neg = b[i] == b'-';
-            let start = if neg { i + 1 } else { i };
-            if start >= b.len() || !b[start].is_ascii_digit() { return None; }
-            // Fast integer path
-            let mut n: i64 = (b[start] - b'0') as i64;
-            let mut k = start + 1;
-            while k < b.len() && b[k].is_ascii_digit() {
-                n = n * 10 + (b[k] - b'0') as i64;
-                k += 1;
-            }
-            if k < b.len() && (b[k] == b'.' || b[k] == b'e' || b[k] == b'E') {
-                // Has decimal/exponent — use fast-float
-                let end = {
-                    let mut e = k;
-                    if b[e] == b'.' { e += 1; while e < b.len() && b[e].is_ascii_digit() { e += 1; } }
-                    if e < b.len() && (b[e] == b'e' || b[e] == b'E') {
-                        e += 1;
-                        if e < b.len() && (b[e] == b'+' || b[e] == b'-') { e += 1; }
-                        while e < b.len() && b[e].is_ascii_digit() { e += 1; }
+            // Parse the numeric value inline; record None when the
+            // current value isn't numeric so a later non-match doesn't
+            // resurrect an earlier numeric value.
+            last_was_match = true;
+            let mut value: Option<f64> = None;
+            if i < b.len() {
+                let neg = b[i] == b'-';
+                let start = if neg { i + 1 } else { i };
+                if start < b.len() && b[start].is_ascii_digit() {
+                    let mut n: i64 = (b[start] - b'0') as i64;
+                    let mut k = start + 1;
+                    while k < b.len() && b[k].is_ascii_digit() {
+                        n = n * 10 + (b[k] - b'0') as i64;
+                        k += 1;
                     }
-                    e
-                };
-                let num_str = unsafe { std::str::from_utf8_unchecked(&b[i..end]) };
-                return fast_float::parse::<f64, _>(num_str).ok();
+                    if k < b.len() && (b[k] == b'.' || b[k] == b'e' || b[k] == b'E') {
+                        let end = {
+                            let mut e = k;
+                            if b[e] == b'.' { e += 1; while e < b.len() && b[e].is_ascii_digit() { e += 1; } }
+                            if e < b.len() && (b[e] == b'e' || b[e] == b'E') {
+                                e += 1;
+                                if e < b.len() && (b[e] == b'+' || b[e] == b'-') { e += 1; }
+                                while e < b.len() && b[e].is_ascii_digit() { e += 1; }
+                            }
+                            e
+                        };
+                        let num_str = unsafe { std::str::from_utf8_unchecked(&b[i..end]) };
+                        value = fast_float::parse::<f64, _>(num_str).ok();
+                    } else if (k - start) <= 15 {
+                        value = Some(if neg { -(n as f64) } else { n as f64 });
+                    }
+                }
             }
-            if (k - start) > 15 { return None; }
-            let val = if neg { -(n as f64) } else { n as f64 };
-            return Some(val);
+            last_match = value;
         }
-        // Skip value
-        i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return None };
-        // Skip ws
+        // Skip past the value (whether we parsed or not) so we keep scanning.
+        i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return if last_was_match { last_match } else { None } };
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
-        if i >= b.len() { return None; }
-        if b[i] == b'}' { return None; }
-        if b[i] != b',' { return None; }
+        if i >= b.len() { return last_match; }
+        if b[i] == b'}' { return last_match; }
+        if b[i] != b',' { return last_match; }
         i += 1;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
     }
