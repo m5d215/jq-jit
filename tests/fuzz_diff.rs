@@ -248,7 +248,15 @@ fn filter_strategy() -> impl Strategy<Value = FilterExpr> {
 enum JsonShape {
     Null,
     Bool(bool),
-    IntN(i32),
+    /// Integer literal. Widened from `i32` (#321) so the adversarial
+    /// pool below can stress the f64 mantissa boundary (`±2^53`) and
+    /// the i32 boundary (`±2^31`). Anything ≤ 2^53 in absolute value
+    /// round-trips as an integer through both jq's number printer and
+    /// the harness's `serde_json` re-parse; values strictly beyond
+    /// that boundary become floats and would trip the float-formatting
+    /// asymmetry called out in the module doc, so the adversarial pool
+    /// caps at ±2^53.
+    IntN(i64),
     Str(String),
     Arr(Vec<JsonShape>),
     Obj(Vec<(String, JsonShape)>),
@@ -274,13 +282,52 @@ fn render_json(v: &JsonShape) -> String {
     }
 }
 
+/// Boundary integer pool (#321). Each value round-trips as an
+/// integer through jq's printer and `serde_json`. The largest
+/// magnitude here is `±2^53`, the f64 mantissa limit; anything
+/// beyond that becomes a float in jq's output and trips the
+/// float-formatting asymmetry described in the module doc.
+const ADVERSARIAL_INTS: &[i64] = &[
+    i32::MIN as i64,
+    i32::MAX as i64,
+    (i32::MAX as i64) + 1,
+    -((i32::MAX as i64) + 1),
+    1 << 53,
+    -(1i64 << 53),
+];
+
+/// String pool with shapes that have surfaced bugs historically:
+/// empty string, single ASCII, runs that brush against the small
+/// SSO threshold, and a longer ASCII string that exercises
+/// allocation paths on both runtimes. Stays ASCII-only — non-ASCII
+/// adds an encoding-class divergence the next round can broaden
+/// into once the integer expansion settles.
+const ADVERSARIAL_STRS: &[&str] = &[
+    "",
+    "0",
+    "true",
+    "null",
+    "          ",
+    "abcdefghijklmnopqrstuvwxyz",
+];
+
 fn json_leaf() -> impl Strategy<Value = JsonShape> {
+    // Mix the conservative leaf set with a small adversarial pool
+    // (#321). Weighted ~5:1 so the adversarial values are exercised
+    // every round without crowding out the normal distribution.
     prop_oneof![
-        Just(JsonShape::Null),
-        any::<bool>().prop_map(JsonShape::Bool),
-        (-5i32..=5).prop_map(JsonShape::IntN),
-        prop::sample::select(vec!["", "a", "ab", "0", "hello"])
-            .prop_map(|s| JsonShape::Str(s.to_string())),
+        5 => prop_oneof![
+            Just(JsonShape::Null),
+            any::<bool>().prop_map(JsonShape::Bool),
+            (-5i64..=5).prop_map(JsonShape::IntN),
+            prop::sample::select(vec!["", "a", "ab", "0", "hello"])
+                .prop_map(|s| JsonShape::Str(s.to_string())),
+        ],
+        1 => prop_oneof![
+            prop::sample::select(ADVERSARIAL_INTS).prop_map(JsonShape::IntN),
+            prop::sample::select(ADVERSARIAL_STRS)
+                .prop_map(|s| JsonShape::Str(s.to_string())),
+        ],
     ]
 }
 
