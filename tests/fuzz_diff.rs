@@ -26,6 +26,15 @@
 //! * `.[:]` — slice with both endpoints absent. jq treats this as a
 //!   syntax error; jq-jit's parser accepts it. Distinct from the
 //!   runtime fast-path bug class this harness chases.
+//! * `.[N:]` / `.[:N]` on non-array/non-string — jq raises
+//!   `cannot slice <type>`; jq-jit silently returns `null` (#327,
+//!   same family as #127 / #199). All slice forms stay out of the
+//!   harness until #327 is closed.
+//! * `reverse` on a number — jq evaluates
+//!   `[.[length-1, length-2 ..0]]` which returns `[]` for `length=0`
+//!   and errors otherwise; jq-jit's `reverse` rejects numbers up-front
+//!   (#328). `reverse` stays out of the builtin pool until #328 is
+//!   closed.
 //! * `..` (recurse) — output ordering is grammar-defined and the
 //!   permutations explode the search space without finding new bugs.
 //! * Float literals in input — jq's number printer normalizes
@@ -33,10 +42,6 @@
 //!   re-parse can mask, leading to false-positive shrinks. Restrict
 //!   numeric inputs to integers and let the *filter* introduce
 //!   floating arithmetic when needed.
-//! * Duplicate keys in input objects — `parse_json_object` dedupes
-//!   (#233), but the raw-byte `keys` / `length` / `to_entries`
-//!   /iteration fast paths skip that dedup (#325). The shape stays
-//!   excluded until #325 is closed.
 //! * Duplicate keys in `{k: v, k: v'}` literals — jq-jit's optimizer
 //!   sometimes drops the earlier value's evaluation when a later one
 //!   will rebind the same key, losing any error it would have raised
@@ -87,7 +92,7 @@ const IDENT_POOL: &[&str] = &["a", "b", "c", "x", "y"];
 /// the `(int, bool, str, arr, obj)` input distribution below.
 const BUILTIN_UNARY: &[&str] = &[
     "length", "keys", "keys_unsorted", "values", "type",
-    "tostring", "to_entries", "reverse", "sort", "min", "max",
+    "tostring", "to_entries", "sort", "min", "max",
     "floor", "ceil", "fabs", "not", "add", "empty", "any", "all",
     "ascii_downcase", "ascii_upcase", "utf8bytelength",
 ];
@@ -97,10 +102,6 @@ enum FilterExpr {
     Identity,
     Field(String),
     Index(i32),
-    /// Half-open slice. `.[:]` (both endpoints absent) is excluded —
-    /// see module docs.
-    SliceLo(i32, Option<i32>),
-    SliceHi(Option<i32>, i32),
     ArrayConstruct(Vec<FilterExpr>),
     ObjectConstruct(Vec<(String, FilterExpr)>),
     Pipe(Box<FilterExpr>, Box<FilterExpr>),
@@ -121,14 +122,6 @@ fn render(expr: &FilterExpr) -> String {
         FilterExpr::Identity => ".".into(),
         FilterExpr::Field(name) => format!(".{}", name),
         FilterExpr::Index(n) => format!(".[{}]", n),
-        FilterExpr::SliceLo(a, b) => {
-            let hi = b.map(|v| v.to_string()).unwrap_or_default();
-            format!(".[{}:{}]", a, hi)
-        }
-        FilterExpr::SliceHi(a, b) => {
-            let lo = a.map(|v| v.to_string()).unwrap_or_default();
-            format!(".[{}:{}]", lo, b)
-        }
         FilterExpr::ArrayConstruct(items) => {
             if items.is_empty() { return "[]".into(); }
             let parts: Vec<String> = items.iter().map(render).collect();
@@ -173,12 +166,6 @@ fn leaf_strategy() -> impl Strategy<Value = FilterExpr> {
         prop::sample::select(BUILTIN_UNARY).prop_map(FilterExpr::UnaryBuiltin),
         (0u32..5).prop_map(FilterExpr::RangeN),
         (-3i32..=3).prop_map(FilterExpr::IntLiteral),
-        prop_oneof![
-            (-3i32..=3, prop::option::of(-3i32..=3))
-                .prop_map(|(a, b)| FilterExpr::SliceLo(a, b)),
-            (prop::option::of(-3i32..=3), -3i32..=3)
-                .prop_map(|(a, b)| FilterExpr::SliceHi(a, b)),
-        ],
     ]
 }
 
@@ -266,18 +253,11 @@ fn json_strategy() -> impl Strategy<Value = JsonShape> {
     json_leaf().prop_recursive(3, 12, 3, |inner| {
         prop_oneof![
             prop::collection::vec(inner.clone(), 0..=3).prop_map(JsonShape::Arr),
-            // Input-side dedup is enforced by `parse_json_object`
-            // (#233), but the raw-byte fast paths for keys / length /
-            // to_entries / iteration scan the bytes directly and still
-            // see every duplicate (#325). Until that is closed,
-            // dedupe at generation time so the harness exercises the
-            // unique-key shape only.
+            // Duplicate input keys are deduped last-wins-first-position
+            // by both the value-level parse path (#233) and the
+            // raw-byte fast paths (#325). Generate freely.
             prop::collection::vec((ident_strategy(), inner.clone()), 0..=3)
-                .prop_map(|mut pairs| {
-                    let mut seen = std::collections::HashSet::new();
-                    pairs.retain(|(k, _)| seen.insert(k.clone()));
-                    JsonShape::Obj(pairs)
-                }),
+                .prop_map(JsonShape::Obj),
         ]
     })
 }
