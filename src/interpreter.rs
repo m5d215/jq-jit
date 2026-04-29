@@ -2013,8 +2013,26 @@ fn input_behind_short_circuit(e: &crate::ir::Expr) -> bool {
                 || input_behind_short_circuit(then_branch)
                 || input_behind_short_circuit(else_branch)
         }
-        Expr::BinOp { lhs, rhs, .. } => {
-            input_behind_short_circuit(lhs) || input_behind_short_circuit(rhs)
+        Expr::BinOp { op, lhs, rhs } => {
+            // jq's `and` / `or` short-circuit on the lhs's truthiness:
+            // `0 or X` returns true without evaluating X, `false and X`
+            // returns false without evaluating X. Substituting an
+            // input-side expression (with potential errors / side
+            // effects) into the rhs of an `and` / `or` therefore lets
+            // the simplifier silently elide that evaluation when the
+            // lhs's value is statically determinable. Treat any Input
+            // reference inside the rhs as behind a short-circuit so
+            // the Pipe-substitution at `simplify_expr` line ~1281
+            // refuses (#375, sibling of the Alternative.fallback /
+            // TryCatch.* guards #354).
+            use crate::ir::BinOp;
+            if matches!(op, BinOp::And | BinOp::Or) {
+                input_behind_short_circuit(lhs)
+                    || contains_input(rhs)
+                    || input_behind_short_circuit(rhs)
+            } else {
+                input_behind_short_circuit(lhs) || input_behind_short_circuit(rhs)
+            }
         }
         Expr::UnaryOp { operand, .. } | Expr::Negate { operand } => input_behind_short_circuit(operand),
         Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => {
