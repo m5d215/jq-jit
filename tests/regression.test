@@ -5649,3 +5649,21 @@ sort
 {"c":null} < {"c":false}
 null
 true
+
+# #345: StringChain's Field part silently coerced non-string fields to
+# raw bytes (`"hi" + 42` was concatenated as `"hi42"`); the
+# FieldArithToString part dropped non-numeric arith silently. Both
+# now bail to the generic interpreter, which raises jq's
+# `string + number` error.
+[(.a + ":" + .b)?]
+{"a":"hi","b":42}
+[]
+
+[(.a + ":" + (.b * 2 + 1 | tostring))?]
+{"a":"hi","b":"xyz"}
+[]
+
+# String-string concatenation still folds via the fast path.
+[.a + ":" + (.b | tostring), .a]
+{"a":"hi","b":42}
+["hi:42","hi"]
