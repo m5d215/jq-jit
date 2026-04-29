@@ -1270,7 +1270,19 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             // silently swallow lhs runtime errors — e.g. `.a | 0` on a
             // non-object array must raise "Cannot index array with
             // string a", not collapse to a bare `0` (#172).
-            if sl.is_simple_scalar() && sr.is_input_free() && contains_input(&sr) {
+            //
+            // Additionally, refuse substitution when any Input position
+            // in `sr` is reached only through a short-circuiting wrapper
+            // (`Alternative.fallback`, `TryCatch.*`, `Alternative.primary`
+            // when fallback would be reached on error). Substituting `sl`
+            // into a fallback / catch slot can elide a runtime error from
+            // `sl`'s evaluation that the original Pipe semantics would
+            // have raised eagerly (#354).
+            if sl.is_simple_scalar()
+                && sr.is_input_free()
+                && contains_input(&sr)
+                && !input_behind_short_circuit(&sr)
+            {
                 return sr.substitute_input(&sl);
             }
             // [gen] | map(f) = [gen] | [.[] | f] → [gen | f]
@@ -1965,6 +1977,72 @@ fn contains_input(expr: &crate::ir::Expr) -> bool {
         Expr::FuncCall { args, .. } => args.iter().any(contains_input),
         Expr::ClosureOp { .. } | Expr::AnyShort { .. } | Expr::AllShort { .. }
         | Expr::AlternativeDestructure { .. } => true, // conservative
+    }
+}
+
+/// Returns true when at least one `Expr::Input` reference inside `e`
+/// is reached only through a short-circuiting wrapper — currently
+/// `Alternative.fallback`, `TryCatch.try_expr`, or `TryCatch.catch_expr`.
+/// Beta-substituting a side-effecting (or error-producing) replacement
+/// into one of those positions can silently elide a runtime error,
+/// because the wrapper's semantics deliberately re-route around errors
+/// in the inner expression (#354 family).
+///
+/// The `Alternative.primary` slot is *not* short-circuiting — it always
+/// evaluates first — so Input there is safe to substitute.
+fn input_behind_short_circuit(e: &crate::ir::Expr) -> bool {
+    use crate::ir::Expr;
+    match e {
+        Expr::Alternative { primary, fallback } => {
+            input_behind_short_circuit(primary) || contains_input(fallback)
+                || input_behind_short_circuit(fallback)
+        }
+        Expr::TryCatch { try_expr, catch_expr } => {
+            // try_expr's errors are caught; the post-substitution
+            // result no longer raises. catch_expr only fires on error;
+            // its evaluation order is conditional.
+            contains_input(try_expr) || contains_input(catch_expr)
+                || input_behind_short_circuit(try_expr)
+                || input_behind_short_circuit(catch_expr)
+        }
+        Expr::Pipe { left, right } => {
+            input_behind_short_circuit(left) || input_behind_short_circuit(right)
+        }
+        Expr::IfThenElse { cond, then_branch, else_branch } => {
+            input_behind_short_circuit(cond)
+                || input_behind_short_circuit(then_branch)
+                || input_behind_short_circuit(else_branch)
+        }
+        Expr::BinOp { lhs, rhs, .. } => {
+            input_behind_short_circuit(lhs) || input_behind_short_circuit(rhs)
+        }
+        Expr::UnaryOp { operand, .. } | Expr::Negate { operand } => input_behind_short_circuit(operand),
+        Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => {
+            input_behind_short_circuit(expr) || input_behind_short_circuit(key)
+        }
+        Expr::Comma { left, right } => {
+            input_behind_short_circuit(left) || input_behind_short_circuit(right)
+        }
+        Expr::Each { input_expr } | Expr::EachOpt { input_expr } => input_behind_short_circuit(input_expr),
+        Expr::ObjectConstruct { pairs } => {
+            pairs.iter().any(|(k, v)| input_behind_short_circuit(k) || input_behind_short_circuit(v))
+        }
+        Expr::Collect { generator } => input_behind_short_circuit(generator),
+        Expr::Format { expr, .. } => input_behind_short_circuit(expr),
+        Expr::Slice { expr, from, to } => {
+            input_behind_short_circuit(expr)
+                || from.as_ref().is_some_and(|e| input_behind_short_circuit(e))
+                || to.as_ref().is_some_and(|e| input_behind_short_circuit(e))
+        }
+        Expr::StringInterpolation { parts } => parts.iter().any(|p| match p {
+            crate::ir::StringPart::Expr(e) => input_behind_short_circuit(e),
+            _ => false,
+        }),
+        Expr::LetBinding { value, body, .. } => {
+            input_behind_short_circuit(value) || input_behind_short_circuit(body)
+        }
+        // Conservative leaf: no Input here, or no short-circuit.
+        _ => false,
     }
 }
 

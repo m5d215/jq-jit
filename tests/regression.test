@@ -5726,3 +5726,20 @@ false
 {x: 1, x: 2}
 null
 {"x":2}
+
+# #354: simplify_expr's Pipe substitution moved error-producing exprs
+# into Alternative.fallback, eliding the error. Now the substitution
+# refuses when any Input position is reached only through a
+# short-circuiting wrapper.
+[((0 | .a) | (0 // .))?]
+null
+[]
+
+# Non-regression: safe substitutions still apply.
+5 | (. + 1)
+null
+6
+
+[((0 | .a) | (try . catch "x"))?]
+null
+[]
