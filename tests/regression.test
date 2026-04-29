@@ -6012,3 +6012,42 @@ false
 (select(.a > 0)) | ({a: (.a)})
 {"a":5}
 {"a":5}
+
+# #381: select_cmp_then_array, select_cmp_then_remap, and
+# select_arith_cmp_then_array silently dropped rows when the
+# select gate passed but a remap-source field was missing on the
+# (otherwise valid) object input. jq's value-level semantics
+# turn missing fields into `null`, so jq emits a row with nulls;
+# the fast paths skipped the row entirely. Distinct from #377 /
+# #379 (non-object input bail) — those closed the outer
+# `json_object_get_num` failure; #381 closes the inner
+# `json_object_get_fields_raw_buf` failure.
+(select(.a > 0)) | ([.c, .c])
+{"a":1}
+[null,null]
+
+(select(.a >= -2)) | ({a: (.c)})
+{"a":0}
+{"a":null}
+
+(select(.a + 0 > 0)) | ([.c, .c])
+{"a":1}
+[null,null]
+
+# Mixed: one of the array elements is the select field (present),
+# another is a missing field. jq emits null for the missing one;
+# the fast path must bail.
+(select(.a > 0)) | ([.a, .c])
+{"a":1}
+[1,null]
+
+# Counter-case: when all remap fields are present the fast path
+# stays on the hot path — these inputs must not detour through
+# generic.
+(select(.a > 0)) | ([.b, .c])
+{"a":1,"b":2,"c":3}
+[2,3]
+
+(select(.a > 0)) | ({a: (.b)})
+{"a":1,"b":2}
+{"a":2}
