@@ -8167,6 +8167,42 @@ fn real_main() {
                                 return Ok(());
                             }
                             let out_branch = output.unwrap_or(else_output);
+                            // Check whether any Remap/Computed pair would
+                            // exercise an inline emitter outside its narrow
+                            // domain (string + number, missing fields,
+                            // etc.). Bail to generic so jq's verdict
+                            // (including type errors) is preserved (#368,
+                            // sibling of #324 / #337 / #351).
+                            let would_err = match out_branch {
+                                BranchOutput::Remap(_) => {
+                                    let resolved_data = if output.is_some() {
+                                        branch_resolved[output_idx].as_ref()
+                                    } else {
+                                        else_resolved.as_ref()
+                                    };
+                                    resolved_data.map_or(false, |(_, res, _)| {
+                                        res.iter().any(|rv| resolved_would_error(rv, raw, &ranges_buf))
+                                    })
+                                }
+                                BranchOutput::Computed(_) => {
+                                    let resolved_remap = if output.is_some() {
+                                        branch_computed[output_idx].as_ref()
+                                    } else {
+                                        else_computed.as_ref()
+                                    };
+                                    resolved_remap.map_or(false, |rv| resolved_would_error(rv, raw, &ranges_buf))
+                                }
+                                _ => false,
+                            };
+                            if would_err {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                if compact_buf.len() >= 1 << 17 {
+                                    let _ = out.write_all(&compact_buf);
+                                    compact_buf.clear();
+                                }
+                                return Ok(());
+                            }
                             match out_branch {
                                 BranchOutput::Literal(ref bytes) => {
                                     compact_buf.extend_from_slice(bytes);
@@ -15351,6 +15387,40 @@ fn real_main() {
                             return Ok(());
                         }
                         let out_branch = output.unwrap_or(else_output);
+                        // Sibling check to the stdin apply-site above
+                        // (#368): bail when any inline emitter would
+                        // silently emit null for a type mismatch jq raises
+                        // on.
+                        let would_err = match out_branch {
+                            BranchOutput::Remap(_) => {
+                                let resolved_data = if output.is_some() {
+                                    branch_resolved[output_idx].as_ref()
+                                } else {
+                                    else_resolved.as_ref()
+                                };
+                                resolved_data.map_or(false, |(_, res, _)| {
+                                    res.iter().any(|rv| resolved_would_error(rv, raw, &ranges_buf))
+                                })
+                            }
+                            BranchOutput::Computed(_) => {
+                                let resolved_remap = if output.is_some() {
+                                    branch_computed2[output_idx].as_ref()
+                                } else {
+                                    else_computed2.as_ref()
+                                };
+                                resolved_remap.map_or(false, |rv| resolved_would_error(rv, raw, &ranges_buf))
+                            }
+                            _ => false,
+                        };
+                        if would_err {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            if compact_buf.len() >= 1 << 17 {
+                                let _ = out.write_all(&compact_buf);
+                                compact_buf.clear();
+                            }
+                            return Ok(());
+                        }
                         match out_branch {
                             BranchOutput::Literal(ref bytes) => {
                                 compact_buf.extend_from_slice(bytes);

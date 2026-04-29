@@ -5871,3 +5871,33 @@ null
 (select(.a < 0)) | (.a + .a)
 {}
 null
+
+# #368: cond_chain Remap/Computed output silently emitted null on
+# arith type mismatches that jq raises on. The minimal repro
+# `{a: (.x + 0), a: 1}` over `{"x":""}` errors in jq because
+# `"" + 0` is invalid; jq-jit emitted `{"a":null,"a":1}`. Now the
+# apply probes each pair via `resolved_would_error` and bails to
+# generic when any pair's domain is exceeded.
+[({a: (.x + 0), a: 1})?]
+{"x":""}
+[]
+
+# Same pattern wrapped in limit(1; ...) — the original fuzz repro.
+[(limit(1; {a: (.x + 0), y: (.c), y: (0 + .c)}))?]
+{"x":"","c":null}
+[]
+
+# Array operand on the LHS of arithmetic also errors in jq.
+[({a: (.x + 0), a: 1})?]
+{"x":[1]}
+[]
+
+# Happy path: numeric .x still computes via the fast path.
+{a: (.x + 0)}
+{"x":2}
+{"a":2}
+
+# null + 0 is valid in jq (null acts as identity for addition).
+{a: (.x + 0)}
+{"x":null}
+{"a":0}
