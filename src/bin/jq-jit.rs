@@ -1268,6 +1268,18 @@ fn resolved_would_error(
                     && parse_json_num(bytes_of(b.cond_field_idx)).is_none()
             })
         }
+        // `.a + ":" + (.b | tostring)`: `Field` parts silently coerce
+        // non-string fields to raw bytes (jq raises
+        // `string + number cannot be added`); `FieldArithToString`
+        // parts silently drop the part on non-numeric fields, leaving
+        // a truncated string. Bail when any part is outside its
+        // emitter's domain (#345).
+        ResolvedRemap::StringChain(parts) => parts.iter().any(|p| match p {
+            ResolvedStringChainPart::Literal(_) => false,
+            ResolvedStringChainPart::Field(idx) => !is_str(bytes_of(*idx)),
+            ResolvedStringChainPart::FieldToString(_) => false,
+            ResolvedStringChainPart::FieldArithToString(idx, _) => parse_json_num(bytes_of(*idx)).is_none(),
+        }),
         _ => false,
     }
 }
