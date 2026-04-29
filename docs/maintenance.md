@@ -53,6 +53,30 @@ done
 コーパスに 1 件追加すること（`tests/regression.test` の追加に加えて）。
 jq バイナリは `JQ_BIN` → `/opt/homebrew/opt/jq/bin/jq` → `PATH` の順で解決する。
 
+### Proptest 差分 harness（`tests/fuzz_diff.rs` / #319）
+
+ランダム生成した `(filter, input)` ペアを jq-jit と jq 1.8.x にかけて値レベルで
+比較する。`cargo test --release` のデフォルトで 256 ケース回り、shrinker が
+失敗を最小再現に縮める。
+
+```bash
+# デフォルト（CI 内、~5s）
+cargo test --release --test fuzz_diff
+
+# 大規模実行（夜間 / 手動 sweep 用）
+JQJIT_PROPTEST_CASES=100000 cargo test --release --test fuzz_diff -- --nocapture
+```
+
+distribution は意図的に保守的: `try/catch` と `?` を外して error メッセージ
+書式の divergence を stderr 側に逃がし、`.[:]`・`..`・float 入力リテラル・
+重複 key の object input/literal を generator から除外している（理由は
+ファイル冒頭の module doc 参照）。新しい fast path を足したら、distribution
+を広げて proptest が新しい shape を喰うように generator を伸ばす。
+
+heavier opt-in 版が `tests/differential_proptest.rs`（`#[ignore]`）。こちらは
+`try/catch` を含む全 grammar を回すので、error 書式の divergence を含めて
+当てに行きたい時に `--ignored` で起動する。
+
 ### テスト出力
 
 `cargo test --release` だけだと regression 通過数が非表示。必ず `--nocapture`:

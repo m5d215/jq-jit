@@ -5365,3 +5365,14 @@ keys
 [ keys? ]
 42
 []
+
+# #319 fuzz_diff drive-by: simplify_expr's `[…] | length` rewrite
+# returned 1 for `[]` and `[empty]` because `Expr::Empty` fell into the
+# "non-input → 1 element" fallback. Empty produces zero outputs.
+[] | length
+null
+0
+
+[empty] | length
+null
+0

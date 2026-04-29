@@ -649,6 +649,11 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                     fn count_comma_elements_no_input(e: &Expr) -> Option<usize> {
                         match e {
+                            // `[]` and `[empty]` both lower to
+                            // `Collect { generator: Empty }`. The
+                            // catch-all branch below would rewrite them
+                            // to `1`; Empty produces zero outputs.
+                            Expr::Empty => Some(0),
                             Expr::Comma { left, right } => {
                                 Some(count_comma_elements_no_input(left)? + count_comma_elements_no_input(right)?)
                             }
