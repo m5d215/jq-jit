@@ -2000,13 +2000,24 @@ fn push_const_json(expr: &crate::ir::Expr, buf: &mut Vec<u8>) -> bool {
         }
         Expr::ObjectConstruct { pairs } => {
             // All keys must be string literals. Duplicates collapse via
-            // `normalize_object_pairs` (last value wins, keeps first position).
+            // `normalize_object_pairs` (last value wins, keeps first
+            // position). Every value — including ones that will be
+            // overwritten by a later duplicate — must be `push_const_json`-
+            // emittable: jq evaluates each `(key: value)` pair in source
+            // order, so an earlier pair's runtime error must still surface
+            // even when a later pair would rebind the same key. If we
+            // dedup first and only check the survivors, the eliminated
+            // expression's error is silently dropped (#324).
             let mut extracted: Vec<(&str, &Expr)> = Vec::with_capacity(pairs.len());
             for (key, val) in pairs {
                 match key {
                     Expr::Literal(Literal::Str(k)) => extracted.push((k.as_str(), val)),
                     _ => return false,
                 }
+            }
+            for (_, val) in &extracted {
+                let mut probe = Vec::new();
+                if !push_const_json(val, &mut probe) { return false; }
             }
             let normalized = normalize_object_pairs(extracted);
             buf.push(b'{');
