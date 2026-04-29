@@ -5958,3 +5958,34 @@ null
 [((select(.a <= 0)) | ({a: (.a + .b)}))?]
 {"a":-1,"a":1}
 []
+
+# #375: Pipe substitution silently elided `.a` evaluation when the
+# substituted Input position landed on the rhs of `and` / `or`.
+# `(0) | ((.a) | (0 or .a))` over null should error at the inner
+# `.a` step because the outer pipe makes the input `0`; the
+# simplifier collapsed the inner pipe to `0 or .a.a` and short-
+# circuited at `0`, never reaching the `.a` evaluation that errors.
+[((0) | ((.a) | (0 or .a)))?]
+null
+[]
+
+# Sibling: `and` short-circuits when lhs is falsy. Inner `.a` on
+# the intermediate `0` must still error before `false and …` is
+# evaluated.
+[((0) | ((.a) | (false and .a)))?]
+null
+[]
+
+# Truthy-lhs `or` skips the rhs in jq's eval, but the explicit
+# pipe step must still run on the intermediate value. Same shape
+# as the fuzz repro with a literal-truthy lhs.
+[((0) | ((.a) | (true or .a)))?]
+null
+[]
+
+# Counter-case: when the `.a` is in the lhs of `or`, it's always
+# evaluated. With an object input the `.a` resolves cleanly and
+# both implementations agree.
+({"a": true}) | (.a or false)
+null
+true
