@@ -5555,3 +5555,24 @@ null
 {a: 1, a: 2} | length
 null
 1
+
+# #337: const_expr_to_json's ObjectConstruct fold (sibling to #324)
+# dedup'd duplicate keys before checking that every value was
+# const-foldable, so an input-dependent expression in an earlier
+# pair was eliminated and its runtime error never fired.
+# `.[0]` on an object errors; jq-jit previously folded the inner
+# {a: (.[0]), a: (0)} to {a: 0} at parse time and never evaluated .[0].
+[({a: ({a: (.[0]), a: (0)})})?]
+{"a":null}
+[]
+
+# When .[0] is well-defined (array/null), the dedup still applies and
+# the inner pair collapses to the last value — matching jq.
+{a: ({a: (.[0]), a: (0)})}
+[42]
+{"a":{"a":0}}
+
+# Pure-literal nested object literals still fold to a constant.
+{a: {b: 1, b: 2}}
+null
+{"a":{"b":2}}
