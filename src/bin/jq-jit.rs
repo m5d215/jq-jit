@@ -10402,11 +10402,14 @@ fn real_main() {
                                         BinOp::Eq => v1 == v2, BinOp::Ne => v1 != v2,
                                         _ => false,
                                     };
-                                    if pass {
+                                    if !pass {
+                                        handled = true;
+                                    } else if !resolved_would_error(&resolved, raw, &ranges_buf) {
                                         emit_resolved_value(&mut compact_buf, &resolved, raw, &ranges_buf);
                                         compact_buf.push(b'\n');
+                                        handled = true;
                                     }
-                                    handled = true;
+                                    // else: out-of-domain (#389) → bail to generic
                                 }
                             }
                         }
@@ -17595,11 +17598,14 @@ fn real_main() {
                                     BinOp::Eq => v1 == v2, BinOp::Ne => v1 != v2,
                                     _ => false,
                                 };
-                                if pass {
+                                // Sibling fix to the stdin apply-site above (#389).
+                                if !pass {
+                                    handled = true;
+                                } else if !resolved_would_error(&resolved, raw, &ranges_buf) {
                                     emit_resolved_value(&mut compact_buf, &resolved, raw, &ranges_buf);
                                     compact_buf.push(b'\n');
+                                    handled = true;
                                 }
-                                handled = true;
                             }
                         }
                     }

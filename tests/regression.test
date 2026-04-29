@@ -6117,3 +6117,23 @@ null
 (select(.a >= .a)) | (.b)
 {"a":0,"b":7}
 7
+
+# #389: select(.f1 cmp .f2) | <value-expr> called emit_resolved_value
+# unconditionally and trusted its inline `b"null"` fallback — wrong
+# for out-of-domain operands (array+number errors, mixed types,
+# etc.). Probe `resolved_would_error` first; on miss, bail.
+[((select(.c >= .c)) | (.x + .c))?]
+{"c":0,"x":[]}
+[]
+
+# Array concat — out-of-domain for the inline emitter's numeric
+# branch but in jq's domain. Bail routes through generic which
+# concatenates correctly.
+(select(.c >= .c)) | (.x + .x)
+{"c":0,"x":[1]}
+[1,1]
+
+# Numeric baseline stays on the hot path.
+(select(.c >= .c)) | (.x + .c)
+{"c":1,"x":2}
+3
