@@ -6105,3 +6105,15 @@ null
 (select(.y > -3)) | (.c + .c)
 {"y":1,"c":3}
 6
+
+# #387: select(.f1 cmp .f2) | .out silently dropped rows when the
+# select gate passed but `.out` was missing on the input. jq emits
+# null. Bail to generic on missing output field.
+(select(.a >= .a)) | (.b)
+{"a":0}
+null
+
+# Counter-case: output field present — fast path stays hot.
+(select(.a >= .a)) | (.b)
+{"a":0,"b":7}
+7

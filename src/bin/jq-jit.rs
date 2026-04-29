@@ -10177,7 +10177,10 @@ fn real_main() {
                                     _ => false,
                                 };
                                 if pass {
-                                    // Only now fetch the output field
+                                    // Only now fetch the output field. If
+                                    // missing, jq emits null — bail to
+                                    // generic instead of silently dropping
+                                    // the row (#387).
                                     if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sff_out) {
                                         let out_val = &raw[vs..ve];
                                         if use_pretty_buf && (out_val[0] == b'{' || out_val[0] == b'[') {
@@ -10186,6 +10189,9 @@ fn real_main() {
                                             compact_buf.extend_from_slice(out_val);
                                         }
                                         compact_buf.push(b'\n');
+                                    } else {
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                     }
                                 }
                             } else {
@@ -17378,6 +17384,7 @@ fn real_main() {
                                 _ => false,
                             };
                             if pass {
+                                // Sibling fix to the stdin apply-site above (#387).
                                 if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sff_out) {
                                     let out_val = &raw[vs..ve];
                                     if use_pretty_buf && (out_val[0] == b'{' || out_val[0] == b'[') {
@@ -17386,6 +17393,9 @@ fn real_main() {
                                         compact_buf.extend_from_slice(out_val);
                                     }
                                     compact_buf.push(b'\n');
+                                } else {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                 }
                             }
                         } else {
