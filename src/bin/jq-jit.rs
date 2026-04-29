@@ -9565,6 +9565,14 @@ fn real_main() {
                         Ok(())
                     })
                 } else if let Some((ref sel_field, ref sel_op, threshold, ref cremap)) = select_cmp_cremap {
+                    // select(.f cmp N) | {computed_remap} — sibling of
+                    // #366 / #368 / #369. Fast path requires object input
+                    // with a numeric select field, all remap fields
+                    // present, and every remap pair inside its inline
+                    // emitter's domain. Anything else (#373) bails to
+                    // the generic interpreter so jq's verdict (type
+                    // errors on non-object input, null on missing fields,
+                    // domain-mismatch errors) is preserved.
                     use jq_jit::ir::BinOp;
                     // Collect all unique fields needed (select field + remap fields)
                     let mut all_fields: Vec<String> = Vec::new();
@@ -9591,7 +9599,7 @@ fn real_main() {
                     let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        // Lazy fetch: check select condition first with fast single-field lookup
+                        let mut handled = false;
                         if let Some(val) = json_object_get_num(raw, 0, sel_field) {
                             let pass = match sel_op {
                                 BinOp::Gt => val > threshold,
@@ -9602,16 +9610,22 @@ fn real_main() {
                                 BinOp::Ne => val != threshold,
                                 _ => false,
                             };
-                            if pass {
-                                // Only now extract all remap fields
-                                if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                            if !pass {
+                                handled = true;
+                            } else if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                                if !resolved.iter().any(|res| resolved_would_error(res, raw, &ranges_buf)) {
                                     for (i, res) in resolved.iter().enumerate() {
                                         compact_buf.extend_from_slice(&key_prefixes[i]);
                                         emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
                                     }
                                     compact_buf.extend_from_slice(obj_close);
+                                    handled = true;
                                 }
                             }
+                        }
+                        if !handled {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -16780,7 +16794,8 @@ fn real_main() {
                 let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    // Lazy fetch: check select condition first with fast single-field lookup
+                    // Sibling fix to the stdin apply-site above (#373).
+                    let mut handled = false;
                     if let Some(val) = json_object_get_num(raw, 0, sel_field) {
                         let pass = match sel_op {
                             BinOp::Gt => val > threshold, BinOp::Lt => val < threshold,
@@ -16788,16 +16803,22 @@ fn real_main() {
                             BinOp::Eq => val == threshold, BinOp::Ne => val != threshold,
                             _ => false,
                         };
-                        if pass {
-                            // Only now extract all remap fields
-                            if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                        if !pass {
+                            handled = true;
+                        } else if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                            if !resolved.iter().any(|res| resolved_would_error(res, raw, &ranges_buf)) {
                                 for (i, res) in resolved.iter().enumerate() {
                                     compact_buf.extend_from_slice(&key_prefixes[i]);
                                     emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
                                 }
                                 compact_buf.extend_from_slice(obj_close);
+                                handled = true;
                             }
                         }
+                    }
+                    if !handled {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);

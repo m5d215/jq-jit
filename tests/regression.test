@@ -5928,3 +5928,33 @@ select(.a > .b)
 select(.b > .a)
 {"b":1,"a":5,"a":1,"b":7}
 {"a":1,"b":7}
+
+# #373: select_cmp_then_computed_remap silent-skipped on non-object
+# input. `(select(.a <= 0)) | ({a: (.a + .b)})` over `[]` errored
+# in jq but jq-jit emitted nothing. Sibling of #366/#368 covering
+# the `select(.f cmp N) | {computed_remap}` shape.
+[((select(.a <= 0)) | ({a: (.a + .b)}))?]
+[]
+[]
+
+# null input: select passes (null<=0 is true), .a+.b is null+null
+# = null, output `{"a":null}`.
+(select(.a <= 0)) | ({a: (.a + .b)})
+null
+{"a":null}
+
+# Type mismatch in remap pair: jq raises, fast path now bails to
+# generic so the error reaches stdout.
+[((select(.a <= 0)) | ({a: (.a + .b)}))?]
+{"a":-1,"b":"x"}
+[]
+
+# Happy path with both fields numeric: still computes via fast path.
+(select(.a <= 0)) | ({a: (.a + .b)})
+{"a":-1,"b":2}
+{"a":1}
+
+# Duplicate select-field keys: last-wins (.a=1) makes select fail.
+[((select(.a <= 0)) | ({a: (.a + .b)}))?]
+{"a":-1,"a":1}
+[]
