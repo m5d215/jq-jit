@@ -106,6 +106,30 @@ enum FilterExpr {
     Reduce(Box<FilterExpr>),
     RangeN(u32),
     IntLiteral(i32),
+    /// `.f1 op .f2` — exercises the FieldCmpField / FieldOpField fast
+    /// paths the leaf shapes don't otherwise reach (#347).
+    FieldFieldBinop(String, BinopOp, String),
+    /// `.field op N` and `N op .field` — exercises FieldCmpConst /
+    /// FieldOpConst / ConstOpField shapes, which were already in the
+    /// distribution via leaf composition but worth a direct hit.
+    FieldConstBinop(String, BinopOp, i32),
+    ConstFieldBinop(i32, BinopOp, String),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BinopOp { Add, Sub, Mul, Div, Mod, Gt, Lt, Ge, Le, Eq, Ne, And, Or }
+
+impl BinopOp {
+    fn render(self) -> &'static str {
+        match self {
+            BinopOp::Add => "+", BinopOp::Sub => "-", BinopOp::Mul => "*",
+            BinopOp::Div => "/", BinopOp::Mod => "%",
+            BinopOp::Gt => ">", BinopOp::Lt => "<",
+            BinopOp::Ge => ">=", BinopOp::Le => "<=",
+            BinopOp::Eq => "==", BinopOp::Ne => "!=",
+            BinopOp::And => "and", BinopOp::Or => "or",
+        }
+    }
 }
 
 fn render(expr: &FilterExpr) -> String {
@@ -150,7 +174,18 @@ fn render(expr: &FilterExpr) -> String {
         ),
         FilterExpr::RangeN(n) => format!("range({})", n),
         FilterExpr::IntLiteral(n) => n.to_string(),
+        FilterExpr::FieldFieldBinop(f1, op, f2) => format!(".{} {} .{}", f1, op.render(), f2),
+        FilterExpr::FieldConstBinop(f, op, n) => format!(".{} {} {}", f, op.render(), n),
+        FilterExpr::ConstFieldBinop(n, op, f) => format!("{} {} .{}", n, op.render(), f),
     }
+}
+
+fn binop_strategy() -> impl Strategy<Value = BinopOp> {
+    prop_oneof![
+        Just(BinopOp::Add), Just(BinopOp::Sub), Just(BinopOp::Mul), Just(BinopOp::Div), Just(BinopOp::Mod),
+        Just(BinopOp::Gt), Just(BinopOp::Lt), Just(BinopOp::Ge), Just(BinopOp::Le), Just(BinopOp::Eq), Just(BinopOp::Ne),
+        Just(BinopOp::And), Just(BinopOp::Or),
+    ]
 }
 
 fn ident_strategy() -> impl Strategy<Value = String> {
@@ -171,6 +206,12 @@ fn leaf_strategy() -> impl Strategy<Value = FilterExpr> {
             (prop::option::of(-3i32..=3), -3i32..=3)
                 .prop_map(|(a, b)| FilterExpr::SliceHi(a, b)),
         ],
+        (ident_strategy(), binop_strategy(), ident_strategy())
+            .prop_map(|(a, op, b)| FilterExpr::FieldFieldBinop(a, op, b)),
+        (ident_strategy(), binop_strategy(), -3i32..=3)
+            .prop_map(|(f, op, n)| FilterExpr::FieldConstBinop(f, op, n)),
+        (-3i32..=3, binop_strategy(), ident_strategy())
+            .prop_map(|(n, op, f)| FilterExpr::ConstFieldBinop(n, op, f)),
     ]
 }
 
