@@ -1196,7 +1196,14 @@ fn resolved_would_error(
             _ => true,
         }
     };
-    let _ = (is_arr, is_obj);
+    let _ = (is_arr, is_obj, is_null);
+    // String-domain emitters (#334 / #127 family). Every variant below
+    // has an inline `else { buf.extend_from_slice(b"null"); }` branch
+    // that fires when the field value isn't a quoted string, but jq's
+    // builtins (ascii_*case, ltrimstr/rtrimstr, startswith/endswith,
+    // index/contains, split, etc.) raise on non-string input. Routing
+    // those rows through the generic interpreter produces jq's verdict.
+    let str_domain = |idx: usize| -> bool { !is_str(bytes_of(idx)) };
     match resolved {
         ResolvedRemap::FieldOpField(i1, op, i2) => !arith_fastpath_ok(bytes_of(*i1), bytes_of(*i2), op),
         ResolvedRemap::FieldOpConst(i, op, _) => !arith_op_with_const_ok(bytes_of(*i), op),
@@ -1218,6 +1225,13 @@ fn resolved_would_error(
             }
             true
         }
+        ResolvedRemap::FieldStringCase(idx, _) => str_domain(*idx),
+        ResolvedRemap::FieldStrBuiltin(idx, _, _) => str_domain(*idx),
+        ResolvedRemap::FieldSplitJoin(idx, _, _) => str_domain(*idx),
+        ResolvedRemap::FieldSplitLength(idx, _) => str_domain(*idx),
+        ResolvedRemap::FieldSplitIndex(idx, _, _) => str_domain(*idx),
+        // -.field errors on non-number; the inline emitter coerces to null.
+        ResolvedRemap::FieldNegate(idx) => parse_json_num(bytes_of(*idx)).is_none(),
         _ => false,
     }
 }

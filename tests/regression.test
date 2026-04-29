@@ -5491,3 +5491,42 @@ null
 {b: 1, b: (1+1)}
 null
 {"b":2}
+
+# #334: standalone_array's string-domain emitters (FieldStringCase,
+# FieldStrBuiltin, FieldSplitJoin, FieldSplitLength, FieldSplitIndex)
+# all silently emitted `null` when the field value wasn't a quoted
+# string — but jq raises on every non-string input. FieldNegate had
+# the matching bug on non-numbers. All now bail to the generic path,
+# which produces jq's verdict.
+[((.c) | (ascii_downcase))?]
+{"c":null}
+[]
+
+[((.c) | (ascii_upcase))?]
+{"c":42}
+[]
+
+[((.c) | (ltrimstr("a")))?]
+{"c":42}
+[]
+
+[((.c) | (startswith("h")))?]
+{"c":[1,2,3]}
+[]
+
+[(-.c)?]
+{"c":"x"}
+[]
+
+# String-domain emitters still work when the field is a string.
+[((.c) | (ascii_upcase)), .c]
+{"c":"hello"}
+["HELLO","hello"]
+
+[((.c) | (ltrimstr("he"))), .c]
+{"c":"hello"}
+["llo","hello"]
+
+[-.c, .c]
+{"c":42}
+[-42,42]
