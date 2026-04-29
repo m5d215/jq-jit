@@ -192,6 +192,50 @@ fn ident_strategy() -> impl Strategy<Value = String> {
     prop::sample::select(IDENT_POOL).prop_map(|s| s.to_string())
 }
 
+/// Field-vs-field / field-vs-const binops as a standalone strategy.
+/// Reused by `composition_biased_pipe` so the select-side and the
+/// post-select-side can both draw from the same pool independently.
+fn binop_expr_strategy() -> impl Strategy<Value = FilterExpr> {
+    prop_oneof![
+        (ident_strategy(), binop_strategy(), ident_strategy())
+            .prop_map(|(a, op, b)| FilterExpr::FieldFieldBinop(a, op, b)),
+        (ident_strategy(), binop_strategy(), -3i32..=3)
+            .prop_map(|(f, op, n)| FilterExpr::FieldConstBinop(f, op, n)),
+        (-3i32..=3, binop_strategy(), ident_strategy())
+            .prop_map(|(n, op, f)| FilterExpr::ConstFieldBinop(n, op, f)),
+    ]
+}
+
+/// Composition-biased generator (#320). Produces `Pipe(L, R)` where
+/// `L` is a `select(<binop>)` shape and `R` is a reader (binop, field,
+/// array-construct, object-construct) over the surviving input. This
+/// is the cross-product shape that has repeatedly surfaced
+/// multi-fast-path bugs when both halves hit independent detectors and
+/// the apply-site invariant fails on one side: #358 (Pipe-substitution
+/// over `and`/`or`), #366 (`select_cmp_then_value`), #373
+/// (`select_cmp_then_computed_remap`), #375 (short-circuit elision).
+/// The random recursion in `filter_strategy` already produces these by
+/// accident; biasing this branch higher exercises them deterministically.
+fn composition_biased_pipe() -> impl Strategy<Value = FilterExpr> {
+    let select_shape = binop_expr_strategy()
+        .prop_map(|inner| FilterExpr::Select(Box::new(inner)));
+
+    let post_select_shape = prop_oneof![
+        binop_expr_strategy(),
+        ident_strategy().prop_map(FilterExpr::Field),
+        prop::collection::vec(ident_strategy().prop_map(FilterExpr::Field), 1..=3)
+            .prop_map(FilterExpr::ArrayConstruct),
+        prop::collection::vec(
+            (ident_strategy(), ident_strategy().prop_map(FilterExpr::Field)),
+            1..=3,
+        )
+            .prop_map(FilterExpr::ObjectConstruct),
+    ];
+
+    (select_shape, post_select_shape)
+        .prop_map(|(l, r)| FilterExpr::Pipe(Box::new(l), Box::new(r)))
+}
+
 fn leaf_strategy() -> impl Strategy<Value = FilterExpr> {
     prop_oneof![
         Just(FilterExpr::Identity),
@@ -222,23 +266,28 @@ fn filter_strategy() -> impl Strategy<Value = FilterExpr> {
         4,   // max items per collection / branches
         |inner| {
             prop_oneof![
-                prop::collection::vec(inner.clone(), 0..=3).prop_map(FilterExpr::ArrayConstruct),
-                prop::collection::vec(
-                    (ident_strategy(), inner.clone()),
-                    0..=3,
-                ).prop_map(FilterExpr::ObjectConstruct),
-                (inner.clone(), inner.clone())
-                    .prop_map(|(a, b)| FilterExpr::Pipe(Box::new(a), Box::new(b))),
-                (inner.clone(), inner.clone())
-                    .prop_map(|(a, b)| FilterExpr::Comma(Box::new(a), Box::new(b))),
-                (inner.clone(), inner.clone(), inner.clone()).prop_map(|(a, b, c)| {
-                    FilterExpr::If(Box::new(a), Box::new(b), Box::new(c))
-                }),
-                (inner.clone(), inner.clone()).prop_map(|(a, b)| FilterExpr::Slash(Box::new(a), Box::new(b))),
-                (1u32..=4, inner.clone()).prop_map(|(n, g)| FilterExpr::Limit(n, Box::new(g))),
-                inner.clone().prop_map(|f| FilterExpr::Map(Box::new(f))),
-                inner.clone().prop_map(|f| FilterExpr::Select(Box::new(f))),
-                inner.clone().prop_map(|g| FilterExpr::Reduce(Box::new(g))),
+                // Composition-biased Pipe (#320) — see
+                // `composition_biased_pipe` for the rationale.
+                3 => composition_biased_pipe(),
+                1 => prop_oneof![
+                    prop::collection::vec(inner.clone(), 0..=3).prop_map(FilterExpr::ArrayConstruct),
+                    prop::collection::vec(
+                        (ident_strategy(), inner.clone()),
+                        0..=3,
+                    ).prop_map(FilterExpr::ObjectConstruct),
+                    (inner.clone(), inner.clone())
+                        .prop_map(|(a, b)| FilterExpr::Pipe(Box::new(a), Box::new(b))),
+                    (inner.clone(), inner.clone())
+                        .prop_map(|(a, b)| FilterExpr::Comma(Box::new(a), Box::new(b))),
+                    (inner.clone(), inner.clone(), inner.clone()).prop_map(|(a, b, c)| {
+                        FilterExpr::If(Box::new(a), Box::new(b), Box::new(c))
+                    }),
+                    (inner.clone(), inner.clone()).prop_map(|(a, b)| FilterExpr::Slash(Box::new(a), Box::new(b))),
+                    (1u32..=4, inner.clone()).prop_map(|(n, g)| FilterExpr::Limit(n, Box::new(g))),
+                    inner.clone().prop_map(|f| FilterExpr::Map(Box::new(f))),
+                    inner.clone().prop_map(|f| FilterExpr::Select(Box::new(f))),
+                    inner.clone().prop_map(|g| FilterExpr::Reduce(Box::new(g))),
+                ],
             ]
         },
     )
