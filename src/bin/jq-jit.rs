@@ -9528,6 +9528,12 @@ fn real_main() {
                     let mut ranges_buf = vec![(0usize, 0usize); remap_fields.len()];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
+                        // Sibling of #363 / #367 / #374 / #378: gate on a
+                        // numeric select field; bail to generic when the
+                        // gate fails so jq's verdict (type errors on
+                        // non-object input, value-level type-ordered cmp
+                        // on non-numeric fields) is preserved.
+                        let mut handled = false;
                         if let Some(val) = json_object_get_num(raw, 0, sel_field) {
                             let pass = match op {
                                 BinOp::Gt => val > threshold,
@@ -9557,6 +9563,11 @@ fn real_main() {
                                     compact_buf.extend_from_slice(obj_close);
                                 }
                             }
+                            handled = true;
+                        }
+                        if !handled {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -16742,6 +16753,8 @@ fn real_main() {
                 let mut ranges_buf = vec![(0usize, 0usize); remap_fields.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
+                    // Sibling fix to the stdin apply-site above.
+                    let mut handled = false;
                     if let Some(val) = json_object_get_num(raw, 0, sel_field) {
                         let pass = match op {
                             BinOp::Gt => val > threshold,
@@ -16771,6 +16784,11 @@ fn real_main() {
                                 compact_buf.extend_from_slice(obj_close);
                             }
                         }
+                        handled = true;
+                    }
+                    if !handled {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
