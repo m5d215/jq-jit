@@ -1251,6 +1251,18 @@ fn resolved_would_error(
         // array < object`), e.g. `"abc" > 0` is true. Bail to generic
         // (#341).
         ResolvedRemap::FieldCmpConst(idx, _, _) => parse_json_num(bytes_of(*idx)).is_none(),
+        // `field cmp field` — the inline emitter handles num/num,
+        // str/str, and (num/str)-mixed; everything else falls through
+        // to `null`. jq's total ordering produces a defined verdict for
+        // null/bool/array/object pairs too, so bail when neither side
+        // is numeric and at most one is a string (#347).
+        ResolvedRemap::FieldCmpField(i1, _, i2) => {
+            let a = bytes_of(*i1);
+            let b = bytes_of(*i2);
+            !((is_num(a) && is_num(b))
+                || (is_str(a) && is_str(b))
+                || (is_str(a) ^ is_str(b)))
+        }
         // BoolExpr (`cmp1 and/or cmp2`) emits null when any side's
         // bool eval returns None — which happens whenever an inner
         // FieldCmpConst hits a non-numeric field. Bail when any

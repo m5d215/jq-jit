@@ -5667,3 +5667,32 @@ true
 [.a + ":" + (.b | tostring), .a]
 {"a":"hi","b":42}
 ["hi:42","hi"]
+
+# #347: FieldCmpField inline emitter only covered num/num, str/str,
+# and num/str pairs; null/bool/array/object pairs fell through to
+# `null`. jq's total ordering produces a defined verdict for every
+# pair (`null < false < true < number < string < array < object`).
+[.x > .y, .x]
+{"x":[1],"y":2}
+[true,[1]]
+
+[.x > .y, .x]
+{"x":null,"y":false}
+[false,null]
+
+[.x > .y, .x]
+{"x":true,"y":false}
+[true,true]
+
+[.x > .y, .x]
+{"x":{"a":1},"y":[1]}
+[true,{"a":1}]
+
+# num/num and str/str still take the fast path.
+[.x > .y, .x]
+{"x":1,"y":2}
+[false,1]
+
+[.x > .y, .x]
+{"x":"b","y":"a"}
+[true,"b"]
