@@ -6275,3 +6275,18 @@ null
 (select(.c != "")) | (.c + .c)
 {"c":42}
 84
+
+# select_compound_field silently dropped rows when the output field
+# was missing instead of emitting `null` (jq's behaviour for
+# missing-field reads).
+(select((.x > 0) or (.x < 0))) | (.a)
+{"x":-2147483648}
+null
+
+(select((.x > 0) and (.y > 0))) | (.a)
+{"x":1,"y":2}
+null
+
+(select((.x > 0) or (.x < 0))) | (.a)
+{"x":1,"a":"hi"}
+"hi"
