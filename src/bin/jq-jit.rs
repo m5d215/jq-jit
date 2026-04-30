@@ -10892,39 +10892,55 @@ fn real_main() {
                             } else { None };
                             if let Some(pass) = pass {
                                 if pass {
-                                    compact_buf.push(b'"');
-                                    for &(idx, typ, ai) in &actions {
-                                        match typ {
-                                            0 => { compact_buf.extend_from_slice(&lit_bufs[idx]); }
-                                            1 => {
-                                                let (vs, ve) = ranges_buf[idx];
-                                                let val_bytes = &raw[vs..ve];
-                                                if val_bytes[0] == b'"' && val_bytes.len() >= 2 {
-                                                    compact_buf.extend_from_slice(&val_bytes[1..val_bytes.len()-1]);
-                                                } else {
-                                                    compact_buf.extend_from_slice(val_bytes);
-                                                }
-                                            }
-                                            _ => {
-                                                let (vs, ve) = ranges_buf[idx];
-                                                let s = unsafe { std::str::from_utf8_unchecked(&raw[vs..ve]) };
-                                                if let Ok(mut v) = s.trim().parse::<f64>() {
-                                                    for &(ref op, n) in arith_ops_list[ai] {
-                                                        v = match op {
-                                                            jq_jit::ir::BinOp::Add => v + n, jq_jit::ir::BinOp::Sub => v - n,
-                                                            jq_jit::ir::BinOp::Mul => v * n, jq_jit::ir::BinOp::Div => v / n,
-                                                            jq_jit::ir::BinOp::Mod => jq_jit::runtime::jq_mod_f64(v, n).unwrap_or(f64::NAN),
-                                                            _ => v,
-                                                        };
-                                                    }
-                                                    push_jq_number_bytes(&mut compact_buf, v);
-                                                }
+                                    // Plain-Field action (type 1) requires a quoted-string
+                                    // operand for the inline emit to match jq — `s + s`
+                                    // errors on non-string and `null + null` is null
+                                    // (handled by generic). Pre-check before emitting
+                                    // anything; on miss, bail to generic.
+                                    let mut needs_generic = false;
+                                    for &(idx, typ, _) in &actions {
+                                        if typ == 1 {
+                                            let (vs, ve) = ranges_buf[idx];
+                                            if vs >= ve || raw[vs] != b'"' {
+                                                needs_generic = true;
+                                                break;
                                             }
                                         }
                                     }
-                                    compact_buf.extend_from_slice(b"\"\n");
+                                    if !needs_generic {
+                                        compact_buf.push(b'"');
+                                        for &(idx, typ, ai) in &actions {
+                                            match typ {
+                                                0 => { compact_buf.extend_from_slice(&lit_bufs[idx]); }
+                                                1 => {
+                                                    let (vs, ve) = ranges_buf[idx];
+                                                    let val = &raw[vs..ve];
+                                                    // val is guaranteed quoted-string here.
+                                                    compact_buf.extend_from_slice(&val[1..val.len()-1]);
+                                                }
+                                                _ => {
+                                                    let (vs, ve) = ranges_buf[idx];
+                                                    let s = unsafe { std::str::from_utf8_unchecked(&raw[vs..ve]) };
+                                                    if let Ok(mut v) = s.trim().parse::<f64>() {
+                                                        for &(ref op, n) in arith_ops_list[ai] {
+                                                            v = match op {
+                                                                jq_jit::ir::BinOp::Add => v + n, jq_jit::ir::BinOp::Sub => v - n,
+                                                                jq_jit::ir::BinOp::Mul => v * n, jq_jit::ir::BinOp::Div => v / n,
+                                                                jq_jit::ir::BinOp::Mod => jq_jit::runtime::jq_mod_f64(v, n).unwrap_or(f64::NAN),
+                                                                _ => v,
+                                                            };
+                                                        }
+                                                        push_jq_number_bytes(&mut compact_buf, v);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        compact_buf.extend_from_slice(b"\"\n");
+                                        handled = true;
+                                    }
+                                } else {
+                                    handled = true;
                                 }
-                                handled = true;
                             }
                         }
                         if !handled {
@@ -18125,39 +18141,54 @@ fn real_main() {
                         } else { None };
                         if let Some(pass) = pass {
                             if pass {
-                                compact_buf.push(b'"');
-                                for &(idx, typ, ai) in &actions {
-                                    match typ {
-                                        0 => { compact_buf.extend_from_slice(&lit_bufs[idx]); }
-                                        1 => {
-                                            let (vs, ve) = ranges_buf[idx];
-                                            let val_bytes = &raw[vs..ve];
-                                            if val_bytes[0] == b'"' && val_bytes.len() >= 2 {
-                                                compact_buf.extend_from_slice(&val_bytes[1..val_bytes.len()-1]);
-                                            } else {
-                                                compact_buf.extend_from_slice(val_bytes);
-                                            }
-                                        }
-                                        _ => {
-                                            let (vs, ve) = ranges_buf[idx];
-                                            let s = unsafe { std::str::from_utf8_unchecked(&raw[vs..ve]) };
-                                            if let Ok(mut v) = s.trim().parse::<f64>() {
-                                                for &(ref op, n) in arith_ops_list[ai] {
-                                                    v = match op {
-                                                        jq_jit::ir::BinOp::Add => v + n, jq_jit::ir::BinOp::Sub => v - n,
-                                                        jq_jit::ir::BinOp::Mul => v * n, jq_jit::ir::BinOp::Div => v / n,
-                                                        jq_jit::ir::BinOp::Mod => jq_jit::runtime::jq_mod_f64(v, n).unwrap_or(f64::NAN),
-                                                        _ => v,
-                                                    };
-                                                }
-                                                push_jq_number_bytes(&mut compact_buf, v);
-                                            }
+                                // Sibling pre-check to the in-memory apply above:
+                                // a plain `.f` (action type 1) requires a string
+                                // operand to match jq inline. Bail to generic for
+                                // any non-string operand.
+                                let mut needs_generic = false;
+                                for &(idx, typ, _) in &actions {
+                                    if typ == 1 {
+                                        let (vs, ve) = ranges_buf[idx];
+                                        if vs >= ve || raw[vs] != b'"' {
+                                            needs_generic = true;
+                                            break;
                                         }
                                     }
                                 }
-                                compact_buf.extend_from_slice(b"\"\n");
+                                if !needs_generic {
+                                    compact_buf.push(b'"');
+                                    for &(idx, typ, ai) in &actions {
+                                        match typ {
+                                            0 => { compact_buf.extend_from_slice(&lit_bufs[idx]); }
+                                            1 => {
+                                                let (vs, ve) = ranges_buf[idx];
+                                                let val = &raw[vs..ve];
+                                                // val is guaranteed quoted-string here.
+                                                compact_buf.extend_from_slice(&val[1..val.len()-1]);
+                                            }
+                                            _ => {
+                                                let (vs, ve) = ranges_buf[idx];
+                                                let s = unsafe { std::str::from_utf8_unchecked(&raw[vs..ve]) };
+                                                if let Ok(mut v) = s.trim().parse::<f64>() {
+                                                    for &(ref op, n) in arith_ops_list[ai] {
+                                                        v = match op {
+                                                            jq_jit::ir::BinOp::Add => v + n, jq_jit::ir::BinOp::Sub => v - n,
+                                                            jq_jit::ir::BinOp::Mul => v * n, jq_jit::ir::BinOp::Div => v / n,
+                                                            jq_jit::ir::BinOp::Mod => jq_jit::runtime::jq_mod_f64(v, n).unwrap_or(f64::NAN),
+                                                            _ => v,
+                                                        };
+                                                    }
+                                                    push_jq_number_bytes(&mut compact_buf, v);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    compact_buf.extend_from_slice(b"\"\n");
+                                    handled = true;
+                                }
+                            } else {
+                                handled = true;
                             }
-                            handled = true;
                         }
                     }
                     if !handled {
