@@ -10866,52 +10866,66 @@ fn real_main() {
                     let mut ranges_buf = vec![(0usize, 0usize); field_names.len()];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
-                            let (cs, ce) = ranges_buf[0]; // condition field
+                        // #402: bail to generic for non-object input,
+                        // missing fields, non-string cond field with
+                        // str-builtin, or anywhere the inline string
+                        // chain emit can't faithfully match jq.
+                        let mut handled = false;
+                        if raw.first() == Some(&b'{')
+                            && json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf)
+                        {
+                            let (cs, ce) = ranges_buf[0];
                             let cond_val = &raw[cs..ce];
                             let pass = if let Some(ref eq_bytes) = expected_eq {
                                 let m = cond_val == eq_bytes.as_slice();
-                                if is_ne { !m } else { m }
+                                Some(if is_ne { !m } else { m })
                             } else if cond_val.len() >= 2 && cond_val[0] == b'"' {
                                 let inner = &cond_val[1..cond_val.len()-1];
-                                if let Some(sw) = sw_bytes { inner.starts_with(sw) }
-                                else if let Some(ew) = ew_bytes { inner.ends_with(ew) }
-                                else if let Some(co) = co_bytes { inner.windows(co.len()).any(|w| w == co) }
-                                else { false }
-                            } else { false };
-                            if pass {
-                                compact_buf.push(b'"');
-                                for &(idx, typ, ai) in &actions {
-                                    match typ {
-                                        0 => { compact_buf.extend_from_slice(&lit_bufs[idx]); }
-                                        1 => {
-                                            let (vs, ve) = ranges_buf[idx];
-                                            let val_bytes = &raw[vs..ve];
-                                            if val_bytes[0] == b'"' && val_bytes.len() >= 2 {
-                                                compact_buf.extend_from_slice(&val_bytes[1..val_bytes.len()-1]);
-                                            } else {
-                                                compact_buf.extend_from_slice(val_bytes);
-                                            }
-                                        }
-                                        _ => {
-                                            let (vs, ve) = ranges_buf[idx];
-                                            let s = unsafe { std::str::from_utf8_unchecked(&raw[vs..ve]) };
-                                            if let Ok(mut v) = s.trim().parse::<f64>() {
-                                                for &(ref op, n) in arith_ops_list[ai] {
-                                                    v = match op {
-                                                        jq_jit::ir::BinOp::Add => v + n, jq_jit::ir::BinOp::Sub => v - n,
-                                                        jq_jit::ir::BinOp::Mul => v * n, jq_jit::ir::BinOp::Div => v / n,
-                                                        jq_jit::ir::BinOp::Mod => jq_jit::runtime::jq_mod_f64(v, n).unwrap_or(f64::NAN),
-                                                        _ => v,
-                                                    };
+                                Some(if let Some(sw) = sw_bytes { inner.starts_with(sw) }
+                                    else if let Some(ew) = ew_bytes { inner.ends_with(ew) }
+                                    else if let Some(co) = co_bytes { inner.windows(co.len()).any(|w| w == co) }
+                                    else { false })
+                            } else { None };
+                            if let Some(pass) = pass {
+                                if pass {
+                                    compact_buf.push(b'"');
+                                    for &(idx, typ, ai) in &actions {
+                                        match typ {
+                                            0 => { compact_buf.extend_from_slice(&lit_bufs[idx]); }
+                                            1 => {
+                                                let (vs, ve) = ranges_buf[idx];
+                                                let val_bytes = &raw[vs..ve];
+                                                if val_bytes[0] == b'"' && val_bytes.len() >= 2 {
+                                                    compact_buf.extend_from_slice(&val_bytes[1..val_bytes.len()-1]);
+                                                } else {
+                                                    compact_buf.extend_from_slice(val_bytes);
                                                 }
-                                                push_jq_number_bytes(&mut compact_buf, v);
+                                            }
+                                            _ => {
+                                                let (vs, ve) = ranges_buf[idx];
+                                                let s = unsafe { std::str::from_utf8_unchecked(&raw[vs..ve]) };
+                                                if let Ok(mut v) = s.trim().parse::<f64>() {
+                                                    for &(ref op, n) in arith_ops_list[ai] {
+                                                        v = match op {
+                                                            jq_jit::ir::BinOp::Add => v + n, jq_jit::ir::BinOp::Sub => v - n,
+                                                            jq_jit::ir::BinOp::Mul => v * n, jq_jit::ir::BinOp::Div => v / n,
+                                                            jq_jit::ir::BinOp::Mod => jq_jit::runtime::jq_mod_f64(v, n).unwrap_or(f64::NAN),
+                                                            _ => v,
+                                                        };
+                                                    }
+                                                    push_jq_number_bytes(&mut compact_buf, v);
+                                                }
                                             }
                                         }
                                     }
+                                    compact_buf.extend_from_slice(b"\"\n");
                                 }
-                                compact_buf.extend_from_slice(b"\"\n");
+                                handled = true;
                             }
+                        }
+                        if !handled {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -18088,52 +18102,63 @@ fn real_main() {
                 let mut ranges_buf = vec![(0usize, 0usize); field_names.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
+                    // Sibling fix to the stdin apply-site above (#402).
+                    let mut handled = false;
+                    if raw.first() == Some(&b'{')
+                        && json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf)
+                    {
                         let (cs, ce) = ranges_buf[0];
                         let cond_val = &raw[cs..ce];
                         let pass = if let Some(ref eq_bytes) = expected_eq {
                             let m = cond_val == eq_bytes.as_slice();
-                            if is_ne { !m } else { m }
+                            Some(if is_ne { !m } else { m })
                         } else if cond_val.len() >= 2 && cond_val[0] == b'"' {
                             let inner = &cond_val[1..cond_val.len()-1];
-                            if let Some(sw) = sw_bytes { inner.starts_with(sw) }
-                            else if let Some(ew) = ew_bytes { inner.ends_with(ew) }
-                            else if let Some(co) = co_bytes { inner.windows(co.len()).any(|w| w == co) }
-                            else { false }
-                        } else { false };
-                        if pass {
-                            compact_buf.push(b'"');
-                            for &(idx, typ, ai) in &actions {
-                                match typ {
-                                    0 => { compact_buf.extend_from_slice(&lit_bufs[idx]); }
-                                    1 => {
-                                        let (vs, ve) = ranges_buf[idx];
-                                        let val_bytes = &raw[vs..ve];
-                                        if val_bytes[0] == b'"' && val_bytes.len() >= 2 {
-                                            compact_buf.extend_from_slice(&val_bytes[1..val_bytes.len()-1]);
-                                        } else {
-                                            compact_buf.extend_from_slice(val_bytes);
-                                        }
-                                    }
-                                    _ => {
-                                        let (vs, ve) = ranges_buf[idx];
-                                        let s = unsafe { std::str::from_utf8_unchecked(&raw[vs..ve]) };
-                                        if let Ok(mut v) = s.trim().parse::<f64>() {
-                                            for &(ref op, n) in arith_ops_list[ai] {
-                                                v = match op {
-                                                    jq_jit::ir::BinOp::Add => v + n, jq_jit::ir::BinOp::Sub => v - n,
-                                                    jq_jit::ir::BinOp::Mul => v * n, jq_jit::ir::BinOp::Div => v / n,
-                                                    jq_jit::ir::BinOp::Mod => jq_jit::runtime::jq_mod_f64(v, n).unwrap_or(f64::NAN),
-                                                    _ => v,
-                                                };
+                            Some(if let Some(sw) = sw_bytes { inner.starts_with(sw) }
+                                else if let Some(ew) = ew_bytes { inner.ends_with(ew) }
+                                else if let Some(co) = co_bytes { inner.windows(co.len()).any(|w| w == co) }
+                                else { false })
+                        } else { None };
+                        if let Some(pass) = pass {
+                            if pass {
+                                compact_buf.push(b'"');
+                                for &(idx, typ, ai) in &actions {
+                                    match typ {
+                                        0 => { compact_buf.extend_from_slice(&lit_bufs[idx]); }
+                                        1 => {
+                                            let (vs, ve) = ranges_buf[idx];
+                                            let val_bytes = &raw[vs..ve];
+                                            if val_bytes[0] == b'"' && val_bytes.len() >= 2 {
+                                                compact_buf.extend_from_slice(&val_bytes[1..val_bytes.len()-1]);
+                                            } else {
+                                                compact_buf.extend_from_slice(val_bytes);
                                             }
-                                            push_jq_number_bytes(&mut compact_buf, v);
+                                        }
+                                        _ => {
+                                            let (vs, ve) = ranges_buf[idx];
+                                            let s = unsafe { std::str::from_utf8_unchecked(&raw[vs..ve]) };
+                                            if let Ok(mut v) = s.trim().parse::<f64>() {
+                                                for &(ref op, n) in arith_ops_list[ai] {
+                                                    v = match op {
+                                                        jq_jit::ir::BinOp::Add => v + n, jq_jit::ir::BinOp::Sub => v - n,
+                                                        jq_jit::ir::BinOp::Mul => v * n, jq_jit::ir::BinOp::Div => v / n,
+                                                        jq_jit::ir::BinOp::Mod => jq_jit::runtime::jq_mod_f64(v, n).unwrap_or(f64::NAN),
+                                                        _ => v,
+                                                    };
+                                                }
+                                                push_jq_number_bytes(&mut compact_buf, v);
+                                            }
                                         }
                                     }
                                 }
+                                compact_buf.extend_from_slice(b"\"\n");
                             }
-                            compact_buf.extend_from_slice(b"\"\n");
+                            handled = true;
                         }
+                    }
+                    if !handled {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
