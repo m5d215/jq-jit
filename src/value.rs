@@ -798,15 +798,68 @@ where F: FnMut(usize, usize) -> Result<()> {
     Ok(())
 }
 
+/// Cheap no-duplicate proof for a list of target field names within
+/// the object at `pos`. Returns `true` when each field's **first byte**
+/// occurs at most once across the entire buffer `b`, which is a sound
+/// over-approximation of "no duplicate of any target key at the top
+/// level": every duplicate of a field starting with byte `c` would
+/// require `c` to appear at least twice in the bytes, so a count of one
+/// proves there's no duplicate. False positives — `c` appearing inside
+/// string values or in keys whose names share a first byte — only route
+/// to the slow scan-to-end path, never to incorrect early-exit.
+///
+/// Picking the cheapest possible proof matters because the hot helpers
+/// run on small (30-ish-byte) NDJSON rows in tight inner loops; every
+/// nanosecond on the no-dup branch is a regression for callers that
+/// would never have benefitted from early-exit (e.g. queries reading
+/// the last field of the object). Two `memchr` probes keep the
+/// worst-case bound at the SIMD scanner's first-hit cost rather than a
+/// full pass over the buffer.
+///
+/// Only `pos == 0` calls participate. The hot-path callers in
+/// `fast_path.rs` route through `json_stream_raw` / `apply_*_raw`,
+/// which slice the input into a single-record buffer per call, so
+/// `b` is the object's bytes plus optional trailing whitespace and
+/// over-counting from sibling rows is impossible. Nested calls
+/// (`json_object_get_nested_field_raw` recursing with `pos != 0`)
+/// would need a real object-end scan to bound the search safely;
+/// running that scan offsets the savings on small rows, so we skip
+/// the proof and let the slow scan-to-end path take over —
+/// correctness equivalent, no perf regression vs v1.4.4.
+///
+/// Used as a pre-check by the hot read helpers (`json_object_get_num`,
+/// `json_object_get_two_nums`, `json_object_get_field_raw`,
+/// `json_object_get_fields_raw_buf`) so the post-#371 correctness fix
+/// doesn't pay scan-to-end cost on the dup-free common case (#410).
+#[inline]
+pub fn obj_no_dup_target_keys(b: &[u8], pos: usize, fields: &[&[u8]]) -> bool {
+    if pos != 0 { return false; }
+    for f in fields {
+        if f.is_empty() { return false; }
+        let needle = f[0];
+        let mut it = memchr::memchr_iter(needle, b);
+        if it.next().is_none() { return false; }
+        if it.next().is_some() { return false; }
+    }
+    true
+}
+
 /// Extract a numeric field value from a JSON object without full parsing.
 /// Returns Some(f64) if the field exists and is numeric, None otherwise.
 /// Used for select fast paths to avoid parsing discarded objects.
 pub fn json_object_get_num(b: &[u8], pos: usize, field: &str) -> Option<f64> {
-    // jq dedupes duplicate input keys last-wins (#233 / #325). Scan to
-    // end of the object and use the LAST matching key's value; if that
-    // value isn't numeric, return None even when an earlier same-key
-    // value was numeric (#360).
+    // jq dedupes duplicate input keys last-wins (#233 / #325 / #360).
+    // For correctness in the worst case we have to scan to the end of
+    // the object and keep the LAST matching key's value (returning None
+    // when that final value isn't numeric, even if an earlier same-key
+    // value was). The scan-to-end pays a steep regression for the
+    // overwhelmingly common dup-free case (#410), so we route through
+    // a SIMD pre-check that proves at-most-one occurrence of the target
+    // key — proof good enough to early-exit on first match. Failed proof
+    // (escapes, oversize keys, malformed input, real duplicates) drops
+    // through to the legacy scan-to-end loop.
     if pos >= b.len() || b[pos] != b'{' { return None; }
+    let early_exit = obj_no_dup_target_keys(b, pos, &[field.as_bytes()]);
     let field_bytes = field.as_bytes();
     let mut i = pos + 1;
     while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
@@ -863,6 +916,11 @@ pub fn json_object_get_num(b: &[u8], pos: usize, field: &str) -> Option<f64> {
             }
             last_match = value;
         }
+        // Once we've recorded a match for the target key and the
+        // SIMD pre-check confirmed at-most-one occurrence, the
+        // first-wins value matches last-wins exactly (#410). Otherwise,
+        // keep scanning to honor #360's last-wins semantics.
+        if early_exit && last_was_match { return last_match; }
         // Skip past the value (whether we parsed or not) so we keep scanning.
         i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return if last_was_match { last_match } else { None } };
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
@@ -880,11 +938,14 @@ pub fn json_object_get_num(b: &[u8], pos: usize, field: &str) -> Option<f64> {
 pub fn json_object_get_field_raw(b: &[u8], pos: usize, field: &str) -> Option<(usize, usize)> {
     if pos >= b.len() || b[pos] != b'{' { return None; }
     let field_bytes = field.as_bytes();
+    // jq dedupes duplicate input keys last-wins (#233 / #325). The SIMD
+    // pre-check (#410) lets us early-exit on the first match when the
+    // target key provably appears at most once; otherwise we fall back
+    // to scan-to-end with last-wins.
+    let early_exit = obj_no_dup_target_keys(b, pos, &[field_bytes]);
     let mut i = pos + 1;
     while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
     if i < b.len() && b[i] == b'}' { return None; }
-    // jq dedupes duplicate input keys last-wins (#233): scan to the end of the
-    // object and return the last match, not the first.
     let mut last_match: Option<(usize, usize)> = None;
     loop {
         if i >= b.len() || b[i] != b'"' { return last_match; }
@@ -904,6 +965,7 @@ pub fn json_object_get_field_raw(b: &[u8], pos: usize, field: &str) -> Option<(u
         let val_end = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return last_match };
         if key_matches {
             last_match = Some((val_start, val_end));
+            if early_exit { return last_match; }
         }
         i = val_end;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
@@ -3314,6 +3376,13 @@ pub fn json_object_get_two_nums(b: &[u8], pos: usize, field1: &str, field2: &str
     // later duplicate arrives. The pre-#371 version exited on the first
     // match for each field, returning a first-wins read that disagreed
     // with jq for inputs like `{"a":5,"a":1,"b":3}` (#371).
+    //
+    // The SIMD pre-check from #410 reinstates that early-exit only when
+    // it can prove neither target appears more than once in the
+    // object's bytes, restoring the v1.4.3 perf for the dup-free common
+    // case while keeping the scan-to-end loop available as the
+    // fallback for any input that fails the proof.
+    let early_exit = obj_no_dup_target_keys(b, pos, &[f1, f2]);
     let mut val1: Option<f64> = None;
     let mut val2: Option<f64> = None;
     let mut i = pos + 1;
@@ -3366,6 +3435,13 @@ pub fn json_object_get_two_nums(b: &[u8], pos: usize, field1: &str, field2: &str
                 if neg { -(n as f64) } else { n as f64 }
             };
             if match1 { val1 = Some(val); } else { val2 = Some(val); }
+            // Both targets recorded and the SIMD pre-check confirmed
+            // each appears at most once → first-wins agrees with
+            // last-wins (#410). Return without scanning the rest of
+            // the object.
+            if early_exit {
+                if let (Some(a), Some(b)) = (val1, val2) { return Some((a, b)); }
+            }
         } else {
             i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return None };
         }
@@ -3462,6 +3538,21 @@ pub fn json_object_get_fields_raw_buf(b: &[u8], pos: usize, input_fields: &[&str
     // a small subset of fields from larger inputs, but the value-level
     // path was already this expensive — every call site routes
     // through here for value-level coverage parity.
+    //
+    // The SIMD pre-check from #410 reinstates a `found == n` exit
+    // gated on a proof that no requested key appears more than once
+    // in the object. The proof step uses two stack-bounded inputs at
+    // most (we only check up to a handful of keys here) to avoid
+    // allocating in the hot path.
+    let mut field_byte_refs_small: [&[u8]; 16] = [b""; 16];
+    let early_exit = if n <= field_byte_refs_small.len() {
+        for (i, f) in input_fields.iter().enumerate() {
+            field_byte_refs_small[i] = f.as_bytes();
+        }
+        obj_no_dup_target_keys(b, pos, &field_byte_refs_small[..n])
+    } else {
+        false
+    };
     let mut found_mask: u64 = 0;
     let mut i = pos + 1;
     while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
@@ -3492,6 +3583,12 @@ pub fn json_object_get_fields_raw_buf(b: &[u8], pos: usize, input_fields: &[&str
             out[idx] = (val_start, val_end);
             found_mask |= 1u64 << idx;
             i = val_end;
+            // All requested fields seen and the SIMD pre-check
+            // confirmed each appears at most once → first-wins agrees
+            // with last-wins, no need to scan the trailing keys (#410).
+            if early_exit && found_mask.count_ones() as usize == n {
+                return true;
+            }
         } else {
             i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return false };
         }
