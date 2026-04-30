@@ -1319,15 +1319,20 @@ fn resolved_would_error(
         ResolvedRemap::FieldCmpConst(idx, _, _) => parse_json_num(bytes_of(*idx)).is_none(),
         // `field cmp field` — the inline emitter handles num/num,
         // str/str, and (num/str)-mixed; everything else falls through
-        // to `null`. jq's total ordering produces a defined verdict for
-        // null/bool/array/object pairs too, so bail when neither side
-        // is numeric and at most one is a string (#347).
+        // to `null`. jq's total ordering is
+        // null < false < true < number < string < array < object,
+        // so bail when one side is a string and the other is anything
+        // *other than a number* — the emitter's str/non-str branch
+        // assumes the non-str is numeric and would otherwise return
+        // the wrong verdict (#392). Same intent as #347; the prior
+        // `is_str(a) ^ is_str(b)` was too permissive.
         ResolvedRemap::FieldCmpField(i1, _, i2) => {
             let a = bytes_of(*i1);
             let b = bytes_of(*i2);
+            let num_str_mixed = (is_str(a) && is_num(b)) || (is_num(a) && is_str(b));
             !((is_num(a) && is_num(b))
                 || (is_str(a) && is_str(b))
-                || (is_str(a) ^ is_str(b)))
+                || num_str_mixed)
         }
         // BoolExpr (`cmp1 and/or cmp2`) emits null when any side's
         // bool eval returns None — which happens whenever an inner

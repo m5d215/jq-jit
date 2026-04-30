@@ -6137,3 +6137,28 @@ null
 (select(.c >= .c)) | (.x + .c)
 {"c":1,"x":2}
 3
+
+# #392: resolved_would_error::FieldCmpField allowed str/non-num
+# pairs through the inline emitter, which returns the wrong
+# verdict (jq's total order is null<false<true<num<str<arr<obj,
+# but the emitter's str/non-str branch assumed non-str = num).
+# Tighten the gate to require the non-str side be numeric; bail
+# otherwise.
+(select(.c >= .c)) | (.a > .x)
+{"x":[],"c":0,"a":""}
+false
+
+# Counter-case: str vs num still rides the fast path (jq: num<str).
+(select(.c >= .c)) | (.a > .x)
+{"x":0,"c":0,"a":""}
+true
+
+# str vs null — null<str, so str>null=true. Should bail to generic.
+(select(.c >= .c)) | (.a > .x)
+{"x":null,"c":0,"a":""}
+true
+
+# str vs object — str<obj, so str>obj=false.
+(select(.c >= .c)) | (.a > .x)
+{"x":{},"c":0,"a":""}
+false
