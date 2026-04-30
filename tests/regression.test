@@ -6290,3 +6290,44 @@ null
 (select((.x > 0) or (.x < 0))) | (.a)
 {"x":1,"a":"hi"}
 "hi"
+
+# #410: SIMD pre-check (`obj_no_dup_target_keys`) restores the
+# pre-#371 first-match early-exit when it can prove the target key
+# appears at most once. These cases stress the boundary conditions
+# where the proof must NOT incorrectly take the fast path.
+
+# Duplicate target inside a nested object: needle counts both
+# occurrences, so the slow path runs and last-wins on the OUTER
+# `.x` (the inner duplicate is irrelevant to the outer read).
+.x
+{"a":{"x":99},"x":1,"x":2}
+2
+
+# Field name appearing as a quoted string value: needle counts both,
+# slow path runs, last-wins still gives the unique top-level key.
+.x
+{"name":"x","x":42}
+42
+
+# Field name appearing as a JSON-escaped substring inside a string
+# value: the bare-quoted needle would over-count (false positive)
+# and route to the slow path, which still returns the right answer.
+.x
+{"note":"the \"x\" key","x":7}
+7
+
+# Duplicate target across two values where the slow path's last-wins
+# semantics matter: confirm we didn't accidentally early-exit.
+.x + .y
+{"x":1,"x":10,"y":3}
+13
+
+# Three-way duplicate of one field; last-wins picks the third.
+.x
+{"x":1,"x":2,"x":3}
+3
+
+# `.x + .y` with a duplicate of `.y` further down the object.
+.x + .y
+{"x":2,"y":1,"name":"row","y":40}
+42
