@@ -34,6 +34,35 @@
 //!   numeric inputs to integers and let the *filter* introduce
 //!   floating arithmetic when needed.
 //!
+//! ## Expected-divergence classes
+//!
+//! Some shapes legitimately produce different stdout on jq vs jq-jit
+//! without either being wrong. The harness is designed to land those
+//! in the "both errored → skip" branch (or to mask the difference via
+//! `normalize`); when adding new adversarial shapes, check the value
+//! against this list before widening the generator:
+//!
+//! * **Non-finite floats** (`NaN`, `±Infinity`, `-0.0`, denormals,
+//!   values beyond the f64 mantissa boundary). jq's printer emits
+//!   non-canonical forms (`1.797e+308`, `nan`) that the harness's
+//!   `serde_json` re-parse rejects, while jq-jit may print canonical
+//!   JSON. The integer adversarial pool deliberately caps at `±2^53`;
+//!   floats beyond that are left to a future phase that extends
+//!   `normalize` to recognise both spellings.
+//! * **Broken UTF-8** (lone surrogates, embedded NUL, BOM in the
+//!   middle of a string). jq-1.8 may reject these at input parse; the
+//!   reference run lands in `is_error` and the case is skipped. The
+//!   adversarial string pool stays inside well-formed UTF-8 for now.
+//! * **Empty input** — both implementations agree to error, so the
+//!   `both_error` branch covers it.
+//!
+//! When a new adversarial generator surfaces a true divergence, mint a
+//! permanent regression case in `tests/regression.test` and the value
+//! stays in the generator. When it surfaces an *expected* divergence,
+//! either extend `normalize` to fold both sides together or filter the
+//! shape out of the generator with an inline comment pointing back
+//! here.
+//!
 //! ## Knobs
 //!
 //! * `JQJIT_PROPTEST_CASES` — case budget (default 256, ≤30s on dev hw)
@@ -426,8 +455,66 @@ fn json_leaf() -> impl Strategy<Value = JsonShape> {
     ]
 }
 
+/// Adversarial object-key pool (#321 phase 2). Empty string is the
+/// notable shape — `{"": v}` is valid JSON, valid jq input, and
+/// touches a different code path on key lookup, key sort, and key
+/// serialization than any non-empty key. Mixed with one ident-pool
+/// key so duplicate-vs-unique permutations both occur.
+const ADVERSARIAL_OBJ_KEYS: &[&str] = &["", "a"];
+
+/// Single-element nested chain `[[[...x]]]` or `{"a":{"a":{...x}}}`,
+/// depth `1..=10`. The conservative recursive generator caps at
+/// depth 3, so this is the only path that exercises field/index
+/// access through depth >3 on shapes the parser still accepts as a
+/// single value. Stresses recursion-depth assumptions in the eval
+/// and JIT layers without invoking `..`, which is excluded by the
+/// module doc.
+fn deep_chain_strategy() -> impl Strategy<Value = JsonShape> {
+    (1usize..=10, any::<bool>(), json_leaf()).prop_map(|(depth, use_arr, leaf)| {
+        let mut v = leaf;
+        for _ in 0..depth {
+            v = if use_arr {
+                JsonShape::Arr(vec![v])
+            } else {
+                JsonShape::Obj(vec![("a".to_string(), v)])
+            };
+        }
+        v
+    })
+}
+
+/// Sparse array: length 4–12, all `null` except one position with a
+/// leaf value. Real-world telemetry and timeseries pad with nulls,
+/// and this is the shape most likely to surface a fast path that
+/// short-circuits on the first non-null index instead of iterating
+/// the whole array.
+fn sparse_array_strategy() -> impl Strategy<Value = JsonShape> {
+    (4usize..=12, json_leaf()).prop_flat_map(|(len, leaf)| {
+        (Just(len), Just(leaf), 0usize..len).prop_map(|(len, leaf, pos)| {
+            let mut items = vec![JsonShape::Null; len];
+            items[pos] = leaf;
+            JsonShape::Arr(items)
+        })
+    })
+}
+
+/// Object with adversarial keys (including `""`) and 1–3 entries.
+/// Duplicate `""` keys are deduped last-wins by jq; the harness
+/// already tolerates that for the ident pool (#233 / #325), and the
+/// same applies to the empty key.
+fn adversarial_obj_strategy() -> impl Strategy<Value = JsonShape> {
+    prop::collection::vec(
+        (
+            prop::sample::select(ADVERSARIAL_OBJ_KEYS).prop_map(|s| s.to_string()),
+            json_leaf(),
+        ),
+        1..=3,
+    )
+    .prop_map(JsonShape::Obj)
+}
+
 fn json_strategy() -> impl Strategy<Value = JsonShape> {
-    json_leaf().prop_recursive(3, 12, 3, |inner| {
+    let recursive = json_leaf().prop_recursive(3, 12, 3, |inner| {
         prop_oneof![
             prop::collection::vec(inner.clone(), 0..=3).prop_map(JsonShape::Arr),
             // Duplicate input keys are deduped last-wins-first-position
@@ -436,7 +523,20 @@ fn json_strategy() -> impl Strategy<Value = JsonShape> {
             prop::collection::vec((ident_strategy(), inner.clone()), 0..=3)
                 .prop_map(JsonShape::Obj),
         ]
-    })
+    });
+
+    // Mix the conservative recursive generator with adversarial
+    // container shapes (#321 phase 2). Weighted ~5:1 to mirror the
+    // adversarial-leaf split — frequent enough that every multi-k run
+    // hits each shape, rare enough not to crowd out normal coverage.
+    prop_oneof![
+        5 => recursive,
+        1 => prop_oneof![
+            deep_chain_strategy(),
+            sparse_array_strategy(),
+            adversarial_obj_strategy(),
+        ],
+    ]
 }
 
 struct RunOutput {
