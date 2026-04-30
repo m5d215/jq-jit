@@ -10560,6 +10560,21 @@ fn real_main() {
                     } else { None };
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
+                        // #394: non-object input must bail to generic so jq's
+                        // type-error verdict (`Cannot index <type> with
+                        // string`) is preserved instead of silently dropping
+                        // the row. Detect by peeking the first byte; the
+                        // record fed by `json_stream_raw` is already
+                        // whitespace-trimmed at the boundary.
+                        if raw.first() != Some(&b'{') {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            if compact_buf.len() >= 1 << 17 {
+                                let _ = out.write_all(&compact_buf);
+                                compact_buf.clear();
+                            }
+                            return Ok(());
+                        }
                         let pass = if let Some(ref expected) = expected_eq {
                             // eq/ne test
                             if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sel_field) {
@@ -17757,6 +17772,16 @@ fn real_main() {
                 } else { None };
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
+                    // Sibling fix to the stdin apply-site above (#394).
+                    if raw.first() != Some(&b'{') {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        return Ok(());
+                    }
                     let pass = if let Some(ref expected) = expected_eq {
                         if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sel_field) {
                             let val_bytes = &raw[vs..ve];
