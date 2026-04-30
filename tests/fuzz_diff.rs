@@ -49,10 +49,14 @@
 //!   JSON. The integer adversarial pool deliberately caps at `±2^53`;
 //!   floats beyond that are left to a future phase that extends
 //!   `normalize` to recognise both spellings.
-//! * **Broken UTF-8** (lone surrogates, embedded NUL, BOM in the
-//!   middle of a string). jq-1.8 may reject these at input parse; the
-//!   reference run lands in `is_error` and the case is skipped. The
-//!   adversarial string pool stays inside well-formed UTF-8 for now.
+//! * **Broken UTF-8** (lone surrogates such as `"\uD83D"` without the
+//!   trailing low surrogate, embedded NUL bytes). jq-1.8 rejects these
+//!   at input parse while jq-jit's parser accepts them, producing an
+//!   error-vs-success mismatch the harness would flag as a bug. The
+//!   adversarial string pool stays inside well-formed UTF-8 — multi-
+//!   byte text, RTL, combining marks, supplementary-plane emoji, and
+//!   mid-string BOM all round-trip cleanly through both implementations
+//!   and are safe to include.
 //! * **Empty input** — both implementations agree to error, so the
 //!   `both_error` branch covers it.
 //!
@@ -422,10 +426,15 @@ const ADVERSARIAL_INTS: &[i64] = &[
 
 /// String pool with shapes that have surfaced bugs historically:
 /// empty string, single ASCII, runs that brush against the small
-/// SSO threshold, and a longer ASCII string that exercises
-/// allocation paths on both runtimes. Stays ASCII-only — non-ASCII
-/// adds an encoding-class divergence the next round can broaden
-/// into once the integer expansion settles.
+/// SSO threshold, a longer ASCII string that exercises allocation
+/// paths on both runtimes, and a multi-byte UTF-8 cross-section
+/// (#321 phase 3a) covering 2-byte / 3-byte / 4-byte sequences,
+/// RTL text, combining marks, BMP-supplementary emoji, and a BOM
+/// in mid-string position. All values are well-formed UTF-8 — lone
+/// surrogates and embedded NUL are deliberately excluded because
+/// jq-1.8 rejects them at input parse and the harness would surface
+/// an error-vs-success mismatch (see "Expected-divergence classes"
+/// in the module doc).
 const ADVERSARIAL_STRS: &[&str] = &[
     "",
     "0",
@@ -433,6 +442,22 @@ const ADVERSARIAL_STRS: &[&str] = &[
     "null",
     "          ",
     "abcdefghijklmnopqrstuvwxyz",
+    // 3-byte CJK
+    "日本語",
+    // RTL Hebrew
+    "שלום",
+    // Combining mark: e + U+0301
+    "e\u{0301}",
+    // 4-byte BMP-supplementary emoji
+    "😀",
+    // 4-byte musical symbol
+    "𝄞",
+    // BOM (U+FEFF) in mid-string — exercises the path where the
+    // byte-order mark is *not* at offset 0 and must be preserved.
+    "a\u{FEFF}b",
+    // Long multi-byte run — stresses allocation / SSO boundaries
+    // for codepoint vs byte indexing.
+    "日本語日本語日本語日本語日本語日本語日本語日本語",
 ];
 
 fn json_leaf() -> impl Strategy<Value = JsonShape> {
