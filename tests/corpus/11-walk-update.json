@@ -1,0 +1,7 @@
+{
+  "Title": "Hello World",
+  "Sections": [
+    {"Heading": "Introduction", "Body": "Some TEXT here."},
+    {"Heading": "Conclusion", "Body": "WrApUp."}
+  ]
+}

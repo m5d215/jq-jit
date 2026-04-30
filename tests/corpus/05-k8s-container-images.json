@@ -1,0 +1,32 @@
+{
+  "items": [
+    {
+      "kind": "Pod",
+      "metadata": {"name": "web-1"},
+      "spec": {
+        "containers": [
+          {"name": "nginx", "image": "nginx:1.25"},
+          {"name": "sidecar", "image": "envoy:1.30"}
+        ]
+      }
+    },
+    {
+      "kind": "Pod",
+      "metadata": {"name": "web-2"},
+      "spec": {
+        "containers": [
+          {"name": "nginx", "image": "nginx:1.25"}
+        ]
+      }
+    },
+    {
+      "kind": "Pod",
+      "metadata": {"name": "worker-1"},
+      "spec": {
+        "containers": [
+          {"name": "app", "image": "myapp:v3.2"}
+        ]
+      }
+    }
+  ]
+}

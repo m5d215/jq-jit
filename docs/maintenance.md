@@ -77,6 +77,32 @@ heavier opt-in 版が `tests/differential_proptest.rs`（`#[ignore]`）。こち
 `try/catch` を含む全 grammar を回すので、error 書式の divergence を含めて
 当てに行きたい時に `--ignored` で起動する。
 
+### Real-world スクリプト corpus（`tests/corpus/` / #322）
+
+人が実際に書く idiomatic な filter — cookbook 級の `group_by` / `with_entries` /
+`walk` / `paths` レシピや k8s manifest の image 列挙、ログ抽出、`@csv` 投影など —
+を curated set として保持し、`cargo test --release --test corpus_diff` で
+jq 1.8.x と毎回突き合わせる。proptest が generator distribution の射程外で
+取りこぼす「実際の人間が書く形」の divergence を網にかける位置づけ。
+
+レイアウトはフラット pair: `tests/corpus/<name>.jq` と `tests/corpus/<name>.json`。
+ケース追加は **2 ファイル新規作成のみ、harness 側に手は入れない**。runner は
+`*.jq` を全件走査して同名 `.json` と組ませる。
+
+```bash
+cargo test --release --test corpus_diff
+```
+
+新しいケースを足す時は:
+
+1. `tests/corpus/<name>.jq` に script、`tests/corpus/<name>.json` に input を置く。
+2. ローカルで `JQ_BIN=/opt/homebrew/opt/jq/bin/jq cargo test --release --test corpus_diff` を流して parity を確認。
+3. **expected-divergence の取り扱い**: corpus は parity-clean のみを保持する方針。
+   jq と jq-jit が割れる shape を見つけたら corpus には入れず、
+   `tests/regression.test` に divergence を再現する最小ケースを起票して
+   バグを潰してから corpus に昇格させる。corpus に「skip」「expected fail」の
+   仕組みは置かない（数が増えると divergence が常態化するので）。
+
 ### テスト出力
 
 `cargo test --release` だけだと regression 通過数が非表示。必ず `--nocapture`:
