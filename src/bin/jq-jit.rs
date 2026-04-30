@@ -1141,11 +1141,15 @@ fn eval_arith_raw_unresolved(
 /// Compare two raw JSON field values using jq type ordering.
 /// Handles: both numeric, both string, mixed (number < string).
 #[inline]
-fn compare_raw_fields(raw: &[u8], r1: (usize, usize), r2: (usize, usize), op: &jq_jit::ir::BinOp) -> bool {
+fn compare_raw_fields(raw: &[u8], r1: (usize, usize), r2: (usize, usize), op: &jq_jit::ir::BinOp) -> Option<bool> {
     use jq_jit::ir::BinOp;
     // jq's total ordering: null < false < true < number < string < array < object.
     // Use the first byte of each span as a cheap type tag so we can resolve
     // null/null, bool/*, and cross-type pairs without parsing.
+    //
+    // Returns `None` when the comparison can't be decided on the fast
+    // path — empty span, or `parse_json_num` declines a numeric span
+    // (>15-digit integer, etc., #406). Callers should bail to generic.
     fn type_rank(first: u8) -> u8 {
         match first {
             b'n' => 0,
@@ -1160,19 +1164,19 @@ fn compare_raw_fields(raw: &[u8], r1: (usize, usize), r2: (usize, usize), op: &j
     }
     let s1 = &raw[r1.0..r1.1];
     let s2 = &raw[r2.0..r2.1];
-    if s1.is_empty() || s2.is_empty() { return false; }
+    if s1.is_empty() || s2.is_empty() { return None; }
     let t1 = type_rank(s1[0]);
     let t2 = type_rank(s2[0]);
     if t1 != t2 {
-        return match op {
+        return Some(match op {
             BinOp::Gt => t1 > t2, BinOp::Lt => t1 < t2,
             BinOp::Ge => t1 >= t2, BinOp::Le => t1 <= t2,
             BinOp::Eq => false, BinOp::Ne => true,
             _ => false,
-        };
+        });
     }
     // Same type: compare values.
-    match s1[0] {
+    Some(match s1[0] {
         b'n' => matches!(op, BinOp::Eq | BinOp::Ge | BinOp::Le),
         b'f' | b't' => matches!(op, BinOp::Eq | BinOp::Ge | BinOp::Le),
         b'-' | b'0'..=b'9' => match (parse_json_num(s1), parse_json_num(s2)) {
@@ -1182,7 +1186,7 @@ fn compare_raw_fields(raw: &[u8], r1: (usize, usize), r2: (usize, usize), op: &j
                 BinOp::Eq => v1 == v2, BinOp::Ne => v1 != v2,
                 _ => false,
             },
-            _ => false,
+            _ => return None,
         },
         b'"' => {
             let i1 = &s1[1..s1.len()-1];
@@ -1215,11 +1219,11 @@ fn compare_raw_fields(raw: &[u8], r1: (usize, usize), r2: (usize, usize), op: &j
                         _ => false,
                     }
                 }
-                _ => false,
+                _ => return None,
             }
         }
-        _ => false,
-    }
+        _ => return None,
+    })
 }
 
 /// Return true if `resolved` would raise an error in jq for the given
@@ -1623,7 +1627,7 @@ fn emit_resolved_value(
                         if b.cond_arith_ops.is_empty() {
                             // No arith ops: full type-aware comparison
                             if r2.0 < r2.1 && vs < ve {
-                                compare_raw_fields(raw, (vs, ve), r2, &b.cond_op)
+                                compare_raw_fields(raw, (vs, ve), r2, &b.cond_op).unwrap_or(false)
                             } else { false }
                         } else {
                             // With arith ops: must be numeric
@@ -1988,7 +1992,7 @@ fn eval_resolved_bool(resolved: &ResolvedRemap, raw: &[u8], ranges: &[(usize, us
             let r1 = ranges[*idx1];
             let r2 = ranges[*idx2];
             if r1.0 < r1.1 && r2.0 < r2.1 {
-                Some(compare_raw_fields(raw, r1, r2, op))
+                compare_raw_fields(raw, r1, r2, op)
             } else { None }
         }
         ResolvedRemap::BoolExpr(ref l, ref bool_op, ref r) => {
@@ -7926,7 +7930,7 @@ fn real_main() {
                                     }
                                     return Ok(());
                                 }
-                                let pass = compare_raw_fields(raw, r1.unwrap(), r2.unwrap(), cond_op);
+                                let pass = compare_raw_fields(raw, r1.unwrap(), r2.unwrap(), cond_op).unwrap_or(false);
                                 let out_br = if pass { then_out } else { else_output };
                                 match out_br {
                                     BranchOutput::Literal(ref bytes) => {
@@ -8135,7 +8139,7 @@ fn real_main() {
                                         let both_num_or_str = vs < ve && r2.0 < r2.1
                                             && is_num_or_str(raw[vs]) && is_num_or_str(raw[r2.0]);
                                         if br.cond_arith_ops.is_empty() && both_num_or_str {
-                                            Some(compare_raw_fields(raw, (vs, ve), r2, &br.cond_op))
+                                            compare_raw_fields(raw, (vs, ve), r2, &br.cond_op)
                                         } else if let (Some(mut val), Some(rhs)) = (
                                             parse_json_num(field_bytes),
                                             parse_json_num(&raw[r2.0..r2.1]),
@@ -8791,7 +8795,7 @@ fn real_main() {
                                     let is_num_or_str = |c: u8| c == b'"' || c == b'-' || c.is_ascii_digit();
                                     if r1.0 < r1.1 && r2.0 < r2.1
                                         && is_num_or_str(raw[r1.0]) && is_num_or_str(raw[r2.0]) {
-                                        Some(compare_raw_fields(raw, r1, r2, op))
+                                        compare_raw_fields(raw, r1, r2, op)
                                     } else { None }
                                 }
                             };
@@ -10266,7 +10270,7 @@ fn real_main() {
                                 json_object_get_field_raw(raw, 0, sff_f1),
                                 json_object_get_field_raw(raw, 0, sff_f2),
                             ) {
-                                Some(compare_raw_fields(raw, r1, r2, &sff_op))
+                                compare_raw_fields(raw, r1, r2, &sff_op)
                             } else {
                                 None
                             }
@@ -15293,7 +15297,7 @@ fn real_main() {
                                 }
                                 return Ok(());
                             }
-                            let pass = compare_raw_fields(raw, r1.unwrap(), r2.unwrap(), cond_op);
+                            let pass = compare_raw_fields(raw, r1.unwrap(), r2.unwrap(), cond_op).unwrap_or(false);
                             let out_br = if pass { then_out } else { else_output };
                             match out_br {
                                 BranchOutput::Literal(ref bytes) => {
@@ -15495,7 +15499,7 @@ fn real_main() {
                                     let both_num_or_str = vs < ve && r2.0 < r2.1
                                         && is_num_or_str(raw[vs]) && is_num_or_str(raw[r2.0]);
                                     if br.cond_arith_ops.is_empty() && both_num_or_str {
-                                        Some(compare_raw_fields(raw, (vs, ve), r2, &br.cond_op))
+                                        compare_raw_fields(raw, (vs, ve), r2, &br.cond_op)
                                     } else if let (Some(mut val), Some(rhs)) = (
                                         parse_json_num(field_bytes),
                                         parse_json_num(&raw[r2.0..r2.1]),
@@ -16135,7 +16139,7 @@ fn real_main() {
                                 let is_num_or_str = |c: u8| c == b'"' || c == b'-' || c.is_ascii_digit();
                                 if r1.0 < r1.1 && r2.0 < r2.1
                                     && is_num_or_str(raw[r1.0]) && is_num_or_str(raw[r2.0]) {
-                                    Some(compare_raw_fields(raw, r1, r2, op))
+                                    compare_raw_fields(raw, r1, r2, op)
                                 } else { None }
                             }
                         };
@@ -17537,7 +17541,7 @@ fn real_main() {
                             json_object_get_field_raw(raw, 0, sff_f1),
                             json_object_get_field_raw(raw, 0, sff_f2),
                         ) {
-                            Some(compare_raw_fields(raw, r1, r2, &sff_op))
+                            compare_raw_fields(raw, r1, r2, &sff_op)
                         } else {
                             None
                         }

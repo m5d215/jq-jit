@@ -6246,3 +6246,18 @@ false
 (select(.a == "")) | (.a + .a)
 {"a":""}
 ""
+
+# #406: select(.f1 cmp .f2) silently dropped rows when fields are
+# big integers (>15 digits) because parse_json_num declines and
+# compare_raw_fields returned false instead of signalling bail.
+select(.a >= .a)
+{"a":9007199254740992}
+{"a":9007199254740992}
+
+select(.a == .a)
+{"a":9007199254740991}
+{"a":9007199254740991}
+
+select(.a <= .a)
+{"a":9007199254740993}
+{"a":9007199254740993}
