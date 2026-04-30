@@ -1,0 +1,9 @@
+{
+  "events": [
+    {"time": "2026-04-30T08:00:00Z", "level": "info", "service": "api", "message": "started"},
+    {"time": "2026-04-30T08:01:12Z", "level": "error", "service": "db", "message": "connection refused"},
+    {"time": "2026-04-30T08:01:15Z", "level": "warn", "service": "api", "message": "slow query"},
+    {"time": "2026-04-30T08:02:03Z", "level": "error", "service": "api", "message": "500 from upstream"},
+    {"time": "2026-04-30T08:03:00Z", "level": "info", "service": "api", "message": "ok"}
+  ]
+}

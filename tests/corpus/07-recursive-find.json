@@ -1,0 +1,11 @@
+{
+  "name": "myproject",
+  "homepage": "https://example.com/proj",
+  "repository": {"type": "git", "url": "https://github.com/example/proj"},
+  "links": [
+    "http://insecure.example.com",
+    "https://docs.example.com",
+    "https://example.com/proj"
+  ],
+  "internal": {"trace": "trace-id-1234"}
+}

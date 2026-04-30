@@ -1,0 +1,6 @@
+{
+  "server": {"host": "example.com", "port": 8080},
+  "features": {"auth": true, "cache": false},
+  "tags": ["prod", "us-east"],
+  "version": 3
+}

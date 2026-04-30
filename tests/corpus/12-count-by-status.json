@@ -1,0 +1,11 @@
+{
+  "entries": [
+    {"id": 1, "status": "open"},
+    {"id": 2, "status": "closed"},
+    {"id": 3, "status": "open"},
+    {"id": 4, "status": "closed"},
+    {"id": 5, "status": "merged"},
+    {"id": 6, "status": "open"},
+    {"id": 7, "status": "closed"}
+  ]
+}
