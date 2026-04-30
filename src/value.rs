@@ -1115,7 +1115,7 @@ pub fn json_value_length(b: &[u8], pos: usize) -> Option<usize> {
 /// equivalent to jq's behaviour for keys without escape sequences.
 /// Escape-equivalent keys (e.g. `"a"` vs `"a"`) are not folded;
 /// jq does fold them after unescape. That edge case is uncommon in
-/// real inputs and not currently surfaced by `tests/fuzz_diff.rs`.
+/// real inputs and not currently surfaced by `tests/fuzz_restricted.rs`.
 pub fn json_object_dedup_pairs(
     b: &[u8],
     pos: usize,

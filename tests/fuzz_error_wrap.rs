@@ -12,15 +12,15 @@
 //! random shapes we lock in `(error)? ≡ empty` as a structural invariant.
 //!
 //! The generator is a deliberately *narrower* version of
-//! `differential_proptest.rs`'s `FilterExpr`: it excludes multi-valued
+//! `fuzz_full.rs`'s `FilterExpr`: it excludes multi-valued
 //! constructors (`,`, `range`, `recurse`, `foreach`, `limit(n>1; …)`)
 //! and assignment forms because the "empty output" post-condition is
 //! ill-defined when the filter can yield several values before erroring.
 //! Single-valued shapes give a sharp predicate.
 //!
-//! ## Why default-on, unlike `differential_proptest.rs`
+//! ## Why default-on, unlike `fuzz_full.rs`
 //!
-//! `differential_proptest.rs` is `#[ignore]` because it asserts full
+//! `fuzz_full.rs` is `#[ignore]` because it asserts full
 //! value-level equivalence and trips on every fast-path divergence; it
 //! waits on the broader contract (#83) to land. The narrower invariant
 //! here passes today (post-sweep) and is what we want to keep passing.
@@ -35,11 +35,15 @@
 //! paste it into `tests/regression.test` (the `(<expr>)?` wrap is what
 //! you'd assert against `""`).
 
-use std::path::PathBuf;
-use std::process::Command;
+mod common;
+
 use std::time::Duration;
 
 use proptest::prelude::*;
+
+use common::diff_harness::{jq_jit_path, require_jq, run_filter};
+
+const TEST_LABEL: &str = "fuzz_error_wrap";
 
 const IDENT_POOL: &[&str] = &["a", "b", "c", "x", "y"];
 
@@ -234,88 +238,14 @@ fn json_strategy() -> impl Strategy<Value = JsonShape> {
     })
 }
 
-struct RunOutput {
-    stdout: String,
-    is_error: bool,
-}
-
-fn run_once(bin: &str, filter: &str, input: &str, timeout: Duration) -> Option<RunOutput> {
-    let mut cmd = Command::new(bin);
-    cmd.arg("-c").arg(filter);
-    cmd.stdin(std::process::Stdio::piped());
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-    let mut child = cmd.spawn().ok()?;
-    {
-        use std::io::Write;
-        let mut stdin = child.stdin.take()?;
-        let _ = stdin.write_all(input.as_bytes());
-        let _ = stdin.write_all(b"\n");
-    }
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let out = child.wait_with_output().ok()?;
-                let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-                let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-                #[cfg(unix)]
-                {
-                    use std::os::unix::process::ExitStatusExt;
-                    if let Some(sig) = status.signal() {
-                        return Some(RunOutput {
-                            stdout: format!("<killed by signal {}> stderr: {}", sig, stderr.trim()),
-                            is_error: true,
-                        });
-                    }
-                }
-                return Some(RunOutput { stdout, is_error: !status.success() });
-            }
-            Ok(None) => {
-                if start.elapsed() > timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Some(RunOutput { stdout: "<timeout>".to_string(), is_error: true });
-                }
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            Err(_) => return None,
-        }
-    }
-}
-
-fn resolve_jq() -> Option<String> {
-    let candidates: Vec<String> = std::env::var("JQ_BIN")
-        .ok()
-        .into_iter()
-        .chain(std::iter::once("/opt/homebrew/opt/jq/bin/jq".to_string()))
-        .chain(std::iter::once("jq".to_string()))
-        .collect();
-    for cand in &candidates {
-        let Ok(out) = Command::new(cand).arg("--version").output() else { continue };
-        if !out.status.success() { continue; }
-        let ver = String::from_utf8_lossy(&out.stdout);
-        if ver.trim().starts_with("jq-1.8.") { return Some(cand.clone()); }
-    }
-    None
-}
-
 fn output_is_empty(s: &str) -> bool {
     s.lines().all(|l| l.trim().is_empty())
 }
 
 #[test]
 fn fast_path_error_wrap_empty() {
-    let Some(jq) = resolve_jq() else {
-        let msg = "no jq-1.8.x binary found. Set JQ_BIN to a jq-1.8.x binary.";
-        if std::env::var_os("CI").is_some() {
-            panic!("fast_path_error_wrap_proptest: {}", msg);
-        }
-        eprintln!("SKIP fast_path_error_wrap_proptest: {}", msg);
-        return;
-    };
-    let jq_jit: PathBuf = env!("CARGO_BIN_EXE_jq-jit").into();
-    let jq_jit = jq_jit.to_string_lossy().into_owned();
+    let Some(jq) = require_jq(TEST_LABEL) else { return };
+    let jq_jit = jq_jit_path().to_string();
 
     let cases: u32 = std::env::var("JQJIT_PROPTEST_CASES")
         .ok().and_then(|s| s.parse().ok()).unwrap_or(200);
@@ -341,7 +271,7 @@ fn fast_path_error_wrap_empty() {
         let input = render_json(&input_shape);
 
         // Step 1: does jq error on this filter+input?
-        let Some(r_jq) = run_once(&jq, &filter, &input, timeout) else {
+        let Some(r_jq) = run_filter(&jq, &filter, &input, timeout) else {
             return Ok(());  // spawn failure — skip
         };
         if !r_jq.is_error {
@@ -351,7 +281,7 @@ fn fast_path_error_wrap_empty() {
 
         // Step 2: does jq-jit (filter)? produce empty output?
         let wrapped = format!("({})?", filter);
-        let Some(r_jit) = run_once(&jq_jit, &wrapped, &input, timeout) else {
+        let Some(r_jit) = run_filter(&jq_jit, &wrapped, &input, timeout) else {
             return Ok(());
         };
 

@@ -2,7 +2,7 @@
 //! / fast-path dispatch *and* through the generic tree-walking interpreter,
 //! and assert identical stdout + exit-code class.
 //!
-//! Differential testing against `jq-1.8.1` (`tests/differential.rs`) catches
+//! Differential testing against `jq-1.8.1` (`tests/diff_corpus.rs`) catches
 //! external divergences only. This harness catches the *internal* class —
 //! the JIT path and the interpreter path inside jq-jit drifting apart on the
 //! same filter — without depending on an external `jq` binary.
@@ -15,9 +15,13 @@
 //! Set `JIT_INTERP_DIFF_LIMIT=N` to truncate the corpus during local
 //! development; the default runs every case in `tests/regression.test`.
 
+mod common;
+
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
+
+use common::json_normalize::{normalize_value, serialize_sorted};
 
 struct Case {
     filter: String,
@@ -115,9 +119,9 @@ fn run_once(bin: &str, filter: &str, input: &str, force_interp: bool) -> Option<
     }
 }
 
-/// Compact JSON normalisation matching `tests/differential.rs`. Filters that
-/// emit non-JSON lines (raw error text via `error("…")`) fall through to the
-/// raw string branch so their output still compares directly.
+/// Lossy variant of `common::json_normalize::normalize`: filters that
+/// emit non-JSON lines (raw error text via `error("…")`) fall through to
+/// the raw string branch so their output still compares directly.
 fn normalize(output: &str) -> String {
     let mut lines = Vec::new();
     for line in output.lines() {
@@ -131,50 +135,6 @@ fn normalize(output: &str) -> String {
         }
     }
     lines.join("\n")
-}
-
-fn normalize_value(val: serde_json::Value) -> serde_json::Value {
-    use serde_json::Value;
-    match val {
-        Value::Number(n) => {
-            if let Some(f) = n.as_f64() {
-                if f.is_finite() && f == (f as i64) as f64 && f.abs() < (1i64 << 53) as f64 {
-                    return Value::Number(serde_json::Number::from(f as i64));
-                }
-            }
-            Value::Number(n)
-        }
-        Value::Array(arr) => Value::Array(arr.into_iter().map(normalize_value).collect()),
-        Value::Object(map) => Value::Object(
-            map.into_iter()
-                .map(|(k, v)| (k, normalize_value(v)))
-                .collect(),
-        ),
-        other => other,
-    }
-}
-
-fn serialize_sorted(val: &serde_json::Value) -> String {
-    use serde_json::Value;
-    match val {
-        Value::Null => "null".to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        Value::String(s) => serde_json::to_string(s).unwrap(),
-        Value::Array(arr) => {
-            let items: Vec<String> = arr.iter().map(serialize_sorted).collect();
-            format!("[{}]", items.join(","))
-        }
-        Value::Object(map) => {
-            let mut entries: Vec<(&String, &Value)> = map.iter().collect();
-            entries.sort_by_key(|(k, _)| *k);
-            let items: Vec<String> = entries
-                .iter()
-                .map(|(k, v)| format!("{}:{}", serde_json::to_string(k).unwrap(), serialize_sorted(v)))
-                .collect();
-            format!("{{{}}}", items.join(","))
-        }
-    }
 }
 
 /// Cases the harness flags but does not fail on. Each entry pins a specific

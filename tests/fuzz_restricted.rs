@@ -7,7 +7,7 @@
 //!
 //! ## Why "conservative"
 //!
-//! `tests/differential_proptest.rs` already exists as a heavier opt-in
+//! `tests/fuzz_full.rs` already exists as a heavier opt-in
 //! variant (`#[ignore]`) that exercises the full grammar and trips on
 //! every fast-path divergence as it falls out. This file is the
 //! *default-on* counterpart — its generators omit shapes whose
@@ -20,7 +20,7 @@
 //! * `try ... catch …` and `(…)?` — these turn raised errors into
 //!   in-band values, exposing minor error-message wording divergences
 //!   (parens around quoted keys, value-tagged numbers, etc.) that are
-//!   their own bug class. The opt-in `differential_proptest.rs` covers
+//!   their own bug class. The opt-in `fuzz_full.rs` covers
 //!   that surface; this harness keeps errors on stderr so they remain
 //!   in the "both errored → skip" branch.
 //! * `.[:]` — slice with both endpoints absent. jq treats this as a
@@ -76,7 +76,7 @@
 //! Bigger runs:
 //!
 //! ```bash
-//! JQJIT_PROPTEST_CASES=100000 cargo test --release --test fuzz_diff
+//! JQJIT_PROPTEST_CASES=100000 cargo test --release --test fuzz_restricted
 //! ```
 //!
 //! When a failure shrinks, paste the minimal `(FilterExpr, JsonShape)`
@@ -89,7 +89,7 @@
 //! 1. **Include it here** — add the new builtin / shape to the lists
 //!    below if its grammar is single-valued and its divergence surface
 //!    is small.
-//! 2. **Leave it to `differential_proptest.rs`** — if the shape needs
+//! 2. **Leave it to `fuzz_full.rs`** — if the shape needs
 //!    its own dedicated contract test (e.g. multi-stream forms), let
 //!    the heavier opt-in harness cover it for now.
 //!
@@ -97,11 +97,16 @@
 //! by `cargo test`. Only fall back to (2) when a shape is genuinely
 //! divergence-prone in a way that can't be fixed in the same PR.
 
-use std::path::PathBuf;
-use std::process::Command;
+mod common;
+
 use std::time::Duration;
 
 use proptest::prelude::*;
+
+use common::diff_harness::{jq_jit_path, require_jq, run_filter};
+use common::json_normalize::normalize;
+
+const TEST_LABEL: &str = "fuzz_restricted";
 
 const IDENT_POOL: &[&str] = &["a", "b", "c", "x", "y"];
 
@@ -600,136 +605,10 @@ fn json_strategy() -> impl Strategy<Value = JsonShape> {
     ]
 }
 
-struct RunOutput {
-    stdout: String,
-    is_error: bool,
-}
-
-fn run_once(bin: &str, filter: &str, input: &str, timeout: Duration) -> Option<RunOutput> {
-    let mut cmd = Command::new(bin);
-    cmd.arg("-c").arg(filter);
-    cmd.stdin(std::process::Stdio::piped());
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-    let mut child = cmd.spawn().ok()?;
-    {
-        use std::io::Write;
-        let mut stdin = child.stdin.take()?;
-        let _ = stdin.write_all(input.as_bytes());
-        let _ = stdin.write_all(b"\n");
-    }
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let out = child.wait_with_output().ok()?;
-                let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-                let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-                #[cfg(unix)]
-                {
-                    use std::os::unix::process::ExitStatusExt;
-                    if let Some(sig) = status.signal() {
-                        return Some(RunOutput {
-                            stdout: format!("<killed by signal {}> stderr: {}", sig, stderr.trim()),
-                            is_error: true,
-                        });
-                    }
-                }
-                return Some(RunOutput { stdout, is_error: !status.success() });
-            }
-            Ok(None) => {
-                if start.elapsed() > timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Some(RunOutput { stdout: "<timeout>".to_string(), is_error: true });
-                }
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            Err(_) => return None,
-        }
-    }
-}
-
-fn normalize(output: &str) -> Result<String, String> {
-    let mut lines = Vec::new();
-    for line in output.lines() {
-        let t = line.trim();
-        if t.is_empty() { continue; }
-        let v: serde_json::Value = serde_json::from_str(t)
-            .map_err(|e| format!("non-JSON `{}`: {}", t, e))?;
-        lines.push(serialize_sorted(&normalize_value(v)));
-    }
-    Ok(lines.join("\n"))
-}
-
-fn normalize_value(val: serde_json::Value) -> serde_json::Value {
-    use serde_json::Value;
-    match val {
-        Value::Number(n) => {
-            if let Some(f) = n.as_f64() {
-                if f.is_finite() && f == (f as i64) as f64 && f.abs() < (1i64 << 53) as f64 {
-                    return Value::Number(serde_json::Number::from(f as i64));
-                }
-            }
-            Value::Number(n)
-        }
-        Value::Array(a) => Value::Array(a.into_iter().map(normalize_value).collect()),
-        Value::Object(m) => Value::Object(m.into_iter().map(|(k, v)| (k, normalize_value(v))).collect()),
-        other => other,
-    }
-}
-
-fn serialize_sorted(val: &serde_json::Value) -> String {
-    use serde_json::Value;
-    match val {
-        Value::Null => "null".into(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        Value::String(s) => serde_json::to_string(s).unwrap(),
-        Value::Array(a) => {
-            let items: Vec<String> = a.iter().map(serialize_sorted).collect();
-            format!("[{}]", items.join(","))
-        }
-        Value::Object(m) => {
-            let mut entries: Vec<(&String, &Value)> = m.iter().collect();
-            entries.sort_by_key(|(k, _)| *k);
-            let items: Vec<String> = entries
-                .iter()
-                .map(|(k, v)| format!("{}:{}", serde_json::to_string(k).unwrap(), serialize_sorted(v)))
-                .collect();
-            format!("{{{}}}", items.join(","))
-        }
-    }
-}
-
-fn resolve_jq() -> Option<String> {
-    let candidates: Vec<String> = std::env::var("JQ_BIN")
-        .ok()
-        .into_iter()
-        .chain(std::iter::once("/opt/homebrew/opt/jq/bin/jq".to_string()))
-        .chain(std::iter::once("jq".to_string()))
-        .collect();
-    for cand in &candidates {
-        let Ok(out) = Command::new(cand).arg("--version").output() else { continue };
-        if !out.status.success() { continue; }
-        let ver = String::from_utf8_lossy(&out.stdout);
-        if ver.trim().starts_with("jq-1.8.") { return Some(cand.clone()); }
-    }
-    None
-}
-
 #[test]
-fn fuzz_diff_against_jq_1_8() {
-    let Some(jq) = resolve_jq() else {
-        let msg = "no jq-1.8.x binary found. Set JQ_BIN to a jq-1.8.x binary.";
-        if std::env::var_os("CI").is_some() {
-            panic!("fuzz_diff: {}", msg);
-        }
-        eprintln!("SKIP fuzz_diff: {}", msg);
-        return;
-    };
-    let jq_jit: PathBuf = env!("CARGO_BIN_EXE_jq-jit").into();
-    let jq_jit = jq_jit.to_string_lossy().into_owned();
+fn fuzz_restricted_against_jq_1_8() {
+    let Some(jq) = require_jq(TEST_LABEL) else { return };
+    let jq_jit = jq_jit_path().to_string();
 
     let cases: u32 = std::env::var("JQJIT_PROPTEST_CASES")
         .ok().and_then(|s| s.parse().ok()).unwrap_or(256);
@@ -754,10 +633,10 @@ fn fuzz_diff_against_jq_1_8() {
         let filter = render(&expr);
         let input = render_json(&input_shape);
 
-        let Some(r_jq) = run_once(&jq, &filter, &input, timeout) else {
+        let Some(r_jq) = run_filter(&jq, &filter, &input, timeout) else {
             return Ok(());
         };
-        let Some(r_jit) = run_once(&jq_jit, &filter, &input, timeout) else {
+        let Some(r_jit) = run_filter(&jq_jit, &filter, &input, timeout) else {
             return Ok(());
         };
 
@@ -804,13 +683,13 @@ fn fuzz_diff_against_jq_1_8() {
     });
 
     eprintln!(
-        "=== fuzz_diff (vs {}) ===\n  compared: {}\n  both_errored: {}",
+        "=== fuzz_restricted (vs {}) ===\n  compared: {}\n  both_errored: {}",
         jq,
         compared.load(std::sync::atomic::Ordering::Relaxed),
         both_error.load(std::sync::atomic::Ordering::Relaxed),
     );
 
     if let Err(e) = result {
-        panic!("fuzz_diff failed:\n{}", e);
+        panic!("fuzz_restricted failed:\n{}", e);
     }
 }

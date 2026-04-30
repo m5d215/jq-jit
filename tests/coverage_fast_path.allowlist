@@ -2,7 +2,7 @@
 # Generated: 2026-04-23T09:00Z from the coverage baseline.
 # See docs/maintenance.md for how to shrink this list.
 #
-# Rules enforced by tests/fast_path_coverage.rs:
+# Rules enforced by tests/coverage_fast_path.rs:
 #   - Entry appears here AND is in the src detect_* registry AND the
 #     corpus does not hit it  → grandfathered (tolerated, not failing)
 #   - Entry appears here but the src registry no longer has it  → FAIL
