@@ -2382,7 +2382,17 @@ pub fn eval(
                 let old_val = crate::runtime::rt_getpath(&result, path).unwrap_or(Value::Null);
                 let mut has_output = false;
                 let mut new_val = old_val.clone();
-                eval(update_expr, old_val, env, &mut |v| { has_output = true; new_val = v; Ok(true) })?;
+                // jq `|=` takes the FIRST value the RHS emits and discards the
+                // rest (`{a:1} | .a |= (1,2)` is `{a:1}`, not `{a:2}`). Returning
+                // `Ok(false)` from the callback stops the generator after the
+                // first hit; without it the interpreter ended up with the last
+                // emitted value and diverged from JIT / fast-path on the same
+                // filter (#323 self-diff caught this).
+                eval(update_expr, old_val, env, &mut |v| {
+                    has_output = true;
+                    new_val = v;
+                    Ok(false)
+                })?;
                 if has_output {
                     result = crate::runtime::rt_setpath(&result, path, &new_val)?;
                 } else {

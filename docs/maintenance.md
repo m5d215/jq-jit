@@ -103,6 +103,34 @@ cargo test --release --test corpus_diff
    バグを潰してから corpus に昇格させる。corpus に「skip」「expected fail」の
    仕組みは置かない（数が増えると divergence が常態化するので）。
 
+### JIT vs interpreter self-diff（`tests/jit_vs_interp.rs` / #323）
+
+JIT/raw-byte fast path と generic tree-walking interpreter が同じ filter で
+同じ結果を返すかを `tests/regression.test` 全件で突き合わせる internal
+consistency check。jq バイナリは要らない。
+
+binary 側の knob は環境変数 `JQJIT_FORCE_INTERPRETER=1`:
+
+- raw-byte fast path 群（`detect_*` / `is_*`）を全部黙らせる
+- `compile_jit()` 呼び出しをスキップ
+- `Filter::execute` / `Filter::execute_cb` を `set_force_interpreter(true)` で
+  generic eval パスに固定
+
+```bash
+# self-diff 全件（CI 内、~14s）
+cargo test --release --test jit_vs_interp
+
+# 開発中に件数を絞る
+JIT_INTERP_DIFF_LIMIT=200 cargo test --release --test jit_vs_interp -- --nocapture
+```
+
+新しい fast path を足した直後 / 既存の fast path を弄った直後はこれが落ちる
+ことがある。落ちたら基本的に「fast path 側が正しい」（差分テストで jq と
+照合済み）／「interpreter 側が drift してる」のどちらか。両側を直すか、
+どうしても今すぐ直せない invariant 違反は `KNOWN_DIVERGENCES` に line 番号と
+理由を書いて allowlist する。allowlist は audit trail なので、ケースを直したら
+必ずエントリも消す（ハーネスは「known なのに今 pass した」も検知して落ちる）。
+
 ### テスト出力
 
 `cargo test --release` だけだと regression 通過数が非表示。必ず `--nocapture`:

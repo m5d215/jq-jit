@@ -9,6 +9,23 @@ use anyhow::Result;
 use crate::ir::CompiledFunc;
 use crate::value::Value;
 
+/// Self-diff knob for issue #323: when set, [`Filter::execute`] and
+/// [`Filter::execute_cb`] skip the typed fast path and JIT and run the generic
+/// tree-walking interpreter, regardless of whether `compile_jit` was called.
+/// The binary sets this once at startup when `JQJIT_FORCE_INTERPRETER` is in
+/// the environment; tests/jit_vs_interp.rs shells out twice — once with it,
+/// once without — and asserts identical output.
+static FORCE_INTERPRETER: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_force_interpreter(on: bool) {
+    FORCE_INTERPRETER.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn force_interpreter() -> bool {
+    FORCE_INTERPRETER.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Comparison value: either numeric or string.
 #[derive(Debug, Clone)]
 pub enum CmpVal {
@@ -11063,17 +11080,22 @@ impl Filter {
 
     /// Execute the filter against an input value, collecting all results.
     pub fn execute(&self, input: &Value) -> Result<Vec<Value>> {
+        let forced = force_interpreter();
         // Typed fast path (issue #83): probed ahead of JIT / eval. Only
         // migrated filter shapes return `Some`; every other shape or
         // unhandled input type returns `None` and falls through to the
         // authoritative generic path below.
-        if let Some(verdict) = self.try_typed_fast_path(input) {
-            return verdict.map(|v| vec![v]);
+        if !forced {
+            if let Some(verdict) = self.try_typed_fast_path(input) {
+                return verdict.map(|v| vec![v]);
+            }
         }
 
         // Try JIT execution first
-        if let Some(jit_fn) = self.jit_fn {
-            return crate::jit::execute_jit(jit_fn, input);
+        if !forced {
+            if let Some(jit_fn) = self.jit_fn {
+                return crate::jit::execute_jit(jit_fn, input);
+            }
         }
 
         let (ref expr, ref funcs) = self.parsed;
@@ -11083,17 +11105,22 @@ impl Filter {
     /// Execute the filter with a callback for each result (avoids Vec allocation).
     /// Returns Ok(true) if all values were processed, Ok(false) if stopped early.
     pub fn execute_cb(&self, input: &Value, cb: &mut dyn FnMut(&Value) -> Result<bool>) -> Result<bool> {
+        let forced = force_interpreter();
         // Typed fast path (issue #83) — see `execute` for rationale. The
         // current pilot emits a single value, so hitting it closes out the
         // generator: we invoke `cb` once with the verdict and return its
         // continue/stop decision to the caller.
-        if let Some(verdict) = self.try_typed_fast_path(input) {
-            let val = verdict?;
-            return cb(&val);
+        if !forced {
+            if let Some(verdict) = self.try_typed_fast_path(input) {
+                let val = verdict?;
+                return cb(&val);
+            }
         }
 
-        if let Some(jit_fn) = self.jit_fn {
-            return crate::jit::execute_jit_cb(jit_fn, input, cb);
+        if !forced {
+            if let Some(jit_fn) = self.jit_fn {
+                return crate::jit::execute_jit_cb(jit_fn, input, cb);
+            }
         }
 
         let (ref expr, ref funcs) = self.parsed;
