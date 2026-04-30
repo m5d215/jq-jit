@@ -120,6 +120,34 @@ const BUILTIN_UNARY: &[&str] = &[
     "tostring", "to_entries", "reverse", "sort", "min", "max",
     "floor", "ceil", "fabs", "not", "add", "empty", "any", "all",
     "ascii_downcase", "ascii_upcase", "utf8bytelength",
+    // Non-finite producers (#321 phase 3b). Both ignore input and
+    // emit the same canonical form on jq-1.8 and jq-jit:
+    //   infinite -> 1.7976931348623157e+308 (jq stores Infinity as
+    //               f64::MAX in its number printer)
+    //   nan      -> null (NaN serializes as JSON null)
+    // Combinations like `infinite + 1`, `infinite > 0`, `nan == nan`
+    // were verified identical via probe before adding to the pool.
+    "infinite", "nan",
+];
+
+/// Float literals used as filter leaves (#321 phase 3b). Covers the
+/// f64 boundary cross-section the issue calls out: `f64::MAX`,
+/// `f64::MIN`, denormals, and overflow spellings. Inputs that
+/// overflow to Infinity (`1e500`) print as `1E+500` on both
+/// implementations; `serde_json` rejects that as out-of-range, so
+/// the harness lands the case in the jq-side normalize-Err branch and
+/// skips. The eval/JIT path is still exercised, which is the goal.
+/// Pure float literals stay in the *filter* per the module-doc
+/// exclusion on input-side floats.
+const FLOAT_LITERALS: &[&str] = &[
+    "1.7976931348623157e+308",  // exact f64::MAX
+    "-1.7976931348623157e+308", // exact -f64::MAX
+    "1e308",                    // just under f64::MAX
+    "-1e308",
+    "1e500",                    // overflows to Infinity printer
+    "-1e500",
+    "1e-300",                   // small normal
+    "5e-324",                   // smallest subnormal
 ];
 
 #[derive(Debug, Clone)]
@@ -144,6 +172,12 @@ enum FilterExpr {
     Reduce(Box<FilterExpr>),
     RangeN(u32),
     IntLiteral(i32),
+    /// Float literal as a static spelling, drawn from
+    /// `FLOAT_LITERALS` (#321 phase 3b). Stored as `&'static str`
+    /// rather than `f64` so the rendered filter matches the source
+    /// spelling exactly — relevant for overflow forms (`1e500`)
+    /// where `f64::to_string` would emit `inf` instead.
+    FloatLiteral(&'static str),
     /// `.f1 op .f2` — exercises the FieldCmpField / FieldOpField fast
     /// paths the leaf shapes don't otherwise reach (#347).
     FieldFieldBinop(String, BinopOp, String),
@@ -226,6 +260,7 @@ fn render(expr: &FilterExpr) -> String {
         ),
         FilterExpr::RangeN(n) => format!("range({})", n),
         FilterExpr::IntLiteral(n) => n.to_string(),
+        FilterExpr::FloatLiteral(s) => (*s).to_string(),
         FilterExpr::FieldFieldBinop(f1, op, f2) => format!(".{} {} .{}", f1, op.render(), f2),
         FilterExpr::FieldConstBinop(f, op, n) => format!(".{} {} {}", f, op.render(), n),
         FilterExpr::ConstFieldBinop(n, op, f) => format!("{} {} .{}", n, op.render(), f),
@@ -323,6 +358,7 @@ fn leaf_strategy() -> impl Strategy<Value = FilterExpr> {
         prop::sample::select(BUILTIN_UNARY).prop_map(FilterExpr::UnaryBuiltin),
         (0u32..5).prop_map(FilterExpr::RangeN),
         (-3i32..=3).prop_map(FilterExpr::IntLiteral),
+        prop::sample::select(FLOAT_LITERALS).prop_map(FilterExpr::FloatLiteral),
         prop_oneof![
             (-3i32..=3, prop::option::of(-3i32..=3))
                 .prop_map(|(a, b)| FilterExpr::SliceLo(a, b)),
