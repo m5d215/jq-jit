@@ -10949,36 +10949,47 @@ fn real_main() {
                     let mut ranges = vec![(0usize, 0usize); all_fields.len()];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        // Check string condition
-                        let pass = if let Some(ref expected) = expected_eq {
+                        // #400: bail to generic for shapes the inline emitter
+                        // can't faithfully match. Same template as #398.
+                        let mut handled = false;
+                        if raw.first() == Some(&b'{') {
                             if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sel_field) {
-                                let val_bytes = &raw[vs..ve];
-                                let m = val_bytes == expected.as_slice();
-                                if test_type == "eq" { m } else { !m }
-                            } else { false }
-                        } else {
-                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sel_field) {
-                                let val = &raw[vs..ve];
-                                if val.len() >= 2 && val[0] == b'"' && val[ve-vs-1] == b'"' && !val[1..ve-vs-1].contains(&b'\\') {
-                                    let inner = &val[1..ve-vs-1];
-                                    match test_type.as_str() {
-                                        "startswith" => inner.starts_with(test_arg.as_bytes()),
-                                        "endswith" => inner.ends_with(test_arg.as_bytes()),
-                                        "contains" => bytes_contains(inner, test_arg.as_bytes()),
-                                        _ => false,
+                                let pass = if let Some(ref expected) = expected_eq {
+                                    let val_bytes = &raw[vs..ve];
+                                    let m = val_bytes == expected.as_slice();
+                                    Some(if test_type == "eq" { m } else { !m })
+                                } else {
+                                    let val = &raw[vs..ve];
+                                    if val.len() >= 2 && val[0] == b'"' && val[ve-vs-1] == b'"' && !val[1..ve-vs-1].contains(&b'\\') {
+                                        let inner = &val[1..ve-vs-1];
+                                        Some(match test_type.as_str() {
+                                            "startswith" => inner.starts_with(test_arg.as_bytes()),
+                                            "endswith" => inner.ends_with(test_arg.as_bytes()),
+                                            "contains" => bytes_contains(inner, test_arg.as_bytes()),
+                                            _ => false,
+                                        })
+                                    } else { None }
+                                };
+                                if let Some(pass) = pass {
+                                    if !pass {
+                                        handled = true;
+                                    } else if json_object_get_fields_raw_buf(raw, 0, &field_strs, &mut ranges)
+                                        && !resolved.iter().any(|r| resolved_would_error(r, raw, &ranges))
+                                    {
+                                        for (i, (prefix, res)) in key_prefixes.iter().zip(resolved.iter()).enumerate() {
+                                            compact_buf.extend_from_slice(prefix);
+                                            emit_resolved_value(&mut compact_buf, res, raw, &ranges);
+                                            let _ = i;
+                                        }
+                                        compact_buf.extend_from_slice(obj_close);
+                                        handled = true;
                                     }
-                                } else { false }
-                            } else { false }
-                        };
-                        if pass {
-                            if json_object_get_fields_raw_buf(raw, 0, &field_strs, &mut ranges) {
-                                for (i, (prefix, res)) in key_prefixes.iter().zip(resolved.iter()).enumerate() {
-                                    compact_buf.extend_from_slice(prefix);
-                                    emit_resolved_value(&mut compact_buf, res, raw, &ranges);
-                                    let _ = i;
                                 }
-                                compact_buf.extend_from_slice(obj_close);
                             }
+                        }
+                        if !handled {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -18160,34 +18171,45 @@ fn real_main() {
                 let mut ranges = vec![(0usize, 0usize); all_fields.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    let pass = if let Some(ref expected) = expected_eq {
+                    // Sibling fix to the stdin apply-site above (#400).
+                    let mut handled = false;
+                    if raw.first() == Some(&b'{') {
                         if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sel_field) {
-                            let val_bytes = &raw[vs..ve];
-                            let m = val_bytes == expected.as_slice();
-                            if test_type == "eq" { m } else { !m }
-                        } else { false }
-                    } else {
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sel_field) {
-                            let val = &raw[vs..ve];
-                            if val.len() >= 2 && val[0] == b'"' && val[ve-vs-1] == b'"' && !val[1..ve-vs-1].contains(&b'\\') {
-                                let inner = &val[1..ve-vs-1];
-                                match test_type.as_str() {
-                                    "startswith" => inner.starts_with(test_arg.as_bytes()),
-                                    "endswith" => inner.ends_with(test_arg.as_bytes()),
-                                    "contains" => bytes_contains(inner, test_arg.as_bytes()),
-                                    _ => false,
+                            let pass = if let Some(ref expected) = expected_eq {
+                                let val_bytes = &raw[vs..ve];
+                                let m = val_bytes == expected.as_slice();
+                                Some(if test_type == "eq" { m } else { !m })
+                            } else {
+                                let val = &raw[vs..ve];
+                                if val.len() >= 2 && val[0] == b'"' && val[ve-vs-1] == b'"' && !val[1..ve-vs-1].contains(&b'\\') {
+                                    let inner = &val[1..ve-vs-1];
+                                    Some(match test_type.as_str() {
+                                        "startswith" => inner.starts_with(test_arg.as_bytes()),
+                                        "endswith" => inner.ends_with(test_arg.as_bytes()),
+                                        "contains" => bytes_contains(inner, test_arg.as_bytes()),
+                                        _ => false,
+                                    })
+                                } else { None }
+                            };
+                            if let Some(pass) = pass {
+                                if !pass {
+                                    handled = true;
+                                } else if json_object_get_fields_raw_buf(raw, 0, &field_strs, &mut ranges)
+                                    && !resolved.iter().any(|r| resolved_would_error(r, raw, &ranges))
+                                {
+                                    for (prefix, res) in key_prefixes.iter().zip(resolved.iter()) {
+                                        compact_buf.extend_from_slice(prefix);
+                                        emit_resolved_value(&mut compact_buf, res, raw, &ranges);
+                                    }
+                                    compact_buf.extend_from_slice(obj_close);
+                                    handled = true;
                                 }
-                            } else { false }
-                        } else { false }
-                    };
-                    if pass {
-                        if json_object_get_fields_raw_buf(raw, 0, &field_strs, &mut ranges) {
-                            for (prefix, res) in key_prefixes.iter().zip(resolved.iter()) {
-                                compact_buf.extend_from_slice(prefix);
-                                emit_resolved_value(&mut compact_buf, res, raw, &ranges);
                             }
-                            compact_buf.extend_from_slice(obj_close);
                         }
+                    }
+                    if !handled {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
