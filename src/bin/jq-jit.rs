@@ -10560,13 +10560,15 @@ fn real_main() {
                     } else { None };
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        // #394: non-object input must bail to generic so jq's
-                        // type-error verdict (`Cannot index <type> with
-                        // string`) is preserved instead of silently dropping
-                        // the row. Detect by peeking the first byte; the
-                        // record fed by `json_stream_raw` is already
-                        // whitespace-trimmed at the boundary.
-                        if raw.first() != Some(&b'{') {
+                        // #394 / #396: bail to generic on non-object input
+                        // (jq raises type error) and on missing select field
+                        // (jq's verdict depends on test_type — `null != lit`
+                        // passes, `null == lit` rejects, str-funcs error;
+                        // generic handles each correctly).
+                        let sel_range = if raw.first() == Some(&b'{') {
+                            json_object_get_field_raw(raw, 0, sel_field)
+                        } else { None };
+                        let Some((vs, ve)) = sel_range else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             if compact_buf.len() >= 1 << 17 {
@@ -10574,28 +10576,33 @@ fn real_main() {
                                 compact_buf.clear();
                             }
                             return Ok(());
-                        }
+                        };
                         let pass = if let Some(ref expected) = expected_eq {
-                            // eq/ne test
-                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sel_field) {
-                                let val_bytes = &raw[vs..ve];
-                                let m = val_bytes == expected.as_slice();
-                                if test_type == "eq" { m } else { !m }
-                            } else { false }
+                            let val_bytes = &raw[vs..ve];
+                            let m = val_bytes == expected.as_slice();
+                            if test_type == "eq" { m } else { !m }
                         } else {
                             // startswith/endswith/contains
-                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sel_field) {
-                                let val = &raw[vs..ve];
-                                if val.len() >= 2 && val[0] == b'"' && val[ve-vs-1] == b'"' && !val[1..ve-vs-1].contains(&b'\\') {
-                                    let inner = &val[1..ve-vs-1];
-                                    match test_type.as_str() {
-                                        "startswith" => inner.starts_with(test_arg.as_bytes()),
-                                        "endswith" => inner.ends_with(test_arg.as_bytes()),
-                                        "contains" => bytes_contains(inner, test_arg.as_bytes()),
-                                        _ => false,
-                                    }
-                                } else { false }
-                            } else { false }
+                            let val = &raw[vs..ve];
+                            if val.len() >= 2 && val[0] == b'"' && val[ve-vs-1] == b'"' && !val[1..ve-vs-1].contains(&b'\\') {
+                                let inner = &val[1..ve-vs-1];
+                                match test_type.as_str() {
+                                    "startswith" => inner.starts_with(test_arg.as_bytes()),
+                                    "endswith" => inner.ends_with(test_arg.as_bytes()),
+                                    "contains" => bytes_contains(inner, test_arg.as_bytes()),
+                                    _ => false,
+                                }
+                            } else {
+                                // Non-string field with str-builtin: jq errors.
+                                // Bail.
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                if compact_buf.len() >= 1 << 17 {
+                                    let _ = out.write_all(&compact_buf);
+                                    compact_buf.clear();
+                                }
+                                return Ok(());
+                            }
                         };
                         if pass {
                             if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
@@ -10606,6 +10613,9 @@ fn real_main() {
                                     compact_buf.extend_from_slice(val);
                                 }
                                 compact_buf.push(b'\n');
+                            } else {
+                                // Output field missing — jq emits null.
+                                compact_buf.extend_from_slice(b"null\n");
                             }
                         }
                         if compact_buf.len() >= 1 << 17 {
@@ -17772,8 +17782,11 @@ fn real_main() {
                 } else { None };
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    // Sibling fix to the stdin apply-site above (#394).
-                    if raw.first() != Some(&b'{') {
+                    // Sibling fix to the stdin apply-site above (#394 / #396).
+                    let sel_range = if raw.first() == Some(&b'{') {
+                        json_object_get_field_raw(raw, 0, sel_field)
+                    } else { None };
+                    let Some((vs, ve)) = sel_range else {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         if compact_buf.len() >= 1 << 17 {
@@ -17781,26 +17794,30 @@ fn real_main() {
                             compact_buf.clear();
                         }
                         return Ok(());
-                    }
+                    };
                     let pass = if let Some(ref expected) = expected_eq {
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sel_field) {
-                            let val_bytes = &raw[vs..ve];
-                            let m = val_bytes == expected.as_slice();
-                            if test_type == "eq" { m } else { !m }
-                        } else { false }
+                        let val_bytes = &raw[vs..ve];
+                        let m = val_bytes == expected.as_slice();
+                        if test_type == "eq" { m } else { !m }
                     } else {
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sel_field) {
-                            let val = &raw[vs..ve];
-                            if val.len() >= 2 && val[0] == b'"' && val[ve-vs-1] == b'"' && !val[1..ve-vs-1].contains(&b'\\') {
-                                let inner = &val[1..ve-vs-1];
-                                match test_type.as_str() {
-                                    "startswith" => inner.starts_with(test_arg.as_bytes()),
-                                    "endswith" => inner.ends_with(test_arg.as_bytes()),
-                                    "contains" => bytes_contains(inner, test_arg.as_bytes()),
-                                    _ => false,
-                                }
-                            } else { false }
-                        } else { false }
+                        let val = &raw[vs..ve];
+                        if val.len() >= 2 && val[0] == b'"' && val[ve-vs-1] == b'"' && !val[1..ve-vs-1].contains(&b'\\') {
+                            let inner = &val[1..ve-vs-1];
+                            match test_type.as_str() {
+                                "startswith" => inner.starts_with(test_arg.as_bytes()),
+                                "endswith" => inner.ends_with(test_arg.as_bytes()),
+                                "contains" => bytes_contains(inner, test_arg.as_bytes()),
+                                _ => false,
+                            }
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            if compact_buf.len() >= 1 << 17 {
+                                let _ = out.write_all(&compact_buf);
+                                compact_buf.clear();
+                            }
+                            return Ok(());
+                        }
                     };
                     if pass {
                         if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
@@ -17811,6 +17828,8 @@ fn real_main() {
                                 compact_buf.extend_from_slice(val);
                             }
                             compact_buf.push(b'\n');
+                        } else {
+                            compact_buf.extend_from_slice(b"null\n");
                         }
                     }
                     if compact_buf.len() >= 1 << 17 {

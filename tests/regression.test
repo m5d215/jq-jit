@@ -6179,3 +6179,30 @@ false
 [((select(.a == "")) | (.a))]
 {"a":"x"}
 []
+
+# #396: select_str_then_field with `ne` test on missing field —
+# `null != "lit"` is true so jq passes the gate and emits `.a` =
+# null. Pre-fix the fast path conflated missing-field with
+# pass=false and emitted nothing.
+(select(.a != "")) | (.a)
+{}
+null
+
+# Same shape but `eq`: `null == "lit"` is false so jq rejects.
+# No output. Wrap to confirm bail-to-generic doesn't add a row.
+[((select(.a == "")) | (.a))]
+{}
+[]
+
+# `select(.a | startswith("foo"))` on an object missing `.a`
+# errors in jq (`null | startswith ...`). Bail to generic.
+[((select(.a | startswith(""))) | (.a))?]
+{}
+[]
+
+# `ne` with present non-matching field, output field missing:
+# select passes, `.b` on object missing → null. Fast path emits
+# null directly via the new `else` branch.
+(select(.a != "")) | (.b)
+{"a":"x"}
+null
