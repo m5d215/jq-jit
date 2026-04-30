@@ -1,6 +1,6 @@
 [package]
 name = "jq-jit"
-version = "1.4.3"
+version = "1.4.4"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "A JIT-compiling implementation of jq using Cranelift"
