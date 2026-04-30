@@ -6236,3 +6236,13 @@ false
 (select(.a == "")) | ({a: (.a)})
 {"a":""}
 {"a":""}
+
+# #402: select_str_then_str_chain shares the same gap class as
+# the field/array/cremap siblings.
+[((select(.a == "")) | (.a + .a))?]
+false
+[]
+
+(select(.a == "")) | (.a + .a)
+{"a":""}
+""
