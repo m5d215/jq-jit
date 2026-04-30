@@ -6162,3 +6162,20 @@ true
 (select(.c >= .c)) | (.a > .x)
 {"x":{},"c":0,"a":""}
 false
+
+# #394: select(.f == "lit") | .out silently dropped non-object
+# inputs. jq raises a type error indexing a non-object with a
+# string key. Bail to generic on raw[0] != '{'.
+[((select(.a == "")) | (.a))?]
+false
+[]
+
+# Counter-case: object with matching string. Fast path stays hot.
+(select(.a == "hello")) | (.a)
+{"a":"hello"}
+"hello"
+
+# Counter-case: object with non-matching string — select rejects.
+[((select(.a == "")) | (.a))]
+{"a":"x"}
+[]
