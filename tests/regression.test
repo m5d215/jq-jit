@@ -6222,3 +6222,17 @@ false
 (select(.a == "")) | ([.a,.a])
 {"a":""}
 ["",""]
+
+# #400: select_str_then_computed_remap shares the same gap class
+# as the field/array siblings.
+[((select(.a == "")) | ({a: (.a)}))?]
+false
+[]
+
+(select(.a != "")) | ({a: (.a)})
+{}
+{"a":null}
+
+(select(.a == "")) | ({a: (.a)})
+{"a":""}
+{"a":""}
