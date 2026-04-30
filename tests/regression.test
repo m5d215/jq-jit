@@ -6261,3 +6261,17 @@ select(.a == .a)
 select(.a <= .a)
 {"a":9007199254740993}
 {"a":9007199254740993}
+
+# #406 follow-up: select_str_str_chain with non-string Field operand
+# silently produced "nullnull" by extending raw bytes; jq's null+null=null.
+[((select(.c != "")) | (.c + .c))?]
+{"c":null}
+[null]
+
+(select(.c != "")) | (.c + .c)
+{"c":null}
+null
+
+(select(.c != "")) | (.c + .c)
+{"c":42}
+84
