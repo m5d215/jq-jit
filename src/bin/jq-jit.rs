@@ -8995,6 +8995,11 @@ fn real_main() {
                                     compact_buf.extend_from_slice(val);
                                 }
                                 compact_buf.push(b'\n');
+                            } else {
+                                // Output field absent on a passing row — jq reads
+                                // missing as null. Without this branch the fast path
+                                // silently dropped the row.
+                                compact_buf.extend_from_slice(b"null\n");
                             }
                         }
                         if compact_buf.len() >= 1 << 17 {
@@ -16355,6 +16360,10 @@ fn real_main() {
                                 compact_buf.extend_from_slice(val);
                             }
                             compact_buf.push(b'\n');
+                        } else {
+                            // Sibling fix to the in-memory apply above —
+                            // emit `null` for missing-output-field rows.
+                            compact_buf.extend_from_slice(b"null\n");
                         }
                     }
                     if compact_buf.len() >= 1 << 17 {
