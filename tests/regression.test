@@ -6206,3 +6206,19 @@ null
 (select(.a != "")) | (.b)
 {"a":"x"}
 null
+
+# #398: select_str_then_array shares the same gap class as
+# select_str_then_field — non-object input, missing select field,
+# non-string field with str-builtin, and missing remap fields all
+# silent-skipped. Bail in each case.
+[((select(.a == "")) | ([.a,.a]))?]
+false
+[]
+
+(select(.a != "")) | ([.a,.a])
+{}
+[null,null]
+
+(select(.a == "")) | ([.a,.a])
+{"a":""}
+["",""]
