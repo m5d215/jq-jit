@@ -6331,3 +6331,29 @@ null
 .x + .y
 {"x":2,"y":1,"name":"row","y":40}
 42
+
+# #405: select_ff_cmp_then_array shares the same Family A gap as
+# the value sibling (#389) and the str sibling (#399). The bug is
+# unreachable through the current grammar because the dispatcher
+# orders detect_select_ff_cmp_then_value first, which classifies
+# [a,b] as RemapExpr::FieldArray and shadows the array path. The
+# apply is fixed preemptively; these tests lock in Family A
+# semantics for the shape regardless of routing.
+[((select(.c >= .c)) | ([.a, .a]))?]
+false
+[]
+
+(select(.c >= .c)) | ([.a, .a])
+{}
+[null,null]
+
+(select(.c >= .c)) | ([.a, .a])
+{"a":"x","c":0}
+["x","x"]
+
+# Out-of-domain remap operand: .x is array, .c is number, jq raises
+# a type error on .x + .c. Wrapped with `?` yields []. Pre-fix at
+# the array apply would have silently emitted [].
+[((select(.c >= .c)) | ([.x + .c, .c]))?]
+{"c":0,"x":[]}
+[]

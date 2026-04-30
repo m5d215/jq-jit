@@ -10439,6 +10439,14 @@ fn real_main() {
                     })
                 } else if let Some((ref sff_f1, ref sff_op, ref sff_f2, ref arr_elems)) = select_ff_cmp_array {
                     // select(.f1 cmp .f2) | [array]
+                    // #405: same Family A gap as #389 / #399. Restructure
+                    // with `handled` flag and per-element resolved_would_error
+                    // probe; bail to process_input on non-object input,
+                    // missing select fields, non-numeric operands, or
+                    // out-of-domain remap operands. The bug is unreachable
+                    // through the current grammar (the dispatcher orders
+                    // detect_select_ff_cmp_then_value first), but fixed
+                    // preemptively at the source level.
                     use jq_jit::ir::BinOp;
                     let mut all_fields: Vec<String> = Vec::new();
                     let mut field_idx = std::collections::HashMap::new();
@@ -10465,6 +10473,7 @@ fn real_main() {
                     let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
+                        let mut handled = false;
                         if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
                             let r1 = &ranges_buf[f1_idx];
                             let r2 = &ranges_buf[f2_idx];
@@ -10479,16 +10488,23 @@ fn real_main() {
                                         BinOp::Eq => v1 == v2, BinOp::Ne => v1 != v2,
                                         _ => false,
                                     };
-                                    if pass {
+                                    if !pass {
+                                        handled = true;
+                                    } else if !resolved.iter().any(|r| resolved_would_error(r, raw, &ranges_buf)) {
                                         compact_buf.push(b'[');
                                         for (i, res) in resolved.iter().enumerate() {
                                             if i > 0 { compact_buf.push(b','); }
                                             emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
                                         }
                                         compact_buf.extend_from_slice(b"]\n");
+                                        handled = true;
                                     }
                                 }
                             }
+                        }
+                        if !handled {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -17717,6 +17733,7 @@ fn real_main() {
                     Ok(())
                 })
             } else if let Some((ref sff_f1, ref sff_op, ref sff_f2, ref arr_elems)) = select_ff_cmp_array {
+                // Sibling fix to the stdin apply-site above (#405).
                 use jq_jit::ir::BinOp;
                 let content_bytes = content.as_bytes();
                 let mut all_fields: Vec<String> = Vec::new();
@@ -17744,6 +17761,7 @@ fn real_main() {
                 let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
+                    let mut handled = false;
                     if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
                         let r1 = &ranges_buf[f1_idx];
                         let r2 = &ranges_buf[f2_idx];
@@ -17758,16 +17776,23 @@ fn real_main() {
                                     BinOp::Eq => v1 == v2, BinOp::Ne => v1 != v2,
                                     _ => false,
                                 };
-                                if pass {
+                                if !pass {
+                                    handled = true;
+                                } else if !resolved.iter().any(|r| resolved_would_error(r, raw, &ranges_buf)) {
                                     compact_buf.push(b'[');
                                     for (i, res) in resolved.iter().enumerate() {
                                         if i > 0 { compact_buf.push(b','); }
                                         emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
                                     }
                                     compact_buf.extend_from_slice(b"]\n");
+                                    handled = true;
                                 }
                             }
                         }
+                    }
+                    if !handled {
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
