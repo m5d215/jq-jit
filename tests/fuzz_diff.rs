@@ -72,6 +72,11 @@ use proptest::prelude::*;
 
 const IDENT_POOL: &[&str] = &["a", "b", "c", "x", "y"];
 
+/// String-literal pool for `select(.f == "lit")` shapes. Overlaps with
+/// the JSON leaf string pool so matches occur often enough for the
+/// select_str_* fast paths to actually fire.
+const STR_LITERAL_POOL: &[&str] = &["", "a", "ab", "0", "hello"];
+
 /// Single-valued unary builtins with stable jq behaviour. Each has been
 /// observed to round-trip via `serde_json` re-parse cleanly across
 /// 100k+ proptest cases. When extending, prefer builtins that emit
@@ -114,6 +119,20 @@ enum FilterExpr {
     /// distribution via leaf composition but worth a direct hit.
     FieldConstBinop(String, BinopOp, i32),
     ConstFieldBinop(i32, BinopOp, String),
+    /// `.field op "lit"` — exercises the select_str_* family
+    /// (#394 / #396 / #398).
+    FieldStrConstBinop(String, BinopOp, String),
+    /// `(<binop>) <and|or> (<binop>)` — compound boolean condition.
+    /// Used inside `select(...)` to exercise the
+    /// `select_compound_*` fast paths.
+    CompoundCond(Box<FilterExpr>, AndOr, Box<FilterExpr>),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AndOr { And, Or }
+
+impl AndOr {
+    fn render(self) -> &'static str { match self { AndOr::And => "and", AndOr::Or => "or" } }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -177,6 +196,10 @@ fn render(expr: &FilterExpr) -> String {
         FilterExpr::FieldFieldBinop(f1, op, f2) => format!(".{} {} .{}", f1, op.render(), f2),
         FilterExpr::FieldConstBinop(f, op, n) => format!(".{} {} {}", f, op.render(), n),
         FilterExpr::ConstFieldBinop(n, op, f) => format!("{} {} .{}", n, op.render(), f),
+        FilterExpr::FieldStrConstBinop(f, op, s) => {
+            format!(".{} {} {}", f, op.render(), serde_json::to_string(s).unwrap())
+        }
+        FilterExpr::CompoundCond(l, ao, r) => format!("({}) {} ({})", render(l), ao.render(), render(r)),
     }
 }
 
@@ -192,6 +215,21 @@ fn ident_strategy() -> impl Strategy<Value = String> {
     prop::sample::select(IDENT_POOL).prop_map(|s| s.to_string())
 }
 
+fn str_literal_strategy() -> impl Strategy<Value = String> {
+    prop::sample::select(STR_LITERAL_POOL).prop_map(|s| s.to_string())
+}
+
+fn cmp_binop_strategy() -> impl Strategy<Value = BinopOp> {
+    prop_oneof![
+        Just(BinopOp::Gt), Just(BinopOp::Lt), Just(BinopOp::Ge),
+        Just(BinopOp::Le), Just(BinopOp::Eq), Just(BinopOp::Ne),
+    ]
+}
+
+fn andor_strategy() -> impl Strategy<Value = AndOr> {
+    prop_oneof![Just(AndOr::And), Just(AndOr::Or)]
+}
+
 /// Field-vs-field / field-vs-const binops as a standalone strategy.
 /// Reused by `composition_biased_pipe` so the select-side and the
 /// post-select-side can both draw from the same pool independently.
@@ -203,6 +241,8 @@ fn binop_expr_strategy() -> impl Strategy<Value = FilterExpr> {
             .prop_map(|(f, op, n)| FilterExpr::FieldConstBinop(f, op, n)),
         (-3i32..=3, binop_strategy(), ident_strategy())
             .prop_map(|(n, op, f)| FilterExpr::ConstFieldBinop(n, op, f)),
+        (ident_strategy(), cmp_binop_strategy(), str_literal_strategy())
+            .prop_map(|(f, op, s)| FilterExpr::FieldStrConstBinop(f, op, s)),
     ]
 }
 
@@ -217,8 +257,14 @@ fn binop_expr_strategy() -> impl Strategy<Value = FilterExpr> {
 /// The random recursion in `filter_strategy` already produces these by
 /// accident; biasing this branch higher exercises them deterministically.
 fn composition_biased_pipe() -> impl Strategy<Value = FilterExpr> {
-    let select_shape = binop_expr_strategy()
-        .prop_map(|inner| FilterExpr::Select(Box::new(inner)));
+    // Select gate: plain binop *or* a compound (and/or) of two
+    // binops, which is the shape that exercises the
+    // `select_compound_*` fast paths.
+    let plain_binop = binop_expr_strategy();
+    let compound_cond = (binop_expr_strategy(), andor_strategy(), binop_expr_strategy())
+        .prop_map(|(l, ao, r)| FilterExpr::CompoundCond(Box::new(l), ao, Box::new(r)));
+    let select_inner = prop_oneof![2 => plain_binop, 1 => compound_cond];
+    let select_shape = select_inner.prop_map(|inner| FilterExpr::Select(Box::new(inner)));
 
     let post_select_shape = prop_oneof![
         binop_expr_strategy(),
