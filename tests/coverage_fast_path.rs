@@ -1,7 +1,7 @@
 //! Fast-path coverage test: every named `detect_*` fast path in
 //! `src/bin/jq-jit.rs` must be exercised by at least one entry in
 //! `tests/differential/corpus.test`, unless it is explicitly grandfathered
-//! into `tests/fast_path_coverage.allowlist`. A new, non-allowlisted fast
+//! into `tests/coverage_fast_path.allowlist`. A new, non-allowlisted fast
 //! path with zero corpus coverage blocks merge.
 //!
 //! Works by running each corpus case with `JQJIT_TRACE=1`, parsing the
@@ -15,7 +15,7 @@
 //! same PR is all that's needed to keep this test green — no macro_rules!
 //! registry or `inventory` dependency required.
 //!
-//! The allowlist (`tests/fast_path_coverage.allowlist`) is a grandfathered
+//! The allowlist (`tests/coverage_fast_path.allowlist`) is a grandfathered
 //! baseline of currently uncovered paths: it only shrinks. Adding new
 //! corpus probes that hit an allowlisted name forces its removal (the test
 //! fails if an allowlisted name is actually covered), so the list decays
@@ -225,7 +225,7 @@ fn fast_paths_have_nonzero_corpus_coverage() {
         eprintln!("tests/differential/corpus.test. Use `JQJIT_TRACE=1 ./target/release/jq-jit`");
         eprintln!("to confirm the new probe actually hits the path. If the path is");
         eprintln!("genuinely unreachable from user filters, document why in");
-        eprintln!("tests/fast_path_coverage.allowlist instead.");
+        eprintln!("tests/coverage_fast_path.allowlist instead.");
     }
 
     if !stale_allowlist.is_empty() {
@@ -234,7 +234,7 @@ fn fast_paths_have_nonzero_corpus_coverage() {
         for n in &stale_allowlist {
             eprintln!("  {}", n);
         }
-        eprintln!("\nThese names are in tests/fast_path_coverage.allowlist but no longer");
+        eprintln!("\nThese names are in tests/coverage_fast_path.allowlist but no longer");
         eprintln!("exist in src/bin/jq-jit.rs. Remove them.");
     }
 
@@ -244,7 +244,7 @@ fn fast_paths_have_nonzero_corpus_coverage() {
         for n in &covered_allowlist {
             eprintln!("  {}", n);
         }
-        eprintln!("\nThese names are in tests/fast_path_coverage.allowlist but the corpus");
+        eprintln!("\nThese names are in tests/coverage_fast_path.allowlist but the corpus");
         eprintln!("already exercises them — remove them from the allowlist.");
     }
 
@@ -268,7 +268,7 @@ fn fast_paths_have_nonzero_corpus_coverage() {
 
 fn load_allowlist() -> Vec<String> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fast_path_coverage.allowlist");
+        .join("tests/coverage_fast_path.allowlist");
     let Ok(content) = std::fs::read_to_string(&path) else {
         return Vec::new();
     };

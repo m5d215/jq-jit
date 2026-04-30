@@ -2,7 +2,7 @@
 # Format: `<path>  <count>` — one file per line.
 # Blank lines and `#`-prefixed comments are ignored.
 #
-# The test in tests/value_factory_enforcement.rs enforces both an upper
+# The test in tests/enforce_value_factories.rs enforces both an upper
 # and lower bound: the count is the exact number of raw construction
 # sites tolerated in each file. Adding a new site without bumping the
 # count fails the test; reducing the count (by migrating to a factory)

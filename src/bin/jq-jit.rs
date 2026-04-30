@@ -59,7 +59,7 @@ fn jqjit_trace_enabled() -> bool {
 /// compilation, and routes [`Filter::execute`] / [`Filter::execute_cb`]
 /// through the generic tree-walking interpreter (see
 /// [`jq_jit::interpreter::set_force_interpreter`]). The
-/// `tests/jit_vs_interp.rs` self-diff harness shells out twice with the same
+/// `tests/selfdiff_jit_interp.rs` self-diff harness shells out twice with the same
 /// arguments and asserts identical stdout / exit-code class.
 fn force_interpreter_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

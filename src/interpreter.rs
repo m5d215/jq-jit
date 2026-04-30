@@ -13,7 +13,7 @@ use crate::value::Value;
 /// [`Filter::execute_cb`] skip the typed fast path and JIT and run the generic
 /// tree-walking interpreter, regardless of whether `compile_jit` was called.
 /// The binary sets this once at startup when `JQJIT_FORCE_INTERPRETER` is in
-/// the environment; tests/jit_vs_interp.rs shells out twice — once with it,
+/// the environment; tests/selfdiff_jit_interp.rs shells out twice — once with it,
 /// once without — and asserts identical output.
 static FORCE_INTERPRETER: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);

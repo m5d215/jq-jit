@@ -11,7 +11,7 @@
 //!
 //! Since migrating the ~50 existing call sites is its own refactor, this
 //! test grandfathers each current site into
-//! `tests/value_factory_enforcement.allowlist` (file + line-count).
+//! `tests/enforce_value_factories.allowlist` (file + line-count).
 //! The allowlist is unidirectional:
 //!
 //!   - New `Value::Obj(Rc::new(…))` site not in allowlist  →  FAIL
@@ -56,7 +56,7 @@ fn walk(base: &PathBuf, dir: &PathBuf, counts: &mut BTreeMap<String, usize>) {
 
 fn load_allowlist() -> BTreeMap<String, usize> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/value_factory_enforcement.allowlist");
+        .join("tests/enforce_value_factories.allowlist");
     let Ok(content) = std::fs::read_to_string(&path) else {
         return BTreeMap::new();
     };
@@ -124,7 +124,7 @@ fn value_obj_construction_goes_through_factories() {
         eprintln!("  Value::object_from_normalized_pairs(pairs)  // asserts pre-deduped");
         eprintln!("  Value::object_from_map(map)                 // reuse an ObjMap built via insert/push_unique");
         eprintln!("\nIf a raw construction is genuinely necessary (e.g. inside value.rs");
-        eprintln!("itself), add the file to tests/value_factory_enforcement.allowlist.");
+        eprintln!("itself), add the file to tests/enforce_value_factories.allowlist.");
     }
     if !grew.is_empty() {
         eprintln!();
