@@ -54,6 +54,22 @@ fn jqjit_trace_enabled() -> bool {
     })
 }
 
+/// Self-diff knob (issue #323): when `JQJIT_FORCE_INTERPRETER` is set in the
+/// environment, the binary disables raw-byte fast paths, skips JIT
+/// compilation, and routes [`Filter::execute`] / [`Filter::execute_cb`]
+/// through the generic tree-walking interpreter (see
+/// [`jq_jit::interpreter::set_force_interpreter`]). The
+/// `tests/jit_vs_interp.rs` self-diff harness shells out twice with the same
+/// arguments and asserts identical stdout / exit-code class.
+fn force_interpreter_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("JQJIT_FORCE_INTERPRETER")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false)
+    })
+}
+
 fn jqjit_trace_fast_path(name: &str, filter_text: &str) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static EMITTED: AtomicBool = AtomicBool::new(false);
@@ -2103,6 +2119,10 @@ fn main() {
 }
 
 fn real_main() {
+    let force_interp = force_interpreter_enabled();
+    if force_interp {
+        jq_jit::interpreter::set_force_interpreter(true);
+    }
     let args: Vec<String> = std::env::args().collect();
 
     let mut filter_str = None;
@@ -2478,7 +2498,10 @@ fn real_main() {
     // since their runtime dominates regardless of input size.
     // Must be done before process_input closure captures &filter.
     const JIT_THRESHOLD: usize = 4096;
-    if filter.has_loop_constructs() || null_input {
+    if force_interp {
+        // Self-diff mode (#323) — leave jit_fn empty and let
+        // execute / execute_cb take the eval path.
+    } else if filter.has_loop_constructs() || null_input {
         filter.compile_jit();
     } else if !null_input {
         if files.is_empty() {
@@ -2542,7 +2565,9 @@ fn real_main() {
     }
     // Raw byte fast paths bypass Value construction and cannot inject color codes.
     // Disable them when color output is requested.
-    let use_raw_fast_paths = (use_compact_buf || use_pretty_buf) && !color_output;
+    // Self-diff mode (#323) also disables them so every filter shape is
+    // serviced by Filter::execute_cb on the eval path.
+    let use_raw_fast_paths = (use_compact_buf || use_pretty_buf) && !color_output && !force_interp;
 
     // JQJIT_TRACE: emit a single [trace] line naming the first fast path that
     // fires. `trace_detect!` wraps `Option`-returning detectors; `trace_is!`
