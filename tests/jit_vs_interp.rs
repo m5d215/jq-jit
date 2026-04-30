@@ -191,9 +191,8 @@ fn serialize_sorted(val: &serde_json::Value) -> String {
 ///   values to `±1.7976931348623157e+308`. Plumbing the original `repr`
 ///   through `value_to_json_tojson` is the obvious local fix, but doing so
 ///   without also flipping `have_decnum` to `true` breaks the upstream
-///   `tests/official/jq.test` decnum consistency check (#443). Resolving
-///   that needs a coordinated answer about whether jq-jit claims decnum
-///   semantics — out of scope for the self-diff infrastructure work.
+///   `tests/official/jq.test` decnum consistency check (#443). Tracked
+///   in #415.
 const KNOWN_DIVERGENCES: &[usize] = &[2197, 2202, 2207, 2333, 2338];
 
 #[test]
