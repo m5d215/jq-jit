@@ -8,74 +8,74 @@
 //! or "generator" (zero or more outputs). Scalar expressions compile to
 //! direct computation; generators compile to loops with Yield operations.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{Result, bail};
 
-// Process-wide lock guarding the entire JIT path (compile + execute).
+// JIT runtime state used by trampolines and codegen.
 //
-// jq-jit's JIT layer carries non-trivial mutable global state — the error
-// flag/value/message slots, the closure-ops vector, and the reusable JitEnv —
-// none of which are thread-safe. The codegen side embeds the address of
-// `JIT_ERROR_FLAG` directly into JIT'd machine code, so making these
-// thread-locals would require non-trivial codegen changes. Instead, every
-// `JitCompiler` instance acquires this lock for its full lifetime, which
-// transitively covers any `execute_jit*` call routed through that compiler.
-// Two threads that both want to JIT will serialize at `JitCompiler::new`.
-//
-// This is what previously hid behind `--test-threads=1` in CI: parallel test
-// runs were instantiating multiple `JitCompiler`s and racing on the globals,
-// which surfaced as intermittent SIGSEGVs. With the lock held the globals
-// behave as if jq-jit were truly single-threaded, regardless of how many
-// threads `cargo test` spawns.
-static JIT_GLOBAL_LOCK: Mutex<()> = Mutex::new(());
-
-fn jit_global_lock() -> MutexGuard<'static, ()> {
-    // Poison cannot corrupt JIT-allocated memory we care about: a panic
-    // mid-compile leaves the globals in a transient state that the next
-    // compiler reinitialises. Recover the guard rather than aborting.
-    JIT_GLOBAL_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+// jq-jit is single-threaded per execution but `cargo test` runs many JIT'd
+// queries in parallel. We keep transient runtime state thread-local, and the
+// per-execution error flag lives on `JitEnv` itself — codegen loads it via
+// `env_ptr + offset_of!(JitEnv, error_flag)`, giving every thread its own
+// flag without runtime address resolution and without a process-wide lock.
+thread_local! {
+    /// Last error message produced by a runtime trampoline.
+    static JIT_LAST_ERROR: UnsafeCell<Option<String>> = const { UnsafeCell::new(None) };
+    /// Direct `Value` storage for the `error` builtin — avoids Value→JSON→Value
+    /// round-trip in try-catch.
+    static JIT_ERROR_VALUE: UnsafeCell<Option<Value>> = const { UnsafeCell::new(None) };
+    /// Closure ops captured at compile time; consumed by runtime trampolines
+    /// during execution.
+    static JIT_CLOSURE_OPS: UnsafeCell<Vec<Expr>> = const { UnsafeCell::new(Vec::new()) };
+    /// Pointer to the `JitEnv` currently being driven by `execute_jit*`.
+    /// `set_jit_error` consults this to flip the env's `error_flag` without
+    /// plumbing an env pointer through every fallible trampoline signature.
+    static CURRENT_ENV: Cell<*mut JitEnv> = const { Cell::new(std::ptr::null_mut()) };
 }
 
-// Thread-local error storage for JIT runtime functions.
-// When a fallible runtime function encounters an error, it stores the error
-// message here. The CheckError JitOp checks this and branches to catch handlers.
-// Access is serialised by `JIT_GLOBAL_LOCK` (held by the live `JitCompiler`).
-struct GlobalCell<T>(std::cell::UnsafeCell<T>);
-unsafe impl<T> Sync for GlobalCell<T> {}
+fn current_env() -> *mut JitEnv {
+    CURRENT_ENV.with(|c| c.get())
+}
 
-static JIT_LAST_ERROR: GlobalCell<Option<String>> = GlobalCell(std::cell::UnsafeCell::new(None));
-/// Direct Value storage for `error` builtin — avoids Value→JSON→Value round-trip in try-catch.
-static JIT_ERROR_VALUE: GlobalCell<Option<Value>> = GlobalCell(std::cell::UnsafeCell::new(None));
-static JIT_CLOSURE_OPS: GlobalCell<Vec<Expr>> = GlobalCell(std::cell::UnsafeCell::new(Vec::new()));
-/// Fast error flag for inline CheckError: non-zero means an error is pending.
-/// Read directly by JIT codegen to avoid function call overhead.
-static JIT_ERROR_FLAG: GlobalCell<i64> = GlobalCell(std::cell::UnsafeCell::new(0));
+fn set_error_flag() {
+    let env = current_env();
+    if !env.is_null() {
+        unsafe { (*env).error_flag = 1; }
+    }
+}
+
+fn clear_error_flag() {
+    let env = current_env();
+    if !env.is_null() {
+        unsafe { (*env).error_flag = 0; }
+    }
+}
 
 fn set_jit_error(msg: String) {
-    unsafe {
-        *JIT_LAST_ERROR.0.get() = Some(msg);
-        *JIT_ERROR_FLAG.0.get() = 1;
-    }
+    JIT_LAST_ERROR.with(|cell| unsafe { *cell.get() = Some(msg); });
+    set_error_flag();
+}
+
+fn set_jit_error_value(val: Value) {
+    JIT_ERROR_VALUE.with(|cell| unsafe { *cell.get() = Some(val); });
+    set_error_flag();
 }
 
 fn take_jit_error() -> Option<String> {
-    unsafe { (*JIT_LAST_ERROR.0.get()).take() }
+    JIT_LAST_ERROR.with(|cell| unsafe { (*cell.get()).take() })
 }
 
 fn take_jit_error_value() -> Option<Value> {
-    unsafe { (*JIT_ERROR_VALUE.0.get()).take() }
+    JIT_ERROR_VALUE.with(|cell| unsafe { (*cell.get()).take() })
 }
 
 fn clear_jit_error() {
-    unsafe {
-        *JIT_LAST_ERROR.0.get() = None;
-        *JIT_ERROR_VALUE.0.get() = None;
-        *JIT_ERROR_FLAG.0.get() = 0;
-    }
+    JIT_LAST_ERROR.with(|cell| unsafe { *cell.get() = None; });
+    JIT_ERROR_VALUE.with(|cell| unsafe { *cell.get() = None; });
+    clear_error_flag();
 }
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder, StackSlotData, StackSlotKind};
 use cranelift_codegen::settings::{self, Configurable};
@@ -6280,11 +6280,11 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
 }
 extern "C" fn jit_rt_throw_error(msg: *const Value, env: *mut JitEnv) -> i64 {
     unsafe {
-        let val = (*msg).clone();
         // Store value directly — defer serialization until propagation (if not caught)
-        *JIT_ERROR_VALUE.0.get() = Some(val);
-        *JIT_ERROR_FLAG.0.get() = 1;
-        let _ = env;
+        set_jit_error_value((*msg).clone());
+        // `set_jit_error_value` flips the flag via CURRENT_ENV; we also have
+        // env here explicitly, so write through it to keep the contract local.
+        (*env).error_flag = 1;
         GEN_ERROR
     }
 }
@@ -7255,10 +7255,10 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             if parts.len() == 2 {
                 let path_idx: usize = parts[0].parse().unwrap_or(0);
                 let value_idx: usize = parts[1].parse().unwrap_or(0);
-                let (path_expr, value_expr) = {
-                    let ops = &*JIT_CLOSURE_OPS.0.get();
+                let (path_expr, value_expr) = JIT_CLOSURE_OPS.with(|cell| {
+                    let ops = &*cell.get();
                     (ops.get(path_idx).cloned(), ops.get(value_idx).cloned())
-                };
+                });
                 if let (Some(path_expr), Some(value_expr)) = (path_expr, value_expr) {
                     let input = if !args.is_empty() { args[0].clone() } else { Value::Null };
                     let env = new_delegated_env(&[&path_expr, &value_expr]);
@@ -7276,10 +7276,10 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             if parts.len() == 2 {
                 let path_idx: usize = parts[0].parse().unwrap_or(0);
                 let update_idx: usize = parts[1].parse().unwrap_or(0);
-                let (path_expr, update_expr) = {
-                    let ops = &*JIT_CLOSURE_OPS.0.get();
+                let (path_expr, update_expr) = JIT_CLOSURE_OPS.with(|cell| {
+                    let ops = &*cell.get();
                     (ops.get(path_idx).cloned(), ops.get(update_idx).cloned())
-                };
+                });
                 if let (Some(path_expr), Some(update_expr)) = (path_expr, update_expr) {
                     let input = if !args.is_empty() { args[0].clone() } else { Value::Null };
                     let env = new_delegated_env(&[&path_expr, &update_expr]);
@@ -7294,7 +7294,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
         // __paths_filtered__:idx — native paths(f) DFS with filter
         if let Some(rest) = name.strip_prefix("__paths_filtered__:") {
             let idx: usize = rest.parse().unwrap_or(0);
-            let filter_expr = (&*JIT_CLOSURE_OPS.0.get()).get(idx).cloned();
+            let filter_expr = JIT_CLOSURE_OPS.with(|cell| (&*cell.get()).get(idx).cloned());
             if let Some(filter_expr) = filter_expr {
                 let input = if !args.is_empty() { args[0].clone() } else { Value::Null };
 
@@ -7379,7 +7379,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
         // __path__:idx — runtime path expression evaluation
         if let Some(rest) = name.strip_prefix("__path__:") {
             let idx: usize = rest.parse().unwrap_or(0);
-            let path_expr = (&*JIT_CLOSURE_OPS.0.get()).get(idx).cloned();
+            let path_expr = JIT_CLOSURE_OPS.with(|cell| (&*cell.get()).get(idx).cloned());
             if let Some(path_expr) = path_expr {
                 let input = if !args.is_empty() { args[0].clone() } else { Value::Null };
                 let env = new_delegated_env(&[&path_expr]);
@@ -7398,7 +7398,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                 let idx: usize = parts[1].parse().unwrap_or(0);
                 if !args.is_empty() {
                     let container = &args[0];
-                    let key_expr = (&*JIT_CLOSURE_OPS.0.get()).get(idx).cloned();
+                    let key_expr = JIT_CLOSURE_OPS.with(|cell| (&*cell.get()).get(idx).cloned());
                     if let Some(key_expr) = key_expr {
                         let op_kind = match op_name {
                             "sort_by" => Some(ClosureOpKind::SortBy),
@@ -7487,7 +7487,7 @@ extern "C" fn jit_rt_try_end(env: *mut JitEnv) {
 extern "C" fn jit_rt_propagate_error(env: *mut JitEnv) {
     // Always clear the flag — the error is either consumed here or already
     // drained by CheckError::get_error.
-    unsafe { *JIT_ERROR_FLAG.0.get() = 0; }
+    unsafe { (*env).error_flag = 0; }
     // Check for direct Value from `error` builtin (deferred serialization)
     if let Some(val) = take_jit_error_value() {
         let _ = take_jit_error(); // clear the marker
@@ -7503,14 +7503,14 @@ extern "C" fn jit_rt_propagate_error(env: *mut JitEnv) {
 /// Check if the last operation produced an error.
 /// Returns 1 if error, 0 if ok.
 extern "C" fn jit_rt_has_error() -> i64 {
-    unsafe {
-        if (*JIT_ERROR_VALUE.0.get()).is_some() || (*JIT_LAST_ERROR.0.get()).is_some() { 1 } else { 0 }
-    }
+    let has_value = JIT_ERROR_VALUE.with(|cell| unsafe { (*cell.get()).is_some() });
+    let has_msg = JIT_LAST_ERROR.with(|cell| unsafe { (*cell.get()).is_some() });
+    if has_value || has_msg { 1 } else { 0 }
 }
 
 /// Get the last error as a Value and write it to dst. Clears the error.
-extern "C" fn jit_rt_get_error(dst: *mut Value) {
-    unsafe { *JIT_ERROR_FLAG.0.get() = 0; }
+extern "C" fn jit_rt_get_error(dst: *mut Value, env: *mut JitEnv) {
+    unsafe { (*env).error_flag = 0; }
     // Fast path: use directly stored Value from `error` builtin
     if let Some(v) = take_jit_error_value() {
         let _ = take_jit_error(); // clear the string too
@@ -7622,6 +7622,10 @@ pub struct JitEnv {
     pub str_bufs: Vec<String>,
     pub try_depth: u32,
     pub error_msg: Option<String>,
+    /// Non-zero means a runtime error is pending. Codegen loads this directly
+    /// via `env_ptr + offset_of!(JitEnv, error_flag)` in `CheckError` /
+    /// `JumpIfError`, avoiding an embedded static address.
+    pub error_flag: i64,
 }
 
 impl Default for JitEnv {
@@ -7638,6 +7642,7 @@ impl JitEnv {
             str_bufs: Vec::new(),
             try_depth: 0,
             error_msg: None,
+            error_flag: 0,
         }
     }
 }
@@ -7893,13 +7898,6 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
 }
 
 pub struct JitCompiler {
-    /// Held for the entire lifetime of this compiler so concurrent threads
-    /// cannot trample the JIT globals (`JIT_ERROR_FLAG`, `JIT_CLOSURE_OPS`,
-    /// `REUSABLE_ENV`, ...). Dropped automatically when the compiler is
-    /// dropped, after every JIT'd function pointer it owns has been
-    /// invalidated. Field order matters — `_lock` is first so it is released
-    /// last, after `module` has freed its mmap'd code pages.
-    _lock: MutexGuard<'static, ()>,
     module: JITModule,
     ctx: cranelift_codegen::Context,
     func_ctx: FunctionBuilderContext,
@@ -7917,9 +7915,6 @@ pub struct JitCompiler {
 
 impl JitCompiler {
     pub fn new() -> Result<Self> {
-        // Acquire the global lock before touching any cranelift or
-        // jq-jit JIT state. See `JIT_GLOBAL_LOCK` for rationale.
-        let _lock = jit_global_lock();
         let mut flag_builder = settings::builder();
         flag_builder.set("opt_level", "speed")?;
         let isa_builder = cranelift_native::builder().map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -8013,7 +8008,6 @@ impl JitCompiler {
         declare_rt_funcs(&mut module, &mut rt_funcs)?;
 
         Ok(JitCompiler {
-            _lock,
             module, ctx: cranelift_codegen::Context::new(),
             func_ctx: FunctionBuilderContext::new(), rt_funcs,
             _string_constants: Vec::new(), _repr_constants: Vec::new(),
@@ -8044,7 +8038,7 @@ impl JitCompiler {
 
         // Store closure ops for runtime access
         if !fl.closure_ops.is_empty() {
-            unsafe { *JIT_CLOSURE_OPS.0.get() = fl.closure_ops.clone(); }
+            JIT_CLOSURE_OPS.with(|cell| unsafe { *cell.get() = fl.closure_ops.clone(); });
         }
 
         let ops = optimize_clone_yield(fl.ops);
@@ -9149,9 +9143,10 @@ impl JitCompiler {
                         b.ins().call(rt["try_end"], &[env_ptr]);
                     }
                     JitOp::CheckError { error_dst, catch_label } => {
-                        // Inline error flag check: read JIT_ERROR_FLAG directly
-                        let flag_addr = b.ins().iconst(ptr_ty, JIT_ERROR_FLAG.0.get() as i64);
-                        let flag_val = b.ins().load(types::I64, cranelift_codegen::ir::MemFlags::new(), flag_addr, 0);
+                        // Load env.error_flag via env_ptr + offset_of!(JitEnv, error_flag).
+                        // Per-env so threads don't race; codegen carries no static address.
+                        let flag_off = std::mem::offset_of!(JitEnv, error_flag) as i32;
+                        let flag_val = b.ins().load(types::I64, cranelift_codegen::ir::MemFlags::new(), env_ptr, flag_off);
                         let zero = b.ins().iconst(types::I64, 0);
                         let is_err = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, flag_val, zero);
                         let err_blk = b.create_block();
@@ -9161,16 +9156,16 @@ impl JitCompiler {
                         b.switch_to_block(err_blk);
                         b.seal_block(err_blk);
                         let d = slot_addr(&mut b, *error_dst);
-                        b.ins().call(rt["get_error"], &[d]);
+                        b.ins().call(rt["get_error"], &[d, env_ptr]);
                         b.ins().jump(label_blocks[*catch_label as usize], &[]);
                         // OK path: continue
                         b.switch_to_block(ok_blk);
                         b.seal_block(ok_blk);
                     }
                     JitOp::JumpIfError { label } => {
-                        // Branch on JIT_ERROR_FLAG without draining the pending error.
-                        let flag_addr = b.ins().iconst(ptr_ty, JIT_ERROR_FLAG.0.get() as i64);
-                        let flag_val = b.ins().load(types::I64, cranelift_codegen::ir::MemFlags::new(), flag_addr, 0);
+                        // Branch on env.error_flag without draining the pending error.
+                        let flag_off = std::mem::offset_of!(JitEnv, error_flag) as i32;
+                        let flag_val = b.ins().load(types::I64, cranelift_codegen::ir::MemFlags::new(), env_ptr, flag_off);
                         let zero = b.ins().iconst(types::I64, 0);
                         let is_err = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, flag_val, zero);
                         let ok_blk = b.create_block();
@@ -9345,7 +9340,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("try_end", [p], []);
     decl!("propagate_error", [p], []);
     decl!("has_error", [], [p]);  // -> 0/1
-    decl!("get_error", [p], []);  // dst
+    decl!("get_error", [p, p], []);  // dst, env
     decl!("throw_error", [p, p], [p]);
     decl!("call_builtin", [p, p, p, p, p], [p]);  // dst, name_ptr, name_len, args_ptr, nargs -> status
     decl!("reverse_inplace", [p], [p]);  // v: *mut Value -> status
@@ -9389,10 +9384,12 @@ unsafe extern "C" fn collect_callback(value: *const Value, ctx: *mut u8) -> i64 
     GEN_CONTINUE
 }
 
-// Global reusable JIT env — safe because jq-jit is single-threaded (uses Rc, not Arc).
-struct GlobalJitEnv(std::cell::UnsafeCell<Option<JitEnv>>);
-unsafe impl Sync for GlobalJitEnv {}
-static REUSABLE_ENV: GlobalJitEnv = GlobalJitEnv(std::cell::UnsafeCell::new(None));
+// Per-thread reusable JIT env. Each thread that runs JIT'd code keeps its
+// own pre-allocated `JitEnv` to avoid re-allocating the 65536-slot vars
+// vector on every `execute_jit` call.
+thread_local! {
+    static REUSABLE_ENV: UnsafeCell<Option<JitEnv>> = const { UnsafeCell::new(None) };
+}
 
 /// Copy live LoadVar bindings from the JIT env into the eval Env before we delegate
 /// a complex closure-op expression back to eval. Without this, constructs like
@@ -9410,15 +9407,17 @@ fn seed_eval_env_from_jit(env: &Rc<RefCell<crate::eval::Env>>, exprs: &[&Expr]) 
         Flattener::collect_loadvar_indices(e, &mut indices);
     }
     if indices.is_empty() { return; }
-    let jit_env_opt = unsafe { &mut *REUSABLE_ENV.0.get() };
-    let jit_env = match jit_env_opt.as_ref() { Some(e) => e, None => return };
-    let mut env_mut = env.borrow_mut();
-    for idx in indices {
-        let i = idx as usize;
-        if i < jit_env.vars.len() {
-            env_mut.seed_var(idx, jit_env.vars[i].clone());
+    REUSABLE_ENV.with(|cell| {
+        let jit_env_opt = unsafe { &*cell.get() };
+        let jit_env = match jit_env_opt.as_ref() { Some(e) => e, None => return };
+        let mut env_mut = env.borrow_mut();
+        for idx in indices {
+            let i = idx as usize;
+            if i < jit_env.vars.len() {
+                env_mut.seed_var(idx, jit_env.vars[i].clone());
+            }
         }
-    }
+    });
 }
 
 /// Build a fresh `eval::Env` for a JIT→eval closure-op delegation, auto-seeded
@@ -9440,13 +9439,25 @@ fn reset_delegated_env(env: &Rc<RefCell<crate::eval::Env>>, exprs: &[&Expr]) {
 }
 
 fn with_jit_env<R>(f: impl FnOnce(&mut JitEnv) -> R) -> R {
-    let env_opt = unsafe { &mut *REUSABLE_ENV.0.get() };
-    let env = env_opt.get_or_insert_with(JitEnv::new);
-    env.collect_stacks.clear();
-    env.str_bufs.clear();
-    env.try_depth = 0;
-    env.error_msg = None;
-    f(env)
+    struct EnvGuard(*mut JitEnv);
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            CURRENT_ENV.with(|c| c.set(self.0));
+        }
+    }
+    REUSABLE_ENV.with(|cell| {
+        let env_opt = unsafe { &mut *cell.get() };
+        let env = env_opt.get_or_insert_with(JitEnv::new);
+        env.collect_stacks.clear();
+        env.str_bufs.clear();
+        env.try_depth = 0;
+        env.error_msg = None;
+        env.error_flag = 0;
+        // Publish the env pointer so runtime trampolines that don't take env
+        // (e.g. via `set_jit_error`) can flip `error_flag` on the right env.
+        let _guard = EnvGuard(CURRENT_ENV.with(|c| c.replace(env as *mut JitEnv)));
+        f(env)
+    })
 }
 
 
