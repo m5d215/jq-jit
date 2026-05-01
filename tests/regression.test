@@ -6392,3 +6392,37 @@ false
 [((select(.c >= .c)) | ([.x + .c, .c]))?]
 {"c":0,"x":[]}
 []
+
+# Issue #426: f64 arithmetic result formats with lowercase `e+` (jq's dtoa
+# style for non-decnum values). Decnum-resident literal preservation still
+# uses uppercase via canonical_repr_bytes; this only covers the no-repr path.
+1e100 * 1e100
+null
+1e+200
+
+# Issue #426: same for unary multiplication-by-1 dropping out of decnum
+1e308 * 1
+null
+1e+308
+
+# Issue #426: tonumber yields a no-repr Value::Num; arithmetic preserves that
+"1e200" | tonumber * 1
+null
+1e+200
+
+# Issue #426: literal preservation must keep uppercase `E-` even though the
+# new no-repr formatter would render lowercase. Lexer compares against the
+# canonical (decnum-style) form so repr is retained.
+1e-100
+null
+1E-100
+
+# Issue #426: same for fractional mantissa
+1.5e-10
+null
+1.5E-10
+
+# Issue #426: input JSON parser preserves repr too; tojson re-renders uppercase
+tojson
+1.5e-10
+"1.5E-10"

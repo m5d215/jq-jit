@@ -426,11 +426,16 @@ impl Lexer {
         }
         let num_str: String = self.chars[start..self.pos].iter().collect();
         let n: f64 = num_str.parse().map_err(|e| anyhow::anyhow!("invalid number '{}': {}", num_str, e))?;
-        // Preserve original string for numbers that lose precision in f64.
-        // Drop preservation for source forms that aren't valid JSON (e.g. `.5`),
-        // so downstream emitters can rely on repr being JSON-safe.
+        // Preserve original string when the canonical literal form (jq's
+        // decnum-style uppercase `E+`, decimal-expanded when |te| is small)
+        // differs from the f64-default form. Without this, scientific
+        // literals like `1e-100` would lose their repr and re-render as
+        // lowercase `e-` from the no-repr path, dropping jq's literal
+        // preservation. Drop forms that aren't valid JSON (e.g. `.5`) so
+        // downstream emitters can rely on repr being JSON-safe.
+        let canonical = crate::value::normalize_jq_repr(&num_str).unwrap_or_else(|| num_str.clone());
         let f64_repr = crate::value::format_jq_number(n);
-        let repr = if f64_repr != num_str {
+        let repr = if canonical != f64_repr {
             let norm = normalize_num_repr(&num_str);
             if crate::value::is_valid_json_number(&norm) {
                 Some(Rc::from(norm))

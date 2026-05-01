@@ -4603,8 +4603,14 @@ fn parse_json_number(b: &[u8], pos: usize) -> Result<(Value, usize)> {
             }
         }
     }
+    // Compare against the canonical decnum-style form (uppercase `E+`, decimal
+    // expansion when |te| is small) rather than the f64 default. Without this,
+    // scientific input like `1.5e-10` would lose its repr because the lowercase
+    // f64 default matches the lowercase source, and the no-repr path renders
+    // lowercase too — but jq's literal preservation expects uppercase. See #426.
+    let canonical = normalize_jq_repr(canonical_in).unwrap_or_else(|| canonical_in.to_string());
     let f64_repr = format_jq_number(n);
-    let repr = if f64_repr == canonical_in { None } else { Some(Rc::from(canonical_in)) };
+    let repr = if canonical == f64_repr { None } else { Some(Rc::from(canonical_in)) };
     Ok((Value::number_opt(n, repr), i))
 }
 
@@ -5264,13 +5270,13 @@ pub fn push_jq_number_str(buf: &mut String, n: f64) {
 
     // For very small numbers (abs < 1e-4), always use scientific notation (matching %g)
     if abs != 0.0 && abs < 1e-4 {
-        buf.push_str(&format_as_scientific(n));
+        buf.push_str(&format_as_scientific_lowercase(n));
         return;
     }
 
     // For large numbers: compare fixed vs scientific length, prefer shorter
     if abs >= 1e16 {
-        let sci = format_as_scientific(n);
+        let sci = format_as_scientific_lowercase(n);
         if sci.len() < s.len() {
             buf.push_str(&sci);
             return;
@@ -5404,34 +5410,29 @@ fn format_canonical_mantissa(sig: &str) -> String {
     }
 }
 
-/// Format a number in scientific notation matching jq's style.
-fn format_as_scientific(n: f64) -> String {
+/// Format a number in jq's f64 dtoa scientific style: lowercase `e`, explicit
+/// `+`/`-` sign, single-digit negative exponent zero-padded to two digits.
+///
+/// jq 1.8.1 uses two number renderers depending on whether the value is
+/// decnum-resident or f64-resident. Decnum literals print uppercase
+/// (`1E+10`) via `canonical_repr_bytes`; values without a preserved repr —
+/// arithmetic results, `tonumber`, etc — print lowercase here. See #426.
+fn format_as_scientific_lowercase(n: f64) -> String {
     let sci = format!("{:e}", n);
-    let sci = if sci.contains("e-") { sci } else { sci.replacen("e", "e+", 1) };
-    normalize_scientific(&sci)
-}
-
-/// Normalize scientific notation to match jq 1.8.1's format: uppercase `E`,
-/// explicit `+`/`-` sign, two-digit exponent for values below 100.
-fn normalize_scientific(s: &str) -> String {
-    if let Some(idx) = s.find(|c: char| c == 'e' || c == 'E') {
-        let mantissa = &s[..idx];
-        let exp_str = &s[idx+1..]; // includes sign
-        let (sign, digits) = if let Some(rest) = exp_str.strip_prefix('-') {
-            ("-", rest)
-        } else if let Some(rest) = exp_str.strip_prefix('+') {
-            ("+", rest)
-        } else {
-            ("+", exp_str)
-        };
-        let exp: i32 = digits.parse().unwrap_or(0);
-        if exp.abs() < 100 {
-            format!("{}E{}{:02}", mantissa, sign, exp.abs())
-        } else {
-            format!("{}E{}{}", mantissa, sign, exp.abs())
-        }
+    let (mantissa, exp_str) = match sci.find('e') {
+        Some(idx) => (&sci[..idx], &sci[idx + 1..]),
+        None => return sci,
+    };
+    let (sign, digits) = if let Some(rest) = exp_str.strip_prefix('-') {
+        ('-', rest)
     } else {
-        s.to_string()
+        ('+', exp_str)
+    };
+    let exp: i32 = digits.parse().unwrap_or(0);
+    if exp.abs() < 10 {
+        format!("{}e{}{:02}", mantissa, sign, exp.abs())
+    } else {
+        format!("{}e{}{}", mantissa, sign, exp.abs())
     }
 }
 
