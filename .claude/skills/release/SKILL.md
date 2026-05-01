@@ -3,7 +3,7 @@ name: release
 description: Cut a new jq-jit release — pre-flight, bench, version bump, tag, push. Single PR.
 ---
 
-# /release — jq-jit release workflow
+# release — jq-jit release workflow
 
 Cut a new release from the current branch. Bundles benchmark capture,
 `Cargo.toml` bump, and `docs/benchmark-history.{tsv,md}` updates into a
@@ -14,15 +14,25 @@ GitHub Release, and bumps the Homebrew tap formula.
 Run **autonomously** end-to-end. Do not pause for confirmation unless
 the regression gate triggers (see step 4).
 
-## Args
+## Invocation
 
-| Form | Behavior |
+This skill is **not bound to a slash command** — `/release` resolves to
+the user-global aeonnext release skill at `~/.claude/skills/release/`,
+not this one. Invoke it via the `Skill` tool (the description above
+matches user intent like "リリースして" / "release" / "release v1.5.0"
+in the jq-jit repo).
+
+## Determining the version
+
+Extract from user input:
+
+| User says | Behavior |
 |---|---|
-| `/release` | Auto-detect bump type from commits since last tag |
-| `/release patch` | Force patch bump (e.g. v1.4.4 → v1.4.5) |
-| `/release minor` | Force minor bump (v1.4.4 → v1.5.0) |
-| `/release major` | Force major bump (v1.4.4 → v2.0.0) |
-| `/release v1.5.0` | Explicit version |
+| "release" / "リリース" (no other arg) | Auto-detect bump type from commits since last tag |
+| "release patch" / "patch でリリース" | Force patch bump (e.g. v1.4.4 → v1.4.5) |
+| "release minor" / "minor リリース" | Force minor bump (v1.4.4 → v1.5.0) |
+| "release major" / "major リリース" | Force major bump (v1.4.4 → v2.0.0) |
+| "release v1.5.0" / "v1.5.0 でリリース" | Explicit version |
 
 Auto-detection scans `git log v<latest>..HEAD --pretty=%s` for
 Conventional Commits prefixes:
