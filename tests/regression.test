@@ -6291,27 +6291,31 @@ null
 {"x":1,"a":"hi"}
 "hi"
 
-# #410: SIMD pre-check (`obj_no_dup_target_keys`) restores the
-# pre-#371 first-match early-exit when it can prove the target key
-# appears at most once. These cases stress the boundary conditions
-# where the proof must NOT incorrectly take the fast path.
+# #410 / #422: the dup-free first-match early-exit is gated on the
+# `no_target_first_byte_in_remainder` proof — after a match is
+# recorded, the helper checks only the trailing bytes for the
+# target key's first byte. False positives (the byte present for
+# any reason: nested duplicates, string values, escaped substrings,
+# real top-level duplicates) must NOT take the early-exit path.
 
-# Duplicate target inside a nested object: needle counts both
-# occurrences, so the slow path runs and last-wins on the OUTER
-# `.x` (the inner duplicate is irrelevant to the outer read).
+# Duplicate target inside a nested object: the outer scan sees the
+# inner `x` byte still ahead, falls back to scan-to-end, and
+# last-wins on the OUTER `.x` (the inner duplicate is irrelevant to
+# the outer read).
 .x
 {"a":{"x":99},"x":1,"x":2}
 2
 
-# Field name appearing as a quoted string value: needle counts both,
-# slow path runs, last-wins still gives the unique top-level key.
+# Field name appearing as a quoted string value: needle still
+# present in the remainder, slow path runs, last-wins still gives
+# the unique top-level key.
 .x
 {"name":"x","x":42}
 42
 
 # Field name appearing as a JSON-escaped substring inside a string
-# value: the bare-quoted needle would over-count (false positive)
-# and route to the slow path, which still returns the right answer.
+# value: the bare needle finds the byte (false positive) and routes
+# to the slow path, which still returns the right answer.
 .x
 {"note":"the \"x\" key","x":7}
 7
@@ -6331,6 +6335,37 @@ null
 .x + .y
 {"x":2,"y":1,"name":"row","y":40}
 42
+
+# #422: the in-loop variant must hold last-wins when the duplicate
+# sits AFTER the requested key — exercises the path where the
+# remainder check sees the target's first byte and continues the
+# scan instead of returning early.
+.x
+{"x":1,"name":"item","x":99}
+99
+
+# String interpolation reading two fields where one of them is the
+# last key in the object (`.name`). The remainder after the last
+# match is just `}` — the proof must hold even though the row is
+# tiny and the per-row overhead would have killed us in the upfront
+# variant (#422).
+"\(.name)=\(.x)"
+{"x":1,"y":2,"name":"row"}
+"row=1"
+
+# `[.name, .x, .y] | @csv` reads three fields where the last
+# requested match is also the last key in the object — the
+# remainder is just `}` and the proof must early-exit cleanly.
+[.name, .x, .y] | @csv
+{"x":1,"y":2,"name":"row"}
+"\"row\",1,2"
+
+# Same shape but with a duplicate `.name` further along: the
+# remainder check must see the `n` byte and fall back to the
+# scan-to-end so last-wins binds correctly.
+[.name, .x, .y] | @csv
+{"x":1,"y":2,"name":"first","name":"last"}
+"\"last\",1,2"
 
 # #405: select_ff_cmp_then_array shares the same Family A gap as
 # the value sibling (#389) and the str sibling (#399). The bug is
