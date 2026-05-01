@@ -1,27 +1,20 @@
 #!/bin/bash
-# Comprehensive jq-jit benchmark suite
-# Sources: jq, gojq, jaq bench patterns + jq-jit weak-pattern analysis
+# Comprehensive jq-jit benchmark — broad coverage across NDJSON, generators,
+# reduce/foreach, regex, type conversion, and an external jaq filter corpus.
+# Source dataset for docs/benchmark-history.md release columns.
 #
 # Usage:
-#   bench/comprehensive.sh          # full run (best of 3)
-#   bench/comprehensive.sh --quick  # quick run (1 pass, 15s timeout)
+#   bench/comprehensive.sh                        # benchmark target/release/jq-jit
+#   JQ_JIT=path/to/binary bench/comprehensive.sh  # benchmark a different build, or set
+#                                                 # JQ_JIT=$(which jq) for a sanity comparison
 #
-# bench/run.sh — quick daily checks (17 NDJSON patterns, ~30s, colored ratios)
-# This script — thorough analysis (80+ patterns: generators, strings, regex, etc.)
+# bench/run.sh — quick daily checks (142 NDJSON patterns).
+# This script — broader coverage (~92 patterns + jaq-derived filters).
 set -e
 
 JQ_JIT="${JQ_JIT:-target/release/jq-jit}"
-JQ="$(command -v jq 2>/dev/null || true)"
-JAQ="$(command -v jaq 2>/dev/null || true)"
-TIMEOUT=30
+TIMEOUT=15
 RUNS=3
-
-if [ "$1" = "--quick" ]; then
-    #RUNS=1
-    TIMEOUT=15
-    JQ=
-    JAQ=
-fi
 
 if [ ! -x "$JQ_JIT" ]; then
     echo "Error: $JQ_JIT not found. Run: cargo build --release"
@@ -46,77 +39,201 @@ fi
 bench_ndjson() {
     local label="$1" flags="$2" filter="$3" datafile="${4:-$NDJSON}"
     printf "  %-35s" "$label"
-    for tool in "$JQ_JIT" "$JQ" "$JAQ"; do
-        if [ -z "$tool" ]; then printf "  %-14s" "N/A"; continue; fi
-        local best=999 failed=0
-        for ((i=0; i<RUNS; i++)); do
-            local t
-            t=$( { TIMEFORMAT='%U'; time timeout "$TIMEOUT" "$tool" $flags "$filter" "$datafile" > /dev/null 2>&1; } 2>&1 ) && rc=0 || rc=$?
-            if [ $rc -ne 0 ]; then failed=1; break; fi
-            if (( $(echo "$t < $best" | bc -l) )); then best=$t; fi
-        done
-        if [ $failed -eq 1 ]; then
-            printf "  %-14s" "FAIL/TIMEOUT"
-        else
-            printf "  %-14s" "${best}s"
-        fi
+    local best=999 failed=0
+    for ((i=0; i<RUNS; i++)); do
+        local t
+        t=$( { TIMEFORMAT='%U'; time timeout "$TIMEOUT" "$JQ_JIT" $flags "$filter" "$datafile" > /dev/null 2>&1; } 2>&1 ) && rc=0 || rc=$?
+        if [ $rc -ne 0 ]; then failed=1; break; fi
+        if (( $(echo "$t < $best" | bc -l) )); then best=$t; fi
     done
-    echo ""
+    if [ $failed -eq 1 ]; then
+        printf "  %-14s\n" "FAIL/TIMEOUT"
+    else
+        printf "  %-14s\n" "${best}s"
+    fi
 }
 
 # Benchmark runner: single JSON input via echo
 bench_gen() {
     local label="$1" n="$2" filter="$3"
     printf "  %-35s" "$label"
-    for tool in "$JQ_JIT" "$JQ" "$JAQ"; do
-        if [ -z "$tool" ]; then printf "  %-14s" "N/A"; continue; fi
-        local best=999 failed=0
-        for ((i=0; i<RUNS; i++)); do
-            local t
-            t=$( { TIMEFORMAT='%U'; time echo "$n" | timeout "$TIMEOUT" "$tool" "$filter" > /dev/null 2>&1; } 2>&1 ) && rc=0 || rc=$?
-            if [ $rc -ne 0 ]; then failed=1; break; fi
-            if (( $(echo "$t < $best" | bc -l) )); then best=$t; fi
-        done
-        if [ $failed -eq 1 ]; then
-            printf "  %-14s" "FAIL/TIMEOUT"
-        else
-            printf "  %-14s" "${best}s"
-        fi
+    local best=999 failed=0
+    for ((i=0; i<RUNS; i++)); do
+        local t
+        t=$( { TIMEFORMAT='%U'; time echo "$n" | timeout "$TIMEOUT" "$JQ_JIT" "$filter" > /dev/null 2>&1; } 2>&1 ) && rc=0 || rc=$?
+        if [ $rc -ne 0 ]; then failed=1; break; fi
+        if (( $(echo "$t < $best" | bc -l) )); then best=$t; fi
     done
-    echo ""
+    if [ $failed -eq 1 ]; then
+        printf "  %-14s\n" "FAIL/TIMEOUT"
+    else
+        printf "  %-14s\n" "${best}s"
+    fi
 }
 
 header() {
-    printf "  %-35s  %-14s  %-14s  %-14s\n" "Benchmark" "jq-jit" "jq" "jaq"
-    printf "  %-35s  %-14s  %-14s  %-14s\n" "---" "---" "---" "---"
+    printf "  %-35s  %-14s\n" "Benchmark" "time"
+    printf "  %-35s  %-14s\n" "---" "---"
 }
 
 echo "=== Comprehensive jq-jit Benchmark Suite ==="
-echo "Tools: jq-jit | jq $(jq --version 2>&1) | jaq $(jaq --version 2>&1 | awk '{print $2}')"
+echo "Binary: $JQ_JIT"
 echo "Runs: best of $RUNS, timeout ${TIMEOUT}s"
 echo ""
 
 # --- NDJSON workloads (2M objects) ---
 echo "--- NDJSON workloads (2M objects) ---"
 header
-bench_ndjson "empty"                   ""   "empty"
-bench_ndjson "identity -c"             "-c" "."
-bench_ndjson "identity (pretty)"       ""   "."
-bench_ndjson "field access .name"      "-c" ".name"
-bench_ndjson "nested .x,.y,.name"      "-c" ".x,.y,.name"
-bench_ndjson "arithmetic .x + .y"      "-c" ".x + .y"
-bench_ndjson "select .x > 1500000"     "-c" "select(.x > 1500000)"
-bench_ndjson "string concat"           "-c" '.name + "_x"'
-bench_ndjson "object construct"        "-c" '{a: .x, b: .y}'
-bench_ndjson "array construct"         "-c" '[.name, .x]'
-bench_ndjson ".[]"                     "-c" ".[]"
-bench_ndjson "to_entries"              "-c" "to_entries"
-bench_ndjson "keys"                    "-c" "keys"
-bench_ndjson "keys_unsorted"           "-c" "keys_unsorted"
-bench_ndjson "length"                  "-c" "length"
-bench_ndjson 'has("x")'               "-c" 'has("x")'
-bench_ndjson "type"                    "-c" "type"
-bench_ndjson "del(.name)"             "-c" "del(.name)"
+# Format per entry: 'label:flags:filter'. The filter is everything after the
+# second `:` so embedded colons (e.g. `{name: .name}`) are preserved verbatim.
+# Labels MUST NOT contain `:` (the parser splits on the first two).
+NDJSON_TESTS=(
+    'empty::empty'
+    'identity -c:-c:.'
+    'identity (pretty)::.'
+    'field access .name:-c:.name'
+    'nested .x,.y,.name:-c:.x,.y,.name'
+    'arithmetic .x + .y:-c:.x + .y'
+    'select .x > 1500000:-c:select(.x > 1500000)'
+    'string concat:-c:.name + "_x"'
+    'object construct:-c:{a: .x, b: .y}'
+    'array construct:-c:[.name, .x]'
+    '.[]:-c:.[]'
+    'to_entries:-c:to_entries'
+    'keys:-c:keys'
+    'keys_unsorted:-c:keys_unsorted'
+    'length:-c:length'
+    'has("x"):-c:has("x")'
+    'type:-c:type'
+    'del(.name):-c:del(.name)'
+    '@csv:-c:[.name, .x] | @csv'
+    'split/join:-c:.name | split("a") | join("b")'
+    'select|field:-c:select(.x > 1000000) | .name'
+    'select|remap:-c:select(.x > 1000000) | {n:.name, v:.y}'
+    'computed remap:-c:{name: .name, double: (.x * 2), sum: (.x + .y)}'
+    '[.x,.y]|add:-c:[.x, .y] | add'
+    '[.x,.y]|avg:-c:[.x, .y] | add / length'
+    'map(*2)|add:-c:[.x, .y] | map(. * 2) | add'
+    'keys|length:-c:keys | length'
+    '.+{z=0}:-c:. + {z: 0}'
+    'split|first:-c:.name | split("_") | .[0]'
+    'slice[0..5]:-c:.name[0:5]'
+    'dynkey {(.name)}:-c:{(.name): .x}'
+    '.x += 1:-c:.x += 1'
+    '{a}+{b} merge:-c:{a: .name} + {b: .x}'
+    '.x*2+1:-c:.x * 2 + 1'
+    '.x+.y*2:-c:.x + .y * 2'
+    '.x > .y:-c:.x > .y'
+    'to_entries|len:-c:to_entries | length'
+    '.x|.+1 (pipe):-c:.x | . + 1'
+    '.x|.*2|.+1:-c:.x | . * 2 | . + 1'
+    '.name|.+"_x":-c:.name | . + "_x"'
+    '.x>N | not:-c:.x > 1000000 | not'
+    'and (2 cmp):-c:.x > 100 and .y < 500'
+    'if-then-else:-c:if .x > 1000000 then "big" else "small" end'
+    'sel(and)|field:-c:select(.x > 100 and .y < 500) | .name'
+    'sel(and)|remap:-c:select(.x > 100 and .y < 500) | {n:.name, v:.y}'
+    'arith|cmp:-c:.x | . * 2 | . + 1 | . > 1000000'
+    'if cmp .field:-c:if .x > 1000000 then .name else .y end'
+    'split|length:-c:.name | split("_") | length'
+    '[x,y]|min:-c:[.x, .y] | min'
+    '[x,y]|max:-c:[.x, .y] | max'
+    '[x,y]|sort|.[0]:-c:[.x, .y] | sort | .[0]'
+    '.name|len>5:-c:.name | length > 5'
+    'sel(len>5)|.x:-c:select(.name | length > 5) | .x'
+    'if .x>.y .name:-c:if .x > .y then .name else .x end'
+    'sel(.x>.y)|.name:-c:select(.x > .y) | .name'
+    '.x*2|tostring:-c:.x * 2 | tostring'
+    '.x*.x+1:-c:.x | . * . + 1'
+    '{k=.name,v=tostr}:-c:{key:.name,val:(.x|tostring)}'
+    'str add chain:-c:.name + ":" + (.x|tostring)'
+    'if>.y .name|empty:-c:if .x > .y then .name else empty end'
+    'if .x%2==0:-c:if .x % 2 == 0 then "even" else "odd" end'
+    'if .x*2+1>1M:-c:if .x * 2 + 1 > 1000000 then "big" else "small" end'
+    'sel(.x%2==0)|.name:-c:select(.x % 2 == 0) | .name'
+    'sel(.x*2+1>1M):-c:select(.x * 2 + 1 > 1000000)'
+    '.x|@json:-c:.x | @json'
+    '.x|@text:-c:.x | @text'
+    '.name|@json:-c:.name | @json'
+    'sel|[arr]:-c:select(.x > 500) | [.name, .x]'
+    'sel(and)|[arr]:-c:select(.x > 100 and .y < 500) | [.name, .x, .y]'
+    'if>.y [arr]:-c:if .x > .y then [.name, .x] else [.name, .y] end'
+    'if sw then .f:-c:if .name | startswith("user_1") then .x else .y end'
+    'dynkey {(.n)=.x*2}:-c:{(.name): (.x * 2)}'
+    'sel(and)|.x*.y:-c:select(.x > 500 and .y < 1000) | .x * .y'
+    'sel>N|str chain:-c:select(.x > 1000) | (.name + ":" + (.x | tostring))'
+    '.f+"_"+arith_ts:-c:.name + "_" + (.x * 2 | tostring)'
+    'sel(sw)|str ch:-c:select(.name | startswith("item_1")) | (.name + ":" + (.x | tostring))'
+    'split|rev|join:-c:.name | split("_") | reverse | join("-")'
+    'dynkey+static:-c:{(.name): .x, total: (.x + .y)}'
+    'if>.y str chain:-c:if .x > .y then .name + ":big" else .name + ":small" end'
+    'remap+str chain:-c:{a: (.name + "_" + (.x | tostring)), b: .y}'
+    'sel(len>8):-c:select(.name | length > 8)'
+    'up|split|join:-c:.name | ascii_upcase | split("_") | join("-")'
+    '.name|index:-c:.name | index("_")'
+    '.name|index+1:-c:.name | index("_") + 1'
+    '.name|rindex:-c:.name | rindex("_")'
+    '.name|indices:-c:.name | indices("_")'
+    '[x,y]|sort:-c:[.x, .y] | sort'
+    '.name|scan:-c:.name | scan("[0-9]+")'
+    '.name|gsub:-c:.name | gsub("_"; "-")'
+    'walk(if num .+1):-c:walk(if type == "number" then . + 1 else . end)'
+    'tojson:-c:tojson'
+    '{name,x}:-c:{name,x}'
+    '.z//.name:-c:.z // .name'
+    '.x|=test(re):-c:.name |= test("^item_[0-9]+")'
+    './sep|first:-c:.name |= (. / "_" | .[0])'
+    '.y=(.x*2):-c:.y = (.x * 2)'
+    '.y=(.x+.y):-c:.y = (.x + .y)'
+    'objects:-c:objects'
+    '.tag|=if..then N:-c:.tag |= if . == "abc" then 1 else 0 end'
+    '.x=(.x+1):-c:.x = (.x + 1)'
+    'sel>N|.y+=1:-c:select(.x > 1000000) | .y += 1'
+    'sel(and)|.x+=1:-c:select(.x > 500 and .y < 1000) | .x += 1'
+    'sel(sw)|.x+=1:-c:select(.name | startswith("item_1")) | .x += 1'
+    'match(re):-c:.name | match("([a-z]+)_([0-9]+)")'
+    'capture(re):-c:.name | capture("(?P<w>[a-z]+)_(?P<n>[0-9]+)")'
+    'first(.name,.x):-c:first(.name, .x)'
+    'if .x==null:-c:if .x == null then "none" else "some" end'
+    'we(sw(.key)):-c:with_entries(select(.key | startswith("n")))'
+    'sel(sw or ew):-c:select((.name | startswith("item_1")) or (.name | endswith("_0")))'
+    'path(.name,.x):-c:path(.name, .x)'
+    'sel(str+num+num):-c:select((.name | contains("_1")) and .x > 500 and .y < 1000)'
+    'nested if|field:-c:if .x > 100 then if .y < 500 then .name else empty end else empty end'
+    '.f|floor|.*2:-c:.x | floor | . * 2'
+    'split|len>1:-c:.name | split("_") | length > 1'
+    '.name|len|.*2:-c:.name | length | . * 2'
+    'if len>5 .x .y:-c:if .name | length > 5 then .x else .y end'
+    'sel(len>5)|remap:-c:select(.name | length > 5) | {n:.name, v:.x}'
+    '.x|tostr|len:-c:.x | tostring | length'
+    'if .x>.y .x .y:-c:if .x > .y then .x else .y end'
+    'split|last|tonum:-c:.name | split("_") | last | tonumber'
+    'split|rev|.[0]:-c:.name | split("_") | reverse | .[0]'
+    'split|.[0]+.[1]:-c:.name | split("_") | .[0] + "-" + .[1]'
+    '.[]|strings:-c:.[] | strings'
+    '.[]|numbers:-c:.[] | numbers'
+    '[x,y]|any(>1M):-c:[.x, .y] | any(. > 1000000)'
+    'sel(dc|sw):-c:select(.name | ascii_downcase | startswith("user"))'
+    '[[x,y],[n]]|flat:-c:[[.x,.y],[.name]] | flatten'
+    '.x|floor|.*2:-c:.x | floor | . * 2'
+    'tojson|fromjson:-c:tojson | fromjson'
+    '[.x]|add:-c:[.x] | add'
+    'if>N {o}+.:-c:if .x > 1000000 then {status:"high"} + . else . end'
+    'if>N .+{o}:-c:if .x > 1000000 then . + {status:"high"} else . end'
+    'if .n=="s" .+{o}:-c:if .name == "user_1" then . + {found:true} else . end'
+    'sel(.n>"s"):-c:select(.name > "user_5")'
+    '[x,y,z]|min:-c:[.x, .y, .x] | min'
+    'if .n|len>5 l s:-c:if .name | length > 5 then "long" else "short" end'
+    'if .x|flr>N b s:-c:if .x | floor > 1000000 then "big" else "small" end'
+    'if .n|test l e:-c:if .name | test("^user") then "yes" else "no" end'
+    'if .n|sw l e:-c:if .name | startswith("user") then "yes" else "no" end'
+    'if .n|ew l e:-c:if .name | endswith("_0") then "yes" else "no" end'
+    '.n|len|tostr:-c:.name | length | tostring'
+)
+for t in "${NDJSON_TESTS[@]}"; do
+    IFS=: read -r label flags filter <<< "$t"
+    bench_ndjson "$label" "$flags" "$filter"
+done
 
 echo ""
 echo "--- String operations (2M objects) ---"
@@ -256,7 +373,7 @@ if [ -d "$BENCH_DIR" ]; then
         fi
     done
 else
-    echo "  (jaq repo not found at $BENCH_DIR — run: git clone https://github.com/01mf02/jaq /tmp/jaq-repo)"
+    echo "  (jaq repo not found at $BENCH_DIR — clone it for the external corpus section)"
 fi
 
 echo ""

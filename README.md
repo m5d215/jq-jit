@@ -198,13 +198,19 @@ cargo test --release -- --test-threads=1
 
 ## Benchmarks
 
-Run benchmarks comparing against `jq`, `gojq`, and `jaq`:
+Measure jq-jit on your own hardware:
 
 ```bash
-bash bench/run.sh
+bash bench/comprehensive.sh
 ```
 
-This generates 2M NDJSON objects and measures performance across 100+ filter patterns (identity, field access, arithmetic, select, string operations, regex, object construction, and more).
+This generates 2M NDJSON objects and measures performance across ~250
+filter patterns spanning NDJSON, generators, reduce/foreach, regex,
+type conversion, and an external jaq filter corpus.
+
+Set `JQ_JIT` to point at a different binary — e.g. `JQ_JIT=$(which jq)
+bash bench/comprehensive.sh` for a sanity comparison against the
+reference jq build.
 
 ## License
 
