@@ -6426,3 +6426,44 @@ null
 tojson
 1.5e-10
 "1.5E-10"
+
+# Issue #428: tonumber preserves the source repr so scientific input round-trips
+# through jq's decnum-style canonical form (uppercase E+, decimal expansion when
+# |te| <= 6) instead of collapsing to f64-default rendering.
+"1e10" | tonumber
+null
+1E+10
+
+# Issue #428: fractional-mantissa scientific source preserves uppercase E+
+"1.5e10" | tonumber
+null
+1.5E+10
+
+# Issue #428: negative-mantissa scientific source preserves the sign
+"-1e10" | tonumber
+null
+-1E+10
+
+# Issue #428: leading `+` is stripped before the repr is stored, so output has
+# no leading `+` (matches jq).
+"+1e10" | tonumber
+null
+1E+10
+
+# Issue #428: small negative-exponent scientific input expands to decimal form
+# (matches jq's decimal-expansion threshold).
+"1e-5" | tonumber
+null
+0.00001
+
+# Issue #428: decimal source preserves its decimal form rather than reformatting
+# to scientific.
+"0.00001" | tonumber
+null
+0.00001
+
+# Issue #428: integer-valued scientific input above the f64 integer fast-path
+# threshold (>= 1e16) preserves uppercase E+, not the lowercase arithmetic form.
+"1.5e16" | tonumber
+null
+1.5E+16

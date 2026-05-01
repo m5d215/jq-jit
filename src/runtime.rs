@@ -1371,7 +1371,20 @@ fn rt_tonumber(v: &Value) -> Result<Value> {
             // Strip leading '+' for compatibility with jq
             let parse_str = s_ref.strip_prefix('+').unwrap_or(s_ref);
             match fast_float::parse(parse_str) {
-                Ok(n) => Ok(Value::number(n)),
+                Ok(n) => {
+                    // Mirror parse_json_number: preserve repr when the canonical
+                    // decnum-style form differs from the f64 default. Without
+                    // this, `"1e10" | tonumber` collapses to `10000000000`
+                    // instead of jq's `1E+10`. See #428.
+                    let canonical = crate::value::normalize_jq_repr(parse_str)
+                        .unwrap_or_else(|| parse_str.to_string());
+                    let f64_repr = crate::value::format_jq_number(n);
+                    if canonical != f64_repr && crate::value::is_valid_json_number(parse_str) {
+                        Ok(Value::number_with_repr(n, Rc::from(parse_str)))
+                    } else {
+                        Ok(Value::number(n))
+                    }
+                }
                 Err(_) => bail!("Invalid numeric literal: {}", crate::value::value_to_json(v)),
             }
         }
