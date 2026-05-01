@@ -1849,13 +1849,20 @@ fn rt_regex_split(v: &Value, re: &Value, flags: &Value) -> Result<Value> {
 }
 
 fn rt_join(v: &Value, sep: &Value) -> Result<Value> {
-    match (v, sep) {
-        (Value::Arr(a), Value::Str(s)) => {
-            // Estimate capacity: average item ~8 bytes + separator
-            let cap = a.len() * (8 + s.len());
+    // jq treats `null` as the additive identity for strings (`"a" + null == "a"`),
+    // and `join` is internally a reduce over `acc + sep + item`, so a `null`
+    // separator collapses to the empty string. See #430.
+    let sep_bytes: &[u8] = match sep {
+        Value::Str(s) => s.as_bytes(),
+        Value::Null => b"",
+        _ => bail!("join requires array and string"),
+    };
+    match v {
+        Value::Arr(a) => {
+            let cap = a.len() * (8 + sep_bytes.len());
             let mut buf: Vec<u8> = Vec::with_capacity(cap);
             for (i, item) in a.iter().enumerate() {
-                if i > 0 { buf.extend_from_slice(s.as_bytes()); }
+                if i > 0 { buf.extend_from_slice(sep_bytes); }
                 match item {
                     Value::Str(sv) => buf.extend_from_slice(sv.as_bytes()),
                     Value::Null => {},
