@@ -2,7 +2,7 @@
 """Append a new version column to docs/benchmark-history.{tsv,md}.
 
 Workflow:
-    bench/update_history.py <version-label> [bench_output_file]
+    .claude/skills/release/scripts/update_history.py <version> [bench_output_file]
 
   - If a bench output file is given, parses it and appends rows to the TSV.
   - Otherwise, runs `bench/comprehensive.sh` first, captures its stdout,
@@ -13,6 +13,9 @@ Workflow:
 The TSV is the source of truth (long format,
 `section / benchmark / version / time_seconds`); the markdown is a slim
 human-readable view derived from it.
+
+Used by the `/release` skill but also runnable standalone for ad-hoc
+history additions.
 """
 import csv
 import re
@@ -21,7 +24,9 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(
+    subprocess.check_output(['git', 'rev-parse', '--show-toplevel'], text=True).strip()
+)
 TSV = ROOT / 'docs/benchmark-history.tsv'
 MD = ROOT / 'docs/benchmark-history.md'
 BENCH = ROOT / 'bench/comprehensive.sh'
