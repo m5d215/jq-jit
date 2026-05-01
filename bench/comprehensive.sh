@@ -1,27 +1,20 @@
 #!/bin/bash
-# Comprehensive jq-jit benchmark suite
-# Sources: jq, gojq, jaq bench patterns + jq-jit weak-pattern analysis
+# Comprehensive jq-jit benchmark — broad coverage across NDJSON, generators,
+# reduce/foreach, regex, type conversion, and an external jaq filter corpus.
+# Source dataset for docs/benchmark-history.md release columns.
 #
 # Usage:
-#   bench/comprehensive.sh          # full run (best of 3)
-#   bench/comprehensive.sh --quick  # quick run (1 pass, 15s timeout)
+#   bench/comprehensive.sh                        # benchmark target/release/jq-jit
+#   JQ_JIT=path/to/binary bench/comprehensive.sh  # benchmark a different build, or set
+#                                                 # JQ_JIT=$(which jq) for a sanity comparison
 #
-# bench/run.sh — quick daily checks (17 NDJSON patterns, ~30s, colored ratios)
-# This script — thorough analysis (80+ patterns: generators, strings, regex, etc.)
+# bench/run.sh — quick daily checks (142 NDJSON patterns).
+# This script — broader coverage (~92 patterns + jaq-derived filters).
 set -e
 
 JQ_JIT="${JQ_JIT:-target/release/jq-jit}"
-JQ="$(command -v jq 2>/dev/null || true)"
-JAQ="$(command -v jaq 2>/dev/null || true)"
-TIMEOUT=30
+TIMEOUT=15
 RUNS=3
-
-if [ "$1" = "--quick" ]; then
-    #RUNS=1
-    TIMEOUT=15
-    JQ=
-    JAQ=
-fi
 
 if [ ! -x "$JQ_JIT" ]; then
     echo "Error: $JQ_JIT not found. Run: cargo build --release"
@@ -46,53 +39,45 @@ fi
 bench_ndjson() {
     local label="$1" flags="$2" filter="$3" datafile="${4:-$NDJSON}"
     printf "  %-35s" "$label"
-    for tool in "$JQ_JIT" "$JQ" "$JAQ"; do
-        if [ -z "$tool" ]; then printf "  %-14s" "N/A"; continue; fi
-        local best=999 failed=0
-        for ((i=0; i<RUNS; i++)); do
-            local t
-            t=$( { TIMEFORMAT='%U'; time timeout "$TIMEOUT" "$tool" $flags "$filter" "$datafile" > /dev/null 2>&1; } 2>&1 ) && rc=0 || rc=$?
-            if [ $rc -ne 0 ]; then failed=1; break; fi
-            if (( $(echo "$t < $best" | bc -l) )); then best=$t; fi
-        done
-        if [ $failed -eq 1 ]; then
-            printf "  %-14s" "FAIL/TIMEOUT"
-        else
-            printf "  %-14s" "${best}s"
-        fi
+    local best=999 failed=0
+    for ((i=0; i<RUNS; i++)); do
+        local t
+        t=$( { TIMEFORMAT='%U'; time timeout "$TIMEOUT" "$JQ_JIT" $flags "$filter" "$datafile" > /dev/null 2>&1; } 2>&1 ) && rc=0 || rc=$?
+        if [ $rc -ne 0 ]; then failed=1; break; fi
+        if (( $(echo "$t < $best" | bc -l) )); then best=$t; fi
     done
-    echo ""
+    if [ $failed -eq 1 ]; then
+        printf "  %-14s\n" "FAIL/TIMEOUT"
+    else
+        printf "  %-14s\n" "${best}s"
+    fi
 }
 
 # Benchmark runner: single JSON input via echo
 bench_gen() {
     local label="$1" n="$2" filter="$3"
     printf "  %-35s" "$label"
-    for tool in "$JQ_JIT" "$JQ" "$JAQ"; do
-        if [ -z "$tool" ]; then printf "  %-14s" "N/A"; continue; fi
-        local best=999 failed=0
-        for ((i=0; i<RUNS; i++)); do
-            local t
-            t=$( { TIMEFORMAT='%U'; time echo "$n" | timeout "$TIMEOUT" "$tool" "$filter" > /dev/null 2>&1; } 2>&1 ) && rc=0 || rc=$?
-            if [ $rc -ne 0 ]; then failed=1; break; fi
-            if (( $(echo "$t < $best" | bc -l) )); then best=$t; fi
-        done
-        if [ $failed -eq 1 ]; then
-            printf "  %-14s" "FAIL/TIMEOUT"
-        else
-            printf "  %-14s" "${best}s"
-        fi
+    local best=999 failed=0
+    for ((i=0; i<RUNS; i++)); do
+        local t
+        t=$( { TIMEFORMAT='%U'; time echo "$n" | timeout "$TIMEOUT" "$JQ_JIT" "$filter" > /dev/null 2>&1; } 2>&1 ) && rc=0 || rc=$?
+        if [ $rc -ne 0 ]; then failed=1; break; fi
+        if (( $(echo "$t < $best" | bc -l) )); then best=$t; fi
     done
-    echo ""
+    if [ $failed -eq 1 ]; then
+        printf "  %-14s\n" "FAIL/TIMEOUT"
+    else
+        printf "  %-14s\n" "${best}s"
+    fi
 }
 
 header() {
-    printf "  %-35s  %-14s  %-14s  %-14s\n" "Benchmark" "jq-jit" "jq" "jaq"
-    printf "  %-35s  %-14s  %-14s  %-14s\n" "---" "---" "---" "---"
+    printf "  %-35s  %-14s\n" "Benchmark" "time"
+    printf "  %-35s  %-14s\n" "---" "---"
 }
 
 echo "=== Comprehensive jq-jit Benchmark Suite ==="
-echo "Tools: jq-jit | jq $(jq --version 2>&1) | jaq $(jaq --version 2>&1 | awk '{print $2}')"
+echo "Binary: $JQ_JIT"
 echo "Runs: best of $RUNS, timeout ${TIMEOUT}s"
 echo ""
 
@@ -256,7 +241,7 @@ if [ -d "$BENCH_DIR" ]; then
         fi
     done
 else
-    echo "  (jaq repo not found at $BENCH_DIR — run: git clone https://github.com/01mf02/jaq /tmp/jaq-repo)"
+    echo "  (jaq repo not found at $BENCH_DIR — clone it for the external corpus section)"
 fi
 
 echo ""

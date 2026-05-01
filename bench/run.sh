@@ -1,19 +1,18 @@
 #!/bin/bash
-# Quick daily benchmark — 17 NDJSON workloads, ~30s, colored output with ratios
-# For thorough analysis (80+ patterns), use: bench/comprehensive.sh
+# Quick daily benchmark — 142 NDJSON workloads, jq-jit only.
+#
 # Usage:
-#   bench/run.sh [data_file]               # full run incl. jq/gojq/jaq if installed
-#   bench/run.sh --self-only [data_file]   # jq-jit only (skips slow competitors)
+#   bench/run.sh [data_file]               # benchmark target/release/jq-jit
+#   JQ_JIT=path/to/binary bench/run.sh     # benchmark a different build, or set
+#                                          # JQ_JIT=$(which jq) for a sanity comparison
+#
+# For broader coverage (generators, reduce, regex, etc.) and the dataset
+# behind docs/benchmark-history.md, use bench/comprehensive.sh.
 set -e
-
-SELF_ONLY=0
-if [ "$1" = "--self-only" ]; then
-    SELF_ONLY=1
-    shift
-fi
 
 DATAFILE="${1:-/tmp/bench_2m.json}"
 RUNS=3
+TIMEOUT=15
 
 # Generate data if missing
 if [ ! -f "$DATAFILE" ]; then
@@ -21,63 +20,40 @@ if [ ! -f "$DATAFILE" ]; then
     bash "$(dirname "$0")/generate_data.sh" "$DATAFILE"
 fi
 
-COUNT=$(awk 'END{print NR}' "$DATAFILE")
-echo "=== jq-jit Benchmark ($COUNT NDJSON objects) ==="
-echo ""
-
-# Detect available tools
 JQ_JIT="${JQ_JIT:-target/release/jq-jit}"
 if [ ! -x "$JQ_JIT" ]; then
     echo "Error: $JQ_JIT not found. Run: cargo build --release"
     exit 1
 fi
 
-TOOLS=("$JQ_JIT")
-NAMES=("jq-jit")
-
-if [ "$SELF_ONLY" -eq 0 ]; then
-    for cmd in jq gojq jaq; do
-        if command -v "$cmd" > /dev/null 2>&1; then
-            TOOLS+=("$(command -v "$cmd")")
-            case "$cmd" in
-                jq)   NAMES+=("jq $($cmd --version 2>&1 | head -1)") ;;
-                gojq) NAMES+=("gojq $(gojq --version 2>&1 | awk '{print $2}')") ;;
-                jaq)  NAMES+=("jaq $(jaq --version 2>&1 | awk '{print $2}')") ;;
-            esac
-        fi
-    done
-fi
-
-echo "Tools: ${NAMES[*]}"
-echo "Data:  $DATAFILE ($COUNT NDJSON objects)"
-echo "Runs:  best of $RUNS"
+COUNT=$(awk 'END{print NR}' "$DATAFILE")
+echo "=== jq-jit Benchmark ($COUNT NDJSON objects) ==="
+echo "Binary: $JQ_JIT"
+echo "Data:   $DATAFILE"
+echo "Runs:   best of $RUNS, timeout ${TIMEOUT}s"
 echo ""
 
 # Run a benchmark: best user CPU time of $RUNS
 bench() {
-    local tool="$1"; shift
-    local best=999
+    local best=999 failed=0
     for ((i=0; i<RUNS; i++)); do
         local t
-        t=$( { TIMEFORMAT='%U'; time "$tool" "$@" "$DATAFILE" > /dev/null 2>&1; } 2>&1 )
+        t=$( { TIMEFORMAT='%U'; time timeout "$TIMEOUT" "$JQ_JIT" "$@" "$DATAFILE" > /dev/null 2>&1; } 2>&1 ) && rc=0 || rc=$?
+        if [ $rc -ne 0 ]; then failed=1; break; fi
         if (( $(echo "$t < $best" | bc -l) )); then
             best=$t
         fi
     done
-    echo "$best"
+    if [ $failed -eq 1 ]; then
+        echo "FAIL/TIMEOUT"
+    else
+        echo "$best"
+    fi
 }
 
 # Header
-printf "%-28s" "Workload"
-for name in "${NAMES[@]}"; do
-    printf "  %-12s" "$name"
-done
-echo ""
-printf "%-28s" "----------------------------"
-for name in "${NAMES[@]}"; do
-    printf "  %-12s" "------------"
-done
-echo ""
+printf "%-28s  %-14s\n" "Workload" "time"
+printf "%-28s  %-14s\n" "----------------------------" "------"
 
 # Tests — NDJSON format: each line is one JSON object
 # Filters operate on individual objects (no .[] needed)
@@ -229,20 +205,14 @@ TESTS=(
 for test in "${TESTS[@]}"; do
     IFS=: read -r label flags filter <<< "$test"
     printf "%-28s" "$label"
-    first=""
-    for tool in "${TOOLS[@]}"; do
-        t=$(bench "$tool" $flags "$filter")
-        if [ -z "$first" ]; then
-            first=$t
-            printf "  \033[32m%-12s\033[0m" "${t}s"
-        else
-            ratio=$(echo "scale=1; $t / $first" | bc -l)
-            printf "  %-12s" "${t}s (${ratio}x)"
-        fi
-    done
+    t=$(bench $flags "$filter")
+    if [ "$t" = "FAIL/TIMEOUT" ]; then
+        printf "  \033[31m%-14s\033[0m" "$t"
+    else
+        printf "  \033[32m%-14s\033[0m" "${t}s"
+    fi
     echo ""
 done
 
 echo ""
 echo "Times are user CPU seconds (best of $RUNS). Lower is better."
-echo "Ratio is relative to jq-jit (higher = slower)."
