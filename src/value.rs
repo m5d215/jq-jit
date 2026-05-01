@@ -798,48 +798,44 @@ where F: FnMut(usize, usize) -> Result<()> {
     Ok(())
 }
 
-/// Cheap no-duplicate proof for a list of target field names within
-/// the object at `pos`. Returns `true` when each field's **first byte**
-/// occurs at most once across the entire buffer `b`, which is a sound
-/// over-approximation of "no duplicate of any target key at the top
-/// level": every duplicate of a field starting with byte `c` would
-/// require `c` to appear at least twice in the bytes, so a count of one
-/// proves there's no duplicate. False positives — `c` appearing inside
-/// string values or in keys whose names share a first byte — only route
-/// to the slow scan-to-end path, never to incorrect early-exit.
+/// Cheap "no remaining duplicate" check used inside scan loops *after*
+/// every target key has been seen at least once. Returns `true` when
+/// the first byte of every target field is absent from `&b[start..]`,
+/// which proves no duplicate of those keys exists in the rest of the
+/// buffer (every duplicate of a key starting with byte `c` requires
+/// `c` to appear at least once more in the bytes). False positives —
+/// `c` inside a string value or shared with another key's first byte —
+/// only route to the slow scan-to-end path, never to incorrect
+/// early-exit.
 ///
-/// Picking the cheapest possible proof matters because the hot helpers
-/// run on small (30-ish-byte) NDJSON rows in tight inner loops; every
-/// nanosecond on the no-dup branch is a regression for callers that
-/// would never have benefitted from early-exit (e.g. queries reading
-/// the last field of the object). Two `memchr` probes keep the
-/// worst-case bound at the SIMD scanner's first-hit cost rather than a
-/// full pass over the buffer.
+/// The original #410 patch did this check **upfront** on the entire
+/// buffer (`obj_no_dup_target_keys`) before scanning. That paid
+/// `2×fields.len()` `memchr_iter` startups per record even when no
+/// early-exit savings were possible — namely when the last requested
+/// key sits at the end of the row, so the scan had to reach the end
+/// anyway. The in-loop variant defers the check until after all keys
+/// are matched and only scans the trailing bytes (`b.len() - start`),
+/// dropping the per-row overhead from ~20ns to a couple of ns on
+/// NDJSON shapes like `{"x":…,"y":…,"name":…}` reading `name+x`.
+/// Fixes the v1.4.5 string-interpolation / `@csv` / `to_entries`
+/// regressions (#422) without giving back the v1.4.5 wins on
+/// single-field readers and `.x + .y`-shaped two-field readers.
 ///
-/// Only `pos == 0` calls participate. The hot-path callers in
-/// `fast_path.rs` route through `json_stream_raw` / `apply_*_raw`,
-/// which slice the input into a single-record buffer per call, so
-/// `b` is the object's bytes plus optional trailing whitespace and
-/// over-counting from sibling rows is impossible. Nested calls
-/// (`json_object_get_nested_field_raw` recursing with `pos != 0`)
-/// would need a real object-end scan to bound the search safely;
-/// running that scan offsets the savings on small rows, so we skip
-/// the proof and let the slow scan-to-end path take over —
-/// correctness equivalent, no perf regression vs v1.4.4.
+/// Only `pos == 0` callers participate. Per-record buffers from
+/// `json_stream_raw` keep `b[start..]` bounded by the current row's
+/// trailing whitespace; `pos != 0` (nested) call sites would scan
+/// into unrelated sibling data, so they keep the scan-to-end
+/// behavior — correctness equivalent, no perf regression vs v1.4.4.
 ///
-/// Used as a pre-check by the hot read helpers (`json_object_get_num`,
+/// Used by the hot read helpers (`json_object_get_num`,
 /// `json_object_get_two_nums`, `json_object_get_field_raw`,
-/// `json_object_get_fields_raw_buf`) so the post-#371 correctness fix
-/// doesn't pay scan-to-end cost on the dup-free common case (#410).
+/// `json_object_get_fields_raw_buf`).
 #[inline]
-pub fn obj_no_dup_target_keys(b: &[u8], pos: usize, fields: &[&[u8]]) -> bool {
-    if pos != 0 { return false; }
-    for f in fields {
-        if f.is_empty() { return false; }
-        let needle = f[0];
-        let mut it = memchr::memchr_iter(needle, b);
-        if it.next().is_none() { return false; }
-        if it.next().is_some() { return false; }
+fn no_target_first_byte_in_remainder(b: &[u8], start: usize, first_bytes: &[u8]) -> bool {
+    if start > b.len() { return false; }
+    let rem = &b[start..];
+    for &c in first_bytes {
+        if memchr::memchr(c, rem).is_some() { return false; }
     }
     true
 }
@@ -853,14 +849,16 @@ pub fn json_object_get_num(b: &[u8], pos: usize, field: &str) -> Option<f64> {
     // the object and keep the LAST matching key's value (returning None
     // when that final value isn't numeric, even if an earlier same-key
     // value was). The scan-to-end pays a steep regression for the
-    // overwhelmingly common dup-free case (#410), so we route through
-    // a SIMD pre-check that proves at-most-one occurrence of the target
-    // key — proof good enough to early-exit on first match. Failed proof
-    // (escapes, oversize keys, malformed input, real duplicates) drops
-    // through to the legacy scan-to-end loop.
+    // overwhelmingly common dup-free case (#410). After the first
+    // match, we run the cheap `no_target_first_byte_in_remainder`
+    // proof on the bytes left in the row and early-exit when the
+    // target key cannot reappear. The check is skipped for `pos != 0`
+    // callers (nested) where `b[i..]` would extend into unrelated
+    // sibling data and for empty field names.
     if pos >= b.len() || b[pos] != b'{' { return None; }
-    let early_exit = obj_no_dup_target_keys(b, pos, &[field.as_bytes()]);
     let field_bytes = field.as_bytes();
+    let allow_early_exit = pos == 0 && !field_bytes.is_empty();
+    let mut early_exit_attempted = false;
     let mut i = pos + 1;
     while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
     if i < b.len() && b[i] == b'}' { return None; }
@@ -916,11 +914,6 @@ pub fn json_object_get_num(b: &[u8], pos: usize, field: &str) -> Option<f64> {
             }
             last_match = value;
         }
-        // Once we've recorded a match for the target key and the
-        // SIMD pre-check confirmed at-most-one occurrence, the
-        // first-wins value matches last-wins exactly (#410). Otherwise,
-        // keep scanning to honor #360's last-wins semantics.
-        if early_exit && last_was_match { return last_match; }
         // Skip past the value (whether we parsed or not) so we keep scanning.
         i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return if last_was_match { last_match } else { None } };
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
@@ -929,6 +922,21 @@ pub fn json_object_get_num(b: &[u8], pos: usize, field: &str) -> Option<f64> {
         if b[i] != b',' { return last_match; }
         i += 1;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        // After the first match (and only at the top level), once
+        // we've consumed the comma and there are more keys ahead,
+        // check whether the target key's first byte still appears
+        // in the remaining bytes. If not, no duplicate is possible
+        // and the first-wins read agrees with last-wins (#410 /
+        // #422). Run at most once per call. Skipping when the next
+        // byte was `}` keeps the last-key-in-row case (e.g.
+        // `.name | startswith(…)` on `{"x":…,"y":…,"name":…}`)
+        // free of memchr overhead.
+        if allow_early_exit && last_was_match && !early_exit_attempted {
+            early_exit_attempted = true;
+            if no_target_first_byte_in_remainder(b, i, &[field_bytes[0]]) {
+                return last_match;
+            }
+        }
     }
 }
 
@@ -938,11 +946,13 @@ pub fn json_object_get_num(b: &[u8], pos: usize, field: &str) -> Option<f64> {
 pub fn json_object_get_field_raw(b: &[u8], pos: usize, field: &str) -> Option<(usize, usize)> {
     if pos >= b.len() || b[pos] != b'{' { return None; }
     let field_bytes = field.as_bytes();
-    // jq dedupes duplicate input keys last-wins (#233 / #325). The SIMD
-    // pre-check (#410) lets us early-exit on the first match when the
-    // target key provably appears at most once; otherwise we fall back
-    // to scan-to-end with last-wins.
-    let early_exit = obj_no_dup_target_keys(b, pos, &[field_bytes]);
+    // jq dedupes duplicate input keys last-wins (#233 / #325). After
+    // the first match (and only at the top level) we run the cheap
+    // `no_target_first_byte_in_remainder` check to early-exit when
+    // no duplicate is possible (#410 / #422); otherwise we keep
+    // scanning to honor last-wins.
+    let allow_early_exit = pos == 0 && !field_bytes.is_empty();
+    let mut early_exit_attempted = false;
     let mut i = pos + 1;
     while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
     if i < b.len() && b[i] == b'}' { return None; }
@@ -965,7 +975,6 @@ pub fn json_object_get_field_raw(b: &[u8], pos: usize, field: &str) -> Option<(u
         let val_end = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return last_match };
         if key_matches {
             last_match = Some((val_start, val_end));
-            if early_exit { return last_match; }
         }
         i = val_end;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
@@ -974,6 +983,18 @@ pub fn json_object_get_field_raw(b: &[u8], pos: usize, field: &str) -> Option<(u
         if b[i] != b',' { return last_match; }
         i += 1;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        // After the first match (and only at the top level), once
+        // we've consumed the comma and there are more keys ahead,
+        // check whether the target key's first byte still appears
+        // in the remaining bytes. If not, no duplicate is possible
+        // and the first-wins read agrees with last-wins (#410 /
+        // #422). Run at most once per call.
+        if allow_early_exit && last_match.is_some() && !early_exit_attempted {
+            early_exit_attempted = true;
+            if no_target_first_byte_in_remainder(b, i, &[field_bytes[0]]) {
+                return last_match;
+            }
+        }
     }
 }
 
@@ -3377,12 +3398,15 @@ pub fn json_object_get_two_nums(b: &[u8], pos: usize, field1: &str, field2: &str
     // match for each field, returning a first-wins read that disagreed
     // with jq for inputs like `{"a":5,"a":1,"b":3}` (#371).
     //
-    // The SIMD pre-check from #410 reinstates that early-exit only when
-    // it can prove neither target appears more than once in the
-    // object's bytes, restoring the v1.4.3 perf for the dup-free common
-    // case while keeping the scan-to-end loop available as the
-    // fallback for any input that fails the proof.
-    let early_exit = obj_no_dup_target_keys(b, pos, &[f1, f2]);
+    // After both targets are recorded, the in-loop
+    // `no_target_first_byte_in_remainder` proof (#410 / #422) lets us
+    // early-exit when neither key's first byte still appears in the
+    // remaining bytes — first-wins agrees with last-wins exactly when
+    // no further occurrence is possible. The check runs at most once
+    // per call and is gated on `pos == 0` so nested calls do not
+    // scan into unrelated sibling data.
+    let allow_early_exit = pos == 0 && !f1.is_empty() && !f2.is_empty();
+    let mut early_exit_attempted = false;
     let mut val1: Option<f64> = None;
     let mut val2: Option<f64> = None;
     let mut i = pos + 1;
@@ -3435,13 +3459,6 @@ pub fn json_object_get_two_nums(b: &[u8], pos: usize, field1: &str, field2: &str
                 if neg { -(n as f64) } else { n as f64 }
             };
             if match1 { val1 = Some(val); } else { val2 = Some(val); }
-            // Both targets recorded and the SIMD pre-check confirmed
-            // each appears at most once → first-wins agrees with
-            // last-wins (#410). Return without scanning the rest of
-            // the object.
-            if early_exit {
-                if let (Some(a), Some(b)) = (val1, val2) { return Some((a, b)); }
-            }
         } else {
             i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return None };
         }
@@ -3459,6 +3476,20 @@ pub fn json_object_get_two_nums(b: &[u8], pos: usize, field1: &str, field2: &str
         if b[i] != b',' { return None; }
         i += 1;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        // Both targets recorded and there are more keys ahead → run
+        // the cheap remainder proof. If neither key's first byte
+        // appears in the remaining bytes, no duplicate is possible
+        // and first-wins agrees with last-wins (#410 / #422). The
+        // proof is gated on `allow_early_exit` (top-level only) and
+        // runs at most once per call.
+        if allow_early_exit && !early_exit_attempted {
+            if let (Some(a), Some(b_val)) = (val1, val2) {
+                early_exit_attempted = true;
+                if no_target_first_byte_in_remainder(b, i, &[f1[0], f2[0]]) {
+                    return Some((a, b_val));
+                }
+            }
+        }
     }
 }
 
@@ -3539,20 +3570,23 @@ pub fn json_object_get_fields_raw_buf(b: &[u8], pos: usize, input_fields: &[&str
     // path was already this expensive — every call site routes
     // through here for value-level coverage parity.
     //
-    // The SIMD pre-check from #410 reinstates a `found == n` exit
-    // gated on a proof that no requested key appears more than once
-    // in the object. The proof step uses two stack-bounded inputs at
-    // most (we only check up to a handful of keys here) to avoid
-    // allocating in the hot path.
-    let mut field_byte_refs_small: [&[u8]; 16] = [b""; 16];
-    let early_exit = if n <= field_byte_refs_small.len() {
+    // After all requested fields are matched, the in-loop
+    // `no_target_first_byte_in_remainder` proof (#410 / #422) gates a
+    // `found == n` exit. The proof scans only the trailing bytes, so
+    // it stays cheap on NDJSON shapes where the last requested key
+    // sits at the end of the row and the upfront-pre-check variant
+    // would have paid full-row scans for zero savings.
+    let mut first_bytes_small: [u8; 16] = [0; 16];
+    let allow_early_exit = pos == 0 && n > 0 && n <= first_bytes_small.len() && {
+        let mut all_non_empty = true;
         for (i, f) in input_fields.iter().enumerate() {
-            field_byte_refs_small[i] = f.as_bytes();
+            let fb = f.as_bytes();
+            if fb.is_empty() { all_non_empty = false; break; }
+            first_bytes_small[i] = fb[0];
         }
-        obj_no_dup_target_keys(b, pos, &field_byte_refs_small[..n])
-    } else {
-        false
+        all_non_empty
     };
+    let mut early_exit_attempted = false;
     let mut found_mask: u64 = 0;
     let mut i = pos + 1;
     while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
@@ -3583,12 +3617,6 @@ pub fn json_object_get_fields_raw_buf(b: &[u8], pos: usize, input_fields: &[&str
             out[idx] = (val_start, val_end);
             found_mask |= 1u64 << idx;
             i = val_end;
-            // All requested fields seen and the SIMD pre-check
-            // confirmed each appears at most once → first-wins agrees
-            // with last-wins, no need to scan the trailing keys (#410).
-            if early_exit && found_mask.count_ones() as usize == n {
-                return true;
-            }
         } else {
             i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return false };
         }
@@ -3600,6 +3628,23 @@ pub fn json_object_get_fields_raw_buf(b: &[u8], pos: usize, input_fields: &[&str
         if b[i] != b',' { return false; }
         i += 1;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        // All requested fields seen and there are more keys ahead →
+        // run the cheap remainder proof. If no requested key's first
+        // byte appears in the remaining bytes, no duplicate is
+        // possible and first-wins agrees with last-wins (#410 /
+        // #422). Skipping this when the next byte was `}` keeps the
+        // last-key-in-row case (e.g. `[.name, .x, .y] | @csv` on
+        // `{"x":…,"y":…,"name":…}`) free of memchr overhead. Run at
+        // most once per call.
+        if allow_early_exit
+            && !early_exit_attempted
+            && found_mask.count_ones() as usize == n
+        {
+            early_exit_attempted = true;
+            if no_target_first_byte_in_remainder(b, i, &first_bytes_small[..n]) {
+                return true;
+            }
+        }
     }
 }
 
