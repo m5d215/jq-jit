@@ -2051,3 +2051,240 @@ jaq-derived	jaq: str-slice	v1.0.0	0.013
 jaq-derived	jaq: str-slice	v1.1.0	0.014
 jaq-derived	jaq: str-slice	v1.4.3	0.014
 jaq-derived	jaq: str-slice	v1.4.4	0.013
+NDJSON workloads (2M objects)	empty	3d440ca	0.017
+NDJSON workloads (2M objects)	identity -c	3d440ca	0.078
+NDJSON workloads (2M objects)	identity (pretty)	3d440ca	0.101
+NDJSON workloads (2M objects)	field access .name	3d440ca	0.087
+NDJSON workloads (2M objects)	nested .x,.y,.name	3d440ca	0.144
+NDJSON workloads (2M objects)	arithmetic .x + .y	3d440ca	0.082
+NDJSON workloads (2M objects)	select .x > 1500000	3d440ca	0.069
+NDJSON workloads (2M objects)	string concat	3d440ca	0.096
+NDJSON workloads (2M objects)	object construct	3d440ca	0.112
+NDJSON workloads (2M objects)	array construct	3d440ca	0.116
+NDJSON workloads (2M objects)	.[]	3d440ca	0.100
+NDJSON workloads (2M objects)	to_entries	3d440ca	0.161
+NDJSON workloads (2M objects)	keys	3d440ca	0.098
+NDJSON workloads (2M objects)	keys_unsorted	3d440ca	0.094
+NDJSON workloads (2M objects)	length	3d440ca	0.080
+NDJSON workloads (2M objects)	has("x")	3d440ca	0.029
+NDJSON workloads (2M objects)	type	3d440ca	0.022
+NDJSON workloads (2M objects)	del(.name)	3d440ca	0.098
+NDJSON workloads (2M objects)	@csv	3d440ca	0.140
+NDJSON workloads (2M objects)	split/join	3d440ca	0.093
+NDJSON workloads (2M objects)	select|field	3d440ca	0.112
+NDJSON workloads (2M objects)	select|remap	3d440ca	0.095
+NDJSON workloads (2M objects)	computed remap	3d440ca	0.211
+NDJSON workloads (2M objects)	[.x,.y]|add	3d440ca	0.082
+NDJSON workloads (2M objects)	[.x,.y]|avg	3d440ca	0.110
+NDJSON workloads (2M objects)	map(*2)|add	3d440ca	0.110
+NDJSON workloads (2M objects)	keys|length	3d440ca	0.254
+NDJSON workloads (2M objects)	.+{z=0}	3d440ca	0.143
+NDJSON workloads (2M objects)	split|first	3d440ca	0.092
+NDJSON workloads (2M objects)	slice[0..5]	3d440ca	0.095
+NDJSON workloads (2M objects)	dynkey {(.name)}	3d440ca	0.118
+NDJSON workloads (2M objects)	.x += 1	3d440ca	0.069
+NDJSON workloads (2M objects)	{a}+{b} merge	3d440ca	0.143
+NDJSON workloads (2M objects)	.x*2+1	3d440ca	0.049
+NDJSON workloads (2M objects)	.x+.y*2	3d440ca	0.102
+NDJSON workloads (2M objects)	.x > .y	3d440ca	0.076
+NDJSON workloads (2M objects)	to_entries|len	3d440ca	0.397
+NDJSON workloads (2M objects)	.x|.+1 (pipe)	3d440ca	0.047
+NDJSON workloads (2M objects)	.x|.*2|.+1	3d440ca	0.049
+NDJSON workloads (2M objects)	.name|.+"_x"	3d440ca	0.098
+NDJSON workloads (2M objects)	.x>N | not	3d440ca	0.040
+NDJSON workloads (2M objects)	and (2 cmp)	3d440ca	0.080
+NDJSON workloads (2M objects)	if-then-else	3d440ca	0.043
+NDJSON workloads (2M objects)	sel(and)|field	3d440ca	0.076
+NDJSON workloads (2M objects)	sel(and)|remap	3d440ca	0.074
+NDJSON workloads (2M objects)	arith|cmp	3d440ca	0.044
+NDJSON workloads (2M objects)	if cmp .field	3d440ca	0.102
+NDJSON workloads (2M objects)	split|length	3d440ca	0.094
+NDJSON workloads (2M objects)	[x,y]|min	3d440ca	0.090
+NDJSON workloads (2M objects)	[x,y]|max	3d440ca	0.091
+NDJSON workloads (2M objects)	[x,y]|sort|.[0]	3d440ca	0.087
+NDJSON workloads (2M objects)	.name|len>5	3d440ca	0.096
+NDJSON workloads (2M objects)	sel(len>5)|.x	3d440ca	0.125
+NDJSON workloads (2M objects)	if .x>.y .name	3d440ca	0.087
+NDJSON workloads (2M objects)	sel(.x>.y)|.name	3d440ca	0.071
+NDJSON workloads (2M objects)	.x*2|tostring	3d440ca	0.047
+NDJSON workloads (2M objects)	.x*.x+1	3d440ca	0.056
+NDJSON workloads (2M objects)	{k=.name,v=tostr}	3d440ca	0.160
+NDJSON workloads (2M objects)	str add chain	3d440ca	0.386
+NDJSON workloads (2M objects)	if>.y .name|empty	3d440ca	0.071
+NDJSON workloads (2M objects)	if .x%2==0	3d440ca	0.045
+NDJSON workloads (2M objects)	if .x*2+1>1M	3d440ca	0.045
+NDJSON workloads (2M objects)	sel(.x%2==0)|.name	3d440ca	0.074
+NDJSON workloads (2M objects)	sel(.x*2+1>1M)	3d440ca	0.142
+NDJSON workloads (2M objects)	.x|@json	3d440ca	0.045
+NDJSON workloads (2M objects)	.x|@text	3d440ca	0.045
+NDJSON workloads (2M objects)	.name|@json	3d440ca	0.104
+NDJSON workloads (2M objects)	sel|[arr]	3d440ca	0.148
+NDJSON workloads (2M objects)	sel(and)|[arr]	3d440ca	0.076
+NDJSON workloads (2M objects)	if>.y [arr]	3d440ca	0.199
+NDJSON workloads (2M objects)	if sw then .f	3d440ca	0.135
+NDJSON workloads (2M objects)	dynkey {(.n)=.x*2}	3d440ca	0.131
+NDJSON workloads (2M objects)	sel(and)|.x*.y	3d440ca	0.075
+NDJSON workloads (2M objects)	sel>N|str chain	3d440ca	0.158
+NDJSON workloads (2M objects)	.f+"_"+arith_ts	3d440ca	0.145
+NDJSON workloads (2M objects)	sel(sw)|str ch	3d440ca	0.317
+NDJSON workloads (2M objects)	split|rev|join	3d440ca	0.123
+NDJSON workloads (2M objects)	dynkey+static	3d440ca	0.324
+NDJSON workloads (2M objects)	if>.y str chain	3d440ca	0.186
+NDJSON workloads (2M objects)	remap+str chain	3d440ca	0.171
+NDJSON workloads (2M objects)	sel(len>8)	3d440ca	0.163
+NDJSON workloads (2M objects)	up|split|join	3d440ca	0.101
+NDJSON workloads (2M objects)	.name|index	3d440ca	0.126
+NDJSON workloads (2M objects)	.name|index+1	3d440ca	0.127
+NDJSON workloads (2M objects)	.name|rindex	3d440ca	0.131
+NDJSON workloads (2M objects)	.name|indices	3d440ca	0.153
+NDJSON workloads (2M objects)	[x,y]|sort	3d440ca	0.154
+NDJSON workloads (2M objects)	.name|scan	3d440ca	0.218
+NDJSON workloads (2M objects)	.name|gsub	3d440ca	0.175
+NDJSON workloads (2M objects)	walk(if num .+1)	3d440ca	0.140
+NDJSON workloads (2M objects)	tojson	3d440ca	0.106
+NDJSON workloads (2M objects)	{name,x}	3d440ca	0.144
+NDJSON workloads (2M objects)	.z//.name	3d440ca	0.165
+NDJSON workloads (2M objects)	.x|=test(re)	3d440ca	0.123
+NDJSON workloads (2M objects)	./sep|first	3d440ca	0.131
+NDJSON workloads (2M objects)	.y=(.x*2)	3d440ca	0.112
+NDJSON workloads (2M objects)	.y=(.x+.y)	3d440ca	0.161
+NDJSON workloads (2M objects)	objects	3d440ca	0.081
+NDJSON workloads (2M objects)	.tag|=if..then N	3d440ca	0.613
+NDJSON workloads (2M objects)	.x=(.x+1)	3d440ca	0.070
+NDJSON workloads (2M objects)	sel>N|.y+=1	3d440ca	0.085
+NDJSON workloads (2M objects)	sel(and)|.x+=1	3d440ca	0.100
+NDJSON workloads (2M objects)	sel(sw)|.x+=1	3d440ca	0.132
+NDJSON workloads (2M objects)	match(re)	3d440ca	0.369
+NDJSON workloads (2M objects)	capture(re)	3d440ca	0.306
+NDJSON workloads (2M objects)	first(.name,.x)	3d440ca	0.090
+NDJSON workloads (2M objects)	if .x==null	3d440ca	0.043
+NDJSON workloads (2M objects)	we(sw(.key))	3d440ca	0.111
+NDJSON workloads (2M objects)	sel(sw or ew)	3d440ca	0.211
+NDJSON workloads (2M objects)	path(.name,.x)	3d440ca	0.276
+NDJSON workloads (2M objects)	sel(str+num+num)	3d440ca	0.142
+NDJSON workloads (2M objects)	nested if|field	3d440ca	0.076
+NDJSON workloads (2M objects)	.f|floor|.*2	3d440ca	0.050
+NDJSON workloads (2M objects)	split|len>1	3d440ca	0.122
+NDJSON workloads (2M objects)	.name|len|.*2	3d440ca	0.106
+NDJSON workloads (2M objects)	if len>5 .x .y	3d440ca	0.137
+NDJSON workloads (2M objects)	sel(len>5)|remap	3d440ca	0.230
+NDJSON workloads (2M objects)	.x|tostr|len	3d440ca	0.056
+NDJSON workloads (2M objects)	if .x>.y .x .y	3d440ca	0.093
+NDJSON workloads (2M objects)	split|last|tonum	3d440ca	0.100
+NDJSON workloads (2M objects)	split|rev|.[0]	3d440ca	0.097
+NDJSON workloads (2M objects)	split|.[0]+.[1]	3d440ca	0.122
+NDJSON workloads (2M objects)	.[]|strings	3d440ca	0.096
+NDJSON workloads (2M objects)	.[]|numbers	3d440ca	0.107
+NDJSON workloads (2M objects)	[x,y]|any(>1M)	3d440ca	0.082
+NDJSON workloads (2M objects)	sel(dc|sw)	3d440ca	0.104
+NDJSON workloads (2M objects)	[[x,y],[n]]|flat	3d440ca	0.475
+NDJSON workloads (2M objects)	.x|floor|.*2	3d440ca	0.051
+NDJSON workloads (2M objects)	tojson|fromjson	3d440ca	0.083
+NDJSON workloads (2M objects)	[.x]|add	3d440ca	0.048
+NDJSON workloads (2M objects)	if>N {o}+.	3d440ca	0.123
+NDJSON workloads (2M objects)	if>N .+{o}	3d440ca	0.124
+NDJSON workloads (2M objects)	if .n=="s" .+{o}	3d440ca	0.167
+NDJSON workloads (2M objects)	sel(.n>"s")	3d440ca	0.095
+NDJSON workloads (2M objects)	[x,y,z]|min	3d440ca	0.311
+NDJSON workloads (2M objects)	if .n|len>5 l s	3d440ca	0.107
+NDJSON workloads (2M objects)	if .x|flr>N b s	3d440ca	0.047
+NDJSON workloads (2M objects)	if .n|test l e	3d440ca	0.111
+NDJSON workloads (2M objects)	if .n|sw l e	3d440ca	0.090
+NDJSON workloads (2M objects)	if .n|ew l e	3d440ca	0.092
+NDJSON workloads (2M objects)	.n|len|tostr	3d440ca	0.097
+String operations (2M objects)	ascii_downcase	3d440ca	0.110
+String operations (2M objects)	ascii_upcase	3d440ca	0.108
+String operations (2M objects)	ltrimstr	3d440ca	0.101
+String operations (2M objects)	rtrimstr	3d440ca	0.105
+String operations (2M objects)	split	3d440ca	0.169
+String operations (2M objects)	case+split	3d440ca	0.126
+String operations (2M objects)	join	3d440ca	0.101
+String operations (2M objects)	startswith	3d440ca	0.101
+String operations (2M objects)	endswith	3d440ca	0.103
+String operations (2M objects)	tostring	3d440ca	0.052
+String operations (2M objects)	tonumber	3d440ca	0.117
+String operations (2M objects)	string interpolation	3d440ca	0.135
+String ops (200K objects)	test (regex)	3d440ca	0.014
+String ops (200K objects)	match (regex)	3d440ca	0.033
+String ops (200K objects)	@base64	3d440ca	0.013
+String ops (200K objects)	@uri	3d440ca	0.013
+String ops (200K objects)	@html	3d440ca	0.013
+String ops (200K objects)	@csv (array)	3d440ca	0.020
+String ops (200K objects)	@tsv (array)	3d440ca	0.018
+String ops (200K objects)	gsub	3d440ca	0.020
+String ops (200K objects)	case+gsub	3d440ca	0.193
+String ops (200K objects)	case+test	3d440ca	0.130
+String ops (200K objects)	ltrim+tonum+arith	3d440ca	0.118
+Numeric & math (2M objects)	floor	3d440ca	0.048
+Numeric & math (2M objects)	sqrt	3d440ca	0.078
+Numeric & math (2M objects)	modulo	3d440ca	0.051
+Numeric & math (2M objects)	if-elif-else	3d440ca	0.125
+Numeric & math (2M objects)	select|del	3d440ca	0.079
+Numeric & math (2M objects)	select|merge	3d440ca	0.110
+Numeric & math (2M objects)	select(test)|merge	3d440ca	0.022
+Array generators	range(2M) | length	3d440ca	0.011
+Array generators	reverse(2M)	3d440ca	0.018
+Array generators	sort(2M)	3d440ca	0.023
+Array generators	unique(1M)	3d440ca	0.029
+Array generators	flatten(500K)	3d440ca	0.010
+Array generators	min, max(2M)	3d440ca	0.017
+Array generators	add numbers(2M)	3d440ca	0.012
+Array generators	any/all(2M)	3d440ca	0.028
+Array generators	limit(10; range(10M))	3d440ca	0.002
+Array generators	first(range(10M))	3d440ca	0.002
+Array generators	last(range(2M))	3d440ca	0.002
+Array generators	indices(1M)	3d440ca	0.015
+Reduce & foreach	reduce (sum)	3d440ca	0.009
+Reduce & foreach	reduce (array build)	3d440ca	0.004
+Reduce & foreach	reduce (obj build)	3d440ca	0.010
+Reduce & foreach	reduce (setpath)	3d440ca	0.016
+Reduce & foreach	foreach (running sum)	3d440ca	0.010
+Reduce & foreach	foreach + emit	3d440ca	0.010
+Reduce & foreach	reduce (sum-of-squares)	3d440ca	0.032
+Reduce & foreach	reduce (conditional)	3d440ca	0.035
+Reduce & foreach	reduce (product)	3d440ca	0.035
+Reduce & foreach	foreach (conditional)	3d440ca	0.011
+Reduce & foreach	until (100M)	3d440ca	0.297
+Reduce & foreach	reduce (harmonic)	3d440ca	0.033
+Reduce & foreach	reduce (floor pipe)	3d440ca	0.033
+Reduce & foreach	reduce (sqrt pipe)	3d440ca	0.032
+Reduce & foreach	reduce (sin+cos)	3d440ca	0.052
+Object operations	large obj construct	3d440ca	0.004
+Object operations	large obj keys	3d440ca	0.011
+Object operations	large obj to_entries	3d440ca	0.012
+Object operations	with_entries	3d440ca	0.009
+Assignment operators	.[] |= f (100K)	3d440ca	0.005
+Assignment operators	.[] += 1 (100K)	3d440ca	0.005
+Assignment operators	.[k] = v reduce(50K)	3d440ca	0.008
+String-heavy generators	gsub(100K)	3d440ca	0.025
+String-heavy generators	join large(100K)	3d440ca	0.006
+String-heavy generators	explode/implode(100K)	3d440ca	0.029
+String-heavy generators	reduce str concat(100K)	3d440ca	0.008
+Try-catch & alternative	alternative //	3d440ca	0.032
+Try-catch & alternative	try-catch	3d440ca	0.023
+Try-catch & alternative	label-break	3d440ca	0.004
+Type conversion	tojson/fromjson(100K)	3d440ca	0.022
+Type conversion	null propagation(2M)	3d440ca	0.088
+jaq-derived	jaq: reverse	3d440ca	0.011
+jaq-derived	jaq: sort	3d440ca	0.018
+jaq-derived	jaq: group-by	3d440ca	0.037
+jaq-derived	jaq: min-max	3d440ca	0.011
+jaq-derived	jaq: ex-implode	3d440ca	0.019
+jaq-derived	jaq: repeat	3d440ca	0.011
+jaq-derived	jaq: from	3d440ca	0.006
+jaq-derived	jaq: last	3d440ca	0.002
+jaq-derived	jaq: cumsum	3d440ca	0.010
+jaq-derived	jaq: cumsum-xy	3d440ca	0.017
+jaq-derived	jaq: try-catch	3d440ca	0.083
+jaq-derived	jaq: add	3d440ca	0.040
+jaq-derived	jaq: reduce	3d440ca	0.081
+jaq-derived	jaq: reduce-update	3d440ca	0.005
+jaq-derived	jaq: kv	3d440ca	0.015
+jaq-derived	jaq: kv-update	3d440ca	0.018
+jaq-derived	jaq: kv-entries	3d440ca	0.055
+jaq-derived	jaq: pyramid	3d440ca	0.016
+jaq-derived	jaq: upto	3d440ca	0.007
+jaq-derived	jaq: tree-flatten	3d440ca	0.003
+jaq-derived	jaq: tree-update	3d440ca	0.007
+jaq-derived	jaq: to-fromjson	3d440ca	0.005
+jaq-derived	jaq: str-slice	3d440ca	0.014

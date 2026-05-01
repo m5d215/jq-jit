@@ -86,6 +86,7 @@ echo "--- NDJSON workloads (2M objects) ---"
 header
 # Format per entry: 'label:flags:filter'. The filter is everything after the
 # second `:` so embedded colons (e.g. `{name: .name}`) are preserved verbatim.
+# Labels MUST NOT contain `:` (the parser splits on the first two).
 NDJSON_TESTS=(
     'empty::empty'
     'identity -c:-c:.'
@@ -144,7 +145,7 @@ NDJSON_TESTS=(
     'sel(.x>.y)|.name:-c:select(.x > .y) | .name'
     '.x*2|tostring:-c:.x * 2 | tostring'
     '.x*.x+1:-c:.x | . * . + 1'
-    '{k:.name,v:tostr}:-c:{key:.name,val:(.x|tostring)}'
+    '{k=.name,v=tostr}:-c:{key:.name,val:(.x|tostring)}'
     'str add chain:-c:.name + ":" + (.x|tostring)'
     'if>.y .name|empty:-c:if .x > .y then .name else empty end'
     'if .x%2==0:-c:if .x % 2 == 0 then "even" else "odd" end'
@@ -158,7 +159,7 @@ NDJSON_TESTS=(
     'sel(and)|[arr]:-c:select(.x > 100 and .y < 500) | [.name, .x, .y]'
     'if>.y [arr]:-c:if .x > .y then [.name, .x] else [.name, .y] end'
     'if sw then .f:-c:if .name | startswith("user_1") then .x else .y end'
-    'dynkey {(.n):.x*2}:-c:{(.name): (.x * 2)}'
+    'dynkey {(.n)=.x*2}:-c:{(.name): (.x * 2)}'
     'sel(and)|.x*.y:-c:select(.x > 500 and .y < 1000) | .x * .y'
     'sel>N|str chain:-c:select(.x > 1000) | (.name + ":" + (.x | tostring))'
     '.f+"_"+arith_ts:-c:.name + "_" + (.x * 2 | tostring)'
