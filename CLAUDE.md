@@ -7,7 +7,6 @@ JIT compilation implementation of jq.
 ```bash
 cargo build --release            # Build (must have zero warnings)
 cargo test --release             # Test (official 509 + regression)
-./bench/run.sh                   # Benchmark
 ./bench/comprehensive.sh         # Benchmark (vs past results, see docs/benchmark-history.md)
 ```
 

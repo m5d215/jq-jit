@@ -1,0 +1,2053 @@
+section	benchmark	version	time_seconds
+NDJSON workloads (2M objects)	empty	1118cf	0.018
+NDJSON workloads (2M objects)	empty	v0.5.0	0.018
+NDJSON workloads (2M objects)	empty	3ae841e	0.017
+NDJSON workloads (2M objects)	empty	fa2eb51	0.016
+NDJSON workloads (2M objects)	empty	2884a5f	0.018
+NDJSON workloads (2M objects)	empty	v0.6.0	0.016
+NDJSON workloads (2M objects)	empty	v0.7.0	0.016
+NDJSON workloads (2M objects)	empty	9e563a9	0.016
+NDJSON workloads (2M objects)	empty	b59f7c9	0.016
+NDJSON workloads (2M objects)	empty	11388d4	0.016
+NDJSON workloads (2M objects)	empty	v0.8.0	0.017
+NDJSON workloads (2M objects)	empty	195fdc4	0.016
+NDJSON workloads (2M objects)	empty	v0.9.0	0.016
+NDJSON workloads (2M objects)	empty	v0.10.0	0.016
+NDJSON workloads (2M objects)	empty	v1.0.0	0.017
+NDJSON workloads (2M objects)	empty	v1.1.0	0.018
+NDJSON workloads (2M objects)	empty	v1.4.3	0.017
+NDJSON workloads (2M objects)	empty	v1.4.4	0.017
+NDJSON workloads (2M objects)	identity -c	1118cf	0.078
+NDJSON workloads (2M objects)	identity -c	v0.5.0	0.076
+NDJSON workloads (2M objects)	identity -c	3ae841e	0.077
+NDJSON workloads (2M objects)	identity -c	fa2eb51	0.078
+NDJSON workloads (2M objects)	identity -c	2884a5f	0.080
+NDJSON workloads (2M objects)	identity -c	v0.6.0	0.081
+NDJSON workloads (2M objects)	identity -c	v0.7.0	0.078
+NDJSON workloads (2M objects)	identity -c	9e563a9	0.078
+NDJSON workloads (2M objects)	identity -c	b59f7c9	0.082
+NDJSON workloads (2M objects)	identity -c	11388d4	0.077
+NDJSON workloads (2M objects)	identity -c	v0.8.0	0.076
+NDJSON workloads (2M objects)	identity -c	195fdc4	0.081
+NDJSON workloads (2M objects)	identity -c	v0.9.0	0.076
+NDJSON workloads (2M objects)	identity -c	v0.10.0	0.083
+NDJSON workloads (2M objects)	identity -c	v1.0.0	0.081
+NDJSON workloads (2M objects)	identity -c	v1.1.0	0.077
+NDJSON workloads (2M objects)	identity -c	v1.4.3	0.082
+NDJSON workloads (2M objects)	identity -c	v1.4.4	0.082
+NDJSON workloads (2M objects)	identity (pretty)	1118cf	0.102
+NDJSON workloads (2M objects)	identity (pretty)	v0.5.0	0.097
+NDJSON workloads (2M objects)	identity (pretty)	3ae841e	0.103
+NDJSON workloads (2M objects)	identity (pretty)	fa2eb51	0.104
+NDJSON workloads (2M objects)	identity (pretty)	2884a5f	0.107
+NDJSON workloads (2M objects)	identity (pretty)	v0.6.0	0.103
+NDJSON workloads (2M objects)	identity (pretty)	v0.7.0	0.101
+NDJSON workloads (2M objects)	identity (pretty)	9e563a9	0.103
+NDJSON workloads (2M objects)	identity (pretty)	b59f7c9	0.101
+NDJSON workloads (2M objects)	identity (pretty)	11388d4	0.101
+NDJSON workloads (2M objects)	identity (pretty)	v0.8.0	0.098
+NDJSON workloads (2M objects)	identity (pretty)	195fdc4	0.103
+NDJSON workloads (2M objects)	identity (pretty)	v0.9.0	0.099
+NDJSON workloads (2M objects)	identity (pretty)	v0.10.0	0.110
+NDJSON workloads (2M objects)	identity (pretty)	v1.0.0	0.103
+NDJSON workloads (2M objects)	identity (pretty)	v1.1.0	0.099
+NDJSON workloads (2M objects)	identity (pretty)	v1.4.3	0.108
+NDJSON workloads (2M objects)	identity (pretty)	v1.4.4	0.099
+NDJSON workloads (2M objects)	field access .name	1118cf	0.070
+NDJSON workloads (2M objects)	field access .name	v0.5.0	0.065
+NDJSON workloads (2M objects)	field access .name	3ae841e	0.064
+NDJSON workloads (2M objects)	field access .name	fa2eb51	0.069
+NDJSON workloads (2M objects)	field access .name	2884a5f	0.071
+NDJSON workloads (2M objects)	field access .name	v0.6.0	0.068
+NDJSON workloads (2M objects)	field access .name	v0.7.0	0.067
+NDJSON workloads (2M objects)	field access .name	9e563a9	0.066
+NDJSON workloads (2M objects)	field access .name	b59f7c9	0.066
+NDJSON workloads (2M objects)	field access .name	11388d4	0.067
+NDJSON workloads (2M objects)	field access .name	v0.8.0	0.066
+NDJSON workloads (2M objects)	field access .name	195fdc4	0.068
+NDJSON workloads (2M objects)	field access .name	v0.9.0	0.068
+NDJSON workloads (2M objects)	field access .name	v0.10.0	0.068
+NDJSON workloads (2M objects)	field access .name	v1.0.0	0.067
+NDJSON workloads (2M objects)	field access .name	v1.1.0	0.066
+NDJSON workloads (2M objects)	field access .name	v1.4.3	0.080
+NDJSON workloads (2M objects)	field access .name	v1.4.4	0.080
+NDJSON workloads (2M objects)	nested .x,.y,.name	1118cf	0.124
+NDJSON workloads (2M objects)	nested .x,.y,.name	v0.5.0	0.123
+NDJSON workloads (2M objects)	nested .x,.y,.name	3ae841e	0.125
+NDJSON workloads (2M objects)	nested .x,.y,.name	fa2eb51	0.130
+NDJSON workloads (2M objects)	nested .x,.y,.name	2884a5f	0.103
+NDJSON workloads (2M objects)	nested .x,.y,.name	v0.6.0	0.098
+NDJSON workloads (2M objects)	nested .x,.y,.name	v0.7.0	0.098
+NDJSON workloads (2M objects)	nested .x,.y,.name	9e563a9	0.098
+NDJSON workloads (2M objects)	nested .x,.y,.name	b59f7c9	0.097
+NDJSON workloads (2M objects)	nested .x,.y,.name	11388d4	0.096
+NDJSON workloads (2M objects)	nested .x,.y,.name	v0.8.0	0.096
+NDJSON workloads (2M objects)	nested .x,.y,.name	195fdc4	0.095
+NDJSON workloads (2M objects)	nested .x,.y,.name	v0.9.0	0.096
+NDJSON workloads (2M objects)	nested .x,.y,.name	v0.10.0	0.101
+NDJSON workloads (2M objects)	nested .x,.y,.name	v1.0.0	0.096
+NDJSON workloads (2M objects)	nested .x,.y,.name	v1.1.0	0.096
+NDJSON workloads (2M objects)	nested .x,.y,.name	v1.4.3	0.111
+NDJSON workloads (2M objects)	nested .x,.y,.name	v1.4.4	0.123
+NDJSON workloads (2M objects)	arithmetic .x + .y	1118cf	0.058
+NDJSON workloads (2M objects)	arithmetic .x + .y	v0.5.0	0.057
+NDJSON workloads (2M objects)	arithmetic .x + .y	3ae841e	0.058
+NDJSON workloads (2M objects)	arithmetic .x + .y	fa2eb51	0.057
+NDJSON workloads (2M objects)	arithmetic .x + .y	2884a5f	0.059
+NDJSON workloads (2M objects)	arithmetic .x + .y	v0.6.0	0.058
+NDJSON workloads (2M objects)	arithmetic .x + .y	v0.7.0	0.062
+NDJSON workloads (2M objects)	arithmetic .x + .y	9e563a9	0.064
+NDJSON workloads (2M objects)	arithmetic .x + .y	b59f7c9	0.063
+NDJSON workloads (2M objects)	arithmetic .x + .y	11388d4	0.063
+NDJSON workloads (2M objects)	arithmetic .x + .y	v0.8.0	0.061
+NDJSON workloads (2M objects)	arithmetic .x + .y	195fdc4	0.066
+NDJSON workloads (2M objects)	arithmetic .x + .y	v0.9.0	0.064
+NDJSON workloads (2M objects)	arithmetic .x + .y	v0.10.0	0.065
+NDJSON workloads (2M objects)	arithmetic .x + .y	v1.0.0	0.064
+NDJSON workloads (2M objects)	arithmetic .x + .y	v1.1.0	0.064
+NDJSON workloads (2M objects)	arithmetic .x + .y	v1.4.3	0.064
+NDJSON workloads (2M objects)	arithmetic .x + .y	v1.4.4	0.094
+NDJSON workloads (2M objects)	select .x > 1500000	1118cf	0.046
+NDJSON workloads (2M objects)	select .x > 1500000	v0.5.0	0.044
+NDJSON workloads (2M objects)	select .x > 1500000	3ae841e	0.046
+NDJSON workloads (2M objects)	select .x > 1500000	fa2eb51	0.046
+NDJSON workloads (2M objects)	select .x > 1500000	2884a5f	0.048
+NDJSON workloads (2M objects)	select .x > 1500000	v0.6.0	0.047
+NDJSON workloads (2M objects)	select .x > 1500000	v0.7.0	0.047
+NDJSON workloads (2M objects)	select .x > 1500000	9e563a9	0.046
+NDJSON workloads (2M objects)	select .x > 1500000	b59f7c9	0.046
+NDJSON workloads (2M objects)	select .x > 1500000	11388d4	0.046
+NDJSON workloads (2M objects)	select .x > 1500000	v0.8.0	0.045
+NDJSON workloads (2M objects)	select .x > 1500000	195fdc4	0.046
+NDJSON workloads (2M objects)	select .x > 1500000	v0.9.0	0.046
+NDJSON workloads (2M objects)	select .x > 1500000	v0.10.0	0.048
+NDJSON workloads (2M objects)	select .x > 1500000	v1.0.0	0.046
+NDJSON workloads (2M objects)	select .x > 1500000	v1.1.0	0.047
+NDJSON workloads (2M objects)	select .x > 1500000	v1.4.3	0.066
+NDJSON workloads (2M objects)	select .x > 1500000	v1.4.4	0.115
+NDJSON workloads (2M objects)	string concat	1118cf	0.076
+NDJSON workloads (2M objects)	string concat	v0.5.0	0.073
+NDJSON workloads (2M objects)	string concat	3ae841e	0.073
+NDJSON workloads (2M objects)	string concat	fa2eb51	0.079
+NDJSON workloads (2M objects)	string concat	2884a5f	0.083
+NDJSON workloads (2M objects)	string concat	v0.6.0	0.076
+NDJSON workloads (2M objects)	string concat	v0.7.0	0.074
+NDJSON workloads (2M objects)	string concat	9e563a9	0.076
+NDJSON workloads (2M objects)	string concat	b59f7c9	0.075
+NDJSON workloads (2M objects)	string concat	11388d4	0.074
+NDJSON workloads (2M objects)	string concat	v0.8.0	0.074
+NDJSON workloads (2M objects)	string concat	195fdc4	0.077
+NDJSON workloads (2M objects)	string concat	v0.9.0	0.074
+NDJSON workloads (2M objects)	string concat	v0.10.0	0.079
+NDJSON workloads (2M objects)	string concat	v1.0.0	0.075
+NDJSON workloads (2M objects)	string concat	v1.1.0	0.074
+NDJSON workloads (2M objects)	string concat	v1.4.3	0.090
+NDJSON workloads (2M objects)	string concat	v1.4.4	0.089
+NDJSON workloads (2M objects)	object construct	1118cf	0.103
+NDJSON workloads (2M objects)	object construct	v0.5.0	0.099
+NDJSON workloads (2M objects)	object construct	3ae841e	0.096
+NDJSON workloads (2M objects)	object construct	fa2eb51	0.104
+NDJSON workloads (2M objects)	object construct	2884a5f	0.075
+NDJSON workloads (2M objects)	object construct	v0.6.0	0.075
+NDJSON workloads (2M objects)	object construct	v0.7.0	0.072
+NDJSON workloads (2M objects)	object construct	9e563a9	0.075
+NDJSON workloads (2M objects)	object construct	b59f7c9	0.082
+NDJSON workloads (2M objects)	object construct	11388d4	0.085
+NDJSON workloads (2M objects)	object construct	v0.8.0	0.081
+NDJSON workloads (2M objects)	object construct	195fdc4	0.083
+NDJSON workloads (2M objects)	object construct	v0.9.0	0.082
+NDJSON workloads (2M objects)	object construct	v0.10.0	0.087
+NDJSON workloads (2M objects)	object construct	v1.0.0	0.084
+NDJSON workloads (2M objects)	object construct	v1.1.0	0.083
+NDJSON workloads (2M objects)	object construct	v1.4.3	0.087
+NDJSON workloads (2M objects)	object construct	v1.4.4	0.127
+NDJSON workloads (2M objects)	array construct	1118cf	0.107
+NDJSON workloads (2M objects)	array construct	v0.5.0	0.106
+NDJSON workloads (2M objects)	array construct	3ae841e	0.108
+NDJSON workloads (2M objects)	array construct	fa2eb51	0.116
+NDJSON workloads (2M objects)	array construct	2884a5f	0.087
+NDJSON workloads (2M objects)	array construct	v0.6.0	0.085
+NDJSON workloads (2M objects)	array construct	v0.7.0	0.082
+NDJSON workloads (2M objects)	array construct	9e563a9	0.084
+NDJSON workloads (2M objects)	array construct	b59f7c9	0.081
+NDJSON workloads (2M objects)	array construct	11388d4	0.080
+NDJSON workloads (2M objects)	array construct	v0.8.0	0.082
+NDJSON workloads (2M objects)	array construct	195fdc4	0.083
+NDJSON workloads (2M objects)	array construct	v0.9.0	0.082
+NDJSON workloads (2M objects)	array construct	v0.10.0	0.090
+NDJSON workloads (2M objects)	array construct	v1.0.0	0.086
+NDJSON workloads (2M objects)	array construct	v1.1.0	0.081
+NDJSON workloads (2M objects)	array construct	v1.4.3	0.097
+NDJSON workloads (2M objects)	array construct	v1.4.4	0.102
+NDJSON workloads (2M objects)	.[]	1118cf	0.077
+NDJSON workloads (2M objects)	.[]	v0.5.0	0.076
+NDJSON workloads (2M objects)	.[]	3ae841e	0.084
+NDJSON workloads (2M objects)	.[]	fa2eb51	0.084
+NDJSON workloads (2M objects)	.[]	2884a5f	0.082
+NDJSON workloads (2M objects)	.[]	v0.6.0	0.080
+NDJSON workloads (2M objects)	.[]	v0.7.0	0.077
+NDJSON workloads (2M objects)	.[]	9e563a9	0.081
+NDJSON workloads (2M objects)	.[]	b59f7c9	0.078
+NDJSON workloads (2M objects)	.[]	11388d4	0.078
+NDJSON workloads (2M objects)	.[]	v0.8.0	0.076
+NDJSON workloads (2M objects)	.[]	195fdc4	0.077
+NDJSON workloads (2M objects)	.[]	v0.9.0	0.075
+NDJSON workloads (2M objects)	.[]	v0.10.0	0.081
+NDJSON workloads (2M objects)	.[]	v1.0.0	0.080
+NDJSON workloads (2M objects)	.[]	v1.1.0	0.081
+NDJSON workloads (2M objects)	.[]	v1.4.3	0.085
+NDJSON workloads (2M objects)	.[]	v1.4.4	0.098
+NDJSON workloads (2M objects)	to_entries	1118cf	0.139
+NDJSON workloads (2M objects)	to_entries	v0.5.0	0.136
+NDJSON workloads (2M objects)	to_entries	3ae841e	0.140
+NDJSON workloads (2M objects)	to_entries	fa2eb51	0.137
+NDJSON workloads (2M objects)	to_entries	2884a5f	0.145
+NDJSON workloads (2M objects)	to_entries	v0.6.0	0.138
+NDJSON workloads (2M objects)	to_entries	v0.7.0	0.138
+NDJSON workloads (2M objects)	to_entries	9e563a9	0.142
+NDJSON workloads (2M objects)	to_entries	b59f7c9	0.139
+NDJSON workloads (2M objects)	to_entries	11388d4	0.142
+NDJSON workloads (2M objects)	to_entries	v0.8.0	0.140
+NDJSON workloads (2M objects)	to_entries	195fdc4	0.141
+NDJSON workloads (2M objects)	to_entries	v0.9.0	0.140
+NDJSON workloads (2M objects)	to_entries	v0.10.0	0.149
+NDJSON workloads (2M objects)	to_entries	v1.0.0	0.143
+NDJSON workloads (2M objects)	to_entries	v1.1.0	0.142
+NDJSON workloads (2M objects)	to_entries	v1.4.3	0.104
+NDJSON workloads (2M objects)	to_entries	v1.4.4	0.112
+NDJSON workloads (2M objects)	keys	1118cf	0.114
+NDJSON workloads (2M objects)	keys	v0.5.0	0.118
+NDJSON workloads (2M objects)	keys	3ae841e	0.115
+NDJSON workloads (2M objects)	keys	fa2eb51	0.118
+NDJSON workloads (2M objects)	keys	2884a5f	0.120
+NDJSON workloads (2M objects)	keys	v0.6.0	0.114
+NDJSON workloads (2M objects)	keys	v0.7.0	0.085
+NDJSON workloads (2M objects)	keys	9e563a9	0.086
+NDJSON workloads (2M objects)	keys	b59f7c9	0.084
+NDJSON workloads (2M objects)	keys	11388d4	0.084
+NDJSON workloads (2M objects)	keys	v0.8.0	0.085
+NDJSON workloads (2M objects)	keys	195fdc4	0.085
+NDJSON workloads (2M objects)	keys	v0.9.0	0.083
+NDJSON workloads (2M objects)	keys	v0.10.0	0.086
+NDJSON workloads (2M objects)	keys	v1.0.0	0.085
+NDJSON workloads (2M objects)	keys	v1.1.0	0.085
+NDJSON workloads (2M objects)	keys	v1.4.3	0.088
+NDJSON workloads (2M objects)	keys	v1.4.4	0.102
+NDJSON workloads (2M objects)	keys_unsorted	1118cf	0.072
+NDJSON workloads (2M objects)	keys_unsorted	v0.5.0	0.072
+NDJSON workloads (2M objects)	keys_unsorted	3ae841e	0.073
+NDJSON workloads (2M objects)	keys_unsorted	fa2eb51	0.074
+NDJSON workloads (2M objects)	keys_unsorted	2884a5f	0.078
+NDJSON workloads (2M objects)	keys_unsorted	v0.6.0	0.077
+NDJSON workloads (2M objects)	keys_unsorted	v0.7.0	0.074
+NDJSON workloads (2M objects)	keys_unsorted	9e563a9	0.075
+NDJSON workloads (2M objects)	keys_unsorted	b59f7c9	0.075
+NDJSON workloads (2M objects)	keys_unsorted	11388d4	0.076
+NDJSON workloads (2M objects)	keys_unsorted	v0.8.0	0.072
+NDJSON workloads (2M objects)	keys_unsorted	195fdc4	0.074
+NDJSON workloads (2M objects)	keys_unsorted	v0.9.0	0.073
+NDJSON workloads (2M objects)	keys_unsorted	v0.10.0	0.077
+NDJSON workloads (2M objects)	keys_unsorted	v1.0.0	0.076
+NDJSON workloads (2M objects)	keys_unsorted	v1.1.0	0.075
+NDJSON workloads (2M objects)	keys_unsorted	v1.4.3	0.078
+NDJSON workloads (2M objects)	keys_unsorted	v1.4.4	0.091
+NDJSON workloads (2M objects)	length	1118cf	0.065
+NDJSON workloads (2M objects)	length	v0.5.0	0.064
+NDJSON workloads (2M objects)	length	3ae841e	0.064
+NDJSON workloads (2M objects)	length	fa2eb51	0.064
+NDJSON workloads (2M objects)	length	2884a5f	0.066
+NDJSON workloads (2M objects)	length	v0.6.0	0.067
+NDJSON workloads (2M objects)	length	v0.7.0	0.064
+NDJSON workloads (2M objects)	length	9e563a9	0.064
+NDJSON workloads (2M objects)	length	b59f7c9	0.064
+NDJSON workloads (2M objects)	length	11388d4	0.064
+NDJSON workloads (2M objects)	length	v0.8.0	0.063
+NDJSON workloads (2M objects)	length	195fdc4	0.064
+NDJSON workloads (2M objects)	length	v0.9.0	0.063
+NDJSON workloads (2M objects)	length	v0.10.0	0.066
+NDJSON workloads (2M objects)	length	v1.0.0	0.063
+NDJSON workloads (2M objects)	length	v1.1.0	0.065
+NDJSON workloads (2M objects)	length	v1.4.3	0.073
+NDJSON workloads (2M objects)	length	v1.4.4	0.085
+NDJSON workloads (2M objects)	has("x")	1118cf	0.025
+NDJSON workloads (2M objects)	has("x")	v0.5.0	0.025
+NDJSON workloads (2M objects)	has("x")	3ae841e	0.026
+NDJSON workloads (2M objects)	has("x")	fa2eb51	0.026
+NDJSON workloads (2M objects)	has("x")	2884a5f	0.027
+NDJSON workloads (2M objects)	has("x")	v0.6.0	0.026
+NDJSON workloads (2M objects)	has("x")	v0.7.0	0.025
+NDJSON workloads (2M objects)	has("x")	9e563a9	0.025
+NDJSON workloads (2M objects)	has("x")	b59f7c9	0.025
+NDJSON workloads (2M objects)	has("x")	11388d4	0.025
+NDJSON workloads (2M objects)	has("x")	v0.8.0	0.024
+NDJSON workloads (2M objects)	has("x")	195fdc4	0.025
+NDJSON workloads (2M objects)	has("x")	v0.9.0	0.025
+NDJSON workloads (2M objects)	has("x")	v0.10.0	0.028
+NDJSON workloads (2M objects)	has("x")	v1.0.0	0.025
+NDJSON workloads (2M objects)	has("x")	v1.1.0	0.025
+NDJSON workloads (2M objects)	has("x")	v1.4.3	0.030
+NDJSON workloads (2M objects)	has("x")	v1.4.4	0.030
+NDJSON workloads (2M objects)	type	1118cf	0.018
+NDJSON workloads (2M objects)	type	v0.5.0	0.017
+NDJSON workloads (2M objects)	type	3ae841e	0.018
+NDJSON workloads (2M objects)	type	fa2eb51	0.018
+NDJSON workloads (2M objects)	type	2884a5f	0.019
+NDJSON workloads (2M objects)	type	v0.6.0	0.019
+NDJSON workloads (2M objects)	type	v0.7.0	0.018
+NDJSON workloads (2M objects)	type	9e563a9	0.019
+NDJSON workloads (2M objects)	type	b59f7c9	0.018
+NDJSON workloads (2M objects)	type	11388d4	0.018
+NDJSON workloads (2M objects)	type	v0.8.0	0.018
+NDJSON workloads (2M objects)	type	195fdc4	0.018
+NDJSON workloads (2M objects)	type	v0.9.0	0.018
+NDJSON workloads (2M objects)	type	v0.10.0	0.019
+NDJSON workloads (2M objects)	type	v1.0.0	0.018
+NDJSON workloads (2M objects)	type	v1.1.0	0.019
+NDJSON workloads (2M objects)	type	v1.4.3	0.019
+NDJSON workloads (2M objects)	type	v1.4.4	0.019
+NDJSON workloads (2M objects)	del(.name)	1118cf	0.110
+NDJSON workloads (2M objects)	del(.name)	v0.5.0	0.110
+NDJSON workloads (2M objects)	del(.name)	3ae841e	0.109
+NDJSON workloads (2M objects)	del(.name)	fa2eb51	0.111
+NDJSON workloads (2M objects)	del(.name)	2884a5f	0.113
+NDJSON workloads (2M objects)	del(.name)	v0.6.0	0.112
+NDJSON workloads (2M objects)	del(.name)	v0.7.0	0.090
+NDJSON workloads (2M objects)	del(.name)	9e563a9	0.089
+NDJSON workloads (2M objects)	del(.name)	b59f7c9	0.087
+NDJSON workloads (2M objects)	del(.name)	11388d4	0.090
+NDJSON workloads (2M objects)	del(.name)	v0.8.0	0.087
+NDJSON workloads (2M objects)	del(.name)	195fdc4	0.092
+NDJSON workloads (2M objects)	del(.name)	v0.9.0	0.088
+NDJSON workloads (2M objects)	del(.name)	v0.10.0	0.091
+NDJSON workloads (2M objects)	del(.name)	v1.0.0	0.089
+NDJSON workloads (2M objects)	del(.name)	v1.1.0	0.088
+NDJSON workloads (2M objects)	del(.name)	v1.4.3	0.098
+NDJSON workloads (2M objects)	del(.name)	v1.4.4	0.095
+String operations (2M objects)	ascii_downcase	1118cf	0.254
+String operations (2M objects)	ascii_downcase	v0.5.0	0.081
+String operations (2M objects)	ascii_downcase	3ae841e	0.083
+String operations (2M objects)	ascii_downcase	fa2eb51	0.087
+String operations (2M objects)	ascii_downcase	2884a5f	0.089
+String operations (2M objects)	ascii_downcase	v0.6.0	0.086
+String operations (2M objects)	ascii_downcase	v0.7.0	0.082
+String operations (2M objects)	ascii_downcase	9e563a9	0.085
+String operations (2M objects)	ascii_downcase	b59f7c9	0.083
+String operations (2M objects)	ascii_downcase	11388d4	0.083
+String operations (2M objects)	ascii_downcase	v0.8.0	0.083
+String operations (2M objects)	ascii_downcase	195fdc4	0.084
+String operations (2M objects)	ascii_downcase	v0.9.0	0.085
+String operations (2M objects)	ascii_downcase	v0.10.0	0.088
+String operations (2M objects)	ascii_downcase	v1.0.0	0.082
+String operations (2M objects)	ascii_downcase	v1.1.0	0.084
+String operations (2M objects)	ascii_downcase	v1.4.3	0.090
+String operations (2M objects)	ascii_downcase	v1.4.4	0.088
+String operations (2M objects)	ascii_upcase	1118cf	0.255
+String operations (2M objects)	ascii_upcase	v0.5.0	0.083
+String operations (2M objects)	ascii_upcase	3ae841e	0.082
+String operations (2M objects)	ascii_upcase	fa2eb51	0.087
+String operations (2M objects)	ascii_upcase	2884a5f	0.090
+String operations (2M objects)	ascii_upcase	v0.6.0	0.088
+String operations (2M objects)	ascii_upcase	v0.7.0	0.085
+String operations (2M objects)	ascii_upcase	9e563a9	0.084
+String operations (2M objects)	ascii_upcase	b59f7c9	0.083
+String operations (2M objects)	ascii_upcase	11388d4	0.081
+String operations (2M objects)	ascii_upcase	v0.8.0	0.084
+String operations (2M objects)	ascii_upcase	195fdc4	0.084
+String operations (2M objects)	ascii_upcase	v0.9.0	0.085
+String operations (2M objects)	ascii_upcase	v0.10.0	0.088
+String operations (2M objects)	ascii_upcase	v1.0.0	0.085
+String operations (2M objects)	ascii_upcase	v1.1.0	0.083
+String operations (2M objects)	ascii_upcase	v1.4.3	0.090
+String operations (2M objects)	ascii_upcase	v1.4.4	0.088
+String operations (2M objects)	ltrimstr	1118cf	0.233
+String operations (2M objects)	ltrimstr	v0.5.0	0.081
+String operations (2M objects)	ltrimstr	3ae841e	0.081
+String operations (2M objects)	ltrimstr	fa2eb51	0.083
+String operations (2M objects)	ltrimstr	2884a5f	0.089
+String operations (2M objects)	ltrimstr	v0.6.0	0.086
+String operations (2M objects)	ltrimstr	v0.7.0	0.081
+String operations (2M objects)	ltrimstr	9e563a9	0.083
+String operations (2M objects)	ltrimstr	b59f7c9	0.080
+String operations (2M objects)	ltrimstr	11388d4	0.079
+String operations (2M objects)	ltrimstr	v0.8.0	0.079
+String operations (2M objects)	ltrimstr	195fdc4	0.081
+String operations (2M objects)	ltrimstr	v0.9.0	0.080
+String operations (2M objects)	ltrimstr	v0.10.0	0.085
+String operations (2M objects)	ltrimstr	v1.0.0	0.082
+String operations (2M objects)	ltrimstr	v1.1.0	0.082
+String operations (2M objects)	ltrimstr	v1.4.3	0.090
+String operations (2M objects)	ltrimstr	v1.4.4	0.090
+String operations (2M objects)	rtrimstr	1118cf	0.238
+String operations (2M objects)	rtrimstr	v0.5.0	0.079
+String operations (2M objects)	rtrimstr	3ae841e	0.080
+String operations (2M objects)	rtrimstr	fa2eb51	0.083
+String operations (2M objects)	rtrimstr	2884a5f	0.085
+String operations (2M objects)	rtrimstr	v0.6.0	0.085
+String operations (2M objects)	rtrimstr	v0.7.0	0.083
+String operations (2M objects)	rtrimstr	9e563a9	0.081
+String operations (2M objects)	rtrimstr	b59f7c9	0.080
+String operations (2M objects)	rtrimstr	11388d4	0.083
+String operations (2M objects)	rtrimstr	v0.8.0	0.080
+String operations (2M objects)	rtrimstr	195fdc4	0.084
+String operations (2M objects)	rtrimstr	v0.9.0	0.082
+String operations (2M objects)	rtrimstr	v0.10.0	0.087
+String operations (2M objects)	rtrimstr	v1.0.0	0.082
+String operations (2M objects)	rtrimstr	v1.1.0	0.083
+String operations (2M objects)	rtrimstr	v1.4.3	0.089
+String operations (2M objects)	rtrimstr	v1.4.4	0.090
+String operations (2M objects)	split	1118cf	0.331
+String operations (2M objects)	split	v0.5.0	0.327
+String operations (2M objects)	split	3ae841e	0.149
+String operations (2M objects)	split	fa2eb51	0.151
+String operations (2M objects)	split	2884a5f	0.161
+String operations (2M objects)	split	v0.6.0	0.154
+String operations (2M objects)	split	v0.7.0	0.152
+String operations (2M objects)	split	9e563a9	0.152
+String operations (2M objects)	split	b59f7c9	0.147
+String operations (2M objects)	split	11388d4	0.149
+String operations (2M objects)	split	v0.8.0	0.145
+String operations (2M objects)	split	195fdc4	0.151
+String operations (2M objects)	split	v0.9.0	0.153
+String operations (2M objects)	split	v0.10.0	0.160
+String operations (2M objects)	split	v1.0.0	0.153
+String operations (2M objects)	split	v1.1.0	0.149
+String operations (2M objects)	split	v1.4.3	0.150
+String operations (2M objects)	split	v1.4.4	0.151
+String operations (2M objects)	case+split	1118cf	
+String operations (2M objects)	case+split	v0.5.0	
+String operations (2M objects)	case+split	3ae841e	
+String operations (2M objects)	case+split	fa2eb51	
+String operations (2M objects)	case+split	2884a5f	
+String operations (2M objects)	case+split	v0.6.0	
+String operations (2M objects)	case+split	v0.7.0	
+String operations (2M objects)	case+split	9e563a9	
+String operations (2M objects)	case+split	b59f7c9	
+String operations (2M objects)	case+split	11388d4	
+String operations (2M objects)	case+split	v0.8.0	
+String operations (2M objects)	case+split	195fdc4	0.110
+String operations (2M objects)	case+split	v0.9.0	0.106
+String operations (2M objects)	case+split	v0.10.0	0.111
+String operations (2M objects)	case+split	v1.0.0	0.106
+String operations (2M objects)	case+split	v1.1.0	0.109
+String operations (2M objects)	case+split	v1.4.3	0.117
+String operations (2M objects)	case+split	v1.4.4	0.116
+String operations (2M objects)	join	1118cf	0.352
+String operations (2M objects)	join	v0.5.0	0.368
+String operations (2M objects)	join	3ae841e	0.102
+String operations (2M objects)	join	fa2eb51	0.106
+String operations (2M objects)	join	2884a5f	0.082
+String operations (2M objects)	join	v0.6.0	0.080
+String operations (2M objects)	join	v0.7.0	0.081
+String operations (2M objects)	join	9e563a9	0.081
+String operations (2M objects)	join	b59f7c9	0.079
+String operations (2M objects)	join	11388d4	0.080
+String operations (2M objects)	join	v0.8.0	0.076
+String operations (2M objects)	join	195fdc4	0.078
+String operations (2M objects)	join	v0.9.0	0.078
+String operations (2M objects)	join	v0.10.0	0.083
+String operations (2M objects)	join	v1.0.0	0.081
+String operations (2M objects)	join	v1.1.0	0.078
+String operations (2M objects)	join	v1.4.3	0.087
+String operations (2M objects)	join	v1.4.4	0.092
+String operations (2M objects)	startswith	1118cf	0.219
+String operations (2M objects)	startswith	v0.5.0	0.076
+String operations (2M objects)	startswith	3ae841e	0.081
+String operations (2M objects)	startswith	fa2eb51	0.083
+String operations (2M objects)	startswith	2884a5f	0.084
+String operations (2M objects)	startswith	v0.6.0	0.085
+String operations (2M objects)	startswith	v0.7.0	0.080
+String operations (2M objects)	startswith	9e563a9	0.082
+String operations (2M objects)	startswith	b59f7c9	0.080
+String operations (2M objects)	startswith	11388d4	0.080
+String operations (2M objects)	startswith	v0.8.0	0.078
+String operations (2M objects)	startswith	195fdc4	0.081
+String operations (2M objects)	startswith	v0.9.0	0.081
+String operations (2M objects)	startswith	v0.10.0	0.084
+String operations (2M objects)	startswith	v1.0.0	0.082
+String operations (2M objects)	startswith	v1.1.0	0.080
+String operations (2M objects)	startswith	v1.4.3	0.084
+String operations (2M objects)	startswith	v1.4.4	0.086
+String operations (2M objects)	endswith	1118cf	0.221
+String operations (2M objects)	endswith	v0.5.0	0.079
+String operations (2M objects)	endswith	3ae841e	0.079
+String operations (2M objects)	endswith	fa2eb51	0.081
+String operations (2M objects)	endswith	2884a5f	0.085
+String operations (2M objects)	endswith	v0.6.0	0.084
+String operations (2M objects)	endswith	v0.7.0	0.081
+String operations (2M objects)	endswith	9e563a9	0.081
+String operations (2M objects)	endswith	b59f7c9	0.079
+String operations (2M objects)	endswith	11388d4	0.079
+String operations (2M objects)	endswith	v0.8.0	0.078
+String operations (2M objects)	endswith	195fdc4	0.081
+String operations (2M objects)	endswith	v0.9.0	0.081
+String operations (2M objects)	endswith	v0.10.0	0.083
+String operations (2M objects)	endswith	v1.0.0	0.080
+String operations (2M objects)	endswith	v1.1.0	0.079
+String operations (2M objects)	endswith	v1.4.3	0.085
+String operations (2M objects)	endswith	v1.4.4	0.088
+String operations (2M objects)	tostring	1118cf	0.212
+String operations (2M objects)	tostring	v0.5.0	0.040
+String operations (2M objects)	tostring	3ae841e	0.042
+String operations (2M objects)	tostring	fa2eb51	0.042
+String operations (2M objects)	tostring	2884a5f	0.043
+String operations (2M objects)	tostring	v0.6.0	0.044
+String operations (2M objects)	tostring	v0.7.0	0.043
+String operations (2M objects)	tostring	9e563a9	0.043
+String operations (2M objects)	tostring	b59f7c9	0.043
+String operations (2M objects)	tostring	11388d4	0.042
+String operations (2M objects)	tostring	v0.8.0	0.042
+String operations (2M objects)	tostring	195fdc4	0.042
+String operations (2M objects)	tostring	v0.9.0	0.042
+String operations (2M objects)	tostring	v0.10.0	0.043
+String operations (2M objects)	tostring	v1.0.0	0.043
+String operations (2M objects)	tostring	v1.1.0	0.043
+String operations (2M objects)	tostring	v1.4.3	0.043
+String operations (2M objects)	tostring	v1.4.4	0.095
+String operations (2M objects)	tonumber	1118cf	0.265
+String operations (2M objects)	tonumber	v0.5.0	0.257
+String operations (2M objects)	tonumber	3ae841e	0.092
+String operations (2M objects)	tonumber	fa2eb51	0.093
+String operations (2M objects)	tonumber	2884a5f	0.096
+String operations (2M objects)	tonumber	v0.6.0	0.093
+String operations (2M objects)	tonumber	v0.7.0	0.091
+String operations (2M objects)	tonumber	9e563a9	0.093
+String operations (2M objects)	tonumber	b59f7c9	0.092
+String operations (2M objects)	tonumber	11388d4	0.092
+String operations (2M objects)	tonumber	v0.8.0	0.089
+String operations (2M objects)	tonumber	195fdc4	0.091
+String operations (2M objects)	tonumber	v0.9.0	0.093
+String operations (2M objects)	tonumber	v0.10.0	0.096
+String operations (2M objects)	tonumber	v1.0.0	0.095
+String operations (2M objects)	tonumber	v1.1.0	0.092
+String operations (2M objects)	tonumber	v1.4.3	0.108
+String operations (2M objects)	tonumber	v1.4.4	0.104
+String operations (2M objects)	string interpolation	1118cf	0.322
+String operations (2M objects)	string interpolation	v0.5.0	0.313
+String operations (2M objects)	string interpolation	3ae841e	0.122
+String operations (2M objects)	string interpolation	fa2eb51	0.125
+String operations (2M objects)	string interpolation	2884a5f	0.099
+String operations (2M objects)	string interpolation	v0.6.0	0.096
+String operations (2M objects)	string interpolation	v0.7.0	0.096
+String operations (2M objects)	string interpolation	9e563a9	0.101
+String operations (2M objects)	string interpolation	b59f7c9	0.095
+String operations (2M objects)	string interpolation	11388d4	0.093
+String operations (2M objects)	string interpolation	v0.8.0	0.096
+String operations (2M objects)	string interpolation	195fdc4	0.098
+String operations (2M objects)	string interpolation	v0.9.0	0.094
+String operations (2M objects)	string interpolation	v0.10.0	0.100
+String operations (2M objects)	string interpolation	v1.0.0	0.096
+String operations (2M objects)	string interpolation	v1.1.0	0.097
+String operations (2M objects)	string interpolation	v1.4.3	0.104
+String operations (2M objects)	string interpolation	v1.4.4	0.106
+String ops (200K objects)	test (regex)	1118cf	0.027
+String ops (200K objects)	test (regex)	v0.5.0	0.025
+String ops (200K objects)	test (regex)	3ae841e	0.011
+String ops (200K objects)	test (regex)	fa2eb51	0.011
+String ops (200K objects)	test (regex)	2884a5f	0.011
+String ops (200K objects)	test (regex)	v0.6.0	0.011
+String ops (200K objects)	test (regex)	v0.7.0	0.011
+String ops (200K objects)	test (regex)	9e563a9	0.011
+String ops (200K objects)	test (regex)	b59f7c9	0.011
+String ops (200K objects)	test (regex)	11388d4	0.011
+String ops (200K objects)	test (regex)	v0.8.0	0.011
+String ops (200K objects)	test (regex)	195fdc4	0.011
+String ops (200K objects)	test (regex)	v0.9.0	0.010
+String ops (200K objects)	test (regex)	v0.10.0	0.011
+String ops (200K objects)	test (regex)	v1.0.0	0.011
+String ops (200K objects)	test (regex)	v1.1.0	0.011
+String ops (200K objects)	test (regex)	v1.4.3	0.013
+String ops (200K objects)	test (regex)	v1.4.4	0.013
+String ops (200K objects)	match (regex)	1118cf	0.089
+String ops (200K objects)	match (regex)	v0.5.0	0.088
+String ops (200K objects)	match (regex)	3ae841e	0.087
+String ops (200K objects)	match (regex)	fa2eb51	0.088
+String ops (200K objects)	match (regex)	2884a5f	0.087
+String ops (200K objects)	match (regex)	v0.6.0	0.088
+String ops (200K objects)	match (regex)	v0.7.0	0.087
+String ops (200K objects)	match (regex)	9e563a9	0.090
+String ops (200K objects)	match (regex)	b59f7c9	0.087
+String ops (200K objects)	match (regex)	11388d4	0.086
+String ops (200K objects)	match (regex)	v0.8.0	0.088
+String ops (200K objects)	match (regex)	195fdc4	0.140
+String ops (200K objects)	match (regex)	v0.9.0	0.079
+String ops (200K objects)	match (regex)	v0.10.0	0.037
+String ops (200K objects)	match (regex)	v1.0.0	0.036
+String ops (200K objects)	match (regex)	v1.1.0	0.037
+String ops (200K objects)	match (regex)	v1.4.3	0.031
+String ops (200K objects)	match (regex)	v1.4.4	0.032
+String ops (200K objects)	@base64	1118cf	0.032
+String ops (200K objects)	@base64	v0.5.0	0.032
+String ops (200K objects)	@base64	3ae841e	0.010
+String ops (200K objects)	@base64	fa2eb51	0.010
+String ops (200K objects)	@base64	2884a5f	0.011
+String ops (200K objects)	@base64	v0.6.0	0.010
+String ops (200K objects)	@base64	v0.7.0	0.009
+String ops (200K objects)	@base64	9e563a9	0.010
+String ops (200K objects)	@base64	b59f7c9	0.010
+String ops (200K objects)	@base64	11388d4	0.009
+String ops (200K objects)	@base64	v0.8.0	0.009
+String ops (200K objects)	@base64	195fdc4	0.010
+String ops (200K objects)	@base64	v0.9.0	0.009
+String ops (200K objects)	@base64	v0.10.0	0.010
+String ops (200K objects)	@base64	v1.0.0	0.010
+String ops (200K objects)	@base64	v1.1.0	0.010
+String ops (200K objects)	@base64	v1.4.3	0.011
+String ops (200K objects)	@base64	v1.4.4	0.011
+String ops (200K objects)	@uri	1118cf	0.029
+String ops (200K objects)	@uri	v0.5.0	0.029
+String ops (200K objects)	@uri	3ae841e	0.010
+String ops (200K objects)	@uri	fa2eb51	0.010
+String ops (200K objects)	@uri	2884a5f	0.011
+String ops (200K objects)	@uri	v0.6.0	0.010
+String ops (200K objects)	@uri	v0.7.0	0.009
+String ops (200K objects)	@uri	9e563a9	0.010
+String ops (200K objects)	@uri	b59f7c9	0.010
+String ops (200K objects)	@uri	11388d4	0.010
+String ops (200K objects)	@uri	v0.8.0	0.010
+String ops (200K objects)	@uri	195fdc4	0.010
+String ops (200K objects)	@uri	v0.9.0	0.010
+String ops (200K objects)	@uri	v0.10.0	0.010
+String ops (200K objects)	@uri	v1.0.0	0.010
+String ops (200K objects)	@uri	v1.1.0	0.011
+String ops (200K objects)	@uri	v1.4.3	0.011
+String ops (200K objects)	@uri	v1.4.4	0.011
+String ops (200K objects)	@html	1118cf	0.035
+String ops (200K objects)	@html	v0.5.0	0.035
+String ops (200K objects)	@html	3ae841e	0.010
+String ops (200K objects)	@html	fa2eb51	0.010
+String ops (200K objects)	@html	2884a5f	0.011
+String ops (200K objects)	@html	v0.6.0	0.010
+String ops (200K objects)	@html	v0.7.0	0.010
+String ops (200K objects)	@html	9e563a9	0.010
+String ops (200K objects)	@html	b59f7c9	0.010
+String ops (200K objects)	@html	11388d4	0.010
+String ops (200K objects)	@html	v0.8.0	0.010
+String ops (200K objects)	@html	195fdc4	0.010
+String ops (200K objects)	@html	v0.9.0	0.010
+String ops (200K objects)	@html	v0.10.0	0.010
+String ops (200K objects)	@html	v1.0.0	0.010
+String ops (200K objects)	@html	v1.1.0	0.010
+String ops (200K objects)	@html	v1.4.3	0.012
+String ops (200K objects)	@html	v1.4.4	0.011
+String ops (200K objects)	@csv (array)	1118cf	0.058
+String ops (200K objects)	@csv (array)	v0.5.0	0.056
+String ops (200K objects)	@csv (array)	3ae841e	0.015
+String ops (200K objects)	@csv (array)	fa2eb51	0.016
+String ops (200K objects)	@csv (array)	2884a5f	0.013
+String ops (200K objects)	@csv (array)	v0.6.0	0.012
+String ops (200K objects)	@csv (array)	v0.7.0	0.012
+String ops (200K objects)	@csv (array)	9e563a9	0.013
+String ops (200K objects)	@csv (array)	b59f7c9	0.012
+String ops (200K objects)	@csv (array)	11388d4	0.012
+String ops (200K objects)	@csv (array)	v0.8.0	0.012
+String ops (200K objects)	@csv (array)	195fdc4	0.012
+String ops (200K objects)	@csv (array)	v0.9.0	0.013
+String ops (200K objects)	@csv (array)	v0.10.0	0.013
+String ops (200K objects)	@csv (array)	v1.0.0	0.012
+String ops (200K objects)	@csv (array)	v1.1.0	0.013
+String ops (200K objects)	@csv (array)	v1.4.3	0.013
+String ops (200K objects)	@csv (array)	v1.4.4	0.014
+String ops (200K objects)	@tsv (array)	1118cf	0.059
+String ops (200K objects)	@tsv (array)	v0.5.0	0.057
+String ops (200K objects)	@tsv (array)	3ae841e	0.016
+String ops (200K objects)	@tsv (array)	fa2eb51	0.015
+String ops (200K objects)	@tsv (array)	2884a5f	0.013
+String ops (200K objects)	@tsv (array)	v0.6.0	0.012
+String ops (200K objects)	@tsv (array)	v0.7.0	0.012
+String ops (200K objects)	@tsv (array)	9e563a9	0.012
+String ops (200K objects)	@tsv (array)	b59f7c9	0.012
+String ops (200K objects)	@tsv (array)	11388d4	0.012
+String ops (200K objects)	@tsv (array)	v0.8.0	0.012
+String ops (200K objects)	@tsv (array)	195fdc4	0.012
+String ops (200K objects)	@tsv (array)	v0.9.0	0.013
+String ops (200K objects)	@tsv (array)	v0.10.0	0.013
+String ops (200K objects)	@tsv (array)	v1.0.0	0.012
+String ops (200K objects)	@tsv (array)	v1.1.0	0.013
+String ops (200K objects)	@tsv (array)	v1.4.3	0.013
+String ops (200K objects)	@tsv (array)	v1.4.4	0.014
+String ops (200K objects)	gsub	1118cf	0.036
+String ops (200K objects)	gsub	v0.5.0	0.035
+String ops (200K objects)	gsub	3ae841e	0.017
+String ops (200K objects)	gsub	fa2eb51	0.017
+String ops (200K objects)	gsub	2884a5f	0.018
+String ops (200K objects)	gsub	v0.6.0	0.017
+String ops (200K objects)	gsub	v0.7.0	0.016
+String ops (200K objects)	gsub	9e563a9	0.017
+String ops (200K objects)	gsub	b59f7c9	0.017
+String ops (200K objects)	gsub	11388d4	0.016
+String ops (200K objects)	gsub	v0.8.0	0.016
+String ops (200K objects)	gsub	195fdc4	0.017
+String ops (200K objects)	gsub	v0.9.0	0.016
+String ops (200K objects)	gsub	v0.10.0	0.018
+String ops (200K objects)	gsub	v1.0.0	0.017
+String ops (200K objects)	gsub	v1.1.0	0.018
+String ops (200K objects)	gsub	v1.4.3	0.018
+String ops (200K objects)	gsub	v1.4.4	0.018
+String ops (200K objects)	case+gsub	1118cf	
+String ops (200K objects)	case+gsub	v0.5.0	
+String ops (200K objects)	case+gsub	3ae841e	
+String ops (200K objects)	case+gsub	fa2eb51	
+String ops (200K objects)	case+gsub	2884a5f	
+String ops (200K objects)	case+gsub	v0.6.0	
+String ops (200K objects)	case+gsub	v0.7.0	
+String ops (200K objects)	case+gsub	9e563a9	
+String ops (200K objects)	case+gsub	b59f7c9	
+String ops (200K objects)	case+gsub	11388d4	
+String ops (200K objects)	case+gsub	v0.8.0	
+String ops (200K objects)	case+gsub	195fdc4	0.173
+String ops (200K objects)	case+gsub	v0.9.0	0.169
+String ops (200K objects)	case+gsub	v0.10.0	0.176
+String ops (200K objects)	case+gsub	v1.0.0	0.171
+String ops (200K objects)	case+gsub	v1.1.0	0.176
+String ops (200K objects)	case+gsub	v1.4.3	0.181
+String ops (200K objects)	case+gsub	v1.4.4	0.180
+String ops (200K objects)	case+test	1118cf	
+String ops (200K objects)	case+test	v0.5.0	
+String ops (200K objects)	case+test	3ae841e	
+String ops (200K objects)	case+test	fa2eb51	
+String ops (200K objects)	case+test	2884a5f	
+String ops (200K objects)	case+test	v0.6.0	
+String ops (200K objects)	case+test	v0.7.0	
+String ops (200K objects)	case+test	9e563a9	
+String ops (200K objects)	case+test	b59f7c9	
+String ops (200K objects)	case+test	11388d4	
+String ops (200K objects)	case+test	v0.8.0	
+String ops (200K objects)	case+test	195fdc4	0.108
+String ops (200K objects)	case+test	v0.9.0	0.109
+String ops (200K objects)	case+test	v0.10.0	0.109
+String ops (200K objects)	case+test	v1.0.0	0.108
+String ops (200K objects)	case+test	v1.1.0	0.110
+String ops (200K objects)	case+test	v1.4.3	0.116
+String ops (200K objects)	case+test	v1.4.4	0.115
+String ops (200K objects)	ltrim+tonum+arith	1118cf	
+String ops (200K objects)	ltrim+tonum+arith	v0.5.0	
+String ops (200K objects)	ltrim+tonum+arith	3ae841e	
+String ops (200K objects)	ltrim+tonum+arith	fa2eb51	
+String ops (200K objects)	ltrim+tonum+arith	2884a5f	
+String ops (200K objects)	ltrim+tonum+arith	v0.6.0	
+String ops (200K objects)	ltrim+tonum+arith	v0.7.0	
+String ops (200K objects)	ltrim+tonum+arith	9e563a9	
+String ops (200K objects)	ltrim+tonum+arith	b59f7c9	
+String ops (200K objects)	ltrim+tonum+arith	11388d4	
+String ops (200K objects)	ltrim+tonum+arith	v0.8.0	
+String ops (200K objects)	ltrim+tonum+arith	195fdc4	0.083
+String ops (200K objects)	ltrim+tonum+arith	v0.9.0	0.083
+String ops (200K objects)	ltrim+tonum+arith	v0.10.0	0.086
+String ops (200K objects)	ltrim+tonum+arith	v1.0.0	0.084
+String ops (200K objects)	ltrim+tonum+arith	v1.1.0	0.083
+String ops (200K objects)	ltrim+tonum+arith	v1.4.3	0.107
+String ops (200K objects)	ltrim+tonum+arith	v1.4.4	0.107
+Numeric & math (2M objects)	floor	1118cf	0.183
+Numeric & math (2M objects)	floor	v0.5.0	0.039
+Numeric & math (2M objects)	floor	3ae841e	0.039
+Numeric & math (2M objects)	floor	fa2eb51	0.040
+Numeric & math (2M objects)	floor	2884a5f	0.041
+Numeric & math (2M objects)	floor	v0.6.0	0.041
+Numeric & math (2M objects)	floor	v0.7.0	0.041
+Numeric & math (2M objects)	floor	9e563a9	0.042
+Numeric & math (2M objects)	floor	b59f7c9	0.040
+Numeric & math (2M objects)	floor	11388d4	0.041
+Numeric & math (2M objects)	floor	v0.8.0	0.040
+Numeric & math (2M objects)	floor	195fdc4	0.041
+Numeric & math (2M objects)	floor	v0.9.0	0.040
+Numeric & math (2M objects)	floor	v0.10.0	0.042
+Numeric & math (2M objects)	floor	v1.0.0	0.041
+Numeric & math (2M objects)	floor	v1.1.0	0.041
+Numeric & math (2M objects)	floor	v1.4.3	0.042
+Numeric & math (2M objects)	floor	v1.4.4	0.091
+Numeric & math (2M objects)	sqrt	1118cf	0.266
+Numeric & math (2M objects)	sqrt	v0.5.0	0.127
+Numeric & math (2M objects)	sqrt	3ae841e	0.068
+Numeric & math (2M objects)	sqrt	fa2eb51	0.070
+Numeric & math (2M objects)	sqrt	2884a5f	0.070
+Numeric & math (2M objects)	sqrt	v0.6.0	0.070
+Numeric & math (2M objects)	sqrt	v0.7.0	0.070
+Numeric & math (2M objects)	sqrt	9e563a9	0.069
+Numeric & math (2M objects)	sqrt	b59f7c9	0.069
+Numeric & math (2M objects)	sqrt	11388d4	0.069
+Numeric & math (2M objects)	sqrt	v0.8.0	0.069
+Numeric & math (2M objects)	sqrt	195fdc4	0.070
+Numeric & math (2M objects)	sqrt	v0.9.0	0.069
+Numeric & math (2M objects)	sqrt	v0.10.0	0.072
+Numeric & math (2M objects)	sqrt	v1.0.0	0.069
+Numeric & math (2M objects)	sqrt	v1.1.0	0.071
+Numeric & math (2M objects)	sqrt	v1.4.3	0.072
+Numeric & math (2M objects)	sqrt	v1.4.4	0.115
+Numeric & math (2M objects)	modulo	1118cf	0.169
+Numeric & math (2M objects)	modulo	v0.5.0	0.067
+Numeric & math (2M objects)	modulo	3ae841e	0.067
+Numeric & math (2M objects)	modulo	fa2eb51	0.068
+Numeric & math (2M objects)	modulo	2884a5f	0.071
+Numeric & math (2M objects)	modulo	v0.6.0	0.069
+Numeric & math (2M objects)	modulo	v0.7.0	0.069
+Numeric & math (2M objects)	modulo	9e563a9	0.071
+Numeric & math (2M objects)	modulo	b59f7c9	0.069
+Numeric & math (2M objects)	modulo	11388d4	0.069
+Numeric & math (2M objects)	modulo	v0.8.0	0.069
+Numeric & math (2M objects)	modulo	195fdc4	0.070
+Numeric & math (2M objects)	modulo	v0.9.0	0.069
+Numeric & math (2M objects)	modulo	v0.10.0	0.073
+Numeric & math (2M objects)	modulo	v1.0.0	0.070
+Numeric & math (2M objects)	modulo	v1.1.0	0.070
+Numeric & math (2M objects)	modulo	v1.4.3	0.045
+Numeric & math (2M objects)	modulo	v1.4.4	0.095
+Numeric & math (2M objects)	if-elif-else	1118cf	0.200
+Numeric & math (2M objects)	if-elif-else	v0.5.0	0.167
+Numeric & math (2M objects)	if-elif-else	3ae841e	0.125
+Numeric & math (2M objects)	if-elif-else	fa2eb51	0.132
+Numeric & math (2M objects)	if-elif-else	2884a5f	0.101
+Numeric & math (2M objects)	if-elif-else	v0.6.0	0.100
+Numeric & math (2M objects)	if-elif-else	v0.7.0	0.101
+Numeric & math (2M objects)	if-elif-else	9e563a9	0.102
+Numeric & math (2M objects)	if-elif-else	b59f7c9	0.106
+Numeric & math (2M objects)	if-elif-else	11388d4	0.104
+Numeric & math (2M objects)	if-elif-else	v0.8.0	0.102
+Numeric & math (2M objects)	if-elif-else	195fdc4	0.105
+Numeric & math (2M objects)	if-elif-else	v0.9.0	0.103
+Numeric & math (2M objects)	if-elif-else	v0.10.0	0.106
+Numeric & math (2M objects)	if-elif-else	v1.0.0	0.103
+Numeric & math (2M objects)	if-elif-else	v1.1.0	0.107
+Numeric & math (2M objects)	if-elif-else	v1.4.3	0.102
+Numeric & math (2M objects)	if-elif-else	v1.4.4	0.134
+Numeric & math (2M objects)	select|del	1118cf	
+Numeric & math (2M objects)	select|del	v0.5.0	
+Numeric & math (2M objects)	select|del	3ae841e	
+Numeric & math (2M objects)	select|del	fa2eb51	
+Numeric & math (2M objects)	select|del	2884a5f	
+Numeric & math (2M objects)	select|del	v0.6.0	
+Numeric & math (2M objects)	select|del	v0.7.0	
+Numeric & math (2M objects)	select|del	9e563a9	
+Numeric & math (2M objects)	select|del	b59f7c9	
+Numeric & math (2M objects)	select|del	11388d4	
+Numeric & math (2M objects)	select|del	v0.8.0	
+Numeric & math (2M objects)	select|del	195fdc4	0.069
+Numeric & math (2M objects)	select|del	v0.9.0	0.070
+Numeric & math (2M objects)	select|del	v0.10.0	0.071
+Numeric & math (2M objects)	select|del	v1.0.0	0.069
+Numeric & math (2M objects)	select|del	v1.1.0	0.069
+Numeric & math (2M objects)	select|del	v1.4.3	0.073
+Numeric & math (2M objects)	select|del	v1.4.4	0.126
+Numeric & math (2M objects)	select|merge	1118cf	
+Numeric & math (2M objects)	select|merge	v0.5.0	
+Numeric & math (2M objects)	select|merge	3ae841e	
+Numeric & math (2M objects)	select|merge	fa2eb51	
+Numeric & math (2M objects)	select|merge	2884a5f	
+Numeric & math (2M objects)	select|merge	v0.6.0	
+Numeric & math (2M objects)	select|merge	v0.7.0	
+Numeric & math (2M objects)	select|merge	9e563a9	
+Numeric & math (2M objects)	select|merge	b59f7c9	
+Numeric & math (2M objects)	select|merge	11388d4	
+Numeric & math (2M objects)	select|merge	v0.8.0	
+Numeric & math (2M objects)	select|merge	195fdc4	0.094
+Numeric & math (2M objects)	select|merge	v0.9.0	0.093
+Numeric & math (2M objects)	select|merge	v0.10.0	0.105
+Numeric & math (2M objects)	select|merge	v1.0.0	0.101
+Numeric & math (2M objects)	select|merge	v1.1.0	0.101
+Numeric & math (2M objects)	select|merge	v1.4.3	0.105
+Numeric & math (2M objects)	select|merge	v1.4.4	0.157
+Numeric & math (2M objects)	select(test)|merge	1118cf	
+Numeric & math (2M objects)	select(test)|merge	v0.5.0	
+Numeric & math (2M objects)	select(test)|merge	3ae841e	
+Numeric & math (2M objects)	select(test)|merge	fa2eb51	
+Numeric & math (2M objects)	select(test)|merge	2884a5f	
+Numeric & math (2M objects)	select(test)|merge	v0.6.0	
+Numeric & math (2M objects)	select(test)|merge	v0.7.0	
+Numeric & math (2M objects)	select(test)|merge	9e563a9	
+Numeric & math (2M objects)	select(test)|merge	b59f7c9	
+Numeric & math (2M objects)	select(test)|merge	11388d4	
+Numeric & math (2M objects)	select(test)|merge	v0.8.0	
+Numeric & math (2M objects)	select(test)|merge	195fdc4	0.019
+Numeric & math (2M objects)	select(test)|merge	v0.9.0	0.019
+Numeric & math (2M objects)	select(test)|merge	v0.10.0	0.020
+Numeric & math (2M objects)	select(test)|merge	v1.0.0	0.019
+Numeric & math (2M objects)	select(test)|merge	v1.1.0	0.020
+Numeric & math (2M objects)	select(test)|merge	v1.4.3	0.022
+Numeric & math (2M objects)	select(test)|merge	v1.4.4	0.021
+Array generators	range(2M) | length	1118cf	0.007
+Array generators	range(2M) | length	v0.5.0	0.007
+Array generators	range(2M) | length	3ae841e	0.011
+Array generators	range(2M) | length	fa2eb51	0.010
+Array generators	range(2M) | length	2884a5f	0.011
+Array generators	range(2M) | length	v0.6.0	0.010
+Array generators	range(2M) | length	v0.7.0	0.010
+Array generators	range(2M) | length	9e563a9	0.010
+Array generators	range(2M) | length	b59f7c9	0.010
+Array generators	range(2M) | length	11388d4	0.010
+Array generators	range(2M) | length	v0.8.0	0.010
+Array generators	range(2M) | length	195fdc4	0.010
+Array generators	range(2M) | length	v0.9.0	0.010
+Array generators	range(2M) | length	v0.10.0	0.010
+Array generators	range(2M) | length	v1.0.0	0.010
+Array generators	range(2M) | length	v1.1.0	0.011
+Array generators	range(2M) | length	v1.4.3	0.011
+Array generators	range(2M) | length	v1.4.4	0.011
+Array generators	reverse(2M)	1118cf	0.014
+Array generators	reverse(2M)	v0.5.0	0.013
+Array generators	reverse(2M)	3ae841e	0.018
+Array generators	reverse(2M)	fa2eb51	0.016
+Array generators	reverse(2M)	2884a5f	0.018
+Array generators	reverse(2M)	v0.6.0	0.017
+Array generators	reverse(2M)	v0.7.0	0.017
+Array generators	reverse(2M)	9e563a9	0.017
+Array generators	reverse(2M)	b59f7c9	0.016
+Array generators	reverse(2M)	11388d4	0.016
+Array generators	reverse(2M)	v0.8.0	0.016
+Array generators	reverse(2M)	195fdc4	0.016
+Array generators	reverse(2M)	v0.9.0	0.016
+Array generators	reverse(2M)	v0.10.0	0.017
+Array generators	reverse(2M)	v1.0.0	0.016
+Array generators	reverse(2M)	v1.1.0	0.017
+Array generators	reverse(2M)	v1.4.3	0.017
+Array generators	reverse(2M)	v1.4.4	0.017
+Array generators	sort(2M)	1118cf	0.047
+Array generators	sort(2M)	v0.5.0	0.027
+Array generators	sort(2M)	3ae841e	0.023
+Array generators	sort(2M)	fa2eb51	0.021
+Array generators	sort(2M)	2884a5f	0.023
+Array generators	sort(2M)	v0.6.0	0.022
+Array generators	sort(2M)	v0.7.0	0.021
+Array generators	sort(2M)	9e563a9	0.022
+Array generators	sort(2M)	b59f7c9	0.021
+Array generators	sort(2M)	11388d4	0.021
+Array generators	sort(2M)	v0.8.0	0.021
+Array generators	sort(2M)	195fdc4	0.021
+Array generators	sort(2M)	v0.9.0	0.021
+Array generators	sort(2M)	v0.10.0	0.022
+Array generators	sort(2M)	v1.0.0	0.021
+Array generators	sort(2M)	v1.1.0	0.022
+Array generators	sort(2M)	v1.4.3	0.022
+Array generators	sort(2M)	v1.4.4	0.022
+Array generators	unique(1M)	1118cf	0.086
+Array generators	unique(1M)	v0.5.0	0.062
+Array generators	unique(1M)	3ae841e	0.028
+Array generators	unique(1M)	fa2eb51	0.028
+Array generators	unique(1M)	2884a5f	0.028
+Array generators	unique(1M)	v0.6.0	0.028
+Array generators	unique(1M)	v0.7.0	0.028
+Array generators	unique(1M)	9e563a9	0.028
+Array generators	unique(1M)	b59f7c9	0.028
+Array generators	unique(1M)	11388d4	0.028
+Array generators	unique(1M)	v0.8.0	0.027
+Array generators	unique(1M)	195fdc4	0.028
+Array generators	unique(1M)	v0.9.0	0.028
+Array generators	unique(1M)	v0.10.0	0.029
+Array generators	unique(1M)	v1.0.0	0.028
+Array generators	unique(1M)	v1.1.0	0.028
+Array generators	unique(1M)	v1.4.3	0.028
+Array generators	unique(1M)	v1.4.4	0.028
+Array generators	flatten(500K)	1118cf	0.008
+Array generators	flatten(500K)	v0.5.0	0.008
+Array generators	flatten(500K)	3ae841e	0.010
+Array generators	flatten(500K)	fa2eb51	0.009
+Array generators	flatten(500K)	2884a5f	0.010
+Array generators	flatten(500K)	v0.6.0	0.009
+Array generators	flatten(500K)	v0.7.0	0.009
+Array generators	flatten(500K)	9e563a9	0.010
+Array generators	flatten(500K)	b59f7c9	0.009
+Array generators	flatten(500K)	11388d4	0.009
+Array generators	flatten(500K)	v0.8.0	0.009
+Array generators	flatten(500K)	195fdc4	0.009
+Array generators	flatten(500K)	v0.9.0	0.009
+Array generators	flatten(500K)	v0.10.0	0.010
+Array generators	flatten(500K)	v1.0.0	0.009
+Array generators	flatten(500K)	v1.1.0	0.010
+Array generators	flatten(500K)	v1.4.3	0.010
+Array generators	flatten(500K)	v1.4.4	0.010
+Array generators	min, max(2M)	1118cf	0.016
+Array generators	min, max(2M)	v0.5.0	0.013
+Array generators	min, max(2M)	3ae841e	0.019
+Array generators	min, max(2M)	fa2eb51	0.020
+Array generators	min, max(2M)	2884a5f	0.019
+Array generators	min, max(2M)	v0.6.0	0.020
+Array generators	min, max(2M)	v0.7.0	0.020
+Array generators	min, max(2M)	9e563a9	0.019
+Array generators	min, max(2M)	b59f7c9	0.016
+Array generators	min, max(2M)	11388d4	0.017
+Array generators	min, max(2M)	v0.8.0	0.020
+Array generators	min, max(2M)	195fdc4	0.019
+Array generators	min, max(2M)	v0.9.0	0.017
+Array generators	min, max(2M)	v0.10.0	0.021
+Array generators	min, max(2M)	v1.0.0	0.018
+Array generators	min, max(2M)	v1.1.0	0.017
+Array generators	min, max(2M)	v1.4.3	0.017
+Array generators	min, max(2M)	v1.4.4	0.018
+Array generators	add numbers(2M)	1118cf	0.016
+Array generators	add numbers(2M)	v0.5.0	0.016
+Array generators	add numbers(2M)	3ae841e	0.020
+Array generators	add numbers(2M)	fa2eb51	0.019
+Array generators	add numbers(2M)	2884a5f	0.020
+Array generators	add numbers(2M)	v0.6.0	0.019
+Array generators	add numbers(2M)	v0.7.0	0.019
+Array generators	add numbers(2M)	9e563a9	0.020
+Array generators	add numbers(2M)	b59f7c9	0.019
+Array generators	add numbers(2M)	11388d4	0.019
+Array generators	add numbers(2M)	v0.8.0	0.018
+Array generators	add numbers(2M)	195fdc4	0.019
+Array generators	add numbers(2M)	v0.9.0	0.019
+Array generators	add numbers(2M)	v0.10.0	0.012
+Array generators	add numbers(2M)	v1.0.0	0.011
+Array generators	add numbers(2M)	v1.1.0	0.012
+Array generators	add numbers(2M)	v1.4.3	0.012
+Array generators	add numbers(2M)	v1.4.4	0.012
+Array generators	any/all(2M)	1118cf	0.054
+Array generators	any/all(2M)	v0.5.0	0.016
+Array generators	any/all(2M)	3ae841e	0.027
+Array generators	any/all(2M)	fa2eb51	0.027
+Array generators	any/all(2M)	2884a5f	0.027
+Array generators	any/all(2M)	v0.6.0	0.027
+Array generators	any/all(2M)	v0.7.0	0.026
+Array generators	any/all(2M)	9e563a9	0.027
+Array generators	any/all(2M)	b59f7c9	0.026
+Array generators	any/all(2M)	11388d4	0.026
+Array generators	any/all(2M)	v0.8.0	0.026
+Array generators	any/all(2M)	195fdc4	0.027
+Array generators	any/all(2M)	v0.9.0	0.027
+Array generators	any/all(2M)	v0.10.0	0.027
+Array generators	any/all(2M)	v1.0.0	0.027
+Array generators	any/all(2M)	v1.1.0	0.027
+Array generators	any/all(2M)	v1.4.3	0.028
+Array generators	any/all(2M)	v1.4.4	0.027
+Array generators	limit(10; range(10M))	1118cf	0.002
+Array generators	limit(10; range(10M))	v0.5.0	0.002
+Array generators	limit(10; range(10M))	3ae841e	0.002
+Array generators	limit(10; range(10M))	fa2eb51	0.002
+Array generators	limit(10; range(10M))	2884a5f	0.002
+Array generators	limit(10; range(10M))	v0.6.0	0.002
+Array generators	limit(10; range(10M))	v0.7.0	0.002
+Array generators	limit(10; range(10M))	9e563a9	0.002
+Array generators	limit(10; range(10M))	b59f7c9	0.002
+Array generators	limit(10; range(10M))	11388d4	0.002
+Array generators	limit(10; range(10M))	v0.8.0	0.002
+Array generators	limit(10; range(10M))	195fdc4	0.002
+Array generators	limit(10; range(10M))	v0.9.0	0.002
+Array generators	limit(10; range(10M))	v0.10.0	0.002
+Array generators	limit(10; range(10M))	v1.0.0	0.002
+Array generators	limit(10; range(10M))	v1.1.0	0.003
+Array generators	limit(10; range(10M))	v1.4.3	0.002
+Array generators	limit(10; range(10M))	v1.4.4	0.002
+Array generators	first(range(10M))	1118cf	0.002
+Array generators	first(range(10M))	v0.5.0	0.002
+Array generators	first(range(10M))	3ae841e	0.002
+Array generators	first(range(10M))	fa2eb51	0.002
+Array generators	first(range(10M))	2884a5f	0.002
+Array generators	first(range(10M))	v0.6.0	0.002
+Array generators	first(range(10M))	v0.7.0	0.002
+Array generators	first(range(10M))	9e563a9	0.002
+Array generators	first(range(10M))	b59f7c9	0.002
+Array generators	first(range(10M))	11388d4	0.002
+Array generators	first(range(10M))	v0.8.0	0.002
+Array generators	first(range(10M))	195fdc4	0.002
+Array generators	first(range(10M))	v0.9.0	0.002
+Array generators	first(range(10M))	v0.10.0	0.002
+Array generators	first(range(10M))	v1.0.0	0.002
+Array generators	first(range(10M))	v1.1.0	0.002
+Array generators	first(range(10M))	v1.4.3	0.002
+Array generators	first(range(10M))	v1.4.4	0.002
+Array generators	last(range(2M))	1118cf	0.002
+Array generators	last(range(2M))	v0.5.0	0.002
+Array generators	last(range(2M))	3ae841e	0.002
+Array generators	last(range(2M))	fa2eb51	0.002
+Array generators	last(range(2M))	2884a5f	0.002
+Array generators	last(range(2M))	v0.6.0	0.002
+Array generators	last(range(2M))	v0.7.0	0.002
+Array generators	last(range(2M))	9e563a9	0.002
+Array generators	last(range(2M))	b59f7c9	0.002
+Array generators	last(range(2M))	11388d4	0.002
+Array generators	last(range(2M))	v0.8.0	0.002
+Array generators	last(range(2M))	195fdc4	0.002
+Array generators	last(range(2M))	v0.9.0	0.002
+Array generators	last(range(2M))	v0.10.0	0.002
+Array generators	last(range(2M))	v1.0.0	0.002
+Array generators	last(range(2M))	v1.1.0	0.003
+Array generators	last(range(2M))	v1.4.3	0.002
+Array generators	last(range(2M))	v1.4.4	0.002
+Array generators	indices(1M)	1118cf	0.037
+Array generators	indices(1M)	v0.5.0	0.014
+Array generators	indices(1M)	3ae841e	0.015
+Array generators	indices(1M)	fa2eb51	0.015
+Array generators	indices(1M)	2884a5f	0.015
+Array generators	indices(1M)	v0.6.0	0.014
+Array generators	indices(1M)	v0.7.0	0.014
+Array generators	indices(1M)	9e563a9	0.015
+Array generators	indices(1M)	b59f7c9	0.014
+Array generators	indices(1M)	11388d4	0.014
+Array generators	indices(1M)	v0.8.0	0.014
+Array generators	indices(1M)	195fdc4	0.015
+Array generators	indices(1M)	v0.9.0	0.014
+Array generators	indices(1M)	v0.10.0	0.015
+Array generators	indices(1M)	v1.0.0	0.015
+Array generators	indices(1M)	v1.1.0	0.015
+Array generators	indices(1M)	v1.4.3	0.015
+Array generators	indices(1M)	v1.4.4	0.015
+Reduce & foreach	reduce (sum)	1118cf	0.011
+Reduce & foreach	reduce (sum)	v0.5.0	0.008
+Reduce & foreach	reduce (sum)	3ae841e	0.014
+Reduce & foreach	reduce (sum)	fa2eb51	0.014
+Reduce & foreach	reduce (sum)	2884a5f	0.014
+Reduce & foreach	reduce (sum)	v0.6.0	0.014
+Reduce & foreach	reduce (sum)	v0.7.0	0.014
+Reduce & foreach	reduce (sum)	9e563a9	0.014
+Reduce & foreach	reduce (sum)	b59f7c9	0.014
+Reduce & foreach	reduce (sum)	11388d4	0.014
+Reduce & foreach	reduce (sum)	v0.8.0	0.014
+Reduce & foreach	reduce (sum)	195fdc4	0.014
+Reduce & foreach	reduce (sum)	v0.9.0	0.014
+Reduce & foreach	reduce (sum)	v0.10.0	0.008
+Reduce & foreach	reduce (sum)	v1.0.0	0.008
+Reduce & foreach	reduce (sum)	v1.1.0	0.009
+Reduce & foreach	reduce (sum)	v1.4.3	0.009
+Reduce & foreach	reduce (sum)	v1.4.4	0.009
+Reduce & foreach	reduce (array build)	1118cf	0.038
+Reduce & foreach	reduce (array build)	v0.5.0	0.036
+Reduce & foreach	reduce (array build)	3ae841e	0.033
+Reduce & foreach	reduce (array build)	fa2eb51	0.033
+Reduce & foreach	reduce (array build)	2884a5f	0.037
+Reduce & foreach	reduce (array build)	v0.6.0	0.037
+Reduce & foreach	reduce (array build)	v0.7.0	0.036
+Reduce & foreach	reduce (array build)	9e563a9	0.003
+Reduce & foreach	reduce (array build)	b59f7c9	0.003
+Reduce & foreach	reduce (array build)	11388d4	0.003
+Reduce & foreach	reduce (array build)	v0.8.0	0.004
+Reduce & foreach	reduce (array build)	195fdc4	0.003
+Reduce & foreach	reduce (array build)	v0.9.0	0.003
+Reduce & foreach	reduce (array build)	v0.10.0	0.004
+Reduce & foreach	reduce (array build)	v1.0.0	0.004
+Reduce & foreach	reduce (array build)	v1.1.0	0.004
+Reduce & foreach	reduce (array build)	v1.4.3	0.004
+Reduce & foreach	reduce (array build)	v1.4.4	0.004
+Reduce & foreach	reduce (obj build)	1118cf	0.010
+Reduce & foreach	reduce (obj build)	v0.5.0	0.009
+Reduce & foreach	reduce (obj build)	3ae841e	0.009
+Reduce & foreach	reduce (obj build)	fa2eb51	0.009
+Reduce & foreach	reduce (obj build)	2884a5f	0.009
+Reduce & foreach	reduce (obj build)	v0.6.0	0.009
+Reduce & foreach	reduce (obj build)	v0.7.0	0.009
+Reduce & foreach	reduce (obj build)	9e563a9	0.009
+Reduce & foreach	reduce (obj build)	b59f7c9	0.009
+Reduce & foreach	reduce (obj build)	11388d4	0.009
+Reduce & foreach	reduce (obj build)	v0.8.0	0.010
+Reduce & foreach	reduce (obj build)	195fdc4	0.009
+Reduce & foreach	reduce (obj build)	v0.9.0	0.009
+Reduce & foreach	reduce (obj build)	v0.10.0	0.009
+Reduce & foreach	reduce (obj build)	v1.0.0	0.009
+Reduce & foreach	reduce (obj build)	v1.1.0	0.010
+Reduce & foreach	reduce (obj build)	v1.4.3	0.010
+Reduce & foreach	reduce (obj build)	v1.4.4	0.010
+Reduce & foreach	reduce (setpath)	1118cf	0.018
+Reduce & foreach	reduce (setpath)	v0.5.0	0.016
+Reduce & foreach	reduce (setpath)	3ae841e	0.016
+Reduce & foreach	reduce (setpath)	fa2eb51	0.016
+Reduce & foreach	reduce (setpath)	2884a5f	0.017
+Reduce & foreach	reduce (setpath)	v0.6.0	0.016
+Reduce & foreach	reduce (setpath)	v0.7.0	0.016
+Reduce & foreach	reduce (setpath)	9e563a9	0.019
+Reduce & foreach	reduce (setpath)	b59f7c9	0.015
+Reduce & foreach	reduce (setpath)	11388d4	0.015
+Reduce & foreach	reduce (setpath)	v0.8.0	0.016
+Reduce & foreach	reduce (setpath)	195fdc4	0.015
+Reduce & foreach	reduce (setpath)	v0.9.0	0.015
+Reduce & foreach	reduce (setpath)	v0.10.0	0.017
+Reduce & foreach	reduce (setpath)	v1.0.0	0.015
+Reduce & foreach	reduce (setpath)	v1.1.0	0.017
+Reduce & foreach	reduce (setpath)	v1.4.3	0.016
+Reduce & foreach	reduce (setpath)	v1.4.4	0.016
+Reduce & foreach	foreach (running sum)	1118cf	0.011
+Reduce & foreach	foreach (running sum)	v0.5.0	0.010
+Reduce & foreach	foreach (running sum)	3ae841e	0.011
+Reduce & foreach	foreach (running sum)	fa2eb51	0.011
+Reduce & foreach	foreach (running sum)	2884a5f	0.011
+Reduce & foreach	foreach (running sum)	v0.6.0	0.011
+Reduce & foreach	foreach (running sum)	v0.7.0	0.011
+Reduce & foreach	foreach (running sum)	9e563a9	0.011
+Reduce & foreach	foreach (running sum)	b59f7c9	0.011
+Reduce & foreach	foreach (running sum)	11388d4	0.010
+Reduce & foreach	foreach (running sum)	v0.8.0	0.011
+Reduce & foreach	foreach (running sum)	195fdc4	0.011
+Reduce & foreach	foreach (running sum)	v0.9.0	0.011
+Reduce & foreach	foreach (running sum)	v0.10.0	0.010
+Reduce & foreach	foreach (running sum)	v1.0.0	0.009
+Reduce & foreach	foreach (running sum)	v1.1.0	0.010
+Reduce & foreach	foreach (running sum)	v1.4.3	0.010
+Reduce & foreach	foreach (running sum)	v1.4.4	0.010
+Reduce & foreach	foreach + emit	1118cf	0.074
+Reduce & foreach	foreach + emit	v0.5.0	0.033
+Reduce & foreach	foreach + emit	3ae841e	0.011
+Reduce & foreach	foreach + emit	fa2eb51	0.011
+Reduce & foreach	foreach + emit	2884a5f	0.011
+Reduce & foreach	foreach + emit	v0.6.0	0.011
+Reduce & foreach	foreach + emit	v0.7.0	0.011
+Reduce & foreach	foreach + emit	9e563a9	0.011
+Reduce & foreach	foreach + emit	b59f7c9	0.011
+Reduce & foreach	foreach + emit	11388d4	0.010
+Reduce & foreach	foreach + emit	v0.8.0	0.012
+Reduce & foreach	foreach + emit	195fdc4	0.011
+Reduce & foreach	foreach + emit	v0.9.0	0.011
+Reduce & foreach	foreach + emit	v0.10.0	0.009
+Reduce & foreach	foreach + emit	v1.0.0	0.009
+Reduce & foreach	foreach + emit	v1.1.0	0.009
+Reduce & foreach	foreach + emit	v1.4.3	0.010
+Reduce & foreach	foreach + emit	v1.4.4	0.010
+Reduce & foreach	reduce (sum-of-squares)	1118cf	
+Reduce & foreach	reduce (sum-of-squares)	v0.5.0	
+Reduce & foreach	reduce (sum-of-squares)	3ae841e	0.063
+Reduce & foreach	reduce (sum-of-squares)	fa2eb51	0.060
+Reduce & foreach	reduce (sum-of-squares)	2884a5f	0.063
+Reduce & foreach	reduce (sum-of-squares)	v0.6.0	0.060
+Reduce & foreach	reduce (sum-of-squares)	v0.7.0	0.060
+Reduce & foreach	reduce (sum-of-squares)	9e563a9	0.061
+Reduce & foreach	reduce (sum-of-squares)	b59f7c9	0.060
+Reduce & foreach	reduce (sum-of-squares)	11388d4	0.060
+Reduce & foreach	reduce (sum-of-squares)	v0.8.0	0.066
+Reduce & foreach	reduce (sum-of-squares)	195fdc4	0.060
+Reduce & foreach	reduce (sum-of-squares)	v0.9.0	0.060
+Reduce & foreach	reduce (sum-of-squares)	v0.10.0	0.035
+Reduce & foreach	reduce (sum-of-squares)	v1.0.0	0.032
+Reduce & foreach	reduce (sum-of-squares)	v1.1.0	0.032
+Reduce & foreach	reduce (sum-of-squares)	v1.4.3	0.032
+Reduce & foreach	reduce (sum-of-squares)	v1.4.4	0.032
+Reduce & foreach	reduce (conditional)	1118cf	
+Reduce & foreach	reduce (conditional)	v0.5.0	
+Reduce & foreach	reduce (conditional)	3ae841e	0.076
+Reduce & foreach	reduce (conditional)	fa2eb51	0.074
+Reduce & foreach	reduce (conditional)	2884a5f	0.080
+Reduce & foreach	reduce (conditional)	v0.6.0	0.074
+Reduce & foreach	reduce (conditional)	v0.7.0	0.074
+Reduce & foreach	reduce (conditional)	9e563a9	0.075
+Reduce & foreach	reduce (conditional)	b59f7c9	0.074
+Reduce & foreach	reduce (conditional)	11388d4	0.074
+Reduce & foreach	reduce (conditional)	v0.8.0	0.081
+Reduce & foreach	reduce (conditional)	195fdc4	0.074
+Reduce & foreach	reduce (conditional)	v0.9.0	0.074
+Reduce & foreach	reduce (conditional)	v0.10.0	0.035
+Reduce & foreach	reduce (conditional)	v1.0.0	0.034
+Reduce & foreach	reduce (conditional)	v1.1.0	0.034
+Reduce & foreach	reduce (conditional)	v1.4.3	0.034
+Reduce & foreach	reduce (conditional)	v1.4.4	0.034
+Reduce & foreach	reduce (product)	1118cf	
+Reduce & foreach	reduce (product)	v0.5.0	
+Reduce & foreach	reduce (product)	3ae841e	0.065
+Reduce & foreach	reduce (product)	fa2eb51	0.063
+Reduce & foreach	reduce (product)	2884a5f	0.065
+Reduce & foreach	reduce (product)	v0.6.0	0.063
+Reduce & foreach	reduce (product)	v0.7.0	0.063
+Reduce & foreach	reduce (product)	9e563a9	0.065
+Reduce & foreach	reduce (product)	b59f7c9	0.063
+Reduce & foreach	reduce (product)	11388d4	0.063
+Reduce & foreach	reduce (product)	v0.8.0	0.069
+Reduce & foreach	reduce (product)	195fdc4	0.063
+Reduce & foreach	reduce (product)	v0.9.0	0.062
+Reduce & foreach	reduce (product)	v0.10.0	0.035
+Reduce & foreach	reduce (product)	v1.0.0	0.036
+Reduce & foreach	reduce (product)	v1.1.0	0.034
+Reduce & foreach	reduce (product)	v1.4.3	0.034
+Reduce & foreach	reduce (product)	v1.4.4	0.034
+Reduce & foreach	foreach (conditional)	1118cf	
+Reduce & foreach	foreach (conditional)	v0.5.0	
+Reduce & foreach	foreach (conditional)	3ae841e	0.014
+Reduce & foreach	foreach (conditional)	fa2eb51	0.014
+Reduce & foreach	foreach (conditional)	2884a5f	0.015
+Reduce & foreach	foreach (conditional)	v0.6.0	0.014
+Reduce & foreach	foreach (conditional)	v0.7.0	0.014
+Reduce & foreach	foreach (conditional)	9e563a9	0.014
+Reduce & foreach	foreach (conditional)	b59f7c9	0.013
+Reduce & foreach	foreach (conditional)	11388d4	0.014
+Reduce & foreach	foreach (conditional)	v0.8.0	0.014
+Reduce & foreach	foreach (conditional)	195fdc4	0.014
+Reduce & foreach	foreach (conditional)	v0.9.0	0.013
+Reduce & foreach	foreach (conditional)	v0.10.0	0.010
+Reduce & foreach	foreach (conditional)	v1.0.0	0.010
+Reduce & foreach	foreach (conditional)	v1.1.0	0.010
+Reduce & foreach	foreach (conditional)	v1.4.3	0.010
+Reduce & foreach	foreach (conditional)	v1.4.4	0.010
+Reduce & foreach	until (100M)	1118cf	
+Reduce & foreach	until (100M)	v0.5.0	
+Reduce & foreach	until (100M)	3ae841e	0.599
+Reduce & foreach	until (100M)	fa2eb51	0.584
+Reduce & foreach	until (100M)	2884a5f	0.583
+Reduce & foreach	until (100M)	v0.6.0	0.581
+Reduce & foreach	until (100M)	v0.7.0	0.584
+Reduce & foreach	until (100M)	9e563a9	0.594
+Reduce & foreach	until (100M)	b59f7c9	0.583
+Reduce & foreach	until (100M)	11388d4	0.585
+Reduce & foreach	until (100M)	v0.8.0	0.620
+Reduce & foreach	until (100M)	195fdc4	0.581
+Reduce & foreach	until (100M)	v0.9.0	0.581
+Reduce & foreach	until (100M)	v0.10.0	0.311
+Reduce & foreach	until (100M)	v1.0.0	0.294
+Reduce & foreach	until (100M)	v1.1.0	0.293
+Reduce & foreach	until (100M)	v1.4.3	0.295
+Reduce & foreach	until (100M)	v1.4.4	0.294
+Reduce & foreach	reduce (harmonic)	1118cf	
+Reduce & foreach	reduce (harmonic)	v0.5.0	
+Reduce & foreach	reduce (harmonic)	3ae841e	0.062
+Reduce & foreach	reduce (harmonic)	fa2eb51	0.061
+Reduce & foreach	reduce (harmonic)	2884a5f	0.064
+Reduce & foreach	reduce (harmonic)	v0.6.0	0.060
+Reduce & foreach	reduce (harmonic)	v0.7.0	0.060
+Reduce & foreach	reduce (harmonic)	9e563a9	0.062
+Reduce & foreach	reduce (harmonic)	b59f7c9	0.061
+Reduce & foreach	reduce (harmonic)	11388d4	0.061
+Reduce & foreach	reduce (harmonic)	v0.8.0	0.064
+Reduce & foreach	reduce (harmonic)	195fdc4	0.060
+Reduce & foreach	reduce (harmonic)	v0.9.0	0.060
+Reduce & foreach	reduce (harmonic)	v0.10.0	0.034
+Reduce & foreach	reduce (harmonic)	v1.0.0	0.031
+Reduce & foreach	reduce (harmonic)	v1.1.0	0.032
+Reduce & foreach	reduce (harmonic)	v1.4.3	0.032
+Reduce & foreach	reduce (harmonic)	v1.4.4	0.032
+Reduce & foreach	reduce (floor pipe)	1118cf	
+Reduce & foreach	reduce (floor pipe)	v0.5.0	
+Reduce & foreach	reduce (floor pipe)	3ae841e	0.062
+Reduce & foreach	reduce (floor pipe)	fa2eb51	0.060
+Reduce & foreach	reduce (floor pipe)	2884a5f	0.064
+Reduce & foreach	reduce (floor pipe)	v0.6.0	0.060
+Reduce & foreach	reduce (floor pipe)	v0.7.0	0.060
+Reduce & foreach	reduce (floor pipe)	9e563a9	0.061
+Reduce & foreach	reduce (floor pipe)	b59f7c9	0.060
+Reduce & foreach	reduce (floor pipe)	11388d4	0.060
+Reduce & foreach	reduce (floor pipe)	v0.8.0	0.064
+Reduce & foreach	reduce (floor pipe)	195fdc4	0.060
+Reduce & foreach	reduce (floor pipe)	v0.9.0	0.060
+Reduce & foreach	reduce (floor pipe)	v0.10.0	0.034
+Reduce & foreach	reduce (floor pipe)	v1.0.0	0.031
+Reduce & foreach	reduce (floor pipe)	v1.1.0	0.032
+Reduce & foreach	reduce (floor pipe)	v1.4.3	0.032
+Reduce & foreach	reduce (floor pipe)	v1.4.4	0.032
+Reduce & foreach	reduce (sqrt pipe)	1118cf	
+Reduce & foreach	reduce (sqrt pipe)	v0.5.0	
+Reduce & foreach	reduce (sqrt pipe)	3ae841e	0.063
+Reduce & foreach	reduce (sqrt pipe)	fa2eb51	0.060
+Reduce & foreach	reduce (sqrt pipe)	2884a5f	0.063
+Reduce & foreach	reduce (sqrt pipe)	v0.6.0	0.060
+Reduce & foreach	reduce (sqrt pipe)	v0.7.0	0.061
+Reduce & foreach	reduce (sqrt pipe)	9e563a9	0.062
+Reduce & foreach	reduce (sqrt pipe)	b59f7c9	0.060
+Reduce & foreach	reduce (sqrt pipe)	11388d4	0.061
+Reduce & foreach	reduce (sqrt pipe)	v0.8.0	0.067
+Reduce & foreach	reduce (sqrt pipe)	195fdc4	0.060
+Reduce & foreach	reduce (sqrt pipe)	v0.9.0	0.060
+Reduce & foreach	reduce (sqrt pipe)	v0.10.0	0.034
+Reduce & foreach	reduce (sqrt pipe)	v1.0.0	0.032
+Reduce & foreach	reduce (sqrt pipe)	v1.1.0	0.033
+Reduce & foreach	reduce (sqrt pipe)	v1.4.3	0.032
+Reduce & foreach	reduce (sqrt pipe)	v1.4.4	0.032
+Reduce & foreach	reduce (sin+cos)	1118cf	
+Reduce & foreach	reduce (sin+cos)	v0.5.0	
+Reduce & foreach	reduce (sin+cos)	3ae841e	0.056
+Reduce & foreach	reduce (sin+cos)	fa2eb51	0.058
+Reduce & foreach	reduce (sin+cos)	2884a5f	0.058
+Reduce & foreach	reduce (sin+cos)	v0.6.0	0.057
+Reduce & foreach	reduce (sin+cos)	v0.7.0	0.057
+Reduce & foreach	reduce (sin+cos)	9e563a9	0.057
+Reduce & foreach	reduce (sin+cos)	b59f7c9	0.057
+Reduce & foreach	reduce (sin+cos)	11388d4	0.057
+Reduce & foreach	reduce (sin+cos)	v0.8.0	0.058
+Reduce & foreach	reduce (sin+cos)	195fdc4	0.057
+Reduce & foreach	reduce (sin+cos)	v0.9.0	0.056
+Reduce & foreach	reduce (sin+cos)	v0.10.0	0.052
+Reduce & foreach	reduce (sin+cos)	v1.0.0	0.050
+Reduce & foreach	reduce (sin+cos)	v1.1.0	0.051
+Reduce & foreach	reduce (sin+cos)	v1.4.3	0.052
+Reduce & foreach	reduce (sin+cos)	v1.4.4	0.052
+Object operations	large obj construct	1118cf	0.003
+Object operations	large obj construct	v0.5.0	0.003
+Object operations	large obj construct	3ae841e	0.004
+Object operations	large obj construct	fa2eb51	0.003
+Object operations	large obj construct	2884a5f	0.004
+Object operations	large obj construct	v0.6.0	0.003
+Object operations	large obj construct	v0.7.0	0.003
+Object operations	large obj construct	9e563a9	0.003
+Object operations	large obj construct	b59f7c9	0.003
+Object operations	large obj construct	11388d4	0.003
+Object operations	large obj construct	v0.8.0	0.004
+Object operations	large obj construct	195fdc4	0.003
+Object operations	large obj construct	v0.9.0	0.003
+Object operations	large obj construct	v0.10.0	0.004
+Object operations	large obj construct	v1.0.0	0.003
+Object operations	large obj construct	v1.1.0	0.004
+Object operations	large obj construct	v1.4.3	0.004
+Object operations	large obj construct	v1.4.4	0.004
+Object operations	large obj keys	1118cf	0.009
+Object operations	large obj keys	v0.5.0	0.009
+Object operations	large obj keys	3ae841e	0.009
+Object operations	large obj keys	fa2eb51	0.009
+Object operations	large obj keys	2884a5f	0.009
+Object operations	large obj keys	v0.6.0	0.009
+Object operations	large obj keys	v0.7.0	0.009
+Object operations	large obj keys	9e563a9	0.009
+Object operations	large obj keys	b59f7c9	0.009
+Object operations	large obj keys	11388d4	0.009
+Object operations	large obj keys	v0.8.0	0.009
+Object operations	large obj keys	195fdc4	0.009
+Object operations	large obj keys	v0.9.0	0.009
+Object operations	large obj keys	v0.10.0	0.010
+Object operations	large obj keys	v1.0.0	0.009
+Object operations	large obj keys	v1.1.0	0.010
+Object operations	large obj keys	v1.4.3	0.011
+Object operations	large obj keys	v1.4.4	0.010
+Object operations	large obj to_entries	1118cf	0.009
+Object operations	large obj to_entries	v0.5.0	0.010
+Object operations	large obj to_entries	3ae841e	0.011
+Object operations	large obj to_entries	fa2eb51	0.011
+Object operations	large obj to_entries	2884a5f	0.011
+Object operations	large obj to_entries	v0.6.0	0.010
+Object operations	large obj to_entries	v0.7.0	0.010
+Object operations	large obj to_entries	9e563a9	0.011
+Object operations	large obj to_entries	b59f7c9	0.010
+Object operations	large obj to_entries	11388d4	0.010
+Object operations	large obj to_entries	v0.8.0	0.011
+Object operations	large obj to_entries	195fdc4	0.010
+Object operations	large obj to_entries	v0.9.0	0.010
+Object operations	large obj to_entries	v0.10.0	0.012
+Object operations	large obj to_entries	v1.0.0	0.010
+Object operations	large obj to_entries	v1.1.0	0.011
+Object operations	large obj to_entries	v1.4.3	0.011
+Object operations	large obj to_entries	v1.4.4	0.012
+Object operations	with_entries	1118cf	0.007
+Object operations	with_entries	v0.5.0	0.007
+Object operations	with_entries	3ae841e	0.008
+Object operations	with_entries	fa2eb51	0.009
+Object operations	with_entries	2884a5f	0.008
+Object operations	with_entries	v0.6.0	0.008
+Object operations	with_entries	v0.7.0	0.008
+Object operations	with_entries	9e563a9	0.009
+Object operations	with_entries	b59f7c9	0.008
+Object operations	with_entries	11388d4	0.008
+Object operations	with_entries	v0.8.0	0.008
+Object operations	with_entries	195fdc4	0.008
+Object operations	with_entries	v0.9.0	0.008
+Object operations	with_entries	v0.10.0	0.009
+Object operations	with_entries	v1.0.0	0.008
+Object operations	with_entries	v1.1.0	0.009
+Object operations	with_entries	v1.4.3	0.009
+Object operations	with_entries	v1.4.4	0.009
+Assignment operators	.[] |= f (100K)	1118cf	0.005
+Assignment operators	.[] |= f (100K)	v0.5.0	0.003
+Assignment operators	.[] |= f (100K)	3ae841e	0.004
+Assignment operators	.[] |= f (100K)	fa2eb51	0.004
+Assignment operators	.[] |= f (100K)	2884a5f	0.004
+Assignment operators	.[] |= f (100K)	v0.6.0	0.004
+Assignment operators	.[] |= f (100K)	v0.7.0	0.004
+Assignment operators	.[] |= f (100K)	9e563a9	0.004
+Assignment operators	.[] |= f (100K)	b59f7c9	0.004
+Assignment operators	.[] |= f (100K)	11388d4	0.004
+Assignment operators	.[] |= f (100K)	v0.8.0	0.004
+Assignment operators	.[] |= f (100K)	195fdc4	0.004
+Assignment operators	.[] |= f (100K)	v0.9.0	0.004
+Assignment operators	.[] |= f (100K)	v0.10.0	0.004
+Assignment operators	.[] |= f (100K)	v1.0.0	0.004
+Assignment operators	.[] |= f (100K)	v1.1.0	0.005
+Assignment operators	.[] |= f (100K)	v1.4.3	0.005
+Assignment operators	.[] |= f (100K)	v1.4.4	0.005
+Assignment operators	.[] += 1 (100K)	1118cf	0.005
+Assignment operators	.[] += 1 (100K)	v0.5.0	0.004
+Assignment operators	.[] += 1 (100K)	3ae841e	0.005
+Assignment operators	.[] += 1 (100K)	fa2eb51	0.005
+Assignment operators	.[] += 1 (100K)	2884a5f	0.005
+Assignment operators	.[] += 1 (100K)	v0.6.0	0.004
+Assignment operators	.[] += 1 (100K)	v0.7.0	0.004
+Assignment operators	.[] += 1 (100K)	9e563a9	0.005
+Assignment operators	.[] += 1 (100K)	b59f7c9	0.004
+Assignment operators	.[] += 1 (100K)	11388d4	0.004
+Assignment operators	.[] += 1 (100K)	v0.8.0	0.005
+Assignment operators	.[] += 1 (100K)	195fdc4	0.005
+Assignment operators	.[] += 1 (100K)	v0.9.0	0.004
+Assignment operators	.[] += 1 (100K)	v0.10.0	0.005
+Assignment operators	.[] += 1 (100K)	v1.0.0	0.004
+Assignment operators	.[] += 1 (100K)	v1.1.0	0.005
+Assignment operators	.[] += 1 (100K)	v1.4.3	0.005
+Assignment operators	.[] += 1 (100K)	v1.4.4	0.005
+Assignment operators	.[k] = v reduce(50K)	1118cf	0.008
+Assignment operators	.[k] = v reduce(50K)	v0.5.0	0.009
+Assignment operators	.[k] = v reduce(50K)	3ae841e	0.008
+Assignment operators	.[k] = v reduce(50K)	fa2eb51	0.008
+Assignment operators	.[k] = v reduce(50K)	2884a5f	0.008
+Assignment operators	.[k] = v reduce(50K)	v0.6.0	0.008
+Assignment operators	.[k] = v reduce(50K)	v0.7.0	0.008
+Assignment operators	.[k] = v reduce(50K)	9e563a9	0.008
+Assignment operators	.[k] = v reduce(50K)	b59f7c9	0.008
+Assignment operators	.[k] = v reduce(50K)	11388d4	0.008
+Assignment operators	.[k] = v reduce(50K)	v0.8.0	0.008
+Assignment operators	.[k] = v reduce(50K)	195fdc4	0.008
+Assignment operators	.[k] = v reduce(50K)	v0.9.0	0.008
+Assignment operators	.[k] = v reduce(50K)	v0.10.0	0.008
+Assignment operators	.[k] = v reduce(50K)	v1.0.0	0.008
+Assignment operators	.[k] = v reduce(50K)	v1.1.0	0.009
+Assignment operators	.[k] = v reduce(50K)	v1.4.3	0.008
+Assignment operators	.[k] = v reduce(50K)	v1.4.4	0.008
+String-heavy generators	gsub(100K)	1118cf	0.020
+String-heavy generators	gsub(100K)	v0.5.0	0.020
+String-heavy generators	gsub(100K)	3ae841e	0.018
+String-heavy generators	gsub(100K)	fa2eb51	0.018
+String-heavy generators	gsub(100K)	2884a5f	0.019
+String-heavy generators	gsub(100K)	v0.6.0	0.018
+String-heavy generators	gsub(100K)	v0.7.0	0.018
+String-heavy generators	gsub(100K)	9e563a9	0.018
+String-heavy generators	gsub(100K)	b59f7c9	0.018
+String-heavy generators	gsub(100K)	11388d4	0.018
+String-heavy generators	gsub(100K)	v0.8.0	0.018
+String-heavy generators	gsub(100K)	195fdc4	0.018
+String-heavy generators	gsub(100K)	v0.9.0	0.018
+String-heavy generators	gsub(100K)	v0.10.0	0.018
+String-heavy generators	gsub(100K)	v1.0.0	0.018
+String-heavy generators	gsub(100K)	v1.1.0	0.019
+String-heavy generators	gsub(100K)	v1.4.3	0.025
+String-heavy generators	gsub(100K)	v1.4.4	0.025
+String-heavy generators	join large(100K)	1118cf	0.007
+String-heavy generators	join large(100K)	v0.5.0	0.006
+String-heavy generators	join large(100K)	3ae841e	0.005
+String-heavy generators	join large(100K)	fa2eb51	0.005
+String-heavy generators	join large(100K)	2884a5f	0.005
+String-heavy generators	join large(100K)	v0.6.0	0.005
+String-heavy generators	join large(100K)	v0.7.0	0.005
+String-heavy generators	join large(100K)	9e563a9	0.005
+String-heavy generators	join large(100K)	b59f7c9	0.005
+String-heavy generators	join large(100K)	11388d4	0.005
+String-heavy generators	join large(100K)	v0.8.0	0.005
+String-heavy generators	join large(100K)	195fdc4	0.005
+String-heavy generators	join large(100K)	v0.9.0	0.005
+String-heavy generators	join large(100K)	v0.10.0	0.005
+String-heavy generators	join large(100K)	v1.0.0	0.005
+String-heavy generators	join large(100K)	v1.1.0	0.005
+String-heavy generators	join large(100K)	v1.4.3	0.006
+String-heavy generators	join large(100K)	v1.4.4	0.005
+String-heavy generators	explode/implode(100K)	1118cf	0.049
+String-heavy generators	explode/implode(100K)	v0.5.0	0.030
+String-heavy generators	explode/implode(100K)	3ae841e	0.028
+String-heavy generators	explode/implode(100K)	fa2eb51	0.028
+String-heavy generators	explode/implode(100K)	2884a5f	0.029
+String-heavy generators	explode/implode(100K)	v0.6.0	0.028
+String-heavy generators	explode/implode(100K)	v0.7.0	0.028
+String-heavy generators	explode/implode(100K)	9e563a9	0.028
+String-heavy generators	explode/implode(100K)	b59f7c9	0.028
+String-heavy generators	explode/implode(100K)	11388d4	0.028
+String-heavy generators	explode/implode(100K)	v0.8.0	0.028
+String-heavy generators	explode/implode(100K)	195fdc4	0.028
+String-heavy generators	explode/implode(100K)	v0.9.0	0.027
+String-heavy generators	explode/implode(100K)	v0.10.0	0.029
+String-heavy generators	explode/implode(100K)	v1.0.0	0.027
+String-heavy generators	explode/implode(100K)	v1.1.0	0.029
+String-heavy generators	explode/implode(100K)	v1.4.3	0.029
+String-heavy generators	explode/implode(100K)	v1.4.4	0.028
+String-heavy generators	reduce str concat(100K)	1118cf	
+String-heavy generators	reduce str concat(100K)	v0.5.0	
+String-heavy generators	reduce str concat(100K)	3ae841e	0.007
+String-heavy generators	reduce str concat(100K)	fa2eb51	0.007
+String-heavy generators	reduce str concat(100K)	2884a5f	0.007
+String-heavy generators	reduce str concat(100K)	v0.6.0	0.007
+String-heavy generators	reduce str concat(100K)	v0.7.0	0.007
+String-heavy generators	reduce str concat(100K)	9e563a9	0.007
+String-heavy generators	reduce str concat(100K)	b59f7c9	0.007
+String-heavy generators	reduce str concat(100K)	11388d4	0.007
+String-heavy generators	reduce str concat(100K)	v0.8.0	0.008
+String-heavy generators	reduce str concat(100K)	195fdc4	0.007
+String-heavy generators	reduce str concat(100K)	v0.9.0	0.007
+String-heavy generators	reduce str concat(100K)	v0.10.0	0.007
+String-heavy generators	reduce str concat(100K)	v1.0.0	0.007
+String-heavy generators	reduce str concat(100K)	v1.1.0	0.008
+String-heavy generators	reduce str concat(100K)	v1.4.3	0.008
+String-heavy generators	reduce str concat(100K)	v1.4.4	0.008
+Try-catch & alternative	alternative //	1118cf	0.090
+Try-catch & alternative	alternative //	v0.5.0	0.026
+Try-catch & alternative	alternative //	3ae841e	0.033
+Try-catch & alternative	alternative //	fa2eb51	0.033
+Try-catch & alternative	alternative //	2884a5f	0.032
+Try-catch & alternative	alternative //	v0.6.0	0.031
+Try-catch & alternative	alternative //	v0.7.0	0.031
+Try-catch & alternative	alternative //	9e563a9	0.032
+Try-catch & alternative	alternative //	b59f7c9	0.031
+Try-catch & alternative	alternative //	11388d4	0.031
+Try-catch & alternative	alternative //	v0.8.0	0.032
+Try-catch & alternative	alternative //	195fdc4	0.031
+Try-catch & alternative	alternative //	v0.9.0	0.031
+Try-catch & alternative	alternative //	v0.10.0	0.032
+Try-catch & alternative	alternative //	v1.0.0	0.031
+Try-catch & alternative	alternative //	v1.1.0	0.032
+Try-catch & alternative	alternative //	v1.4.3	0.031
+Try-catch & alternative	alternative //	v1.4.4	0.031
+Try-catch & alternative	try-catch	1118cf	0.049
+Try-catch & alternative	try-catch	v0.5.0	0.020
+Try-catch & alternative	try-catch	3ae841e	0.023
+Try-catch & alternative	try-catch	fa2eb51	0.023
+Try-catch & alternative	try-catch	2884a5f	0.023
+Try-catch & alternative	try-catch	v0.6.0	0.022
+Try-catch & alternative	try-catch	v0.7.0	0.022
+Try-catch & alternative	try-catch	9e563a9	0.022
+Try-catch & alternative	try-catch	b59f7c9	0.022
+Try-catch & alternative	try-catch	11388d4	0.022
+Try-catch & alternative	try-catch	v0.8.0	0.022
+Try-catch & alternative	try-catch	195fdc4	0.022
+Try-catch & alternative	try-catch	v0.9.0	0.022
+Try-catch & alternative	try-catch	v0.10.0	0.023
+Try-catch & alternative	try-catch	v1.0.0	0.022
+Try-catch & alternative	try-catch	v1.1.0	0.023
+Try-catch & alternative	try-catch	v1.4.3	0.023
+Try-catch & alternative	try-catch	v1.4.4	0.023
+Try-catch & alternative	label-break	1118cf	0.002
+Try-catch & alternative	label-break	v0.5.0	0.003
+Try-catch & alternative	label-break	3ae841e	0.003
+Try-catch & alternative	label-break	fa2eb51	0.003
+Try-catch & alternative	label-break	2884a5f	0.003
+Try-catch & alternative	label-break	v0.6.0	0.003
+Try-catch & alternative	label-break	v0.7.0	0.003
+Try-catch & alternative	label-break	9e563a9	0.003
+Try-catch & alternative	label-break	b59f7c9	0.003
+Try-catch & alternative	label-break	11388d4	0.003
+Try-catch & alternative	label-break	v0.8.0	0.003
+Try-catch & alternative	label-break	195fdc4	0.003
+Try-catch & alternative	label-break	v0.9.0	0.003
+Try-catch & alternative	label-break	v0.10.0	0.004
+Try-catch & alternative	label-break	v1.0.0	0.003
+Try-catch & alternative	label-break	v1.1.0	0.004
+Try-catch & alternative	label-break	v1.4.3	0.004
+Try-catch & alternative	label-break	v1.4.4	0.004
+Type conversion	tojson/fromjson(100K)	1118cf	0.073
+Type conversion	tojson/fromjson(100K)	v0.5.0	0.071
+Type conversion	tojson/fromjson(100K)	3ae841e	0.070
+Type conversion	tojson/fromjson(100K)	fa2eb51	0.071
+Type conversion	tojson/fromjson(100K)	2884a5f	0.072
+Type conversion	tojson/fromjson(100K)	v0.6.0	0.071
+Type conversion	tojson/fromjson(100K)	v0.7.0	0.072
+Type conversion	tojson/fromjson(100K)	9e563a9	0.071
+Type conversion	tojson/fromjson(100K)	b59f7c9	0.069
+Type conversion	tojson/fromjson(100K)	11388d4	0.070
+Type conversion	tojson/fromjson(100K)	v0.8.0	0.072
+Type conversion	tojson/fromjson(100K)	195fdc4	0.071
+Type conversion	tojson/fromjson(100K)	v0.9.0	0.070
+Type conversion	tojson/fromjson(100K)	v0.10.0	0.023
+Type conversion	tojson/fromjson(100K)	v1.0.0	0.021
+Type conversion	tojson/fromjson(100K)	v1.1.0	0.022
+Type conversion	tojson/fromjson(100K)	v1.4.3	0.021
+Type conversion	tojson/fromjson(100K)	v1.4.4	0.021
+Type conversion	null propagation(2M)	1118cf	0.097
+Type conversion	null propagation(2M)	v0.5.0	0.042
+Type conversion	null propagation(2M)	3ae841e	0.088
+Type conversion	null propagation(2M)	fa2eb51	0.089
+Type conversion	null propagation(2M)	2884a5f	0.088
+Type conversion	null propagation(2M)	v0.6.0	0.087
+Type conversion	null propagation(2M)	v0.7.0	0.086
+Type conversion	null propagation(2M)	9e563a9	0.088
+Type conversion	null propagation(2M)	b59f7c9	0.085
+Type conversion	null propagation(2M)	11388d4	0.087
+Type conversion	null propagation(2M)	v0.8.0	0.088
+Type conversion	null propagation(2M)	195fdc4	0.086
+Type conversion	null propagation(2M)	v0.9.0	0.086
+Type conversion	null propagation(2M)	v0.10.0	0.088
+Type conversion	null propagation(2M)	v1.0.0	0.101
+Type conversion	null propagation(2M)	v1.1.0	0.087
+Type conversion	null propagation(2M)	v1.4.3	0.089
+Type conversion	null propagation(2M)	v1.4.4	0.090
+jaq-derived	jaq: reverse	1118cf	0.008
+jaq-derived	jaq: reverse	v0.5.0	0.008
+jaq-derived	jaq: reverse	3ae841e	0.010
+jaq-derived	jaq: reverse	fa2eb51	0.009
+jaq-derived	jaq: reverse	2884a5f	0.010
+jaq-derived	jaq: reverse	v0.6.0	0.010
+jaq-derived	jaq: reverse	v0.7.0	0.010
+jaq-derived	jaq: reverse	9e563a9	0.010
+jaq-derived	jaq: reverse	b59f7c9	0.009
+jaq-derived	jaq: reverse	11388d4	0.009
+jaq-derived	jaq: reverse	v0.8.0	0.010
+jaq-derived	jaq: reverse	195fdc4	0.009
+jaq-derived	jaq: reverse	v0.9.0	0.009
+jaq-derived	jaq: reverse	v0.10.0	0.010
+jaq-derived	jaq: reverse	v1.0.0	0.010
+jaq-derived	jaq: reverse	v1.1.0	0.010
+jaq-derived	jaq: reverse	v1.4.3	0.010
+jaq-derived	jaq: reverse	v1.4.4	0.011
+jaq-derived	jaq: sort	1118cf	0.036
+jaq-derived	jaq: sort	v0.5.0	0.016
+jaq-derived	jaq: sort	3ae841e	0.017
+jaq-derived	jaq: sort	fa2eb51	0.017
+jaq-derived	jaq: sort	2884a5f	0.016
+jaq-derived	jaq: sort	v0.6.0	0.016
+jaq-derived	jaq: sort	v0.7.0	0.016
+jaq-derived	jaq: sort	9e563a9	0.016
+jaq-derived	jaq: sort	b59f7c9	0.016
+jaq-derived	jaq: sort	11388d4	0.015
+jaq-derived	jaq: sort	v0.8.0	0.017
+jaq-derived	jaq: sort	195fdc4	0.016
+jaq-derived	jaq: sort	v0.9.0	0.016
+jaq-derived	jaq: sort	v0.10.0	0.017
+jaq-derived	jaq: sort	v1.0.0	0.016
+jaq-derived	jaq: sort	v1.1.0	0.017
+jaq-derived	jaq: sort	v1.4.3	0.018
+jaq-derived	jaq: sort	v1.4.4	0.018
+jaq-derived	jaq: group-by	1118cf	0.069
+jaq-derived	jaq: group-by	v0.5.0	0.068
+jaq-derived	jaq: group-by	3ae841e	0.036
+jaq-derived	jaq: group-by	fa2eb51	0.036
+jaq-derived	jaq: group-by	2884a5f	0.038
+jaq-derived	jaq: group-by	v0.6.0	0.036
+jaq-derived	jaq: group-by	v0.7.0	0.035
+jaq-derived	jaq: group-by	9e563a9	0.036
+jaq-derived	jaq: group-by	b59f7c9	0.035
+jaq-derived	jaq: group-by	11388d4	0.035
+jaq-derived	jaq: group-by	v0.8.0	0.037
+jaq-derived	jaq: group-by	195fdc4	0.036
+jaq-derived	jaq: group-by	v0.9.0	0.035
+jaq-derived	jaq: group-by	v0.10.0	0.038
+jaq-derived	jaq: group-by	v1.0.0	0.036
+jaq-derived	jaq: group-by	v1.1.0	0.037
+jaq-derived	jaq: group-by	v1.4.3	0.034
+jaq-derived	jaq: group-by	v1.4.4	0.035
+jaq-derived	jaq: min-max	1118cf	0.008
+jaq-derived	jaq: min-max	v0.5.0	0.008
+jaq-derived	jaq: min-max	3ae841e	0.010
+jaq-derived	jaq: min-max	fa2eb51	0.011
+jaq-derived	jaq: min-max	2884a5f	0.012
+jaq-derived	jaq: min-max	v0.6.0	0.010
+jaq-derived	jaq: min-max	v0.7.0	0.011
+jaq-derived	jaq: min-max	9e563a9	0.010
+jaq-derived	jaq: min-max	b59f7c9	0.011
+jaq-derived	jaq: min-max	11388d4	0.010
+jaq-derived	jaq: min-max	v0.8.0	0.012
+jaq-derived	jaq: min-max	195fdc4	0.010
+jaq-derived	jaq: min-max	v0.9.0	0.009
+jaq-derived	jaq: min-max	v0.10.0	0.010
+jaq-derived	jaq: min-max	v1.0.0	0.010
+jaq-derived	jaq: min-max	v1.1.0	0.011
+jaq-derived	jaq: min-max	v1.4.3	0.010
+jaq-derived	jaq: min-max	v1.4.4	0.010
+jaq-derived	jaq: ex-implode	1118cf	0.018
+jaq-derived	jaq: ex-implode	v0.5.0	0.018
+jaq-derived	jaq: ex-implode	3ae841e	0.018
+jaq-derived	jaq: ex-implode	fa2eb51	0.019
+jaq-derived	jaq: ex-implode	2884a5f	0.019
+jaq-derived	jaq: ex-implode	v0.6.0	0.019
+jaq-derived	jaq: ex-implode	v0.7.0	0.018
+jaq-derived	jaq: ex-implode	9e563a9	0.019
+jaq-derived	jaq: ex-implode	b59f7c9	0.018
+jaq-derived	jaq: ex-implode	11388d4	0.018
+jaq-derived	jaq: ex-implode	v0.8.0	0.019
+jaq-derived	jaq: ex-implode	195fdc4	0.018
+jaq-derived	jaq: ex-implode	v0.9.0	0.018
+jaq-derived	jaq: ex-implode	v0.10.0	0.019
+jaq-derived	jaq: ex-implode	v1.0.0	0.018
+jaq-derived	jaq: ex-implode	v1.1.0	0.019
+jaq-derived	jaq: ex-implode	v1.4.3	0.019
+jaq-derived	jaq: ex-implode	v1.4.4	0.019
+jaq-derived	jaq: repeat	1118cf	0.015
+jaq-derived	jaq: repeat	v0.5.0	0.008
+jaq-derived	jaq: repeat	3ae841e	0.011
+jaq-derived	jaq: repeat	fa2eb51	0.011
+jaq-derived	jaq: repeat	2884a5f	0.011
+jaq-derived	jaq: repeat	v0.6.0	0.011
+jaq-derived	jaq: repeat	v0.7.0	0.011
+jaq-derived	jaq: repeat	9e563a9	0.011
+jaq-derived	jaq: repeat	b59f7c9	0.010
+jaq-derived	jaq: repeat	11388d4	0.010
+jaq-derived	jaq: repeat	v0.8.0	0.011
+jaq-derived	jaq: repeat	195fdc4	0.010
+jaq-derived	jaq: repeat	v0.9.0	0.010
+jaq-derived	jaq: repeat	v0.10.0	0.011
+jaq-derived	jaq: repeat	v1.0.0	0.011
+jaq-derived	jaq: repeat	v1.1.0	0.012
+jaq-derived	jaq: repeat	v1.4.3	0.011
+jaq-derived	jaq: repeat	v1.4.4	0.011
+jaq-derived	jaq: from	1118cf	0.002
+jaq-derived	jaq: from	v0.5.0	0.002
+jaq-derived	jaq: from	3ae841e	0.005
+jaq-derived	jaq: from	fa2eb51	0.005
+jaq-derived	jaq: from	2884a5f	0.006
+jaq-derived	jaq: from	v0.6.0	0.005
+jaq-derived	jaq: from	v0.7.0	0.005
+jaq-derived	jaq: from	9e563a9	0.005
+jaq-derived	jaq: from	b59f7c9	0.005
+jaq-derived	jaq: from	11388d4	0.005
+jaq-derived	jaq: from	v0.8.0	0.006
+jaq-derived	jaq: from	195fdc4	0.005
+jaq-derived	jaq: from	v0.9.0	0.005
+jaq-derived	jaq: from	v0.10.0	0.005
+jaq-derived	jaq: from	v1.0.0	0.005
+jaq-derived	jaq: from	v1.1.0	0.006
+jaq-derived	jaq: from	v1.4.3	0.006
+jaq-derived	jaq: from	v1.4.4	0.006
+jaq-derived	jaq: last	1118cf	0.002
+jaq-derived	jaq: last	v0.5.0	0.002
+jaq-derived	jaq: last	3ae841e	0.002
+jaq-derived	jaq: last	fa2eb51	0.002
+jaq-derived	jaq: last	2884a5f	0.002
+jaq-derived	jaq: last	v0.6.0	0.002
+jaq-derived	jaq: last	v0.7.0	0.002
+jaq-derived	jaq: last	9e563a9	0.002
+jaq-derived	jaq: last	b59f7c9	0.002
+jaq-derived	jaq: last	11388d4	0.002
+jaq-derived	jaq: last	v0.8.0	0.002
+jaq-derived	jaq: last	195fdc4	0.002
+jaq-derived	jaq: last	v0.9.0	0.002
+jaq-derived	jaq: last	v0.10.0	0.002
+jaq-derived	jaq: last	v1.0.0	0.002
+jaq-derived	jaq: last	v1.1.0	0.003
+jaq-derived	jaq: last	v1.4.3	0.002
+jaq-derived	jaq: last	v1.4.4	0.002
+jaq-derived	jaq: cumsum	1118cf	0.012
+jaq-derived	jaq: cumsum	v0.5.0	0.010
+jaq-derived	jaq: cumsum	3ae841e	0.011
+jaq-derived	jaq: cumsum	fa2eb51	0.011
+jaq-derived	jaq: cumsum	2884a5f	0.012
+jaq-derived	jaq: cumsum	v0.6.0	0.011
+jaq-derived	jaq: cumsum	v0.7.0	0.011
+jaq-derived	jaq: cumsum	9e563a9	0.011
+jaq-derived	jaq: cumsum	b59f7c9	0.011
+jaq-derived	jaq: cumsum	11388d4	0.011
+jaq-derived	jaq: cumsum	v0.8.0	0.012
+jaq-derived	jaq: cumsum	195fdc4	0.011
+jaq-derived	jaq: cumsum	v0.9.0	0.011
+jaq-derived	jaq: cumsum	v0.10.0	0.010
+jaq-derived	jaq: cumsum	v1.0.0	0.009
+jaq-derived	jaq: cumsum	v1.1.0	0.010
+jaq-derived	jaq: cumsum	v1.4.3	0.010
+jaq-derived	jaq: cumsum	v1.4.4	0.012
+jaq-derived	jaq: cumsum-xy	1118cf	0.060
+jaq-derived	jaq: cumsum-xy	v0.5.0	0.039
+jaq-derived	jaq: cumsum-xy	3ae841e	0.017
+jaq-derived	jaq: cumsum-xy	fa2eb51	0.017
+jaq-derived	jaq: cumsum-xy	2884a5f	0.018
+jaq-derived	jaq: cumsum-xy	v0.6.0	0.017
+jaq-derived	jaq: cumsum-xy	v0.7.0	0.017
+jaq-derived	jaq: cumsum-xy	9e563a9	0.018
+jaq-derived	jaq: cumsum-xy	b59f7c9	0.017
+jaq-derived	jaq: cumsum-xy	11388d4	0.017
+jaq-derived	jaq: cumsum-xy	v0.8.0	0.019
+jaq-derived	jaq: cumsum-xy	195fdc4	0.017
+jaq-derived	jaq: cumsum-xy	v0.9.0	0.017
+jaq-derived	jaq: cumsum-xy	v0.10.0	0.017
+jaq-derived	jaq: cumsum-xy	v1.0.0	0.016
+jaq-derived	jaq: cumsum-xy	v1.1.0	0.017
+jaq-derived	jaq: cumsum-xy	v1.4.3	0.016
+jaq-derived	jaq: cumsum-xy	v1.4.4	0.018
+jaq-derived	jaq: try-catch	1118cf	0.053
+jaq-derived	jaq: try-catch	v0.5.0	0.028
+jaq-derived	jaq: try-catch	3ae841e	0.083
+jaq-derived	jaq: try-catch	fa2eb51	0.084
+jaq-derived	jaq: try-catch	2884a5f	0.091
+jaq-derived	jaq: try-catch	v0.6.0	0.084
+jaq-derived	jaq: try-catch	v0.7.0	0.083
+jaq-derived	jaq: try-catch	9e563a9	0.084
+jaq-derived	jaq: try-catch	b59f7c9	0.084
+jaq-derived	jaq: try-catch	11388d4	0.083
+jaq-derived	jaq: try-catch	v0.8.0	0.089
+jaq-derived	jaq: try-catch	195fdc4	0.085
+jaq-derived	jaq: try-catch	v0.9.0	0.083
+jaq-derived	jaq: try-catch	v0.10.0	0.087
+jaq-derived	jaq: try-catch	v1.0.0	0.085
+jaq-derived	jaq: try-catch	v1.1.0	0.090
+jaq-derived	jaq: try-catch	v1.4.3	0.084
+jaq-derived	jaq: try-catch	v1.4.4	0.088
+jaq-derived	jaq: add	1118cf	0.077
+jaq-derived	jaq: add	v0.5.0	0.068
+jaq-derived	jaq: add	3ae841e	0.040
+jaq-derived	jaq: add	fa2eb51	0.040
+jaq-derived	jaq: add	2884a5f	0.042
+jaq-derived	jaq: add	v0.6.0	0.040
+jaq-derived	jaq: add	v0.7.0	0.039
+jaq-derived	jaq: add	9e563a9	0.040
+jaq-derived	jaq: add	b59f7c9	0.039
+jaq-derived	jaq: add	11388d4	0.039
+jaq-derived	jaq: add	v0.8.0	0.041
+jaq-derived	jaq: add	195fdc4	0.039
+jaq-derived	jaq: add	v0.9.0	0.038
+jaq-derived	jaq: add	v0.10.0	0.041
+jaq-derived	jaq: add	v1.0.0	0.039
+jaq-derived	jaq: add	v1.1.0	0.042
+jaq-derived	jaq: add	v1.4.3	0.039
+jaq-derived	jaq: add	v1.4.4	0.042
+jaq-derived	jaq: reduce	1118cf	0.102
+jaq-derived	jaq: reduce	v0.5.0	0.081
+jaq-derived	jaq: reduce	3ae841e	0.078
+jaq-derived	jaq: reduce	fa2eb51	0.078
+jaq-derived	jaq: reduce	2884a5f	0.090
+jaq-derived	jaq: reduce	v0.6.0	0.087
+jaq-derived	jaq: reduce	v0.7.0	0.079
+jaq-derived	jaq: reduce	9e563a9	0.092
+jaq-derived	jaq: reduce	b59f7c9	0.085
+jaq-derived	jaq: reduce	11388d4	0.084
+jaq-derived	jaq: reduce	v0.8.0	0.077
+jaq-derived	jaq: reduce	195fdc4	0.086
+jaq-derived	jaq: reduce	v0.9.0	0.083
+jaq-derived	jaq: reduce	v0.10.0	0.083
+jaq-derived	jaq: reduce	v1.0.0	0.079
+jaq-derived	jaq: reduce	v1.1.0	0.092
+jaq-derived	jaq: reduce	v1.4.3	0.084
+jaq-derived	jaq: reduce	v1.4.4	0.094
+jaq-derived	jaq: reduce-update	1118cf	0.004
+jaq-derived	jaq: reduce-update	v0.5.0	0.004
+jaq-derived	jaq: reduce-update	3ae841e	0.004
+jaq-derived	jaq: reduce-update	fa2eb51	0.004
+jaq-derived	jaq: reduce-update	2884a5f	0.004
+jaq-derived	jaq: reduce-update	v0.6.0	0.004
+jaq-derived	jaq: reduce-update	v0.7.0	0.004
+jaq-derived	jaq: reduce-update	9e563a9	0.004
+jaq-derived	jaq: reduce-update	b59f7c9	0.004
+jaq-derived	jaq: reduce-update	11388d4	0.004
+jaq-derived	jaq: reduce-update	v0.8.0	0.005
+jaq-derived	jaq: reduce-update	195fdc4	0.004
+jaq-derived	jaq: reduce-update	v0.9.0	0.004
+jaq-derived	jaq: reduce-update	v0.10.0	0.004
+jaq-derived	jaq: reduce-update	v1.0.0	0.004
+jaq-derived	jaq: reduce-update	v1.1.0	0.005
+jaq-derived	jaq: reduce-update	v1.4.3	0.005
+jaq-derived	jaq: reduce-update	v1.4.4	0.005
+jaq-derived	jaq: kv	1118cf	0.016
+jaq-derived	jaq: kv	v0.5.0	0.014
+jaq-derived	jaq: kv	3ae841e	0.013
+jaq-derived	jaq: kv	fa2eb51	0.013
+jaq-derived	jaq: kv	2884a5f	0.013
+jaq-derived	jaq: kv	v0.6.0	0.013
+jaq-derived	jaq: kv	v0.7.0	0.013
+jaq-derived	jaq: kv	9e563a9	0.013
+jaq-derived	jaq: kv	b59f7c9	0.013
+jaq-derived	jaq: kv	11388d4	0.013
+jaq-derived	jaq: kv	v0.8.0	0.014
+jaq-derived	jaq: kv	195fdc4	0.013
+jaq-derived	jaq: kv	v0.9.0	0.013
+jaq-derived	jaq: kv	v0.10.0	0.014
+jaq-derived	jaq: kv	v1.0.0	0.013
+jaq-derived	jaq: kv	v1.1.0	0.015
+jaq-derived	jaq: kv	v1.4.3	0.014
+jaq-derived	jaq: kv	v1.4.4	0.014
+jaq-derived	jaq: kv-update	1118cf	0.020
+jaq-derived	jaq: kv-update	v0.5.0	0.016
+jaq-derived	jaq: kv-update	3ae841e	0.017
+jaq-derived	jaq: kv-update	fa2eb51	0.017
+jaq-derived	jaq: kv-update	2884a5f	0.018
+jaq-derived	jaq: kv-update	v0.6.0	0.017
+jaq-derived	jaq: kv-update	v0.7.0	0.017
+jaq-derived	jaq: kv-update	9e563a9	0.018
+jaq-derived	jaq: kv-update	b59f7c9	0.017
+jaq-derived	jaq: kv-update	11388d4	0.017
+jaq-derived	jaq: kv-update	v0.8.0	0.018
+jaq-derived	jaq: kv-update	195fdc4	0.017
+jaq-derived	jaq: kv-update	v0.9.0	0.017
+jaq-derived	jaq: kv-update	v0.10.0	0.017
+jaq-derived	jaq: kv-update	v1.0.0	0.017
+jaq-derived	jaq: kv-update	v1.1.0	0.018
+jaq-derived	jaq: kv-update	v1.4.3	0.019
+jaq-derived	jaq: kv-update	v1.4.4	0.018
+jaq-derived	jaq: kv-entries	1118cf	0.057
+jaq-derived	jaq: kv-entries	v0.5.0	0.054
+jaq-derived	jaq: kv-entries	3ae841e	0.052
+jaq-derived	jaq: kv-entries	fa2eb51	0.053
+jaq-derived	jaq: kv-entries	2884a5f	0.053
+jaq-derived	jaq: kv-entries	v0.6.0	0.053
+jaq-derived	jaq: kv-entries	v0.7.0	0.053
+jaq-derived	jaq: kv-entries	9e563a9	0.053
+jaq-derived	jaq: kv-entries	b59f7c9	0.052
+jaq-derived	jaq: kv-entries	11388d4	0.052
+jaq-derived	jaq: kv-entries	v0.8.0	0.054
+jaq-derived	jaq: kv-entries	195fdc4	0.054
+jaq-derived	jaq: kv-entries	v0.9.0	0.052
+jaq-derived	jaq: kv-entries	v0.10.0	0.057
+jaq-derived	jaq: kv-entries	v1.0.0	0.056
+jaq-derived	jaq: kv-entries	v1.1.0	0.055
+jaq-derived	jaq: kv-entries	v1.4.3	0.056
+jaq-derived	jaq: kv-entries	v1.4.4	0.056
+jaq-derived	jaq: pyramid	1118cf	
+jaq-derived	jaq: pyramid	v0.5.0	
+jaq-derived	jaq: pyramid	3ae841e	0.015
+jaq-derived	jaq: pyramid	fa2eb51	0.015
+jaq-derived	jaq: pyramid	2884a5f	0.016
+jaq-derived	jaq: pyramid	v0.6.0	0.015
+jaq-derived	jaq: pyramid	v0.7.0	0.015
+jaq-derived	jaq: pyramid	9e563a9	0.016
+jaq-derived	jaq: pyramid	b59f7c9	0.015
+jaq-derived	jaq: pyramid	11388d4	0.015
+jaq-derived	jaq: pyramid	v0.8.0	0.015
+jaq-derived	jaq: pyramid	195fdc4	0.015
+jaq-derived	jaq: pyramid	v0.9.0	0.015
+jaq-derived	jaq: pyramid	v0.10.0	0.016
+jaq-derived	jaq: pyramid	v1.0.0	0.016
+jaq-derived	jaq: pyramid	v1.1.0	0.016
+jaq-derived	jaq: pyramid	v1.4.3	0.016
+jaq-derived	jaq: pyramid	v1.4.4	0.015
+jaq-derived	jaq: upto	1118cf	
+jaq-derived	jaq: upto	v0.5.0	
+jaq-derived	jaq: upto	3ae841e	0.006
+jaq-derived	jaq: upto	fa2eb51	0.006
+jaq-derived	jaq: upto	2884a5f	0.006
+jaq-derived	jaq: upto	v0.6.0	0.006
+jaq-derived	jaq: upto	v0.7.0	0.005
+jaq-derived	jaq: upto	9e563a9	0.007
+jaq-derived	jaq: upto	b59f7c9	0.005
+jaq-derived	jaq: upto	11388d4	0.006
+jaq-derived	jaq: upto	v0.8.0	0.006
+jaq-derived	jaq: upto	195fdc4	0.006
+jaq-derived	jaq: upto	v0.9.0	0.006
+jaq-derived	jaq: upto	v0.10.0	0.006
+jaq-derived	jaq: upto	v1.0.0	0.007
+jaq-derived	jaq: upto	v1.1.0	0.007
+jaq-derived	jaq: upto	v1.4.3	0.007
+jaq-derived	jaq: upto	v1.4.4	0.007
+jaq-derived	jaq: tree-flatten	1118cf	
+jaq-derived	jaq: tree-flatten	v0.5.0	
+jaq-derived	jaq: tree-flatten	3ae841e	0.003
+jaq-derived	jaq: tree-flatten	fa2eb51	0.002
+jaq-derived	jaq: tree-flatten	2884a5f	0.003
+jaq-derived	jaq: tree-flatten	v0.6.0	0.002
+jaq-derived	jaq: tree-flatten	v0.7.0	0.002
+jaq-derived	jaq: tree-flatten	9e563a9	0.003
+jaq-derived	jaq: tree-flatten	b59f7c9	0.002
+jaq-derived	jaq: tree-flatten	11388d4	0.002
+jaq-derived	jaq: tree-flatten	v0.8.0	0.002
+jaq-derived	jaq: tree-flatten	195fdc4	0.002
+jaq-derived	jaq: tree-flatten	v0.9.0	0.002
+jaq-derived	jaq: tree-flatten	v0.10.0	0.003
+jaq-derived	jaq: tree-flatten	v1.0.0	0.003
+jaq-derived	jaq: tree-flatten	v1.1.0	0.003
+jaq-derived	jaq: tree-flatten	v1.4.3	0.003
+jaq-derived	jaq: tree-flatten	v1.4.4	0.003
+jaq-derived	jaq: tree-update	1118cf	
+jaq-derived	jaq: tree-update	v0.5.0	
+jaq-derived	jaq: tree-update	3ae841e	0.006
+jaq-derived	jaq: tree-update	fa2eb51	0.005
+jaq-derived	jaq: tree-update	2884a5f	0.006
+jaq-derived	jaq: tree-update	v0.6.0	0.006
+jaq-derived	jaq: tree-update	v0.7.0	0.006
+jaq-derived	jaq: tree-update	9e563a9	0.006
+jaq-derived	jaq: tree-update	b59f7c9	0.006
+jaq-derived	jaq: tree-update	11388d4	0.006
+jaq-derived	jaq: tree-update	v0.8.0	0.006
+jaq-derived	jaq: tree-update	195fdc4	0.006
+jaq-derived	jaq: tree-update	v0.9.0	0.006
+jaq-derived	jaq: tree-update	v0.10.0	0.006
+jaq-derived	jaq: tree-update	v1.0.0	0.006
+jaq-derived	jaq: tree-update	v1.1.0	0.007
+jaq-derived	jaq: tree-update	v1.4.3	0.007
+jaq-derived	jaq: tree-update	v1.4.4	0.007
+jaq-derived	jaq: to-fromjson	1118cf	
+jaq-derived	jaq: to-fromjson	v0.5.0	
+jaq-derived	jaq: to-fromjson	3ae841e	0.018
+jaq-derived	jaq: to-fromjson	fa2eb51	0.018
+jaq-derived	jaq: to-fromjson	2884a5f	0.019
+jaq-derived	jaq: to-fromjson	v0.6.0	0.018
+jaq-derived	jaq: to-fromjson	v0.7.0	0.018
+jaq-derived	jaq: to-fromjson	9e563a9	0.018
+jaq-derived	jaq: to-fromjson	b59f7c9	0.018
+jaq-derived	jaq: to-fromjson	11388d4	0.018
+jaq-derived	jaq: to-fromjson	v0.8.0	0.018
+jaq-derived	jaq: to-fromjson	195fdc4	0.018
+jaq-derived	jaq: to-fromjson	v0.9.0	0.018
+jaq-derived	jaq: to-fromjson	v0.10.0	0.005
+jaq-derived	jaq: to-fromjson	v1.0.0	0.004
+jaq-derived	jaq: to-fromjson	v1.1.0	0.005
+jaq-derived	jaq: to-fromjson	v1.4.3	0.005
+jaq-derived	jaq: to-fromjson	v1.4.4	0.005
+jaq-derived	jaq: str-slice	1118cf	
+jaq-derived	jaq: str-slice	v0.5.0	
+jaq-derived	jaq: str-slice	3ae841e	0.013
+jaq-derived	jaq: str-slice	fa2eb51	0.013
+jaq-derived	jaq: str-slice	2884a5f	0.014
+jaq-derived	jaq: str-slice	v0.6.0	0.013
+jaq-derived	jaq: str-slice	v0.7.0	0.013
+jaq-derived	jaq: str-slice	9e563a9	0.013
+jaq-derived	jaq: str-slice	b59f7c9	0.013
+jaq-derived	jaq: str-slice	11388d4	0.013
+jaq-derived	jaq: str-slice	v0.8.0	0.014
+jaq-derived	jaq: str-slice	195fdc4	0.013
+jaq-derived	jaq: str-slice	v0.9.0	0.013
+jaq-derived	jaq: str-slice	v0.10.0	0.014
+jaq-derived	jaq: str-slice	v1.0.0	0.013
+jaq-derived	jaq: str-slice	v1.1.0	0.014
+jaq-derived	jaq: str-slice	v1.4.3	0.014
+jaq-derived	jaq: str-slice	v1.4.4	0.013
