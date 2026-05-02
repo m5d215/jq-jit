@@ -6902,3 +6902,45 @@ null
 "abc" | try tonumber catch .
 null
 "string (\"abc\") cannot be parsed as a number"
+
+# Issue #463: `.[{start, end}]` on an array dispatches to a slice (was:
+# "Cannot index array with object" because the obj-key path errored
+# before checking for a slice spec).
+[1,2,3,4,5] | .[{start:1,end:3}]
+null
+[2,3]
+
+# Issue #463: same on a string
+"abcde" | .[{start:1,end:3}]
+null
+"bc"
+
+# Issue #463: null start = 0, null end = len (whole-array slice)
+[1,2,3] | .[{start:null,end:null}]
+null
+[1,2,3]
+
+# Issue #463: fractional start/end use floor / ceil like jq's slice
+[1,2,3,4,5] | .[{start:1.5,end:3.5}]
+null
+[2,3,4]
+
+# Issue #463: empty obj is not a slice spec — emit jq's wording
+try ([1,2,3] | .[{}]) catch .
+null
+"Array/string slice indices must be integers"
+
+# Issue #463: missing end → not a slice → wording
+try ([1,2,3] | .[{start:0}]) catch .
+null
+"Array/string slice indices must be integers"
+
+# Issue #463: non-numeric start → wording (the slice path validates types)
+try ([1,2,3] | .[{start:"x",end:2}]) catch .
+null
+"Array/string slice indices must be integers"
+
+# Issue #463: same wording for string receiver
+try ("abcde" | .[{a:1}]) catch .
+null
+"Array/string slice indices must be integers"

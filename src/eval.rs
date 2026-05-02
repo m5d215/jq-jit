@@ -3198,6 +3198,30 @@ pub fn eval_index(base: &Value, key: &Value, optional: bool) -> std::result::Res
                 Err("Cannot index string with number".to_string())
             }
         }
+        // jq dispatches `.[obj]` on an array or string as a slice when the
+        // object has both `start` and `end` keys (each being a number or
+        // null). Otherwise it errors with the slice-indices wording — even
+        // when the base is null. See #463.
+        (Value::Arr(_), Value::Obj(ObjInner(spec)))
+        | (Value::Str(_), Value::Obj(ObjInner(spec))) => {
+            let start = spec.get("start");
+            let end = spec.get("end");
+            match (start, end) {
+                (Some(s), Some(e)) => {
+                    let valid = matches!(s, Value::Num(_, _) | Value::Null)
+                        && matches!(e, Value::Num(_, _) | Value::Null);
+                    if !valid {
+                        if optional { return Err("type error".into()); }
+                        return Err("Array/string slice indices must be integers".to_string());
+                    }
+                    eval_slice(base, s, e).map_err(|e| e.to_string())
+                }
+                _ => {
+                    if optional { Err("type error".into()) }
+                    else { Err("Array/string slice indices must be integers".to_string()) }
+                }
+            }
+        }
         // Null receiver: only string/number/object keys short-circuit to null;
         // null/bool/array keys still raise the same type error jq emits on a
         // non-null base (#193). The keys here mirror what jq's `.[$k]` accepts
