@@ -3132,7 +3132,10 @@ fn time_arr_to_tm(a: &[Value]) -> Result<libc::tm> {
         t.tm_year = get(0) as i32 - 1900;
     }
     t.tm_mon = get(1) as i32;
-    t.tm_mday = if a.len() > 2 { get(2) as i32 } else { 1 };
+    // jq leaves missing mday at 0 (which strftime renders as "00" and
+    // timegm normalises to the previous day); don't default to 1 here.
+    // See `[2024] | strftime("%Y-%m-%d")` → `"2023-12-31"` in jq 1.8.1.
+    t.tm_mday = get(2) as i32;
     t.tm_hour = get(3) as i32;
     t.tm_min = get(4) as i32;
     t.tm_sec = get(5) as i32;
@@ -3288,9 +3291,20 @@ fn rt_fromisodate(v: &Value) -> Result<Value> {
 fn rt_toisodate(v: &Value) -> Result<Value> {
     use chrono::DateTime;
 
+    // jq defines `todate`/`todateiso8601` as
+    // `def todate: strftime("%Y-%m-%dT%H:%M:%SZ")`, so broken-down-time
+    // arrays are accepted and non-numeric/non-array inputs surface the
+    // standard `strftime/1 requires parsed datetime inputs` wording.
+    // Delegate to `rt_strftime` for the array branch and the type-error
+    // wording (#531). Number input still goes through the chrono path
+    // below so the existing fractional-second handling is preserved.
+    if !matches!(v, Value::Num(_, _)) {
+        let fmt = Value::from_str("%Y-%m-%dT%H:%M:%SZ");
+        return rt_strftime(v, &fmt);
+    }
     let epoch = match v {
         Value::Num(n, _) => *n,
-        _ => bail!("toisodate input must be a number"),
+        _ => unreachable!(),
     };
 
     let secs = epoch.floor() as i64;
