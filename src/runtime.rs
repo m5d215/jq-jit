@@ -402,6 +402,12 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             Value::Num(n, _) => {
                 let mut sign: i32 = 0;
                 let r = unsafe { lgamma_r(*n, &mut sign) };
+                // Apple's libm leaves `sign` at 0 for `lgamma_r(0)` (a pole
+                // where the sign of gamma is undefined). jq's bundled libm
+                // (glibc) treats the limit as +inf from positive arguments
+                // and returns sign=1; align with that. Negative integers
+                // already get sign=1 from Apple's libm. (#529)
+                if *n == 0.0 { sign = 1; }
                 Ok(Value::Arr(Rc::new(vec![Value::number(r), Value::number(sign as f64)])))
             }
             _ => bail!("{} number required", errdesc(v)),
