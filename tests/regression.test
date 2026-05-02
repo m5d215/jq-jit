@@ -6769,3 +6769,62 @@ try to_entries catch .
 try to_entries catch .
 "x"
 "string (\"x\") has no keys"
+
+# Issue #459: number-only unary builtins all use jq's uniform
+# `<type> (<v>) number required` wording (was: `X cannot be floored`,
+# `X requires number`, etc.).
+try floor catch .
+null
+"null (null) number required"
+
+# Issue #459: ceil on string
+try ceil catch .
+"x"
+"string (\"x\") number required"
+
+# Issue #459: round on array
+try round catch .
+[1]
+"array ([1]) number required"
+
+# Issue #459: sqrt on null
+try sqrt catch .
+null
+"null (null) number required"
+
+# Issue #459: log on object
+try log catch .
+{"a":1}
+"object ({\"a\":1}) number required"
+
+# Issue #459: fabs on string (was already this wording, kept as a guard
+# so the unification doesn't accidentally regress it later)
+try fabs catch .
+"x"
+"string (\"x\") number required"
+
+# Issue #459: trig family — sin via jq's wording
+try sin catch .
+"x"
+"string (\"x\") number required"
+
+# Issue #459: lgamma_r picks up the same wording
+try lgamma_r catch .
+null
+"null (null) number required"
+
+# Issue #459: binary builtins report the first non-number argument.
+# atan2(null;1) — first arg is bad
+try atan2(.; 1) catch .
+null
+"null (null) number required"
+
+# Issue #459: atan2(1;null) — second arg is bad
+try atan2(1; .) catch .
+null
+"null (null) number required"
+
+# Issue #459: pow inherits the same wording as jq
+try pow(.; 2) catch .
+"x"
+"string (\"x\") number required"
