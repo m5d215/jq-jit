@@ -41,13 +41,15 @@ fn raw_contains_non_canonical_number(bytes: &[u8]) -> bool {
                 }
             }
             b'+' => return true,
-            // Special-float literals accepted by parse_json_value: `nan`,
-            // `NaN`, `Infinity`, `-NaN`, `-Infinity`. jq normalises these to
-            // `null` (NaN) or `±1.7976931348623157e+308` (Infinity) — the
-            // raw input bytes would otherwise leak through as invalid JSON.
-            b'n' if bytes.get(i..i+3) == Some(b"nan") => return true,
-            b'N' if bytes.get(i..i+3) == Some(b"NaN") => return true,
-            b'I' if bytes.get(i..i+8) == Some(b"Infinity") => return true,
+            // Special-float literals accepted by parse_json_value:
+            // `nan` / `inf` / `infinity` (case-insensitive), with optional
+            // `+`/`-` prefix. jq normalises these to `null` (NaN) or
+            // `±1.7976931348623157e+308` (Infinity) — the raw input bytes
+            // would otherwise leak through as invalid JSON
+            // (issues #513, #515).
+            b'n' | b'N' if bytes.get(i..i+3).is_some_and(|s| s.eq_ignore_ascii_case(b"nan")) => return true,
+            b'i' | b'I' if bytes.get(i..i+8).is_some_and(|s| s.eq_ignore_ascii_case(b"infinity"))
+                || bytes.get(i..i+3).is_some_and(|s| s.eq_ignore_ascii_case(b"inf")) => return true,
             b'e' | b'E' => {
                 // Only flag when this `e`/`E` is part of a number — the
                 // immediately preceding byte is a digit or `.`.

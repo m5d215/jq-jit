@@ -4158,19 +4158,51 @@ fn skip_ws(b: &[u8], mut pos: usize) -> usize {
 
 const MAX_JSON_DEPTH: usize = 10000;
 
+/// Recognise jq's case-insensitive special-float literals (`nan`, `inf`,
+/// `infinity`) at the given position, with optional `+`/`-` prefix already
+/// stripped off by the caller. Returns `(f64_value, advance)` where advance
+/// is the number of bytes consumed past `pos` (NOT counting any sign).
+///
+/// `negate` flips the sign for `inf`/`infinity` (NaN is sign-agnostic — jq
+/// treats `+nan`/`-nan` the same as `nan`).
+fn try_special_float_token(b: &[u8], pos: usize, negate: bool) -> Option<(f64, usize)> {
+    fn ci_eq(b: &[u8], pos: usize, needle: &[u8]) -> bool {
+        b.get(pos..pos + needle.len())
+            .is_some_and(|slice| slice.iter().zip(needle.iter())
+                .all(|(a, n)| a.eq_ignore_ascii_case(n)))
+    }
+    if ci_eq(b, pos, b"infinity") {
+        let v = if negate { f64::NEG_INFINITY } else { f64::INFINITY };
+        Some((v, 8))
+    } else if ci_eq(b, pos, b"inf") {
+        let v = if negate { f64::NEG_INFINITY } else { f64::INFINITY };
+        Some((v, 3))
+    } else if ci_eq(b, pos, b"nan") {
+        Some((f64::NAN, 3))
+    } else {
+        None
+    }
+}
+
 /// Skip past a JSON value without constructing it. Returns the position after the value.
 pub fn skip_json_value(b: &[u8], pos: usize) -> Result<usize> {
     if pos >= b.len() { bail!("Unexpected end of JSON"); }
     match b[pos] {
         b'n' => {
             if b.get(pos..pos+4) == Some(b"null") { Ok(pos + 4) }
-            else if b.get(pos..pos+3) == Some(b"nan") { Ok(pos + 3) }
+            else if let Some((_, adv)) = try_special_float_token(b, pos, false) { Ok(pos + adv) }
             else { bail!("Invalid JSON at position {}", pos) }
         }
         b't' => { if b.get(pos..pos+4) == Some(b"true") { Ok(pos + 4) } else { bail!("Invalid JSON at position {}", pos) } }
         b'f' => { if b.get(pos..pos+5) == Some(b"false") { Ok(pos + 5) } else { bail!("Invalid JSON at position {}", pos) } }
-        b'N' => { if b.get(pos..pos+3) == Some(b"NaN") { Ok(pos + 3) } else { bail!("Invalid JSON at position {}", pos) } }
-        b'I' => { if b.get(pos..pos+8) == Some(b"Infinity") { Ok(pos + 8) } else { bail!("Invalid JSON at position {}", pos) } }
+        b'N' => {
+            if let Some((_, adv)) = try_special_float_token(b, pos, false) { Ok(pos + adv) }
+            else { bail!("Invalid JSON at position {}", pos) }
+        }
+        b'i' | b'I' => {
+            if let Some((_, adv)) = try_special_float_token(b, pos, false) { Ok(pos + adv) }
+            else { bail!("Invalid JSON at position {}", pos) }
+        }
         b'"' => {
             // Validate the same way parse_json_string does — raw U+0000..U+001F
             // inside a string is illegal JSON (RFC 8259). The fast path uses
@@ -4228,12 +4260,12 @@ pub fn skip_json_value(b: &[u8], pos: usize) -> Result<usize> {
         }
         b'-' | b'+' | b'0'..=b'9' => {
             let mut i = pos;
-            if b[i] == b'-' {
-                // -Infinity and -NaN are accepted by parse_json_value; match here too.
-                if b.get(pos..pos+9) == Some(b"-Infinity") { return Ok(pos + 9); }
-                if b.get(pos..pos+4) == Some(b"-NaN") { return Ok(pos + 4); }
-                i += 1;
-            } else if b[i] == b'+' {
+            if b[i] == b'-' || b[i] == b'+' {
+                // Special-float literals (case-insensitive nan/inf/infinity)
+                // also accept the sign prefix per jq's input parser.
+                if let Some((_, adv)) = try_special_float_token(b, pos + 1, false) {
+                    return Ok(pos + 1 + adv);
+                }
                 i += 1;
             }
             while i < b.len() && b[i].is_ascii_digit() { i += 1; }
@@ -4349,7 +4381,9 @@ fn parse_json_value(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)
     match b[pos] {
         b'n' => {
             if b.get(pos..pos+4) == Some(b"null") { Ok((Value::Null, pos + 4)) }
-            else if b.get(pos..pos+3) == Some(b"nan") { Ok((Value::number(f64::NAN), pos + 3)) }
+            else if let Some((v, adv)) = try_special_float_token(b, pos, false) {
+                Ok((Value::number(v), pos + adv))
+            }
             else { bail!("Invalid JSON at position {}", pos) }
         }
         b't' => {
@@ -4361,17 +4395,26 @@ fn parse_json_value(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)
             else { bail!("Invalid JSON at position {}", pos) }
         }
         b'N' => {
-            if b.get(pos..pos+3) == Some(b"NaN") { Ok((Value::number(f64::NAN), pos + 3)) }
+            if let Some((v, adv)) = try_special_float_token(b, pos, false) {
+                Ok((Value::number(v), pos + adv))
+            }
             else { bail!("Invalid JSON at position {}", pos) }
         }
-        b'I' => {
-            if b.get(pos..pos+8) == Some(b"Infinity") { Ok((Value::number(f64::INFINITY), pos + 8)) }
+        b'i' | b'I' => {
+            if let Some((v, adv)) = try_special_float_token(b, pos, false) {
+                Ok((Value::number(v), pos + adv))
+            }
             else { bail!("Invalid JSON at position {}", pos) }
         }
         b'"' => parse_json_string(b, pos),
         b'[' => parse_json_array(b, pos, depth),
         b'{' => parse_json_object(b, pos, depth),
         b'+' => {
+            // +inf / +infinity / +nan are accepted by jq's input parser
+            // (`+nan` collapses to the same NaN value as `-nan`).
+            if let Some((v, adv)) = try_special_float_token(b, pos + 1, false) {
+                return Ok((Value::number(v), pos + 1 + adv));
+            }
             // jq extension: leading '+' is ignored and the rest is parsed as a positive number.
             parse_json_number(b, pos)
         }
@@ -4391,9 +4434,10 @@ fn parse_json_value(b: &[u8], pos: usize, depth: usize) -> Result<(Value, usize)
                 // Has decimal/exponent — fall through to full parser
                 parse_json_number(b, pos)
             }
-            // -Infinity, -NaN, or other
-            else if b.get(pos..pos+9) == Some(b"-Infinity") { Ok((Value::number(f64::NEG_INFINITY), pos + 9)) }
-            else if b.get(pos..pos+4) == Some(b"-NaN") { Ok((Value::number(f64::NAN), pos + 4)) }
+            // -Infinity / -inf / -infinity / -nan / -NaN (case-insensitive).
+            else if let Some((v, adv)) = try_special_float_token(b, pos + 1, true) {
+                Ok((Value::number(v), pos + 1 + adv))
+            }
             else { parse_json_number(b, pos) }
         }
         b'0' => {
