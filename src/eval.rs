@@ -2909,8 +2909,14 @@ pub fn eval(
             eval(input_expr, input.clone(), env, &mut |s| {
                 eval(re, input.clone(), env, &mut |rv| {
                     eval(flags, input.clone(), env, &mut |fv| {
-                        let input_str = s.as_str().ok_or_else(|| anyhow::anyhow!("sub/gsub input must be string"))?;
-                        let re_str = rv.as_str().ok_or_else(|| anyhow::anyhow!("sub/gsub regex must be string"))?;
+                        let input_str = s.as_str().ok_or_else(|| anyhow::anyhow!(
+                            "{} cannot be matched, as it is not a string",
+                            crate::runtime::errdesc_pub(&s),
+                        ))?;
+                        let re_str = rv.as_str().ok_or_else(|| anyhow::anyhow!(
+                            "{} is not a string",
+                            crate::runtime::errdesc_pub(&rv),
+                        ))?;
                         let segments = crate::runtime::sub_gsub_segments(input_str, re_str, &fv, is_global)?;
                         let mut result = String::new();
                         for seg in &segments {

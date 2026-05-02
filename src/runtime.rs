@@ -1728,14 +1728,14 @@ fn value_contains(a: &Value, b: &Value) -> bool {
 fn rt_startswith(v: &Value, prefix: &Value) -> Result<Value> {
     match (v, prefix) {
         (Value::Str(s), Value::Str(p)) => Ok(Value::from_bool(s.starts_with(p.as_str()))),
-        _ => bail!("startswith requires strings"),
+        _ => bail!("startswith() requires string inputs"),
     }
 }
 
 fn rt_endswith(v: &Value, suffix: &Value) -> Result<Value> {
     match (v, suffix) {
         (Value::Str(s), Value::Str(p)) => Ok(Value::from_bool(s.ends_with(p.as_str()))),
-        _ => bail!("endswith requires strings"),
+        _ => bail!("endswith() requires string inputs"),
     }
 }
 
