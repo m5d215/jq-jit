@@ -1806,6 +1806,11 @@ pub fn json_object_replace_field(b: &[u8], pos: usize, field: &str, new_val: &[u
 pub fn json_object_update_field_num(b: &[u8], pos: usize, field: &str, op: crate::ir::BinOp, n: f64, buf: &mut Vec<u8>) -> bool {
     use crate::ir::BinOp;
     if pos >= b.len() || b[pos] != b'{' { return false; }
+    // The 3-way splice below copies bytes verbatim around the modified
+    // field, which would leak interior whitespace from the input through
+    // to stdout. jq always re-renders compactly under `-c`; bail to the
+    // generic eval path when the input isn't already compact (#523).
+    if !is_json_compact(&b[pos..]) { return false; }
     // Find the target field value range, then do 3-way copy:
     // (bytes before value) + (new number) + (bytes after value including closing brace)
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
@@ -1836,6 +1841,7 @@ pub fn json_object_update_field_num_chain(
     use crate::ir::UnaryOp;
     use crate::interpreter::NumChainStep;
     if pos >= b.len() || b[pos] != b'{' { return false; }
+    if !is_json_compact(&b[pos..]) { return false; } // #523
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
         if let Some(mut v) = parse_json_num(&b[val_start..val_end]) {
             for step in steps {
@@ -1882,6 +1888,7 @@ pub fn json_object_update_field_gsub(
     b: &[u8], pos: usize, field: &str, re: &regex::Regex, replacement: &str, is_global: bool, buf: &mut Vec<u8>,
 ) -> bool {
     if pos >= b.len() || b[pos] != b'{' { return false; }
+    if !is_json_compact(&b[pos..]) { return false; } // #523
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
         if val_start >= val_end || b[val_start] != b'"' { return false; }
         let inner = &b[val_start + 1..val_end - 1];
@@ -1978,6 +1985,7 @@ pub fn json_object_update_field_test(
     b: &[u8], pos: usize, field: &str, re: &regex::Regex, buf: &mut Vec<u8>,
 ) -> bool {
     if pos >= b.len() || b[pos] != b'{' { return false; }
+    if !is_json_compact(&b[pos..]) { return false; } // #523
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
         if val_start >= val_end || b[val_start] != b'"' { return false; }
         let inner = &b[val_start + 1..val_end - 1];
@@ -2010,6 +2018,7 @@ pub fn json_object_assign_field_arith(
 ) -> bool {
     use crate::ir::BinOp;
     if pos >= b.len() || b[pos] != b'{' { return false; }
+    if !is_json_compact(&b[pos..]) { return false; } // #523
     // 1. Read src field value
     let src_val = if let Some((vs, ve)) = json_object_get_field_raw(b, pos, src_field) {
         match parse_json_num(&b[vs..ve]) { Some(v) => v, None => return false }
@@ -2048,6 +2057,7 @@ pub fn json_object_assign_two_fields_arith(
 ) -> bool {
     use crate::ir::BinOp;
     if pos >= b.len() || b[pos] != b'{' { return false; }
+    if !is_json_compact(&b[pos..]) { return false; } // #523
     let v1 = if let Some((vs, ve)) = json_object_get_field_raw(b, pos, src1_field) {
         match parse_json_num(&b[vs..ve]) { Some(v) => v, None => return false }
     } else { return false; };
@@ -2083,6 +2093,7 @@ pub fn json_object_update_field_split_first(
     b: &[u8], pos: usize, field: &str, sep: &str, buf: &mut Vec<u8>,
 ) -> bool {
     if pos >= b.len() || b[pos] != b'{' { return false; }
+    if !is_json_compact(&b[pos..]) { return false; } // #523
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
         if val_start >= val_end || b[val_start] != b'"' { return false; }
         let inner = &b[val_start + 1..val_end - 1];
@@ -2147,6 +2158,7 @@ pub fn json_object_update_field_split_last(
     b: &[u8], pos: usize, field: &str, sep: &str, buf: &mut Vec<u8>,
 ) -> bool {
     if pos >= b.len() || b[pos] != b'{' { return false; }
+    if !is_json_compact(&b[pos..]) { return false; } // #523
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
         if val_start >= val_end || b[val_start] != b'"' { return false; }
         let inner = &b[val_start + 1..val_end - 1];
@@ -2209,6 +2221,7 @@ pub fn json_object_update_field_trim(
     b: &[u8], pos: usize, field: &str, trim_str: &str, is_rtrim: bool, buf: &mut Vec<u8>,
 ) -> bool {
     if pos >= b.len() || b[pos] != b'{' { return false; }
+    if !is_json_compact(&b[pos..]) { return false; } // #523
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
         if val_start >= val_end || b[val_start] != b'"' { return false; }
         let inner = &b[val_start + 1..val_end - 1];
@@ -2274,6 +2287,7 @@ pub fn json_object_update_field_slice(
     b: &[u8], pos: usize, field: &str, from: Option<i64>, to: Option<i64>, buf: &mut Vec<u8>,
 ) -> bool {
     if pos >= b.len() || b[pos] != b'{' { return false; }
+    if !is_json_compact(&b[pos..]) { return false; } // #523
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
         if val_start >= val_end || b[val_start] != b'"' { return false; }
         let inner = &b[val_start + 1..val_end - 1];
@@ -2403,6 +2417,7 @@ pub fn json_object_update_field_length(
     b: &[u8], pos: usize, field: &str, buf: &mut Vec<u8>,
 ) -> bool {
     if pos >= b.len() || b[pos] != b'{' { return false; }
+    if !is_json_compact(&b[pos..]) { return false; } // #523
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
         if val_start >= val_end || b[val_start] != b'"' { return false; }
         let inner = &b[val_start + 1..val_end - 1];
@@ -2435,6 +2450,7 @@ pub fn json_object_update_field_tostring(
     b: &[u8], pos: usize, field: &str, buf: &mut Vec<u8>,
 ) -> bool {
     if pos >= b.len() || b[pos] != b'{' { return false; }
+    if !is_json_compact(&b[pos..]) { return false; } // #523
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
         if val_start >= val_end { return false; }
         let first = b[val_start];
@@ -2474,6 +2490,7 @@ pub fn json_object_update_field_str_concat(
     b: &[u8], pos: usize, field: &str, prefix: &[u8], suffix: &[u8], buf: &mut Vec<u8>,
 ) -> bool {
     if pos >= b.len() || b[pos] != b'{' { return false; }
+    if !is_json_compact(&b[pos..]) { return false; } // #523
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
         if val_start >= val_end || b[val_start] != b'"' { return false; }
         let inner = &b[val_start + 1..val_end - 1];
@@ -2497,6 +2514,7 @@ pub fn json_object_update_field_str_map(
     b: &[u8], pos: usize, field: &str, cond_str: &[u8], then_json: &[u8], else_json: &[u8], buf: &mut Vec<u8>,
 ) -> bool {
     if pos >= b.len() || b[pos] != b'{' { return false; }
+    if !is_json_compact(&b[pos..]) { return false; } // #523
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
         if val_start >= val_end || b[val_start] != b'"' { return false; }
         let inner = &b[val_start + 1..val_end - 1];
