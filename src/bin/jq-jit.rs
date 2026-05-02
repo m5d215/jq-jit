@@ -21,6 +21,11 @@ fn raw_contains_del_byte(bytes: &[u8]) -> bool {
 /// would normalise differently from jq's canonical output (e.g. `1e10`
 /// → `1E+10`, `+1` → `1`, `1e-5` → `0.00001`). Used to disable raw-byte
 /// passthrough so the canonical form lands on stdout (issues #110, #143).
+///
+/// Also catches the special-float literals `nan`, `NaN`, `Infinity` (and
+/// their `-`-prefixed variants) that jq's input parser accepts but
+/// re-renders as `null` / `±1.7976931348623157e+308` (issue #513).
+/// Without this check, identity passthrough would emit invalid JSON.
 fn raw_contains_non_canonical_number(bytes: &[u8]) -> bool {
     let mut i = 0;
     while i < bytes.len() {
@@ -36,6 +41,13 @@ fn raw_contains_non_canonical_number(bytes: &[u8]) -> bool {
                 }
             }
             b'+' => return true,
+            // Special-float literals accepted by parse_json_value: `nan`,
+            // `NaN`, `Infinity`, `-NaN`, `-Infinity`. jq normalises these to
+            // `null` (NaN) or `±1.7976931348623157e+308` (Infinity) — the
+            // raw input bytes would otherwise leak through as invalid JSON.
+            b'n' if bytes.get(i..i+3) == Some(b"nan") => return true,
+            b'N' if bytes.get(i..i+3) == Some(b"NaN") => return true,
+            b'I' if bytes.get(i..i+8) == Some(b"Infinity") => return true,
             b'e' | b'E' => {
                 // Only flag when this `e`/`E` is part of a number — the
                 // immediately preceding byte is a digit or `.`.
