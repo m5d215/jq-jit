@@ -5571,13 +5571,17 @@ pub(crate) fn repr_is_exact_for_f64(repr: &str, n: f64) -> bool {
     let mut i = 0;
     if matches!(bytes.first(), Some(b'-') | Some(b'+')) { i += 1; }
     let mut sig_digits = 0u32;
+    let mut trailing_zeros = 0u32;
     let mut started = false;
     while i < bytes.len() && bytes[i] != b'e' && bytes[i] != b'E' {
         let c = bytes[i];
         if c == b'.' { i += 1; continue; }
         if !c.is_ascii_digit() { return false; }
-        if c != b'0' { started = true; }
-        if started { sig_digits += 1; }
+        if c != b'0' { started = true; trailing_zeros = 0; }
+        if started {
+            sig_digits += 1;
+            if c == b'0' { trailing_zeros += 1; }
+        }
         i += 1;
     }
     let mut exp_val: i32 = 0;
@@ -5593,7 +5597,11 @@ pub(crate) fn repr_is_exact_for_f64(repr: &str, n: f64) -> bool {
         if exp_neg { exp_val = -exp_val; }
     }
     if exp_val > 308 || exp_val < -323 { return false; }
-    sig_digits <= 15
+    // Trailing zeros (after the last non-zero digit, integer or fractional)
+    // do not contribute precision: `100000000000000.0` has effective sig=1
+    // even though the digit count is 16. Subtract them so the cap matches
+    // the actual precision the literal claims.
+    sig_digits.saturating_sub(trailing_zeros) <= 15
 }
 
 fn value_to_json_depth(v: &Value, depth: usize, precise: bool) -> String {

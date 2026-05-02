@@ -7993,3 +7993,28 @@ flatten
 flatten
 {"a":[1,2],"b":3}
 [1,2,3]
+
+# Issue #507: tojson preserves trailing-zero floats up to f64-exact magnitudes
+100000000000000.0 | tojson
+null
+"100000000000000.0"
+
+# Issue #507: 1e15 with .0 stays a decimal-form float
+1000000000000000.0 | tojson
+null
+"1000000000000000.0"
+
+# Issue #507: 1e16 with .0 — exactly representable, repr preserved
+10000000000000000.0 | tojson
+null
+"10000000000000000.0"
+
+# Issue #507: trailing zero on a non-integer float still preserved
+100.50 | tojson
+null
+"100.50"
+
+# Issue #507: literal with significant non-zero digits beyond 15 still drops repr
+13911860366432393.0 | tojson | length
+null
+17
