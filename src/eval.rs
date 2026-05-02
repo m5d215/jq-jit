@@ -3306,8 +3306,22 @@ fn eval_range(from: &Value, to: &Value, step: Option<&Value>, cb: &mut dyn FnMut
     let s = match step { Some(Value::Num(n, _)) => *n, Some(_) => bail!("range: step must be number"), None => 1.0 };
     if s == 0.0 { return Ok(true); }
     let mut c = f;
-    if s > 0.0 { while c < t { if !cb(Value::number(c))? { return Ok(false); } c += s; } }
-    else { while c > t { if !cb(Value::number(c))? { return Ok(false); } c += s; } }
+    let mut first = true;
+    if s > 0.0 {
+        while c < t {
+            let v = if first { from.clone() } else { Value::number(c) };
+            first = false;
+            if !cb(v)? { return Ok(false); }
+            c += s;
+        }
+    } else {
+        while c > t {
+            let v = if first { from.clone() } else { Value::number(c) };
+            first = false;
+            if !cb(v)? { return Ok(false); }
+            c += s;
+        }
+    }
     Ok(true)
 }
 
