@@ -8,6 +8,14 @@ use std::process;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// Returns true if `bytes` contains a 0x7F (DEL) byte. jq escapes DEL
+/// the same way it escapes U+0000..U+001F (`` instead of raw),
+/// so byte-copy passthrough paths must bail when this is present (#446).
+#[inline]
+fn raw_contains_del_byte(bytes: &[u8]) -> bool {
+    memchr::memchr(0x7F, bytes).is_some()
+}
+
 #[inline]
 /// Returns true if `bytes` contains a JSON number whose lexical form
 /// would normalise differently from jq's canonical output (e.g. `1e10`
@@ -5796,6 +5804,7 @@ fn real_main() {
                     // (#233); copying bytes through preserves them.
                     let stream_clean = whole_file_compact
                         && !raw_contains_non_canonical_number(content)
+                        && !raw_contains_del_byte(content)
                         && !json_stream_has_duplicate_keys(content);
                     if stream_clean {
                         let _ = out.write_all(content);
@@ -5806,10 +5815,10 @@ fn real_main() {
                             if json_value_has_duplicate_keys(raw) {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 push_compact_line(&mut compact_buf, &v);
-                            } else if is_json_compact(raw) && !raw_contains_non_canonical_number(raw) {
+                            } else if is_json_compact(raw) && !raw_contains_non_canonical_number(raw) && !raw_contains_del_byte(raw) {
                                 compact_buf.extend_from_slice(raw);
                                 compact_buf.push(b'\n');
-                            } else if !raw_contains_non_canonical_number(raw) {
+                            } else if !raw_contains_non_canonical_number(raw) && !raw_contains_del_byte(raw) {
                                 push_json_compact_raw(&mut compact_buf, raw);
                                 compact_buf.push(b'\n');
                             } else {

@@ -1345,7 +1345,8 @@ pub fn json_object_keys_join_to_buf(b: &[u8], pos: usize, sep: &[u8], sorted: bo
     }
     buf.push(b'"');
     // Check if separator needs JSON escaping
-    let sep_needs_escape = sep.iter().any(|&c| c == b'"' || c == b'\\' || c < 0x20);
+    // jq escapes 0x7F (DEL) too, in addition to U+0000..U+001F (#446).
+    let sep_needs_escape = sep.iter().any(|&c| c == b'"' || c == b'\\' || c < 0x20 || c == 0x7F);
     for (idx, &(ks, ke)) in keys_buf.iter().enumerate() {
         if idx > 0 {
             if sep_needs_escape {
@@ -1353,7 +1354,7 @@ pub fn json_object_keys_join_to_buf(b: &[u8], pos: usize, sep: &[u8], sorted: bo
                     match c {
                         b'"' => buf.extend_from_slice(b"\\\""),
                         b'\\' => buf.extend_from_slice(b"\\\\"),
-                        c if c < 0x20 => {
+                        c if c < 0x20 || c == 0x7F => {
                             buf.extend_from_slice(b"\\u00");
                             buf.push(b"0123456789abcdef"[(c >> 4) as usize]);
                             buf.push(b"0123456789abcdef"[(c & 0xf) as usize]);
@@ -1924,7 +1925,8 @@ pub fn json_object_update_field_gsub(
                 b'\n' => buf.extend_from_slice(b"\\n"),
                 b'\r' => buf.extend_from_slice(b"\\r"),
                 b'\t' => buf.extend_from_slice(b"\\t"),
-                c if c < 0x20 => {
+                // jq also escapes 0x7F (DEL) as `` (#446).
+                c if c < 0x20 || c == 0x7F => {
                     buf.extend_from_slice(format!("\\u{:04x}", c).as_bytes());
                 }
                 _ => buf.push(ch),
@@ -2105,7 +2107,8 @@ pub fn json_object_update_field_split_first(
                     b'\n' => buf.extend_from_slice(b"\\n"),
                     b'\r' => buf.extend_from_slice(b"\\r"),
                     b'\t' => buf.extend_from_slice(b"\\t"),
-                    c if c < 0x20 => {
+                    // jq also escapes 0x7F (DEL) (#446).
+                    c if c < 0x20 || c == 0x7F => {
                         buf.extend_from_slice(format!("\\u{:04x}", c).as_bytes());
                     }
                     _ => buf.push(ch),
@@ -2167,7 +2170,8 @@ pub fn json_object_update_field_split_last(
                     b'\n' => buf.extend_from_slice(b"\\n"),
                     b'\r' => buf.extend_from_slice(b"\\r"),
                     b'\t' => buf.extend_from_slice(b"\\t"),
-                    c if c < 0x20 => {
+                    // jq also escapes 0x7F (DEL) (#446).
+                    c if c < 0x20 || c == 0x7F => {
                         buf.extend_from_slice(format!("\\u{:04x}", c).as_bytes());
                     }
                     _ => buf.push(ch),
@@ -2232,7 +2236,8 @@ pub fn json_object_update_field_trim(
                     b'\n' => buf.extend_from_slice(b"\\n"),
                     b'\r' => buf.extend_from_slice(b"\\r"),
                     b'\t' => buf.extend_from_slice(b"\\t"),
-                    c if c < 0x20 => buf.extend_from_slice(format!("\\u{:04x}", c).as_bytes()),
+                    // jq also escapes 0x7F (DEL) (#446).
+                    c if c < 0x20 || c == 0x7F => buf.extend_from_slice(format!("\\u{:04x}", c).as_bytes()),
                     _ => buf.push(ch),
                 }
             }
@@ -2305,7 +2310,8 @@ pub fn json_object_update_field_slice(
                 b'\n' => buf.extend_from_slice(b"\\n"),
                 b'\r' => buf.extend_from_slice(b"\\r"),
                 b'\t' => buf.extend_from_slice(b"\\t"),
-                c if c < 0x20 => buf.extend_from_slice(format!("\\u{:04x}", c).as_bytes()),
+                // jq also escapes 0x7F (DEL) (#446).
+                c if c < 0x20 || c == 0x7F => buf.extend_from_slice(format!("\\u{:04x}", c).as_bytes()),
                 _ => buf.push(ch),
             }
         }
@@ -3807,16 +3813,25 @@ pub fn push_tojson_raw(buf: &mut Vec<u8>, b: &[u8]) {
             b'"' => {
                 buf.extend_from_slice(b"\\\"");
                 i += 1;
-                // Inside JSON string: scan chunks between special chars
+                // Inside JSON string: scan chunks between special chars.
+                // Also break at 0x7F so it can be escaped as `` —
+                // jq escapes DEL the same way it escapes U+0000..U+001F
+                // (#446). Raw 0x00..0x1F never reach this path because the
+                // input parser rejects unescaped control chars.
                 loop {
                     let chunk_start = i;
-                    while i < len && b[i] != b'"' && b[i] != b'\\' { i += 1; }
+                    while i < len && b[i] != b'"' && b[i] != b'\\' && b[i] != 0x7F { i += 1; }
                     if i > chunk_start { buf.extend_from_slice(&b[chunk_start..i]); }
                     if i >= len { break; }
                     if b[i] == b'"' {
                         buf.extend_from_slice(b"\\\"");
                         i += 1;
                         break;
+                    }
+                    if b[i] == 0x7F {
+                        buf.extend_from_slice(b"\\\\u007f");
+                        i += 1;
+                        continue;
                     }
                     // backslash escape sequence
                     buf.extend_from_slice(b"\\\\");
