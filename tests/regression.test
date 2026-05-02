@@ -7233,3 +7233,43 @@ try @bogus catch .
 try @MyCustom catch .
 null
 "MyCustom is not a valid format"
+
+# Issue #467: .[arr] on an array aliases to indices(arr)
+[1,2,3,4,1,2,3] | .[[1,2]]
+null
+[0,4]
+
+# Issue #467: .[[]] on an array returns []
+[1,2,3] | .[[]]
+null
+[]
+
+# Issue #467: .[arr] with no occurrences returns []
+[1,2,3] | .[[5]]
+null
+[]
+
+# Issue #467: nested-array search
+[[1,2],3,[1,2]] | .[[[1,2]]]
+null
+[0,2]
+
+# Issue #467: .[arr] still errors on string receivers
+"abcabc" | try .[["a"]] catch .
+null
+"Cannot index string with array"
+
+# Issue #467: path(.[arr]) yields the array as a single path element
+[1,2,3] | path(.[[1]])
+null
+[[1]]
+
+# Issue #467: assignment via .[arr] errors with jq's setpath wording
+try ([1,2,3] | .[[1]] = 99) catch .
+null
+"Cannot update field at array index of array"
+
+# Issue #467: |= update via .[arr] same error
+try ([1,2,3] | .[[1]] |= "x") catch .
+null
+"Cannot update field at array index of array"
