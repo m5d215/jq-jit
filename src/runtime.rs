@@ -2301,11 +2301,38 @@ pub fn rt_setpath_mut(v: &mut Value, path: &[Value], val: Value) -> Result<()> {
 pub fn rt_delpaths(v: &Value, paths: &Value) -> Result<Value> {
     match paths {
         Value::Arr(ps) => {
-            let mut result = v.clone();
-            // Sort paths in reverse order so deletions don't affect indices
+            // Sort ascending so any path that is a strict prefix of another
+            // appears first; that lets us drop the longer path as subsumed.
+            // jq's `delpaths_sorted` (jv_aux.c) achieves the same by grouping
+            // paths sharing a first key and skipping descent when one path in
+            // the group is a "delete this whole key" path. Without this,
+            // `delpaths([["a"],["a","b"]]) on {"a":1,...}` errors on the
+            // second path (descending into `.a` = number); jq returns the
+            // object minus `.a`. See #432.
             let mut sorted_paths: Vec<&Value> = ps.iter().collect();
-            sorted_paths.sort_by(|a, b| compare_values(b, a));
+            sorted_paths.sort_by(|a, b| compare_values(a, b));
+            let mut filtered: Vec<&Value> = Vec::with_capacity(sorted_paths.len());
             for path in sorted_paths {
+                let p_arr = match path {
+                    Value::Arr(p) => p,
+                    _ => return Err(anyhow::anyhow!("Path must be specified as array")),
+                };
+                let subsumed = filtered.iter().any(|prev| {
+                    let prev_arr = match prev {
+                        Value::Arr(q) => q,
+                        _ => return false,
+                    };
+                    prev_arr.len() <= p_arr.len()
+                        && prev_arr.iter().zip(p_arr.iter()).all(|(a, b)| a == b)
+                });
+                if !subsumed {
+                    filtered.push(path);
+                }
+            }
+            // Iterate filtered paths in reverse to preserve array index
+            // stability when multiple sibling indices are deleted.
+            let mut result = v.clone();
+            for path in filtered.into_iter().rev() {
                 result = delete_path(&result, path)?;
             }
             Ok(result)
