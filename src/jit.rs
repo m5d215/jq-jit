@@ -7198,7 +7198,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                             Value::Null => {}
                             Value::True => buf.extend_from_slice(b"true"),
                             Value::False => buf.extend_from_slice(b"false"),
-                            Value::Num(n, _) => crate::value::push_jq_number_bytes(&mut buf, *n),
+                            Value::Num(n, crate::value::NumRepr(repr)) => crate::value::push_value_num_repr_bytes(&mut buf, *n, repr.as_ref()),
                             _ => buf.extend_from_slice(crate::value::value_to_json(v).as_bytes()),
                         }
                     }
@@ -7234,7 +7234,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                             Value::Null => {}
                             Value::True => buf.extend_from_slice(b"true"),
                             Value::False => buf.extend_from_slice(b"false"),
-                            Value::Num(n, _) => crate::value::push_jq_number_bytes(&mut buf, *n),
+                            Value::Num(n, crate::value::NumRepr(repr)) => crate::value::push_value_num_repr_bytes(&mut buf, *n, repr.as_ref()),
                             _ => buf.extend_from_slice(crate::value::value_to_json(v).as_bytes()),
                         }
                     }

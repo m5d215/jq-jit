@@ -7568,3 +7568,58 @@ null
 1.0e-5 | tojson
 null
 "0.000010"
+
+# Issue #475: @csv preserves number repr
+[1.0] | @csv
+null
+"1.0"
+
+# Issue #475: @csv preserves multiple number reprs
+[1.0, 2.5, 0e10] | @csv
+null
+"1.0,2.5,0E+10"
+
+# Issue #475: @csv preserves 0E+10 form
+[0e10] | @csv
+null
+"0E+10"
+
+# Issue #475: @csv preserves 0.0 form
+[0.0] | @csv
+null
+"0.0"
+
+# Issue #475: @csv preserves 1.0e-5 expansion
+[1.0e-5] | @csv
+null
+"0.000010"
+
+# Issue #475: @csv preserves 1e30 → 1E+30 (uppercase scientific)
+[1e30] | @csv
+null
+"1E+30"
+
+# Issue #475: @csv mixed types still work
+[1.0, "a", null, true] | @csv
+null
+"1.0,\"a\",,true"
+
+# Issue #475: @csv on integer (no repr) stays as integer
+[1] | @csv
+null
+"1"
+
+# Issue #475: @tsv preserves number repr
+[1.0, 2.5] | @tsv
+null
+"1.0\t2.5"
+
+# Issue #475: @tsv preserves 0e10 form
+[0e10] | @tsv
+null
+"0E+10"
+
+# Issue #475: @tsv on integer (no repr)
+[1, 2, 3] | @tsv
+null
+"1\t2\t3"

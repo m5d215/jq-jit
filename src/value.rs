@@ -5249,6 +5249,35 @@ pub fn format_jq_number(n: f64) -> String {
 
 /// Push a formatted jq number directly to a String buffer (avoids intermediate allocation).
 #[inline]
+/// Push a number's canonical jq representation, preferring the original
+/// repr (so `1.0` stays `1.0`, `0e10` stays `0E+10`) when it round-trips
+/// through f64. Falls back to f64 dtoa otherwise. Used by @csv / @tsv
+/// formatters where jq preserves the literal shape (#475).
+pub fn push_value_num_repr_str(buf: &mut String, n: f64, repr: Option<&Rc<str>>) {
+    if let Some(r) = repr.filter(|r| is_valid_json_number(r) && repr_is_exact_for_f64(r, n)) {
+        if let Some(canonical) = normalize_jq_repr(r) {
+            buf.push_str(&canonical);
+        } else {
+            buf.push_str(r);
+        }
+    } else {
+        push_jq_number_str(buf, n);
+    }
+}
+
+/// Same as [`push_value_num_repr_str`] but writes UTF-8 bytes to a `Vec<u8>`.
+pub fn push_value_num_repr_bytes(buf: &mut Vec<u8>, n: f64, repr: Option<&Rc<str>>) {
+    if let Some(r) = repr.filter(|r| is_valid_json_number(r) && repr_is_exact_for_f64(r, n)) {
+        if let Some(canonical) = normalize_jq_repr(r) {
+            buf.extend_from_slice(canonical.as_bytes());
+        } else {
+            buf.extend_from_slice(r.as_bytes());
+        }
+    } else {
+        push_jq_number_bytes(buf, n);
+    }
+}
+
 pub fn push_jq_number_str(buf: &mut String, n: f64) {
     if n.is_nan() {
         buf.push_str("null");
