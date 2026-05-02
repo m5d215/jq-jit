@@ -8756,4 +8756,39 @@ gsub("l"; "X")
 "hello"
 "heXXo"
 
+# Issue #547: mktime with null element bails like jq
+try mktime catch .
+[null]
+"mktime requires parsed datetime inputs"
+
+# Issue #547: mktime with two nulls
+try mktime catch .
+[null, null]
+"mktime requires parsed datetime inputs"
+
+# Issue #547: mktime with mixed numeric+string
+try mktime catch .
+[1, "a"]
+"mktime requires parsed datetime inputs"
+
+# Issue #547: mktime with string in middle of fields
+try mktime catch .
+[1, 2, 3, 4, 5, "x"]
+"mktime requires parsed datetime inputs"
+
+# Issue #547: mktime accepts year-only [2024]
+mktime
+[2024]
+1703980800
+
+# Issue #547: mktime with full broken-down time still works
+mktime
+[2024,0,1,0,0,0]
+1704067200
+
+# Issue #547: empty array keeps the gmtime-validator wording
+try mktime catch .
+[]
+"invalid gmtime representation"
+
 
