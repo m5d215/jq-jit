@@ -1622,12 +1622,19 @@ pub fn eval(
                                 }
                                 if let Some((vi, body)) = let_bind {
                                     let old = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], elem);
+                                    // jq's `all` is vacuously true when the
+                                    // predicate yields no values for an
+                                    // element, and false on the first falsy
+                                    // value (#519).
                                     let is_true = match eval_one(body, &Value::Null, env) {
                                         Ok(v) => v.is_truthy(),
                                         Err(()) => {
-                                            let mut t = false;
-                                            eval(body, Value::Null, env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
-                                            t
+                                            let mut found_falsy = false;
+                                            eval(body, Value::Null, env, &mut |v| {
+                                                if !v.is_truthy() { found_falsy = true; Ok(false) }
+                                                else { Ok(true) }
+                                            })?;
+                                            !found_falsy
                                         }
                                     };
                                     env.borrow_mut().vars[vi as usize] = old;
@@ -1648,9 +1655,12 @@ pub fn eval(
                                             if v.is_truthy() { Ok(true) } else { all_true = false; Ok(false) }
                                         }
                                         Err(()) => {
-                                            let mut truthy = false;
-                                            eval(predicate, elem, env, &mut |v| { truthy = v.is_truthy(); Ok(true) })?;
-                                            if truthy { Ok(true) } else { all_true = false; Ok(false) }
+                                            let mut found_falsy = false;
+                                            eval(predicate, elem, env, &mut |v| {
+                                                if !v.is_truthy() { found_falsy = true; Ok(false) }
+                                                else { Ok(true) }
+                                            })?;
+                                            if found_falsy { all_true = false; Ok(false) } else { Ok(true) }
                                         }
                                     }
                                 }
@@ -1679,12 +1689,19 @@ pub fn eval(
                                         drop(e);
                                     }
                                     let old = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], elem);
+                                    // jq's `any` is vacuously false when the
+                                    // predicate yields no values for an
+                                    // element, and true on the first truthy
+                                    // value (#519).
                                     let is_true = match eval_one(body, &Value::Null, env) {
                                         Ok(v) => v.is_truthy(),
                                         Err(()) => {
-                                            let mut t = false;
-                                            eval(body, Value::Null, env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
-                                            t
+                                            let mut found_truthy = false;
+                                            eval(body, Value::Null, env, &mut |v| {
+                                                if v.is_truthy() { found_truthy = true; Ok(false) }
+                                                else { Ok(true) }
+                                            })?;
+                                            found_truthy
                                         }
                                     };
                                     env.borrow_mut().vars[vi as usize] = old;
@@ -1696,9 +1713,12 @@ pub fn eval(
                                             if v.is_truthy() { any_true = true; Ok(false) } else { Ok(true) }
                                         }
                                         Err(()) => {
-                                            let mut truthy = false;
-                                            eval(predicate, elem, env, &mut |v| { truthy = v.is_truthy(); Ok(true) })?;
-                                            if truthy { any_true = true; Ok(false) } else { Ok(true) }
+                                            let mut found_truthy = false;
+                                            eval(predicate, elem, env, &mut |v| {
+                                                if v.is_truthy() { found_truthy = true; Ok(false) }
+                                                else { Ok(true) }
+                                            })?;
+                                            if found_truthy { any_true = true; Ok(false) } else { Ok(true) }
                                         }
                                     }
                                 }
@@ -2718,12 +2738,18 @@ pub fn eval(
                         drop(e);
                     }
                     let old = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], elem);
+                    // jq's `all` returns true vacuously when the predicate
+                    // emits no values for an element, and false on the first
+                    // falsy value (other values are short-circuited away).
                     let is_true = match eval_one(body, &Value::Null, env) {
                         Ok(v) => v.is_truthy(),
                         Err(()) => {
-                            let mut t = false;
-                            eval(body, Value::Null, env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
-                            t
+                            let mut found_falsy = false;
+                            eval(body, Value::Null, env, &mut |v| {
+                                if !v.is_truthy() { found_falsy = true; Ok(false) }
+                                else { Ok(true) }
+                            })?;
+                            !found_falsy
                         }
                     };
                     env.borrow_mut().vars[vi as usize] = old;
@@ -2735,9 +2761,12 @@ pub fn eval(
                             if v.is_truthy() { Ok(true) } else { all_true = false; Ok(false) }
                         }
                         Err(()) => {
-                            let mut truthy = false;
-                            eval(predicate, elem, env, &mut |v| { truthy = v.is_truthy(); Ok(true) })?;
-                            if truthy { Ok(true) } else { all_true = false; Ok(false) }
+                            let mut found_falsy = false;
+                            eval(predicate, elem, env, &mut |v| {
+                                if !v.is_truthy() { found_falsy = true; Ok(false) }
+                                else { Ok(true) }
+                            })?;
+                            if found_falsy { all_true = false; Ok(false) } else { Ok(true) }
                         }
                     }
                 }
@@ -2765,12 +2794,18 @@ pub fn eval(
                         drop(e);
                     }
                     let old = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], elem);
+                    // jq's `any` returns false vacuously when the predicate
+                    // emits no values, and true on the first truthy value
+                    // (other values are short-circuited away).
                     let is_true = match eval_one(body, &Value::Null, env) {
                         Ok(v) => v.is_truthy(),
                         Err(()) => {
-                            let mut t = false;
-                            eval(body, Value::Null, env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
-                            t
+                            let mut found_truthy = false;
+                            eval(body, Value::Null, env, &mut |v| {
+                                if v.is_truthy() { found_truthy = true; Ok(false) }
+                                else { Ok(true) }
+                            })?;
+                            found_truthy
                         }
                     };
                     env.borrow_mut().vars[vi as usize] = old;
@@ -2782,9 +2817,12 @@ pub fn eval(
                             if v.is_truthy() { any_true = true; Ok(false) } else { Ok(true) }
                         }
                         Err(()) => {
-                            let mut truthy = false;
-                            eval(predicate, elem, env, &mut |v| { truthy = v.is_truthy(); Ok(true) })?;
-                            if truthy { any_true = true; Ok(false) } else { Ok(true) }
+                            let mut found_truthy = false;
+                            eval(predicate, elem, env, &mut |v| {
+                                if v.is_truthy() { found_truthy = true; Ok(false) }
+                                else { Ok(true) }
+                            })?;
+                            if found_truthy { any_true = true; Ok(false) } else { Ok(true) }
                         }
                     }
                 }

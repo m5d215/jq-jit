@@ -474,14 +474,22 @@ pub(crate) fn is_single_valued_expr(e: &crate::ir::Expr) -> bool {
         | Expr::Range { .. } | Expr::Limit { .. }
         | Expr::RegexMatch { .. } | Expr::RegexScan { .. }
         | Expr::RegexCapture { .. } => false,
+        // `.x?` / `.[]?` swallow type errors and yield empty for
+        // mismatched inputs — that's a 0-or-1 value count, not exactly
+        // one. Treat them as multi-valued so the all/any short-circuit
+        // rewrite (and any other optimisation that distributes pipe over
+        // a comma list) doesn't drop the empty branches and skew the
+        // result (#519).
+        Expr::IndexOpt { .. } => false,
+        // `try/catch` can swallow errors into the catch branch; if the
+        // catch is `empty` the whole thing yields nothing. Conservatively
+        // treat it as not exactly-one.
+        Expr::TryCatch { .. } => false,
         Expr::Pipe { left, right } => is_single_valued_expr(left) && is_single_valued_expr(right),
         Expr::IfThenElse { cond, then_branch, else_branch } => {
             is_single_valued_expr(cond)
                 && is_single_valued_expr(then_branch)
                 && is_single_valued_expr(else_branch)
-        }
-        Expr::TryCatch { try_expr, catch_expr } => {
-            is_single_valued_expr(try_expr) && is_single_valued_expr(catch_expr)
         }
         Expr::Alternative { primary, fallback } => {
             is_single_valued_expr(primary) && is_single_valued_expr(fallback)
@@ -493,7 +501,7 @@ pub(crate) fn is_single_valued_expr(e: &crate::ir::Expr) -> bool {
         Expr::BinOp { lhs, rhs, .. } => is_single_valued_expr(lhs) && is_single_valued_expr(rhs),
         Expr::UnaryOp { operand, .. } => is_single_valued_expr(operand),
         Expr::Negate { operand } => is_single_valued_expr(operand),
-        Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => {
+        Expr::Index { expr, key } => {
             is_single_valued_expr(expr) && is_single_valued_expr(key)
         }
         Expr::Input | Expr::Literal(_) | Expr::LoadVar { .. }
@@ -1257,9 +1265,17 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     }
                     let mut elems = Vec::new();
                     collect_comma_for_any(lg, &mut elems);
-                    // Bail on multi-valued branches (issue #152).
+                    // Bail on multi-valued branches (issue #152) AND on
+                    // multi-valued predicates: `(e1, e2) and (e3, e4)` is
+                    // a 4-valued cross product, while jq's `all/any` short-
+                    // circuits over the flattened predicate stream and
+                    // returns one bool. Without this guard, e.g.
+                    // `[1,2] | all((true, false))` rewrites to
+                    // `(true, false) and (true, false)` and emits 3 values
+                    // instead of jq's single `false`.
                     if elems.len() >= 2 && elems.len() <= 8
                         && elems.iter().all(is_single_valued_expr)
+                        && is_single_valued_expr(pred)
                     {
                         let combiner = if is_any { crate::ir::BinOp::Or } else { crate::ir::BinOp::And };
                         let mut result = simplify_expr(&Expr::Pipe {
