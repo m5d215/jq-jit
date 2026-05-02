@@ -8083,3 +8083,28 @@ try (reduce range(1) as $_ (.; setpath(["a"]; 99))) catch .
 try (reduce range(1) as $_ (.; setpath([null]; 99))) catch .
 5
 "Cannot index number with null"
+
+# Issue #511: standalone low surrogate (\udcXX) renders as U+FFFD (length 1)
+"\udc00" | length
+null
+1
+
+# Issue #511: low surrogate in a string keeps neighbours
+"a\udc00b" | length
+null
+3
+
+# Issue #511: two low surrogates each become U+FFFD
+"\udc00\udc00" | length
+null
+2
+
+# Issue #511: max low surrogate also becomes U+FFFD
+"\udfff" | length
+null
+1
+
+# Issue #511: low surrogate produces explicit replacement character
+"\udc00" | explode
+null
+[65533]

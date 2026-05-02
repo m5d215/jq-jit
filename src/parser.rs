@@ -596,25 +596,40 @@ impl Lexer {
 
                             // Handle surrogate pairs
                             if (0xD800..=0xDBFF).contains(&cp) {
-                                // High surrogate, look for \uXXXX low surrogate
-                                if self.pos + 5 < self.chars.len()
-                                    && self.chars[self.pos] == '\\'
-                                    && self.chars[self.pos + 1] == 'u'
+                                // High surrogate. jq requires the next escape
+                                // to be a valid low surrogate `\uDC00..=\uDFFF`;
+                                // anything else (EOF, plain char, another high
+                                // surrogate, low-surrogate-with-junk) is a parse
+                                // error. Silently dropping it would diverge from
+                                // jq, which rejects the literal at parse time.
+                                let invalid_pair = || anyhow::anyhow!(
+                                    "Invalid \\uXXXX\\uXXXX surrogate pair escape"
+                                );
+                                if self.pos + 5 >= self.chars.len()
+                                    || self.chars[self.pos] != '\\'
+                                    || self.chars[self.pos + 1] != 'u'
                                 {
-                                    self.pos += 2;
-                                    let hex2: String = self.chars[self.pos..self.pos+4].iter().collect();
-                                    self.pos += 4;
-                                    let cp2 = u32::from_str_radix(&hex2, 16)
-                                        .map_err(|_| anyhow::anyhow!("invalid unicode escape"))?;
-                                    if (0xDC00..=0xDFFF).contains(&cp2) {
-                                        let combined = ((cp - 0xD800) << 10) + (cp2 - 0xDC00) + 0x10000;
-                                        if let Some(c) = char::from_u32(combined) {
-                                            current.push(c);
-                                        }
-                                    }
+                                    return Err(invalid_pair());
+                                }
+                                self.pos += 2;
+                                let hex2: String = self.chars[self.pos..self.pos+4].iter().collect();
+                                self.pos += 4;
+                                let cp2 = u32::from_str_radix(&hex2, 16)
+                                    .map_err(|_| anyhow::anyhow!("invalid unicode escape"))?;
+                                if !(0xDC00..=0xDFFF).contains(&cp2) {
+                                    return Err(invalid_pair());
+                                }
+                                let combined = ((cp - 0xD800) << 10) + (cp2 - 0xDC00) + 0x10000;
+                                if let Some(c) = char::from_u32(combined) {
+                                    current.push(c);
                                 }
                             } else if let Some(c) = char::from_u32(cp) {
                                 current.push(c);
+                            } else {
+                                // Standalone low surrogate (DC00-DFFF) — jq
+                                // emits U+FFFD (replacement character) for these
+                                // rather than dropping or erroring.
+                                current.push('\u{FFFD}');
                             }
                         }
                         _ => {
