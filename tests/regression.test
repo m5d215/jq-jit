@@ -6944,3 +6944,67 @@ null
 try ("abcde" | .[{a:1}]) catch .
 null
 "Array/string slice indices must be integers"
+
+# Issue #471: sub/gsub on non-string input emits jq's
+# `<errdesc> cannot be matched, as it is not a string` wording
+# (was: generic "sub/gsub input must be string").
+try (null | sub("a"; "b")) catch .
+null
+"null (null) cannot be matched, as it is not a string"
+
+# Issue #471: same wording for arrays
+try ([1] | sub("a"; "b")) catch .
+null
+"array ([1]) cannot be matched, as it is not a string"
+
+# Issue #471: same for objects
+try ({a:1} | sub("a"; "b")) catch .
+null
+"object ({\"a\":1}) cannot be matched, as it is not a string"
+
+# Issue #471: same for numbers
+try (5 | sub("a"; "b")) catch .
+null
+"number (5) cannot be matched, as it is not a string"
+
+# Issue #471: gsub follows the same path
+try (null | gsub("a"; "b")) catch .
+null
+"null (null) cannot be matched, as it is not a string"
+
+# Issue #471: regex arg uses jq's `<errdesc> is not a string` wording
+# (different from the input-side wording).
+try ("abc" | sub(123; "y")) catch .
+null
+"number (123) is not a string"
+
+# Issue #471: regex arg null
+try ("abc" | sub(null; "y")) catch .
+null
+"null (null) is not a string"
+
+# Issue #472: startswith error wording matches jq
+# (was: "startswith requires strings"; jq: "startswith() requires string inputs")
+try (1 | startswith("x")) catch .
+null
+"startswith() requires string inputs"
+
+# Issue #472: same on object input
+try ({a:1} | startswith("x")) catch .
+null
+"startswith() requires string inputs"
+
+# Issue #472: arg side also gets the same wording
+try ("abc" | startswith(123)) catch .
+null
+"startswith() requires string inputs"
+
+# Issue #472: endswith follows the same shape
+try (1 | endswith("x")) catch .
+null
+"endswith() requires string inputs"
+
+# Issue #472: endswith arg side
+try ("abc" | endswith(123)) catch .
+null
+"endswith() requires string inputs"
