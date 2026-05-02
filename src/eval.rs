@@ -3536,7 +3536,7 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
             }
             Ok(String::from_utf8_lossy(&r).into_owned())
         }
-        _ => bail!("unknown format: @{}", name),
+        _ => bail!("{} is not a valid format", name),
     }
 }
 

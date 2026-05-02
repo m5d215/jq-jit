@@ -7213,3 +7213,23 @@ try @tsv catch .
 [1,2,3] | @tsv
 null
 "1\t2\t3"
+
+# Issue #468: unknown @format wording uses '<name> is not a valid format'
+try @xyz catch .
+null
+"xyz is not a valid format"
+
+# Issue #468: unknown @format on string input
+try @hex catch .
+"x"
+"hex is not a valid format"
+
+# Issue #468: unknown @format on object input
+try @bogus catch .
+{"a":1}
+"bogus is not a valid format"
+
+# Issue #468: unknown @format with mixed-case name
+try @MyCustom catch .
+null
+"MyCustom is not a valid format"
