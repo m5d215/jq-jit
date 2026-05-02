@@ -7623,3 +7623,28 @@ null
 [1, 2, 3] | @tsv
 null
 "1\t2\t3"
+
+# Issue #476: INDEX/1 desugars to INDEX(.[]; idx_expr)
+INDEX(.)
+[1,2,3]
+{"1":1,"2":2,"3":3}
+
+# Issue #476: INDEX/1 over array of objects keyed by .a
+INDEX(.a)
+[{"a":1,"b":2},{"a":3,"b":4}]
+{"1":{"a":1,"b":2},"3":{"a":3,"b":4}}
+
+# Issue #476: INDEX/1 last-write-wins on duplicate keys
+INDEX(.a)
+[{"a":1,"x":"first"},{"a":1,"x":"second"}]
+{"1":{"a":1,"x":"second"}}
+
+# Issue #476: INDEX/1 on empty input returns {}
+INDEX(.)
+[]
+{}
+
+# Issue #476: INDEX/1 advertised in builtins is now actually callable
+[builtins[]] | map(select(test("^INDEX"))) | sort
+null
+["INDEX/1","INDEX/2"]

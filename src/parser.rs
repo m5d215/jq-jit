@@ -3679,6 +3679,38 @@ impl Parser {
                     }),
                 })
             }
+            // INDEX/1: INDEX(idx_expr) = INDEX(.[]; idx_expr).
+            // jq advertised both /1 and /2 in `builtins`, but /1 had no
+            // dispatch path so callers got an "unknown function" error
+            // (#476). Desugar straight to the same Reduce shape as /2.
+            ("INDEX", 1) => {
+                let f = args.into_iter().next().unwrap();
+                let stream = Expr::Each { input_expr: Box::new(Expr::Input) };
+                let x_var = self.scope.alloc_var("__idx_x__");
+                let acc_var = self.scope.alloc_var("__idx_acc__");
+                Ok(Expr::Reduce {
+                    source: Box::new(stream),
+                    init: Box::new(Expr::ObjectConstruct { pairs: vec![] }),
+                    var_index: x_var,
+                    acc_index: acc_var,
+                    update: Box::new(Expr::BinOp {
+                        op: BinOp::Add,
+                        lhs: Box::new(Expr::Input),
+                        rhs: Box::new(Expr::ObjectConstruct {
+                            pairs: vec![(
+                                Expr::Pipe {
+                                    left: Box::new(Expr::LoadVar { var_index: x_var }),
+                                    right: Box::new(Expr::Pipe {
+                                        left: Box::new(f),
+                                        right: Box::new(Expr::UnaryOp { op: UnaryOp::ToString, operand: Box::new(Expr::Input) }),
+                                    }),
+                                },
+                                Expr::LoadVar { var_index: x_var },
+                            )],
+                        }),
+                    }),
+                })
+            }
             // INDEX/2: INDEX(stream; f) = reduce stream as $x ({}; . + {($x|f|tostring): $x})
             ("INDEX", 2) => {
                 let mut args = args.into_iter();
