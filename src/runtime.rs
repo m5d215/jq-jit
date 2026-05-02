@@ -61,12 +61,25 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "reverse" => unary_op(args, rt_reverse),
         "flatten" if args.len() < 2 => unary_op(args, |v| rt_flatten(v, None)),
         "flatten" => {
+            // jq's stdlib desugars `flatten($d)` to roughly
+            // `if $d < 0 then error("flatten depth must not be negative")
+            //  else <reduce that subtracts 1 from $d each step> end`.
+            // jq's value ordering (null/false/true < 0 < string/array/object)
+            // makes each non-numeric type take a deterministic path (#537):
+            //   null / true / false → "negative" branch
+            //   string / array / object → arithmetic error in the reduce
             match &args[1] {
                 Value::Num(n, _) => {
                     if *n < 0.0 { bail!("flatten depth must not be negative"); }
                     rt_flatten(&args[0], Some(*n as usize))
                 }
-                _ => rt_flatten(&args[0], None)
+                Value::Null | Value::True | Value::False => {
+                    bail!("flatten depth must not be negative");
+                }
+                other => bail!(
+                    "{} and number (1) cannot be subtracted",
+                    errdesc(other),
+                ),
             }
         }
         "unique" => unary_op(args, rt_unique),
