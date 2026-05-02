@@ -8716,4 +8716,44 @@ transpose
 [[1,2,3],[4,5]]
 [[1,4],[2,5],[3,null]]
 
+# Issue #545: sub with number replacement surfaces jq's addition error
+try (sub("l"; 1)) catch .
+"hello"
+"string (\"he\") and number (1) cannot be added"
+
+# Issue #545: sub with null replacement drops the match (null = additive identity)
+sub("l"; null)
+"hello"
+"helo"
+
+# Issue #545: sub with boolean replacement errors
+try (sub("l"; true)) catch .
+"hello"
+"string (\"he\") and boolean (true) cannot be added"
+
+# Issue #545: sub with array replacement errors
+try (sub("l"; [])) catch .
+"hello"
+"string (\"he\") and array ([]) cannot be added"
+
+# Issue #545: gsub null drops every match
+gsub("l"; null)
+"hello"
+"heo"
+
+# Issue #545: gsub with number replacement errors
+try (gsub("l"; 1)) catch .
+"hello"
+"string (\"he\") and number (1) cannot be added"
+
+# Issue #545: legitimate string replacement still works
+sub("l"; "X")
+"hello"
+"heXlo"
+
+# Issue #545: gsub legitimate string replacement
+gsub("l"; "X")
+"hello"
+"heXXo"
+
 
