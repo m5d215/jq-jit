@@ -2712,9 +2712,11 @@ impl Parser {
             | "sin" | "cos" | "tan" | "asin" | "acos" | "atan"
             | "sinh" | "cosh" | "tanh" | "asinh" | "acosh" | "atanh"
             | "exp" | "exp2" | "exp10" | "log" | "log2" | "log10"
+            | "expm1" | "log1p" | "erf" | "erfc"
             | "cbrt" | "significand" | "exponent" | "logb"
-            | "nearbyint" | "trunc" | "rint" | "j0" | "j1"
+            | "nearbyint" | "trunc" | "rint" | "j0" | "j1" | "y0" | "y1"
             | "gamma" | "tgamma" | "lgamma" | "lgamma_r" | "frexp"
+            | "have_literal_numbers"
             | "keys" | "keys_unsorted" | "values" | "sort" | "reverse"
             | "unique" | "flatten" | "min" | "max" | "add" | "any" | "all"
             | "transpose" | "to_entries" | "from_entries"
@@ -2813,9 +2815,13 @@ impl Parser {
             "recurse" | "recurse_down" => {
                 Ok(Expr::Recurse { input_expr: Box::new(Expr::Input) })
             }
-            "gamma" | "tgamma" | "lgamma" | "lgamma_r" | "frexp" => {
+            "gamma" | "tgamma" | "lgamma" | "lgamma_r" | "frexp"
+            | "expm1" | "log1p" | "erf" | "erfc" | "y0" | "y1"
+            | "have_literal_numbers" => {
                 // libm-backed math builtins not represented as UnaryOp.
                 // Run through CallBuiltin so the runtime dispatches them.
+                // `have_literal_numbers` is a feature-flag builtin; jq 1.8.1
+                // returns true (decnum is enabled in mainline). See #473.
                 Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
             }
             "values" => {
@@ -3428,7 +3434,10 @@ impl Parser {
             }
             ("pow", 2) | ("atan2", 2) | ("fma", 3)
             | ("remainder", 2) | ("drem", 2) | ("hypot", 2)
-            | ("ldexp", 2) | ("scalb", 2) | ("scalbln", 2) => {
+            | ("ldexp", 2) | ("scalb", 2) | ("scalbln", 2)
+            | ("copysign", 2) | ("fdim", 2) | ("fmax", 2) | ("fmin", 2)
+            | ("fmod", 2) | ("nextafter", 2) | ("nexttoward", 2)
+            | ("jn", 2) | ("yn", 2) => {
                 Ok(Expr::CallBuiltin { name: name.to_string(), args })
             }
             ("nth", 1) | ("nth", 2) => {
