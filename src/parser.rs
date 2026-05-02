@@ -1175,11 +1175,16 @@ impl Parser {
         }
 
         if alt_patterns.len() == 1 {
-            // No ?// alternatives - simple binding
+            // No ?// alternatives - simple binding. Snapshot the scope
+            // before allocating the pattern's vars so a same-name shadow
+            // (`5 as $x | (10 as $x | …), $x`) doesn't leak into outer
+            // lookups after the body is parsed. See #499.
             let pattern = alt_patterns.into_iter().next().unwrap();
+            let saved_vars = self.scope.vars.len();
             let allocs = self.alloc_pattern_vars(&pattern);
             self.expect(&Token::Pipe)?;
             let body = self.parse_pipe()?;
+            self.scope.vars.truncate(saved_vars);
             return self.build_binding(value_expr, pattern, allocs, body);
         }
 
@@ -1195,6 +1200,9 @@ impl Parser {
             .filter(|n| seen.insert(n.clone()))
             .collect();
 
+        // Snapshot scope before allocating the alt-destructure vars so
+        // they don't leak into outer lookups (#499).
+        let saved_vars = self.scope.vars.len();
         // Allocate once for shared variables
         let mut var_map: std::collections::HashMap<String, u16> = std::collections::HashMap::new();
         for name in &unique_vars {
@@ -1204,6 +1212,7 @@ impl Parser {
 
         self.expect(&Token::Pipe)?;
         let body = self.parse_pipe()?;
+        self.scope.vars.truncate(saved_vars);
 
         // Build: try (bind pattern1 | body) catch try (bind pattern2 | body) catch ... bind patternN | body
         // The last alternative runs WITHOUT a try-catch so its error propagates —
@@ -2573,10 +2582,14 @@ impl Parser {
             self.expect(&Token::LParen)?;
             let init = self.parse_pipe()?;
             self.expect(&Token::Semicolon)?;
+            // Snapshot scope so a same-name `$x` shadow doesn't leak after
+            // this reduce expression closes (#499).
+            let saved_vars = self.scope.vars.len();
             let var_idx = self.scope.alloc_var(&var_name);
             let acc_idx = self.scope.alloc_var("__acc__");
             let update = self.parse_pipe()?;
             self.expect(&Token::RParen)?;
+            self.scope.vars.truncate(saved_vars);
 
             Ok(Expr::Reduce {
                 source: Box::new(source),
@@ -2595,11 +2608,13 @@ impl Parser {
             self.expect(&Token::LParen)?;
             let init = self.parse_pipe()?;
             self.expect(&Token::Semicolon)?;
+            let saved_vars = self.scope.vars.len();
             let allocs = self.alloc_pattern_vars(&pattern);
             let tmp_var = self.scope.alloc_var("__reduce_item__");
             let acc_idx = self.scope.alloc_var("__acc__");
             let update_raw = self.parse_pipe()?;
             self.expect(&Token::RParen)?;
+            self.scope.vars.truncate(saved_vars);
 
             let update = self.build_binding(
                 Expr::LoadVar { var_index: tmp_var },
@@ -2635,6 +2650,9 @@ impl Parser {
             self.expect(&Token::LParen)?;
             let init = self.parse_pipe()?;
             self.expect(&Token::Semicolon)?;
+            // Snapshot scope so a same-name `$x` shadow doesn't leak after
+            // this foreach expression closes (#499).
+            let saved_vars = self.scope.vars.len();
             let var_idx = self.scope.alloc_var(&var_name);
             let acc_idx = self.scope.alloc_var("__acc__");
             let update = self.parse_pipe()?;
@@ -2644,6 +2662,7 @@ impl Parser {
                 None
             };
             self.expect(&Token::RParen)?;
+            self.scope.vars.truncate(saved_vars);
 
             Ok(Expr::Foreach {
                 source: Box::new(source),
@@ -2660,6 +2679,7 @@ impl Parser {
             self.expect(&Token::LParen)?;
             let init = self.parse_pipe()?;
             self.expect(&Token::Semicolon)?;
+            let saved_vars = self.scope.vars.len();
             let allocs = self.alloc_pattern_vars(&pattern);
             let tmp_var = self.scope.alloc_var("__foreach_item__");
             let acc_idx = self.scope.alloc_var("__acc__");
@@ -2670,6 +2690,7 @@ impl Parser {
                 None
             };
             self.expect(&Token::RParen)?;
+            self.scope.vars.truncate(saved_vars);
 
             // Wrap update in pattern binding
             let update = self.build_binding(
