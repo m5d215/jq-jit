@@ -8671,4 +8671,49 @@ true
 "abcabc"
 ["a","a"]
 
+# Issue #543: transpose on number uses jq's "Cannot iterate over" wording
+try transpose catch .
+1
+"Cannot iterate over number (1)"
+
+# Issue #543: transpose on null
+try transpose catch .
+null
+"Cannot iterate over null (null)"
+
+# Issue #543: transpose on string
+try transpose catch .
+"abc"
+"Cannot iterate over string (\"abc\")"
+
+# Issue #543: transpose on array of non-arrays surfaces row index error
+try transpose catch .
+[1,2]
+"Cannot index number with number"
+
+# Issue #543: transpose on array with mixed array+non-array elements
+try transpose catch .
+[[1,2], 3]
+"Cannot index number with number"
+
+# Issue #543: transpose on array of nulls treats them as empty rows
+transpose
+[null]
+[]
+
+# Issue #543: transpose accepts object input (iterates values)
+transpose
+{"a":[1,2],"b":[3,4]}
+[[1,3],[2,4]]
+
+# Issue #543: transpose on empty object → empty array
+transpose
+{}
+[]
+
+# Issue #543: legitimate array transpose still works
+transpose
+[[1,2,3],[4,5]]
+[[1,4],[2,5],[3,null]]
+
 
