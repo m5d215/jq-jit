@@ -2988,9 +2988,25 @@ pub fn eval(
                                     replacement = tv;
                                     Ok(true)
                                 })?;
+                                // jq's sub/gsub concatenates the replacement
+                                // into the running string via `+`. String
+                                // works as expected; null is the additive
+                                // identity (drops the match); other types
+                                // surface jq's standard addition error
+                                // referencing the partial result built so
+                                // far (#545). The previous `.to_string()`
+                                // catch-all silently coerced non-strings.
                                 match &replacement {
                                     Value::Str(s) => result.push_str(s),
-                                    other => result.push_str(&other.to_string()),
+                                    Value::Null => {},
+                                    other => {
+                                        let partial = Value::from_string(result);
+                                        bail!(
+                                            "{} and {} cannot be added",
+                                            crate::runtime::errdesc_pub(&partial),
+                                            crate::runtime::errdesc_pub(other),
+                                        );
+                                    }
                                 }
                             }
                         }
