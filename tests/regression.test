@@ -7928,3 +7928,33 @@ null
 null
 7
 3
+
+# Issue #503: range with float-literal start preserves repr on first yield
+[range(0.0; 3)]
+null
+[0.0,1,2]
+
+# Issue #503: explicit step preserves first-only repr
+[range(0.0; 1.0; 0.25)]
+null
+[0.0,0.25,0.5,0.75]
+
+# Issue #503: negative step preserves first-only repr
+[range(3.0; 0; -1)]
+null
+[3.0,2,1]
+
+# Issue #503: from a variable that holds a float-repr value
+1.0 as $x | [range($x; 4)]
+null
+[1.0,2,3]
+
+# Issue #503: empty range yields nothing (no spurious 0.0 emission)
+[range(5.0; 1)]
+null
+[]
+
+# Issue #503: integer literal still renders as integer
+[range(0; 3)]
+null
+[0,1,2]
