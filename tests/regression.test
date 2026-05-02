@@ -8837,3 +8837,33 @@ getpath([[]])
 try (getpath([[1,2]])) catch .
 "abc"
 "Cannot index string with array"
+
+# Issue #552: .a |= (.[]?) on object whose .a is a scalar deletes .a
+.a |= (.[]?)
+{"a":1,"b":2}
+{"b":2}
+
+# Issue #552: .a |= (.[]?) when .a is iterable takes first element
+.a |= (.[]?)
+{"a":[1,2,3]}
+{"a":1}
+
+# Issue #552: .a |= range(0;0) (empty generator) deletes .a
+.a |= range(0;0)
+{"a":1,"b":2}
+{"b":2}
+
+# Issue #552: .a |= (false | select(.)) (empty via select) deletes .a
+.a |= (false | select(.))
+{"a":1,"b":2}
+{"b":2}
+
+# Issue #552: .a |= (.[]?, 99) takes first non-empty value (preserves #208)
+.a |= (.[]?, 99)
+{"a":1,"b":2}
+{"a":99,"b":2}
+
+# Issue #552: literal empty path |= empty still works (interpreter rewrite, #155)
+.a |= empty
+{"a":1,"b":2}
+{"b":2}

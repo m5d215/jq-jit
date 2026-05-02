@@ -2816,6 +2816,34 @@ impl Flattener {
                         s.emit(JitOp::Label { id: after_lbl });
                     });
                     self.emit(JitOp::Drop { slot: old_val });
+                    if ok {
+                        // Empty closure → del(path) per jq's `path |= F`
+                        // semantics. Without this, `.a |= (.[]?)` on a scalar
+                        // `.a` value silently produced zero outputs because
+                        // the loop body above never ran. The literal-empty
+                        // case is rewritten to `del(path)` upstream by
+                        // simplify_expr (#155), but any runtime-empty
+                        // generator hits this path. See #552.
+                        let del_lbl = self.alloc_label();
+                        let end_lbl = self.alloc_label();
+                        self.emit(JitOp::BranchOnVar { var: first_var, nonzero_label: end_lbl, zero_label: del_lbl });
+                        self.emit(JitOp::Label { id: del_lbl });
+                        let path_for_del = self.alloc_slot();
+                        self.emit(JitOp::Clone { dst: path_for_del, src: path_arr });
+                        self.emit(JitOp::CollectBegin);
+                        self.emit(JitOp::CollectPush { src: path_for_del });
+                        let paths_arr = self.alloc_slot();
+                        self.emit(JitOp::CollectFinish { dst: paths_arr });
+                        let inp_for_del = self.alloc_slot();
+                        self.emit(JitOp::Clone { dst: inp_for_del, src: input_slot });
+                        let del_out = self.alloc_slot();
+                        self.emit_propagating(JitOp::CallBuiltin { dst: del_out, name: "delpaths".to_string(), args: vec![inp_for_del, paths_arr] });
+                        self.emit(JitOp::Drop { slot: inp_for_del });
+                        self.emit(JitOp::Drop { slot: paths_arr });
+                        self.emit_yield(del_out);
+                        self.emit(JitOp::Drop { slot: del_out });
+                        self.emit(JitOp::Label { id: end_lbl });
+                    }
                     self.emit(JitOp::Drop { slot: path_arr });
                     return ok;
                 }
