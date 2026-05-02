@@ -6740,3 +6740,16 @@ null
 0e0
 null
 0
+
+# Issue #446: tojson on a string containing 0x7F (DEL) escapes it as
+# ``, matching jq. Without this the byte was passed through raw,
+# producing valid JSON but a stream that didn't match jq byte-for-byte.
+"" | tojson
+null
+"\"\\u007f\""
+
+# Issue #446: identity output also escapes 0x7F (the whole-file
+# passthrough fast path now bails when the input contains DEL).
+. | length
+""
+1
