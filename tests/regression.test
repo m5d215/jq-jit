@@ -7648,3 +7648,53 @@ INDEX(.)
 [builtins[]] | map(select(test("^INDEX"))) | sort
 null
 ["INDEX/1","INDEX/2"]
+
+# Issue #465: errdesc truncates strings at 14 bytes (11 source + ...)
+try (. + 1) catch .
+"abcdefghijklmno"
+"string (\"abcdefghij...) and number (1) cannot be added"
+
+# Issue #465: 14-byte string is exactly at threshold (no truncation)
+try (. + 1) catch .
+"abcdefghijkl"
+"string (\"abcdefghijkl\") and number (1) cannot be added"
+
+# Issue #465: 15-byte string triggers truncation
+try (. + 1) catch .
+"abcdefghijklm"
+"string (\"abcdefghij...) and number (1) cannot be added"
+
+# Issue #465: errdesc truncates arrays
+try (. + 1) catch .
+[1,2,3,4,5,6,7,8,9,10]
+"array ([1,2,3,4,5,...) and number (1) cannot be added"
+
+# Issue #465: errdesc truncates objects
+try (. + 1) catch .
+{"a":1,"b":2,"c":3,"d":4,"e":5}
+"object ({\"a\":1,\"b\":...) and number (1) cannot be added"
+
+# Issue #465: errdesc truncates long numbers
+try (. + "x") catch .
+123456789012345
+"number (12345678901...) and string (\"x\") cannot be added"
+
+# Issue #465: short strings unchanged
+try (. + 1) catch .
+"abc"
+"string (\"abc\") and number (1) cannot be added"
+
+# Issue #465: multibyte truncation backs up to UTF-8 boundary
+try (. + 1) catch .
+"xxxx☆☆☆☆☆☆"
+"string (\"xxxx☆☆...) and number (1) cannot be added"
+
+# Issue #465: all-multibyte truncation
+try (. + 1) catch .
+"☆☆☆☆☆☆☆☆☆☆☆☆"
+"string (\"☆☆☆...) and number (1) cannot be added"
+
+# Issue #465: 2-byte multibyte (é) truncation
+try (. + 1) catch .
+"éééééééééééééééé"
+"string (\"ééééé...) and number (1) cannot be added"
