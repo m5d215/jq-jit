@@ -8433,3 +8433,25 @@ null
 [range(0; 3)]
 null
 [0,1,2]
+
+# Issue #529: lgamma_r(0) returns sign=1 (jq's glibc convention) not Apple's 0
+lgamma_r
+0
+[1.7976931348623157e+308,1]
+
+# Issue #529: lgamma_r on regular positive value still works.
+# Pick an exactly-representable input/output pair to avoid the
+# Apple-libm vs glibc 1-ULP drift that hit `lgamma_r(0.5)` in CI.
+lgamma_r
+1
+[0,1]
+
+# Issue #529: lgamma_r on negative-fractional preserves sign=-1
+lgamma_r
+-0.5
+[1.2655121234846454,-1]
+
+# Issue #529: lgamma_r on negative integer (also a pole) still returns sign=1
+lgamma_r
+-1
+[1.7976931348623157e+308,1]
