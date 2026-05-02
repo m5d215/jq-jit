@@ -7273,3 +7273,83 @@ null
 try ([1,2,3] | .[[1]] |= "x") catch .
 null
 "Cannot update field at array index of array"
+
+# Issue #461: test rejects non-string non-array pattern with type-only wording
+"abc" | try test(123) catch .
+null
+"number not a string or array"
+
+# Issue #461: test rejects object pattern
+"abc" | try test({}) catch .
+null
+"object not a string or array"
+
+# Issue #461: test rejects null pattern
+"abc" | try test(null) catch .
+null
+"null not a string or array"
+
+# Issue #461: test array-form pattern uses errdesc on the bad inner element
+"abc" | try test([1]) catch .
+null
+"number (1) is not a string"
+
+# Issue #461: test array-form pattern errors on empty array
+"abc" | try test([]) catch .
+null
+"array not a string or array"
+
+# Issue #461: test array-form pattern works
+"abc" | test(["abc"])
+null
+true
+
+# Issue #461: test array-form pattern with flags
+"ABC" | test(["abc","i"])
+null
+true
+
+# Issue #461: match rejects non-string non-array
+"abc" | try match(123) catch .
+null
+"number not a string or array"
+
+# Issue #461: match array-form pattern works
+"abc" | match(["abc"])
+null
+{"offset":0,"length":3,"string":"abc","captures":[]}
+
+# Issue #461: capture rejects non-string non-array
+"abc" | try capture(123) catch .
+null
+"number not a string or array"
+
+# Issue #461: scan rejects non-string with errdesc wording
+"abc" | try scan(123) catch .
+null
+"number (123) is not a string"
+
+# Issue #461: sub rejects non-string pattern with errdesc
+"abc" | try sub(123; "x") catch .
+null
+"number (123) is not a string"
+
+# Issue #461: gsub rejects non-string pattern with errdesc
+"abc" | try gsub(123; "x") catch .
+null
+"number (123) is not a string"
+
+# Issue #461: splits rejects non-string pattern with errdesc
+"abc" | try splits(123) catch .
+null
+"number (123) is not a string"
+
+# Issue #461: explicit non-string flags arg rejected with errdesc
+"abc" | try test("a"; 123) catch .
+null
+"number (123) is not a string"
+
+# Issue #461: scan with happy-path pattern still works
+"abc" | scan("a")
+null
+"a"

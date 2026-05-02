@@ -148,16 +148,26 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "split" if args.len() <= 2 => binary_arg(args, rt_split),
         "split" => {
             // split(re; flags) — regex split
-            let flags = &args[2];
-            let re = &args[1];
-            rt_regex_split(&args[0], re, flags)
+            let pat_str = coerce_regex_pat_str(&args[1])?;
+            let (pat, _) = apply_regex_flags(&pat_str, &args[2])?;
+            rt_regex_split(&args[0], &Value::from_string(pat), &Value::Null)
         }
         "join" => binary_arg(args, rt_join),
         "index" | "rindex" => binary_arg(args, |a, b| rt_str_index(a, b, name == "rindex")),
         "indices" | "rindices" => binary_arg(args, rt_indices),
         "test" => {
             if args.len() >= 3 {
-                let (pat, _) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2])?;
+                // 1-arg form is the only one that accepts array patterns;
+                // we infer it from a Null flags arg (parser default). See
+                // #461 for the heuristic.
+                let allow_array = matches!(&args[2], Value::Null);
+                let (pat_str, arr_flags) = coerce_regex_pat_or_array(&args[1], allow_array)?;
+                let combined = if matches!(&args[2], Value::Null) {
+                    Value::from_string(arr_flags)
+                } else {
+                    args[2].clone()
+                };
+                let (pat, _) = apply_regex_flags(&pat_str, &combined)?;
                 rt_test(&args[0], &Value::from_string(pat))
             } else {
                 binary_arg(args, rt_test)
@@ -165,7 +175,14 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         }
         "match" => {
             if args.len() >= 3 {
-                let (pat, global) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2])?;
+                let allow_array = matches!(&args[2], Value::Null);
+                let (pat_str, arr_flags) = coerce_regex_pat_or_array(&args[1], allow_array)?;
+                let combined = if matches!(&args[2], Value::Null) {
+                    Value::from_string(arr_flags)
+                } else {
+                    args[2].clone()
+                };
+                let (pat, global) = apply_regex_flags(&pat_str, &combined)?;
                 let re = Value::from_string(pat);
                 if global {
                     rt_match_global(&args[0], &re)
@@ -178,7 +195,14 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         }
         "capture" => {
             if args.len() >= 3 {
-                let (pat, global) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2])?;
+                let allow_array = matches!(&args[2], Value::Null);
+                let (pat_str, arr_flags) = coerce_regex_pat_or_array(&args[1], allow_array)?;
+                let combined = if matches!(&args[2], Value::Null) {
+                    Value::from_string(arr_flags)
+                } else {
+                    args[2].clone()
+                };
+                let (pat, global) = apply_regex_flags(&pat_str, &combined)?;
                 let re = Value::from_string(pat);
                 if global {
                     rt_capture_global(&args[0], &re)
@@ -191,7 +215,8 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         }
         "scan" => {
             if args.len() >= 3 {
-                let (pat, _) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[2])?;
+                let pat_str = coerce_regex_pat_str(&args[1])?;
+                let (pat, _) = apply_regex_flags(&pat_str, &args[2])?;
                 rt_scan(&args[0], &Value::from_string(pat))
             } else {
                 binary_arg(args, rt_scan)
@@ -200,7 +225,8 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "sub" | "gsub" => {
             if args.len() >= 4 {
                 // sub/gsub with flags: input, regex, replacement, flags
-                let (pat, _) = apply_regex_flags(args[1].as_str().unwrap_or(""), &args[3])?;
+                let pat_str = coerce_regex_pat_str(&args[1])?;
+                let (pat, _) = apply_regex_flags(&pat_str, &args[3])?;
                 rt_sub_gsub(&args[0], &Value::from_string(pat), &args[2], name == "gsub")
             } else if args.len() >= 3 {
                 rt_sub_gsub(&args[0], &args[1], &args[2], name == "gsub")
@@ -2554,10 +2580,49 @@ fn next_char_boundary(s: &str, pos: usize) -> usize {
 
 /// Parse jq regex flags string and return (pattern_with_inline_flags, is_global).
 /// Supported flags: i (case-insensitive), x (extended), s (dotall/single-line), g (global).
+/// Coerce a regex pattern arg for builtins that accept either a plain
+/// string OR a `[pattern, flags?]` array (test, match, capture). Mirrors
+/// jq's wording for invalid types (#461). The `allow_array` flag is true
+/// only for the 1-arg form (test(re)) — the 2-arg form (test(re; flags))
+/// rejects array patterns, since jq internally wraps the args into
+/// `[re, flags]` before calling _match_impl.
+fn coerce_regex_pat_or_array(re: &Value, allow_array: bool) -> Result<(String, String)> {
+    match re {
+        Value::Str(s) => Ok((s.as_str().to_string(), String::new())),
+        Value::Arr(a) if allow_array => {
+            let pat = match a.first() {
+                Some(Value::Str(s)) => s.as_str().to_string(),
+                Some(other) => bail!("{} is not a string", errdesc(other)),
+                None => bail!("array not a string or array"),
+            };
+            let flags = match a.get(1) {
+                Some(Value::Str(s)) => s.as_str().to_string(),
+                Some(Value::Null) | None => String::new(),
+                Some(other) => bail!("{} is not a string", errdesc(other)),
+            };
+            Ok((pat, flags))
+        }
+        Value::Arr(_) => bail!("{} is not a string", errdesc(re)),
+        _ => bail!("{} not a string or array", re.type_name()),
+    }
+}
+
+/// Coerce a regex pattern arg for builtins that require a plain string
+/// (scan, sub, gsub, splits). jq emits errdesc-style wording (#461).
+fn coerce_regex_pat_str(re: &Value) -> Result<String> {
+    match re {
+        Value::Str(s) => Ok(s.as_str().to_string()),
+        _ => bail!("{} is not a string", errdesc(re)),
+    }
+}
+
 fn apply_regex_flags(pattern: &str, flags: &Value) -> Result<(String, bool)> {
     let flags_str = match flags {
         Value::Str(s) => s.as_str(),
-        _ => return Ok((pattern.to_string(), false)),
+        Value::Null => return Ok((pattern.to_string(), false)),
+        // jq rejects non-string non-null flags with the standard errdesc
+        // wording (#461).
+        _ => bail!("{} is not a string", errdesc(flags)),
     };
     // jq accepts g, i, l, m, n, p, s, x. Any other character — even mixed in
     // with valid ones — rejects the whole modifier string.
