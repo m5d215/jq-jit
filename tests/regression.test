@@ -6488,3 +6488,47 @@ null
 [1,true,"x",false] | join(null)
 null
 "1truexfalse"
+
+# Issue #434: path(null) on null input yields [], not "Invalid path expression"
+[path(null)]
+null
+[[]]
+
+# Issue #434: same for true and false literals when they match input
+[path(true)]
+true
+[[]]
+
+[path(false)]
+false
+[[]]
+
+# Issue #434: composite expression yielding null works on null input (covers
+# the `path(.a // null)` idiom for marking the absence of a key as a path).
+[path(. // null)]
+null
+[[]]
+
+# Issue #434: if-then-else branch yielding null literal counts as an identity
+# path on null input.
+[path(if true then null else . end)]
+null
+[[]]
+
+# Issue #434: comma streams two null-paths through the same identity rule.
+[path(null, null)]
+null
+[[],[]]
+
+# Issue #434: error path still fires when the literal does not equal the
+# input — wrap with `?` so the harness pins the no-output behaviour without
+# inspecting stderr.
+[path(true)?]
+null
+[]
+
+# Issue #434: same — non-null/true/false literals never satisfy the rule even
+# when their value equals the input. `?` masks the error to empty.
+[path(5)?]
+5
+[]
