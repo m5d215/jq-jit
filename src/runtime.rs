@@ -531,14 +531,24 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
 pub fn errdesc_pub(v: &Value) -> String { errdesc(v) }
 
 fn errdesc(v: &Value) -> String {
-    // For numbers, use Rust's decimal Display (not scientific notation)
-    // so error messages show "12345678901234568000000000..." like jq does.
+    // For numbers, prefer the canonical form of the original repr (so
+    // `1.0` stays `"1.0"`, `1e30` becomes `"1E+30"` matching jq's decnum
+    // output) — but only when the repr round-trips exactly through f64.
+    // For repr that can't round-trip (e.g. 25+ digit literals) and for
+    // computed values without a repr, fall back to Rust's decimal Display
+    // so huge magnitudes show "12345678901234568000000000..." like jq's
+    // non-decnum form does.
     let json = match v {
-        Value::Num(n, _) => {
+        Value::Num(n, NumRepr(repr)) => {
             if n.is_nan() { "null".to_string() }
             else if n.is_infinite() {
                 if n.is_sign_positive() { "1.7976931348623157e+308".to_string() }
                 else { "-1.7976931348623157e+308".to_string() }
+            } else if let Some(canon) = repr.as_ref()
+                .filter(|r| crate::value::is_valid_json_number(r) && crate::value::repr_is_exact_for_f64(r, *n))
+                .map(|r| crate::value::canonical_repr_bytes(r).into_owned())
+            {
+                canon
             } else if *n == 0.0 {
                 if n.is_sign_negative() { "-0".to_string() } else { "0".to_string() }
             } else if *n == n.trunc() && n.abs() < 1e16 {
