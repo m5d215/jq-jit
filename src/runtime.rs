@@ -2238,6 +2238,29 @@ pub fn rt_getpath(v: &Value, path: &Value) -> Result<Value> {
                         let actual = if idx < 0 { (a.len() as i64 + idx) as usize } else { idx as usize };
                         current = a.get(actual).cloned().unwrap_or(Value::Null);
                     }
+                    // Slice path element `{start: N, end: M}`. Without this,
+                    // `.[N:M] |= f` would lose the LHS value (#535) — eval's
+                    // Update branch calls `rt_getpath` to fetch the current
+                    // slice value before applying the update closure, and
+                    // bailing here means the closure runs on `null` instead.
+                    (Value::Arr(a), Value::Obj(ObjInner(slice_spec)))
+                        if slice_spec.contains_key("start") && slice_spec.contains_key("end") =>
+                    {
+                        let len = a.len() as i64;
+                        let (si, ei) = slice_indices(slice_spec, len);
+                        current = Value::Arr(Rc::new(a[si..ei].to_vec()));
+                    }
+                    (Value::Str(s), Value::Obj(ObjInner(slice_spec)))
+                        if slice_spec.contains_key("start") && slice_spec.contains_key("end") =>
+                    {
+                        // String slice indexes by UTF-8 code points, matching
+                        // `.[N:M]` semantics on strings.
+                        let chars: Vec<char> = s.chars().collect();
+                        let len = chars.len() as i64;
+                        let (si, ei) = slice_indices(slice_spec, len);
+                        let sliced: String = chars[si..ei].iter().collect();
+                        current = Value::from_string(sliced);
+                    }
                     // jq short-circuits getpath on null for string/number/object keys
                     // (matching `.[k]` on null), but still errors for null/bool/array keys.
                     (Value::Null, Value::Str(_)) | (Value::Null, Value::Num(_, _)) | (Value::Null, Value::Obj(_)) => {
@@ -2255,6 +2278,27 @@ pub fn rt_getpath(v: &Value, path: &Value) -> Result<Value> {
         }
         _ => bail!("Path must be specified as an array"),
     }
+}
+
+/// Resolve a `{start, end}` slice spec into normalised `(start, end)` byte/element
+/// indices for a sequence of length `len`. Mirrors `rt_setpath`'s slice arm and
+/// jq's `.[N:M]` semantics: missing/null endpoints open to `(0, len)`, negative
+/// indices count from the end, and the result is clamped to `[0, len]`.
+fn slice_indices(slice_spec: &crate::value::ObjMap, len: i64) -> (usize, usize) {
+    let start = match slice_spec.get("start") {
+        Some(Value::Num(n, _)) => n.floor() as i64,
+        _ => 0,
+    };
+    let end = match slice_spec.get("end") {
+        Some(Value::Num(n, _)) => n.ceil() as i64,
+        Some(Value::Null) | None => len,
+        _ => 0,
+    };
+    let si_raw = if start < 0 { (len + start).max(0) } else { start.min(len) };
+    let ei_raw = if end < 0 { (len + end).max(0) } else { end.min(len) };
+    let si = si_raw as usize;
+    let ei = (ei_raw as usize).max(si);
+    (si, ei)
 }
 
 /// Match jq 1.8.1's "Cannot index X with Y" wording for the Y side.

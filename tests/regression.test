@@ -8521,3 +8521,43 @@ join(",")
 [1,2,3]
 "1,2,3"
 
+# Issue #535: slice += extends the slice value with the addend
+.[0:2] += [99]
+[1,2,3,4,5]
+[1,2,99,3,4,5]
+
+# Issue #535: slice |= function applies the closure to the current slice
+.[0:2] |= . + [99]
+[1,2,3,4,5]
+[1,2,99,3,4,5]
+
+# Issue #535: slice |= length errors with the array-only-into-slice wording
+try (.[0:2] |= length) catch .
+[1,2,3,4,5]
+"A slice of an array can only be assigned another array"
+
+# Issue #535: slice += on string surfaces jq's addition error
+try (.[0:2] += [99]) catch .
+"hello"
+"string (\"he\") and array ([99]) cannot be added"
+
+# Issue #535: slice |= reverse on inner range
+.[1:3] |= reverse
+[1,2,3,4,5]
+[1,3,2,4,5]
+
+# Issue #535: getpath with slice spec returns the slice
+getpath([{start:0,end:2}])
+[1,2,3,4,5]
+[1,2]
+
+# Issue #535: getpath with slice spec on string returns substring
+getpath([{start:0,end:2}])
+"hello"
+"he"
+
+# Issue #535: getpath with slice spec on null short-circuits
+getpath([{start:0,end:2}])
+null
+null
+
