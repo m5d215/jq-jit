@@ -681,14 +681,18 @@ fn expr_uses_outer_input(expr: &Expr) -> bool {
         | Expr::Alternative { primary: left, fallback: right }
         | Expr::Index { expr: left, key: right }
         | Expr::IndexOpt { expr: left, key: right }
-        | Expr::SetPath { path: left, value: right }
         | Expr::TryCatch { try_expr: left, catch_expr: right } => {
             expr_uses_outer_input(left) || expr_uses_outer_input(right)
         }
-        // Update/Assign: path_expr gets our input, update_expr gets path value
-        Expr::Update { path_expr, .. } | Expr::Assign { path_expr, .. } => {
-            expr_uses_outer_input(path_expr)
-        }
+        // GetPath/SetPath/DelPaths/Update/Assign always read `.` to produce
+        // their result, regardless of whether the path/value sub-expressions
+        // mention Input. The LetBinding fast path uses `expr_uses_outer_input`
+        // to decide whether the body still needs the bound input or whether it
+        // can run on `Value::Null` — saying "no" here for these forms made
+        // `. as $x | getpath(["a"])` quietly return `null` instead of the
+        // proper `Cannot index <type> with string "a"`. See #556.
+        Expr::GetPath { .. } | Expr::SetPath { .. } | Expr::DelPaths { .. }
+        | Expr::PathExpr { .. } | Expr::Update { .. } | Expr::Assign { .. } => true,
         Expr::IfThenElse { cond, then_branch, else_branch } => {
             expr_uses_outer_input(cond) || expr_uses_outer_input(then_branch) || expr_uses_outer_input(else_branch)
         }
@@ -699,8 +703,7 @@ fn expr_uses_outer_input(expr: &Expr) -> bool {
         | Expr::Recurse { input_expr }
         | Expr::Negate { operand: input_expr } | Expr::UnaryOp { operand: input_expr, .. }
         | Expr::Collect { generator: input_expr }
-        | Expr::PathExpr { expr: input_expr } | Expr::GetPath { path: input_expr }
-        | Expr::DelPaths { paths: input_expr } | Expr::Debug { expr: input_expr }
+        | Expr::Debug { expr: input_expr }
         | Expr::Stderr { expr: input_expr } | Expr::Format { expr: input_expr, .. } => {
             expr_uses_outer_input(input_expr)
         }

@@ -8897,3 +8897,33 @@ try (getpath([true])) catch .
 try (.a |= (1+.)) catch .
 0
 "Cannot index number with string \"a\""
+
+# Issue #556: . as $x | getpath(["a"]) lost outer input and silently returned null on number
+try (. as $x | getpath(["a"])) catch .
+0
+"Cannot index number with string \"a\""
+
+# Issue #556: . as $x | setpath(...) lost outer input and silently emitted modified-null
+try (. as $x | setpath(["a"]; 1)) catch .
+[1,2,3]
+"Cannot index array with string \"a\""
+
+# Issue #556: . as $x | delpaths(...) lost outer input and silently returned null
+try (. as $x | delpaths([["a"]])) catch .
+0
+"Cannot delete fields from number"
+
+# Issue #556: regression — body that genuinely doesn't use outer input still skips clone
+. as $x | 99
+{"a":1}
+99
+
+# Issue #556: setpath after let with object input still works
+. as $x | setpath(["b"]; 2)
+{"a":1}
+{"a":1,"b":2}
+
+# Issue #556: nested let with non-Input value still uses outer input via path expressions
+. as $x | (.a as $y | getpath(["b"]))
+{"a":1,"b":2}
+2
