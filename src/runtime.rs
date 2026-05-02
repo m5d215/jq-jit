@@ -2831,14 +2831,18 @@ pub fn sub_gsub_segments(input: &str, pattern: &str, flags: &Value, global: bool
 fn rt_gmtime(v: &Value) -> Result<Value> {
     match v {
         Value::Num(n, _) => {
-            let secs = *n as i64;
-            Ok(libc_gmtime(secs))
+            // jq preserves fractional seconds in tm_sec: trunc toward zero
+            // for the libc call, then add |n - trunc| (always non-negative)
+            // back. `(-1.5) | gmtime | .[5]` is `59.5`, not `58.5`. See #436.
+            let secs = n.trunc() as i64;
+            let frac = (n - n.trunc()).abs();
+            Ok(libc_gmtime(secs, frac))
         }
         _ => bail!("gmtime requires number"),
     }
 }
 
-fn libc_gmtime(secs: i64) -> Value {
+fn libc_gmtime(secs: i64, frac_sec: f64) -> Value {
     use libc::{gmtime_r, time_t, tm};
     let t = secs as time_t;
     let mut result: tm = unsafe { std::mem::zeroed() };
@@ -2853,7 +2857,7 @@ fn libc_gmtime(secs: i64) -> Value {
         Value::number(result.tm_mday as f64),
         Value::number(result.tm_hour as f64),
         Value::number(result.tm_min as f64),
-        Value::number(result.tm_sec as f64),
+        Value::number(result.tm_sec as f64 + frac_sec),
         Value::number(result.tm_wday as f64),
         Value::number(result.tm_yday as f64),
     ]))
@@ -2862,7 +2866,9 @@ fn libc_gmtime(secs: i64) -> Value {
 fn rt_localtime(v: &Value) -> Result<Value> {
     match v {
         Value::Num(n, _) => {
-            let secs = *n as i64;
+            // Same fractional-seconds preservation as gmtime (#436).
+            let secs = n.trunc() as i64;
+            let frac = (n - n.trunc()).abs();
             use libc::{localtime_r, time_t, tm};
             let t = secs as time_t;
             let mut result: tm = unsafe { std::mem::zeroed() };
@@ -2873,7 +2879,7 @@ fn rt_localtime(v: &Value) -> Result<Value> {
                 Value::number(result.tm_mday as f64),
                 Value::number(result.tm_hour as f64),
                 Value::number(result.tm_min as f64),
-                Value::number(result.tm_sec as f64),
+                Value::number(result.tm_sec as f64 + frac),
                 Value::number(result.tm_wday as f64),
                 Value::number(result.tm_yday as f64),
             ])))

@@ -6571,3 +6571,29 @@ delpaths([["a",1],["a",0]])
 delpaths([["a"],["a","b"]])
 {"a":{"b":1,"c":2},"d":3}
 {"d":3}
+
+# Issue #436: gmtime preserves fractional seconds in tm_sec (jq's behaviour)
+1700000000.5 | gmtime
+null
+[2023,10,14,22,13,20.5,2,317]
+
+# Issue #436: same for sub-second resolution at the start of an epoch second
+0.25 | gmtime | .[5]
+null
+0.25
+
+# Issue #436: integer epoch round-trips unchanged through the new code path
+1700000000 | gmtime
+null
+[2023,10,14,22,13,20,2,317]
+
+# Issue #436: negative-fractional epoch — jq truncates toward zero and adds
+# the absolute fractional offset, so `-1.5` yields sec=59.5 (not 58.5)
+-1.5 | gmtime | .[5]
+null
+59.5
+
+# Issue #436: mktime still drops fractional and round-trips as integer epoch
+1700000000.5 | gmtime | mktime
+null
+1700000000
