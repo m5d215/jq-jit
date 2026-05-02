@@ -7178,7 +7178,17 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                 }
             }
         }
-        // Fast path: getpath([path]) — inline path traversal
+        // Fast path: getpath([path]) — inline path traversal.
+        //
+        // Only the type-matched arms (Obj+Str, Arr+Num, Null+Str/Num/Obj) are
+        // safe to short-circuit here; for any other (current, key) combination
+        // jq raises "Cannot index <type> with <kind>", which the slow path
+        // (`rt_getpath`) reproduces. The earlier version returned Null for
+        // unmatched arms (treating "ok=false but current==Null" as success),
+        // which made callers like the JIT Update branch silently see Null at
+        // a path that should have errored — e.g. `.a |= error` on a number
+        // ran the closure with `null` instead of erroring at the path step.
+        // See #554.
         if name == "getpath" && args.len() == 2 {
             if let Value::Arr(path) = &args[1] {
                 let mut current = args[0].clone();
@@ -7196,10 +7206,10 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                         (Value::Null, Value::Str(_)) | (Value::Null, Value::Num(_, _)) | (Value::Null, Value::Obj(_)) => {
                             current = Value::Null;
                         }
-                        _ => { current = Value::Null; ok = false; break; }
+                        _ => { ok = false; break; }
                     }
                 }
-                if ok || matches!(current, Value::Null) {
+                if ok {
                     std::ptr::write(dst, current);
                     return 0;
                 }
