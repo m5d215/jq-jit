@@ -6619,3 +6619,35 @@ try .[:0] catch .
 .[:2]
 [1,2,3,4]
 [1,2]
+
+# Issue #444: split with a zero-width regex emits an empty match adjacent
+# to a non-empty one (jq's libonig behaviour). Without using
+# `jq_match_spans` here, Rust's `Regex::split` collapses them and the
+# array is one element short.
+"abc" | split("a*"; "")
+null
+["","","b","c",""]
+
+# Issue #444: same on `b*` (zero-width match falls between every pair of
+# consecutive characters)
+"abc" | split("b*"; "")
+null
+["","a","","c",""]
+
+# Issue #444: gsub with zero-width regex inserts the replacement at every
+# enumerated position, including the empty match right after a non-empty
+# match
+"abc" | gsub("a*"; "X")
+null
+"XXbXcX"
+
+# Issue #444: sub-only (non-global) keeps existing single-match behaviour
+"abc" | sub("a*"; "X")
+null
+"Xbc"
+
+# Issue #444: regression of the literal-separator path (zero-width fix
+# must not alter the simple split without flags)
+"a,b,c" | split(",")
+null
+["a","b","c"]
