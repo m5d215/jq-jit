@@ -7478,3 +7478,93 @@ null
 [3,1,2] | sort_by(.)
 null
 [1,2,3]
+
+# Issue #457: 1.0e-5 keeps the mantissa trailing zero through expansion
+1.0e-5
+null
+0.000010
+
+# Issue #457: 1.00e-5 keeps both mantissa zeros
+1.00e-5
+null
+0.0000100
+
+# Issue #457: 1.0e0 expands to 1.0 not 1
+1.0e0
+null
+1.0
+
+# Issue #457: 1.0e-1 keeps trailing zero
+1.0e-1
+null
+0.10
+
+# Issue #457: 1.0e-2 keeps trailing zero
+1.0e-2
+null
+0.010
+
+# Issue #457: 1.0e-3 keeps trailing zero
+1.0e-3
+null
+0.0010
+
+# Issue #457: scientific output preserves mantissa trailing zero
+1.0e10
+null
+1.0E+10
+
+# Issue #457: 1.00e10 keeps both zeros
+1.00e10
+null
+1.00E+10
+
+# Issue #457: 12.0e2 normalizes mantissa to 1.20E+3
+12.0e2
+null
+1.20E+3
+
+# Issue #457: 12.30e-3 keeps trailing zero through expansion
+12.30e-3
+null
+0.01230
+
+# Issue #457: 5.0e-4 keeps trailing zero
+5.0e-4
+null
+0.00050
+
+# Issue #457: 1.5e-5 (no trailing zero in source) stays as 0.000015
+1.5e-5
+null
+0.000015
+
+# Issue #457: negative number preserves trailing zero
+-1.0e-5
+null
+-0.000010
+
+# Issue #457: 1e-5 (no fractional in source) stays minimal
+1e-5
+null
+0.00001
+
+# Issue #457: 1e0 stays as integer
+1e0
+null
+1
+
+# Issue #457: 12.0e1 normalizes to 120 (no fractional)
+12.0e1
+null
+120
+
+# Issue #457: 12.34e2 expands to 1234
+12.34e2
+null
+1234
+
+# Issue #457: tojson preserves trailing zero
+1.0e-5 | tojson
+null
+"0.000010"

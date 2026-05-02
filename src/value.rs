@@ -5410,17 +5410,19 @@ pub fn normalize_jq_repr(repr: &str) -> Option<String> {
             for _ in 0..pad { s.push('0'); }
             return Some(format!("{}{}", sign, s));
         }
-        let frac = sig[int_len..].trim_end_matches('0');
+        // jq's decnum keeps the mantissa's trailing zeros through expansion
+        // (`1.0e0` → `1.0`, not `1`). Don't strip — preserve the original
+        // significand digit count. See #457.
+        let frac = &sig[int_len..];
         if frac.is_empty() {
             return Some(format!("{}{}", sign, &sig[..int_len]));
         }
         return Some(format!("{}{}.{}", sign, &sig[..int_len], frac));
     }
     let zeros = (-te - 1) as usize;
-    let frac = sig.trim_end_matches('0');
-    if frac.is_empty() {
-        return Some(format!("{}0", sign));
-    }
+    // Same trailing-zero preservation for negative-`te` expansion
+    // (`1.0e-5` → `0.000010`, not `0.00001`). See #457.
+    let frac = sig;
     let mut buf = String::with_capacity(zeros + frac.len() + 4);
     buf.push_str(sign);
     buf.push_str("0.");
@@ -5433,12 +5435,10 @@ fn format_canonical_mantissa(sig: &str) -> String {
     if sig.len() <= 1 {
         return sig.to_string();
     }
-    let frac = sig[1..].trim_end_matches('0');
-    if frac.is_empty() {
-        sig[..1].to_string()
-    } else {
-        format!("{}.{}", &sig[..1], frac)
-    }
+    // Preserve the mantissa's trailing zeros (`1.0e10` → `1.0E+10`,
+    // `1.00e10` → `1.00E+10`). See #457.
+    let frac = &sig[1..];
+    format!("{}.{}", &sig[..1], frac)
 }
 
 /// Format a number in jq's f64 dtoa scientific style: lowercase `e`, explicit

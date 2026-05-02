@@ -500,9 +500,11 @@ fn normalize_num_repr(s: &str) -> String {
         // Compute normalized exponent
         let new_exp = exp + (int_part.len() as i64) - 1 - (first_sig as i64);
 
-        // Build normalized mantissa from significant digits
+        // Build normalized mantissa from significant digits.
+        // jq's decnum keeps the literal mantissa's trailing zeros so
+        // `1.0e0` → `1.0`, `1.0e-5` → `0.000010`. Don't trim. See #457.
         let sig_digits: String = digits[first_sig..].iter().collect();
-        let sig_digits = sig_digits.trim_end_matches('0');
+        let sig_digits = sig_digits.as_str();
 
         let exp_sign = if new_exp >= 0 { "+" } else { "" };
         if sig_digits.len() <= 1 {
