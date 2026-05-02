@@ -1383,11 +1383,11 @@ fn rt_tonumber(v: &Value) -> Result<Value> {
         Value::Str(s) => {
             let s_ref: &str = s.as_ref();
             if s_ref.is_empty() {
-                bail!("Cannot convert empty string to number");
+                bail!("{} cannot be parsed as a number", errdesc(v));
             }
             // jq rejects leading/trailing whitespace
             if s_ref.as_bytes()[0].is_ascii_whitespace() || s_ref.as_bytes()[s_ref.len()-1].is_ascii_whitespace() {
-                bail!("Invalid numeric literal: {}", crate::value::value_to_json(v));
+                bail!("{} cannot be parsed as a number", errdesc(v));
             }
             // Strip leading '+' for compatibility with jq
             let parse_str = s_ref.strip_prefix('+').unwrap_or(s_ref);
@@ -1406,7 +1406,7 @@ fn rt_tonumber(v: &Value) -> Result<Value> {
                         Ok(Value::number(n))
                     }
                 }
-                Err(_) => bail!("Invalid numeric literal: {}", crate::value::value_to_json(v)),
+                Err(_) => bail!("{} cannot be parsed as a number", errdesc(v)),
             }
         }
         _ => bail!("{} cannot be parsed as a number", errdesc(v)),
