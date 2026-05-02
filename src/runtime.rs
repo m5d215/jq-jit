@@ -3212,9 +3212,13 @@ fn rt_localtime(v: &Value) -> Result<Value> {
 
 fn time_arr_to_tm(a: &[Value]) -> Result<libc::tm> {
     let get = |i: usize| -> f64 { a.get(i).and_then(|v| v.as_f64()).unwrap_or(0.0) };
-    // Validate that first element is a number
-    if !a.is_empty() {
-        if let Value::Str(_) = &a[0] {
+    // Reject any non-numeric element in the broken-down-time array.
+    // jq's mktime walks each field and bails the moment it sees a non-
+    // number (string, null, bool, etc.) with `mktime requires parsed
+    // datetime inputs`. Without this check `[null]`, `[1, "a"]`, etc.
+    // silently fed `0.0` into libc's timegm and emitted `-1` (#547).
+    for v in a {
+        if !matches!(v, Value::Num(_, _)) {
             bail!("mktime requires parsed datetime inputs");
         }
     }
@@ -3242,12 +3246,6 @@ fn time_arr_to_tm(a: &[Value]) -> Result<libc::tm> {
 
 fn rt_mktime(v: &Value) -> Result<Value> {
     match v {
-        Value::Arr(a) if a.len() >= 2 => {
-            let mut t = time_arr_to_tm(a)?;
-            // Use timegm for UTC
-            let result = unsafe { libc::timegm(&mut t) };
-            Ok(Value::number(result as f64))
-        }
         Value::Arr(a) if a.is_empty() => {
             // jq's mktime on `[]` falls through to the broken-down-time
             // validator and bails with "invalid gmtime representation"
@@ -3255,12 +3253,12 @@ fn rt_mktime(v: &Value) -> Result<Value> {
             bail!("invalid gmtime representation");
         }
         Value::Arr(a) => {
-            // Single-element array: jq still calls into the broken-down-
-            // time validator, which trips on the missing fields.
-            if let Value::Str(_) = &a[0] {
-                bail!("mktime requires parsed datetime inputs");
-            }
-            bail!("mktime requires array of time components");
+            // `time_arr_to_tm` validates that each element is numeric
+            // (#547); single-element arrays like `[2024]` are accepted as
+            // a year-only broken-down time, matching jq.
+            let mut t = time_arr_to_tm(a)?;
+            let result = unsafe { libc::timegm(&mut t) };
+            Ok(Value::number(result as f64))
         }
         _ => bail!("mktime requires array inputs"),
     }
