@@ -3407,8 +3407,8 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
                     Value::Null => {}
                     Value::True => buf.push_str("true"),
                     Value::False => buf.push_str("false"),
-                    Value::Num(n, _) => {
-                        crate::value::push_jq_number_str(&mut buf, *n);
+                    Value::Num(n, crate::value::NumRepr(repr)) => {
+                        crate::value::push_value_num_repr_str(&mut buf, *n, repr.as_ref());
                     }
                     // jq rejects arrays/objects as row elements (issue #79).
                     Value::Arr(_) | Value::Obj(_) => bail!(
@@ -3441,7 +3441,7 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
                     Value::Null => {}
                     Value::True => buf.push_str("true"),
                     Value::False => buf.push_str("false"),
-                    Value::Num(n, _) => crate::value::push_jq_number_str(&mut buf, *n),
+                    Value::Num(n, crate::value::NumRepr(repr)) => crate::value::push_value_num_repr_str(&mut buf, *n, repr.as_ref()),
                     // jq uses the same "csv row" wording for @tsv (issue #79).
                     Value::Arr(_) | Value::Obj(_) => bail!(
                         "{} ({}) is not valid in a csv row",
