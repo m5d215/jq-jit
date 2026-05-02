@@ -1242,10 +1242,10 @@ def inc(x): x |= .+1; inc(.[].a)
 [null,{"b":0},{"a":0},{"a":null},{"a":[0,1]},{"a":{"b":1}},{"a":[{}]},{"a":[{"c":3}]}]
 {"a":[{"b":5}]}
 {"b":0,"a":[{"b":5}]}
-"Cannot index number with number (0)"
+"Cannot index number with number"
 {"a":[{"b":5}]}
-"Cannot index number with string (\"b\")"
-"Cannot index object with number (0)"
+"Cannot index number with string \"b\""
+"Cannot index object with number"
 {"a":[{"b":5}]}
 {"a":[{"c":3,"b":5}]}
 
@@ -1430,7 +1430,7 @@ null
 # Try/catch and general `?` operator
 [.[]|try if . == 0 then error("foo") elif . == 1 then .a elif . == 2 then empty else . end catch .]
 [0,1,2,3]
-["foo","Cannot index number with string (\"a\")",3]
+["foo","Cannot index number with string \"a\"",3]
 
 [.[]|(.a, .a)?]
 [null,true,{"a":1}]
@@ -2380,7 +2380,7 @@ map(try implode catch .)
 
 try 0[implode] catch .
 []
-"Cannot index number with string (\"\")"
+"Cannot index number with string \"\""
 
 # walk
 walk(.)
@@ -2456,14 +2456,14 @@ null
 
 try ("foobar" | .[1.5]) catch .
 null
-"Cannot index string with number (1.5)"
+"Cannot index string with number"
 
 
 # setpath/2 does not leak the input after an invalid get #2970
 
 try ["ok", setpath([1]; 1)] catch ["ko", .]
 {"hi":"hello"}
-["ko","Cannot index object with number (1)"]
+["ko","Cannot index object with number"]
 
 try fromjson catch .
 "{'a': 123}"

@@ -2169,11 +2169,13 @@ pub fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
                     arr[idx] = new_inner;
                     Ok(Value::Arr(Rc::new(arr)))
                 }
-                (Value::Obj(_), Value::Num(n, _)) => {
-                    bail!("Cannot index object with number ({})", crate::value::format_jq_number(*n));
+                (Value::Obj(_), Value::Num(_, _)) => {
+                    // jq: number keys omit the value (#440).
+                    bail!("Cannot index object with number");
                 }
                 (Value::Arr(_), Value::Str(k)) => {
-                    bail!("Cannot index array with string (\"{}\")", k);
+                    // jq: string keys are quoted without parens (#440).
+                    bail!("Cannot index array with string \"{}\"", k);
                 }
                 // Slice assignment: path element is {start: N, end: N}
                 (_, Value::Obj(ObjInner(slice_spec))) if slice_spec.contains_key("start") && slice_spec.contains_key("end") => {
@@ -2221,11 +2223,11 @@ pub fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
                 (_, Value::Arr(_)) => {
                     bail!("Cannot update field at array index of array");
                 }
-                (Value::Num(_, _), Value::Num(n, _)) => {
-                    bail!("Cannot index number with number ({})", crate::value::format_jq_number(*n));
+                (Value::Num(_, _), Value::Num(_, _)) => {
+                    bail!("Cannot index number with number");
                 }
                 (Value::Num(_, _), Value::Str(k)) => {
-                    bail!("Cannot index number with string (\"{}\")", k);
+                    bail!("Cannot index number with string \"{}\"", k);
                 }
                 _ => bail!("Cannot set path"),
             }
@@ -2298,7 +2300,9 @@ pub fn rt_setpath_mut(v: &mut Value, path: &[Value], val: Value) -> Result<()> {
                 }
                 Ok(())
             } else {
-                bail!("Cannot index {} with number ({})", v.type_name(), crate::value::format_jq_number(*n));
+                // jq: number keys omit the value (#440).
+                let _ = n;
+                bail!("Cannot index {} with number", v.type_name());
             }
         }
         Value::Arr(_) => {

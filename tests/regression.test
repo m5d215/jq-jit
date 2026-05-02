@@ -6651,3 +6651,31 @@ null
 "a,b,c" | split(",")
 null
 ["a","b","c"]
+
+# Issue #440: indexing error wording — string keys quoted without parens,
+# number keys omit the value entirely. Matches jq 1.8.1's actual format
+# (which the older jq.test corpus was lagging behind).
+try .a catch .
+false
+"Cannot index boolean with string \"a\""
+
+# Issue #440: same for numeric input
+try .a catch .
+5
+"Cannot index number with string \"a\""
+
+# Issue #440: number keys never include the value, even on string targets
+try .[1] catch .
+"hello"
+"Cannot index string with number"
+
+# Issue #440: same on numeric/boolean targets
+try .[1] catch .
+true
+"Cannot index boolean with number"
+
+# Issue #440: setpath shares the same wording (covers the runtime.rs site
+# the field-access fix doesn't reach)
+try setpath([1]; 1) catch .
+{"hi":"hello"}
+"Cannot index object with number"
