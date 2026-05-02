@@ -8233,3 +8233,58 @@ null
 [{"key":"a","value":1}] | from_entries
 null
 {"a":1}
+
+# Issue #519: all with empty predicate is vacuously true
+[1,2,3] | all(empty)
+null
+true
+
+# Issue #519: any with empty predicate is vacuously false
+[1,2,3] | any(empty)
+null
+false
+
+# Issue #519: all with multi-valued predicate sees a falsy value
+[1,2] | all((true, false))
+null
+false
+
+# Issue #519: any with multi-valued predicate sees a truthy value
+[1,2] | any((true, false))
+null
+true
+
+# Issue #519: all with `?` predicate (0-or-1 valued) — empty branches vacuous
+[1,2,3] | all(.x?)
+null
+true
+
+# Issue #519: any with `?` predicate sees the truthy hit
+[1,{"x":1}] | any(.x?)
+null
+true
+
+# Issue #519: any with `?` predicate stays false when no element matches
+[1,2,3] | any(.x?)
+null
+false
+
+# Issue #519: all on `[]` is vacuously true (existing behaviour preserved)
+[] | all(true)
+null
+true
+
+# Issue #519: any on `[]` is vacuously false (existing behaviour preserved)
+[] | any(true)
+null
+false
+
+# Issue #519: all((true, true)) on every element succeeds
+[1,2] | all((true, true))
+null
+true
+
+# Issue #519: any((false, false)) finds no truthy → false
+[1,2] | any((false, false))
+null
+false
