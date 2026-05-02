@@ -2930,14 +2930,21 @@ impl Flattener {
             }
 
             Expr::Recurse { input_expr } => {
-                if !is_scalar(input_expr) { return false; }
-                // Recurse: yield input, then recurse into each child
-                // Collect all recursive outputs via runtime, then iterate
-                let val = self.flatten_scalar(input_expr, input_slot);
+                // Only the descent-only 0-arg form (`recurse` / `..`) is
+                // safe for the recurse_collect fast path — the parser
+                // shapes that as `Recurse { EachOpt(Input) }`. Custom
+                // step expressions like `recurse(.)` (infinite) or
+                // `recurse(f)` need the eval-side generic loop. See #497.
+                let is_default_descent = matches!(
+                    input_expr.as_ref(),
+                    Expr::EachOpt { input_expr: inner } if matches!(**inner, Expr::Input)
+                );
+                if !is_default_descent { return false; }
+                // Seed is the pipeline input (jq's `def recurse: ., (.[]? | recurse);`).
+                let val = self.flatten_scalar(&Expr::Input, input_slot);
                 let arr = self.alloc_slot();
                 self.emit(JitOp::CallBuiltin { dst: arr, name: "recurse_collect".to_string(), args: vec![val] });
                 self.emit(JitOp::Drop { slot: val });
-                // Iterate the collected array, yielding each element
                 self.flatten_each_with_action(arr, false, &|s, elem| {
                     s.emit_yield(elem);
                 });
@@ -3015,9 +3022,15 @@ impl Flattener {
                     if !l_ok { return false; }
                     return self.flatten_gen(&Expr::PathExpr { expr: right.clone() }, input_slot);
                 }
-                // Native path(recurse) — bypass eval engine, generate paths directly
+                // Native path(recurse) — bypass eval engine, generate paths
+                // directly. Only the descent-only 0-arg form qualifies; the
+                // parser shapes that as `Recurse { EachOpt(Input) }`. See #497.
                 if let Expr::Recurse { input_expr } = path_expr.as_ref() {
-                    if matches!(input_expr.as_ref(), Expr::Input) {
+                    let is_default_descent = matches!(
+                        input_expr.as_ref(),
+                        Expr::EachOpt { input_expr: inner } if matches!(**inner, Expr::Input)
+                    );
+                    if is_default_descent {
                         let inp = self.alloc_slot();
                         self.emit(JitOp::Clone { dst: inp, src: input_slot });
                         let arr = self.alloc_slot();
@@ -3031,10 +3044,14 @@ impl Flattener {
                     }
                 }
                 // Native paths(f) — path(recurse | if f then . else empty end)
-                // DFS with filter applied at each node
+                // DFS with filter applied at each node. The descent shape
+                // is `Recurse { EachOpt(Input) }` after #497.
                 if let Expr::Pipe { left, right } = path_expr.as_ref() {
                     if let Expr::Recurse { input_expr } = left.as_ref() {
-                        if matches!(input_expr.as_ref(), Expr::Input) {
+                        if matches!(
+                            input_expr.as_ref(),
+                            Expr::EachOpt { input_expr: inner } if matches!(**inner, Expr::Input)
+                        ) {
                             if let Expr::IfThenElse { cond, then_branch, else_branch } = right.as_ref() {
                                 if matches!(then_branch.as_ref(), Expr::Input) && matches!(else_branch.as_ref(), Expr::Empty) {
                                     // This is paths(f) where f = cond

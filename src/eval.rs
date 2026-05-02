@@ -3261,8 +3261,12 @@ pub fn eval_index(base: &Value, key: &Value, optional: bool) -> std::result::Res
 }
 
 fn eval_recurse_expr(step: &Expr, val: &Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
-    if matches!(step, Expr::Input) {
-        // Default recurse (.[]): recursive descent into arrays/objects
+    // The 0-arg `recurse` and `..` are desugared by the parser to
+    // `recurse(.[]?)` — i.e. `Expr::EachOpt { Expr::Input }`. Take the
+    // descent fast path only for that exact shape; user-written
+    // `recurse(.)` carries `Expr::Input` and should fall through to the
+    // generic loop (which never terminates, matching jq). See #497.
+    if matches!(step, Expr::EachOpt { input_expr } if matches!(**input_expr, Expr::Input)) {
         eval_recurse_default(val, cb)
     } else {
         // Custom step: use explicit stack to avoid stack overflow.
