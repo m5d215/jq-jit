@@ -588,24 +588,16 @@ fn errdesc(v: &Value) -> String {
     };
     let tn = v.type_name();
     let jlen = json.len();
-    if json.starts_with('"') {
-        // String: threshold 28 bytes of JSON (including quotes)
-        if jlen > 28 {
-            let mut end = 25.min(jlen);
-            while end > 0 && !json.is_char_boundary(end) { end -= 1; }
-            format!("{} ({}...\")", tn, &json[..end])
-        } else {
-            format!("{} ({})", tn, json)
-        }
+    // jq 1.8.1 truncates errdesc previews when the JSON repr is > 14 bytes:
+    // it takes the first 11 bytes (backed up to a UTF-8 char boundary) and
+    // appends `...`. This matches both strings (no closing `"`) and other
+    // types (`array (...`, `object (...`, `number (...`). See #465.
+    if jlen > 14 {
+        let mut end = 11.min(jlen);
+        while end > 0 && !json.is_char_boundary(end) { end -= 1; }
+        format!("{} ({}...)", tn, &json[..end])
     } else {
-        // Non-string: threshold 28 bytes
-        if jlen > 28 {
-            let mut end = 26.min(jlen);
-            while end > 0 && !json.is_char_boundary(end) { end -= 1; }
-            format!("{} ({}...)", tn, &json[..end])
-        } else {
-            format!("{} ({})", tn, json)
-        }
+        format!("{} ({})", tn, json)
     }
 }
 

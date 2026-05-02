@@ -1966,22 +1966,22 @@ true
 
 try -. catch .
 "very-long-long-long-long-string"
-"string (\"very-long-long-long-long...\") cannot be negated"
+"string (\"very-long-...) cannot be negated"
 
 try (.-.) catch .
 "very-long-long-long-long-string"
-"string (\"very-long-long-long-long...\") and string (\"very-long-long-long-long...\") cannot be subtracted"
+"string (\"very-long-...) and string (\"very-long-...) cannot be subtracted"
 
 "x" * range(0; 12; 2) + "☆" * 8 | try -. catch .
 null
-"string (\"☆☆☆☆☆☆☆☆\") cannot be negated"
-"string (\"xx☆☆☆☆☆☆☆☆\") cannot be negated"
-"string (\"xxxx☆☆☆☆☆☆...\") cannot be negated"
-"string (\"xxxxxx☆☆☆☆☆☆...\") cannot be negated"
-"string (\"xxxxxxxx☆☆☆☆☆...\") cannot be negated"
-"string (\"xxxxxxxxxx☆☆☆☆...\") cannot be negated"
+"string (\"☆☆☆...) cannot be negated"
+"string (\"xx☆☆...) cannot be negated"
+"string (\"xxxx☆☆...) cannot be negated"
+"string (\"xxxxxx☆...) cannot be negated"
+"string (\"xxxxxxxx...) cannot be negated"
+"string (\"xxxxxxxxxx...) cannot be negated"
 
-try (. + "x") catch . == if have_decnum then "number (12345678901234567890123456...) and string (\"x\") cannot be added" else "number (12345678901234568000000000...) and string (\"x\") cannot be added" end
+try (. + "x") catch . == if have_decnum then "number (12345678901...) and string (\"x\") cannot be added" else "number (12345678901...) and string (\"x\") cannot be added" end
 123456789012345678901234567890
 true
 
@@ -2003,7 +2003,7 @@ join(",")
 
 try join(",") catch .
 ["1","2",{"a":{"b":{"c":33}}}]
-"string (\"1,2,\") and object ({\"a\":{\"b\":{\"c\":33}}}) cannot be added"
+"string (\"1,2,\") and object ({\"a\":{\"b\":{...) cannot be added"
 
 try join(",") catch .
 ["1","2",[3,4,5]]
