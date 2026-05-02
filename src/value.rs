@@ -3988,30 +3988,44 @@ pub fn push_json_pretty_raw_at(buf: &mut Vec<u8>, b: &[u8], indent_n: usize, use
 /// thousands of unaffected characters. Only whitespace bytes outside
 /// strings cause a chunk break.
 pub fn extend_compact_from_slice(dst: &mut Vec<u8>, src: &[u8]) {
+    // SIMD-skip to the next whitespace OR string-start. Inside a string we
+    // walk verbatim past the closing `"`, then resume the SIMD scan. Each
+    // non-interesting byte is bulk-copied; only whitespace bytes outside
+    // strings cause a chunk break.
     let mut i = 0;
-    let mut chunk_start = 0;
     while i < src.len() {
-        let c = src[i];
+        // memchr3 covers the common case (' ', '\t', '"'). A separate scan
+        // for the rarer `\n`/`\r` keeps the hot loop tight.
+        let common = memchr::memchr3(b' ', b'\t', b'"', &src[i..]);
+        let rare = memchr::memchr2(b'\n', b'\r', &src[i..]);
+        let next = match (common, rare) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let Some(off) = next else {
+            // No more interesting bytes — bulk-copy the rest.
+            dst.extend_from_slice(&src[i..]);
+            return;
+        };
+        let pos = i + off;
+        if pos > i { dst.extend_from_slice(&src[i..pos]); }
+        let c = src[pos];
         if c == b'"' {
-            // Walk through the string literal so its interior whitespace
-            // isn't counted as a break.
-            i += 1;
-            while i < src.len() {
-                let d = src[i];
-                if d == b'\\' { i = i.saturating_add(2); continue; }
-                if d == b'"' { i += 1; break; }
-                i += 1;
+            // Copy the entire string literal (including the closing `"`)
+            // verbatim so interior whitespace and escapes survive.
+            let mut j = pos + 1;
+            while j < src.len() {
+                let d = src[j];
+                if d == b'\\' { j = j.saturating_add(2); continue; }
+                if d == b'"' { j += 1; break; }
+                j += 1;
             }
-        } else if matches!(c, b' ' | b'\t' | b'\n' | b'\r') {
-            if i > chunk_start { dst.extend_from_slice(&src[chunk_start..i]); }
-            i += 1;
-            chunk_start = i;
+            dst.extend_from_slice(&src[pos..j]);
+            i = j;
         } else {
-            i += 1;
+            // Whitespace outside a string — drop it.
+            i = pos + 1;
         }
-    }
-    if chunk_start < src.len() {
-        dst.extend_from_slice(&src[chunk_start..]);
     }
 }
 
