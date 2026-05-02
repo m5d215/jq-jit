@@ -6753,3 +6753,19 @@ null
 . | length
 ""
 1
+
+# Issue #448: to_entries error wording matches jq's `keys` (since jq
+# implements to_entries on top of keys, the error is shared).
+try to_entries catch .
+null
+"null (null) has no keys"
+
+# Issue #448: same on numeric input
+try to_entries catch .
+5
+"number (5) has no keys"
+
+# Issue #448: same on string input — value tag is JSON-quoted
+try to_entries catch .
+"x"
+"string (\"x\") has no keys"
