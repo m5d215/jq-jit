@@ -1838,9 +1838,19 @@ fn rt_regex_split(v: &Value, re: &Value, flags: &Value) -> Result<Value> {
         (Value::Str(s), Value::Str(r)) => {
             let (pat, _global) = apply_regex_flags(r.as_str(), flags)?;
             with_regex(&pat, |regex| {
-                let parts: Vec<Value> = regex.split(s.as_str())
-                    .map(Value::from_str)
-                    .collect();
+                // jq enumerates an empty match adjacent to a non-empty
+                // one; Rust's `Regex::split` skips it. Walk
+                // `jq_match_spans` instead so the slices line up with
+                // jq's output for zero-width regexes like `a*`. See #444.
+                let s_str = s.as_str();
+                let spans = jq_match_spans(regex, s_str);
+                let mut parts: Vec<Value> = Vec::with_capacity(spans.len() + 1);
+                let mut last = 0;
+                for (start, end) in spans {
+                    parts.push(Value::from_str(&s_str[last..start]));
+                    last = end;
+                }
+                parts.push(Value::from_str(&s_str[last..]));
                 Value::Arr(Rc::new(parts))
             })
         }
@@ -2796,14 +2806,28 @@ pub fn sub_gsub_segments(input: &str, pattern: &str, flags: &Value, global: bool
 
         let has_captures = regex.captures_len() > 1;
         if is_global {
+            // jq enumerates an empty match adjacent to a non-empty one for
+            // zero-width regexes (`a*`, etc.). `captures_iter` /
+            // `find_iter` skip those. Walk `jq_match_spans` so the
+            // segment list matches jq's output. See #444.
+            let spans = jq_match_spans(regex, input);
             if has_captures {
-                for caps in regex.captures_iter(input) {
-                    let m = caps.get(0).unwrap();
-                    process_match(m, Some(&caps));
+                for (start, _end) in spans {
+                    if let Some(caps) = regex.captures_at(input, start) {
+                        if let Some(m) = caps.get(0) {
+                            if m.start() == start {
+                                process_match(m, Some(&caps));
+                            }
+                        }
+                    }
                 }
             } else {
-                for m in regex.find_iter(input) {
-                    process_match(m, None);
+                for (start, _end) in spans {
+                    if let Some(m) = regex.find_at(input, start) {
+                        if m.start() == start {
+                            process_match(m, None);
+                        }
+                    }
                 }
             }
         } else if has_captures {
