@@ -8927,3 +8927,33 @@ try (. as $x | delpaths([["a"]])) catch .
 . as $x | (.a as $y | getpath(["b"]))
 {"a":1,"b":2}
 2
+
+# Issue #558: @base64d on whitespace-containing input now matches jq's "is not valid base64 data"
+try (@base64d) catch .
+"abc def ghi"
+"string (\"abc def ghi\") is not valid base64 data"
+
+# Issue #558: @base64d on padded-only input strips trailing =s before length check
+try (@base64d) catch .
+"a===="
+"string (\"a====\") trailing base64 byte found"
+
+# Issue #558: @base64d wraps non-string error value as JSON string
+try (@base64d) catch .
+0
+"string (\"0\") trailing base64 byte found"
+
+# Issue #558: @base64d wraps array error value as JSON string
+try (@base64d) catch .
+[1,2,3]
+"string (\"[1,2,3]\") is not valid base64 data"
+
+# Issue #558: @base64d still rejects single-char input with trailing-byte error
+try (@base64d) catch .
+"a"
+"string (\"a\") trailing base64 byte found"
+
+# Issue #558: @base64d still decodes valid padded input
+@base64d
+"aGVsbG8="
+"hello"
