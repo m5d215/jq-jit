@@ -3988,6 +3988,16 @@ pub fn push_json_pretty_raw_at(buf: &mut Vec<u8>, b: &[u8], indent_n: usize, use
 #[inline]
 pub fn is_json_compact(bytes: &[u8]) -> bool {
     if bytes.len() < 2 { return true; }
+    // Fast path: NDJSON inputs are usually whitespace-free. Two SIMD-backed
+    // memchr scans for ` `/`\n` and `\t`/`\r` short-circuit the common case
+    // without the byte-by-byte walk below (which would otherwise add ~3x
+    // overhead to the field-update fast paths from #523 on a 2M-record
+    // benchmark).
+    if memchr::memchr2(b' ', b'\n', bytes).is_none()
+        && memchr::memchr2(b'\t', b'\r', bytes).is_none()
+    {
+        return true;
+    }
     let b0 = bytes[0];
     // Walk the top-level value, rejecting any whitespace outside string
     // literals. Nested containers (`[{"a":1, "b":2}]`, `{"a":[1, 2]}`,
