@@ -7082,3 +7082,34 @@ null
 try ({} | split("a"; "g")) catch .
 null
 "object ({}) cannot be matched, as it is not a string"
+
+# Issue #481: Cannot iterate over <type> error includes the value tag
+# (was: "Cannot iterate over number"; jq: "Cannot iterate over number (5)")
+try (5 | any) catch .
+null
+"Cannot iterate over number (5)"
+
+# Issue #481: any on string
+try ("x" | any) catch .
+null
+"Cannot iterate over string (\"x\")"
+
+# Issue #481: any on null
+try (null | any) catch .
+null
+"Cannot iterate over null (null)"
+
+# Issue #481: any on boolean
+try (true | any) catch .
+null
+"Cannot iterate over boolean (true)"
+
+# Issue #481: all follows the same wording
+try (-3 | all) catch .
+null
+"Cannot iterate over number (-3)"
+
+# Issue #481: all on null
+try (null | all) catch .
+null
+"Cannot iterate over null (null)"
