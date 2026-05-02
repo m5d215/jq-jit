@@ -3979,38 +3979,39 @@ pub fn push_json_pretty_raw_at(buf: &mut Vec<u8>, b: &[u8], indent_n: usize, use
 ///
 /// Used by the field-update fast paths in `src/value.rs` so the prefix and
 /// suffix copies around the modified field land on stdout without leaking
-/// the input's interior whitespace (#523), without paying the ~3x cost of
+/// the input's interior whitespace (#523), without paying the cost of
 /// bailing to the generic eval path on every record.
+///
+/// The implementation is chunk-oriented: non-whitespace runs (including
+/// whole string literals) are bulk-copied via `extend_from_slice` so the
+/// per-byte cost stays close to `memcpy` even when the slice contains
+/// thousands of unaffected characters. Only whitespace bytes outside
+/// strings cause a chunk break.
 pub fn extend_compact_from_slice(dst: &mut Vec<u8>, src: &[u8]) {
     let mut i = 0;
+    let mut chunk_start = 0;
     while i < src.len() {
         let c = src[i];
-        match c {
-            b'"' => {
-                // Copy the entire string literal, including the surrounding
-                // quotes and any escape pair, verbatim.
-                dst.push(b'"');
+        if c == b'"' {
+            // Walk through the string literal so its interior whitespace
+            // isn't counted as a break.
+            i += 1;
+            while i < src.len() {
+                let d = src[i];
+                if d == b'\\' { i = i.saturating_add(2); continue; }
+                if d == b'"' { i += 1; break; }
                 i += 1;
-                while i < src.len() {
-                    let d = src[i];
-                    if d == b'\\' {
-                        dst.push(b'\\');
-                        if i + 1 < src.len() {
-                            dst.push(src[i + 1]);
-                            i += 2;
-                        } else {
-                            i += 1;
-                        }
-                        continue;
-                    }
-                    dst.push(d);
-                    if d == b'"' { i += 1; break; }
-                    i += 1;
-                }
             }
-            b' ' | b'\t' | b'\n' | b'\r' => { i += 1; }
-            other => { dst.push(other); i += 1; }
+        } else if matches!(c, b' ' | b'\t' | b'\n' | b'\r') {
+            if i > chunk_start { dst.extend_from_slice(&src[chunk_start..i]); }
+            i += 1;
+            chunk_start = i;
+        } else {
+            i += 1;
         }
+    }
+    if chunk_start < src.len() {
+        dst.extend_from_slice(&src[chunk_start..]);
     }
 }
 
