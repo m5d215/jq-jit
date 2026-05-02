@@ -4206,11 +4206,27 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             eval_path(fallback, input, env, cb)
         }
         _ => {
-            // Non-path-safe expression: evaluate and report error
+            // Non-path-safe expression: evaluate, then accept the value as
+            // the empty path `[]` if it is one of `null`/`true`/`false` and
+            // equals the input. jq treats those three literals as identity
+            // path expressions when their result matches the current input
+            // (so `path(.a // null)` and `path(if .x then .y else null end)`
+            // work on falsy branches that produce a literal value). All
+            // other shapes still report the original "Invalid path
+            // expression" error. See #434.
+            let input_for_check = input.clone();
             let mut result_val = Value::Null;
             let mut has_result = false;
-            eval(expr, input, env, &mut |val| { result_val = val; has_result = true; Ok(true) })?;
+            eval(expr, input, env, &mut |val| {
+                result_val = val;
+                has_result = true;
+                Ok(true)
+            })?;
             if has_result {
+                let is_id_value = matches!(&result_val, Value::Null | Value::True | Value::False);
+                if is_id_value && result_val == input_for_check {
+                    return cb(Value::Arr(Rc::new(vec![])));
+                }
                 bail!("__pathexpr_result__:{}", crate::value::value_to_json(&result_val));
             }
             Ok(true)
