@@ -1019,7 +1019,9 @@ fn rt_sort(v: &Value) -> Result<Value> {
             sort_values(&mut sorted);
             Ok(Value::Arr(Rc::new(sorted)))
         }
-        _ => bail!("{} is not an array", v.type_name()),
+        // jq's wording: `<type> (<value>) cannot be sorted, as it is not
+        // an array`. Same for unique. See #450.
+        _ => bail!("{} cannot be sorted, as it is not an array", errdesc(v)),
     }
 }
 
@@ -1121,7 +1123,8 @@ fn rt_unique(v: &Value) -> Result<Value> {
             sorted.dedup_by(|a, b| values_equal(a, b));
             Ok(Value::Arr(Rc::new(sorted)))
         }
-        _ => bail!("{} is not an array", v.type_name()),
+        // Shares wording with `sort` (#450).
+        _ => bail!("{} cannot be sorted, as it is not an array", errdesc(v)),
     }
 }
 
@@ -1137,7 +1140,9 @@ fn rt_min(v: &Value) -> Result<Value> {
             }
             Ok(min.clone())
         }
-        _ => bail!("{} is not an array", v.type_name()),
+        // jq's wording for min/max — implemented as a fold that compares
+        // pairs, so the value appears twice. See #450.
+        _ => bail!("{} and {} cannot be iterated over", errdesc(v), errdesc(v)),
     }
 }
 
@@ -1153,7 +1158,8 @@ fn rt_max(v: &Value) -> Result<Value> {
             }
             Ok(max.clone())
         }
-        _ => bail!("{} is not an array", v.type_name()),
+        // Shares wording with min (#450).
+        _ => bail!("{} and {} cannot be iterated over", errdesc(v), errdesc(v)),
     }
 }
 
