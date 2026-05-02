@@ -2632,33 +2632,56 @@ pub fn eval(
 
         Expr::Limit { count, generator } => {
             eval(count, input.clone(), env, &mut |cv| {
-                if let Value::Num(n, NumRepr(None)) = &cv {
-                    let limit = *n as i64;
-                    if limit == 0 { return Ok(true); }
-                    if limit < 0 {
+                // Match `Num(n, _)` (any repr) so `limit(2.0; ...)` works
+                // — the prior `NumRepr(None)` constraint silently rejected
+                // float-formatted counts (#539).
+                match &cv {
+                    Value::Num(n, _) => {
+                        let limit = *n as i64;
+                        if limit == 0 { return Ok(true); }
+                        if limit < 0 {
+                            bail!("__jqerror__:\"limit doesn't support negative count\"");
+                        }
+                        let limit = limit as usize;
+                        let mut emitted = 0;
+                        let mut stopped_by_outer = false;
+                        let result = eval(generator, input.clone(), env, &mut |val| {
+                            emitted += 1;
+                            let cont = cb(val)?;
+                            if !cont {
+                                stopped_by_outer = true;
+                                Ok(false)
+                            } else if emitted >= limit {
+                                Ok(false)
+                            } else {
+                                Ok(true)
+                            }
+                        });
+                        match result {
+                            Ok(_) if stopped_by_outer => Ok(false),
+                            Ok(_) => Ok(true),
+                            Err(e) => Err(e),
+                        }
+                    }
+                    // jq's value ordering puts null/false/true below numbers,
+                    // so `$n < 0` is true for these and they take jq's
+                    // "negative count" branch (#539).
+                    Value::Null | Value::True | Value::False => {
                         bail!("__jqerror__:\"limit doesn't support negative count\"");
                     }
-                    let limit = limit as usize;
-                    let mut emitted = 0;
-                    let mut stopped_by_outer = false;
-                    let result = eval(generator, input.clone(), env, &mut |val| {
-                        emitted += 1;
-                        let cont = cb(val)?;
-                        if !cont {
-                            stopped_by_outer = true;
-                            Ok(false)
-                        } else if emitted >= limit {
-                            Ok(false)
-                        } else {
-                            Ok(true)
-                        }
-                    });
-                    match result {
-                        Ok(_) if stopped_by_outer => Ok(false),
-                        Ok(_) => Ok(true),
-                        Err(e) => Err(e),
+                    // String / array / object surface jq's `$n - 1`
+                    // arithmetic error from the limit reduce.
+                    other => {
+                        let msg = format!(
+                            "{} and number (1) cannot be subtracted",
+                            crate::runtime::errdesc_pub(other),
+                        );
+                        bail!(
+                            "__jqerror__:{}",
+                            crate::value::value_to_json_precise(&Value::from_string(msg)),
+                        );
                     }
-                } else { bail!("limit: count must be a number") }
+                }
             })
         }
 
