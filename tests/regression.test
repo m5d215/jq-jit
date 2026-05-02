@@ -7008,3 +7008,46 @@ null
 try ("abc" | endswith(123)) catch .
 null
 "endswith() requires string inputs"
+
+# Issue #454: has/in error wording matches jq's
+# `Cannot check whether <type> has a <type> key` (was:
+# "X (v) and Y (v) cannot be has-tested" — different shape and including
+# values).
+try (1 | has(0)) catch .
+null
+"Cannot check whether number has a number key"
+
+# Issue #454: string receiver
+try ("x" | has(0)) catch .
+null
+"Cannot check whether string has a number key"
+
+# Issue #454: string key on number
+try (1 | has("k")) catch .
+null
+"Cannot check whether number has a string key"
+
+# Issue #454: array receiver with non-number key
+try ([1,2,3] | has("x")) catch .
+null
+"Cannot check whether array has a string key"
+
+# Issue #454: object receiver with non-string key
+try ({a:1} | has(0)) catch .
+null
+"Cannot check whether object has a number key"
+
+# Issue #454: in/2 reuses has internally → same wording
+try (0 | in(1)) catch .
+null
+"Cannot check whether number has a number key"
+
+# Issue #454: null receiver still short-circuits to false (no error)
+null | has(0)
+null
+false
+
+# Issue #454: null receiver with string key
+null | has("a")
+null
+false
