@@ -8143,3 +8143,43 @@ null
 .
 {"Infinity":1}
 {"Infinity":1}
+
+# Issue #515: lowercase `inf` accepted as Infinity
+.
+inf
+1.7976931348623157e+308
+
+# Issue #515: lowercase `infinity` accepted as Infinity
+.
+infinity
+1.7976931348623157e+308
+
+# Issue #515: ALL-CAPS Infinity accepted
+.
+INFINITY
+1.7976931348623157e+308
+
+# Issue #515: mixed-case `iNfInItY` accepted (case-insensitive)
+.
+iNfInItY
+1.7976931348623157e+308
+
+# Issue #515: lowercase `-inf` accepted as -Infinity
+.
+-inf
+-1.7976931348623157e+308
+
+# Issue #515: case-insensitive `nAn` accepted as NaN (output null)
+.
+nAn
+null
+
+# Issue #515: `+nan` (signed nan) accepted as NaN
+.
++nan
+null
+
+# Issue #515: embedded inside array
+.
+[nan, NaN, Infinity, -inf, +inf, +NaN]
+[null,null,1.7976931348623157e+308,-1.7976931348623157e+308,1.7976931348623157e+308,null]
