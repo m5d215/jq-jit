@@ -4067,10 +4067,14 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                         (Value::Arr(_), Value::Arr(_)) => {}
                         (Value::Null, _) => {}
                         _ => {
+                            // jq's wording: string keys keep the quoted
+                            // value (`string "x"`), other key types use
+                            // the bare type name (`number`, `boolean`,
+                            // `null`). Aligns with the read-side fix from
+                            // #440. See #500.
                             let key_desc = match &key {
                                 Value::Str(s) => format!("string \"{}\"", s),
-                                Value::Num(n, _) => format!("number ({})", crate::value::format_jq_number(*n)),
-                                other => format!("{} ({})", other.type_name(), crate::value::value_to_json(other)),
+                                other => other.type_name().to_string(),
                             };
                             bail!("Cannot index {} with {}", base_val.type_name(), key_desc);
                         }
