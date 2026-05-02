@@ -6679,3 +6679,29 @@ true
 try setpath([1]; 1) catch .
 {"hi":"hello"}
 "Cannot index object with number"
+
+# Issue #450: min/max wording mirrors jq's fold-based implementation —
+# the value appears twice ("X and X cannot be iterated over").
+try min catch .
+{"a":1}
+"object ({\"a\":1}) and object ({\"a\":1}) cannot be iterated over"
+
+# Issue #450: same for max
+try max catch .
+5
+"number (5) and number (5) cannot be iterated over"
+
+# Issue #450: sort/unique use "cannot be sorted, as it is not an array"
+try sort catch .
+{"a":1}
+"object ({\"a\":1}) cannot be sorted, as it is not an array"
+
+# Issue #450: same for unique
+try unique catch .
+"hello"
+"string (\"hello\") cannot be sorted, as it is not an array"
+
+# Issue #450: array still works (regression of the success path)
+[3,1,2] | sort
+null
+[1,2,3]
