@@ -8867,3 +8867,33 @@ try (getpath([[1,2]])) catch .
 .a |= empty
 {"a":1,"b":2}
 {"b":2}
+
+# Issue #554: getpath fast path returned Null for type-mismatched keys instead of erroring (.a |= error on number)
+try (.a |= error) catch .
+0
+"Cannot index number with string \"a\""
+
+# Issue #554: same on string input
+try (.a |= error) catch .
+"x"
+"Cannot index string with string \"a\""
+
+# Issue #554: same on array input
+try (.a |= error) catch .
+[1]
+"Cannot index array with string \"a\""
+
+# Issue #554: getpath fast path no longer swallows null|getpath([null]) which jq errors on
+try (getpath([null])) catch .
+null
+"Cannot index null with null"
+
+# Issue #554: getpath fast path no longer swallows getpath with boolean key
+try (getpath([true])) catch .
+[1]
+"Cannot index array with boolean"
+
+# Issue #554: .a |= (1+.) still errors on non-object input (regression check)
+try (.a |= (1+.)) catch .
+0
+"Cannot index number with string \"a\""
