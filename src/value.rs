@@ -1810,7 +1810,6 @@ pub fn json_object_update_field_num(b: &[u8], pos: usize, field: &str, op: crate
     // field, which would leak interior whitespace from the input through
     // to stdout. jq always re-renders compactly under `-c`; bail to the
     // generic eval path when the input isn't already compact (#523).
-    if !is_json_compact(&b[pos..]) { return false; }
     // Find the target field value range, then do 3-way copy:
     // (bytes before value) + (new number) + (bytes after value including closing brace)
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
@@ -1822,9 +1821,9 @@ pub fn json_object_update_field_num(b: &[u8], pos: usize, field: &str, op: crate
             while obj_end > val_end && b[obj_end - 1] != b'}' { obj_end -= 1; }
             if obj_end <= val_end { return false; }
             // 3-way bulk copy: prefix + new number + suffix
-            buf.extend_from_slice(&b[pos..val_start]);
+            extend_compact_from_slice(buf, &b[pos..val_start]);
             push_jq_number_bytes(buf, r);
-            buf.extend_from_slice(&b[val_end..obj_end]);
+            extend_compact_from_slice(buf, &b[val_end..obj_end]);
             return true;
         }
     }
@@ -1841,7 +1840,6 @@ pub fn json_object_update_field_num_chain(
     use crate::ir::UnaryOp;
     use crate::interpreter::NumChainStep;
     if pos >= b.len() || b[pos] != b'{' { return false; }
-    if !is_json_compact(&b[pos..]) { return false; } // #523
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
         if let Some(mut v) = parse_json_num(&b[val_start..val_end]) {
             for step in steps {
@@ -1871,9 +1869,9 @@ pub fn json_object_update_field_num_chain(
             let mut obj_end = b.len();
             while obj_end > val_end && b[obj_end - 1] != b'}' { obj_end -= 1; }
             if obj_end <= val_end { return false; }
-            buf.extend_from_slice(&b[pos..val_start]);
+            extend_compact_from_slice(buf, &b[pos..val_start]);
             push_jq_number_bytes(buf, v);
-            buf.extend_from_slice(&b[val_end..obj_end]);
+            extend_compact_from_slice(buf, &b[val_end..obj_end]);
             return true;
         }
     }
@@ -1888,7 +1886,6 @@ pub fn json_object_update_field_gsub(
     b: &[u8], pos: usize, field: &str, re: &regex::Regex, replacement: &str, is_global: bool, buf: &mut Vec<u8>,
 ) -> bool {
     if pos >= b.len() || b[pos] != b'{' { return false; }
-    if !is_json_compact(&b[pos..]) { return false; } // #523
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
         if val_start >= val_end || b[val_start] != b'"' { return false; }
         let inner = &b[val_start + 1..val_end - 1];
@@ -1923,7 +1920,7 @@ pub fn json_object_update_field_gsub(
         while obj_end > val_end && b[obj_end - 1] != b'}' { obj_end -= 1; }
         if obj_end <= val_end { return false; }
         // 3-way copy: prefix + new string value + suffix
-        buf.extend_from_slice(&b[pos..val_start]);
+        extend_compact_from_slice(buf, &b[pos..val_start]);
         buf.push(b'"');
         for &ch in result_bytes {
             match ch {
@@ -1940,7 +1937,7 @@ pub fn json_object_update_field_gsub(
             }
         }
         buf.push(b'"');
-        buf.extend_from_slice(&b[val_end..obj_end]);
+        extend_compact_from_slice(buf, &b[val_end..obj_end]);
         return true;
     }
     false
@@ -1985,7 +1982,6 @@ pub fn json_object_update_field_test(
     b: &[u8], pos: usize, field: &str, re: &regex::Regex, buf: &mut Vec<u8>,
 ) -> bool {
     if pos >= b.len() || b[pos] != b'{' { return false; }
-    if !is_json_compact(&b[pos..]) { return false; } // #523
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
         if val_start >= val_end || b[val_start] != b'"' { return false; }
         let inner = &b[val_start + 1..val_end - 1];
@@ -2002,9 +1998,9 @@ pub fn json_object_update_field_test(
         let mut obj_end = b.len();
         while obj_end > val_end && b[obj_end - 1] != b'}' { obj_end -= 1; }
         if obj_end <= val_end { return false; }
-        buf.extend_from_slice(&b[pos..val_start]);
+        extend_compact_from_slice(buf, &b[pos..val_start]);
         buf.extend_from_slice(if matched { b"true" } else { b"false" });
-        buf.extend_from_slice(&b[val_end..obj_end]);
+        extend_compact_from_slice(buf, &b[val_end..obj_end]);
         return true;
     }
     false
@@ -2018,7 +2014,6 @@ pub fn json_object_assign_field_arith(
 ) -> bool {
     use crate::ir::BinOp;
     if pos >= b.len() || b[pos] != b'{' { return false; }
-    if !is_json_compact(&b[pos..]) { return false; } // #523
     // 1. Read src field value
     let src_val = if let Some((vs, ve)) = json_object_get_field_raw(b, pos, src_field) {
         match parse_json_num(&b[vs..ve]) { Some(v) => v, None => return false }
@@ -2038,9 +2033,9 @@ pub fn json_object_assign_field_arith(
         let mut obj_end = b.len();
         while obj_end > dv_end && b[obj_end - 1] != b'}' { obj_end -= 1; }
         if obj_end <= dv_end { return false; }
-        buf.extend_from_slice(&b[pos..dv_start]);
+        extend_compact_from_slice(buf, &b[pos..dv_start]);
         push_jq_number_bytes(buf, r);
-        buf.extend_from_slice(&b[dv_end..obj_end]);
+        extend_compact_from_slice(buf, &b[dv_end..obj_end]);
         return true;
     }
     // dest field doesn't exist — use set_field_raw for add
@@ -2057,7 +2052,6 @@ pub fn json_object_assign_two_fields_arith(
 ) -> bool {
     use crate::ir::BinOp;
     if pos >= b.len() || b[pos] != b'{' { return false; }
-    if !is_json_compact(&b[pos..]) { return false; } // #523
     let v1 = if let Some((vs, ve)) = json_object_get_field_raw(b, pos, src1_field) {
         match parse_json_num(&b[vs..ve]) { Some(v) => v, None => return false }
     } else { return false; };
@@ -2077,9 +2071,9 @@ pub fn json_object_assign_two_fields_arith(
         let mut obj_end = b.len();
         while obj_end > dv_end && b[obj_end - 1] != b'}' { obj_end -= 1; }
         if obj_end <= dv_end { return false; }
-        buf.extend_from_slice(&b[pos..dv_start]);
+        extend_compact_from_slice(buf, &b[pos..dv_start]);
         push_jq_number_bytes(buf, r);
-        buf.extend_from_slice(&b[dv_end..obj_end]);
+        extend_compact_from_slice(buf, &b[dv_end..obj_end]);
         return true;
     }
     let mut num_buf = Vec::with_capacity(32);
@@ -2093,7 +2087,6 @@ pub fn json_object_update_field_split_first(
     b: &[u8], pos: usize, field: &str, sep: &str, buf: &mut Vec<u8>,
 ) -> bool {
     if pos >= b.len() || b[pos] != b'{' { return false; }
-    if !is_json_compact(&b[pos..]) { return false; } // #523
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
         if val_start >= val_end || b[val_start] != b'"' { return false; }
         let inner = &b[val_start + 1..val_end - 1];
@@ -2102,7 +2095,7 @@ pub fn json_object_update_field_split_first(
         let mut obj_end = b.len();
         while obj_end > val_end && b[obj_end - 1] != b'}' { obj_end -= 1; }
         if obj_end <= val_end { return false; }
-        buf.extend_from_slice(&b[pos..val_start]);
+        extend_compact_from_slice(buf, &b[pos..val_start]);
         buf.push(b'"');
         if has_escapes {
             // Must unescape, split, re-escape
@@ -2146,7 +2139,7 @@ pub fn json_object_update_field_split_first(
             }
         }
         buf.push(b'"');
-        buf.extend_from_slice(&b[val_end..obj_end]);
+        extend_compact_from_slice(buf, &b[val_end..obj_end]);
         return true;
     }
     false
@@ -2158,7 +2151,6 @@ pub fn json_object_update_field_split_last(
     b: &[u8], pos: usize, field: &str, sep: &str, buf: &mut Vec<u8>,
 ) -> bool {
     if pos >= b.len() || b[pos] != b'{' { return false; }
-    if !is_json_compact(&b[pos..]) { return false; } // #523
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
         if val_start >= val_end || b[val_start] != b'"' { return false; }
         let inner = &b[val_start + 1..val_end - 1];
@@ -2167,7 +2159,7 @@ pub fn json_object_update_field_split_last(
         let mut obj_end = b.len();
         while obj_end > val_end && b[obj_end - 1] != b'}' { obj_end -= 1; }
         if obj_end <= val_end { return false; }
-        buf.extend_from_slice(&b[pos..val_start]);
+        extend_compact_from_slice(buf, &b[pos..val_start]);
         buf.push(b'"');
         if has_escapes {
             let s: String = match serde_json::from_slice(&b[val_start..val_end]) {
@@ -2209,7 +2201,7 @@ pub fn json_object_update_field_split_last(
             }
         }
         buf.push(b'"');
-        buf.extend_from_slice(&b[val_end..obj_end]);
+        extend_compact_from_slice(buf, &b[val_end..obj_end]);
         return true;
     }
     false
@@ -2221,7 +2213,6 @@ pub fn json_object_update_field_trim(
     b: &[u8], pos: usize, field: &str, trim_str: &str, is_rtrim: bool, buf: &mut Vec<u8>,
 ) -> bool {
     if pos >= b.len() || b[pos] != b'{' { return false; }
-    if !is_json_compact(&b[pos..]) { return false; } // #523
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
         if val_start >= val_end || b[val_start] != b'"' { return false; }
         let inner = &b[val_start + 1..val_end - 1];
@@ -2240,7 +2231,7 @@ pub fn json_object_update_field_trim(
             } else {
                 s.strip_prefix(trim_str).unwrap_or(&s)
             };
-            buf.extend_from_slice(&b[pos..val_start]);
+            extend_compact_from_slice(buf, &b[pos..val_start]);
             buf.push(b'"');
             for &ch in result.as_bytes() {
                 match ch {
@@ -2257,7 +2248,7 @@ pub fn json_object_update_field_trim(
             buf.push(b'"');
         } else {
             let trim_bytes = trim_str.as_bytes();
-            buf.extend_from_slice(&b[pos..val_start]);
+            extend_compact_from_slice(buf, &b[pos..val_start]);
             buf.push(b'"');
             if is_rtrim {
                 if trim_bytes.is_empty() {
@@ -2276,7 +2267,7 @@ pub fn json_object_update_field_trim(
             }
             buf.push(b'"');
         }
-        buf.extend_from_slice(&b[val_end..obj_end]);
+        extend_compact_from_slice(buf, &b[val_end..obj_end]);
         return true;
     }
     false
@@ -2287,7 +2278,6 @@ pub fn json_object_update_field_slice(
     b: &[u8], pos: usize, field: &str, from: Option<i64>, to: Option<i64>, buf: &mut Vec<u8>,
 ) -> bool {
     if pos >= b.len() || b[pos] != b'{' { return false; }
-    if !is_json_compact(&b[pos..]) { return false; } // #523
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
         if val_start >= val_end || b[val_start] != b'"' { return false; }
         let inner = &b[val_start + 1..val_end - 1];
@@ -2315,7 +2305,7 @@ pub fn json_object_update_field_slice(
             None => len as usize,
         };
         let result: String = if f < t { chars[f..t].iter().collect() } else { String::new() };
-        buf.extend_from_slice(&b[pos..val_start]);
+        extend_compact_from_slice(buf, &b[pos..val_start]);
         buf.push(b'"');
         for &ch in result.as_bytes() {
             match ch {
@@ -2330,7 +2320,7 @@ pub fn json_object_update_field_slice(
             }
         }
         buf.push(b'"');
-        buf.extend_from_slice(&b[val_end..obj_end]);
+        extend_compact_from_slice(buf, &b[val_end..obj_end]);
         return true;
     }
     false
@@ -2417,7 +2407,6 @@ pub fn json_object_update_field_length(
     b: &[u8], pos: usize, field: &str, buf: &mut Vec<u8>,
 ) -> bool {
     if pos >= b.len() || b[pos] != b'{' { return false; }
-    if !is_json_compact(&b[pos..]) { return false; } // #523
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
         if val_start >= val_end || b[val_start] != b'"' { return false; }
         let inner = &b[val_start + 1..val_end - 1];
@@ -2436,9 +2425,9 @@ pub fn json_object_update_field_length(
         let mut obj_end = b.len();
         while obj_end > val_end && b[obj_end - 1] != b'}' { obj_end -= 1; }
         if obj_end <= val_end { return false; }
-        buf.extend_from_slice(&b[pos..val_start]);
+        extend_compact_from_slice(buf, &b[pos..val_start]);
         push_jq_number_bytes(buf, char_len as f64);
-        buf.extend_from_slice(&b[val_end..obj_end]);
+        extend_compact_from_slice(buf, &b[val_end..obj_end]);
         return true;
     }
     false
@@ -2450,7 +2439,6 @@ pub fn json_object_update_field_tostring(
     b: &[u8], pos: usize, field: &str, buf: &mut Vec<u8>,
 ) -> bool {
     if pos >= b.len() || b[pos] != b'{' { return false; }
-    if !is_json_compact(&b[pos..]) { return false; } // #523
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
         if val_start >= val_end { return false; }
         let first = b[val_start];
@@ -2459,12 +2447,12 @@ pub fn json_object_update_field_tostring(
         if obj_end <= val_end { return false; }
         if first == b'"' {
             // Already a string — tostring is identity
-            buf.extend_from_slice(&b[pos..obj_end]);
+            extend_compact_from_slice(buf, &b[pos..obj_end]);
             return true;
         }
         // Number, boolean, or null — wrap the raw value in quotes
         let val_bytes = &b[val_start..val_end];
-        buf.extend_from_slice(&b[pos..val_start]);
+        extend_compact_from_slice(buf, &b[pos..val_start]);
         buf.push(b'"');
         // For numbers, use push_jq_number_bytes for correct formatting
         if first == b'-' || first.is_ascii_digit() {
@@ -2478,7 +2466,7 @@ pub fn json_object_update_field_tostring(
             buf.extend_from_slice(val_bytes);
         }
         buf.push(b'"');
-        buf.extend_from_slice(&b[val_end..obj_end]);
+        extend_compact_from_slice(buf, &b[val_end..obj_end]);
         return true;
     }
     false
@@ -2490,20 +2478,19 @@ pub fn json_object_update_field_str_concat(
     b: &[u8], pos: usize, field: &str, prefix: &[u8], suffix: &[u8], buf: &mut Vec<u8>,
 ) -> bool {
     if pos >= b.len() || b[pos] != b'{' { return false; }
-    if !is_json_compact(&b[pos..]) { return false; } // #523
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
         if val_start >= val_end || b[val_start] != b'"' { return false; }
         let inner = &b[val_start + 1..val_end - 1];
         let mut obj_end = b.len();
         while obj_end > val_end && b[obj_end - 1] != b'}' { obj_end -= 1; }
         if obj_end <= val_end { return false; }
-        buf.extend_from_slice(&b[pos..val_start]);
+        extend_compact_from_slice(buf, &b[pos..val_start]);
         buf.push(b'"');
         buf.extend_from_slice(prefix);
         buf.extend_from_slice(inner);
         buf.extend_from_slice(suffix);
         buf.push(b'"');
-        buf.extend_from_slice(&b[val_end..obj_end]);
+        extend_compact_from_slice(buf, &b[val_end..obj_end]);
         return true;
     }
     false
@@ -2514,20 +2501,19 @@ pub fn json_object_update_field_str_map(
     b: &[u8], pos: usize, field: &str, cond_str: &[u8], then_json: &[u8], else_json: &[u8], buf: &mut Vec<u8>,
 ) -> bool {
     if pos >= b.len() || b[pos] != b'{' { return false; }
-    if !is_json_compact(&b[pos..]) { return false; } // #523
     if let Some((val_start, val_end)) = json_object_get_field_raw(b, pos, field) {
         if val_start >= val_end || b[val_start] != b'"' { return false; }
         let inner = &b[val_start + 1..val_end - 1];
         let mut obj_end = b.len();
         while obj_end > val_end && b[obj_end - 1] != b'}' { obj_end -= 1; }
         if obj_end <= val_end { return false; }
-        buf.extend_from_slice(&b[pos..val_start]);
+        extend_compact_from_slice(buf, &b[pos..val_start]);
         if inner == cond_str {
             buf.extend_from_slice(then_json);
         } else {
             buf.extend_from_slice(else_json);
         }
-        buf.extend_from_slice(&b[val_end..obj_end]);
+        extend_compact_from_slice(buf, &b[val_end..obj_end]);
         return true;
     }
     false
@@ -3986,13 +3972,53 @@ pub fn push_json_pretty_raw_at(buf: &mut Vec<u8>, b: &[u8], indent_n: usize, use
 /// For objects, checks after `{` and after the first `:` for whitespace.
 /// For arrays, checks after `[` for whitespace. Scalars are always compact.
 #[inline]
+/// Copy `src` to `dst` while stripping whitespace outside string literals.
+/// Walks `src` as a fragment of well-formed JSON (the caller passes a sub-
+/// slice of an object that excludes the field value being replaced). String
+/// contents — including any `\\"` escape — are copied verbatim.
+///
+/// Used by the field-update fast paths in `src/value.rs` so the prefix and
+/// suffix copies around the modified field land on stdout without leaking
+/// the input's interior whitespace (#523), without paying the ~3x cost of
+/// bailing to the generic eval path on every record.
+pub fn extend_compact_from_slice(dst: &mut Vec<u8>, src: &[u8]) {
+    let mut i = 0;
+    while i < src.len() {
+        let c = src[i];
+        match c {
+            b'"' => {
+                // Copy the entire string literal, including the surrounding
+                // quotes and any escape pair, verbatim.
+                dst.push(b'"');
+                i += 1;
+                while i < src.len() {
+                    let d = src[i];
+                    if d == b'\\' {
+                        dst.push(b'\\');
+                        if i + 1 < src.len() {
+                            dst.push(src[i + 1]);
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    dst.push(d);
+                    if d == b'"' { i += 1; break; }
+                    i += 1;
+                }
+            }
+            b' ' | b'\t' | b'\n' | b'\r' => { i += 1; }
+            other => { dst.push(other); i += 1; }
+        }
+    }
+}
+
 pub fn is_json_compact(bytes: &[u8]) -> bool {
     if bytes.len() < 2 { return true; }
     // Fast path: NDJSON inputs are usually whitespace-free. Two SIMD-backed
     // memchr scans for ` `/`\n` and `\t`/`\r` short-circuit the common case
-    // without the byte-by-byte walk below (which would otherwise add ~3x
-    // overhead to the field-update fast paths from #523 on a 2M-record
-    // benchmark).
+    // without the byte-by-byte walk below.
     if memchr::memchr2(b' ', b'\n', bytes).is_none()
         && memchr::memchr2(b'\t', b'\r', bytes).is_none()
     {
