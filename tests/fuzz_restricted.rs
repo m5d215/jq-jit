@@ -23,9 +23,6 @@
 //!   their own bug class. The opt-in `fuzz_full.rs` covers
 //!   that surface; this harness keeps errors on stderr so they remain
 //!   in the "both errored → skip" branch.
-//! * `.[:]` — slice with both endpoints absent. jq treats this as a
-//!   syntax error; jq-jit's parser accepts it. Distinct from the
-//!   runtime fast-path bug class this harness chases.
 //! * `..` (recurse) — output ordering is grammar-defined and the
 //!   permutations explode the search space without finding new bugs.
 //! * Float literals in input — jq's number printer normalizes
@@ -160,8 +157,9 @@ enum FilterExpr {
     Identity,
     Field(String),
     Index(i32),
-    /// Half-open slice. `.[:]` (both endpoints absent) is excluded —
-    /// see module docs.
+    /// Half-open slice. The both-bounds-absent form `.[:]` is now a
+    /// parse error in both jq and jq-jit (#438), so the type
+    /// signature still requires the lo bound to be present.
     SliceLo(i32, Option<i32>),
     SliceHi(Option<i32>, i32),
     ArrayConstruct(Vec<FilterExpr>),
