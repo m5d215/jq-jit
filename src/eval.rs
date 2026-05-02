@@ -3190,13 +3190,12 @@ pub fn eval_index(base: &Value, key: &Value, optional: bool) -> std::result::Res
             let i = if idx < 0 { (a.len() as i64 + idx) as usize } else { idx as usize };
             Ok(a.get(i).cloned().unwrap_or(Value::Null))
         }
-        (Value::Str(_), Value::Num(n, _)) => {
-            if n.fract() != 0.0 || n.is_nan() || n.is_infinite() {
-                Err(format!("Cannot index string with number ({})", crate::value::format_jq_number(*n)))
-            } else if optional {
+        (Value::Str(_), Value::Num(_, _)) => {
+            // jq's "Cannot index string with number" omits the value (#440).
+            if optional {
                 Err("type error".into())
             } else {
-                Err(format!("Cannot index string with number ({})", crate::value::format_jq_number(*n)))
+                Err("Cannot index string with number".to_string())
             }
         }
         // Null receiver: only string/number/object keys short-circuit to null;
@@ -3209,9 +3208,13 @@ pub fn eval_index(base: &Value, key: &Value, optional: bool) -> std::result::Res
         _ => {
             if optional { Err("type error".into()) }
             else {
+                // jq's "Cannot index X with Y" wording: string keys are
+                // quoted without parens (`with string "k"`), number keys
+                // omit the value entirely (`with number`). See #440 and
+                // `runtime::index_err_desc`.
                 let key_desc = match key {
-                    Value::Str(s) => format!("string (\"{}\")", s),
-                    Value::Num(n, _) => format!("number ({})", crate::value::format_jq_number(*n)),
+                    Value::Str(s) => format!("string \"{}\"", s),
+                    Value::Num(_, _) => "number".to_string(),
                     _ => key.type_name().to_string(),
                 };
                 Err(format!("Cannot index {} with {}", base.type_name(), key_desc))
