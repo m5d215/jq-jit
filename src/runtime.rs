@@ -2228,7 +2228,7 @@ pub fn rt_getpath(v: &Value, path: &Value) -> Result<Value> {
             }
             Ok(current)
         }
-        _ => bail!("getpath requires array path"),
+        _ => bail!("Path must be specified as an array"),
     }
 }
 
@@ -2347,19 +2347,21 @@ pub fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
                         _ => bail!("Cannot set path"),
                     }
                 }
-                (_, Value::Arr(_)) => {
+                // jq emits a special message when both the container and the
+                // key are arrays: `Cannot update field at array index of array`.
+                // All other type-mismatch combinations use the same wording as
+                // the read side (`rt_getpath`, `.[k]`).
+                (Value::Arr(_), Value::Arr(_)) => {
                     bail!("Cannot update field at array index of array");
                 }
-                (Value::Num(_, _), Value::Num(_, _)) => {
-                    bail!("Cannot index number with number");
-                }
-                (Value::Num(_, _), Value::Str(k)) => {
-                    bail!("Cannot index number with string \"{}\"", k);
-                }
-                _ => bail!("Cannot set path"),
+                (_, _) => bail!(
+                    "Cannot index {} with {}",
+                    v.type_name(),
+                    index_err_desc(key),
+                ),
             }
         }
-        _ => bail!("setpath requires array path"),
+        _ => bail!("Path must be specified as an array"),
     }
 }
 
@@ -2394,7 +2396,7 @@ pub fn rt_setpath_mut(v: &mut Value, path: &[Value], val: Value) -> Result<()> {
                 }
                 Ok(())
             } else {
-                bail!("Cannot index {} with string", v.type_name());
+                bail!("Cannot index {} with string \"{}\"", v.type_name(), k);
             }
         }
         Value::Num(n, _) => {
@@ -2432,10 +2434,17 @@ pub fn rt_setpath_mut(v: &mut Value, path: &[Value], val: Value) -> Result<()> {
                 bail!("Cannot index {} with number", v.type_name());
             }
         }
-        Value::Arr(_) => {
+        // jq's special-case wording for array-key on array-container; the
+        // other combinations share the read-side `Cannot index <container>
+        // with <key_type>` form.
+        Value::Arr(_) if matches!(v, Value::Arr(_)) => {
             bail!("Cannot update field at array index of array");
         }
-        _ => bail!("Cannot set path with {} key", key.type_name()),
+        _ => bail!(
+            "Cannot index {} with {}",
+            v.type_name(),
+            index_err_desc(key),
+        ),
     }
 }
 
@@ -2456,7 +2465,10 @@ pub fn rt_delpaths(v: &Value, paths: &Value) -> Result<Value> {
             for path in sorted_paths {
                 let p_arr = match path {
                     Value::Arr(p) => p,
-                    _ => return Err(anyhow::anyhow!("Path must be specified as array")),
+                    _ => return Err(anyhow::anyhow!(
+                        "Path must be specified as array, not {}",
+                        path.type_name()
+                    )),
                 };
                 let subsumed = filtered.iter().any(|prev| {
                     let prev_arr = match prev {
