@@ -8490,3 +8490,34 @@ todateiso8601
 try todateiso8601 catch .
 null
 "strftime/1 requires parsed datetime inputs"
+
+# Issue #533: join on number uses jq's "Cannot iterate over" wording
+try join(",") catch .
+1
+"Cannot iterate over number (1)"
+
+# Issue #533: join on null
+try join(",") catch .
+null
+"Cannot iterate over null (null)"
+
+# Issue #533: join on string
+try join(",") catch .
+"abc"
+"Cannot iterate over string (\"abc\")"
+
+# Issue #533: join on object iterates the values
+join(",")
+{"a":1,"b":"x"}
+"1,x"
+
+# Issue #533: join on empty object yields empty string
+join(",")
+{}
+""
+
+# Issue #533: join on array still works
+join(",")
+[1,2,3]
+"1,2,3"
+

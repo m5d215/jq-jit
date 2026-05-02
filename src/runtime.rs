@@ -2014,35 +2014,40 @@ fn rt_join(v: &Value, sep: &Value) -> Result<Value> {
         Value::Null => b"",
         _ => bail!("join requires array and string"),
     };
-    match v {
-        Value::Arr(a) => {
-            let cap = a.len() * (8 + sep_bytes.len());
-            let mut buf: Vec<u8> = Vec::with_capacity(cap);
-            for (i, item) in a.iter().enumerate() {
-                if i > 0 { buf.extend_from_slice(sep_bytes); }
-                match item {
-                    Value::Str(sv) => buf.extend_from_slice(sv.as_bytes()),
-                    Value::Null => {},
-                    Value::Num(n, NumRepr(repr)) => {
-                        if let Some(r) = repr.as_ref().filter(|r| crate::value::is_valid_json_number(r)) {
-                            buf.extend_from_slice(r.as_bytes());
-                        } else {
-                            crate::value::push_jq_number_bytes(&mut buf, *n);
-                        }
-                    }
-                    Value::True => buf.extend_from_slice(b"true"),
-                    Value::False => buf.extend_from_slice(b"false"),
-                    _ => {
-                        // jq errors when trying to add string to object/array
-                        let partial = Value::from_string(unsafe { String::from_utf8_unchecked(buf) });
-                        bail!("{} and {} cannot be added", errdesc(&partial), errdesc(item));
-                    }
+    // jq's `join` desugars to a reduce that iterates the input. Both arrays
+    // and objects are accepted (#533); for objects we walk the values in
+    // insertion order, just like `.[]` does.
+    let items: Vec<&Value> = match v {
+        Value::Arr(a) => a.iter().collect(),
+        Value::Obj(ObjInner(o)) => o.values().collect(),
+        // Non-iterable input: jq emits the standard `Cannot iterate over ...`
+        // wording adopted across other iteration sites (#481/#505/#517).
+        _ => bail!("Cannot iterate over {}", errdesc(v)),
+    };
+    let cap = items.len() * (8 + sep_bytes.len());
+    let mut buf: Vec<u8> = Vec::with_capacity(cap);
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 { buf.extend_from_slice(sep_bytes); }
+        match item {
+            Value::Str(sv) => buf.extend_from_slice(sv.as_bytes()),
+            Value::Null => {},
+            Value::Num(n, NumRepr(repr)) => {
+                if let Some(r) = repr.as_ref().filter(|r| crate::value::is_valid_json_number(r)) {
+                    buf.extend_from_slice(r.as_bytes());
+                } else {
+                    crate::value::push_jq_number_bytes(&mut buf, *n);
                 }
             }
-            Ok(Value::from_string(unsafe { String::from_utf8_unchecked(buf) }))
+            Value::True => buf.extend_from_slice(b"true"),
+            Value::False => buf.extend_from_slice(b"false"),
+            _ => {
+                // jq errors when trying to add string to object/array
+                let partial = Value::from_string(unsafe { String::from_utf8_unchecked(buf) });
+                bail!("{} and {} cannot be added", errdesc(&partial), errdesc(item));
+            }
         }
-        _ => bail!("join requires array and string"),
     }
+    Ok(Value::from_string(unsafe { String::from_utf8_unchecked(buf) }))
 }
 
 fn rt_str_index(v: &Value, target: &Value, is_rindex: bool) -> Result<Value> {
