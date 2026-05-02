@@ -1717,7 +1717,18 @@ fn rt_from_entries(v: &Value) -> Result<Value> {
                         };
                         obj.insert(KeyStr::from(key_str), val);
                     }
-                    _ => bail!("from_entries requires array of objects"),
+                    // jq's from_entries desugars to `map(...) | with_entries(.)`.
+                    // For null entries, `.key`/`.name` resolve to null, which
+                    // then reaches object construction and bails as
+                    // `Cannot use null (null) as object key` (#517).
+                    Value::Null => bail!("Cannot use null (null) as object key"),
+                    // For non-null non-object entries, jq's `.key` access on
+                    // the entry surfaces the standard `Cannot index <type>
+                    // with string "key"` error.
+                    other => bail!(
+                        "Cannot index {} with string \"key\"",
+                        other.type_name(),
+                    ),
                 }
             }
             Ok(Value::object_from_map(obj))
@@ -1725,7 +1736,10 @@ fn rt_from_entries(v: &Value) -> Result<Value> {
         // jq's from_entries desugars to `map(...) | add + {}`. On {} the map yields [],
         // add yields null, and null + {} is {} — so empty objects round-trip to {}.
         Value::Obj(ObjInner(o)) if o.is_empty() => Ok(Value::object_from_map(new_objmap())),
-        _ => bail!("{} cannot be converted from entries", v.type_name()),
+        // jq's stdlib starts with `map(...)` which iterates the input — non-array
+        // (and non-empty-object) inputs fail there with the standard
+        // `Cannot iterate over <type> (<value>)` wording (#481/#505/#517).
+        _ => bail!("Cannot iterate over {}", errdesc(v)),
     }
 }
 

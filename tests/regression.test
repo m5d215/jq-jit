@@ -8183,3 +8183,53 @@ null
 .
 [nan, NaN, Infinity, -inf, +inf, +NaN]
 [null,null,1.7976931348623157e+308,-1.7976931348623157e+308,1.7976931348623157e+308,null]
+
+# Issue #517: from_entries on number says "Cannot iterate over <type> (<value>)"
+try (1 | from_entries) catch .
+null
+"Cannot iterate over number (1)"
+
+# Issue #517: from_entries on null
+try (null | from_entries) catch .
+null
+"Cannot iterate over null (null)"
+
+# Issue #517: from_entries on string
+try ("abc" | from_entries) catch .
+null
+"Cannot iterate over string (\"abc\")"
+
+# Issue #517: from_entries with null entry surfaces null-key error
+try ([null] | from_entries) catch .
+null
+"Cannot use null (null) as object key"
+
+# Issue #517: from_entries with number entry surfaces .key index error
+try ([1] | from_entries) catch .
+null
+"Cannot index number with string \"key\""
+
+# Issue #517: from_entries with string entry
+try (["x"] | from_entries) catch .
+null
+"Cannot index string with string \"key\""
+
+# Issue #517: from_entries with boolean entry
+try ([true] | from_entries) catch .
+null
+"Cannot index boolean with string \"key\""
+
+# Issue #517: from_entries with array entry
+try ([[1,2]] | from_entries) catch .
+null
+"Cannot index array with string \"key\""
+
+# Issue #517: empty object input still round-trips to {} (not iteration error)
+{} | from_entries
+null
+{}
+
+# Issue #517: legitimate object array still works
+[{"key":"a","value":1}] | from_entries
+null
+{"a":1}
