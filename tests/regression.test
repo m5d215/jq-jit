@@ -8561,3 +8561,43 @@ getpath([{start:0,end:2}])
 null
 null
 
+# Issue #537: flatten(null) errors with "depth must not be negative"
+try (flatten(null)) catch .
+[[1],[2]]
+"flatten depth must not be negative"
+
+# Issue #537: flatten(true) — bool < 0 in jq's ordering → same negative branch
+try (flatten(true)) catch .
+[[1],[2]]
+"flatten depth must not be negative"
+
+# Issue #537: flatten("a") surfaces the arithmetic error from $d - 1
+try (flatten("a")) catch .
+[[1],[2]]
+"string (\"a\") and number (1) cannot be subtracted"
+
+# Issue #537: flatten([]) also bails through arithmetic
+try (flatten([])) catch .
+[[1],[2]]
+"array ([]) and number (1) cannot be subtracted"
+
+# Issue #537: flatten({}) also bails through arithmetic
+try (flatten({})) catch .
+[[1],[2]]
+"object ({}) and number (1) cannot be subtracted"
+
+# Issue #537: flatten(-1) keeps the negative-depth error
+try (flatten(-1)) catch .
+[[1],[2]]
+"flatten depth must not be negative"
+
+# Issue #537: flatten(0) is identity
+flatten(0)
+[[1],[2]]
+[[1],[2]]
+
+# Issue #537: flatten(99) deep-flattens
+flatten(99)
+[[1],[2]]
+[1,2]
+
