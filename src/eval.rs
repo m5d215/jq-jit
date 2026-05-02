@@ -3204,6 +3204,13 @@ pub fn eval_index(base: &Value, key: &Value, optional: bool) -> std::result::Res
                 Err("Cannot index string with number".to_string())
             }
         }
+        // jq aliases `.[arr]` on an array to `indices(arr)` — returns the
+        // offsets where the subsequence appears. String receivers still
+        // error (`Cannot index string with array`). See #467.
+        (Value::Arr(_), Value::Arr(_)) => {
+            crate::runtime::call_builtin("indices", &[base.clone(), key.clone()])
+                .map_err(|e| e.to_string())
+        }
         // jq dispatches `.[obj]` on an array or string as a slice when the
         // object has both `start` and `end` keys (each being a number or
         // null). Otherwise it errors with the slice-indices wording — even
@@ -4020,6 +4027,11 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                     match (&base_val, &key) {
                         (Value::Obj(_), Value::Str(_)) => {}
                         (Value::Arr(_), Value::Num(_, _)) => {}
+                        // jq accepts `path(.[arr])` on an array — the array
+                        // key becomes a single path component. Updates via
+                        // this path still fail in rt_setpath with `Cannot
+                        // update field at array index of array`. See #467.
+                        (Value::Arr(_), Value::Arr(_)) => {}
                         (Value::Null, _) => {}
                         _ => {
                             let key_desc = match &key {
