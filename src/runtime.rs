@@ -239,79 +239,79 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "pow" => ternary_arg(args, rt_pow),
         "atan2" => ternary_arg(args, |a, b| match (a, b) {
             (Value::Num(y, _), Value::Num(x, _)) => Ok(Value::number(y.atan2(*x))),
-            _ => bail!("atan2 requires numbers"),
+            _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
         "log" => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.ln())),
-            _ => bail!("log requires number"),
+            _ => bail!("{} number required", errdesc(v)),
         }),
         "log2" => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.log2())),
-            _ => bail!("log2 requires number"),
+            _ => bail!("{} number required", errdesc(v)),
         }),
         "log10" => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.log10())),
-            _ => bail!("log10 requires number"),
+            _ => bail!("{} number required", errdesc(v)),
         }),
         "exp" => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.exp())),
-            _ => bail!("exp requires number"),
+            _ => bail!("{} number required", errdesc(v)),
         }),
         "exp2" => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(2f64.powf(*n))),
-            _ => bail!("exp2 requires number"),
+            _ => bail!("{} number required", errdesc(v)),
         }),
         "sin" => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.sin())),
-            _ => bail!("sin requires number"),
+            _ => bail!("{} number required", errdesc(v)),
         }),
         "cos" => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.cos())),
-            _ => bail!("cos requires number"),
+            _ => bail!("{} number required", errdesc(v)),
         }),
         "tan" => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.tan())),
-            _ => bail!("tan requires number"),
+            _ => bail!("{} number required", errdesc(v)),
         }),
         "asin" => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.asin())),
-            _ => bail!("asin requires number"),
+            _ => bail!("{} number required", errdesc(v)),
         }),
         "acos" => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.acos())),
-            _ => bail!("acos requires number"),
+            _ => bail!("{} number required", errdesc(v)),
         }),
         "atan" => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.atan())),
-            _ => bail!("atan requires number"),
+            _ => bail!("{} number required", errdesc(v)),
         }),
         "sinh" => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.sinh())),
-            _ => bail!("sinh requires number"),
+            _ => bail!("{} number required", errdesc(v)),
         }),
         "cosh" => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.cosh())),
-            _ => bail!("cosh requires number"),
+            _ => bail!("{} number required", errdesc(v)),
         }),
         "tanh" => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.tanh())),
-            _ => bail!("tanh requires number"),
+            _ => bail!("{} number required", errdesc(v)),
         }),
         "asinh" => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.asinh())),
-            _ => bail!("asinh requires number"),
+            _ => bail!("{} number required", errdesc(v)),
         }),
         "acosh" => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.acosh())),
-            _ => bail!("acosh requires number"),
+            _ => bail!("{} number required", errdesc(v)),
         }),
         "atanh" => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.atanh())),
-            _ => bail!("atanh requires number"),
+            _ => bail!("{} number required", errdesc(v)),
         }),
         "cbrt" => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.cbrt())),
-            _ => bail!("cbrt requires number"),
+            _ => bail!("{} number required", errdesc(v)),
         }),
         "exp10" => unary_op(args, |v| match v {
             // Use `10.powf(n)` rather than `libm::exp10`. jq's libc-backed
@@ -319,15 +319,15 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             // libm::exp10 takes a different polynomial path that drops the
             // last decimal digit on values like `1.5`.
             Value::Num(n, _) => Ok(Value::number(10f64.powf(*n))),
-            _ => bail!("exp10 requires number"),
+            _ => bail!("{} number required", errdesc(v)),
         }),
         "gamma" | "tgamma" => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(unsafe { tgamma(*n) })),
-            _ => bail!("{} requires number", name),
+            _ => bail!("{} number required", errdesc(v)),
         }),
         "lgamma" => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(unsafe { lgamma(*n) })),
-            _ => bail!("lgamma requires number"),
+            _ => bail!("{} number required", errdesc(v)),
         }),
         "lgamma_r" => unary_op(args, |v| match v {
             Value::Num(n, _) => {
@@ -335,32 +335,32 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                 let r = unsafe { lgamma_r(*n, &mut sign) };
                 Ok(Value::Arr(Rc::new(vec![Value::number(r), Value::number(sign as f64)])))
             }
-            _ => bail!("lgamma_r requires number"),
+            _ => bail!("{} number required", errdesc(v)),
         }),
         "frexp" => unary_op(args, |v| match v {
             Value::Num(n, _) => {
                 let (m, e) = libm::frexp(*n);
                 Ok(Value::Arr(Rc::new(vec![Value::number(m), Value::number(e as f64)])))
             }
-            _ => bail!("frexp requires number"),
+            _ => bail!("{} number required", errdesc(v)),
         }),
         "hypot" => ternary_arg(args, |a, b| match (a, b) {
             (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(libm::hypot(*x, *y))),
-            _ => bail!("hypot requires numbers"),
+            _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
         "remainder" | "drem" => ternary_arg(args, |a, b| match (a, b) {
             (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(libm::remainder(*x, *y))),
-            _ => bail!("{} requires numbers", name),
+            _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
         "ldexp" | "scalbn" | "scalbln" => ternary_arg(args, |a, b| match (a, b) {
             (Value::Num(x, _), Value::Num(y, _)) => {
                 Ok(Value::number(libm::scalbn(*x, *y as i32)))
             }
-            _ => bail!("{} requires numbers", name),
+            _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
         "scalb" => ternary_arg(args, |a, b| match (a, b) {
             (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(*x * 2f64.powf(*y))),
-            _ => bail!("scalb requires numbers"),
+            _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
         "fma" => {
             // jq registers fma as fma/3: `fma(a; b; c) = a * b + c` with the
@@ -370,7 +370,12 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                 (Value::Num(a, _), Value::Num(b, _), Value::Num(c, _)) => {
                     Ok(Value::number(libm::fma(*a, *b, *c)))
                 }
-                _ => bail!("fma requires numbers"),
+                _ => {
+                    let bad = if !matches!(args[1], Value::Num(..)) { &args[1] }
+                              else if !matches!(args[2], Value::Num(..)) { &args[2] }
+                              else { &args[3] };
+                    bail!("{} number required", errdesc(bad));
+                }
             }
         },
         "significand" | "exponent" | "logb" | "nearbyint" | "trunc" | "rint" | "j0" | "j1" => {
@@ -393,7 +398,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                     };
                     Ok(Value::number(r))
                 }
-                _ => bail!("{} requires number", name),
+                _ => bail!("{} number required", errdesc(v)),
             })
         }
         "gmtime" => unary_op(args, rt_gmtime),
@@ -1302,21 +1307,21 @@ fn rt_all(v: &Value) -> Result<Value> {
 fn rt_floor(v: &Value) -> Result<Value> {
     match v {
         Value::Num(n, _) => Ok(Value::number(n.floor())),
-        _ => bail!("{} cannot be floored", v.type_name()),
+        _ => bail!("{} number required", errdesc(v)),
     }
 }
 
 fn rt_ceil(v: &Value) -> Result<Value> {
     match v {
         Value::Num(n, _) => Ok(Value::number(n.ceil())),
-        _ => bail!("{} cannot be ceiled", v.type_name()),
+        _ => bail!("{} number required", errdesc(v)),
     }
 }
 
 fn rt_round(v: &Value) -> Result<Value> {
     match v {
         Value::Num(n, _) => Ok(Value::number(n.round())),
-        _ => bail!("{} cannot be rounded", v.type_name()),
+        _ => bail!("{} number required", errdesc(v)),
     }
 }
 
@@ -1326,7 +1331,7 @@ fn rt_fabs(v: &Value) -> Result<Value> {
             if *n >= 0.0 { Ok(Value::number_opt(*n, repr.clone())) }
             else { Ok(Value::number(n.abs())) }
         }
-        _ => bail!("{} ({}) number required", v.type_name(), crate::value::value_to_json(v)),
+        _ => bail!("{} number required", errdesc(v)),
     }
 }
 
@@ -1346,7 +1351,7 @@ fn rt_abs(v: &Value) -> Result<Value> {
 fn rt_sqrt(v: &Value) -> Result<Value> {
     match v {
         Value::Num(n, _) => Ok(Value::number(n.sqrt())),
-        _ => bail!("{} is not a number", v.type_name()),
+        _ => bail!("{} number required", errdesc(v)),
     }
 }
 
@@ -2076,7 +2081,7 @@ fn rt_indices(v: &Value, target: &Value) -> Result<Value> {
 fn rt_pow(a: &Value, b: &Value) -> Result<Value> {
     match (a, b) {
         (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(x.powf(*y))),
-        _ => bail!("pow requires numbers"),
+        _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
     }
 }
 
