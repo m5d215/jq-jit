@@ -6868,3 +6868,37 @@ null
 try (1.5 % 0) catch .
 null
 "number (1.5) and number (0) cannot be divided (remainder) because the divisor is zero"
+
+# Issue #464: tonumber error wording matches jq's uniform
+# `string ({}) cannot be parsed as a number` (was: jq-jit had three
+# different wordings — "Cannot convert empty string to number",
+# "Invalid numeric literal: ..." for whitespace, and the same for
+# parse failures).
+"" | try tonumber catch .
+null
+"string (\"\") cannot be parsed as a number"
+
+# Issue #464: leading whitespace is rejected with the same wording
+" " | try tonumber catch .
+null
+"string (\" \") cannot be parsed as a number"
+
+# Issue #464: trailing whitespace
+"1 " | try tonumber catch .
+null
+"string (\"1 \") cannot be parsed as a number"
+
+# Issue #464: parse failure on bare sign
+"+" | try tonumber catch .
+null
+"string (\"+\") cannot be parsed as a number"
+
+# Issue #464: parse failure on bare exponent prefix
+"1e" | try tonumber catch .
+null
+"string (\"1e\") cannot be parsed as a number"
+
+# Issue #464: alphabetic-only string
+"abc" | try tonumber catch .
+null
+"string (\"abc\") cannot be parsed as a number"
