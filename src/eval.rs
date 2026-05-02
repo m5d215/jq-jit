@@ -3339,8 +3339,12 @@ fn eval_recurse_default(val: &Value, cb: &mut dyn FnMut(Value) -> GenResult) -> 
 }
 
 fn eval_range(from: &Value, to: &Value, step: Option<&Value>, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
-    let f = match from { Value::Num(n, _) => *n, _ => bail!("range: from must be number") };
-    let t = match to { Value::Num(n, _) => *n, _ => bail!("range: to must be number") };
+    // jq emits a single "Range bounds must be numeric" error for both
+    // out-of-type from and to (#527). The step argument has lazier
+    // semantics in jq (the loop emits the first value before arithmetic
+    // fails) so we keep the previous wording for now.
+    let f = match from { Value::Num(n, _) => *n, _ => bail!("Range bounds must be numeric") };
+    let t = match to { Value::Num(n, _) => *n, _ => bail!("Range bounds must be numeric") };
     let s = match step { Some(Value::Num(n, _)) => *n, Some(_) => bail!("range: step must be number"), None => 1.0 };
     if s == 0.0 { return Ok(true); }
     let mut c = f;
