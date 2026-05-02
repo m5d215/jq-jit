@@ -8792,3 +8792,48 @@ try mktime catch .
 "invalid gmtime representation"
 
 
+
+# Issue #549: getpath with empty object path element matches jq's slice-spec wording
+try (getpath([{}])) catch .
+[1,2,3]
+"Array/string slice indices must be integers"
+
+# Issue #549: getpath with single-key slice spec also requires both keys
+try (getpath([{start:1}])) catch .
+[1,2,3,4,5]
+"Array/string slice indices must be integers"
+
+# Issue #549: getpath with non-numeric/non-null start errors with jq's wording
+try (getpath([{start:"x", end:2}])) catch .
+[1,2,3]
+"Array/string slice indices must be integers"
+
+# Issue #549: getpath with full slice spec returns the slice (array)
+getpath([{start:1, end:3}])
+[1,2,3,4,5]
+[2,3]
+
+# Issue #549: getpath with full slice spec returns the slice (string, code points)
+getpath([{start:1, end:3}])
+"abcdef"
+"bc"
+
+# Issue #549: getpath with null endpoints means whole sequence
+getpath([{start:null, end:null}])
+[1,2,3]
+[1,2,3]
+
+# Issue #549: getpath with array path element returns subsequence positions on array
+getpath([[1,2]])
+[1,2,3,1,2,4]
+[0,3]
+
+# Issue #549: getpath with empty array path element on array returns []
+getpath([[]])
+[1,2,3]
+[]
+
+# Issue #549: getpath with array path element on string still errors (matches .[arr])
+try (getpath([[1,2]])) catch .
+"abc"
+"Cannot index string with array"
