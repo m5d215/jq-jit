@@ -7113,3 +7113,48 @@ null
 try (null | all) catch .
 null
 "Cannot iterate over null (null)"
+
+# Issue #470: halt_error/1 with non-number arg uses errdesc(input) prefix
+try halt_error("y") catch .
+null
+"null (null) halt_error/1: number required"
+
+# Issue #470: halt_error/1 with non-number arg, number input
+try halt_error("y") catch .
+0
+"number (0) halt_error/1: number required"
+
+# Issue #470: halt_error/1 with non-number arg, string input
+try halt_error("y") catch .
+"x"
+"string (\"x\") halt_error/1: number required"
+
+# Issue #470: halt_error/1 with non-number arg, array input
+try halt_error("y") catch .
+[1,2,3]
+"array ([1,2,3]) halt_error/1: number required"
+
+# Issue #470: halt_error/1 with non-number arg, object input
+try halt_error("y") catch .
+{"a":1}
+"object ({\"a\":1}) halt_error/1: number required"
+
+# Issue #470: halt_error/1 with array arg
+try halt_error([1,2,3]) catch .
+null
+"null (null) halt_error/1: number required"
+
+# Issue #470: halt_error/1 with object arg
+try halt_error({}) catch .
+null
+"null (null) halt_error/1: number required"
+
+# Issue #470: halt_error/1 with bool arg
+try halt_error(true) catch .
+null
+"null (null) halt_error/1: number required"
+
+# Issue #470: halt_error/1 with null arg
+try halt_error(null) catch .
+null
+"null (null) halt_error/1: number required"
