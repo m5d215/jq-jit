@@ -1994,6 +1994,12 @@ impl Parser {
                             } else {
                                 Some(self.parse_pipe()?)
                             };
+                            // jq rejects `.[:]` (both bounds absent) at parse
+                            // time; the explicit `.[null:null]` form is fine.
+                            // See #438.
+                            if first.is_none() && second.is_none() {
+                                anyhow::bail!("syntax error, unexpected ']'");
+                            }
                             self.expect(&Token::RBracket)?;
                             let _optional = self.eat(&Token::Question);
                             expr = Expr::Slice {
@@ -2094,6 +2100,9 @@ impl Parser {
                                 } else {
                                     Some(self.parse_pipe()?)
                                 };
+                                if first.is_none() && second.is_none() {
+                                    anyhow::bail!("syntax error, unexpected ']'");
+                                }
                                 self.expect(&Token::RBracket)?;
                                 Ok(Expr::Slice {
                                     expr: Box::new(Expr::Input),
