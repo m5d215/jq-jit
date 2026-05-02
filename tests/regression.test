@@ -8408,3 +8408,28 @@ try (strptime("%Y")) catch .
 try (strptime("%Y")) catch .
 null
 "strptime/1 requires string inputs and arguments"
+
+# Issue #527: range/2 with non-numeric `to` says "Range bounds must be numeric"
+try (range(0; "x")) catch .
+null
+"Range bounds must be numeric"
+
+# Issue #527: range/2 with non-numeric `from`
+try (range("x"; 5)) catch .
+null
+"Range bounds must be numeric"
+
+# Issue #527: null bounds also bail with the same wording
+try (range(null; 5)) catch .
+null
+"Range bounds must be numeric"
+
+# Issue #527: boolean bounds also bail with the same wording
+try (range(true; 5)) catch .
+null
+"Range bounds must be numeric"
+
+# Issue #527: numeric range/2 still works
+[range(0; 3)]
+null
+[0,1,2]
