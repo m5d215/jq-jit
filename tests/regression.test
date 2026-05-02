@@ -8455,3 +8455,38 @@ lgamma_r
 lgamma_r
 -1
 [1.7976931348623157e+308,1]
+
+# Issue #531: todate on null uses jq's strftime/1 wording
+try todate catch .
+null
+"strftime/1 requires parsed datetime inputs"
+
+# Issue #531: todate on string uses jq's strftime/1 wording
+try todate catch .
+"abc"
+"strftime/1 requires parsed datetime inputs"
+
+# Issue #531: todate on object uses jq's strftime/1 wording
+try todate catch .
+{}
+"strftime/1 requires parsed datetime inputs"
+
+# Issue #531: todate accepts broken-down-time array
+todate
+[2024,0,1,12,30,45]
+"2024-01-01T12:30:45Z"
+
+# Issue #531: todate on numeric epoch still works
+todate
+0
+"1970-01-01T00:00:00Z"
+
+# Issue #531: todateiso8601 accepts broken-down-time array
+todateiso8601
+[2024,0,1,12,30,45]
+"2024-01-01T12:30:45Z"
+
+# Issue #531: todateiso8601 on null
+try todateiso8601 catch .
+null
+"strftime/1 requires parsed datetime inputs"
