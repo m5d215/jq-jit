@@ -3150,52 +3150,22 @@ fn rt_strflocaltime_impl(input: &Value, fmt: &Value) -> Result<Value> {
 // -----------------------------------------------------------------------
 
 fn rt_fromisodate(v: &Value) -> Result<Value> {
-    use chrono::{DateTime, FixedOffset, NaiveDateTime, NaiveDate, Local};
+    use chrono::NaiveDateTime;
 
+    // jq's `fromdateiso8601` (and its alias `fromdate`) validates with
+    // strptime against the literal format `%Y-%m-%dT%H:%M:%SZ` — integer
+    // seconds, mandatory `T`, mandatory uppercase `Z`. Fractional seconds
+    // and timezone offsets are rejected. See #458.
     let s = match v {
-        Value::Str(s) => s.as_str().to_string(),
-        _ => bail!("fromisodate input must be a string"),
+        Value::Str(s) => s.as_str(),
+        _ => bail!("strptime/1 requires string inputs and arguments"),
     };
 
-    // Try RFC 3339 first (handles Z and +HH:MM offsets)
-    if let Ok(dt) = DateTime::<FixedOffset>::parse_from_rfc3339(&s) {
-        let epoch = dt.timestamp();
-        let nanos = dt.timestamp_subsec_nanos();
-        return Ok(epoch_with_frac(epoch, nanos));
+    if let Ok(ndt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%SZ") {
+        return Ok(Value::number(ndt.and_utc().timestamp() as f64));
     }
 
-    // Try datetime without timezone (local timezone)
-    for fmt in &["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S"] {
-        if let Ok(ndt) = NaiveDateTime::parse_from_str(&s, fmt) {
-            let local_dt = ndt.and_local_timezone(Local)
-                .single()
-                .ok_or_else(|| anyhow::anyhow!("ambiguous local time: {}", s))?;
-            let epoch = local_dt.timestamp();
-            let nanos = local_dt.timestamp_subsec_nanos();
-            return Ok(epoch_with_frac(epoch, nanos));
-        }
-    }
-
-    // Try date only (local timezone at midnight)
-    if let Ok(nd) = NaiveDate::parse_from_str(&s, "%Y-%m-%d") {
-        let ndt = nd.and_hms_opt(0, 0, 0).unwrap();
-        let local_dt = ndt.and_local_timezone(Local)
-            .single()
-            .ok_or_else(|| anyhow::anyhow!("ambiguous local time: {}", s))?;
-        let epoch = local_dt.timestamp();
-        return Ok(Value::number(epoch as f64));
-    }
-
-    bail!("fromisodate: invalid ISO 8601 date string: {}", s)
-}
-
-fn epoch_with_frac(epoch: i64, nanos: u32) -> Value {
-    if nanos == 0 {
-        Value::number(epoch as f64)
-    } else {
-        let frac = epoch as f64 + nanos as f64 / 1_000_000_000.0;
-        Value::number(frac)
-    }
+    bail!(r#"date "{}" does not match format "%Y-%m-%dT%H:%M:%SZ""#, s)
 }
 
 fn rt_toisodate(v: &Value) -> Result<Value> {

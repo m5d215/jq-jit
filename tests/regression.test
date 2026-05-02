@@ -7353,3 +7353,63 @@ null
 "abc" | scan("a")
 null
 "a"
+
+# Issue #458: fromdate happy path (UTC, integer seconds, trailing Z)
+"2024-01-01T00:00:00Z" | fromdate
+null
+1704067200
+
+# Issue #458: fromdateiso8601 happy path
+"2024-01-01T00:00:00Z" | fromdateiso8601
+null
+1704067200
+
+# Issue #458: fromdate rejects non-string with strptime wording
+try (5 | fromdate) catch .
+null
+"strptime/1 requires string inputs and arguments"
+
+# Issue #458: fromdate rejects null with strptime wording
+try (null | fromdate) catch .
+null
+"strptime/1 requires string inputs and arguments"
+
+# Issue #458: fromdate rejects array with strptime wording
+try ([1] | fromdate) catch .
+null
+"strptime/1 requires string inputs and arguments"
+
+# Issue #458: fromdate rejects date-only string (no T, no time)
+try ("2024-01-01" | fromdate) catch .
+null
+"date \"2024-01-01\" does not match format \"%Y-%m-%dT%H:%M:%SZ\""
+
+# Issue #458: fromdate rejects datetime missing trailing Z
+try ("2024-01-01T00:00:00" | fromdate) catch .
+null
+"date \"2024-01-01T00:00:00\" does not match format \"%Y-%m-%dT%H:%M:%SZ\""
+
+# Issue #458: fromdate rejects offset timezone
+try ("2024-01-01T00:00:00+09:00" | fromdate) catch .
+null
+"date \"2024-01-01T00:00:00+09:00\" does not match format \"%Y-%m-%dT%H:%M:%SZ\""
+
+# Issue #458: fromdate rejects fractional seconds
+try ("2024-01-01T00:00:00.5Z" | fromdate) catch .
+null
+"date \"2024-01-01T00:00:00.5Z\" does not match format \"%Y-%m-%dT%H:%M:%SZ\""
+
+# Issue #458: fromdate rejects lowercase z
+try ("2024-01-01T00:00:00z" | fromdate) catch .
+null
+"date \"2024-01-01T00:00:00z\" does not match format \"%Y-%m-%dT%H:%M:%SZ\""
+
+# Issue #458: fromdate rejects empty string
+try ("" | fromdate) catch .
+null
+"date \"\" does not match format \"%Y-%m-%dT%H:%M:%SZ\""
+
+# Issue #458: fromdateiso8601 (alias) shares the same wording
+try ("not-a-date" | fromdateiso8601) catch .
+null
+"date \"not-a-date\" does not match format \"%Y-%m-%dT%H:%M:%SZ\""
