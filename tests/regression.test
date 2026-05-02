@@ -8373,3 +8373,38 @@ try (. as [$a] | "with") catch "no"
 .x = .y
 {"a":1,"x":42,"y":99}
 {"a":1,"x":99,"y":99}
+
+# Issue #525: gmtime on non-numeric uses jq's "() requires numeric inputs" wording
+try gmtime catch .
+null
+"gmtime() requires numeric inputs"
+
+# Issue #525: localtime on non-numeric matches jq
+try localtime catch .
+"abc"
+"localtime() requires numeric inputs"
+
+# Issue #525: mktime on non-array uses "requires array inputs"
+try mktime catch .
+0
+"mktime requires array inputs"
+
+# Issue #525: mktime on string also bails as non-array
+try mktime catch .
+"abc"
+"mktime requires array inputs"
+
+# Issue #525: mktime on empty array falls through to validator
+try mktime catch .
+[]
+"invalid gmtime representation"
+
+# Issue #525: strptime on non-string matches jq's "/1 requires string inputs and arguments"
+try (strptime("%Y")) catch .
+0
+"strptime/1 requires string inputs and arguments"
+
+# Issue #525: strptime on null
+try (strptime("%Y")) catch .
+null
+"strptime/1 requires string inputs and arguments"

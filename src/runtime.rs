@@ -3058,7 +3058,7 @@ fn rt_gmtime(v: &Value) -> Result<Value> {
             let frac = (n - n.trunc()).abs();
             Ok(libc_gmtime(secs, frac))
         }
-        _ => bail!("gmtime requires number"),
+        _ => bail!("gmtime() requires numeric inputs"),
     }
 }
 
@@ -3104,7 +3104,7 @@ fn rt_localtime(v: &Value) -> Result<Value> {
                 Value::number(result.tm_yday as f64),
             ])))
         }
-        _ => bail!("localtime requires number"),
+        _ => bail!("localtime() requires numeric inputs"),
     }
 }
 
@@ -3143,13 +3143,21 @@ fn rt_mktime(v: &Value) -> Result<Value> {
             let result = unsafe { libc::timegm(&mut t) };
             Ok(Value::number(result as f64))
         }
-        Value::Arr(a) if !a.is_empty() => {
+        Value::Arr(a) if a.is_empty() => {
+            // jq's mktime on `[]` falls through to the broken-down-time
+            // validator and bails with "invalid gmtime representation"
+            // (#525) — the array-vs-not check only catches non-arrays.
+            bail!("invalid gmtime representation");
+        }
+        Value::Arr(a) => {
+            // Single-element array: jq still calls into the broken-down-
+            // time validator, which trips on the missing fields.
             if let Value::Str(_) = &a[0] {
                 bail!("mktime requires parsed datetime inputs");
             }
             bail!("mktime requires array of time components");
         }
-        _ => bail!("mktime requires parsed datetime inputs"),
+        _ => bail!("mktime requires array inputs"),
     }
 }
 
@@ -3216,7 +3224,7 @@ fn rt_strptime(v: &Value, fmt: &Value) -> Result<Value> {
                 Value::number(t.tm_yday as f64),
             ])))
         }
-        _ => bail!("strptime requires string and format"),
+        _ => bail!("strptime/1 requires string inputs and arguments"),
     }
 }
 
