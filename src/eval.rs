@@ -3380,7 +3380,7 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
     // For csv/tsv, the input must be an array
     match name {
         "csv" => {
-            let arr = match val { Value::Arr(a) => a, _ => bail!("@csv requires array input") };
+            let arr = match val { Value::Arr(a) => a, _ => bail!("{} cannot be csv-formatted, only array", crate::runtime::errdesc_pub(val)) };
             let mut buf = String::with_capacity(arr.len() * 16);
             for (i, v) in arr.iter().enumerate() {
                 if i > 0 { buf.push(','); }
@@ -3415,7 +3415,7 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
             return Ok(buf);
         }
         "tsv" => {
-            let arr = match val { Value::Arr(a) => a, _ => bail!("@tsv requires array input") };
+            let arr = match val { Value::Arr(a) => a, _ => bail!("{} cannot be tsv-formatted, only array", crate::runtime::errdesc_pub(val)) };
             let mut buf = String::with_capacity(arr.len() * 16);
             for (i, v) in arr.iter().enumerate() {
                 if i > 0 { buf.push('\t'); }
