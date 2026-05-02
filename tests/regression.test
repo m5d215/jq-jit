@@ -8288,3 +8288,38 @@ true
 [1,2] | any((false, false))
 null
 false
+
+# Issue #521: object destructure error fires catch even when body doesn't ref var
+try (. as {a: $a} | "with-a") catch "no-a"
+0
+"no-a"
+
+# Issue #521: object destructure error on string input
+try (. as {a: $a} | "with-a") catch "no-a"
+"abc"
+"no-a"
+
+# Issue #521: object destructure error on array input
+try (. as {a: $a} | "with-a") catch "no-a"
+[1,2,3]
+"no-a"
+
+# Issue #521: array destructure error fires catch even when body doesn't ref var
+try (. as [$a] | "with") catch "no"
+{"a":1}
+"no"
+
+# Issue #521: array destructure error on number
+try (. as [$a] | "with") catch "no"
+0
+"no"
+
+# Issue #521: object destructure success on matching shape still works (no false catch)
+try (. as {a: $a} | "with-a") catch "no-a"
+{}
+"with-a"
+
+# Issue #521: array destructure success on array input still works
+try (. as [$a] | "with") catch "no"
+[1]
+"with"

@@ -465,6 +465,96 @@ fn const_expr_to_json(expr: &crate::ir::Expr) -> Option<Vec<u8>> {
 /// branch would otherwise be promoted into the surrounding fold and stream
 /// every element instead of being collected first (issue #152). Safe default
 /// when uncertain: false.
+/// Conservative check that an expression cannot raise a runtime error. Used
+/// to decide when a LetBinding can be eliminated even if its body doesn't
+/// reference the bound variable — `(E as $x | F)` may not drop E unless E is
+/// guaranteed not to error (#521).
+fn expr_is_pure_scalar(e: &crate::ir::Expr) -> bool {
+    use crate::ir::Expr;
+    match e {
+        Expr::Literal(_) | Expr::Input | Expr::LoadVar { .. }
+        | Expr::Empty | Expr::Env | Expr::Builtins
+        | Expr::Loc { .. } => true,
+        // `not` and `type` never error on any value.
+        Expr::Not => true,
+        Expr::UnaryOp { op, operand } => {
+            matches!(op, crate::ir::UnaryOp::Type) && expr_is_pure_scalar(operand)
+        }
+        _ => false,
+    }
+}
+
+/// True if `expr` contains a `LoadVar` reference to `var_index`. Used by the
+/// LetBinding inliner to decide whether substitution would actually use the
+/// bound value or only need to keep it for its side effect.
+fn expr_references_var(expr: &crate::ir::Expr, var_index: u16) -> bool {
+    use crate::ir::Expr;
+    match expr {
+        Expr::LoadVar { var_index: idx } => *idx == var_index,
+        Expr::Input | Expr::Empty | Expr::Not | Expr::Env | Expr::Builtins
+        | Expr::ReadInput | Expr::ReadInputs | Expr::ModuleMeta | Expr::GenLabel
+        | Expr::Literal(_) | Expr::Loc { .. } => false,
+        Expr::Pipe { left, right } | Expr::Comma { left, right }
+        | Expr::BinOp { lhs: left, rhs: right, .. }
+        | Expr::Alternative { primary: left, fallback: right }
+        | Expr::While { cond: left, update: right }
+        | Expr::Until { cond: left, update: right }
+        | Expr::Limit { count: left, generator: right }
+        | Expr::Index { expr: left, key: right }
+        | Expr::IndexOpt { expr: left, key: right }
+        | Expr::Update { path_expr: left, update_expr: right }
+        | Expr::Assign { path_expr: left, value_expr: right }
+        | Expr::SetPath { path: left, value: right }
+        | Expr::TryCatch { try_expr: left, catch_expr: right } => {
+            expr_references_var(left, var_index) || expr_references_var(right, var_index)
+        }
+        Expr::IfThenElse { cond, then_branch, else_branch } => {
+            expr_references_var(cond, var_index)
+                || expr_references_var(then_branch, var_index)
+                || expr_references_var(else_branch, var_index)
+        }
+        Expr::LetBinding { value, body, .. } => {
+            expr_references_var(value, var_index) || expr_references_var(body, var_index)
+        }
+        Expr::Each { input_expr } | Expr::EachOpt { input_expr }
+        | Expr::Recurse { input_expr } | Expr::Repeat { update: input_expr }
+        | Expr::Negate { operand: input_expr } | Expr::UnaryOp { operand: input_expr, .. }
+        | Expr::Collect { generator: input_expr }
+        | Expr::PathExpr { expr: input_expr } | Expr::GetPath { path: input_expr }
+        | Expr::DelPaths { paths: input_expr } | Expr::Debug { expr: input_expr }
+        | Expr::Stderr { expr: input_expr } | Expr::Format { expr: input_expr, .. } => {
+            expr_references_var(input_expr, var_index)
+        }
+        Expr::Reduce { source, init, update, .. }
+        | Expr::Foreach { source, init, update, .. } => {
+            expr_references_var(source, var_index)
+                || expr_references_var(init, var_index)
+                || expr_references_var(update, var_index)
+        }
+        Expr::Range { from, to, step } => {
+            expr_references_var(from, var_index)
+                || expr_references_var(to, var_index)
+                || step.as_ref().is_some_and(|s| expr_references_var(s, var_index))
+        }
+        Expr::Slice { expr, .. } => expr_references_var(expr, var_index),
+        Expr::ObjectConstruct { pairs } => {
+            pairs.iter().any(|(k, v)| expr_references_var(k, var_index) || expr_references_var(v, var_index))
+        }
+        Expr::AllShort { generator, predicate } | Expr::AnyShort { generator, predicate } => {
+            expr_references_var(generator, var_index) || expr_references_var(predicate, var_index)
+        }
+        Expr::AlternativeDestructure { alternatives } => {
+            alternatives.iter().any(|a| expr_references_var(a, var_index))
+        }
+        Expr::StringInterpolation { parts } => parts.iter().any(|p| match p {
+            crate::ir::StringPart::Expr(e) => expr_references_var(e, var_index),
+            crate::ir::StringPart::Literal(_) => false,
+        }),
+        // Conservative for variants we don't enumerate: assume they may use the var.
+        _ => true,
+    }
+}
+
 pub(crate) fn is_single_valued_expr(e: &crate::ir::Expr) -> bool {
     use crate::ir::Expr;
     match e {
@@ -1561,12 +1651,24 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                 else_branch: Box::new(se),
             }
         }
-        // Inline LetBinding: (E as $x | F) → F[$x := E] when E is simple
+        // Inline LetBinding: (E as $x | F) → F[$x := E] when E is simple.
+        //
+        // When F doesn't reference $x, the substitution drops E entirely. That
+        // is only safe when E is guaranteed not to error: jq's `as` is
+        // documented to evaluate the right-hand side eagerly and propagate any
+        // error (the destructuring `. as {a:$a} | "lit"` parses to nested
+        // LetBindings whose RHSes are `Index{Input, "a"}` — those must error
+        // on non-objects even when the body doesn't read $a). Without this
+        // guard, the LetBinding gets eliminated and the catch never fires
+        // (#521).
         Expr::LetBinding { var_index, value, body } => {
             let sv = simplify_expr(value);
             let sb = simplify_expr(body);
             if sv.is_simple_scalar() {
-                return sb.substitute_var(*var_index, &sv);
+                let body_uses_var = expr_references_var(&sb, *var_index);
+                if body_uses_var || expr_is_pure_scalar(&sv) {
+                    return sb.substitute_var(*var_index, &sv);
+                }
             }
             Expr::LetBinding { var_index: *var_index, value: Box::new(sv), body: Box::new(sb) }
         }
