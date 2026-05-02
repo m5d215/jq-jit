@@ -6705,3 +6705,38 @@ try unique catch .
 [3,1,2] | sort
 null
 [1,2,3]
+
+# Issue #452: all-zero mantissa with positive exponent stays scientific
+0e1
+null
+0E+1
+
+# Issue #452: all-zero with negative exponent expands to decimal
+0e-1
+null
+0.0
+
+# Issue #452: more zeros for larger negative exponent
+0e-2
+null
+0.00
+
+# Issue #452: existing fractional zeros add to the expansion count
+0.0e-1
+null
+0.00
+
+# Issue #452: zero-mantissa preserves frac shape when exp == 0
+0.0e0
+null
+0.0
+
+# Issue #452: negative-zero preserves the form (sign already canonical)
+-0e10
+null
+0E+10
+
+# Issue #452: existing 0e0 still folds to plain `0`
+0e0
+null
+0
