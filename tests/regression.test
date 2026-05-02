@@ -7158,3 +7158,58 @@ null
 try halt_error(null) catch .
 null
 "null (null) halt_error/1: number required"
+
+# Issue #480: @csv on null input
+try @csv catch .
+null
+"null (null) cannot be csv-formatted, only array"
+
+# Issue #480: @csv on number input
+try @csv catch .
+5
+"number (5) cannot be csv-formatted, only array"
+
+# Issue #480: @csv on string input
+try @csv catch .
+"x"
+"string (\"x\") cannot be csv-formatted, only array"
+
+# Issue #480: @csv on object input
+try @csv catch .
+{"a":1}
+"object ({\"a\":1}) cannot be csv-formatted, only array"
+
+# Issue #480: @csv on boolean input
+try @csv catch .
+true
+"boolean (true) cannot be csv-formatted, only array"
+
+# Issue #480: @csv on array still works
+[1,2,3] | @csv
+null
+"1,2,3"
+
+# Issue #480: @tsv on null input
+try @tsv catch .
+null
+"null (null) cannot be tsv-formatted, only array"
+
+# Issue #480: @tsv on number input
+try @tsv catch .
+5
+"number (5) cannot be tsv-formatted, only array"
+
+# Issue #480: @tsv on string input
+try @tsv catch .
+"x"
+"string (\"x\") cannot be tsv-formatted, only array"
+
+# Issue #480: @tsv on object input
+try @tsv catch .
+{"a":1}
+"object ({\"a\":1}) cannot be tsv-formatted, only array"
+
+# Issue #480: @tsv on array still works
+[1,2,3] | @tsv
+null
+"1\t2\t3"

@@ -7205,7 +7205,10 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                     std::ptr::write(dst, Value::from_string(String::from_utf8_unchecked(buf)));
                     return 0;
                 } else {
-                    set_jit_error("@csv requires array input".to_string());
+                    set_jit_error(format!(
+                        "{} cannot be csv-formatted, only array",
+                        crate::runtime::errdesc_pub(&args[0])
+                    ));
                     std::ptr::write(dst, Value::Null);
                     return GEN_ERROR;
                 }
@@ -7238,7 +7241,10 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                     std::ptr::write(dst, Value::from_string(String::from_utf8_unchecked(buf)));
                     return 0;
                 } else {
-                    set_jit_error("@tsv requires array input".to_string());
+                    set_jit_error(format!(
+                        "{} cannot be tsv-formatted, only array",
+                        crate::runtime::errdesc_pub(&args[0])
+                    ));
                     std::ptr::write(dst, Value::Null);
                     return GEN_ERROR;
                 }
