@@ -1763,31 +1763,45 @@ fn rt_from_entries(v: &Value) -> Result<Value> {
 }
 
 fn rt_transpose(v: &Value) -> Result<Value> {
-    match v {
-        Value::Arr(a) => {
-            if a.is_empty() {
-                return Ok(Value::Arr(Rc::new(vec![])));
-            }
-            let max_len = a.iter().filter_map(|v| {
-                if let Value::Arr(inner) = v { Some(inner.len()) } else { None }
-            }).max().unwrap_or(0);
-
-            let mut result = Vec::with_capacity(max_len);
-            for i in 0..max_len {
-                let mut row = Vec::with_capacity(a.len());
-                for item in a.iter() {
-                    if let Value::Arr(inner) = item {
-                        row.push(inner.get(i).cloned().unwrap_or(Value::Null));
-                    } else {
-                        row.push(Value::Null);
-                    }
-                }
-                result.push(Value::Arr(Rc::new(row)));
-            }
-            Ok(Value::Arr(Rc::new(result)))
-        }
-        _ => bail!("{} cannot be transposed", v.type_name()),
+    // jq's transpose accepts both arrays and objects (objects iterate
+    // their values, like jq's other "iterable" sites). The inner `.[$i]`
+    // index against a non-array element fails with the standard
+    // `Cannot index <type> with number` error (#543); null elements are
+    // treated as empty rows (no-op for indexing).
+    let items: Vec<&Value> = match v {
+        Value::Arr(a) => a.iter().collect(),
+        Value::Obj(ObjInner(o)) => o.values().collect(),
+        other => bail!("Cannot iterate over {}", errdesc(other)),
+    };
+    if items.is_empty() {
+        return Ok(Value::Arr(Rc::new(vec![])));
     }
+    for item in items.iter() {
+        match item {
+            Value::Arr(_) | Value::Null => {}
+            other => bail!(
+                "Cannot index {} with number",
+                other.type_name(),
+            ),
+        }
+    }
+    let max_len = items.iter().filter_map(|v| {
+        if let Value::Arr(inner) = v { Some(inner.len()) } else { None }
+    }).max().unwrap_or(0);
+
+    let mut result = Vec::with_capacity(max_len);
+    for i in 0..max_len {
+        let mut row = Vec::with_capacity(items.len());
+        for item in items.iter() {
+            if let Value::Arr(inner) = item {
+                row.push(inner.get(i).cloned().unwrap_or(Value::Null));
+            } else {
+                row.push(Value::Null);
+            }
+        }
+        result.push(Value::Arr(Rc::new(row)));
+    }
+    Ok(Value::Arr(Rc::new(result)))
 }
 
 fn rt_not(v: &Value) -> Result<Value> {
