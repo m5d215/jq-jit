@@ -5534,7 +5534,7 @@ fn push_value_tojson(v: &Value, out: &mut String, depth: usize) {
 /// True iff `repr` (a JSON-valid decimal literal) represents a value that f64
 /// can hold exactly. Rejects mantissas with more than 15 significant decimal
 /// digits and exponents outside f64's dynamic range.
-fn repr_is_exact_for_f64(repr: &str, n: f64) -> bool {
+pub(crate) fn repr_is_exact_for_f64(repr: &str, n: f64) -> bool {
     if !n.is_finite() { return false; }
     let bytes = repr.as_bytes();
     let mut i = 0;

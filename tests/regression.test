@@ -6828,3 +6828,43 @@ null
 try pow(.; 2) catch .
 "x"
 "string (\"x\") number required"
+
+# Issue #460: division-by-zero error preserves the original number repr.
+# Was: jq-jit dropped trailing `.0`/`E+` and emitted `"number (1)"` even
+# when the literal was `1.0`. Now uses canonical_repr_bytes when the
+# literal round-trips exactly through f64 (so `1.0` stays `1.0`,
+# `1e30` becomes `1E+30`).
+try (1.0 / 0) catch .
+null
+"number (1.0) and number (0) cannot be divided because the divisor is zero"
+
+# Issue #460: divisor-side repr is also preserved
+try (1 / 0.0) catch .
+null
+"number (1) and number (0.0) cannot be divided because the divisor is zero"
+
+# Issue #460: scientific literal canonicalizes to uppercase E+
+try (1e30 / 0) catch .
+null
+"number (1E+30) and number (0) cannot be divided because the divisor is zero"
+
+# Issue #460: 0E+10 keeps its repr, not collapsed to 0
+try (0e10 / 0) catch .
+null
+"number (0E+10) and number (0) cannot be divided because the divisor is zero"
+
+# Issue #460: 0.0 (not -0.0) stays "0.0" — jq prints positive zero with
+# the original repr's decimal form.
+try (0.0 / 0) catch .
+null
+"number (0.0) and number (0) cannot be divided because the divisor is zero"
+
+# Issue #460: -0.0 strips the sign in jq's errdesc (matches its behavior)
+try (-0.0 / 0) catch .
+null
+"number (0.0) and number (0) cannot be divided because the divisor is zero"
+
+# Issue #460: same wording reuse path — modulo-by-zero
+try (1.5 % 0) catch .
+null
+"number (1.5) and number (0) cannot be divided (remainder) because the divisor is zero"
