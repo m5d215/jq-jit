@@ -1558,7 +1558,9 @@ fn rt_to_entries(v: &Value) -> Result<Value> {
             }).collect();
             Ok(Value::Arr(Rc::new(entries)))
         }
-        _ => bail!("{} has no entries", v.type_name()),
+        // jq implements `to_entries` on top of `keys`, so the error
+        // wording is shared: `<type> (<value>) has no keys`. See #448.
+        _ => bail!("{} has no keys", errdesc(v)),
     }
 }
 
