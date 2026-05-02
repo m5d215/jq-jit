@@ -4016,14 +4016,6 @@ pub fn extend_compact_from_slice(dst: &mut Vec<u8>, src: &[u8]) {
 
 pub fn is_json_compact(bytes: &[u8]) -> bool {
     if bytes.len() < 2 { return true; }
-    // Fast path: NDJSON inputs are usually whitespace-free. Two SIMD-backed
-    // memchr scans for ` `/`\n` and `\t`/`\r` short-circuit the common case
-    // without the byte-by-byte walk below.
-    if memchr::memchr2(b' ', b'\n', bytes).is_none()
-        && memchr::memchr2(b'\t', b'\r', bytes).is_none()
-    {
-        return true;
-    }
     let b0 = bytes[0];
     // Walk the top-level value, rejecting any whitespace outside string
     // literals. Nested containers (`[{"a":1, "b":2}]`, `{"a":[1, 2]}`,
