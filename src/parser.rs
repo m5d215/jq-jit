@@ -477,14 +477,21 @@ fn normalize_num_repr(s: &str) -> String {
         let first_sig = digits.iter().position(|c| *c != '0').unwrap_or(digits.len());
 
         if first_sig >= digits.len() {
-            // All-zero mantissa. Drop the exponent and the leading sign;
-            // preserve fractional shape so `0.0e0` stays `0.0`, not `0`.
-            if frac_part.is_empty() {
-                return "0".to_string();
+            // All-zero mantissa. jq's decnum keeps the explicit-exponent
+            // form: `0e1` → `0E+1`, `0e-1` → `0.0`, `0.0e-1` → `0.00`,
+            // `-0e10` → `-0E+10`. Hand the canonical normalisation off to
+            // `normalize_jq_repr`'s all-zero branch (#452).
+            if exp >= 1 {
+                return format!("{}0E+{}", sign, exp);
             }
-            let mut out = String::with_capacity(2 + frac_part.len());
+            let total_zeros = (frac_part.len() as i64) - exp;
+            if total_zeros <= 0 {
+                return format!("{}0", sign);
+            }
+            let mut out = String::with_capacity(2 + total_zeros as usize);
+            out.push_str(sign);
             out.push_str("0.");
-            for _ in 0..frac_part.len() {
+            for _ in 0..total_zeros {
                 out.push('0');
             }
             return out;

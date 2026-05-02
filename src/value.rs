@@ -5348,11 +5348,27 @@ pub fn normalize_jq_repr(repr: &str) -> Option<String> {
     }
     let leading_zeros = combined.bytes().take_while(|&b| b == b'0').count();
     if leading_zeros == combined.len() {
-        // Pure-zero value: jq keeps the explicit-exponent form when present
-        // (`0e10` → `0E+10`, `-0e10` → `-0E+10`) but folds plain `0.0` etc.
+        // Pure-zero value: jq keeps the explicit-exponent form when present.
+        // `0e10`  → `0E+10` (positive exp stays scientific)
+        // `0e-1`  → `0.0`   (negative exp expands to decimal — N+frac zeros)
+        // `0.0e-1` → `0.00` (frac digits add to the zero count)
+        // `0.0e0` → `0.0`   (no exp shift, drop the `e0`)
+        // See #452.
         if let Some(_) = e_pos {
-            let s = if exp >= 0 { '+' } else { '-' };
-            return Some(format!("{}0E{}{}", sign, s, exp.abs()));
+            if exp >= 1 {
+                return Some(format!("{}0E+{}", sign, exp));
+            }
+            // exp <= 0: expand to decimal `0.000...0` with `mant_frac.len() - exp` zeros.
+            // exp == 0 with no frac → "0"; exp == 0 with frac → keep frac zeros.
+            let total_zeros = (mant_frac.len() as i64) - exp as i64;
+            if total_zeros <= 0 {
+                return Some(format!("{}0", sign));
+            }
+            let mut s = String::with_capacity(2 + total_zeros as usize);
+            s.push_str(sign);
+            s.push_str("0.");
+            for _ in 0..total_zeros { s.push('0'); }
+            return Some(s);
         }
         return None;
     }
