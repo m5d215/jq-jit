@@ -7413,3 +7413,68 @@ null
 try ("not-a-date" | fromdateiso8601) catch .
 null
 "date \"not-a-date\" does not match format \"%Y-%m-%dT%H:%M:%SZ\""
+
+# Issue #456: sort_by on object includes projection in error
+try ({a:1,b:2} | sort_by(.)) catch .
+null
+"object ({\"a\":1,\"b\":2}) and array ([[1],[2]]) cannot be sorted, as they are not both arrays"
+
+# Issue #456: sort_by on empty object
+try ({} | sort_by(.)) catch .
+null
+"object ({}) and array ([]) cannot be sorted, as they are not both arrays"
+
+# Issue #456: sort_by uses computed projection, not the literal key_expr
+try ({a:1} | sort_by(.+10)) catch .
+null
+"object ({\"a\":1}) and array ([[11]]) cannot be sorted, as they are not both arrays"
+
+# Issue #456: sort_by with multi-output key collects all per-item outputs
+try ({a:1,b:2} | sort_by(.,.)) catch .
+null
+"object ({\"a\":1,\"b\":2}) and array ([[1,1],[2,2]]) cannot be sorted, as they are not both arrays"
+
+# Issue #456: sort_by with empty key collects []
+try ({a:1,b:2} | sort_by(empty)) catch .
+null
+"object ({\"a\":1,\"b\":2}) and array ([[],[]]) cannot be sorted, as they are not both arrays"
+
+# Issue #456: unique_by on object same wording
+try ({a:1} | unique_by(.)) catch .
+null
+"object ({\"a\":1}) and array ([[1]]) cannot be sorted, as they are not both arrays"
+
+# Issue #456: group_by on object same wording
+try ({a:1} | group_by(.)) catch .
+null
+"object ({\"a\":1}) and array ([[1]]) cannot be sorted, as they are not both arrays"
+
+# Issue #456: min_by on object uses 'cannot be iterated over' suffix
+try ({a:1} | min_by(.)) catch .
+null
+"object ({\"a\":1}) and array ([[1]]) cannot be iterated over"
+
+# Issue #456: max_by on object same iterated-over suffix
+try ({a:1} | max_by(.)) catch .
+null
+"object ({\"a\":1}) and array ([[1]]) cannot be iterated over"
+
+# Issue #456: projection error propagates before the receiver check
+try ({a:1,b:2} | sort_by(error("x"))) catch .
+null
+"x"
+
+# Issue #456: non-iterable input keeps the existing 'Cannot iterate over' wording
+try (5 | sort_by(.)) catch .
+null
+"Cannot iterate over number (5)"
+
+# Issue #456: non-iterable null
+try (null | min_by(.)) catch .
+null
+"Cannot iterate over null (null)"
+
+# Issue #456: array happy-path still works
+[3,1,2] | sort_by(.)
+null
+[1,2,3]

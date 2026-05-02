@@ -3851,7 +3851,36 @@ fn try_eval_key_value<'a>(expr: &Expr, input: &'a Value) -> Option<&'a Value> {
 }
 
 fn eval_closure_op(op: ClosureOpKind, container: &Value, key_expr: &Expr, _input: &Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
-    let a = match container { Value::Arr(a) => a, _ => bail!("Cannot iterate over {}", crate::runtime::errdesc_pub(container)) };
+    let a = match container {
+        Value::Arr(a) => a,
+        // jq evaluates the projection over object values first (so any
+        // projection error propagates), then bails with a wording that
+        // names both the input and the projected key array. See #456.
+        // sort_by/group_by/unique_by say "cannot be sorted, as they are
+        // not both arrays"; min_by/max_by say "cannot be iterated over".
+        Value::Obj(crate::value::ObjInner(o)) => {
+            let mut projections: Vec<Value> = Vec::with_capacity(o.len());
+            for v in o.values() {
+                let mut keys: Vec<Value> = Vec::new();
+                eval(key_expr, v.clone(), env, &mut |k| { keys.push(k); Ok(true) })?;
+                projections.push(Value::Arr(Rc::new(keys)));
+            }
+            let proj = Value::Arr(Rc::new(projections));
+            let suffix = match op {
+                ClosureOpKind::SortBy
+                | ClosureOpKind::GroupBy
+                | ClosureOpKind::UniqueBy => "cannot be sorted, as they are not both arrays",
+                ClosureOpKind::MinBy | ClosureOpKind::MaxBy => "cannot be iterated over",
+            };
+            bail!(
+                "{} and {} {}",
+                crate::runtime::errdesc_pub(container),
+                crate::runtime::errdesc_pub(&proj),
+                suffix
+            );
+        }
+        _ => bail!("Cannot iterate over {}", crate::runtime::errdesc_pub(container)),
+    };
 
     // Fast path: f64 key extraction — avoids eval overhead and Vec<Value> allocations
     if !a.is_empty() {
