@@ -8601,3 +8601,44 @@ flatten(99)
 [[1],[2]]
 [1,2]
 
+# Issue #539: limit accepts float-repr count
+[limit(2.0; .[])]
+[1,2,3]
+[1,2]
+
+# Issue #539: limit on null count uses jq's "negative count" wording
+try (limit(null; .[])) catch .
+[1,2,3]
+"limit doesn't support negative count"
+
+# Issue #539: limit on bool count
+try (limit(true; .[])) catch .
+[1,2,3]
+"limit doesn't support negative count"
+
+# Issue #539: limit on string count surfaces arithmetic error
+try (limit("a"; .[])) catch .
+[1,2,3]
+"string (\"a\") and number (1) cannot be subtracted"
+
+# Issue #539: limit on array count
+try (limit([]; .[])) catch .
+[1]
+"array ([]) and number (1) cannot be subtracted"
+
+# Issue #539: limit on object count
+try (limit({}; .[])) catch .
+[1]
+"object ({}) and number (1) cannot be subtracted"
+
+# Issue #539: numeric negative count keeps the original wording
+try (limit(-1; .[])) catch .
+[1,2,3]
+"limit doesn't support negative count"
+
+# Issue #539: zero count returns empty (no error)
+[limit(0; .[])]
+[1,2,3]
+[]
+
+
