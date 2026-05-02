@@ -7853,3 +7853,28 @@ null
 [paths]
 {"a":1,"b":[2,3]}
 [["a"],["b"],["b",0],["b",1]]
+
+# Issue #500: path(.[0]) on a number errors without value tag
+try path(.[0]) catch .
+5
+"Cannot index number with number"
+
+# Issue #500: path(.[0] // .[1]) preserves the same wording
+try path(.[0] // .[1]) catch .
+5
+"Cannot index number with number"
+
+# Issue #500: path(.x) on a number keeps the string-key value
+try path(.x) catch .
+5
+"Cannot index number with string \"x\""
+
+# Issue #500: path(.[true]) — boolean key, no value
+try path(.[true]) catch .
+5
+"Cannot index number with boolean"
+
+# Issue #500: path(.[null]) — null key
+try path(.[null]) catch .
+5
+"Cannot index number with null"
