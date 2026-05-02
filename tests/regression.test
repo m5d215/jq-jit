@@ -7958,3 +7958,38 @@ null
 [range(0; 3)]
 null
 [0,1,2]
+
+# Issue #505: flatten/0 on number says "Cannot iterate over <type> (<value>)"
+try flatten catch .
+1
+"Cannot iterate over number (1)"
+
+# Issue #505: flatten/0 on string keeps the value tag
+try flatten catch .
+"abc"
+"Cannot iterate over string (\"abc\")"
+
+# Issue #505: flatten/0 on null
+try flatten catch .
+null
+"Cannot iterate over null (null)"
+
+# Issue #505: flatten/0 on boolean
+try flatten catch .
+true
+"Cannot iterate over boolean (true)"
+
+# Issue #505: flatten/1 (with depth) shares the same wording
+try (flatten(2)) catch .
+1
+"Cannot iterate over number (1)"
+
+# Issue #505: array input still flattens normally
+flatten
+[1,[2,[3]]]
+[1,2,3]
+
+# Issue #505: object input still flattens its values
+flatten
+{"a":[1,2],"b":3}
+[1,2,3]

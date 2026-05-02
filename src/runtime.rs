@@ -1217,7 +1217,7 @@ fn rt_flatten(v: &Value, depth: Option<usize>) -> Result<Value> {
             flatten_inner(&values, depth.unwrap_or(usize::MAX), &mut result);
             Ok(Value::Arr(Rc::new(result)))
         }
-        _ => bail!("{} is not an array", v.type_name()),
+        _ => bail!("Cannot iterate over {}", errdesc(v)),
     }
 }
 
