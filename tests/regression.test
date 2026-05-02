@@ -6597,3 +6597,25 @@ null
 1700000000.5 | gmtime | mktime
 null
 1700000000
+
+# Issue #442: slice on a non-iterable shares the indexing-error wording —
+# jq treats slice as path access whose key is the {start, end} object.
+try .[:0] catch .
+false
+"Cannot index boolean with object"
+
+# Issue #442: same on numeric input
+try .[1:2] catch .
+5
+"Cannot index number with object"
+
+# Issue #442: same on object input (objects aren't sliceable)
+try .[:0] catch .
+{"a":1}
+"Cannot index object with object"
+
+# Issue #442: arrays/strings/null still slice normally (regression of the
+# success path against the new wording landing on errors)
+.[:2]
+[1,2,3,4]
+[1,2]

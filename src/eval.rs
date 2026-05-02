@@ -3549,7 +3549,10 @@ pub fn eval_slice(base: &Value, from: &Value, to: &Value) -> Result<Value> {
             }
         }
         Value::Null => Ok(Value::Null),
-        _ => bail!("cannot slice {}", base.type_name()),
+        // jq treats slice as a path access whose key is the {start, end}
+        // object, so type errors share the "Cannot index X with object"
+        // wording rather than a slice-specific message. See #442.
+        _ => bail!("Cannot index {} with object", base.type_name()),
     }
 }
 
