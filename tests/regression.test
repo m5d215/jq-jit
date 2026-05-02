@@ -7878,3 +7878,53 @@ try path(.[true]) catch .
 try path(.[null]) catch .
 5
 "Cannot index number with null"
+
+# Issue #499: nested same-name `as $x` doesn't leak into outer scope
+5 as $x | (10 as $x | $x), $x
+null
+10
+5
+
+# Issue #499: array-context binding doesn't leak
+5 as $x | [10 as $x | $x], $x
+null
+[10]
+5
+
+# Issue #499: pipe-then-comma binding doesn't leak
+5 as $x | (10 as $x | $x | . + 1), $x
+null
+11
+5
+
+# Issue #499: reduce binding doesn't leak the iterator var name
+5 as $x | (reduce range(3) as $x (0; .+$x)), $x
+null
+3
+5
+
+# Issue #499: foreach binding doesn't leak
+5 as $x | (foreach range(3) as $x (0; .+$x; .)), $x
+null
+0
+1
+3
+5
+
+# Issue #499: array-context reduce doesn't leak
+5 as $x | [reduce range(3) as $x (0; .+$x)], $x
+null
+[3]
+5
+
+# Issue #499: destructuring binding doesn't leak
+. as [$a, $b] | (. as [$a, $b] | $a + $b), $a
+[1, 2]
+3
+1
+
+# Issue #499: deep nesting still respects scopes
+1 as $x | 2 as $y | (3 as $x | 4 as $y | $x + $y), $x + $y
+null
+7
+3
