@@ -7051,3 +7051,34 @@ false
 null | has("a")
 null
 false
+
+# Issue #455: split error wording matches jq
+# (single-arg form: "split input and separator must be strings")
+try (null | split(",")) catch .
+null
+"split input and separator must be strings"
+
+# Issue #455: same on number input
+try (5 | split(",")) catch .
+null
+"split input and separator must be strings"
+
+# Issue #455: separator-side bad type
+try ("abc" | split(123)) catch .
+null
+"split input and separator must be strings"
+
+# Issue #455: two-arg regex form uses sub/gsub-style wording
+try (null | split("a"; "")) catch .
+null
+"null (null) cannot be matched, as it is not a string"
+
+# Issue #455: same wording for number input on regex form
+try (5 | split("a"; "g")) catch .
+null
+"number (5) cannot be matched, as it is not a string"
+
+# Issue #455: object input on regex form
+try ({} | split("a"; "g")) catch .
+null
+"object ({}) cannot be matched, as it is not a string"

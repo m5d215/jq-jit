@@ -1852,7 +1852,7 @@ fn rt_split(v: &Value, sep: &Value) -> Result<Value> {
                 Ok(Value::Arr(Rc::new(parts)))
             }
         }
-        _ => bail!("split requires strings"),
+        _ => bail!("split input and separator must be strings"),
     }
 }
 
@@ -1877,7 +1877,8 @@ fn rt_regex_split(v: &Value, re: &Value, flags: &Value) -> Result<Value> {
                 Value::Arr(Rc::new(parts))
             })
         }
-        _ => bail!("split requires strings"),
+        // Two-arg split shares the regex error wording with sub/gsub/scan/match.
+        _ => bail!("{} cannot be matched, as it is not a string", errdesc(v)),
     }
 }
 
