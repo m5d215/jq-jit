@@ -4325,7 +4325,10 @@ fn eval_call_builtin(name: &str, args: &[Expr], input: Value, env: &EnvRef, cb: 
             return eval(&args[0], input.clone(), env, &mut |code_val| {
                 let code = match &code_val {
                     Value::Num(n, _) => *n as i32,
-                    _ => bail!("halt_error/1: exit code must be a number"),
+                    _ => bail!(
+                        "{} halt_error/1: number required",
+                        crate::runtime::errdesc_pub(&input)
+                    ),
                 };
                 halt_error_write(&input);
                 bail!("__halt__:{}", code);
