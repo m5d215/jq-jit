@@ -8108,3 +8108,38 @@ null
 "\udc00" | explode
 null
 [65533]
+
+# Issue #513: identity passthrough on NaN input emits canonical null
+.
+nan
+null
+
+# Issue #513: identity passthrough on NaN (capitalised) input emits null
+.
+NaN
+null
+
+# Issue #513: identity passthrough on Infinity input emits canonical max-f64
+.
+Infinity
+1.7976931348623157e+308
+
+# Issue #513: identity passthrough on -Infinity input emits canonical min-f64
+.
+-Infinity
+-1.7976931348623157e+308
+
+# Issue #513: identity passthrough on -NaN input emits null
+.
+-NaN
+null
+
+# Issue #513: a string literal containing "NaN" still passes through verbatim
+.
+"NaN"
+"NaN"
+
+# Issue #513: an object key "Infinity" still passes through unchanged
+.
+{"Infinity":1}
+{"Infinity":1}
