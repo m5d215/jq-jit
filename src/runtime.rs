@@ -1672,7 +1672,7 @@ fn rt_has(v: &Value, key: &Value) -> Result<Value> {
             Ok(Value::from_bool((idx as usize) < a.len()))
         }
         (Value::Null, _) => Ok(Value::False),
-        _ => bail!("{} ({}) and {} ({}) cannot be has-tested", v.type_name(), crate::value::value_to_json(v), key.type_name(), crate::value::value_to_json(key)),
+        _ => bail!("Cannot check whether {} has a {} key", v.type_name(), key.type_name()),
     }
 }
 
