@@ -6532,3 +6532,42 @@ null
 [path(5)?]
 5
 []
+
+# Issue #432: delpaths subsumes longer paths under their shorter prefix when
+# the prefix is also being deleted. Without this, the longer path's intermediate
+# component would error on type mismatch (e.g. descending into .a where .a is
+# a number) even though .a is about to be deleted anyway.
+delpaths([["a"],["a","b"]])
+{"a":1,"b":2}
+{"b":2}
+
+# Issue #432: same regardless of input path order
+delpaths([["a","b"],["a"]])
+{"a":1,"b":2}
+{"b":2}
+
+# Issue #432: empty path subsumes everything; result is null
+delpaths([[],["a"]])
+[1,2,3]
+null
+
+# Issue #432: same on objects
+delpaths([[],["a"]])
+{"a":1,"b":2}
+null
+
+# Issue #432: array indices are still processed deepest-first for index stability
+delpaths([["a",0],["a",1]])
+{"a":[10,20,30]}
+{"a":[30]}
+
+# Issue #432: same with input order swapped
+delpaths([["a",1],["a",0]])
+{"a":[10,20,30]}
+{"a":[30]}
+
+# Issue #432: nested overlapping (.a and .a.b on a real subobject) still
+# subsumes .a.b under .a
+delpaths([["a"],["a","b"]])
+{"a":{"b":1,"c":2},"d":3}
+{"d":3}
