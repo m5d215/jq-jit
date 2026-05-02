@@ -2824,6 +2824,11 @@ fn rt_test(v: &Value, re: &Value) -> Result<Value> {
             let matched = with_regex(r, |regex| regex.is_match(s))?;
             Ok(Value::from_bool(matched))
         }
+        // jq distinguishes input-side and regex-side type errors. Non-string
+        // input → `<errdesc> cannot be matched, as it is not a string` (#541).
+        (other, _) if !matches!(other, Value::Str(_)) => {
+            bail!("{} cannot be matched, as it is not a string", errdesc(other));
+        }
         _ => bail!("test requires string and regex"),
     }
 }
@@ -2849,6 +2854,9 @@ fn rt_match(v: &Value, re: &Value) -> Result<Value> {
                     }
                 }
             })?
+        }
+        (other, _) if !matches!(other, Value::Str(_)) => {
+            bail!("{} cannot be matched, as it is not a string", errdesc(other));
         }
         _ => bail!("match requires string and regex"),
     }
@@ -2926,6 +2934,9 @@ fn rt_match_global(v: &Value, re: &Value) -> Result<Value> {
                 Ok(Value::Arr(Rc::new(results)))
             })?
         }
+        (other, _) if !matches!(other, Value::Str(_)) => {
+            bail!("{} cannot be matched, as it is not a string", errdesc(other));
+        }
         _ => bail!("match requires string and regex"),
     }
 }
@@ -2949,6 +2960,9 @@ fn rt_capture(v: &Value, re: &Value) -> Result<Value> {
                     None => bail!("capture failed"),
                 }
             })?
+        }
+        (other, _) if !matches!(other, Value::Str(_)) => {
+            bail!("{} cannot be matched, as it is not a string", errdesc(other));
         }
         _ => bail!("capture requires string and regex"),
     }
@@ -2976,6 +2990,9 @@ pub fn rt_capture_global(v: &Value, re: &Value) -> Result<Value> {
                 }
                 Ok(Value::Arr(Rc::new(results)))
             })?
+        }
+        (other, _) if !matches!(other, Value::Str(_)) => {
+            bail!("{} cannot be matched, as it is not a string", errdesc(other));
         }
         _ => bail!("capture requires string and regex"),
     }
@@ -3008,6 +3025,9 @@ fn rt_scan(v: &Value, re: &Value) -> Result<Value> {
                 };
                 Value::Arr(Rc::new(results))
             }).map(Ok)?
+        }
+        (other, _) if !matches!(other, Value::Str(_)) => {
+            bail!("{} cannot be matched, as it is not a string", errdesc(other));
         }
         _ => bail!("scan requires string and regex"),
     }

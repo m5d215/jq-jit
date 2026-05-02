@@ -8641,4 +8641,34 @@ try (limit(-1; .[])) catch .
 [1,2,3]
 []
 
+# Issue #541: scan on non-string uses jq's "cannot be matched" wording
+try (scan("a")) catch .
+0
+"number (0) cannot be matched, as it is not a string"
+
+# Issue #541: match on null
+try (match("a")) catch .
+null
+"null (null) cannot be matched, as it is not a string"
+
+# Issue #541: test on array
+try (test("a")) catch .
+[1]
+"array ([1]) cannot be matched, as it is not a string"
+
+# Issue #541: capture on object
+try (capture("(?<x>.)")) catch .
+{}
+"object ({}) cannot be matched, as it is not a string"
+
+# Issue #541: capture on boolean
+try (capture("(?<x>.)")) catch .
+true
+"boolean (true) cannot be matched, as it is not a string"
+
+# Issue #541: scan on string still works
+[scan("a")]
+"abcabc"
+["a","a"]
+
 
