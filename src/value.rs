@@ -3971,34 +3971,36 @@ pub fn push_json_pretty_raw_at(buf: &mut Vec<u8>, b: &[u8], indent_n: usize, use
 pub fn is_json_compact(bytes: &[u8]) -> bool {
     if bytes.len() < 2 { return true; }
     let b0 = bytes[0];
-    if b0 == b'[' {
-        if bytes[1] <= b' ' { return false; }
-        // Check after first comma: [1,2] is compact, [1, 2] is not
-        // Skip the first value to find the comma
-        if let Ok(end) = skip_json_value(bytes, 1) {
-            if end < bytes.len() && bytes[end] == b',' {
-                if end + 1 < bytes.len() && bytes[end + 1] <= b' ' { return false; }
+    // Walk the top-level value, rejecting any whitespace outside string
+    // literals. Nested containers (`[{"a":1, "b":2}]`, `{"a":[1, 2]}`,
+    // `[[[1, 2]]]`) would otherwise leak the original whitespace through
+    // the passthrough path (#478). Trailing whitespace after the
+    // structural end (e.g. `printf '{}\n'`) is intentionally ignored.
+    let depth_start = if b0 == b'[' || b0 == b'{' { 1 } else { 0 };
+    let mut i = depth_start;
+    let mut depth: i32 = depth_start as i32;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'"' => {
+                i += 1;
+                while i < bytes.len() {
+                    let c = bytes[i];
+                    if c == b'\\' { i += 2; continue; }
+                    if c == b'"' { i += 1; break; }
+                    i += 1;
+                }
+                continue;
             }
+            b'[' | b'{' => { depth += 1; }
+            b']' | b'}' => {
+                depth -= 1;
+                if depth <= 0 { return true; }
+            }
+            b' ' | b'\t' | b'\n' | b'\r' => return false,
+            _ => {}
         }
-        return true;
-    }
-    if b0 != b'{' { return true; }
-    // Object: check after { for whitespace
-    if bytes[1] <= b' ' { return false; }
-    // Check after first colon: {"key":v is compact, {"key": v is not
-    let mut i = 1;
-    if i < bytes.len() && bytes[i] == b'"' {
         i += 1;
-        while i < bytes.len() {
-            if bytes[i] == b'\\' { i += 2; continue; }
-            if bytes[i] == b'"' { i += 1; break; }
-            i += 1;
-        }
-    }
-    // i should be at ':'
-    if i < bytes.len() && bytes[i] == b':' {
-        i += 1;
-        if i < bytes.len() && bytes[i] <= b' ' { return false; }
     }
     true
 }

@@ -7698,3 +7698,38 @@ try (. + 1) catch .
 try (. + 1) catch .
 "éééééééééééééééé"
 "string (\"ééééé...) and number (1) cannot be added"
+
+# Issue #478: object with single-space comma is canonicalized
+.
+{"a":1, "b":2}
+{"a":1,"b":2}
+
+# Issue #478: object with multi-space comma is canonicalized
+.
+{"a":1,  "b":2}
+{"a":1,"b":2}
+
+# Issue #478: nested object inside array passes through canonical
+.
+[{"a":1, "b":2}]
+[{"a":1,"b":2}]
+
+# Issue #478: nested array inside object passes through canonical
+.
+{"a":[1, 2]}
+{"a":[1,2]}
+
+# Issue #478: deeply nested arrays canonicalize whitespace
+.
+[[[1, 2]]]
+[[[1,2]]]
+
+# Issue #478: strings with internal spaces are not stripped
+.
+{"a":"hello world"}
+{"a":"hello world"}
+
+# Issue #478: pure compact input passes through unchanged
+.
+{"a":1,"b":2,"c":3}
+{"a":1,"b":2,"c":3}
