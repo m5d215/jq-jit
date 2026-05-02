@@ -1302,7 +1302,7 @@ fn rt_any(v: &Value) -> Result<Value> {
     match v {
         Value::Arr(a) => Ok(Value::from_bool(a.iter().any(|v| v.is_true()))),
         Value::Obj(ObjInner(o)) => Ok(Value::from_bool(o.values().any(|v| v.is_true()))),
-        _ => bail!("Cannot iterate over {}", v.type_name()),
+        _ => bail!("Cannot iterate over {}", errdesc(v)),
     }
 }
 
@@ -1310,7 +1310,7 @@ fn rt_all(v: &Value) -> Result<Value> {
     match v {
         Value::Arr(a) => Ok(Value::from_bool(a.iter().all(|v| v.is_true()))),
         Value::Obj(ObjInner(o)) => Ok(Value::from_bool(o.values().all(|v| v.is_true()))),
-        _ => bail!("Cannot iterate over {}", v.type_name()),
+        _ => bail!("Cannot iterate over {}", errdesc(v)),
     }
 }
 
