@@ -16,6 +16,23 @@ unsafe extern "C" {
     fn lgamma(x: f64) -> f64;
     fn lgamma_r(x: f64, sign: *mut i32) -> f64;
     fn logb(x: f64) -> f64;
+    // Use libc-backed erf/erfc/expm1/log1p for byte-identical agreement
+    // with jq across platforms; libm-Rust differs from Apple/glibc by
+    // 1 ULP on some inputs (e.g. `erf(1)`). See #473.
+    fn erf(x: f64) -> f64;
+    fn erfc(x: f64) -> f64;
+    fn expm1(x: f64) -> f64;
+    fn log1p(x: f64) -> f64;
+    fn y0(x: f64) -> f64;
+    fn y1(x: f64) -> f64;
+    fn yn(n: i32, x: f64) -> f64;
+    fn jn(n: i32, x: f64) -> f64;
+    fn copysign(x: f64, y: f64) -> f64;
+    fn fdim(x: f64, y: f64) -> f64;
+    fn fmax(x: f64, y: f64) -> f64;
+    fn fmin(x: f64, y: f64) -> f64;
+    fn fmod(x: f64, y: f64) -> f64;
+    fn nextafter(x: f64, y: f64) -> f64;
 }
 
 /// Dispatch a builtin call by name.
@@ -339,6 +356,32 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             Value::Num(n, _) => Ok(Value::number(n.cbrt())),
             _ => bail!("{} number required", errdesc(v)),
         }),
+        // Additional libc unary wrappers (#473). libc-backed for ULP
+        // parity with jq's libm-direct calls.
+        "erf" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(unsafe { erf(*n) })),
+            _ => bail!("{} number required", errdesc(v)),
+        }),
+        "erfc" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(unsafe { erfc(*n) })),
+            _ => bail!("{} number required", errdesc(v)),
+        }),
+        "expm1" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(unsafe { expm1(*n) })),
+            _ => bail!("{} number required", errdesc(v)),
+        }),
+        "log1p" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(unsafe { log1p(*n) })),
+            _ => bail!("{} number required", errdesc(v)),
+        }),
+        "y0" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(unsafe { y0(*n) })),
+            _ => bail!("{} number required", errdesc(v)),
+        }),
+        "y1" => unary_op(args, |v| match v {
+            Value::Num(n, _) => Ok(Value::number(unsafe { y1(*n) })),
+            _ => bail!("{} number required", errdesc(v)),
+        }),
         "exp10" => unary_op(args, |v| match v {
             // Use `10.powf(n)` rather than `libm::exp10`. jq's libc-backed
             // exp10 reuses pow internally on Apple/Linux, so they agree;
@@ -386,6 +429,39 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         }),
         "scalb" => ternary_arg(args, |a, b| match (a, b) {
             (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(*x * 2f64.powf(*y))),
+            _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
+        }),
+        // Additional libc binary wrappers (#473).
+        "copysign" => ternary_arg(args, |a, b| match (a, b) {
+            (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(unsafe { copysign(*x, *y) })),
+            _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
+        }),
+        "fdim" => ternary_arg(args, |a, b| match (a, b) {
+            (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(unsafe { fdim(*x, *y) })),
+            _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
+        }),
+        "fmax" => ternary_arg(args, |a, b| match (a, b) {
+            (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(unsafe { fmax(*x, *y) })),
+            _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
+        }),
+        "fmin" => ternary_arg(args, |a, b| match (a, b) {
+            (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(unsafe { fmin(*x, *y) })),
+            _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
+        }),
+        "fmod" => ternary_arg(args, |a, b| match (a, b) {
+            (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(unsafe { fmod(*x, *y) })),
+            _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
+        }),
+        "nextafter" | "nexttoward" => ternary_arg(args, |a, b| match (a, b) {
+            (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(unsafe { nextafter(*x, *y) })),
+            _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
+        }),
+        "jn" => ternary_arg(args, |a, b| match (a, b) {
+            (Value::Num(n, _), Value::Num(x, _)) => Ok(Value::number(unsafe { jn(*n as i32, *x) })),
+            _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
+        }),
+        "yn" => ternary_arg(args, |a, b| match (a, b) {
+            (Value::Num(n, _), Value::Num(x, _)) => Ok(Value::number(unsafe { yn(*n as i32, *x) })),
             _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
         "fma" => {
@@ -467,6 +543,15 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "have_decnum" => {
             // We don't have arbitrary precision, return false
             Ok(Value::False)
+        }
+        "have_literal_numbers" => {
+            // jq 1.8.1 returns true (decnum literals are supported in
+            // mainline). jq-jit reads literals through f64 so number
+            // identity isn't preserved across all magnitudes; the flag
+            // still makes more sense as `true` since we DO carry the
+            // original repr around for output (`1.0` stays `1.0`). See
+            // #473.
+            Ok(Value::True)
         }
         "have_sql" => Ok(Value::False),
         "have_bom" => Ok(Value::True),
@@ -3227,12 +3312,16 @@ pub fn rt_builtins() -> Value {
         "sqrt/0", "fabs/0", "abs/0",
         "pow/2", "log/0", "log2/0", "log10/0",
         "exp/0", "exp2/0", "exp10/0",
+        "expm1/0", "log1p/0",
+        "erf/0", "erfc/0",
         "sin/0", "cos/0", "tan/0", "asin/0", "acos/0", "atan/0",
         "sinh/0", "cosh/0", "tanh/0", "asinh/0", "acosh/0", "atanh/0",
         "atan2/2", "hypot/2",
+        "copysign/2", "fdim/2", "fmax/2", "fmin/2", "fmod/2",
+        "nextafter/2", "nexttoward/2", "jn/2", "yn/2",
         "significand/0", "logb/0",
         "nearbyint/0", "trunc/0", "rint/0",
-        "j0/0", "j1/0", "cbrt/0",
+        "j0/0", "j1/0", "y0/0", "y1/0", "cbrt/0",
         "gamma/0", "tgamma/0", "lgamma/0", "lgamma_r/0",
         "frexp/0", "fma/3", "ldexp/2", "scalb/2", "scalbln/2",
         "drem/2", "remainder/2",
@@ -3276,7 +3365,7 @@ pub fn rt_builtins() -> Value {
         "INDEX/1", "INDEX/2", "IN/1", "IN/2",
         "JOIN/2", "JOIN/3", "JOIN/4",
         "skip/2",
-        "have_decnum/0",
+        "have_decnum/0", "have_literal_numbers/0",
         "exec/1", "exec/2", "execv/1",
         "fromcsv/0", "fromtsv/0", "fromcsvh/0", "fromcsvh/1", "fromtsvh/0", "fromtsvh/1",
         "toboolean/0",

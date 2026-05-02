@@ -7733,3 +7733,93 @@ try (. + 1) catch .
 .
 {"a":1,"b":2,"c":3}
 {"a":1,"b":2,"c":3}
+
+# Issue #473: have_literal_numbers returns true (jq mainline default)
+have_literal_numbers
+null
+true
+
+# Issue #473: erf is callable (exact at 0)
+0 | erf
+null
+0
+
+# Issue #473: erfc is the complement
+0 | erfc
+null
+1
+
+# Issue #473: expm1 (exact at 0)
+0 | expm1
+null
+0
+
+# Issue #473: log1p (exact at 0)
+0 | log1p
+null
+0
+
+# Issue #473: y0 Bessel (-inf at 0; jq renders as the f64-max approximation)
+0 | y0
+null
+-1.7976931348623157e+308
+
+# Issue #473: copysign with positive magnitude, negative sign
+copysign(5; -1)
+null
+-5
+
+# Issue #473: copysign with negative magnitude, positive sign
+copysign(-1; 5)
+null
+1
+
+# Issue #473: fdim positive difference
+fdim(5; 3)
+null
+2
+
+# Issue #473: fdim clamps negative result to 0
+fdim(3; 5)
+null
+0
+
+# Issue #473: fmax / fmin
+fmax(5; 3)
+null
+5
+
+# Issue #473: fmin
+fmin(5; 3)
+null
+3
+
+# Issue #473: fmod
+fmod(7; 3)
+null
+1
+
+# Issue #473: jn (Bessel J of integer order)
+jn(2; 0)
+null
+0
+
+# Issue #473: yn (Bessel Y of integer order)
+yn(2; 0)
+null
+-1.7976931348623157e+308
+
+# Issue #473: nextafter
+nextafter(5; 6)
+null
+5.000000000000001
+
+# Issue #473: nexttoward (alias for nextafter in f64-only path)
+nexttoward(5; 6)
+null
+5.000000000000001
+
+# Issue #473: y1 Bessel (-inf at 0)
+0 | y1
+null
+-1.7976931348623157e+308
