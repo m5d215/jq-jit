@@ -2141,9 +2141,13 @@ impl Parser {
 
             Token::Recurse => {
                 self.advance();
-                // .. is recurse(. ; .[]?)
-                // Can optionally be followed by .field
-                Ok(Expr::Recurse { input_expr: Box::new(Expr::Input) })
+                // `..` is `recurse`, which jq defines as `recurse(.[]?)`.
+                // Use `EachOpt(Input)` as the AST step so eval/JIT can
+                // distinguish the descent-only 0-arg form from the
+                // user-written `recurse(.)` (which loops forever). See #497.
+                Ok(Expr::Recurse {
+                    input_expr: Box::new(Expr::EachOpt { input_expr: Box::new(Expr::Input) }),
+                })
             }
 
             Token::LParen => {
@@ -2795,11 +2799,14 @@ impl Parser {
                 key: Box::new(Expr::Literal(Literal::Num(-1.0, None))),
             }),
             "paths" => {
-                // paths = [path(..[])] but without the empty root path
-                // Use Recurse with .[] step and then get paths via Each
+                // paths = [path(..[])] but without the empty root path.
+                // Use the `EachOpt(Input)` sentinel so the `Recurse` shape
+                // matches the descent semantics, not `recurse(.)`. See #497.
                 Ok(Expr::Pipe {
                     left: Box::new(Expr::PathExpr {
-                        expr: Box::new(Expr::Recurse { input_expr: Box::new(Expr::Input) }),
+                        expr: Box::new(Expr::Recurse {
+                            input_expr: Box::new(Expr::EachOpt { input_expr: Box::new(Expr::Input) }),
+                        }),
                     }),
                     right: Box::new(Expr::IfThenElse {
                         cond: Box::new(Expr::BinOp {
@@ -2813,7 +2820,13 @@ impl Parser {
                 })
             }
             "recurse" | "recurse_down" => {
-                Ok(Expr::Recurse { input_expr: Box::new(Expr::Input) })
+                // jq: `def recurse: recurse(.[]?);`
+                // `EachOpt(Input)` represents `.[]?` and lets eval/JIT take
+                // the descent fast path; `recurse(.)` (which is infinite)
+                // takes the slow custom-step path instead. See #497.
+                Ok(Expr::Recurse {
+                    input_expr: Box::new(Expr::EachOpt { input_expr: Box::new(Expr::Input) }),
+                })
             }
             "gamma" | "tgamma" | "lgamma" | "lgamma_r" | "frexp"
             | "expm1" | "log1p" | "erf" | "erfc" | "y0" | "y1"
@@ -3246,7 +3259,11 @@ impl Parser {
                 Ok(Expr::Pipe {
                     left: Box::new(Expr::PathExpr {
                         expr: Box::new(Expr::Pipe {
-                            left: Box::new(Expr::Recurse { input_expr: Box::new(Expr::Input) }),
+                            // Use the EachOpt(Input) sentinel for descent
+                            // semantics (#497).
+                            left: Box::new(Expr::Recurse {
+                                input_expr: Box::new(Expr::EachOpt { input_expr: Box::new(Expr::Input) }),
+                            }),
                             right: Box::new(Expr::IfThenElse {
                                 cond: Box::new(f),
                                 then_branch: Box::new(Expr::Input),

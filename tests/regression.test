@@ -7823,3 +7823,33 @@ null
 0 | y1
 null
 -1.7976931348623157e+308
+
+# Issue #497: recurse(.) is infinite (gated by limit)
+[limit(5; recurse(.))]
+null
+[null,null,null,null,null]
+
+# Issue #497: recurse with custom non-identity step still terminates only via limit
+[limit(3; recurse(. + 1))]
+null
+[null,1,2]
+
+# Issue #497: recurse(. + 1) on number (infinite, capped by limit)
+[limit(5; 5 | recurse(. + 1))]
+null
+[5,6,7,8,9]
+
+# Issue #497: 0-arg recurse still does descent (stops at scalars)
+[recurse]
+[1,[2,3]]
+[[1,[2,3]],1,[2,3],2,3]
+
+# Issue #497: .. (alias for recurse) does descent
+[..]
+[1,[2,3]]
+[[1,[2,3]],1,[2,3],2,3]
+
+# Issue #497: paths still works (uses descent under the hood)
+[paths]
+{"a":1,"b":[2,3]}
+[["a"],["b"],["b",0],["b",1]]
