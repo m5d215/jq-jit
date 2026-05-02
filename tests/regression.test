@@ -6467,3 +6467,24 @@ null
 "1.5e16" | tonumber
 null
 1.5E+16
+
+# Issue #430: join(null) treats null as the empty separator (jq's `+ null`
+# identity for strings; join is internally `reduce . as $i (null; . + sep + $i)`).
+[1,2,3] | join(null)
+null
+"123"
+
+# Issue #430: same for empty array (no items, no separator inserted)
+[] | join(null)
+null
+""
+
+# Issue #430: array of strings with null separator
+["a","b","c"] | join(null)
+null
+"abc"
+
+# Issue #430: mixed types with null separator (numbers/booleans render via tostring)
+[1,true,"x",false] | join(null)
+null
+"1truexfalse"
