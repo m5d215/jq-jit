@@ -3697,8 +3697,8 @@ pub fn eval_slice(base: &Value, from: &Value, to: &Value) -> Result<Value> {
     match base {
         Value::Arr(a) => {
             let len = a.len() as i64;
-            let fi = match from { Value::Num(n, _) => slice_index_start(*n, len), Value::Null => 0, _ => bail!("slice: need number") };
-            let ti = match to { Value::Num(n, _) => slice_index_end(*n, len), Value::Null => len as usize, _ => bail!("slice: need number") };
+            let fi = match from { Value::Num(n, _) => slice_index_start(*n, len), Value::Null => 0, _ => bail!("Array/string slice indices must be integers") };
+            let ti = match to { Value::Num(n, _) => slice_index_end(*n, len), Value::Null => len as usize, _ => bail!("Array/string slice indices must be integers") };
             Ok(if fi>=ti { Value::Arr(Rc::new(vec![])) } else { Value::Arr(Rc::new(a[fi..ti].to_vec())) })
         }
         Value::Str(s) => {
@@ -3706,14 +3706,14 @@ pub fn eval_slice(base: &Value, from: &Value, to: &Value) -> Result<Value> {
             // ASCII fast path: byte index == char index, no allocation needed
             if s_str.is_ascii() {
                 let len = s_str.len() as i64;
-                let fi = match from { Value::Num(n, _) => slice_index_start(*n, len), Value::Null => 0, _ => bail!("slice: need number") };
-                let ti = match to { Value::Num(n, _) => slice_index_end(*n, len), Value::Null => len as usize, _ => bail!("slice: need number") };
+                let fi = match from { Value::Num(n, _) => slice_index_start(*n, len), Value::Null => 0, _ => bail!("Array/string slice indices must be integers") };
+                let ti = match to { Value::Num(n, _) => slice_index_end(*n, len), Value::Null => len as usize, _ => bail!("Array/string slice indices must be integers") };
                 Ok(if fi>=ti { Value::from_str("") } else { Value::from_str(&s_str[fi..ti]) })
             } else {
                 // Unicode: count chars without allocation, use char_indices for byte offsets
                 let char_count = s_str.chars().count() as i64;
-                let fi = match from { Value::Num(n, _) => slice_index_start(*n, char_count), Value::Null => 0, _ => bail!("slice: need number") };
-                let ti = match to { Value::Num(n, _) => slice_index_end(*n, char_count), Value::Null => char_count as usize, _ => bail!("slice: need number") };
+                let fi = match from { Value::Num(n, _) => slice_index_start(*n, char_count), Value::Null => 0, _ => bail!("Array/string slice indices must be integers") };
+                let ti = match to { Value::Num(n, _) => slice_index_end(*n, char_count), Value::Null => char_count as usize, _ => bail!("Array/string slice indices must be integers") };
                 Ok(if fi>=ti { Value::from_str("") } else {
                     let mut ci = s_str.char_indices();
                     let start_byte = ci.nth(fi).map(|(pos, _)| pos).unwrap_or(s_str.len());
