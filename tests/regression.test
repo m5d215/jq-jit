@@ -9473,3 +9473,23 @@ numbers
 first(.[] | numbers)
 [1e10, "a", 2.0]
 1E+10
+
+# Issue #601: until(cond; update) preserves input number representation when body never runs
+until(. > 100; . * 2)
+1e10
+1E+10
+
+# Issue #601: until with general fused f64 path preserves input
+until(. > 100; . + 1)
+1.5e2
+1.5E+2
+
+# Issue #601: until still iterates correctly when body must run (regression guard)
+until(. > 100; . * 2)
+50
+200
+
+# Issue #601: until on non-numeric input still falls back to generic path (regression guard)
+until(. > 5; . + 1)
+"hello"
+"hello"
