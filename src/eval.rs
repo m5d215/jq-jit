@@ -3704,10 +3704,109 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
                     }
                 }
             }
-            Ok(String::from_utf8_lossy(&r).into_owned())
+            Ok(jq_utf8_lossy(&r))
         }
         _ => bail!("{} is not a valid format", name),
     }
+}
+
+/// UTF-8 lossy decode that matches jq 1.8.1's `@base64d` substitution policy
+/// (Unicode 6.1+ "maximal subpart of an ill-formed subsequence", #607).
+///
+/// Differs from `String::from_utf8_lossy`, which emits one U+FFFD per invalid
+/// byte even for partial / overlong multi-byte sequences. jq emits one U+FFFD
+/// per ill-formed *sequence*: a leader plus any valid continuations that
+/// follow (up to the expected count), or all remaining bytes if the buffer
+/// ends short.
+fn jq_utf8_lossy(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b < 0x80 {
+            out.push(b as char);
+            i += 1;
+            continue;
+        }
+        // Leader byte width (excluding C0/C1 which are always overlong, and
+        // F5..FF which exceed U+10FFFF).
+        let needed = if (0xC2..0xE0).contains(&b) { 2 }
+                     else if (0xE0..0xF0).contains(&b) { 3 }
+                     else if (0xF0..0xF5).contains(&b) { 4 }
+                     else { 0 };
+        if needed == 0 {
+            out.push('\u{FFFD}');
+            i += 1;
+            continue;
+        }
+        // Not enough bytes: consume all remaining as one U+FFFD.
+        if bytes.len() - i < needed {
+            out.push('\u{FFFD}');
+            i = bytes.len();
+            continue;
+        }
+        // Validate continuations.
+        let c1 = bytes[i + 1];
+        let c1_cont = c1 & 0xC0 == 0x80;
+        if !c1_cont {
+            out.push('\u{FFFD}');
+            i += 1;
+            continue;
+        }
+        // Special leader-byte ranges that further restrict the first
+        // continuation (avoid overlongs and surrogates). When violated, jq
+        // still consumes the full nominal sequence as one U+FFFD.
+        let bad_first = match b {
+            0xE0 => c1 < 0xA0,
+            0xED => c1 >= 0xA0,
+            0xF0 => c1 < 0x90,
+            0xF4 => c1 >= 0x90,
+            _ => false,
+        };
+        if needed >= 3 {
+            let c2 = bytes[i + 2];
+            if c2 & 0xC0 != 0x80 {
+                // Maximal subpart: leader + one valid continuation.
+                out.push('\u{FFFD}');
+                i += 2;
+                continue;
+            }
+            if needed == 4 {
+                let c3 = bytes[i + 3];
+                if c3 & 0xC0 != 0x80 {
+                    out.push('\u{FFFD}');
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        if bad_first {
+            // All `needed` bytes look like a complete sequence at the byte
+            // level, but the codepoint is overlong/surrogate. jq consumes
+            // the whole sequence as one U+FFFD.
+            out.push('\u{FFFD}');
+            i += needed;
+            continue;
+        }
+        // All continuations are valid — decode the codepoint.
+        let cp: u32 = match needed {
+            2 => ((b as u32 & 0x1F) << 6) | (c1 as u32 & 0x3F),
+            3 => ((b as u32 & 0x0F) << 12)
+                | ((c1 as u32 & 0x3F) << 6)
+                | (bytes[i + 2] as u32 & 0x3F),
+            4 => ((b as u32 & 0x07) << 18)
+                | ((c1 as u32 & 0x3F) << 12)
+                | ((bytes[i + 2] as u32 & 0x3F) << 6)
+                | (bytes[i + 3] as u32 & 0x3F),
+            _ => unreachable!(),
+        };
+        match char::from_u32(cp) {
+            Some(c) => out.push(c),
+            None => out.push('\u{FFFD}'),
+        }
+        i += needed;
+    }
+    out
 }
 
 fn slice_index_start(n: f64, len: i64) -> usize {

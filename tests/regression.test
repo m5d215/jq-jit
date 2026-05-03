@@ -9543,3 +9543,33 @@ null
 "YWU=" | @base64d
 null
 "ae"
+
+# Issue #607: @base64d incomplete UTF-8 sequence (E9 + 1 byte) emits 1 U+FFFD
+"6WU=" | @base64d
+null
+"�"
+
+# Issue #607: @base64d overlong 4-byte sequence emits 1 U+FFFD covering all 4 bytes
+"8ICAgA==" | @base64d
+null
+"�"
+
+# Issue #607: @base64d overlong 3-byte sequence emits 1 U+FFFD
+"4ICC" | @base64d
+null
+"�"
+
+# Issue #607: @base64d partial 4-byte sequence + ASCII tail (the null-base64 case)
+"null" | @base64d
+null
+"��"
+
+# Issue #607: @base64d partial sequence + valid follow-on bytes preserves the follow-on
+"6WUA" | @base64d
+null
+"�e\u0000"
+
+# Issue #607: @base64d valid 3-byte UTF-8 still decodes to its codepoint (regression guard)
+"4KCC" | @base64d
+null
+"ࠂ"
