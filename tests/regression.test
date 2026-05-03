@@ -9172,3 +9172,28 @@ null
 "0.5e1" | fromjson
 null
 5
+
+# Issue #572: slice with string `from` raises jq's "Array/string slice indices must be integers"
+try (.["a":3]) catch .
+"abc"
+"Array/string slice indices must be integers"
+
+# Issue #572: slice with string `to` produces the same wording
+try (.[0:"x"]) catch .
+[1,2,3]
+"Array/string slice indices must be integers"
+
+# Issue #572: array endpoint also rejected with the canonical wording
+try (.[0:[]]) catch .
+[1,2,3]
+"Array/string slice indices must be integers"
+
+# Issue #572: null endpoints still slice (regression check)
+.[null:null]
+"abc"
+"abc"
+
+# Issue #572: float endpoints still slice (regression check)
+.[1.5:3]
+"abc"
+"bc"
