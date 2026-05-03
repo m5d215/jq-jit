@@ -9452,3 +9452,38 @@ null
 path(.[0])
 null
 [0]
+
+# Issue #596: path(.[OBJ_SLICE]) on array emits the slice path
+path(.[{"start":1,"end":3}])
+[1,2,3,4,5]
+[{"start":1,"end":3}]
+
+# Issue #596: path(.[OBJ_SLICE]) on string emits the slice path
+path(.[{"start":1,"end":3}])
+"abcdef"
+[{"start":1,"end":3}]
+
+# Issue #596: path(.[OBJ]) without start/end errors with slice wording
+try (path(.[{}])) catch .
+[1,2,3]
+"Array/string slice indices must be integers"
+
+# Issue #596: path(.[OBJ]) with non-num start errors
+try (path(.[{"start":"a","end":1}])) catch .
+[1,2,3]
+"Array/string slice indices must be integers"
+
+# Issue #596: path(.[OBJ_SLICE]?) on array suppresses on invalid slice
+[path(.[{}]?)]
+[1,2,3]
+[]
+
+# Issue #596: del(.[OBJ_SLICE]) removes the slice range
+del(.[{"start":1,"end":3}])
+[1,2,3,4,5]
+[1,4,5]
+
+# Issue #596: del with negative slice obj
+del(.[{"start":-2,"end":-1}])
+[1,2,3,4,5]
+[1,2,3,5]
