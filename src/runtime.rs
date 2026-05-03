@@ -144,11 +144,11 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "env" | "$ENV" => Ok(rt_env()),
         "builtins" => Ok(rt_builtins()),
         "debug" => unary_op(args, |v| {
-            eprintln!("[\"DEBUG:\",{}]", crate::value::value_to_json(v));
+            eprintln!("[\"DEBUG:\",{}]", crate::value::value_to_json_tojson(v));
             Ok(v.clone())
         }),
         "stderr" => unary_op(args, |v| {
-            eprint!("{}", crate::value::value_to_json(v));
+            eprint!("{}", crate::value::value_to_json_tojson(v));
             Ok(v.clone())
         }),
         "input" | "inputs" => {

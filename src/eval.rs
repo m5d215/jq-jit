@@ -3098,7 +3098,7 @@ pub fn eval(
 
         Expr::Debug { expr: de } => {
             eval(de, input.clone(), env, &mut |val| {
-                eprintln!("[\"DEBUG:\",{}]", crate::value::value_to_json(&val));
+                eprintln!("[\"DEBUG:\",{}]", crate::value::value_to_json_tojson(&val));
                 cb(input.clone())
             })
         }
@@ -3110,7 +3110,7 @@ pub fn eval(
                 // through to `cb` unchanged.
                 match &val {
                     Value::Str(s) => eprint!("{}", s.as_str()),
-                    _ => eprint!("{}", crate::value::value_to_json(&val)),
+                    _ => eprint!("{}", crate::value::value_to_json_tojson(&val)),
                 }
                 cb(input.clone())
             })
