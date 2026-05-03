@@ -2670,6 +2670,18 @@ fn delete_path(v: &Value, path: &Value) -> Result<Value> {
                         Ok(v.clone())
                     }
                 }
+                // jq slice-delete: `del(.[{"start":s,"end":e}])` removes
+                // elements [s..e). Reaches here from `del(.[s:e])` and
+                // explicit `del(.[OBJ])` slice paths emitted by Index in
+                // path mode (#596).
+                (Value::Arr(a), Value::Obj(ObjInner(spec))) => {
+                    validate_slice_spec(spec)?;
+                    let (si, ei) = slice_indices(spec, a.len() as i64);
+                    if si >= ei { return Ok(v.clone()); }
+                    let mut new_arr = (**a).clone();
+                    new_arr.drain(si..ei);
+                    Ok(Value::Arr(Rc::new(new_arr)))
+                }
                 // Match jq 1.8.1's error wording for type-incompatible paths (issue #77).
                 (Value::Obj(_), key) => bail!("Cannot delete {} field of object", index_err_desc(key)),
                 (Value::Arr(_), key) => bail!("Cannot delete {} element of array", index_err_desc(key)),

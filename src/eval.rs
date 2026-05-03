@@ -4203,6 +4203,16 @@ fn eval_interp_parts(parts: &[StringPart], idx: usize, cur: String, input: Value
     }
 }
 
+/// jq treats `.[OBJ]` on array/string as a slice when OBJ has both
+/// `start` and `end` keys whose values are Num or Null. Extra keys are
+/// allowed; floats are accepted (truncated downstream by rt_slice).
+/// See #596.
+fn is_valid_slice_object(v: &Value) -> bool {
+    let Value::Obj(crate::value::ObjInner(o)) = v else { return false; };
+    let valid = |k: &str| matches!(o.get(k), Some(Value::Num(_, _) | Value::Null));
+    valid("start") && valid("end")
+}
+
 fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
     match expr {
         Expr::Input => cb(Value::Arr(Rc::new(vec![]))),
@@ -4225,6 +4235,15 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                         // this path still fail in rt_setpath with `Cannot
                         // update field at array index of array`. See #467.
                         (Value::Arr(_), Value::Arr(_)) => {}
+                        // jq treats `.[OBJ]` on array/string as a slice when
+                        // OBJ has both `start` and `end` keys with Num/Null
+                        // values. Otherwise it errors with `Array/string
+                        // slice indices must be integers`. See #596.
+                        (Value::Arr(_) | Value::Str(_), Value::Obj(_)) => {
+                            if !is_valid_slice_object(&key) {
+                                bail!("Array/string slice indices must be integers");
+                            }
+                        }
                         // null accepts string/number/object keys (the slicing
                         // form), but jq errors on bool/null/array keys with
                         // `Cannot index null with <type>` (#594).
@@ -4424,7 +4443,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             // jq suppresses paths whose access would error: `path(.a?)` on
             // a non-object/non-null base emits no path. Mirror the type
             // check from the non-`?` Index path but skip silently on
-            // mismatch instead of bailing. See #590, #594.
+            // mismatch instead of bailing. See #590, #594, #596.
             let input_for_check = input.clone();
             eval_path(be, input.clone(), env, &mut |bp| {
                 eval(ke, input.clone(), env, &mut |key| {
@@ -4433,6 +4452,9 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                         (Value::Obj(_), Value::Str(_)) => {}
                         (Value::Arr(_), Value::Num(_, _)) => {}
                         (Value::Arr(_), Value::Arr(_)) => {}
+                        (Value::Arr(_) | Value::Str(_), Value::Obj(_)) => {
+                            if !is_valid_slice_object(&key) { return Ok(true); }
+                        }
                         (Value::Null, Value::Str(_) | Value::Num(_, _) | Value::Obj(_)) => {}
                         _ => return Ok(true),
                     }
