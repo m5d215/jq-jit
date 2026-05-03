@@ -3659,43 +3659,48 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
         }
         "base64d" => {
             const D: [i8;128] = { let mut t = [-1i8;128]; let c = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"; let mut i=0; while i<c.len() { t[c[i] as usize]=i as i8; i+=1; } t };
-            // jq's `@base64d` does not strip whitespace — `" a"` and `"a "`
-            // both raise "is not valid base64 data". Filtering newlines/spaces
-            // out (as we used to) silently accepted those inputs and could
-            // even mangle a length check, e.g. `"abc def ghi"` was treated as
-            // `"abcdefghi"` (9 → trailing byte) instead of jq's "is not valid
-            // base64 data". See #557.
+            // jq's `@base64d` validates the data in this order (#557, #605):
             //
-            // Trailing `=` padding is consumed (and not counted) before the
-            // length check: jq accepts `"YQ=="`, `"YQ="`, and `"YQ"` as the
-            // single-byte form, while `"a==="` strips to `"a"` (length 1) and
-            // raises "trailing base64 byte found".
+            // 1. Truncate at the *first* `=` (anywhere). So `"=A=="` decodes
+            //    as `""`, and `"a=b"` truncates to `"a"` before length check.
+            // 2. Reject any non-`A-Za-z0-9+/` byte — `"is not valid base64
+            //    data"` fires before any length check, so `"_"` and `" "`
+            //    take this path instead of the trailing-byte path.
+            // 3. Then check length mod 4 != 1 → "trailing base64 byte found".
+            //
+            // Whitespace is *not* stripped — `" a"` and `"a "` both fail
+            // step 2 with "is not valid base64 data" (#557).
             let raw = s.as_bytes();
-            let pad = raw.iter().rev().take_while(|&&b| b == b'=').count();
-            let bs = &raw[..raw.len() - pad];
+            let bs: &[u8] = match raw.iter().position(|&b| b == b'=') {
+                Some(i) => &raw[..i],
+                None => raw,
+            };
             // jq's error message wraps the value in `string (X)` where X is
             // the value's stringified form re-encoded as a JSON string. For
             // `Value::Str` that's the existing JSON-quoted form; for other
             // kinds we wrap the JSON serialisation in another layer of JSON
             // quoting so `0` → `string ("0")`, `[1,2,3]` → `string ("[1,2,3]")`.
             let err_value = || crate::value::value_to_json(&Value::from_str(&s));
+            for &b in bs {
+                let v = D.get(b as usize).copied().unwrap_or(-1);
+                if v < 0 {
+                    bail!("string ({}) is not valid base64 data", err_value());
+                }
+            }
             if bs.len() % 4 == 1 {
                 bail!("string ({}) trailing base64 byte found", err_value());
             }
             let mut r = Vec::new();
             for ch in bs.chunks(4) {
-                let a=D.get(ch[0] as usize).copied().unwrap_or(-1);
-                let b=D.get(ch[1] as usize).copied().unwrap_or(-1);
-                if a<0||b<0 { bail!("string ({}) is not valid base64 data", err_value()); }
-                r.push(((a as u8)<<2)|((b as u8)>>4));
-                if ch.len()>2 {
-                    let c=D.get(ch[2] as usize).copied().unwrap_or(-1);
-                    if c<0 { bail!("string ({}) is not valid base64 data", err_value()); }
-                    r.push(((b as u8)<<4)|((c as u8)>>2));
-                    if ch.len()>3 {
-                        let d=D.get(ch[3] as usize).copied().unwrap_or(-1);
-                        if d<0 { bail!("string ({}) is not valid base64 data", err_value()); }
-                        r.push(((c as u8)<<6)|(d as u8));
+                let a = D[ch[0] as usize] as u8;
+                let b = D[ch[1] as usize] as u8;
+                r.push((a << 2) | (b >> 4));
+                if ch.len() > 2 {
+                    let c = D[ch[2] as usize] as u8;
+                    r.push((b << 4) | (c >> 2));
+                    if ch.len() > 3 {
+                        let d = D[ch[3] as usize] as u8;
+                        r.push((c << 6) | d);
                     }
                 }
             }

@@ -9513,3 +9513,33 @@ fromjson
 fromjson
 "0.0001"
 0.0001
+
+# Issue #605: @base64d invalid char errors before length check
+try ("_" | @base64d) catch .
+null
+"string (\"_\") is not valid base64 data"
+
+# Issue #605: @base64d with whitespace fails char validation
+try (" " | @base64d) catch .
+null
+"string (\" \") is not valid base64 data"
+
+# Issue #605: @base64d truncates at first '=' (internal '=' counts as terminator)
+try ("a=b" | @base64d) catch .
+null
+"string (\"a=b\") trailing base64 byte found"
+
+# Issue #605: @base64d returns empty for leading '='
+"=A==" | @base64d
+null
+""
+
+# Issue #605: @base64d still rejects "_==" with char error (after truncation)
+try ("_==" | @base64d) catch .
+null
+"string (\"_==\") is not valid base64 data"
+
+# Issue #605: @base64d normal decode still works (regression guard)
+"YWU=" | @base64d
+null
+"ae"
