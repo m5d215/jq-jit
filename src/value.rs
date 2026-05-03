@@ -4579,22 +4579,28 @@ fn parse_json_string_raw(b: &[u8], pos: usize) -> Result<(String, usize)> {
                             .map_err(|_| anyhow::anyhow!("Invalid characters in \\uXXXX escape"))?;
                         i += 4;
                         if (0xD800..=0xDBFF).contains(&cp) {
-                            if i + 6 <= b.len() && b[i+1] == b'\\' && b[i+2] == b'u' {
-                                let hex2 = std::str::from_utf8(&b[i+3..i+7]).unwrap_or("0000");
-                                let cp2 = u16::from_str_radix(hex2, 16).unwrap_or(0);
-                                if (0xDC00..=0xDFFF).contains(&cp2) {
-                                    let full = 0x10000 + ((cp as u32 - 0xD800) << 10) + (cp2 as u32 - 0xDC00);
-                                    if let Some(c) = char::from_u32(full) {
-                                        let mut tmp = [0u8; 4];
-                                        buf.extend_from_slice(c.encode_utf8(&mut tmp).as_bytes());
-                                    }
-                                    i += 6;
-                                } else {
-                                    buf.extend_from_slice("\u{FFFD}".as_bytes());
-                                }
-                            } else {
-                                buf.extend_from_slice("\u{FFFD}".as_bytes());
+                            // High surrogate: jq requires a valid low-surrogate
+                            // pair to follow. Anything else (EOF, non-`\u`,
+                            // or wrong codepoint range) is a parse error.
+                            if i + 7 > b.len() || b[i+1] != b'\\' || b[i+2] != b'u' {
+                                bail!("Invalid \\uXXXX\\uXXXX surrogate pair escape");
                             }
+                            let hex2 = std::str::from_utf8(&b[i+3..i+7])
+                                .map_err(|_| anyhow::anyhow!("Invalid \\uXXXX\\uXXXX surrogate pair escape"))?;
+                            let cp2 = u16::from_str_radix(hex2, 16)
+                                .map_err(|_| anyhow::anyhow!("Invalid \\uXXXX\\uXXXX surrogate pair escape"))?;
+                            if !(0xDC00..=0xDFFF).contains(&cp2) {
+                                bail!("Invalid \\uXXXX\\uXXXX surrogate pair escape");
+                            }
+                            let full = 0x10000 + ((cp as u32 - 0xD800) << 10) + (cp2 as u32 - 0xDC00);
+                            if let Some(c) = char::from_u32(full) {
+                                let mut tmp = [0u8; 4];
+                                buf.extend_from_slice(c.encode_utf8(&mut tmp).as_bytes());
+                            }
+                            i += 6;
+                        } else if (0xDC00..=0xDFFF).contains(&cp) {
+                            // Lone low surrogate: jq accepts and replaces with U+FFFD (#615).
+                            buf.extend_from_slice("\u{FFFD}".as_bytes());
                         } else if let Some(c) = char::from_u32(cp as u32) {
                             let mut tmp = [0u8; 4];
                             buf.extend_from_slice(c.encode_utf8(&mut tmp).as_bytes());
