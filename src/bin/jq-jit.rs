@@ -27,17 +27,39 @@ fn raw_contains_del_byte(bytes: &[u8]) -> bool {
 /// re-renders as `null` / `±1.7976931348623157e+308` (issue #513).
 /// Without this check, identity passthrough would emit invalid JSON.
 fn raw_contains_non_canonical_number(bytes: &[u8]) -> bool {
+    // 256-bit byte LUT: true when this byte is one of the "interesting"
+    // chars we need to slow-scan. Lets us memchr-equivalent skip ahead
+    // through the bulk of structural bytes / digits / whitespace / etc.,
+    // which dominate typical NDJSON. (#598 regression fix.)
+    static LUT: [bool; 256] = {
+        let mut t = [false; 256];
+        let chars: &[u8] = &[b'"', b'+', b'e', b'E', b'n', b'N', b'i', b'I'];
+        let mut k = 0;
+        while k < chars.len() { t[chars[k] as usize] = true; k += 1; }
+        t
+    };
     let mut i = 0;
     while i < bytes.len() {
+        // Skip ahead to the next interesting byte. The hot loop is just
+        // a tight LUT lookup the optimiser can vectorise.
+        while i < bytes.len() && !LUT[bytes[i] as usize] { i += 1; }
+        if i >= bytes.len() { return false; }
         match bytes[i] {
             b'"' => {
                 // Skip string contents — a stray `e` inside a string isn't
-                // a number's exponent marker.
+                // a number's exponent marker. Use memchr to jump to the
+                // next `"` or `\` instead of byte-by-byte.
                 i += 1;
                 while i < bytes.len() {
-                    if bytes[i] == b'\\' { i = i.saturating_add(2); continue; }
-                    if bytes[i] == b'"' { i += 1; break; }
-                    i += 1;
+                    match memchr::memchr2(b'"', b'\\', &bytes[i..]) {
+                        Some(off) => {
+                            i += off;
+                            if bytes[i] == b'"' { i += 1; break; }
+                            // backslash: skip the escape sequence
+                            i = i.saturating_add(2);
+                        }
+                        None => { i = bytes.len(); break; }
+                    }
                 }
             }
             b'+' => return true,
@@ -5744,11 +5766,21 @@ fn real_main() {
                     })
                 } else if let Some(ref tf_bytes) = type_filter {
                     // Type filter: objects, arrays, strings, etc.
-                    // Pass through raw input if first byte matches the type
+                    // Pass through raw input if first byte matches the type.
+                    // Non-canonical numeric literals (e.g. `1e10` → `1E+10`)
+                    // need re-rendering through Value, so detour through
+                    // push_compact_line for those records (#598).
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         if !raw.is_empty() && tf_bytes.contains(&raw[0]) {
-                            if use_pretty_buf {
+                            if raw_contains_non_canonical_number(raw) {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                if use_pretty_buf {
+                                    push_pretty_line(&mut compact_buf, &v, indent_n, tab);
+                                } else {
+                                    push_compact_line(&mut compact_buf, &v);
+                                }
+                            } else if use_pretty_buf {
                                 push_json_pretty_raw(&mut compact_buf, raw, 2, false);
                                 compact_buf.push(b'\n');
                             } else {
@@ -12028,6 +12060,9 @@ fn real_main() {
                         })
                     }
                 } else if let Some(ref type_name) = each_type_filter {
+                    // Number canonicalisation (#598) is handled inside
+                    // apply_each_type_filter_raw — it bails per-value when
+                    // a matched value contains a non-canonical literal.
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         let outcome = apply_each_type_filter_raw(raw, type_name, &mut compact_buf);
@@ -21013,7 +21048,14 @@ fn real_main() {
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
                     if !raw.is_empty() && tf_bytes.contains(&raw[0]) {
-                        if use_pretty_buf {
+                        if raw_contains_non_canonical_number(raw) {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            if use_pretty_buf {
+                                push_pretty_line(&mut compact_buf, &v, indent_n, tab);
+                            } else {
+                                push_compact_line(&mut compact_buf, &v);
+                            }
+                        } else if use_pretty_buf {
                             push_json_pretty_raw(&mut compact_buf, raw, 2, false);
                             compact_buf.push(b'\n');
                         } else {
