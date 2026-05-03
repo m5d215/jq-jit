@@ -2703,6 +2703,7 @@ impl Flattener {
                         obj_label: iter_lbl,
                         other_label: other_lbl,
                     });
+                    let final_lbl = self.alloc_label();
                     self.emit(JitOp::Label { id: other_lbl });
                     if !is_each_opt {
                         let err_slot = self.alloc_slot();
@@ -2718,7 +2719,10 @@ impl Flattener {
                             self.emit(JitOp::ReturnError);
                         }
                     } else {
+                        // `(.[]?) |= ...` on a non-iterable yields the input
+                        // once. Skip the iteration and the post-loop yield.
                         self.emit_yield(result);
+                        self.emit(JitOp::Jump { label: final_lbl });
                     }
                     self.emit(JitOp::Label { id: iter_lbl });
 
@@ -2747,6 +2751,7 @@ impl Flattener {
                     self.emit(JitOp::Label { id: done });
 
                     self.emit_yield(result);
+                    self.emit(JitOp::Label { id: final_lbl });
                     self.emit(JitOp::Drop { slot: result });
                     return true;
                 }

@@ -9388,42 +9388,32 @@ try (nth(-1; range(5))) catch .
 null
 "nth doesn't support negative indices"
 
-# Issue #590: path(.f?) suppresses path on non-object/non-null base
-[path(.a?)]
+# Issue #592: (.[]?) |= ... on non-iterable yields input once (not twice)
+. | (.[]?) |= . + 1
 0
-[]
+0
 
-# Issue #590: path(.f?) on null still emits (null accepts any field)
-[path(.a?)]
-null
-[["a"]]
-
-# Issue #590: path(.f?) on object emits
-[path(.a?)]
-{"a":1}
-[["a"]]
-
-# Issue #590: path(.f?) on missing object key still emits
-[path(.a?)]
-{}
-[["a"]]
-
-# Issue #590: path(.f?) on array suppressed
-[path(.a?)]
-[1,2,3]
-[]
-
-# Issue #590: path(.f?) on string suppressed
-[path(.a?)]
+# Issue #592: (.[]?) |= ... on string yields once
+. | (.[]?) |= 1
 "abc"
-[]
+"abc"
 
-# Issue #590: nested path(.a?.b?)
-[path(.a?.b?)]
-{}
-[["a","b"]]
+# Issue #592: (.[]?) |= ... on bool yields once
+. | (.[]?) |= 1
+true
+true
 
-# Issue #590: nested path(.a?.b?) suppressed at outer
-[path(.a?.b?)]
+# Issue #592: (.[]?) |= ... preserves number repr
+. | (.[]?) |= . + 1
+0.0
+0.0
+
+# Issue #592: (.[]?) |= ... on array still applies to elements
+. | (.[]?) |= . + 1
+[1,2,3]
+[2,3,4]
+
+# Issue #592: (.[]) |= without ? still errors on non-iterable
+try (. | (.[]) |= . + 1) catch .
 0
-[]
+"Cannot iterate over number (0)"
