@@ -9417,3 +9417,38 @@ true
 try (. | (.[]) |= . + 1) catch .
 0
 "Cannot iterate over number (0)"
+
+# Issue #594: path(.[KEY]) on null errors for bool key
+try (path(.[true])) catch .
+null
+"Cannot index null with boolean"
+
+# Issue #594: path(.[KEY]) on null errors for null key
+try (path(.[null])) catch .
+null
+"Cannot index null with null"
+
+# Issue #594: path(.[KEY]) on null errors for array key
+try (path(.[[1]])) catch .
+null
+"Cannot index null with array"
+
+# Issue #594: path(.[KEY]?) on null suppresses bool key
+[path(.[true]?)]
+null
+[]
+
+# Issue #594: path(.[KEY]?) on null suppresses array key
+[path(.[[1]]?)]
+null
+[]
+
+# Issue #594: string key on null still emits path
+path(.["a"])
+null
+["a"]
+
+# Issue #594: number key on null still emits path
+path(.[0])
+null
+[0]

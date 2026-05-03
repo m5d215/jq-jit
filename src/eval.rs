@@ -4225,7 +4225,10 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                         // this path still fail in rt_setpath with `Cannot
                         // update field at array index of array`. See #467.
                         (Value::Arr(_), Value::Arr(_)) => {}
-                        (Value::Null, _) => {}
+                        // null accepts string/number/object keys (the slicing
+                        // form), but jq errors on bool/null/array keys with
+                        // `Cannot index null with <type>` (#594).
+                        (Value::Null, Value::Str(_) | Value::Num(_, _) | Value::Obj(_)) => {}
                         _ => {
                             // jq's wording: string keys keep the quoted
                             // value (`string "x"`), other key types use
@@ -4421,7 +4424,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             // jq suppresses paths whose access would error: `path(.a?)` on
             // a non-object/non-null base emits no path. Mirror the type
             // check from the non-`?` Index path but skip silently on
-            // mismatch instead of bailing. See #?.
+            // mismatch instead of bailing. See #590, #594.
             let input_for_check = input.clone();
             eval_path(be, input.clone(), env, &mut |bp| {
                 eval(ke, input.clone(), env, &mut |key| {
@@ -4430,7 +4433,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                         (Value::Obj(_), Value::Str(_)) => {}
                         (Value::Arr(_), Value::Num(_, _)) => {}
                         (Value::Arr(_), Value::Arr(_)) => {}
-                        (Value::Null, _) => {}
+                        (Value::Null, Value::Str(_) | Value::Num(_, _) | Value::Obj(_)) => {}
                         _ => return Ok(true),
                     }
                     let mut p = match &bp { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
