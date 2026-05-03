@@ -945,6 +945,56 @@ pub fn apply_obj_merge_computed_raw(
 /// type name. Returns None for unrecognised type names so callers
 /// can Bail on detector regression.
 #[inline]
+/// Walk `bytes` and return true when it contains a non-canonical numeric
+/// literal — `1e10` (lowercase `e`), `+1`, or the special-float literals
+/// `nan` / `inf` / `infinity` (case-insensitive). String contents are
+/// skipped (a stray `e` inside a string isn't a number's exponent
+/// marker). Mirrors the helper in `bin/jq-jit.rs`. See #598.
+fn raw_contains_non_canonical_number(bytes: &[u8]) -> bool {
+    static LUT: [bool; 256] = {
+        let mut t = [false; 256];
+        let chars: &[u8] = &[b'"', b'+', b'e', b'E', b'n', b'N', b'i', b'I'];
+        let mut k = 0;
+        while k < chars.len() { t[chars[k] as usize] = true; k += 1; }
+        t
+    };
+    let mut i = 0;
+    while i < bytes.len() {
+        while i < bytes.len() && !LUT[bytes[i] as usize] { i += 1; }
+        if i >= bytes.len() { return false; }
+        match bytes[i] {
+            b'"' => {
+                i += 1;
+                while i < bytes.len() {
+                    match memchr::memchr2(b'"', b'\\', &bytes[i..]) {
+                        Some(off) => {
+                            i += off;
+                            if bytes[i] == b'"' { i += 1; break; }
+                            i = i.saturating_add(2);
+                        }
+                        None => return false,
+                    }
+                }
+            }
+            b'+' => return true,
+            b'n' | b'N' if bytes.get(i..i+3).is_some_and(|s| s.eq_ignore_ascii_case(b"nan")) => return true,
+            b'i' | b'I' if bytes.get(i..i+8).is_some_and(|s| s.eq_ignore_ascii_case(b"infinity"))
+                || bytes.get(i..i+3).is_some_and(|s| s.eq_ignore_ascii_case(b"inf")) => return true,
+            b'e' | b'E' => {
+                if i > 0 {
+                    let prev = bytes[i - 1];
+                    if prev.is_ascii_digit() || prev == b'.' {
+                        return true;
+                    }
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    false
+}
+
 fn type_byte_matches(type_name: &str, b: u8) -> Option<bool> {
     Some(match type_name {
         "string" => b == b'"',
@@ -981,15 +1031,31 @@ pub fn apply_each_type_filter_raw(
     if type_byte_matches(type_name, b'\0').is_none() {
         return RawApplyOutcome::Bail;
     }
+    // Number canonicalisation (#598): values containing non-canonical
+    // numeric literals (`1e10`, `+1`, `nan`, `inf`) must be re-rendered
+    // through Value. For type=string/boolean/null the matched value can
+    // never contain such a literal, so we skip the check entirely.
+    let needs_canon_check = !matches!(type_name, "string" | "boolean" | "null");
+    let mut needs_bail = false;
+    let save_len = buf.len();
     let ok = json_each_value_cb(raw, 0, |vs, ve| {
+        if needs_bail { return; }
         let val = &raw[vs..ve];
         if val.is_empty() { return; }
         if matches!(type_byte_matches(type_name, val[0]), Some(true)) {
+            if needs_canon_check && raw_contains_non_canonical_number(val) {
+                needs_bail = true;
+                return;
+            }
             buf.extend_from_slice(val);
             buf.push(b'\n');
         }
     });
-    if ok { RawApplyOutcome::Emit } else { RawApplyOutcome::Bail }
+    if !ok || needs_bail {
+        buf.truncate(save_len);
+        return RawApplyOutcome::Bail;
+    }
+    RawApplyOutcome::Emit
 }
 
 /// Apply the `[.[] | select(type == "<type>")]` raw-byte fast path
@@ -1008,19 +1074,26 @@ pub fn apply_collect_each_select_type_raw(
     if type_byte_matches(type_name, b'\0').is_none() {
         return RawApplyOutcome::Bail;
     }
+    let needs_canon_check = !matches!(type_name, "string" | "boolean" | "null");
+    let mut needs_bail = false;
     let save_len = buf.len();
     buf.push(b'[');
     let mut first_elem = true;
     let ok = json_each_value_cb(raw, 0, |vs, ve| {
+        if needs_bail { return; }
         let val = &raw[vs..ve];
         if val.is_empty() { return; }
         if matches!(type_byte_matches(type_name, val[0]), Some(true)) {
+            if needs_canon_check && raw_contains_non_canonical_number(val) {
+                needs_bail = true;
+                return;
+            }
             if !first_elem { buf.push(b','); }
             first_elem = false;
             buf.extend_from_slice(val);
         }
     });
-    if ok {
+    if ok && !needs_bail {
         buf.extend_from_slice(b"]\n");
         RawApplyOutcome::Emit
     } else {
@@ -1044,6 +1117,7 @@ pub fn apply_first_each_select_type_raw(
     if type_byte_matches(type_name, b'\0').is_none() {
         return RawApplyOutcome::Bail;
     }
+    let needs_canon_check = !matches!(type_name, "string" | "boolean" | "null");
     let mut found_range: Option<(usize, usize)> = None;
     let ok = json_each_value_cb(raw, 0, |vs, ve| {
         if found_range.is_some() { return; }
@@ -1057,7 +1131,11 @@ pub fn apply_first_each_select_type_raw(
         return RawApplyOutcome::Bail;
     }
     if let Some((vs, ve)) = found_range {
-        buf.extend_from_slice(&raw[vs..ve]);
+        let val = &raw[vs..ve];
+        if needs_canon_check && raw_contains_non_canonical_number(val) {
+            return RawApplyOutcome::Bail;
+        }
+        buf.extend_from_slice(val);
         buf.push(b'\n');
     }
     RawApplyOutcome::Emit
