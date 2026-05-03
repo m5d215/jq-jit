@@ -16,7 +16,38 @@ fn raw_contains_del_byte(bytes: &[u8]) -> bool {
     memchr::memchr(0x7F, bytes).is_some()
 }
 
+/// Returns true if `bytes` contains `\uD[8-F]X` — a JSON `\u` escape that
+/// decodes to a surrogate codepoint. Identity passthrough must defer to
+/// the slow parser for these so jq's lone-surrogate semantics apply
+/// (lone high → error, lone low → U+FFFD, valid pair → UTF-8). This
+/// helper is a focused alternative to the full canonicaliser scan when
+/// only the surrogate case matters (#615). Caller is expected to gate
+/// on a cheap `memchr(b'\\', ...)` first so backslash-free records
+/// skip this scan entirely.
 #[inline]
+fn raw_contains_surrogate_escape(bytes: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 5 < bytes.len() {
+        match memchr::memchr(b'\\', &bytes[i..]) {
+            Some(off) => {
+                let p = i + off;
+                if p + 5 < bytes.len()
+                    && bytes[p + 1] == b'u'
+                    && (bytes[p + 2] == b'D' || bytes[p + 2] == b'd')
+                    && matches!(bytes[p + 3],
+                        b'8' | b'9' | b'A' | b'B' | b'C' | b'D' | b'E' | b'F'
+                             | b'a' | b'b' | b'c' | b'd' | b'e' | b'f')
+                {
+                    return true;
+                }
+                i = p + 1;
+            }
+            None => return false,
+        }
+    }
+    false
+}
+
 /// Returns true if `bytes` contains a JSON number whose lexical form
 /// would normalise differently from jq's canonical output (e.g. `1e10`
 /// → `1E+10`, `+1` → `1`, `1e-5` → `0.00001`). Used to disable raw-byte
@@ -55,6 +86,20 @@ fn raw_contains_non_canonical_number(bytes: &[u8]) -> bool {
                         Some(off) => {
                             i += off;
                             if bytes[i] == b'"' { i += 1; break; }
+                            // \uD[8-F]XX is a surrogate codepoint — jq either
+                            // errors (lone high), replaces with U+FFFD (lone
+                            // low), or decodes to UTF-8 (valid pair). Identity
+                            // passthrough must defer to the slow parser to
+                            // pick the right behavior (#615).
+                            if i + 5 < bytes.len()
+                                && bytes[i + 1] == b'u'
+                                && (bytes[i + 2] == b'D' || bytes[i + 2] == b'd')
+                                && matches!(bytes[i + 3],
+                                    b'8' | b'9' | b'A' | b'B' | b'C' | b'D' | b'E' | b'F'
+                                         | b'a' | b'b' | b'c' | b'd' | b'e' | b'f')
+                            {
+                                return true;
+                            }
                             // backslash: skip the escape sequence
                             i = i.saturating_add(2);
                         }
@@ -21120,13 +21165,25 @@ fn real_main() {
                     }
                     all_compact && checked > 0
                 } else { false };
-                if whole_compact2 {
+                // Surrogate handling (#615) requires the slow parser, but
+                // only matters when the body contains `\u` escapes — gated
+                // on a single SIMD `memchr(b'\\')` over the whole body so
+                // the backslash-free common case (typical NDJSON) skips
+                // the surrogate scan entirely. The per-record loop reuses
+                // this flag instead of repeating memchr per record.
+                let body_has_escapes = memchr::memchr(b'\\', cbody).is_some();
+                let bulk_safe = whole_compact2
+                    && (!body_has_escapes || !raw_contains_surrogate_escape(cbody));
+                if bulk_safe {
                     let _ = out.write_all(cbody);
                     Ok(())
                 } else {
                     json_stream_raw(content, |start, end| {
                         let raw = &content_bytes[start..end];
-                        if is_json_compact(raw) {
+                        if body_has_escapes && raw_contains_surrogate_escape(raw) {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, Some(raw), &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        } else if is_json_compact(raw) {
                             compact_buf.extend_from_slice(raw);
                             compact_buf.push(b'\n');
                         } else {

@@ -970,6 +970,18 @@ fn raw_contains_non_canonical_number(bytes: &[u8]) -> bool {
                         Some(off) => {
                             i += off;
                             if bytes[i] == b'"' { i += 1; break; }
+                            // \uD[8-F]XX is a surrogate codepoint — defer to
+                            // the slow parser to handle lone surrogates and
+                            // pair decoding (#615).
+                            if i + 5 < bytes.len()
+                                && bytes[i + 1] == b'u'
+                                && (bytes[i + 2] == b'D' || bytes[i + 2] == b'd')
+                                && matches!(bytes[i + 3],
+                                    b'8' | b'9' | b'A' | b'B' | b'C' | b'D' | b'E' | b'F'
+                                         | b'a' | b'b' | b'c' | b'd' | b'e' | b'f')
+                            {
+                                return true;
+                            }
                             i = i.saturating_add(2);
                         }
                         None => return false,

@@ -9658,3 +9658,28 @@ null
 .
 -0.0000001
 -1E-7
+
+# Issue #615: JSON input parser replaces lone low surrogate with U+FFFD (length)
+length
+"\udc00"
+1
+
+# Issue #615: JSON input parser preserves neighbours around lone low surrogate
+length
+"a\udc00b"
+3
+
+# Issue #615: identity passthrough on JSON input replaces lone low surrogate
+.
+"\udc00"
+"�"
+
+# Issue #615: identity passthrough decodes valid surrogate pair to UTF-8
+.
+"💩"
+"💩"
+
+# Issue #615: identity passthrough on non-surrogate \u escape stays valid
+length
+"é"
+1
