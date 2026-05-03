@@ -2720,13 +2720,76 @@ impl RegexCache {
         }
         // Compile and cache
         let re = regex::Regex::new(pattern)
-            .map_err(|e| anyhow::anyhow!("Invalid regex: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("{}", translate_regex_error(pattern, &e.to_string())))?;
         if self.entries.len() >= REGEX_CACHE_SIZE {
             self.entries.pop();
         }
         self.entries.insert(0, (pattern.to_string(), re));
         Ok(&self.entries[0].1)
     }
+}
+
+/// Map a `regex` crate compile error to jq's Oniguruma-style wording.
+///
+/// jq prefixes every regex compilation failure with `Regex failure:` and
+/// uses Oniguruma's specific phrases (e.g. `premature end of char-class`).
+/// Rust's `regex` crate produces a multi-line message of its own. For each
+/// pattern we recognise, hand back jq's exact wording so error-handling
+/// scripts that look at `try (...) catch .` see the expected string. See
+/// #568.
+fn translate_regex_error(pattern: &str, err: &str) -> String {
+    let kind = if err.contains("unclosed character class") {
+        "premature end of char-class"
+    } else if err.contains("incomplete escape sequence") {
+        "end pattern at escape"
+    } else if err.contains("repetition operator missing expression") {
+        "target of repeat operator is not specified"
+    } else if err.contains("unclosed group") {
+        // jq distinguishes `(...` from `(?...`: the former is "end pattern
+        // with unmatched parenthesis", the latter "end pattern in group".
+        // Walk the pattern from the rightmost unmatched `(` to decide.
+        if has_unclosed_question_group(pattern) {
+            "end pattern in group"
+        } else {
+            "end pattern with unmatched parenthesis"
+        }
+    } else if err.contains("empty capture group name") {
+        "undefined group option"
+    } else if err.contains("unclosed capture group name") {
+        // jq folds incomplete `(?<` groups into the bare unmatched-paren
+        // case rather than reporting a separate name-incomplete error.
+        "end pattern with unmatched parenthesis"
+    } else {
+        return format!("Invalid regex: {}", err);
+    };
+    format!("Regex failure: {}", kind)
+}
+
+/// True iff the pattern's rightmost unmatched `(` is followed by `?` and
+/// nothing else (i.e. the literal `(?` sits at the trailing edge with no
+/// group-type byte yet). jq prints "end pattern in group" for that bare
+/// shape and "end pattern with unmatched parenthesis" for groups that
+/// declared a recognised type (`(?:`, `(?i:`, `(?<x>`, etc.) but never
+/// got closed.
+fn has_unclosed_question_group(pattern: &str) -> bool {
+    let bytes = pattern.as_bytes();
+    let mut depth: i32 = 0;
+    let mut last_open: Option<usize> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if i + 1 < bytes.len() => { i += 2; continue; }
+            b'(' => { depth += 1; last_open = Some(i); }
+            b')' => { depth -= 1; }
+            _ => {}
+        }
+        i += 1;
+    }
+    if depth <= 0 { return false; }
+    let Some(open) = last_open else { return false; };
+    // `(?` alone or `(?` followed by another `(?` etc. — the inner one is
+    // incomplete only when nothing has been written after the `?`.
+    bytes.get(open + 1) == Some(&b'?') && open + 2 == bytes.len()
 }
 
 // Per-thread regex cache. Each `cargo test` worker keeps its own cache so

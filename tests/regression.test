@@ -9092,3 +9092,43 @@ null
 [null, null] | add
 null
 null
+
+# Issue #568: regex error wording matches jq's Oniguruma form
+try (test("[")) catch .
+"abc"
+"Regex failure: premature end of char-class"
+
+# Issue #568: unclosed paren without flag → unmatched parenthesis
+try (test("(unclosed")) catch .
+"abc"
+"Regex failure: end pattern with unmatched parenthesis"
+
+# Issue #568: bare `(?` with nothing after → end pattern in group
+try (test("(?")) catch .
+"abc"
+"Regex failure: end pattern in group"
+
+# Issue #568: `(?:` / `(?i:` with content but no close → unmatched parenthesis
+try (test("(?:abc")) catch .
+"abc"
+"Regex failure: end pattern with unmatched parenthesis"
+
+# Issue #568: lone backslash → end pattern at escape
+try (test("\\")) catch .
+"abc"
+"Regex failure: end pattern at escape"
+
+# Issue #568: bare repetition operator → target of repeat operator
+try (test("*")) catch .
+"abc"
+"Regex failure: target of repeat operator is not specified"
+
+# Issue #568: empty named group → undefined group option
+try (test("(?P<>x)")) catch .
+"abc"
+"Regex failure: undefined group option"
+
+# Issue #568: incomplete `(?<` group folds into unmatched parenthesis (matches jq)
+try (test("(?<")) catch .
+"abc"
+"Regex failure: end pattern with unmatched parenthesis"
