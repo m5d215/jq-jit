@@ -7000,15 +7000,15 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                 let label = &args[1];
                 match label {
                     Value::Str(s) if !s.is_empty() => {
-                        eprintln!("[\"DEBUG:\",{}]", crate::value::value_to_json(input));
+                        eprintln!("[\"DEBUG:\",{}]", crate::value::value_to_json_tojson(input));
                     }
                     _ => {
-                        eprintln!("[\"DEBUG:\",{}]", crate::value::value_to_json(input));
+                        eprintln!("[\"DEBUG:\",{}]", crate::value::value_to_json_tojson(input));
                     }
                 }
                 std::ptr::write(dst, input.clone());
             } else if !args.is_empty() {
-                eprintln!("[\"DEBUG:\",{}]", crate::value::value_to_json(&args[0]));
+                eprintln!("[\"DEBUG:\",{}]", crate::value::value_to_json_tojson(&args[0]));
                 std::ptr::write(dst, args[0].clone());
             } else {
                 std::ptr::write(dst, Value::Null);
@@ -7017,7 +7017,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
         }
         if name == "stderr" {
             if !args.is_empty() {
-                eprint!("{}", crate::value::value_to_json(&args[0]));
+                eprint!("{}", crate::value::value_to_json_tojson(&args[0]));
                 std::ptr::write(dst, args[0].clone());
             } else {
                 std::ptr::write(dst, Value::Null);
