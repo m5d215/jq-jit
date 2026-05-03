@@ -9017,3 +9017,48 @@ null
 . | @json
 0
 "0"
+
+# Issue #564: @text preserves number repr
+. | @text
+0.0
+"0.0"
+
+# Issue #564: @uri preserves number repr in stringification
+. | @uri
+0.0
+"0.0"
+
+# Issue #564: @html preserves number repr
+. | @html
+0.0
+"0.0"
+
+# Issue #564: @sh on a single number keeps the literal form
+. | @sh
+0.0
+"0.0"
+
+# Issue #564: @sh on an array of numbers keeps each repr
+. | @sh
+[1.0, 2.0]
+"1.0 2.0"
+
+# Issue #564: @base64 of a number-bearing repr matches jq's encoding
+. | @base64
+0.0
+"MC4w"
+
+# Issue #564: @text on array preserves nested number reprs
+. | @text
+[1.0, 2.0]
+"[1.0,2.0]"
+
+# Issue #564: integer @text still has no forced decimal
+. | @text
+0
+"0"
+
+# Issue #564: @text | length now reports the correct underlying string length
+. | @text | length
+0.0
+3

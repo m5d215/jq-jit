@@ -3463,7 +3463,12 @@ fn format_sh_scalar(val: &Value) -> Result<String> {
         Value::Null => Ok("null".to_string()),
         Value::True => Ok("true".to_string()),
         Value::False => Ok("false".to_string()),
-        Value::Num(n, _) => Ok(crate::value::format_jq_number(*n)),
+        // `value_to_json_tojson` keeps the carried number repr (`0.0` stays
+        // `"0.0"`) while gracefully falling back to f64-formatted form when
+        // the literal can't round-trip — same logic the `tostring` builtin
+        // uses. The bare `format_jq_number` arm dropped the repr so
+        // `0.0 | @sh` produced `"0"` instead of jq's `"0.0"`. See #564.
+        Value::Num(_, _) => Ok(crate::value::value_to_json_tojson(val)),
         _ => bail!(
             "{} ({}) can not be escaped for shell",
             val.type_name(),
@@ -3558,8 +3563,15 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
         _ => {}
     }
 
-    // For other formats, stringify the value first
-    let s = match val { Value::Str(s) => s.to_string(), _ => crate::value::value_to_json(val) };
+    // For other formats, stringify the value first.
+    //
+    // jq's `@text`, `@uri`, `@html`, `@sh`, `@base64`, `@base64d` all run
+    // their input through the equivalent of `tostring` first. `value_to_json`
+    // discarded the carried number repr, so `0.0 | @text` produced `"0"`
+    // instead of `"0.0"` (and `@base64` encoded `MA==` instead of jq's
+    // `MC4w`). `value_to_json_tojson` keeps the literal form when f64 can
+    // round-trip it, matching `rt_tostring`. See #564.
+    let s = match val { Value::Str(s) => s.to_string(), _ => crate::value::value_to_json_tojson(val) };
     match name {
         "text" => Ok(s),
         // `@json` mirrors the `tojson` builtin, so it must preserve the
