@@ -8957,3 +8957,33 @@ try (@base64d) catch .
 @base64d
 "aGVsbG8="
 "hello"
+
+# Issue #560: string interpolation preserved number literal repr (0.0 stays "0.0")
+"\(0.0)"
+null
+"0.0"
+
+# Issue #560: scientific repr preserved through interpolation
+"\(1e10)"
+null
+"1E+10"
+
+# Issue #560: literal repr survives a let binding before interpolation
+0.0 as $x | "\($x)"
+null
+"0.0"
+
+# Issue #560: small fraction stays in decimal form
+"\(1.5e-3)"
+null
+"0.0015"
+
+# Issue #560: tostring already worked — confirm no regression
+0.0 | tostring
+null
+"0.0"
+
+# Issue #560: integer literals still render without forced decimal
+"\(0)"
+null
+"0"
