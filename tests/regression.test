@@ -8987,3 +8987,33 @@ null
 "\(0)"
 null
 "0"
+
+# Issue #562: @json preserves number repr (matches tojson semantics)
+. | @json
+0.0
+"0.0"
+
+# Issue #562: chained @json preserves the outer string content
+. | @json | @json
+0.0
+"\"0.0\""
+
+# Issue #562: @json on array preserves nested number reprs
+. | @json
+[0.0, 1.5]
+"[0.0,1.5]"
+
+# Issue #562: @json on object preserves number reprs
+. | @json
+{"x":1.0,"y":2.5}
+"{\"x\":1.0,\"y\":2.5}"
+
+# Issue #562: @json | length now reports correct underlying string length
+. | @json | length
+0.0
+3
+
+# Issue #562: integer @json still renders without forced decimal
+. | @json
+0
+"0"
