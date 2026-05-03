@@ -9327,3 +9327,38 @@ try (-.) catch .
 try (-.) catch .
 "1234567890123456789"
 "string (\"1234567890...) cannot be negated"
+
+# Issue #582: range with non-arithmetic step emits `from` first then errors via `+`
+[try (range(0; 10; "a")) catch .]
+null
+[0,"number (0) and string (\"a\") cannot be added"]
+
+# Issue #582: range with array step matches jq's lazy add error
+[try (range(0; 10; [])) catch .]
+null
+[0,"number (0) and array ([]) cannot be added"]
+
+# Issue #582: range with object step matches jq
+[try (range(0; 10; {})) catch .]
+null
+[0,"number (0) and object ({}) cannot be added"]
+
+# Issue #582: range with null step silently emits nothing
+[range(0; 10; null)]
+null
+[]
+
+# Issue #582: range with bool step silently emits nothing
+[range(0; 10; true)]
+null
+[]
+
+# Issue #582: range with step=0 still empty (regression check)
+[range(0; 10; 0)]
+null
+[]
+
+# Issue #582: numeric step still works
+[range(0; 5)]
+null
+[0,1,2,3,4]
