@@ -5489,26 +5489,26 @@ pub fn normalize_jq_repr(repr: &str) -> Option<String> {
     }
     let leading_zeros = combined.bytes().take_while(|&b| b == b'0').count();
     if leading_zeros == combined.len() {
-        // Pure-zero value: jq keeps the explicit-exponent form when present.
-        // `0e10`  → `0E+10` (positive exp stays scientific)
-        // `0e-1`  → `0.0`   (negative exp expands to decimal — N+frac zeros)
-        // `0.0e-1` → `0.00` (frac digits add to the zero count)
-        // `0.0e0` → `0.0`   (no exp shift, drop the `e0`)
-        // See #452.
+        // Pure-zero value: jq's normalisation collapses fractional digits
+        // and the exponent into a single effective exponent and prints the
+        // shortest legal form. `0.0e1` becomes `0` (the `.0` shifts the
+        // effective exp from `+1` down to `0`); `0.0e2` becomes `0E+1`;
+        // `0.000e2` becomes `0.0`. See #452 / #570.
         if let Some(_) = e_pos {
-            if exp >= 1 {
-                return Some(format!("{}0E+{}", sign, exp));
+            let effective_exp = (exp as i64) - (mant_frac.len() as i64);
+            if effective_exp >= 1 {
+                return Some(format!("{}0E+{}", sign, effective_exp));
             }
-            // exp <= 0: expand to decimal `0.000...0` with `mant_frac.len() - exp` zeros.
-            // exp == 0 with no frac → "0"; exp == 0 with frac → keep frac zeros.
-            let total_zeros = (mant_frac.len() as i64) - exp as i64;
-            if total_zeros <= 0 {
+            if effective_exp == 0 {
                 return Some(format!("{}0", sign));
             }
-            let mut s = String::with_capacity(2 + total_zeros as usize);
+            // Negative effective exp: expand to decimal `0.000...0` with the
+            // appropriate number of trailing zeros.
+            let zeros = (-effective_exp) as usize;
+            let mut s = String::with_capacity(2 + zeros);
             s.push_str(sign);
             s.push_str("0.");
-            for _ in 0..total_zeros { s.push('0'); }
+            for _ in 0..zeros { s.push('0'); }
             return Some(s);
         }
         return None;

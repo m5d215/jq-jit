@@ -9132,3 +9132,43 @@ try (test("(?P<>x)")) catch .
 try (test("(?<")) catch .
 "abc"
 "Regex failure: end pattern with unmatched parenthesis"
+
+# Issue #570: zero-value normalization collapses fractional digits into the effective exponent
+"0.0e1" | fromjson
+null
+0
+
+# Issue #570: 0.0e2 normalises to 0E+1 (not 0E+2)
+"0.0e2" | fromjson
+null
+0E+1
+
+# Issue #570: 0.0e3 normalises to 0E+2
+"0.0e3" | fromjson
+null
+0E+2
+
+# Issue #570: 0.00e1 normalises to 0.0
+"0.00e1" | fromjson
+null
+0.0
+
+# Issue #570: 0.000e2 normalises to 0.0
+"0.000e2" | fromjson
+null
+0.0
+
+# Issue #570: pure zero with positive exp keeps scientific form
+"0e1" | fromjson
+null
+0E+1
+
+# Issue #570: 0.0e-1 still expands to 0.00 (regression check)
+"0.0e-1" | fromjson
+null
+0.00
+
+# Issue #570: non-zero values unaffected
+"0.5e1" | fromjson
+null
+5
