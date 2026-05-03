@@ -33,7 +33,7 @@ fn raw_contains_non_canonical_number(bytes: &[u8]) -> bool {
     // which dominate typical NDJSON. (#598 regression fix.)
     static LUT: [bool; 256] = {
         let mut t = [false; 256];
-        let chars: &[u8] = &[b'"', b'+', b'e', b'E', b'n', b'N', b'i', b'I'];
+        let chars: &[u8] = &[b'"', b'+', b'e', b'E', b'n', b'N', b'i', b'I', b'.'];
         let mut k = 0;
         while k < chars.len() { t[chars[k] as usize] = true; k += 1; }
         t
@@ -80,6 +80,18 @@ fn raw_contains_non_canonical_number(bytes: &[u8]) -> bool {
                     if prev.is_ascii_digit() || prev == b'.' {
                         return true;
                     }
+                }
+                i += 1;
+            }
+            b'.' => {
+                // Numbers with a fractional part of 6+ leading zeros need
+                // canonicalisation: jq's decnum normalises anything with
+                // effective exponent < -6 to scientific form. e.g.
+                // `0.0000001` → `1E-7`, `0.0000000` → `0E-7` (#611).
+                if bytes.get(i + 1..i + 7) == Some(&[b'0'; 6][..])
+                    && i > 0 && bytes[i - 1].is_ascii_digit()
+                {
+                    return true;
                 }
                 i += 1;
             }

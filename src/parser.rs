@@ -477,21 +477,26 @@ fn normalize_num_repr(s: &str) -> String {
         let first_sig = digits.iter().position(|c| *c != '0').unwrap_or(digits.len());
 
         if first_sig >= digits.len() {
-            // All-zero mantissa. jq's decnum keeps the explicit-exponent
-            // form: `0e1` → `0E+1`, `0e-1` → `0.0`, `0.0e-1` → `0.00`,
-            // `-0e10` → `-0E+10`. Hand the canonical normalisation off to
-            // `normalize_jq_repr`'s all-zero branch (#452).
-            if exp >= 1 {
-                return format!("{}0E+{}", sign, exp);
+            // All-zero mantissa. jq's decnum collapses the fractional digits
+            // and the exponent into one effective exponent before deciding
+            // the print form: `0e1` → `0E+1`, `0.00e1` → `0.0`, `0e-7` →
+            // `0E-7`, `0.0e-7` → `0E-8` (#452 / #611). Mirror
+            // `normalize_jq_repr`'s pure-zero branch.
+            let effective_exp = (exp as i64) - (frac_part.len() as i64);
+            if effective_exp >= 1 {
+                return format!("{}0E+{}", sign, effective_exp);
             }
-            let total_zeros = (frac_part.len() as i64) - exp;
-            if total_zeros <= 0 {
+            if effective_exp == 0 {
                 return format!("{}0", sign);
             }
-            let mut out = String::with_capacity(2 + total_zeros as usize);
+            if effective_exp < -6 {
+                return format!("{}0E{}", sign, effective_exp);
+            }
+            let zeros = (-effective_exp) as usize;
+            let mut out = String::with_capacity(2 + zeros);
             out.push_str(sign);
             out.push_str("0.");
-            for _ in 0..total_zeros {
+            for _ in 0..zeros {
                 out.push('0');
             }
             return out;

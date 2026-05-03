@@ -5487,9 +5487,20 @@ pub fn normalize_jq_repr(repr: &str) -> Option<String> {
         }
         idx += 1;
     }
-    // No exponent and no leading `+`: nothing to normalize.
+    // Plain decimals (no exponent, no leading sign-needing-strip) only need
+    // normalisation when they contain `0.` followed by 6+ leading zeros —
+    // anything shorter has te >= -6 and is already canonical. This cheap
+    // pre-check keeps the common-case hot path (`tojson` over numeric NDJSON)
+    // out of the te-computing slow path. (#611)
     if e_pos.is_none() && sign != "-" && bytes.first() != Some(&b'+') {
-        return None;
+        // dot_pos was filled by the scan above; reuse it instead of re-scanning.
+        let needs_normalize = match dot_pos {
+            Some(d) => bytes.get(d + 1..d + 7) == Some(&[b'0'; 6][..]),
+            None => false,
+        };
+        if !needs_normalize {
+            return None;
+        }
     }
     let mantissa_end = e_pos.unwrap_or(bytes.len());
     let mant_int_end = dot_pos.unwrap_or(mantissa_end);
@@ -5512,32 +5523,38 @@ pub fn normalize_jq_repr(repr: &str) -> Option<String> {
         // and the exponent into a single effective exponent and prints the
         // shortest legal form. `0.0e1` becomes `0` (the `.0` shifts the
         // effective exp from `+1` down to `0`); `0.0e2` becomes `0E+1`;
-        // `0.000e2` becomes `0.0`. See #452 / #570.
-        if let Some(_) = e_pos {
-            let effective_exp = (exp as i64) - (mant_frac.len() as i64);
-            if effective_exp >= 1 {
-                return Some(format!("{}0E+{}", sign, effective_exp));
-            }
-            if effective_exp == 0 {
-                return Some(format!("{}0", sign));
-            }
-            // Negative effective exp: expand to decimal `0.000...0` with the
-            // appropriate number of trailing zeros.
-            let zeros = (-effective_exp) as usize;
-            let mut s = String::with_capacity(2 + zeros);
-            s.push_str(sign);
-            s.push_str("0.");
-            for _ in 0..zeros { s.push('0'); }
-            return Some(s);
+        // `0.000e2` becomes `0.0` (#452, #570, #611). Plain decimals like
+        // `0.0000000` also normalise to `0E-7` once frac_len exceeds 6.
+        let effective_exp = (exp as i64) - (mant_frac.len() as i64);
+        if effective_exp >= 1 {
+            return Some(format!("{}0E+{}", sign, effective_exp));
         }
-        return None;
+        if effective_exp == 0 && e_pos.is_some() {
+            return Some(format!("{}0", sign));
+        }
+        if effective_exp < -6 {
+            return Some(format!("{}0E{}", sign, effective_exp));
+        }
+        // Plain decimal pure-zeros in [-6, 0] are already canonical
+        // (`0.000000` stays as-is, `0` and `0.0` stay as-is).
+        if e_pos.is_none() {
+            return None;
+        }
+        let zeros = (-effective_exp) as usize;
+        let mut s = String::with_capacity(2 + zeros);
+        s.push_str(sign);
+        s.push_str("0.");
+        for _ in 0..zeros { s.push('0'); }
+        return Some(s);
     }
     let sig: &str = &combined[leading_zeros..];
     let ndigits = sig.len() as i32;
     let te = ndigits - 1 + exp - (mant_frac.len() as i32);
-    // Bail if the input was a plain decimal (no exponent) — those are
-    // already canonical, except for the leading-`+` case handled below.
-    if e_pos.is_none() {
+    // For plain decimals (no exponent), the source is usually already canonical
+    // — except when te falls outside libdecnum's decimal-vs-scientific window
+    // ([0, ndigits) for the integer part, te >= -6 for the fraction). In those
+    // cases jq's decnum still re-normalises (e.g. `0.0000001` → `1E-7`, #611).
+    if e_pos.is_none() && te >= -6 && te < ndigits {
         return None;
     }
     if te >= ndigits || te < -6 {
