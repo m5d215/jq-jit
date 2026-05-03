@@ -2458,48 +2458,38 @@ pub fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
                     // jq: string keys are quoted without parens (#440).
                     bail!("Cannot index array with string \"{}\"", k);
                 }
-                // Slice assignment: path element is {start: N, end: N}
-                (_, Value::Obj(ObjInner(slice_spec))) if slice_spec.contains_key("start") && slice_spec.contains_key("end") => {
-                    // jq applies floor(start) / ceil(end) when consuming a slice path,
-                    // and treats null as the open endpoint (0 for start, len for end).
-                    let len = match v { Value::Arr(a) => a.len() as i64, _ => 0 };
-                    let start = match slice_spec.get("start") {
-                        Some(Value::Num(n, _)) => n.floor() as i64,
-                        _ => 0,
+                // Slice assignment: path element is an object. jq's order is
+                // (1) base must be Arr/Str/Null, else "Cannot index X with
+                // object"; (2) validate the slice spec; (3) for Str, raise
+                // "Cannot update string slices" (regardless of rhs); (4) for
+                // Arr/Null, recurse on the rest, require an array result, and
+                // splice. (#609)
+                (Value::Arr(a), Value::Obj(ObjInner(slice_spec))) => {
+                    validate_slice_spec(slice_spec)?;
+                    let len = a.len() as i64;
+                    let (si, ei) = slice_indices(slice_spec, len);
+                    let new_val = rt_setpath(&Value::Null, &rest, val)?;
+                    let replacement = match &new_val {
+                        Value::Arr(r) => r.as_ref().clone(),
+                        _ => bail!("A slice of an array can only be assigned another array"),
                     };
-                    let end = match slice_spec.get("end") {
-                        Some(Value::Num(n, _)) => n.ceil() as i64,
-                        Some(Value::Null) | None => len,
-                        _ => 0,
+                    let mut result = a[..si].to_vec();
+                    result.extend(replacement);
+                    result.extend_from_slice(&a[ei..]);
+                    Ok(Value::Arr(Rc::new(result)))
+                }
+                (Value::Str(_), Value::Obj(ObjInner(slice_spec))) => {
+                    validate_slice_spec(slice_spec)?;
+                    bail!("Cannot update string slices");
+                }
+                (Value::Null, Value::Obj(ObjInner(slice_spec))) => {
+                    validate_slice_spec(slice_spec)?;
+                    let new_val = rt_setpath(&Value::Null, &rest, val)?;
+                    let replacement = match &new_val {
+                        Value::Arr(r) => r.as_ref().clone(),
+                        _ => bail!("A slice of an array can only be assigned another array"),
                     };
-                    match v {
-                        Value::Arr(a) => {
-                            let len = a.len() as i64;
-                            let si_raw = if start < 0 { (len + start).max(0) } else { start.min(len) };
-                            let ei_raw = if end < 0 { (len + end).max(0) } else { end.min(len) };
-                            let si = si_raw as usize;
-                            let ei = (ei_raw as usize).max(si);
-                            let new_val = rt_setpath(&Value::Null, &rest, val)?;
-                            let replacement = match &new_val {
-                                Value::Arr(r) => r.as_ref().clone(),
-                                _ => bail!("A slice of an array can only be assigned another array"),
-                            };
-                            let mut result = a[..si].to_vec();
-                            result.extend(replacement);
-                            result.extend_from_slice(&a[ei..]);
-                            Ok(Value::Arr(Rc::new(result)))
-                        }
-                        Value::Str(_) => bail!("Cannot update string slices"),
-                        Value::Null => {
-                            let new_val = rt_setpath(&Value::Null, &rest, val)?;
-                            let replacement = match &new_val {
-                                Value::Arr(r) => r.as_ref().clone(),
-                                _ => bail!("A slice of an array can only be assigned another array"),
-                            };
-                            Ok(Value::Arr(Rc::new(replacement)))
-                        }
-                        _ => bail!("Cannot set path"),
-                    }
+                    Ok(Value::Arr(Rc::new(replacement)))
                 }
                 // jq emits a special message when both the container and the
                 // key are arrays: `Cannot update field at array index of array`.
@@ -2586,6 +2576,48 @@ pub fn rt_setpath_mut(v: &mut Value, path: &[Value], val: Value) -> Result<()> {
                 // jq: number keys omit the value (#440).
                 let _ = n;
                 bail!("Cannot index {} with number", v.type_name());
+            }
+        }
+        // Slice assignment: same semantics as `rt_setpath`'s slice arm.
+        // jq's order is (1) base must be Arr/Str/Null, else "Cannot index X
+        // with object"; (2) validate the slice spec; (3) for Str, raise
+        // "Cannot update string slices" (regardless of rhs); (4) for Arr/Null,
+        // recurse on the rest, require an array result, and splice. (#609)
+        Value::Obj(ObjInner(slice_spec)) => {
+            match v {
+                Value::Arr(a) => {
+                    validate_slice_spec(slice_spec)?;
+                    let len = a.len() as i64;
+                    let (si, ei) = slice_indices(slice_spec, len);
+                    let mut new_val = Value::Null;
+                    rt_setpath_mut(&mut new_val, rest, val)?;
+                    let replacement = match new_val {
+                        Value::Arr(r) => Rc::try_unwrap(r).unwrap_or_else(|rc| (*rc).clone()),
+                        _ => bail!("A slice of an array can only be assigned another array"),
+                    };
+                    let arr = Rc::make_mut(a);
+                    let tail: Vec<Value> = arr.split_off(ei);
+                    arr.truncate(si);
+                    arr.extend(replacement);
+                    arr.extend(tail);
+                    Ok(())
+                }
+                Value::Str(_) => {
+                    validate_slice_spec(slice_spec)?;
+                    bail!("Cannot update string slices");
+                }
+                Value::Null => {
+                    validate_slice_spec(slice_spec)?;
+                    let mut new_val = Value::Null;
+                    rt_setpath_mut(&mut new_val, rest, val)?;
+                    let replacement = match new_val {
+                        Value::Arr(r) => Rc::try_unwrap(r).unwrap_or_else(|rc| (*rc).clone()),
+                        _ => bail!("A slice of an array can only be assigned another array"),
+                    };
+                    *v = Value::Arr(Rc::new(replacement));
+                    Ok(())
+                }
+                _ => bail!("Cannot index {} with object", v.type_name()),
             }
         }
         // jq's special-case wording for array-key on array-container; the

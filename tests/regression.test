@@ -9573,3 +9573,48 @@ null
 "4KCC" | @base64d
 null
 "ࠂ"
+
+# Issue #609: setpath with valid slice spec splices the array
+setpath([{"start":1,"end":2}]; [99,100])
+[1,2,3,4,5]
+[1,99,100,3,4,5]
+
+# Issue #609: setpath with slice spec replaces the matching range
+setpath([{"start":1,"end":3}]; [])
+[1,2,3,4,5]
+[1,4,5]
+
+# Issue #609: setpath with malformed slice spec ({}) raises slice-indices error
+try (setpath([{}]; "x")) catch .
+[1,2,3]
+"Array/string slice indices must be integers"
+
+# Issue #609: setpath with partial slice spec also raises slice-indices error
+try (setpath([{"start":0}]; ["x"])) catch .
+[1,2,3]
+"Array/string slice indices must be integers"
+
+# Issue #609: setpath slice on string raises "Cannot update string slices"
+try (setpath([{"start":0,"end":1}]; "x")) catch .
+"abc"
+"Cannot update string slices"
+
+# Issue #609: setpath slice on null treats null as empty array and splices
+setpath([{"start":0,"end":0}]; [1,2,3])
+null
+[1,2,3]
+
+# Issue #609: setpath slice on number still raises "Cannot index ..."
+try (setpath([{}]; "x")) catch .
+0
+"Cannot index number with object"
+
+# Issue #609: setpath slice rhs must be array
+try (setpath([{"start":0,"end":1}]; "x")) catch .
+[1,2,3]
+"A slice of an array can only be assigned another array"
+
+# Issue #609: assignment-side slice on null also runs spec validation
+try (.[{}] = "x") catch .
+null
+"Array/string slice indices must be integers"
