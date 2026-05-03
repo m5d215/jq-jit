@@ -4418,8 +4418,21 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             }
         }
         Expr::IndexOpt { expr: be, key: ke } => {
+            // jq suppresses paths whose access would error: `path(.a?)` on
+            // a non-object/non-null base emits no path. Mirror the type
+            // check from the non-`?` Index path but skip silently on
+            // mismatch instead of bailing. See #?.
+            let input_for_check = input.clone();
             eval_path(be, input.clone(), env, &mut |bp| {
                 eval(ke, input.clone(), env, &mut |key| {
+                    let base_val = crate::runtime::rt_getpath(&input_for_check, &bp).unwrap_or(Value::Null);
+                    match (&base_val, &key) {
+                        (Value::Obj(_), Value::Str(_)) => {}
+                        (Value::Arr(_), Value::Num(_, _)) => {}
+                        (Value::Arr(_), Value::Arr(_)) => {}
+                        (Value::Null, _) => {}
+                        _ => return Ok(true),
+                    }
                     let mut p = match &bp { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
                     p.push(key); cb(Value::Arr(Rc::new(p)))
                 })
