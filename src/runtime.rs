@@ -1767,9 +1767,8 @@ fn rt_from_entries(v: &Value) -> Result<Value> {
                         let key_str = match &key {
                             Value::Str(s) => s.to_string(),
                             other => bail!(
-                                "Cannot use {} ({}) as object key",
-                                other.type_name(),
-                                crate::value::value_to_json(other),
+                                "Cannot use {} as object key",
+                                errdesc(other),
                             ),
                         };
                         obj.insert(KeyStr::from(key_str), val);
