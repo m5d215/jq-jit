@@ -1473,19 +1473,37 @@ fn rt_round(v: &Value) -> Result<Value> {
 
 fn rt_fabs(v: &Value) -> Result<Value> {
     match v {
-        Value::Num(n, NumRepr(repr)) => {
-            if *n >= 0.0 { Ok(Value::number_opt(*n, repr.clone())) }
-            else { Ok(Value::number(n.abs())) }
-        }
+        // jq's `fabs` is the math-style absolute value: it always returns
+        // the canonical f64 form regardless of the input repr — `0.0 |
+        // fabs` → `0`, `-1.0 | fabs` → `1`, `-1e10 | fabs` →
+        // `10000000000`. The previous arm pass-threw the repr for any
+        // `n >= 0.0` (including signed zero), making `0.0 | fabs` come
+        // back as `0.0`. See #578.
+        Value::Num(n, _) => Ok(Value::number(n.abs())),
         _ => bail!("{} number required", errdesc(v)),
     }
 }
 
 fn rt_abs(v: &Value) -> Result<Value> {
     match v {
+        // jq's `abs` keeps the literal repr — `0.0 | abs` stays `0.0`,
+        // `-1.0 | abs` becomes `1.0`, `-1e10 | abs` becomes `1E+10`.
+        // Signed zero is left untouched (`-0.0 | abs` → `-0.0`,
+        // `-0 | abs` → `-0`); other negative numbers strip the leading
+        // `-` from the repr while flipping the f64 sign. See #578.
         Value::Num(n, NumRepr(repr)) => {
-            if *n >= 0.0 { Ok(Value::number_opt(*n, repr.clone())) }
-            else { Ok(Value::number(n.abs())) }
+            if n.is_sign_negative() && *n != 0.0 {
+                let new_repr = repr.as_ref().and_then(|r| {
+                    if !crate::value::is_valid_json_number(r) { return None; }
+                    Some(match r.strip_prefix('-') {
+                        Some(rest) => Rc::from(rest),
+                        None => r.clone(),
+                    })
+                });
+                Ok(Value::number_opt(n.abs(), new_repr))
+            } else {
+                Ok(Value::number_opt(*n, repr.clone()))
+            }
         }
         Value::Str(_) | Value::Arr(_) | Value::Obj(_) => Ok(v.clone()),
         _ => {

@@ -9257,3 +9257,43 @@ null
 -1 | length
 null
 1
+
+# Issue #578: abs preserves literal repr for non-zero numbers
+-1.0 | abs
+null
+1.0
+
+# Issue #578: abs preserves scientific repr
+-1e10 | abs
+null
+1E+10
+
+# Issue #578: abs leaves signed zero untouched
+-0.0 | abs
+null
+-0.0
+
+# Issue #578: abs on zero keeps fractional repr
+0.0 | abs
+null
+0.0
+
+# Issue #578: fabs always returns canonical f64 form (drops repr)
+0.0 | fabs
+null
+0
+
+# Issue #578: fabs on -1.0 drops the .0
+-1.0 | fabs
+null
+1
+
+# Issue #578: fabs on signed zero collapses to 0
+-0.0 | fabs
+null
+0
+
+# Issue #578: fabs on 1.5 keeps f64-canonical (already 1.5)
+-1.5 | fabs
+null
+1.5
