@@ -2526,239 +2526,239 @@ jaq-derived	jaq: tree-update	v1.4.5	0.007
 jaq-derived	jaq: to-fromjson	v1.4.5	0.005
 jaq-derived	jaq: str-slice	v1.4.5	0.014
 NDJSON workloads (2M objects)	empty	v1.5.0	0.017
-NDJSON workloads (2M objects)	identity -c	v1.5.0	0.085
-NDJSON workloads (2M objects)	identity (pretty)	v1.5.0	0.111
-NDJSON workloads (2M objects)	field access .name	v1.5.0	0.097
+NDJSON workloads (2M objects)	identity -c	v1.5.0	0.082
+NDJSON workloads (2M objects)	identity (pretty)	v1.5.0	0.098
+NDJSON workloads (2M objects)	field access .name	v1.5.0	0.096
 NDJSON workloads (2M objects)	nested .x,.y,.name	v1.5.0	0.150
-NDJSON workloads (2M objects)	arithmetic .x + .y	v1.5.0	0.084
-NDJSON workloads (2M objects)	select .x > 1500000	v1.5.0	0.082
-NDJSON workloads (2M objects)	string concat	v1.5.0	0.094
-NDJSON workloads (2M objects)	object construct	v1.5.0	0.116
+NDJSON workloads (2M objects)	arithmetic .x + .y	v1.5.0	0.083
+NDJSON workloads (2M objects)	select .x > 1500000	v1.5.0	0.081
+NDJSON workloads (2M objects)	string concat	v1.5.0	0.092
+NDJSON workloads (2M objects)	object construct	v1.5.0	0.113
 NDJSON workloads (2M objects)	array construct	v1.5.0	0.106
-NDJSON workloads (2M objects)	.[]	v1.5.0	0.101
-NDJSON workloads (2M objects)	to_entries	v1.5.0	0.162
-NDJSON workloads (2M objects)	keys	v1.5.0	0.105
-NDJSON workloads (2M objects)	keys_unsorted	v1.5.0	0.094
-NDJSON workloads (2M objects)	length	v1.5.0	0.088
+NDJSON workloads (2M objects)	.[]	v1.5.0	0.103
+NDJSON workloads (2M objects)	to_entries	v1.5.0	0.164
+NDJSON workloads (2M objects)	keys	v1.5.0	0.104
+NDJSON workloads (2M objects)	keys_unsorted	v1.5.0	0.095
+NDJSON workloads (2M objects)	length	v1.5.0	0.087
 NDJSON workloads (2M objects)	has("x")	v1.5.0	0.036
-NDJSON workloads (2M objects)	type	v1.5.0	0.023
-NDJSON workloads (2M objects)	del(.name)	v1.5.0	0.105
-NDJSON workloads (2M objects)	@csv	v1.5.0	0.125
-NDJSON workloads (2M objects)	split/join	v1.5.0	0.092
-NDJSON workloads (2M objects)	select|field	v1.5.0	0.099
-NDJSON workloads (2M objects)	select|remap	v1.5.0	0.099
-NDJSON workloads (2M objects)	computed remap	v1.5.0	0.189
-NDJSON workloads (2M objects)	[.x,.y]|add	v1.5.0	0.085
-NDJSON workloads (2M objects)	[.x,.y]|avg	v1.5.0	0.110
+NDJSON workloads (2M objects)	type	v1.5.0	0.022
+NDJSON workloads (2M objects)	del(.name)	v1.5.0	0.103
+NDJSON workloads (2M objects)	@csv	v1.5.0	0.127
+NDJSON workloads (2M objects)	split/join	v1.5.0	0.091
+NDJSON workloads (2M objects)	select|field	v1.5.0	0.096
+NDJSON workloads (2M objects)	select|remap	v1.5.0	0.096
+NDJSON workloads (2M objects)	computed remap	v1.5.0	0.187
+NDJSON workloads (2M objects)	[.x,.y]|add	v1.5.0	0.084
+NDJSON workloads (2M objects)	[.x,.y]|avg	v1.5.0	0.108
 NDJSON workloads (2M objects)	map(*2)|add	v1.5.0	0.104
-NDJSON workloads (2M objects)	keys|length	v1.5.0	0.252
-NDJSON workloads (2M objects)	.+{z=0}	v1.5.0	0.147
-NDJSON workloads (2M objects)	split|first	v1.5.0	0.089
-NDJSON workloads (2M objects)	slice[0..5]	v1.5.0	0.094
+NDJSON workloads (2M objects)	keys|length	v1.5.0	0.254
+NDJSON workloads (2M objects)	.+{z=0}	v1.5.0	0.151
+NDJSON workloads (2M objects)	split|first	v1.5.0	0.090
+NDJSON workloads (2M objects)	slice[0..5]	v1.5.0	0.093
 NDJSON workloads (2M objects)	dynkey {(.name)}	v1.5.0	0.108
-NDJSON workloads (2M objects)	.x += 1	v1.5.0	0.126
-NDJSON workloads (2M objects)	{a}+{b} merge	v1.5.0	0.130
-NDJSON workloads (2M objects)	.x*2+1	v1.5.0	0.059
-NDJSON workloads (2M objects)	.x+.y*2	v1.5.0	0.098
-NDJSON workloads (2M objects)	.x > .y	v1.5.0	0.078
+NDJSON workloads (2M objects)	.x += 1	v1.5.0	0.073
+NDJSON workloads (2M objects)	{a}+{b} merge	v1.5.0	0.132
+NDJSON workloads (2M objects)	.x*2+1	v1.5.0	0.058
+NDJSON workloads (2M objects)	.x+.y*2	v1.5.0	0.097
+NDJSON workloads (2M objects)	.x > .y	v1.5.0	0.077
 NDJSON workloads (2M objects)	to_entries|len	v1.5.0	0.398
-NDJSON workloads (2M objects)	.x|.+1 (pipe)	v1.5.0	0.056
-NDJSON workloads (2M objects)	.x|.*2|.+1	v1.5.0	0.060
+NDJSON workloads (2M objects)	.x|.+1 (pipe)	v1.5.0	0.058
+NDJSON workloads (2M objects)	.x|.*2|.+1	v1.5.0	0.058
 NDJSON workloads (2M objects)	.name|.+"_x"	v1.5.0	0.093
 NDJSON workloads (2M objects)	.x>N | not	v1.5.0	0.049
-NDJSON workloads (2M objects)	and (2 cmp)	v1.5.0	0.081
-NDJSON workloads (2M objects)	if-then-else	v1.5.0	0.052
-NDJSON workloads (2M objects)	sel(and)|field	v1.5.0	0.077
-NDJSON workloads (2M objects)	sel(and)|remap	v1.5.0	0.079
-NDJSON workloads (2M objects)	arith|cmp	v1.5.0	0.053
-NDJSON workloads (2M objects)	if cmp .field	v1.5.0	0.114
+NDJSON workloads (2M objects)	and (2 cmp)	v1.5.0	0.080
+NDJSON workloads (2M objects)	if-then-else	v1.5.0	0.051
+NDJSON workloads (2M objects)	sel(and)|field	v1.5.0	0.078
+NDJSON workloads (2M objects)	sel(and)|remap	v1.5.0	0.076
+NDJSON workloads (2M objects)	arith|cmp	v1.5.0	0.054
+NDJSON workloads (2M objects)	if cmp .field	v1.5.0	0.112
 NDJSON workloads (2M objects)	split|length	v1.5.0	0.090
 NDJSON workloads (2M objects)	[x,y]|min	v1.5.0	0.090
-NDJSON workloads (2M objects)	[x,y]|max	v1.5.0	0.093
-NDJSON workloads (2M objects)	[x,y]|sort|.[0]	v1.5.0	0.090
-NDJSON workloads (2M objects)	.name|len>5	v1.5.0	0.091
-NDJSON workloads (2M objects)	sel(len>5)|.x	v1.5.0	0.110
-NDJSON workloads (2M objects)	if .x>.y .name	v1.5.0	0.089
+NDJSON workloads (2M objects)	[x,y]|max	v1.5.0	0.095
+NDJSON workloads (2M objects)	[x,y]|sort|.[0]	v1.5.0	0.089
+NDJSON workloads (2M objects)	.name|len>5	v1.5.0	0.093
+NDJSON workloads (2M objects)	sel(len>5)|.x	v1.5.0	0.105
+NDJSON workloads (2M objects)	if .x>.y .name	v1.5.0	0.088
 NDJSON workloads (2M objects)	sel(.x>.y)|.name	v1.5.0	0.073
-NDJSON workloads (2M objects)	.x*2|tostring	v1.5.0	0.055
+NDJSON workloads (2M objects)	.x*2|tostring	v1.5.0	0.056
 NDJSON workloads (2M objects)	.x*.x+1	v1.5.0	0.065
-NDJSON workloads (2M objects)	{k=.name,v=tostr}	v1.5.0	0.151
-NDJSON workloads (2M objects)	str add chain	v1.5.0	0.386
-NDJSON workloads (2M objects)	if>.y .name|empty	v1.5.0	0.074
-NDJSON workloads (2M objects)	if .x%2==0	v1.5.0	0.055
-NDJSON workloads (2M objects)	if .x*2+1>1M	v1.5.0	0.055
-NDJSON workloads (2M objects)	sel(.x%2==0)|.name	v1.5.0	0.082
-NDJSON workloads (2M objects)	sel(.x*2+1>1M)	v1.5.0	0.157
-NDJSON workloads (2M objects)	.x|@json	v1.5.0	0.048
+NDJSON workloads (2M objects)	{k=.name,v=tostr}	v1.5.0	0.143
+NDJSON workloads (2M objects)	str add chain	v1.5.0	0.381
+NDJSON workloads (2M objects)	if>.y .name|empty	v1.5.0	0.073
+NDJSON workloads (2M objects)	if .x%2==0	v1.5.0	0.053
+NDJSON workloads (2M objects)	if .x*2+1>1M	v1.5.0	0.057
+NDJSON workloads (2M objects)	sel(.x%2==0)|.name	v1.5.0	0.085
+NDJSON workloads (2M objects)	sel(.x*2+1>1M)	v1.5.0	0.156
+NDJSON workloads (2M objects)	.x|@json	v1.5.0	0.047
 NDJSON workloads (2M objects)	.x|@text	v1.5.0	0.048
-NDJSON workloads (2M objects)	.name|@json	v1.5.0	0.104
-NDJSON workloads (2M objects)	sel|[arr]	v1.5.0	0.142
-NDJSON workloads (2M objects)	sel(and)|[arr]	v1.5.0	0.078
+NDJSON workloads (2M objects)	.name|@json	v1.5.0	0.101
+NDJSON workloads (2M objects)	sel|[arr]	v1.5.0	0.143
+NDJSON workloads (2M objects)	sel(and)|[arr]	v1.5.0	0.079
 NDJSON workloads (2M objects)	if>.y [arr]	v1.5.0	0.180
-NDJSON workloads (2M objects)	if sw then .f	v1.5.0	0.140
-NDJSON workloads (2M objects)	dynkey {(.n)=.x*2}	v1.5.0	0.117
-NDJSON workloads (2M objects)	sel(and)|.x*.y	v1.5.0	0.080
-NDJSON workloads (2M objects)	sel>N|str chain	v1.5.0	0.157
-NDJSON workloads (2M objects)	.f+"_"+arith_ts	v1.5.0	0.137
-NDJSON workloads (2M objects)	sel(sw)|str ch	v1.5.0	0.306
+NDJSON workloads (2M objects)	if sw then .f	v1.5.0	0.138
+NDJSON workloads (2M objects)	dynkey {(.n)=.x*2}	v1.5.0	0.112
+NDJSON workloads (2M objects)	sel(and)|.x*.y	v1.5.0	0.077
+NDJSON workloads (2M objects)	sel>N|str chain	v1.5.0	0.154
+NDJSON workloads (2M objects)	.f+"_"+arith_ts	v1.5.0	0.130
+NDJSON workloads (2M objects)	sel(sw)|str ch	v1.5.0	0.302
 NDJSON workloads (2M objects)	split|rev|join	v1.5.0	0.114
-NDJSON workloads (2M objects)	dynkey+static	v1.5.0	0.333
-NDJSON workloads (2M objects)	if>.y str chain	v1.5.0	0.171
-NDJSON workloads (2M objects)	remap+str chain	v1.5.0	0.153
-NDJSON workloads (2M objects)	sel(len>8)	v1.5.0	0.160
-NDJSON workloads (2M objects)	up|split|join	v1.5.0	0.099
-NDJSON workloads (2M objects)	.name|index	v1.5.0	0.122
-NDJSON workloads (2M objects)	.name|index+1	v1.5.0	0.125
-NDJSON workloads (2M objects)	.name|rindex	v1.5.0	0.128
-NDJSON workloads (2M objects)	.name|indices	v1.5.0	0.156
-NDJSON workloads (2M objects)	[x,y]|sort	v1.5.0	0.152
-NDJSON workloads (2M objects)	.name|scan	v1.5.0	0.206
-NDJSON workloads (2M objects)	.name|gsub	v1.5.0	0.167
-NDJSON workloads (2M objects)	walk(if num .+1)	v1.5.0	0.139
-NDJSON workloads (2M objects)	tojson	v1.5.0	0.106
+NDJSON workloads (2M objects)	dynkey+static	v1.5.0	0.332
+NDJSON workloads (2M objects)	if>.y str chain	v1.5.0	0.167
+NDJSON workloads (2M objects)	remap+str chain	v1.5.0	0.155
+NDJSON workloads (2M objects)	sel(len>8)	v1.5.0	0.161
+NDJSON workloads (2M objects)	up|split|join	v1.5.0	0.096
+NDJSON workloads (2M objects)	.name|index	v1.5.0	0.119
+NDJSON workloads (2M objects)	.name|index+1	v1.5.0	0.130
+NDJSON workloads (2M objects)	.name|rindex	v1.5.0	0.124
+NDJSON workloads (2M objects)	.name|indices	v1.5.0	0.152
+NDJSON workloads (2M objects)	[x,y]|sort	v1.5.0	0.154
+NDJSON workloads (2M objects)	.name|scan	v1.5.0	0.216
+NDJSON workloads (2M objects)	.name|gsub	v1.5.0	0.169
+NDJSON workloads (2M objects)	walk(if num .+1)	v1.5.0	0.143
+NDJSON workloads (2M objects)	tojson	v1.5.0	0.107
 NDJSON workloads (2M objects)	{name,x}	v1.5.0	0.128
-NDJSON workloads (2M objects)	.z//.name	v1.5.0	0.153
-NDJSON workloads (2M objects)	.x|=test(re)	v1.5.0	0.178
-NDJSON workloads (2M objects)	./sep|first	v1.5.0	0.187
-NDJSON workloads (2M objects)	.y=(.x*2)	v1.5.0	0.178
-NDJSON workloads (2M objects)	.y=(.x+.y)	v1.5.0	0.228
-NDJSON workloads (2M objects)	objects	v1.5.0	0.133
-NDJSON workloads (2M objects)	.tag|=if..then N	v1.5.0	0.598
-NDJSON workloads (2M objects)	.x=(.x+1)	v1.5.0	0.128
-NDJSON workloads (2M objects)	sel>N|.y+=1	v1.5.0	0.120
+NDJSON workloads (2M objects)	.z//.name	v1.5.0	0.158
+NDJSON workloads (2M objects)	.x|=test(re)	v1.5.0	0.121
+NDJSON workloads (2M objects)	./sep|first	v1.5.0	0.129
+NDJSON workloads (2M objects)	.y=(.x*2)	v1.5.0	0.125
+NDJSON workloads (2M objects)	.y=(.x+.y)	v1.5.0	0.172
+NDJSON workloads (2M objects)	objects	v1.5.0	0.088
+NDJSON workloads (2M objects)	.tag|=if..then N	v1.5.0	0.625
+NDJSON workloads (2M objects)	.x=(.x+1)	v1.5.0	0.072
+NDJSON workloads (2M objects)	sel>N|.y+=1	v1.5.0	0.094
 NDJSON workloads (2M objects)	sel(and)|.x+=1	v1.5.0	0.111
-NDJSON workloads (2M objects)	sel(sw)|.x+=1	v1.5.0	0.161
-NDJSON workloads (2M objects)	match(re)	v1.5.0	0.362
-NDJSON workloads (2M objects)	capture(re)	v1.5.0	0.298
-NDJSON workloads (2M objects)	first(.name,.x)	v1.5.0	0.102
-NDJSON workloads (2M objects)	if .x==null	v1.5.0	0.046
-NDJSON workloads (2M objects)	we(sw(.key))	v1.5.0	0.109
-NDJSON workloads (2M objects)	sel(sw or ew)	v1.5.0	0.206
-NDJSON workloads (2M objects)	path(.name,.x)	v1.5.0	0.273
-NDJSON workloads (2M objects)	sel(str+num+num)	v1.5.0	0.153
-NDJSON workloads (2M objects)	nested if|field	v1.5.0	0.078
+NDJSON workloads (2M objects)	sel(sw)|.x+=1	v1.5.0	0.132
+NDJSON workloads (2M objects)	match(re)	v1.5.0	0.367
+NDJSON workloads (2M objects)	capture(re)	v1.5.0	0.307
+NDJSON workloads (2M objects)	first(.name,.x)	v1.5.0	0.097
+NDJSON workloads (2M objects)	if .x==null	v1.5.0	0.047
+NDJSON workloads (2M objects)	we(sw(.key))	v1.5.0	0.112
+NDJSON workloads (2M objects)	sel(sw or ew)	v1.5.0	0.211
+NDJSON workloads (2M objects)	path(.name,.x)	v1.5.0	0.277
+NDJSON workloads (2M objects)	sel(str+num+num)	v1.5.0	0.154
+NDJSON workloads (2M objects)	nested if|field	v1.5.0	0.077
 NDJSON workloads (2M objects)	.f|floor|.*2	v1.5.0	0.060
 NDJSON workloads (2M objects)	split|len>1	v1.5.0	0.117
-NDJSON workloads (2M objects)	.name|len|.*2	v1.5.0	0.101
-NDJSON workloads (2M objects)	if len>5 .x .y	v1.5.0	0.114
-NDJSON workloads (2M objects)	sel(len>5)|remap	v1.5.0	0.207
-NDJSON workloads (2M objects)	.x|tostr|len	v1.5.0	0.059
-NDJSON workloads (2M objects)	if .x>.y .x .y	v1.5.0	0.093
-NDJSON workloads (2M objects)	split|last|tonum	v1.5.0	0.097
-NDJSON workloads (2M objects)	split|rev|.[0]	v1.5.0	0.092
+NDJSON workloads (2M objects)	.name|len|.*2	v1.5.0	0.102
+NDJSON workloads (2M objects)	if len>5 .x .y	v1.5.0	0.117
+NDJSON workloads (2M objects)	sel(len>5)|remap	v1.5.0	0.200
+NDJSON workloads (2M objects)	.x|tostr|len	v1.5.0	0.060
+NDJSON workloads (2M objects)	if .x>.y .x .y	v1.5.0	0.094
+NDJSON workloads (2M objects)	split|last|tonum	v1.5.0	0.096
+NDJSON workloads (2M objects)	split|rev|.[0]	v1.5.0	0.093
 NDJSON workloads (2M objects)	split|.[0]+.[1]	v1.5.0	0.113
-NDJSON workloads (2M objects)	.[]|strings	v1.5.0	0.107
-NDJSON workloads (2M objects)	.[]|numbers	v1.5.0	0.126
+NDJSON workloads (2M objects)	.[]|strings	v1.5.0	0.095
+NDJSON workloads (2M objects)	.[]|numbers	v1.5.0	0.106
 NDJSON workloads (2M objects)	[x,y]|any(>1M)	v1.5.0	0.084
-NDJSON workloads (2M objects)	sel(dc|sw)	v1.5.0	0.096
-NDJSON workloads (2M objects)	[[x,y],[n]]|flat	v1.5.0	0.456
-NDJSON workloads (2M objects)	.x|floor|.*2	v1.5.0	0.059
-NDJSON workloads (2M objects)	tojson|fromjson	v1.5.0	0.087
-NDJSON workloads (2M objects)	[.x]|add	v1.5.0	0.059
-NDJSON workloads (2M objects)	if>N {o}+.	v1.5.0	0.133
-NDJSON workloads (2M objects)	if>N .+{o}	v1.5.0	0.134
-NDJSON workloads (2M objects)	if .n=="s" .+{o}	v1.5.0	0.164
+NDJSON workloads (2M objects)	sel(dc|sw)	v1.5.0	0.098
+NDJSON workloads (2M objects)	[[x,y],[n]]|flat	v1.5.0	0.452
+NDJSON workloads (2M objects)	.x|floor|.*2	v1.5.0	0.061
+NDJSON workloads (2M objects)	tojson|fromjson	v1.5.0	0.088
+NDJSON workloads (2M objects)	[.x]|add	v1.5.0	0.060
+NDJSON workloads (2M objects)	if>N {o}+.	v1.5.0	0.145
+NDJSON workloads (2M objects)	if>N .+{o}	v1.5.0	0.136
+NDJSON workloads (2M objects)	if .n=="s" .+{o}	v1.5.0	0.162
 NDJSON workloads (2M objects)	sel(.n>"s")	v1.5.0	0.089
 NDJSON workloads (2M objects)	[x,y,z]|min	v1.5.0	0.303
 NDJSON workloads (2M objects)	if .n|len>5 l s	v1.5.0	0.102
-NDJSON workloads (2M objects)	if .x|flr>N b s	v1.5.0	0.054
-NDJSON workloads (2M objects)	if .n|test l e	v1.5.0	0.107
-NDJSON workloads (2M objects)	if .n|sw l e	v1.5.0	0.085
-NDJSON workloads (2M objects)	if .n|ew l e	v1.5.0	0.086
-NDJSON workloads (2M objects)	.n|len|tostr	v1.5.0	0.093
-String operations (2M objects)	ascii_downcase	v1.5.0	0.105
-String operations (2M objects)	ascii_upcase	v1.5.0	0.103
-String operations (2M objects)	ltrimstr	v1.5.0	0.098
-String operations (2M objects)	rtrimstr	v1.5.0	0.099
-String operations (2M objects)	split	v1.5.0	0.166
-String operations (2M objects)	case+split	v1.5.0	0.116
-String operations (2M objects)	join	v1.5.0	0.095
-String operations (2M objects)	startswith	v1.5.0	0.096
+NDJSON workloads (2M objects)	if .x|flr>N b s	v1.5.0	0.057
+NDJSON workloads (2M objects)	if .n|test l e	v1.5.0	0.105
+NDJSON workloads (2M objects)	if .n|sw l e	v1.5.0	0.083
+NDJSON workloads (2M objects)	if .n|ew l e	v1.5.0	0.084
+NDJSON workloads (2M objects)	.n|len|tostr	v1.5.0	0.092
+String operations (2M objects)	ascii_downcase	v1.5.0	0.104
+String operations (2M objects)	ascii_upcase	v1.5.0	0.102
+String operations (2M objects)	ltrimstr	v1.5.0	0.096
+String operations (2M objects)	rtrimstr	v1.5.0	0.098
+String operations (2M objects)	split	v1.5.0	0.169
+String operations (2M objects)	case+split	v1.5.0	0.115
+String operations (2M objects)	join	v1.5.0	0.094
+String operations (2M objects)	startswith	v1.5.0	0.095
 String operations (2M objects)	endswith	v1.5.0	0.098
 String operations (2M objects)	tostring	v1.5.0	0.061
-String operations (2M objects)	tonumber	v1.5.0	0.114
-String operations (2M objects)	string interpolation	v1.5.0	0.121
-String ops (200K objects)	test (regex)	v1.5.0	0.015
-String ops (200K objects)	match (regex)	v1.5.0	0.033
+String operations (2M objects)	tonumber	v1.5.0	0.111
+String operations (2M objects)	string interpolation	v1.5.0	0.119
+String ops (200K objects)	test (regex)	v1.5.0	0.014
+String ops (200K objects)	match (regex)	v1.5.0	0.031
 String ops (200K objects)	@base64	v1.5.0	0.012
 String ops (200K objects)	@uri	v1.5.0	0.012
 String ops (200K objects)	@html	v1.5.0	0.012
 String ops (200K objects)	@csv (array)	v1.5.0	0.016
-String ops (200K objects)	@tsv (array)	v1.5.0	0.015
-String ops (200K objects)	gsub	v1.5.0	0.018
-String ops (200K objects)	case+gsub	v1.5.0	0.178
-String ops (200K objects)	case+test	v1.5.0	0.122
-String ops (200K objects)	ltrim+tonum+arith	v1.5.0	0.114
-Numeric & math (2M objects)	floor	v1.5.0	0.056
-Numeric & math (2M objects)	sqrt	v1.5.0	0.078
-Numeric & math (2M objects)	modulo	v1.5.0	0.057
-Numeric & math (2M objects)	if-elif-else	v1.5.0	0.124
-Numeric & math (2M objects)	select|del	v1.5.0	0.091
-Numeric & math (2M objects)	select|merge	v1.5.0	0.117
-Numeric & math (2M objects)	select(test)|merge	v1.5.0	0.021
+String ops (200K objects)	@tsv (array)	v1.5.0	0.016
+String ops (200K objects)	gsub	v1.5.0	0.019
+String ops (200K objects)	case+gsub	v1.5.0	0.181
+String ops (200K objects)	case+test	v1.5.0	0.121
+String ops (200K objects)	ltrim+tonum+arith	v1.5.0	0.110
+Numeric & math (2M objects)	floor	v1.5.0	0.057
+Numeric & math (2M objects)	sqrt	v1.5.0	0.079
+Numeric & math (2M objects)	modulo	v1.5.0	0.059
+Numeric & math (2M objects)	if-elif-else	v1.5.0	0.127
+Numeric & math (2M objects)	select|del	v1.5.0	0.095
+Numeric & math (2M objects)	select|merge	v1.5.0	0.120
+Numeric & math (2M objects)	select(test)|merge	v1.5.0	0.022
 Array generators	range(2M) | length	v1.5.0	0.011
-Array generators	reverse(2M)	v1.5.0	0.018
+Array generators	reverse(2M)	v1.5.0	0.017
 Array generators	sort(2M)	v1.5.0	0.023
-Array generators	unique(1M)	v1.5.0	0.030
-Array generators	flatten(500K)	v1.5.0	0.011
-Array generators	min, max(2M)	v1.5.0	0.019
-Array generators	add numbers(2M)	v1.5.0	0.013
+Array generators	unique(1M)	v1.5.0	0.029
+Array generators	flatten(500K)	v1.5.0	0.010
+Array generators	min, max(2M)	v1.5.0	0.018
+Array generators	add numbers(2M)	v1.5.0	0.012
 Array generators	any/all(2M)	v1.5.0	0.028
 Array generators	limit(10; range(10M))	v1.5.0	0.002
 Array generators	first(range(10M))	v1.5.0	0.002
 Array generators	last(range(2M))	v1.5.0	0.002
 Array generators	indices(1M)	v1.5.0	0.016
-Reduce & foreach	reduce (sum)	v1.5.0	0.009
-Reduce & foreach	reduce (array build)	v1.5.0	0.004
-Reduce & foreach	reduce (obj build)	v1.5.0	0.009
+Reduce & foreach	reduce (sum)	v1.5.0	0.010
+Reduce & foreach	reduce (array build)	v1.5.0	0.005
+Reduce & foreach	reduce (obj build)	v1.5.0	0.010
 Reduce & foreach	reduce (setpath)	v1.5.0	0.017
 Reduce & foreach	foreach (running sum)	v1.5.0	0.010
 Reduce & foreach	foreach + emit	v1.5.0	0.011
-Reduce & foreach	reduce (sum-of-squares)	v1.5.0	0.033
+Reduce & foreach	reduce (sum-of-squares)	v1.5.0	0.035
 Reduce & foreach	reduce (conditional)	v1.5.0	0.036
-Reduce & foreach	reduce (product)	v1.5.0	0.035
+Reduce & foreach	reduce (product)	v1.5.0	0.034
 Reduce & foreach	foreach (conditional)	v1.5.0	0.011
-Reduce & foreach	until (100M)	v1.5.0	0.301
-Reduce & foreach	reduce (harmonic)	v1.5.0	0.034
+Reduce & foreach	until (100M)	v1.5.0	0.304
+Reduce & foreach	reduce (harmonic)	v1.5.0	0.033
 Reduce & foreach	reduce (floor pipe)	v1.5.0	0.034
-Reduce & foreach	reduce (sqrt pipe)	v1.5.0	0.033
-Reduce & foreach	reduce (sin+cos)	v1.5.0	0.052
+Reduce & foreach	reduce (sqrt pipe)	v1.5.0	0.034
+Reduce & foreach	reduce (sin+cos)	v1.5.0	0.053
 Object operations	large obj construct	v1.5.0	0.004
-Object operations	large obj keys	v1.5.0	0.011
-Object operations	large obj to_entries	v1.5.0	0.012
-Object operations	with_entries	v1.5.0	0.009
-Assignment operators	.[] |= f (100K)	v1.5.0	0.005
-Assignment operators	.[] += 1 (100K)	v1.5.0	0.005
-Assignment operators	.[k] = v reduce(50K)	v1.5.0	0.008
-String-heavy generators	gsub(100K)	v1.5.0	0.026
-String-heavy generators	join large(100K)	v1.5.0	0.005
-String-heavy generators	explode/implode(100K)	v1.5.0	0.027
+Object operations	large obj keys	v1.5.0	0.012
+Object operations	large obj to_entries	v1.5.0	0.014
+Object operations	with_entries	v1.5.0	0.010
+Assignment operators	.[] |= f (100K)	v1.5.0	0.006
+Assignment operators	.[] += 1 (100K)	v1.5.0	0.006
+Assignment operators	.[k] = v reduce(50K)	v1.5.0	0.009
+String-heavy generators	gsub(100K)	v1.5.0	0.027
+String-heavy generators	join large(100K)	v1.5.0	0.006
+String-heavy generators	explode/implode(100K)	v1.5.0	0.028
 String-heavy generators	reduce str concat(100K)	v1.5.0	0.008
 Try-catch & alternative	alternative //	v1.5.0	0.033
-Try-catch & alternative	try-catch	v1.5.0	0.023
+Try-catch & alternative	try-catch	v1.5.0	0.024
 Try-catch & alternative	label-break	v1.5.0	0.004
-Type conversion	tojson/fromjson(100K)	v1.5.0	0.022
-Type conversion	null propagation(2M)	v1.5.0	0.090
+Type conversion	tojson/fromjson(100K)	v1.5.0	0.023
+Type conversion	null propagation(2M)	v1.5.0	0.088
 jaq-derived	jaq: reverse	v1.5.0	0.011
 jaq-derived	jaq: sort	v1.5.0	0.018
 jaq-derived	jaq: group-by	v1.5.0	0.038
-jaq-derived	jaq: min-max	v1.5.0	0.010
-jaq-derived	jaq: ex-implode	v1.5.0	0.019
+jaq-derived	jaq: min-max	v1.5.0	0.012
+jaq-derived	jaq: ex-implode	v1.5.0	0.020
 jaq-derived	jaq: repeat	v1.5.0	0.012
 jaq-derived	jaq: from	v1.5.0	0.006
 jaq-derived	jaq: last	v1.5.0	0.002
-jaq-derived	jaq: cumsum	v1.5.0	0.010
-jaq-derived	jaq: cumsum-xy	v1.5.0	0.017
-jaq-derived	jaq: try-catch	v1.5.0	0.079
+jaq-derived	jaq: cumsum	v1.5.0	0.011
+jaq-derived	jaq: cumsum-xy	v1.5.0	0.018
+jaq-derived	jaq: try-catch	v1.5.0	0.078
 jaq-derived	jaq: add	v1.5.0	0.041
-jaq-derived	jaq: reduce	v1.5.0	0.078
-jaq-derived	jaq: reduce-update	v1.5.0	0.005
+jaq-derived	jaq: reduce	v1.5.0	0.086
+jaq-derived	jaq: reduce-update	v1.5.0	0.006
 jaq-derived	jaq: kv	v1.5.0	0.015
 jaq-derived	jaq: kv-update	v1.5.0	0.019
-jaq-derived	jaq: kv-entries	v1.5.0	0.057
-jaq-derived	jaq: pyramid	v1.5.0	0.016
-jaq-derived	jaq: upto	v1.5.0	0.007
-jaq-derived	jaq: tree-flatten	v1.5.0	0.003
-jaq-derived	jaq: tree-update	v1.5.0	0.225
+jaq-derived	jaq: kv-entries	v1.5.0	0.059
+jaq-derived	jaq: pyramid	v1.5.0	0.017
+jaq-derived	jaq: upto	v1.5.0	0.009
+jaq-derived	jaq: tree-flatten	v1.5.0	0.004
+jaq-derived	jaq: tree-update	v1.5.0	0.007
 jaq-derived	jaq: to-fromjson	v1.5.0	0.005
-jaq-derived	jaq: str-slice	v1.5.0	0.014
+jaq-derived	jaq: str-slice	v1.5.0	0.015
