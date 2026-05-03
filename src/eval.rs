@@ -1069,7 +1069,12 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
                     UnaryOp::Ceil => Value::number(n.ceil()),
                     UnaryOp::Round => Value::number(n.round()),
                     UnaryOp::Fabs | UnaryOp::Abs => Value::number(n.abs()),
-                    UnaryOp::Length => Value::number(n.abs()),
+                    // jq's `length` on a number is `abs` but preserves the
+                    // literal repr (`-1.0 | length` → `1.0`,
+                    // `-0.0 | length` → `0.0`). Delegate to `Value::length`
+                    // so this fast path matches the runtime `rt_length`
+                    // path. See #576.
+                    UnaryOp::Length => val.length().map_err(|_| ())?,
                     UnaryOp::Sqrt => Value::number(n.sqrt()),
                     _ => return eval_unaryop(*op, &val).map_err(|_| ()),
                 });
