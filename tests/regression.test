@@ -9493,3 +9493,23 @@ until(. > 100; . * 2)
 until(. > 5; . + 1)
 "hello"
 "hello"
+
+# Issue #603: fromjson on small decimal preserves repr (no scientific reformat)
+fromjson
+"0.00001"
+0.00001
+
+# Issue #603: another small decimal that previously became scientific
+fromjson
+"0.00009"
+0.00009
+
+# Issue #603: tojson | fromjson round-trips identically for small decimals
+. | fromjson | tojson
+"0.000099"
+"0.000099"
+
+# Issue #603: 1e-4 boundary still works (regression guard)
+fromjson
+"0.0001"
+0.0001

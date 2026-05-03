@@ -4717,7 +4717,12 @@ fn parse_json_number(b: &[u8], pos: usize) -> Result<(Value, usize)> {
     // Rust's Display roundtrips identically — skip format_jq_number to avoid String allocation.
     if !has_exp && has_dot && (i - digits_start) <= 16 {
         let last = b[i - 1];
-        if last != b'0' && (b[digits_start] != b'0' || digits_start + 1 == i || b[digits_start + 1] == b'.') {
+        // The fast path skips storing the repr because the default renderer is
+        // expected to reproduce it. But `push_jq_number_str` switches to
+        // scientific notation for `abs < 1e-4`, so a decimal-form input like
+        // "0.00001" (= 1e-5) would render as "1e-05" without its repr (#603).
+        // Require `abs >= 1e-4` to stay in the fast path.
+        if last != b'0' && (b[digits_start] != b'0' || digits_start + 1 == i || b[digits_start + 1] == b'.') && n.abs() >= 1e-4 {
             return Ok((Value::number(n), i));
         }
         // Integer value with decimal notation (e.g., "1.0", "2.00") — format_jq_number would
