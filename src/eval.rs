@@ -4148,7 +4148,13 @@ fn eval_interp_parts(parts: &[StringPart], idx: usize, cur: String, input: Value
         StringPart::Literal(s) => { let mut n = cur; n.push_str(s); eval_interp_parts(parts, idx+1, n, input, env, cb) }
         StringPart::Expr(e) => {
             eval(e, input.clone(), env, &mut |val| {
-                let s = match &val { Value::Str(s) => s.to_string(), _ => crate::value::value_to_json(&val) };
+                // String interpolation runs `tostring` semantics on the
+                // interpolated value (see jq's manual). `value_to_json`
+                // discards the carried number repr, so `"\(0.0)"` would
+                // render as `"0"` instead of jq's `"0.0"`. Use
+                // `value_to_json_tojson` to keep the literal form when the
+                // f64 round-trips it exactly. See #560.
+                let s = match &val { Value::Str(s) => s.to_string(), _ => crate::value::value_to_json_tojson(&val) };
                 let mut n = cur.clone(); n.push_str(&s);
                 eval_interp_parts(parts, idx+1, n, input.clone(), env, cb)
             })
