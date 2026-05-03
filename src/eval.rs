@@ -3618,27 +3618,42 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
         }
         "base64d" => {
             const D: [i8;128] = { let mut t = [-1i8;128]; let c = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"; let mut i=0; while i<c.len() { t[c[i] as usize]=i as i8; i+=1; } t };
-            let bs: Vec<u8> = s.bytes().filter(|&b| b!=b'\n'&&b!=b'\r'&&b!=b' ').collect();
-            // jq accepts unpadded base64 of length 2 or 3 (decodes to 1 or 2
-            // bytes) but rejects `len % 4 == 1` with the message
-            // "string (...) trailing base64 byte found" (#186). The previous
-            // loop silently truncated `len % 4 == 1` cases via `if ch.len()<2 { break; }`.
+            // jq's `@base64d` does not strip whitespace — `" a"` and `"a "`
+            // both raise "is not valid base64 data". Filtering newlines/spaces
+            // out (as we used to) silently accepted those inputs and could
+            // even mangle a length check, e.g. `"abc def ghi"` was treated as
+            // `"abcdefghi"` (9 → trailing byte) instead of jq's "is not valid
+            // base64 data". See #557.
+            //
+            // Trailing `=` padding is consumed (and not counted) before the
+            // length check: jq accepts `"YQ=="`, `"YQ="`, and `"YQ"` as the
+            // single-byte form, while `"a==="` strips to `"a"` (length 1) and
+            // raises "trailing base64 byte found".
+            let raw = s.as_bytes();
+            let pad = raw.iter().rev().take_while(|&&b| b == b'=').count();
+            let bs = &raw[..raw.len() - pad];
+            // jq's error message wraps the value in `string (X)` where X is
+            // the value's stringified form re-encoded as a JSON string. For
+            // `Value::Str` that's the existing JSON-quoted form; for other
+            // kinds we wrap the JSON serialisation in another layer of JSON
+            // quoting so `0` → `string ("0")`, `[1,2,3]` → `string ("[1,2,3]")`.
+            let err_value = || crate::value::value_to_json(&Value::from_str(&s));
             if bs.len() % 4 == 1 {
-                bail!("string ({}) trailing base64 byte found", crate::value::value_to_json(val));
+                bail!("string ({}) trailing base64 byte found", err_value());
             }
             let mut r = Vec::new();
             for ch in bs.chunks(4) {
                 let a=D.get(ch[0] as usize).copied().unwrap_or(-1);
                 let b=D.get(ch[1] as usize).copied().unwrap_or(-1);
-                if a<0||b<0 { bail!("string ({}) is not valid base64 data", crate::value::value_to_json(val)); }
+                if a<0||b<0 { bail!("string ({}) is not valid base64 data", err_value()); }
                 r.push(((a as u8)<<2)|((b as u8)>>4));
-                if ch.len()>2 && ch[2]!=b'=' {
+                if ch.len()>2 {
                     let c=D.get(ch[2] as usize).copied().unwrap_or(-1);
-                    if c<0 { bail!("string ({}) is not valid base64 data", crate::value::value_to_json(val)); }
+                    if c<0 { bail!("string ({}) is not valid base64 data", err_value()); }
                     r.push(((b as u8)<<4)|((c as u8)>>2));
-                    if ch.len()>3 && ch[3]!=b'=' {
+                    if ch.len()>3 {
                         let d=D.get(ch[3] as usize).copied().unwrap_or(-1);
-                        if d<0 { bail!("string ({}) is not valid base64 data", crate::value::value_to_json(val)); }
+                        if d<0 { bail!("string ({}) is not valid base64 data", err_value()); }
                         r.push(((c as u8)<<6)|(d as u8));
                     }
                 }
