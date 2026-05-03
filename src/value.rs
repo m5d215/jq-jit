@@ -652,8 +652,22 @@ impl Value {
                 bail!("{} ({}) has no length", self.type_name(), crate::value::value_to_json(self))
             }
             Value::Num(n, NumRepr(repr)) => {
-                if *n >= 0.0 { Ok(Value::number_opt(*n, repr.clone())) }
-                else { Ok(Value::number(n.abs())) }
+                // jq's `length` on a number is `abs`, but it preserves the
+                // literal repr — `-1.0 | length` → `1.0`, `-1e10 | length`
+                // → `1E+10`, `-0.0 | length` → `0.0`. The previous arm
+                // pass-threw the repr for any `n >= 0.0` (which includes
+                // `-0.0` → `0.0` in IEEE-754, leaving `"-0.0"` intact) and
+                // dropped the repr for actually-negative numbers (so
+                // `-1.0` came back as `1`, not `1.0`). Strip the leading
+                // `-` from the repr instead — this fixes both. See #576.
+                let new_repr = repr.as_ref().and_then(|r| {
+                    if !crate::value::is_valid_json_number(r) { return None; }
+                    Some(match r.strip_prefix('-') {
+                        Some(rest) => Rc::from(rest),
+                        None => r.clone(),
+                    })
+                });
+                Ok(Value::number_opt(n.abs(), new_repr))
             }
             Value::Str(s) => {
                 // jq counts Unicode codepoints

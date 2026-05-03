@@ -9227,3 +9227,33 @@ try (.[]) catch .
 try (.[]) catch .
 true
 "Cannot iterate over boolean (true)"
+
+# Issue #576: length on -0.0 strips sign and keeps fractional repr (matches jq)
+-0.0 | length
+null
+0.0
+
+# Issue #576: length on -0 collapses to 0
+-0 | length
+null
+0
+
+# Issue #576: length on -1.0 keeps the .0 form
+-1.0 | length
+null
+1.0
+
+# Issue #576: length on -1e10 keeps the scientific repr
+-1e10 | length
+null
+1E+10
+
+# Issue #576: length on 0.0 still keeps the .0
+0.0 | length
+null
+0.0
+
+# Issue #576: length on plain int unchanged
+-1 | length
+null
+1
