@@ -9197,3 +9197,33 @@ try (.[0:[]]) catch .
 .[1.5:3]
 "abc"
 "bc"
+
+# Issue #574: Cannot iterate over number preserves the literal repr (0.0 stays 0.0)
+try (.[]) catch .
+0.0
+"Cannot iterate over number (0.0)"
+
+# Issue #574: scientific repr preserved through the iterate error
+try (.[]) catch .
+1e10
+"Cannot iterate over number (1E+10)"
+
+# Issue #574: -0.0 preserved (not collapsed to -0)
+try (.[]) catch .
+-0.0
+"Cannot iterate over number (-0.0)"
+
+# Issue #574: long string repr is truncated with "..." like jq's errdesc
+try (.[]) catch .
+"1234567890123456789"
+"Cannot iterate over string (\"1234567890...)"
+
+# Issue #574: integer numbers still render without forced decimal
+try (.[]) catch .
+0
+"Cannot iterate over number (0)"
+
+# Issue #574: bool/null still match jq (regression check)
+try (.[]) catch .
+true
+"Cannot iterate over boolean (true)"

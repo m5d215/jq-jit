@@ -6905,12 +6905,12 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             return 0;
         }
         if name == "__each_error__" {
-            // Generate "Cannot iterate over TYPE (VALUE)" error
+            // Generate "Cannot iterate over TYPE (VALUE)" error. Use
+            // errdesc so number reprs survive (`0.0` stays `0.0`) and long
+            // values get jq's `...` truncation. See #574.
             if !args.is_empty() {
                 let v = &args[0];
-                let ty = v.type_name();
-                let json = crate::value::value_to_json(v);
-                set_jit_error(format!("Cannot iterate over {} ({})", ty, json));
+                set_jit_error(format!("Cannot iterate over {}", crate::runtime::errdesc_pub(v)));
                 std::ptr::write(dst, Value::Null);
                 return GEN_ERROR;
             }

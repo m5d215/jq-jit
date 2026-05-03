@@ -1428,7 +1428,9 @@ fn rt_add_all(v: &Value) -> Result<Value> {
             }
             Ok(result)
         }
-        _ => bail!("Cannot iterate over {} ({})", v.type_name(), crate::value::value_to_json(v)),
+        // Use errdesc so number reprs survive (`0.0` stays `0.0`) and long
+        // values get jq's `...` truncation. See #574.
+        _ => bail!("Cannot iterate over {}", errdesc(v)),
     }
 }
 
