@@ -163,6 +163,15 @@ Report to the user:
 - If on a non-main branch with WIP, the release commits ride on top of
   whatever's there. The user invoking `/release` from such a branch is
   asserting that bundling is intentional.
+- **If you `git bisect` mid-release** (e.g. step 4 regression
+  investigation), `git bisect reset` does NOT rebuild. The leftover
+  `target/release/jq-jit` is the binary of whatever commit bisect
+  evaluated last. **Always `cargo build --release` before re-running
+  the bench or any perf comparison.** Hard-learned in v1.5.0
+  (commits `67a28be` → `5d80c22`): the post-bisect re-bench wrote a
+  stale-binary v1.5.0 column into the TSV and almost shipped a wrong
+  regression analysis. Verify with `md5 -q target/release/jq-jit` if
+  in doubt.
 
 ## Files this skill writes to
 
