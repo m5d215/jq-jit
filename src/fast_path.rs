@@ -953,7 +953,7 @@ pub fn apply_obj_merge_computed_raw(
 fn raw_contains_non_canonical_number(bytes: &[u8]) -> bool {
     static LUT: [bool; 256] = {
         let mut t = [false; 256];
-        let chars: &[u8] = &[b'"', b'+', b'e', b'E', b'n', b'N', b'i', b'I'];
+        let chars: &[u8] = &[b'"', b'+', b'e', b'E', b'n', b'N', b'i', b'I', b'.'];
         let mut k = 0;
         while k < chars.len() { t[chars[k] as usize] = true; k += 1; }
         t
@@ -986,6 +986,18 @@ fn raw_contains_non_canonical_number(bytes: &[u8]) -> bool {
                     if prev.is_ascii_digit() || prev == b'.' {
                         return true;
                     }
+                }
+                i += 1;
+            }
+            b'.' => {
+                // 6+ leading zeros in the fractional part means effective
+                // exponent < -6, which jq's decnum normalises to scientific
+                // (#611). Need the previous byte to be a digit so we don't
+                // mistake `[.foo]` style tokens for numeric literals.
+                if bytes.get(i + 1..i + 7) == Some(&[b'0'; 6][..])
+                    && i > 0 && bytes[i - 1].is_ascii_digit()
+                {
+                    return true;
                 }
                 i += 1;
             }

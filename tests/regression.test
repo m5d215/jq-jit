@@ -9618,3 +9618,43 @@ try (setpath([{"start":0,"end":1}]; "x")) catch .
 try (.[{}] = "x") catch .
 null
 "Array/string slice indices must be integers"
+
+# Issue #611: plain decimal input <= 1e-7 normalizes to scientific
+.
+0.0000001
+1E-7
+
+# Issue #611: plain decimal input >1e-7 keeps decimal form (regression guard)
+.
+0.000001
+0.000001
+
+# Issue #611: pure-zero with explicit fractional digits + exponent uses effective_exp
+0.00e1
+null
+0.0
+
+# Issue #611: pure-zero with very negative effective exponent goes scientific
+0e-7
+null
+0E-7
+
+# Issue #611: identity on pure-zero with 7+ frac zeros also normalizes
+.
+0.0000000
+0E-7
+
+# Issue #611: 0.000000 (6 frac zeros) stays decimal (regression guard)
+.
+0.000000
+0.000000
+
+# Issue #611: tojson preserves through canonicalization pipeline
+0.0000001 | tojson
+null
+"1E-7"
+
+# Issue #611: negative tiny decimal also normalizes
+.
+-0.0000001
+-1E-7
