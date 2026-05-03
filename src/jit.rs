@@ -1270,12 +1270,18 @@ impl Flattener {
                     let s_var = self.alloc_var();
                     self.emit(JitOp::F64Const { dst_var: s_var, val: update_const });
                     let cmp = self.alloc_var();
-                    let head = self.alloc_label();
                     let body = self.alloc_label();
                     let done = self.alloc_label();
-                    self.emit(JitOp::Label { id: head });
+                    let fused_out = result_slot.unwrap_or_else(|| self.alloc_slot());
+                    // Pre-check cond on the input. If true on entry, the loop body
+                    // never runs, and jq yields the input verbatim — preserve its
+                    // textual representation by cloning input_slot instead of
+                    // round-tripping through F64Num.
+                    let yield_input = self.alloc_label();
+                    let after = self.alloc_label();
                     self.emit(JitOp::F64Cmp { dst_var: cmp, a_var: acc, b_var: k_var, cc: cond_cc });
-                    self.emit(JitOp::BranchOnVar { var: cmp, nonzero_label: done, zero_label: body });
+                    self.emit(JitOp::BranchOnVar { var: cmp, nonzero_label: yield_input, zero_label: body });
+                    // do-while loop: body, then post-check.
                     self.emit(JitOp::Label { id: body });
                     match update_op {
                         0 => self.emit(JitOp::F64Add { dst_var: acc, a_var: acc, b_var: s_var }),
@@ -1283,10 +1289,14 @@ impl Flattener {
                         2 => self.emit(JitOp::F64Mul { dst_var: acc, a_var: acc, b_var: s_var }),
                         _ => unreachable!(),
                     }
-                    self.emit(JitOp::Jump { label: head });
+                    self.emit(JitOp::F64Cmp { dst_var: cmp, a_var: acc, b_var: k_var, cc: cond_cc });
+                    self.emit(JitOp::BranchOnVar { var: cmp, nonzero_label: done, zero_label: body });
                     self.emit(JitOp::Label { id: done });
-                    let fused_out = result_slot.unwrap_or_else(|| self.alloc_slot());
                     self.emit(JitOp::F64Num { dst: fused_out, src_var: acc });
+                    self.emit(JitOp::Jump { label: after });
+                    self.emit(JitOp::Label { id: yield_input });
+                    self.emit(JitOp::Clone { dst: fused_out, src: input_slot });
+                    self.emit(JitOp::Label { id: after });
                     emit_fused_tail(self, fused_out);
                     fused_out
                 } else if general_f64 {
@@ -1303,21 +1313,30 @@ impl Flattener {
                         self.emit(JitOp::Drop { slot });
                         var_map.push((vi, fvar));
                     }
-                    let head = self.alloc_label();
                     let body = self.alloc_label();
                     let done = self.alloc_label();
-                    self.emit(JitOp::Label { id: head });
-                    let cond_v = self.compile_f64_expr_multi(cond, acc, &var_map);
-                    self.emit(JitOp::BranchOnVar { var: cond_v, nonzero_label: done, zero_label: body });
+                    let fused_out = result_slot.unwrap_or_else(|| self.alloc_slot());
+                    // Pre-check cond on the input. If true on entry, yield input
+                    // verbatim to preserve its textual representation (see narrow
+                    // path comment above for the same reasoning).
+                    let yield_input = self.alloc_label();
+                    let after = self.alloc_label();
+                    let cond_pre = self.compile_f64_expr_multi(cond, acc, &var_map);
+                    self.emit(JitOp::BranchOnVar { var: cond_pre, nonzero_label: yield_input, zero_label: body });
+                    // do-while loop: body, then post-check.
                     self.emit(JitOp::Label { id: body });
                     let new_acc = self.compile_f64_expr_multi(update, acc, &var_map);
                     if new_acc != acc {
                         self.emit(JitOp::F64Move { dst_var: acc, src_var: new_acc });
                     }
-                    self.emit(JitOp::Jump { label: head });
+                    let cond_v = self.compile_f64_expr_multi(cond, acc, &var_map);
+                    self.emit(JitOp::BranchOnVar { var: cond_v, nonzero_label: done, zero_label: body });
                     self.emit(JitOp::Label { id: done });
-                    let fused_out = result_slot.unwrap_or_else(|| self.alloc_slot());
                     self.emit(JitOp::F64Num { dst: fused_out, src_var: acc });
+                    self.emit(JitOp::Jump { label: after });
+                    self.emit(JitOp::Label { id: yield_input });
+                    self.emit(JitOp::Clone { dst: fused_out, src: input_slot });
+                    self.emit(JitOp::Label { id: after });
                     emit_fused_tail(self, fused_out);
                     fused_out
                 } else {
