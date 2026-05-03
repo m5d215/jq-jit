@@ -3394,12 +3394,25 @@ fn eval_recurse_default(val: &Value, cb: &mut dyn FnMut(Value) -> GenResult) -> 
 
 fn eval_range(from: &Value, to: &Value, step: Option<&Value>, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
     // jq emits a single "Range bounds must be numeric" error for both
-    // out-of-type from and to (#527). The step argument has lazier
-    // semantics in jq (the loop emits the first value before arithmetic
-    // fails) so we keep the previous wording for now.
+    // out-of-type from and to (#527).
     let f = match from { Value::Num(n, _) => *n, _ => bail!("Range bounds must be numeric") };
     let t = match to { Value::Num(n, _) => *n, _ => bail!("Range bounds must be numeric") };
-    let s = match step { Some(Value::Num(n, _)) => *n, Some(_) => bail!("range: step must be number"), None => 1.0 };
+    // jq's `range/3` desugars to `from | while(. < upto; . + by)`. The
+    // step is consumed lazily, so `range(0; 10; "a")` emits `0` first and
+    // then surfaces jq's `+`-error on the next iteration. `null`/`true`/
+    // `false` steps silently emit nothing (jq's range short-circuits
+    // before yielding anything when the addition would be an identity or
+    // a type error it would have already filtered). See #582.
+    let s = match step {
+        Some(Value::Num(n, _)) => *n,
+        Some(Value::Null) | Some(Value::True) | Some(Value::False) => return Ok(true),
+        Some(non_num) => {
+            if !cb(from.clone())? { return Ok(false); }
+            let _ = crate::runtime::rt_add(from, non_num)?;
+            return Ok(true);
+        }
+        None => 1.0,
+    };
     if s == 0.0 { return Ok(true); }
     let mut c = f;
     let mut first = true;
