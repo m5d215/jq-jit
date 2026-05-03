@@ -1307,18 +1307,30 @@ fn rt_add_all(v: &Value) -> Result<Value> {
             // Fast path: detect homogeneous types for O(n) pre-allocated merge
             match &a[0] {
                 Value::Num(_, _) => {
-                    // Check if all elements are numbers
+                    // Check if all elements are numbers (or null). Track the
+                    // sole non-null number so a `[N] | add` (or `[null, N]`)
+                    // can return that value verbatim and keep its repr — jq
+                    // returns `1.0` not `1` for `[1.0] | add`. See #566.
                     let mut sum = 0.0f64;
                     let mut all_num = true;
+                    let mut num_count = 0;
+                    let mut sole_num: Option<&Value> = None;
                     for item in a.iter() {
                         match item {
-                            Value::Num(n, _) => sum += n,
+                            Value::Num(n, _) => {
+                                sum += n;
+                                num_count += 1;
+                                sole_num = if num_count == 1 { Some(item) } else { None };
+                            }
                             Value::Null => {}
                             _ => { all_num = false; break; }
                         }
                     }
                     if all_num {
-                        return Ok(Value::number(sum));
+                        return Ok(match sole_num {
+                            Some(v) => v.clone(),
+                            None => Value::number(sum),
+                        });
                     }
                 }
                 Value::Arr(_) => {

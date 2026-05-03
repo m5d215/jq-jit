@@ -9062,3 +9062,33 @@ null
 . | @text | length
 0.0
 3
+
+# Issue #566: [N] | add returns the original value with repr preserved
+[1.0] | add | tojson
+null
+"1.0"
+
+# Issue #566: scientific repr also preserved through single-element add
+[1.5e2] | add | tojson
+null
+"1.5E+2"
+
+# Issue #566: leading nulls don't suppress the sole-num repr
+[null, 1.0] | add | tojson
+null
+"1.0"
+
+# Issue #566: trailing nulls don't suppress the sole-num repr
+[1.0, null] | add | tojson
+null
+"1.0"
+
+# Issue #566: real addition still drops repr (jq decnum-less)
+[1.0, 2.0] | add | tojson
+null
+"3"
+
+# Issue #566: empty / all-null arrays still return null
+[null, null] | add
+null
+null
