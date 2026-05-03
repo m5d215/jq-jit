@@ -1068,7 +1068,13 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
                     UnaryOp::Floor => Value::number(n.floor()),
                     UnaryOp::Ceil => Value::number(n.ceil()),
                     UnaryOp::Round => Value::number(n.round()),
-                    UnaryOp::Fabs | UnaryOp::Abs => Value::number(n.abs()),
+                    // jq's `abs` keeps the literal repr while `fabs`
+                    // returns the canonical f64 form (#578). The two
+                    // shared the same fast-path branch and dropped the
+                    // repr for both. Delegate to the runtime entry points
+                    // so the fast path matches `rt_abs` / `rt_fabs`.
+                    UnaryOp::Fabs => Value::number(n.abs()),
+                    UnaryOp::Abs => return eval_unaryop(*op, &val).map_err(|_| ()),
                     // jq's `length` on a number is `abs` but preserves the
                     // literal repr (`-1.0 | length` → `1.0`,
                     // `-0.0 | length` → `0.0`). Delegate to `Value::length`
