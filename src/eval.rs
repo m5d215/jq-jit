@@ -1818,8 +1818,9 @@ pub fn eval(
                         }
                         Ok(true)
                     }
-                    _ => bail!("Cannot iterate over {} ({})",
-                        container.type_name(), crate::value::value_to_json(&container)),
+                    // Use errdesc so number reprs survive (`0.0` stays
+                    // `0.0`) and long values get jq's truncation. See #574.
+                    _ => bail!("Cannot iterate over {}", crate::runtime::errdesc_pub(&container)),
                 }
             })
         }
@@ -4248,8 +4249,10 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                     _ => {
                         // jq errors `del(.[])` etc. when the current path
                         // points at a non-iterable (issue #54). Silent
-                        // "no paths" turned type errors into no-ops.
-                        bail!("Cannot iterate over {} ({})", base.type_name(), crate::value::value_to_json(&base))
+                        // "no paths" turned type errors into no-ops. Use
+                        // errdesc so number reprs survive (`0.0` stays
+                        // `0.0`) and long values get truncated. See #574.
+                        bail!("Cannot iterate over {}", crate::runtime::errdesc_pub(&base))
                     }
                 }
             });
