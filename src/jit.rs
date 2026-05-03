@@ -6677,9 +6677,8 @@ extern "C" fn jit_rt_obj_insert(obj: *mut Value, key: *mut Value, val: *mut Valu
                 Value::Str(s) => s,
                 other => {
                     set_jit_error(format!(
-                        "Cannot use {} ({}) as object key",
-                        other.type_name(),
-                        crate::value::value_to_json(&other)
+                        "Cannot use {} as object key",
+                        crate::runtime::errdesc_pub(&other)
                     ));
                     drop(other);
                     drop(val_val);

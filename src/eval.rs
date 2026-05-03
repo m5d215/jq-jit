@@ -3438,9 +3438,8 @@ fn object_key_from_value(kv: &Value) -> Result<KeyStr> {
     match kv {
         Value::Str(s) => Ok(KeyStr::from(s.as_str())),
         _ => bail!(
-            "Cannot use {} ({}) as object key",
-            kv.type_name(),
-            crate::value::value_to_json(kv)
+            "Cannot use {} as object key",
+            crate::runtime::errdesc_pub(kv)
         ),
     }
 }
