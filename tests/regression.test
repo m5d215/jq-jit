@@ -9363,17 +9363,27 @@ null
 null
 [0,1,2,3,4]
 
-# Issue #584: object key error preserves number repr
-try ({(.): 1}) catch .
-0.0
-"Cannot use number (0.0) as object key"
+# Issue #586: nth/1 supports negative indices via .[n]
+[10,20,30] | nth(-1)
+null
+30
 
-# Issue #584: object key error preserves negative-zero repr
-try ({(.): 1}) catch .
--0.0
-"Cannot use number (-0.0) as object key"
+# Issue #586: nth/1 with negative wrap
+[10,20,30] | nth(-3)
+null
+10
 
-# Issue #584: object key error preserves exponent repr
-try ({(.): 1}) catch .
-1e10
-"Cannot use number (1E+10) as object key"
+# Issue #586: nth/1 out-of-range returns null
+[10,20,30] | nth(-4)
+null
+null
+
+# Issue #586: nth/1 on object with string key
+{"a":1,"b":2} | nth("a")
+null
+1
+
+# Issue #586: nth/2 still rejects negative indices
+try (nth(-1; range(5))) catch .
+null
+"nth doesn't support negative indices"

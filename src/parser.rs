@@ -3493,10 +3493,24 @@ impl Parser {
             | ("jn", 2) | ("yn", 2) => {
                 Ok(Expr::CallBuiltin { name: name.to_string(), args })
             }
-            ("nth", 1) | ("nth", 2) => {
+            ("nth", 1) => {
+                // jq 1.8.1: def nth($n): .[$n];
+                // — supports negative indices and string indices, unlike nth/2.
+                let n_expr = args.into_iter().next().unwrap();
+                let n_var = self.scope.alloc_var("__nth_n__");
+                Ok(Expr::LetBinding {
+                    var_index: n_var,
+                    value: Box::new(n_expr),
+                    body: Box::new(Expr::Index {
+                        expr: Box::new(Expr::Input),
+                        key: Box::new(Expr::LoadVar { var_index: n_var }),
+                    }),
+                })
+            }
+            ("nth", 2) => {
                 let mut args = args.into_iter();
                 let n_expr = args.next().unwrap();
-                let generator = args.next().unwrap_or(Expr::Each { input_expr: Box::new(Expr::Input) });
+                let generator = args.next().unwrap();
                 // nth(n; g) = n as $n | if $n < 0 then error
                 //   else foreach g as $x (-1; .+1; if . == $n then $x else empty end) end
                 let n_var = self.scope.alloc_var("__nth_n__");
