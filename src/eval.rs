@@ -3562,7 +3562,12 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
     let s = match val { Value::Str(s) => s.to_string(), _ => crate::value::value_to_json(val) };
     match name {
         "text" => Ok(s),
-        "json" => Ok(crate::value::value_to_json(val)),
+        // `@json` mirrors the `tojson` builtin, so it must preserve the
+        // carried number repr exactly the way `rt_tojson` does — otherwise
+        // `0.0 | @json | length` returned 1 (the value was the string
+        // `"0"`, even though the raw-byte CLI fast path printed `"0.0"` for
+        // the standalone `@json` form). See #562.
+        "json" => Ok(crate::value::value_to_json_tojson(val)),
         "html" => {
             let mut r = String::with_capacity(s.len());
             for c in s.chars() {
