@@ -9297,3 +9297,33 @@ null
 -1.5 | fabs
 null
 1.5
+
+# Issue #580: utf8bytelength error keeps number repr (`0.0` not collapsed to `0`)
+try (utf8bytelength) catch .
+0.0
+"number (0.0) only strings have UTF-8 byte length"
+
+# Issue #580: scientific number repr survives
+try (utf8bytelength) catch .
+1e10
+"number (1E+10) only strings have UTF-8 byte length"
+
+# Issue #580: -0.0 preserved (not -0)
+try (utf8bytelength) catch .
+-0.0
+"number (-0.0) only strings have UTF-8 byte length"
+
+# Issue #580: bool length error uses errdesc wording (regression check)
+try (length) catch .
+true
+"boolean (true) has no length"
+
+# Issue #580: negate string error uses errdesc wording
+try (-.) catch .
+"abc"
+"string (\"abc\") cannot be negated"
+
+# Issue #580: long string truncation in negate error
+try (-.) catch .
+"1234567890123456789"
+"string (\"1234567890...) cannot be negated"

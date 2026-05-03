@@ -1113,7 +1113,11 @@ fn rt_length(v: &Value) -> Result<Value> {
 fn rt_utf8bytelength(v: &Value) -> Result<Value> {
     match v {
         Value::Str(s) => Ok(Value::number(s.len() as f64)),
-        _ => bail!("{} ({}) only strings have UTF-8 byte length", v.type_name(), crate::value::value_to_json(v)),
+        // errdesc preserves number repr (`0.0` stays `0.0`) and applies
+        // jq's `...` truncation for long previews. The previous
+        // value_to_json call dropped the repr so `0.0` came back as `0`.
+        // See #580.
+        _ => bail!("{} only strings have UTF-8 byte length", errdesc(v)),
     }
 }
 
@@ -1215,7 +1219,8 @@ fn rt_reverse(v: &Value) -> Result<Value> {
         Value::Str(_) => bail!("Cannot index string with number"),
         Value::Obj(_) => bail!("Cannot index object with number"),
         Value::Num(_, _) => bail!("Cannot index number with number"),
-        Value::True | Value::False => bail!("{} ({}) has no length", v.type_name(), crate::value::value_to_json(v)),
+        // errdesc keeps repr/truncation consistent across error sites (#580).
+        Value::True | Value::False => bail!("{} has no length", errdesc(v)),
         _ => bail!("{} cannot be reversed", v.type_name()),
     }
 }
@@ -1507,7 +1512,8 @@ fn rt_abs(v: &Value) -> Result<Value> {
         }
         Value::Str(_) | Value::Arr(_) | Value::Obj(_) => Ok(v.clone()),
         _ => {
-            bail!("{} ({}) cannot be negated", v.type_name(), crate::value::value_to_json(v))
+            // errdesc keeps the wording consistent with jq for repr (#580).
+            bail!("{} cannot be negated", errdesc(v))
         }
     }
 }
