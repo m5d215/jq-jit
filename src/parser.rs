@@ -2786,6 +2786,7 @@ impl Parser {
             | "todate" | "fromdate" | "date"
             | "input_line_number" | "input_filename"
             | "get_jq_origin" | "get_prog_origin" | "get_search_list"
+            | "tostream"
             | "combinations" | "modf"
             if !matches!(self.current(), Token::LParen) => {
                 self.compile_builtin_noargs(name)
@@ -3019,6 +3020,9 @@ impl Parser {
             }
             "get_jq_origin" | "get_prog_origin" | "get_search_list" => {
                 Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
+            }
+            "tostream" => {
+                Ok(Expr::CallBuiltin { name: "tostream".to_string(), args: vec![] })
             }
             "input_filename" => {
                 // jq emits "<stdin>" for the default stdin input source
@@ -3642,6 +3646,15 @@ impl Parser {
             ("walk", 1) => {
                 let f = args.into_iter().next().unwrap();
                 Ok(Expr::CallBuiltin { name: "walk".to_string(), args: vec![f] })
+            }
+            // fromstream/1, truncate_stream/1: stream reassembly + slicing (#89)
+            ("fromstream", 1) => {
+                let f = args.into_iter().next().unwrap();
+                Ok(Expr::CallBuiltin { name: "fromstream".to_string(), args: vec![f] })
+            }
+            ("truncate_stream", 1) => {
+                let f = args.into_iter().next().unwrap();
+                Ok(Expr::CallBuiltin { name: "truncate_stream".to_string(), args: vec![f] })
             }
             // exec/1: execute shell command and return stdout
             ("exec", 1) => {

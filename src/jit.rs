@@ -256,7 +256,8 @@ fn is_scalar(expr: &Expr) -> bool {
             // Filter-argument builtins can't be treated as scalar
             match (name.as_str(), args.len()) {
                 ("walk", _) | ("pick", _) | ("skip", _) | ("del", _) | ("exec", 2)
-                | ("fromcsv", _) | ("fromtsv", _) | ("fromcsvh", _) | ("fromtsvh", _) => false,
+                | ("fromcsv", _) | ("fromtsv", _) | ("fromcsvh", _) | ("fromtsvh", _)
+                | ("tostream", _) | ("fromstream", _) | ("truncate_stream", _) => false,
                 ("add", 1) => false,
                 _ => args.iter().all(is_scalar),
             }

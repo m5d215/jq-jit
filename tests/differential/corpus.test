@@ -224,12 +224,22 @@ from_entries
 with_entries(.value += 10)
 {"a":1,"b":2}
 
-# ---------- Extra probes: recurse ----------
-# NOTE: tostream/fromstream/truncate_stream are not yet implemented in the
-# native parser; they're deferred to a follow-up issue.
+# ---------- Extra probes: recurse and tostream ----------
 
 [recurse] | length
 {"a":{"b":{"c":1}}}
+
+[tostream]
+{"a":[1,2]}
+
+[tostream]
+{"a":[],"b":{}}
+
+[tostream]
+[1,2,3]
+
+[tostream]
+null
 
 # ---------- Extra probes: reduce ----------
 
@@ -1148,8 +1158,29 @@ $__loc__.file | type
 null
 
 # ---------- Issue #65 parser coverage: streams ----------
-# NOTE: tostream/fromstream/truncate_stream are not yet implemented in the
-# native parser; they're deferred to a follow-up issue.
+
+# tostream / fromstream roundtrip across mixed shapes
+[tostream] | fromstream(.[])
+{"a":[1,2]}
+
+[tostream] | fromstream(.[])
+{"x":{"a":[1,2],"b":3}}
+
+[tostream] | fromstream(.[])
+[1,2,3]
+
+[tostream] | fromstream(.[])
+{"a":[],"b":{}}
+
+[tostream] | fromstream(.[])
+42
+
+# truncate_stream slices off leading path components
+[truncate_stream({a:[1,2]} | tostream)]
+1
+
+[truncate_stream({a:[1,2]} | tostream)]
+2
 
 # ---------- Issue #65 parser coverage: path / leaf ----------
 
