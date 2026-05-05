@@ -3707,6 +3707,7 @@ pub fn rt_builtins() -> Value {
         "have_decnum/0", "have_literal_numbers/0",
         "exec/1", "exec/2", "execv/1",
         "fromcsv/0", "fromtsv/0", "fromcsvh/0", "fromcsvh/1", "fromtsvh/0", "fromtsvh/1",
+        "tostream/0", "fromstream/1", "truncate_stream/1",
         "toboolean/0",
         "format/1",
     ];

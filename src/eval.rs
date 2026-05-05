@@ -4716,6 +4716,15 @@ fn eval_call_builtin(name: &str, args: &[Expr], input: Value, env: &EnvRef, cb: 
         ("fromcsv", 0) | ("fromtsv", 0) => {
             return eval_fromcsv(&input, name == "fromtsv", cb);
         }
+        ("tostream", 0) => {
+            return eval_tostream(&input, cb);
+        }
+        ("fromstream", 1) => {
+            return eval_fromstream(&args[0], input, env, cb);
+        }
+        ("truncate_stream", 1) => {
+            return eval_truncate_stream(&args[0], input, env, cb);
+        }
         ("fromcsvh", _) | ("fromtsvh", _) => {
             let is_tsv = name == "fromtsvh";
             if args.is_empty() {
@@ -4814,6 +4823,196 @@ fn eval_combinations(input: &Value, cb: &mut dyn FnMut(Value) -> GenResult) -> G
         Ok(true)
     }
     rec(&arrays, 0, &mut current, cb)
+}
+
+/// `tostream` (jq 1.8.1): emit `[path, value]` for every leaf and
+/// `[path]` close markers for non-empty containers, depth-first.
+/// Empty containers are leaves (`[path, []]` / `[path, {}]` with no
+/// close marker). See #89.
+fn eval_tostream(input: &Value, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
+    fn walk(
+        v: &Value,
+        path: &mut Vec<Value>,
+        cb: &mut dyn FnMut(Value) -> GenResult,
+    ) -> GenResult {
+        match v {
+            Value::Arr(a) if !a.is_empty() => {
+                let mut last_key = Value::Null;
+                for (i, item) in a.iter().enumerate() {
+                    let key = Value::number(i as f64);
+                    path.push(key.clone());
+                    if !walk(item, path, cb)? { return Ok(false); }
+                    path.pop();
+                    last_key = key;
+                }
+                let mut close_path = path.clone();
+                close_path.push(last_key);
+                cb(Value::Arr(Rc::new(vec![Value::Arr(Rc::new(close_path))])))
+            }
+            Value::Obj(ObjInner(o)) if !o.is_empty() => {
+                let mut last_key = Value::Null;
+                for (k, item) in o.iter() {
+                    let key = Value::from_str(k.as_str());
+                    path.push(key.clone());
+                    if !walk(item, path, cb)? { return Ok(false); }
+                    path.pop();
+                    last_key = key;
+                }
+                let mut close_path = path.clone();
+                close_path.push(last_key);
+                cb(Value::Arr(Rc::new(vec![Value::Arr(Rc::new(close_path))])))
+            }
+            _ => {
+                let path_val = Value::Arr(Rc::new(path.clone()));
+                cb(Value::Arr(Rc::new(vec![path_val, v.clone()])))
+            }
+        }
+    }
+    let mut path = Vec::new();
+    walk(input, &mut path, cb)
+}
+
+/// `fromstream(f)`: reassemble events produced by `f` back into JSON
+/// trees. Mirrors jq's `def fromstream(f): foreach f as $i ...` —
+/// emit a tree once a top-level close marker (path length == 1) or a
+/// root-leaf event (path length == 0) lands. See #89.
+fn eval_fromstream(
+    f: &Expr,
+    input: Value,
+    env: &EnvRef,
+    cb: &mut dyn FnMut(Value) -> GenResult,
+) -> GenResult {
+    let mut acc: Value = Value::Null;
+    let mut have_acc = false;
+    let result = eval(f, input.clone(), env, &mut |event| {
+        let arr = match &event {
+            Value::Arr(a) => a.clone(),
+            _ => bail!("fromstream: expected stream event, got {}", event.type_name()),
+        };
+        let path_arr = match arr.first() {
+            Some(Value::Arr(p)) => p.clone(),
+            _ => bail!("fromstream: stream event missing path"),
+        };
+        match arr.len() {
+            2 => {
+                // Leaf event [path, value].
+                let leaf_value = arr[1].clone();
+                if path_arr.is_empty() {
+                    // Root leaf: emit immediately, no further accumulation.
+                    return cb(leaf_value);
+                }
+                if !have_acc {
+                    acc = init_container_for_first_segment(&path_arr[0])?;
+                    have_acc = true;
+                }
+                acc = setpath_in_place(acc.clone(), &path_arr, leaf_value)?;
+            }
+            1 => {
+                // Close event [path]. When the close path is depth 1 it's
+                // the top-level close — emit and reset.
+                if path_arr.len() == 1 && have_acc {
+                    let val = std::mem::replace(&mut acc, Value::Null);
+                    have_acc = false;
+                    if !cb(val)? { return Ok(false); }
+                }
+                // Deeper close events just bound the inner traversal; the
+                // accumulator already has every leaf set, so nothing else
+                // to do here.
+            }
+            _ => bail!("fromstream: stream event must be [path, value] or [path]"),
+        }
+        Ok(true)
+    });
+    result?;
+    Ok(true)
+}
+
+/// Pick the empty-container shape jq uses when the first path segment
+/// is a number (array) versus a string (object).
+fn init_container_for_first_segment(seg: &Value) -> Result<Value> {
+    match seg {
+        Value::Num(_, _) => Ok(Value::Arr(Rc::new(Vec::new()))),
+        Value::Str(_) => Ok(Value::object_from_map(crate::value::new_objmap())),
+        _ => bail!("fromstream: path segments must be strings or numbers"),
+    }
+}
+
+/// `setpath` over a `Vec<Value>` path, autovivifying intermediate
+/// arrays/objects as jq does — kept local to fromstream so we don't
+/// have to reach into the public setpath path-error wording.
+fn setpath_in_place(target: Value, path: &[Value], value: Value) -> Result<Value> {
+    if path.is_empty() {
+        return Ok(value);
+    }
+    let head = &path[0];
+    let rest = &path[1..];
+    match head {
+        Value::Num(n, _) => {
+            let idx = *n as i64;
+            let mut arr = match target {
+                Value::Arr(a) => Rc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
+                Value::Null => Vec::new(),
+                _ => bail!("fromstream: cannot index {} with number", target.type_name()),
+            };
+            if idx < 0 {
+                bail!("fromstream: negative array index in stream path");
+            }
+            let i = idx as usize;
+            while arr.len() <= i { arr.push(Value::Null); }
+            let inner = std::mem::replace(&mut arr[i], Value::Null);
+            arr[i] = setpath_in_place(inner, rest, value)?;
+            Ok(Value::Arr(Rc::new(arr)))
+        }
+        Value::Str(s) => {
+            let mut obj = match target {
+                Value::Obj(ObjInner(o)) => Rc::try_unwrap(o).unwrap_or_else(|o| (*o).clone()),
+                Value::Null => crate::value::new_objmap(),
+                _ => bail!("fromstream: cannot index {} with string", target.type_name()),
+            };
+            let key = KeyStr::from(s.as_str());
+            let inner = obj.shift_remove(&key).unwrap_or(Value::Null);
+            obj.insert(key, setpath_in_place(inner, rest, value)?);
+            Ok(Value::object_from_map(obj))
+        }
+        _ => bail!("fromstream: path segments must be strings or numbers"),
+    }
+}
+
+/// `truncate_stream(f)`: input is the depth `$n` to drop; for each
+/// event from `f`, emit the event with the first `$n` path components
+/// chopped off (skipping events whose path is too short). See #89.
+fn eval_truncate_stream(
+    f: &Expr,
+    input: Value,
+    env: &EnvRef,
+    cb: &mut dyn FnMut(Value) -> GenResult,
+) -> GenResult {
+    let depth = match &input {
+        Value::Num(n, _) if n.is_finite() && *n >= 0.0 => *n as usize,
+        Value::Num(_, _) => bail!("truncate_stream: depth must be a non-negative integer"),
+        _ => bail!("truncate_stream: depth must be a number"),
+    };
+    eval(f, input.clone(), env, &mut |event| {
+        let arr = match &event {
+            Value::Arr(a) => a.clone(),
+            _ => bail!("truncate_stream: expected stream event, got {}", event.type_name()),
+        };
+        if arr.is_empty() {
+            bail!("truncate_stream: stream event missing path");
+        }
+        let path_arr = match &arr[0] {
+            Value::Arr(p) => p.clone(),
+            _ => bail!("truncate_stream: stream event missing path"),
+        };
+        if path_arr.len() <= depth {
+            return Ok(true);
+        }
+        let new_path: Vec<Value> = path_arr.iter().skip(depth).cloned().collect();
+        let mut new_event: Vec<Value> = Vec::with_capacity(arr.len());
+        new_event.push(Value::Arr(Rc::new(new_path)));
+        for v in arr.iter().skip(1) { new_event.push(v.clone()); }
+        cb(Value::Arr(Rc::new(new_event)))
+    })
 }
 
 /// Emit the `halt_error` message to stderr using jq 1.8.1's rules:

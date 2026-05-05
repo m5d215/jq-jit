@@ -9749,3 +9749,53 @@ get_prog_origin | type
 builtins | contains(["get_jq_origin/0","get_prog_origin/0","get_search_list/0"])
 0
 true
+
+# Issue #89: tostream walks an object and emits leaf + close events
+[tostream]
+{"a":[1,2]}
+[[["a",0],1],[["a",1],2],[["a",1]],[["a"]]]
+
+# Issue #89: tostream on a top-level array
+[tostream]
+[1,2,3]
+[[[0],1],[[1],2],[[2],3],[[2]]]
+
+# Issue #89: tostream emits leaf-style entries for empty containers
+[tostream]
+{"a":[],"b":{}}
+[[["a"],[]],[["b"],{}],[["b"]]]
+
+# Issue #89: tostream on a scalar root just emits a single leaf event
+[tostream]
+null
+[[[],null]]
+
+# Issue #89: tostream on a leaf number
+[tostream]
+42
+[[[],42]]
+
+# Issue #89: fromstream round-trips a tostream stream
+[tostream] | fromstream(.[])
+{"a":[1,2]}
+{"a":[1,2]}
+
+# Issue #89: fromstream round-trips nested objects + arrays
+[tostream] | fromstream(.[])
+{"x":{"a":[1,2],"b":3}}
+{"x":{"a":[1,2],"b":3}}
+
+# Issue #89: fromstream on a single root-leaf event
+[tostream] | fromstream(.[])
+42
+42
+
+# Issue #89: truncate_stream drops leading path components
+[truncate_stream({a:[1,2]} | tostream)]
+1
+[[[0],1],[[1],2],[[1]]]
+
+# Issue #89: truncate_stream skips events whose path is too short
+[truncate_stream({a:[1,2]} | tostream)]
+2
+[]
