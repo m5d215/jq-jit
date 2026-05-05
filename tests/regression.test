@@ -9683,3 +9683,28 @@ length
 length
 "é"
 1
+
+# Issue #613: todate drops subsecond component to match jq round-trip
+todate
+1.5
+"1970-01-01T00:00:01Z"
+
+# Issue #613: todateiso8601 drops subsecond component
+todateiso8601
+0.001
+"1970-01-01T00:00:00Z"
+
+# Issue #613: todate on large fractional epoch drops subseconds
+todate
+1700000000.5
+"2023-11-14T22:13:20Z"
+
+# Issue #613: todate | fromdateiso8601 round-trips fractional epoch to integer
+todate | fromdateiso8601
+1.5
+1
+
+# Issue #613: date alias also drops subseconds
+date
+1.5
+"1970-01-01T00:00:01Z"

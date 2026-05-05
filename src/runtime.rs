@@ -3566,25 +3566,15 @@ fn rt_toisodate(v: &Value) -> Result<Value> {
         _ => unreachable!(),
     };
 
+    // jq's `def todate: strftime("%Y-%m-%dT%H:%M:%SZ")` floors the epoch to
+    // whole seconds before formatting (the broken-down-time `tm` produced by
+    // gmtime has no subsecond field), so any fractional input must be
+    // dropped to keep `todate | fromdateiso8601` round-tripping. See #613.
     let secs = epoch.floor() as i64;
-    let frac = epoch - epoch.floor();
-
-    if frac.abs() < 1e-9 {
-        // Integer epoch: no fractional part
-        let dt = DateTime::from_timestamp(secs, 0)
-            .ok_or_else(|| anyhow::anyhow!("toisodate: invalid epoch: {}", epoch))?;
-        let formatted = dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        Ok(Value::from_str(&formatted))
-    } else {
-        // Float epoch: include milliseconds
-        // Use round(frac * 1000) to get millis to avoid precision loss
-        let millis = (frac * 1000.0).round() as u32;
-        let nanos = millis * 1_000_000;
-        let dt = DateTime::from_timestamp(secs, nanos)
-            .ok_or_else(|| anyhow::anyhow!("toisodate: invalid epoch: {}", epoch))?;
-        let formatted = format!("{}.{:03}Z", dt.format("%Y-%m-%dT%H:%M:%S"), millis);
-        Ok(Value::from_str(&formatted))
-    }
+    let dt = DateTime::from_timestamp(secs, 0)
+        .ok_or_else(|| anyhow::anyhow!("toisodate: invalid epoch: {}", epoch))?;
+    let formatted = dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    Ok(Value::from_str(&formatted))
 }
 
 // -----------------------------------------------------------------------
