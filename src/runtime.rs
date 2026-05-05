@@ -143,6 +143,9 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         }),
         "env" | "$ENV" => Ok(rt_env()),
         "builtins" => Ok(rt_builtins()),
+        "get_jq_origin" => Ok(rt_get_jq_origin()),
+        "get_prog_origin" => Ok(rt_get_prog_origin()),
+        "get_search_list" => Ok(rt_get_search_list()),
         "debug" => unary_op(args, |v| {
             eprintln!("[\"DEBUG:\",{}]", crate::value::value_to_json_tojson(v));
             Ok(v.clone())
@@ -3589,6 +3592,38 @@ fn rt_env() -> Value {
     Value::object_from_map(env)
 }
 
+/// Directory containing the running interpreter binary (jq's
+/// `get_jq_origin/0`). Falls back to an empty string when
+/// `std::env::current_exe()` is unavailable.
+pub fn rt_get_jq_origin() -> Value {
+    let path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    Value::from_string(path)
+}
+
+/// Current working directory of the program (jq's
+/// `get_prog_origin/0`). Falls back to an empty string on error.
+pub fn rt_get_prog_origin() -> Value {
+    let path = std::env::current_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Value::from_string(path)
+}
+
+/// Module search path list. jq-jit doesn't implement `import`/`include`
+/// (see #614), so this returns jq 1.8.1's static defaults; feature-probing
+/// scripts that enumerate the search list still see a shape they recognise.
+pub fn rt_get_search_list() -> Value {
+    Value::Arr(Rc::new(vec![
+        Value::from_str("~/.jq"),
+        Value::from_str("$ORIGIN/../lib/jq"),
+        Value::from_str("$ORIGIN/../lib"),
+    ]))
+}
+
 pub fn rt_builtins() -> Value {
     // Source of truth for the `builtins/0` advertised list. Every spec
     // appears at most once (jq 1.8.1 emits each name+arity exactly once),
@@ -3660,6 +3695,7 @@ pub fn rt_builtins() -> Value {
         "todate/0", "fromdate/0", "date/0",
         "fromdateiso8601/0", "todateiso8601/0",
         "modulemeta/0", "builtins/0",
+        "get_jq_origin/0", "get_prog_origin/0", "get_search_list/0",
         "isempty/1",
         "del/1", "pick/1",
         "halt/0", "halt_error/0", "halt_error/1",

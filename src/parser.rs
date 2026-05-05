@@ -2785,6 +2785,7 @@ impl Parser {
             | "fromdateiso8601" | "todateiso8601" | "fromisodate" | "toisodate"
             | "todate" | "fromdate" | "date"
             | "input_line_number" | "input_filename"
+            | "get_jq_origin" | "get_prog_origin" | "get_search_list"
             | "combinations" | "modf"
             if !matches!(self.current(), Token::LParen) => {
                 self.compile_builtin_noargs(name)
@@ -3014,6 +3015,9 @@ impl Parser {
                 Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
             }
             "combinations" | "modf" => {
+                Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
+            }
+            "get_jq_origin" | "get_prog_origin" | "get_search_list" => {
                 Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
             }
             "input_filename" => {
