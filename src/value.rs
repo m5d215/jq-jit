@@ -5672,6 +5672,19 @@ fn push_value_tojson(v: &Value, out: &mut String, depth: usize) {
                 } else {
                     out.push_str(r);
                 }
+            } else if let Some(canonical) = repr
+                .as_ref()
+                .filter(|r| is_valid_json_number(r) && n.is_finite() && *n != 0.0)
+                .and_then(|r| normalize_jq_repr(r))
+                .filter(|c| fast_float::parse::<f64, _>(c.as_str()).ok() == Some(*n))
+            {
+                // Subnormal-edge case (#616): `repr_is_exact_for_f64` is too
+                // conservative for tiny exponents (< -323), but the literal
+                // can still round-trip through f64 — e.g. `5e-324` is the
+                // canonical form for the smallest positive subnormal. Prefer
+                // the normalised repr when it parses back to the same bits;
+                // otherwise fall through to the lossy f64 dtoa form.
+                out.push_str(&canonical);
             } else {
                 push_jq_number_str(out, *n);
             }
