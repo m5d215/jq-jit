@@ -9799,3 +9799,28 @@ null
 [truncate_stream({a:[1,2]} | tostream)]
 2
 []
+
+# Issue #551: (.. | scalars) |= f preserves all leaves after switching Update
+# from rt_setpath to rt_setpath_mut (Rc::make_mut). Verifies every scalar
+# in a deep binary tree still gets updated, not just the last branch.
+nth(.; 0 | recurse([., .])) | (.. | scalars) |= .+1
+3
+[[[1,1],[1,1]],[[1,1],[1,1]]]
+
+# Issue #551: nested object/array updates compose under the new in-place
+# setpath path — every scalar gets +10, structure unchanged.
+(.. | scalars) |= .+10
+{"a":1,"b":{"c":2,"d":[3,4]}}
+{"a":11,"b":{"c":12,"d":[13,14]}}
+
+# Issue #551: multi-path assignment (no overlap) — each path mutates result
+# in place; Rc::make_mut on the inner objects keeps both writes.
+(.a, .b) = "x"
+{"a":1,"b":2}
+{"a":"x","b":"x"}
+
+# Issue #551: empty-output update deletes the path; the rest of the tree
+# still reflects prior in-place updates.
+.a |= empty | .b += 1
+{"a":1,"b":2}
+{"b":3}
