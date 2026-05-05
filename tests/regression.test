@@ -9729,3 +9729,23 @@ tojson
 .
 5e-324
 5E-324
+
+# Issue #614: get_search_list returns jq's static defaults
+get_search_list
+0
+["~/.jq","$ORIGIN/../lib/jq","$ORIGIN/../lib"]
+
+# Issue #614: get_jq_origin returns a string (the binary's directory)
+get_jq_origin | type
+0
+"string"
+
+# Issue #614: get_prog_origin returns a string (the cwd)
+get_prog_origin | type
+0
+"string"
+
+# Issue #614: builtins/0 advertises the new module-loading inspection trio
+builtins | contains(["get_jq_origin/0","get_prog_origin/0","get_search_list/0"])
+0
+true
