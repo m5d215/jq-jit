@@ -2429,7 +2429,16 @@ pub fn eval(
                     Ok(false)
                 })?;
                 if has_output {
-                    result = crate::runtime::rt_setpath(&result, path, &new_val)?;
+                    // `rt_setpath_mut` mutates `result` via Rc::make_mut, so
+                    // each level is cloned at most once across the loop instead
+                    // of once per touched leaf. Heavy `|=` workloads such as
+                    // `(.. | scalars) |= .+1` over a deep tree drop from
+                    // O(N*D) to O(distinct internal nodes). See #551.
+                    let path_slice = match path {
+                        Value::Arr(a) => a.as_slice(),
+                        _ => bail!("Path must be specified as an array"),
+                    };
+                    crate::runtime::rt_setpath_mut(&mut result, path_slice, new_val)?;
                 } else {
                     // No output = delete this path
                     del_paths.push(path.clone());
@@ -2455,7 +2464,11 @@ pub fn eval(
                 }
                 let mut result = input.clone();
                 for path in &paths {
-                    result = crate::runtime::rt_setpath(&result, path, &new_val)?;
+                    let path_slice = match path {
+                        Value::Arr(a) => a.as_slice(),
+                        _ => bail!("Path must be specified as an array"),
+                    };
+                    crate::runtime::rt_setpath_mut(&mut result, path_slice, new_val.clone())?;
                 }
                 cb(result)
             })
@@ -5240,7 +5253,11 @@ fn eval_pick(f: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> 
     let mut result = Value::Null;
     for path in &paths {
         let val = crate::runtime::rt_getpath(&input, path)?;
-        result = crate::runtime::rt_setpath(&result, path, &val)?;
+        let path_slice = match path {
+            Value::Arr(a) => a.as_slice(),
+            _ => bail!("Path must be specified as an array"),
+        };
+        crate::runtime::rt_setpath_mut(&mut result, path_slice, val)?;
     }
     cb(result)
 }
