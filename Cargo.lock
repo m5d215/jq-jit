@@ -456,7 +456,6 @@ dependencies = [
  "cranelift-native",
  "csv",
  "itoa",
- "libc",
  "libm",
  "memchr",
  "memmap2",
