@@ -920,7 +920,7 @@ pub fn json_object_get_num(b: &[u8], pos: usize, field: &str) -> Option<f64> {
                             e
                         };
                         let num_str = unsafe { std::str::from_utf8_unchecked(&b[i..end]) };
-                        value = fast_float::parse::<f64, _>(num_str).ok();
+                        value = num_str.parse::<f64>().ok();
                     } else if (k - start) <= 15 {
                         value = Some(if neg { -(n as f64) } else { n as f64 });
                     }
@@ -1039,7 +1039,7 @@ pub fn parse_json_num(b: &[u8]) -> Option<f64> {
     }
     if k < b.len() && (b[k] == b'.' || b[k] == b'e' || b[k] == b'E') {
         let num_str = unsafe { std::str::from_utf8_unchecked(b) };
-        return fast_float::parse::<f64, _>(num_str).ok();
+        return num_str.parse::<f64>().ok();
     }
     if k != b.len() { return None; } // trailing garbage
     if (k - start) > 15 { return None; }
@@ -3476,7 +3476,7 @@ pub fn json_object_get_two_nums(b: &[u8], pos: usize, field1: &str, field2: &str
                 };
                 let num_str = unsafe { std::str::from_utf8_unchecked(&b[i..end]) };
                 i = end;
-                fast_float::parse::<f64, _>(num_str).ok()?
+                num_str.parse::<f64>().ok()?
             } else {
                 if (k - start) > 15 { return None; }
                 i = k;
@@ -3770,7 +3770,7 @@ fn walk_json_nums_inner(buf: &mut Vec<u8>, b: &[u8], pos: &mut usize, op: u8, op
                 while *pos < b.len() && b[*pos].is_ascii_digit() { *pos += 1; }
             }
             let num_str = unsafe { std::str::from_utf8_unchecked(&b[start..*pos]) };
-            if let Ok(n) = fast_float::parse::<f64, _>(num_str) {
+            if let Ok(n) = num_str.parse::<f64>() {
                 let result = match op {
                     b'+' => n + operand,
                     b'-' => n - operand,
@@ -4718,7 +4718,7 @@ fn parse_json_number(b: &[u8], pos: usize) -> Result<(Value, usize)> {
     // before stashing the repr (issue #143).
     let num_str = unsafe { std::str::from_utf8_unchecked(&b[pos..i]) };
     let canonical_in = if num_str.starts_with('+') { &num_str[1..] } else { num_str };
-    let n: f64 = fast_float::parse(num_str).unwrap_or(0.0);
+    let n: f64 = num_str.parse::<f64>().unwrap_or(0.0);
     // Fast path: for simple decimals (no exponent, no trailing zeros after dot, ≤15 sig digits),
     // Rust's Display roundtrips identically — skip format_jq_number to avoid String allocation.
     if !has_exp && has_dot && (i - digits_start) <= 16 {
@@ -5676,7 +5676,7 @@ fn push_value_tojson(v: &Value, out: &mut String, depth: usize) {
                 .as_ref()
                 .filter(|r| is_valid_json_number(r) && n.is_finite() && *n != 0.0)
                 .and_then(|r| normalize_jq_repr(r))
-                .filter(|c| fast_float::parse::<f64, _>(c.as_str()).ok() == Some(*n))
+                .filter(|c| c.as_str().parse::<f64>().ok() == Some(*n))
             {
                 // Subnormal-edge case (#616): `repr_is_exact_for_f64` is too
                 // conservative for tiny exponents (< -323), but the literal

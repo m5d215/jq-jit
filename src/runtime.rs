@@ -1554,7 +1554,7 @@ fn rt_tonumber(v: &Value) -> Result<Value> {
             }
             // Strip leading '+' for compatibility with jq
             let parse_str = s_ref.strip_prefix('+').unwrap_or(s_ref);
-            match fast_float::parse(parse_str) {
+            match parse_str.parse::<f64>() {
                 Ok(n) => {
                     // Mirror parse_json_number: preserve repr when the canonical
                     // decnum-style form differs from the f64 default. Without

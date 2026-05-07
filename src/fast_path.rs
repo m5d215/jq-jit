@@ -668,7 +668,7 @@ where
         content
     };
     let num_str = unsafe { std::str::from_utf8_unchecked(num_bytes) };
-    let mut n: f64 = match fast_float::parse(num_str) {
+    let mut n: f64 = match num_str.parse::<f64>() {
         Ok(n) => n,
         Err(_) => return RawApplyOutcome::Bail,
     };
@@ -3079,7 +3079,7 @@ where
     } else if json_object_get_fields_raw_buf(raw, 0, fields, ranges_buf) {
         let mut all_ok = true;
         for (i, &(s, e)) in ranges_buf[..nf].iter().enumerate() {
-            match fast_float::parse::<f64, _>(unsafe { std::str::from_utf8_unchecked(&raw[s..e]) }) {
+            match unsafe { std::str::from_utf8_unchecked(&raw[s..e]) }.parse::<f64>() {
                 Ok(n) => vals_buf[i] = n,
                 Err(_) => { all_ok = false; break; }
             }
