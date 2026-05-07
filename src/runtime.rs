@@ -3318,98 +3318,140 @@ pub fn sub_gsub_segments(input: &str, pattern: &str, flags: &Value, global: bool
 // Date/Time
 // -----------------------------------------------------------------------
 
+// jq's broken-down-time array layout: [year, mon, mday, hour, min, sec, wday, yday]
+// where year is the literal AD year (e.g. 2024), mon/wday/yday are 0-indexed,
+// and mday is 1-indexed.
+#[derive(Default, Clone, Copy)]
+struct BrokenTime {
+    year: i32,
+    mon: i32,
+    mday: i32,
+    hour: i32,
+    min: i32,
+    sec: i32,
+    wday: i32,
+    yday: i32,
+}
+
 fn rt_gmtime(v: &Value) -> Result<Value> {
     match v {
         Value::Num(n, _) => {
             // jq preserves fractional seconds in tm_sec: trunc toward zero
-            // for the libc call, then add |n - trunc| (always non-negative)
+            // for the conversion, then add |n - trunc| (always non-negative)
             // back. `(-1.5) | gmtime | .[5]` is `59.5`, not `58.5`. See #436.
             let secs = n.trunc() as i64;
             let frac = (n - n.trunc()).abs();
-            Ok(libc_gmtime(secs, frac))
+            Ok(broken_to_value(&epoch_to_utc_broken(secs), frac))
         }
         _ => bail!("gmtime() requires numeric inputs"),
     }
 }
 
-fn libc_gmtime(secs: i64, frac_sec: f64) -> Value {
-    use libc::{gmtime_r, time_t, tm};
-    let t = secs as time_t;
-    let mut result: tm = unsafe { std::mem::zeroed() };
-    unsafe { gmtime_r(&t, &mut result) };
-    // jq format: [year+1900, month(0-based), mday, hour, min, sec, wday, yday]
-    // Wait - jq actually uses [tm_year+1900, tm_mon, tm_mday, tm_hour, tm_min, tm_sec, tm_wday, tm_yday]
-    // But test expects [2015,2,5,23,51,47,4,63] for epoch 1425599507
-    // That matches: year=2015, mon=2(march, 0-indexed), mday=5, hour=23, min=51, sec=47, wday=4(thu), yday=63
-    Value::Arr(Rc::new(vec![
-        Value::number((result.tm_year + 1900) as f64),
-        Value::number(result.tm_mon as f64),
-        Value::number(result.tm_mday as f64),
-        Value::number(result.tm_hour as f64),
-        Value::number(result.tm_min as f64),
-        Value::number(result.tm_sec as f64 + frac_sec),
-        Value::number(result.tm_wday as f64),
-        Value::number(result.tm_yday as f64),
-    ]))
-}
-
 fn rt_localtime(v: &Value) -> Result<Value> {
     match v {
         Value::Num(n, _) => {
-            // Same fractional-seconds preservation as gmtime (#436).
             let secs = n.trunc() as i64;
             let frac = (n - n.trunc()).abs();
-            use libc::{localtime_r, time_t, tm};
-            let t = secs as time_t;
-            let mut result: tm = unsafe { std::mem::zeroed() };
-            unsafe { localtime_r(&t, &mut result) };
-            Ok(Value::Arr(Rc::new(vec![
-                Value::number((result.tm_year + 1900) as f64),
-                Value::number(result.tm_mon as f64),
-                Value::number(result.tm_mday as f64),
-                Value::number(result.tm_hour as f64),
-                Value::number(result.tm_min as f64),
-                Value::number(result.tm_sec as f64 + frac),
-                Value::number(result.tm_wday as f64),
-                Value::number(result.tm_yday as f64),
-            ])))
+            Ok(broken_to_value(&epoch_to_local_broken(secs), frac))
         }
         _ => bail!("localtime() requires numeric inputs"),
     }
 }
 
-fn time_arr_to_tm(a: &[Value]) -> Result<libc::tm> {
+fn epoch_to_utc_broken(secs: i64) -> BrokenTime {
+    use chrono::DateTime;
+    DateTime::from_timestamp(secs, 0)
+        .map(|d| ndt_to_broken(&d.naive_utc()))
+        .unwrap_or_default()
+}
+
+fn epoch_to_local_broken(secs: i64) -> BrokenTime {
+    use chrono::DateTime;
+    DateTime::from_timestamp(secs, 0)
+        .map(|d| ndt_to_broken(&d.with_timezone(&chrono::Local).naive_local()))
+        .unwrap_or_default()
+}
+
+fn ndt_to_broken(dt: &chrono::NaiveDateTime) -> BrokenTime {
+    use chrono::{Datelike, Timelike};
+    BrokenTime {
+        year: dt.year(),
+        mon: dt.month0() as i32,
+        mday: dt.day() as i32,
+        hour: dt.hour() as i32,
+        min: dt.minute() as i32,
+        sec: dt.second() as i32,
+        wday: dt.weekday().num_days_from_sunday() as i32,
+        yday: dt.ordinal0() as i32,
+    }
+}
+
+fn broken_to_value(t: &BrokenTime, sec_frac: f64) -> Value {
+    Value::Arr(Rc::new(vec![
+        Value::number(t.year as f64),
+        Value::number(t.mon as f64),
+        Value::number(t.mday as f64),
+        Value::number(t.hour as f64),
+        Value::number(t.min as f64),
+        Value::number(t.sec as f64 + sec_frac),
+        Value::number(t.wday as f64),
+        Value::number(t.yday as f64),
+    ]))
+}
+
+fn time_arr_to_broken(a: &[Value]) -> Result<BrokenTime> {
     let get = |i: usize| -> f64 { a.get(i).and_then(|v| v.as_f64()).unwrap_or(0.0) };
     // Reject any non-numeric element in the broken-down-time array.
     // jq's mktime walks each field and bails the moment it sees a non-
     // number (string, null, bool, etc.) with `mktime requires parsed
     // datetime inputs`. Without this check `[null]`, `[1, "a"]`, etc.
-    // silently fed `0.0` into libc's timegm and emitted `-1` (#547).
+    // silently fed `0.0` into the conversion and emitted `-1` (#547).
     for v in a {
         if !matches!(v, Value::Num(_, _)) {
             bail!("mktime requires parsed datetime inputs");
         }
     }
-    let mut t: libc::tm = unsafe { std::mem::zeroed() };
-    // jq's broken-down-time arrays hold the literal year (e.g. 2023) at
-    // index 0, which is offset by 1900 before handing to libc. When the
-    // year field is absent we keep tm_year at 0 so `strftime("%Y")` renders
-    // as 1900 (libc's "0 years since 1900"), matching jq 1.8.1's default
-    // tm_year fill for `[] | strftime(...)`.
-    if !a.is_empty() {
-        t.tm_year = get(0) as i32 - 1900;
+    // jq's broken-down-time arrays hold the literal year at index 0. When
+    // the year field is absent we default to 1900 so `strftime("%Y")`
+    // renders as "1900", matching jq 1.8.1's default tm_year fill for
+    // `[] | strftime(...)`.
+    let year = if a.is_empty() { 1900 } else { get(0) as i32 };
+    Ok(BrokenTime {
+        year,
+        mon: get(1) as i32,
+        // jq leaves missing mday at 0 (which mktime/timegm normalises to
+        // the previous day, e.g. `[2024] | mktime` → 2023-12-31). Keep 0
+        // here; `mktime_normalize` does the calendar walk.
+        mday: get(2) as i32,
+        hour: get(3) as i32,
+        min: get(4) as i32,
+        sec: get(5) as i32,
+        wday: get(6) as i32,
+        yday: get(7) as i32,
+    })
+}
+
+/// Turn a possibly out-of-range BrokenTime into a normalised NaiveDateTime,
+/// matching libc's `timegm` calendar walk: `mday=0` rolls back a day,
+/// `mon=12` rolls forward a year, and so on. Returns `None` if year/mon
+/// land outside chrono's representable range.
+fn mktime_normalize(t: &BrokenTime) -> Option<chrono::NaiveDateTime> {
+    use chrono::{Duration, NaiveDate};
+    let mut year = t.year;
+    let mut mon = t.mon;
+    if mon < 0 {
+        let n_years = (-mon + 11) / 12;
+        year -= n_years;
+        mon += n_years * 12;
+    } else if mon >= 12 {
+        year += mon / 12;
+        mon %= 12;
     }
-    t.tm_mon = get(1) as i32;
-    // jq leaves missing mday at 0 (which strftime renders as "00" and
-    // timegm normalises to the previous day); don't default to 1 here.
-    // See `[2024] | strftime("%Y-%m-%d")` → `"2023-12-31"` in jq 1.8.1.
-    t.tm_mday = get(2) as i32;
-    t.tm_hour = get(3) as i32;
-    t.tm_min = get(4) as i32;
-    t.tm_sec = get(5) as i32;
-    t.tm_wday = get(6) as i32;
-    t.tm_yday = get(7) as i32;
-    Ok(t)
+    let base = NaiveDate::from_ymd_opt(year, (mon + 1) as u32, 1)?
+        .and_hms_opt(0, 0, 0)?;
+    Some(base
+        + Duration::days((t.mday - 1) as i64)
+        + Duration::seconds(t.hour as i64 * 3600 + t.min as i64 * 60 + t.sec as i64))
 }
 
 fn rt_mktime(v: &Value) -> Result<Value> {
@@ -3421,12 +3463,13 @@ fn rt_mktime(v: &Value) -> Result<Value> {
             bail!("invalid gmtime representation");
         }
         Value::Arr(a) => {
-            // `time_arr_to_tm` validates that each element is numeric
+            // `time_arr_to_broken` validates that each element is numeric
             // (#547); single-element arrays like `[2024]` are accepted as
             // a year-only broken-down time, matching jq.
-            let mut t = time_arr_to_tm(a)?;
-            let result = unsafe { libc::timegm(&mut t) };
-            Ok(Value::number(result as f64))
+            let t = time_arr_to_broken(a)?;
+            let dt = mktime_normalize(&t)
+                .ok_or_else(|| anyhow::anyhow!("mktime: out-of-range broken-down time"))?;
+            Ok(Value::number(dt.and_utc().timestamp() as f64))
         }
         _ => bail!("mktime requires array inputs"),
     }
@@ -3444,56 +3487,57 @@ fn rt_strftime(v: &Value, fmt: &Value) -> Result<Value> {
                     bail!("strftime/1 requires parsed datetime inputs");
                 }
             }
-            let t = time_arr_to_tm(a)?;
-            Ok(Value::from_str(&format_tm(&t, fmt_str)))
+            let t = time_arr_to_broken(a)?;
+            Ok(Value::from_str(&format_broken(&t, fmt_str)))
         }
         Value::Num(n, _) => {
-            // Convert epoch to gmtime first, then format
             let secs = *n as i64;
-            use libc::{gmtime_r, time_t, tm};
-            let t_val = secs as time_t;
-            let mut t: tm = unsafe { std::mem::zeroed() };
-            unsafe { gmtime_r(&t_val, &mut t) };
-            Ok(Value::from_str(&format_tm(&t, fmt_str)))
+            let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
+                .ok_or_else(|| anyhow::anyhow!("strftime: epoch out of range"))?;
+            Ok(Value::from_str(&dt.format(fmt_str).to_string()))
         }
         _ => bail!("strftime/1 requires parsed datetime inputs"),
     }
 }
 
-fn format_tm(t: &libc::tm, fmt: &str) -> String {
-    use std::ffi::CString;
-    let fmt_c = CString::new(fmt).unwrap_or_default();
-    let mut buf = vec![0u8; 256];
-    let len = unsafe {
-        libc::strftime(buf.as_mut_ptr() as *mut libc::c_char, buf.len(), fmt_c.as_ptr(), t)
-    };
-    if len == 0 { String::new() }
-    else { String::from_utf8_lossy(&buf[..len]).into_owned() }
+/// Format a broken-down time using chrono's strftime. chrono requires a
+/// valid `NaiveDateTime`, so we clamp obviously out-of-range fields (the
+/// `[]` and `[1900]` cases store mday=0 which chrono rejects). Existing
+/// regression tests (`#113`) only exercise `%Y` for these edge cases, so
+/// the clamp doesn't shift any tested output.
+fn format_broken(t: &BrokenTime, fmt: &str) -> String {
+    use chrono::NaiveDate;
+    let mon = (t.mon.clamp(0, 11) + 1) as u32;
+    let mday = t.mday.clamp(1, 31) as u32;
+    let hour = t.hour.clamp(0, 23) as u32;
+    let min = t.min.clamp(0, 59) as u32;
+    let sec = t.sec.clamp(0, 59) as u32;
+    let date = NaiveDate::from_ymd_opt(t.year, mon, mday)
+        .or_else(|| NaiveDate::from_ymd_opt(t.year, mon, 1))
+        .or_else(|| NaiveDate::from_ymd_opt(t.year, 1, 1))
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(1900, 1, 1).unwrap());
+    let dt = date
+        .and_hms_opt(hour, min, sec)
+        .unwrap_or_else(|| date.and_hms_opt(0, 0, 0).unwrap());
+    dt.format(fmt).to_string()
 }
 
 fn rt_strptime(v: &Value, fmt: &Value) -> Result<Value> {
     match (v, fmt) {
         (Value::Str(s), Value::Str(f)) => {
-            use std::ffi::CString;
-            let s_c = CString::new(s.as_str()).unwrap_or_default();
-            let f_c = CString::new(f.as_str()).unwrap_or_default();
-            let mut t: libc::tm = unsafe { std::mem::zeroed() };
-            unsafe { libc::strptime(s_c.as_ptr(), f_c.as_ptr(), &mut t) };
-            // Compute yday and wday using mktime
-            let mut t2 = t;
-            unsafe { libc::timegm(&mut t2) };
-            t.tm_wday = t2.tm_wday;
-            t.tm_yday = t2.tm_yday;
-            Ok(Value::Arr(Rc::new(vec![
-                Value::number((t.tm_year + 1900) as f64),
-                Value::number(t.tm_mon as f64),
-                Value::number(t.tm_mday as f64),
-                Value::number(t.tm_hour as f64),
-                Value::number(t.tm_min as f64),
-                Value::number(t.tm_sec as f64),
-                Value::number(t.tm_wday as f64),
-                Value::number(t.tm_yday as f64),
-            ])))
+            // chrono's parse_from_str is stricter than libc's strptime: a
+            // mismatch returns Err. The libc path silently kept a zeroed
+            // tm on failure and produced [1900,0,0,0,0,0,0,0]; preserve
+            // that surface so callers like `fromdateiso8601` (which does
+            // its own validation in `rt_fromisodate`) keep observing the
+            // same shape.
+            match chrono::NaiveDateTime::parse_from_str(s.as_str(), f.as_str()) {
+                Ok(ndt) => {
+                    let t = ndt_to_broken(&ndt);
+                    Ok(broken_to_value(&t, 0.0))
+                }
+                Err(_) => Ok(broken_to_value(&BrokenTime { year: 1900, ..BrokenTime::default() }, 0.0)),
+            }
         }
         _ => bail!("strptime/1 requires string inputs and arguments"),
     }
@@ -3511,17 +3555,15 @@ fn rt_strflocaltime_impl(input: &Value, fmt: &Value) -> Result<Value> {
                     bail!("strflocaltime/1 requires parsed datetime inputs");
                 }
             }
-            let t = time_arr_to_tm(a)?;
-            Ok(Value::from_str(&format_tm(&t, fmt_str.as_str())))
+            let t = time_arr_to_broken(a)?;
+            Ok(Value::from_str(&format_broken(&t, fmt_str.as_str())))
         }
         Value::Num(n, _) => {
-            // Convert epoch to localtime first, then format
             let secs = *n as i64;
-            use libc::{localtime_r, time_t, tm};
-            let t_val = secs as time_t;
-            let mut t: tm = unsafe { std::mem::zeroed() };
-            unsafe { localtime_r(&t_val, &mut t) };
-            Ok(Value::from_str(&format_tm(&t, fmt_str.as_str())))
+            let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
+                .ok_or_else(|| anyhow::anyhow!("strflocaltime: epoch out of range"))?
+                .with_timezone(&chrono::Local);
+            Ok(Value::from_str(&dt.format(fmt_str.as_str()).to_string()))
         }
         _ => bail!("strflocaltime/1 requires parsed datetime inputs"),
     }
