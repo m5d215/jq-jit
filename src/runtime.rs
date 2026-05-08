@@ -23,10 +23,8 @@ unsafe extern "C" {
     fn erfc(x: f64) -> f64;
     fn expm1(x: f64) -> f64;
     fn log1p(x: f64) -> f64;
-    fn y0(x: f64) -> f64;
-    fn y1(x: f64) -> f64;
-    fn yn(n: i32, x: f64) -> f64;
-    fn jn(n: i32, x: f64) -> f64;
+    // y0/y1/yn/jn use libm (pure Rust) below — Windows UCRT's `_yn(n, 0)`
+    // returns NaN where POSIX returns -inf, breaking the regression suite.
     fn copysign(x: f64, y: f64) -> f64;
     fn fdim(x: f64, y: f64) -> f64;
     fn fmax(x: f64, y: f64) -> f64;
@@ -391,11 +389,11 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             _ => bail!("{} number required", errdesc(v)),
         }),
         "y0" => unary_op(args, |v| match v {
-            Value::Num(n, _) => Ok(Value::number(unsafe { y0(*n) })),
+            Value::Num(n, _) => Ok(Value::number(libm::y0(*n))),
             _ => bail!("{} number required", errdesc(v)),
         }),
         "y1" => unary_op(args, |v| match v {
-            Value::Num(n, _) => Ok(Value::number(unsafe { y1(*n) })),
+            Value::Num(n, _) => Ok(Value::number(libm::y1(*n))),
             _ => bail!("{} number required", errdesc(v)),
         }),
         "exp10" => unary_op(args, |v| match v {
@@ -479,11 +477,11 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
         "jn" => ternary_arg(args, |a, b| match (a, b) {
-            (Value::Num(n, _), Value::Num(x, _)) => Ok(Value::number(unsafe { jn(*n as i32, *x) })),
+            (Value::Num(n, _), Value::Num(x, _)) => Ok(Value::number(libm::jn(*n as i32, *x))),
             _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
         "yn" => ternary_arg(args, |a, b| match (a, b) {
-            (Value::Num(n, _), Value::Num(x, _)) => Ok(Value::number(unsafe { yn(*n as i32, *x) })),
+            (Value::Num(n, _), Value::Num(x, _)) => Ok(Value::number(libm::yn(*n as i32, *x))),
             _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
         "fma" => {
