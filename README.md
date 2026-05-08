@@ -47,11 +47,11 @@ Pre-built binaries from the [latest release](https://github.com/m5d215/jq-jit/re
 brew install m5d215/tap/jq-jit
 ```
 
-Only macOS arm64 and Linux x86_64 binaries are currently published. For other platforms, build from source (see below).
+The Homebrew tap covers macOS arm64 and Linux x86_64. Windows x86_64 ships as a `.zip` on the releases page (see below); for any other platform, build from source.
 
 ### Prebuilt binaries (manual)
 
-Download the tarball for your platform from the [releases page](https://github.com/m5d215/jq-jit/releases/latest) and extract `jq-jit` onto your `PATH`.
+Download the archive for your platform from the [releases page](https://github.com/m5d215/jq-jit/releases/latest) and extract the binary onto your `PATH`. macOS / Linux ship as `.tar.gz`, Windows as `.zip` (`jq-jit.exe`).
 
 ## Building
 
