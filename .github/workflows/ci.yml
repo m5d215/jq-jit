@@ -12,24 +12,30 @@ env:
 jobs:
   build-and-test:
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
 
       - name: Install jq 1.8.1 (for differential tests)
+        shell: bash
         run: |
           case "${{ runner.os }}-${{ runner.arch }}" in
-            Linux-X64)   asset=jq-linux-amd64 ;;
-            Linux-ARM64) asset=jq-linux-arm64 ;;
-            macOS-X64)   asset=jq-macos-amd64 ;;
-            macOS-ARM64) asset=jq-macos-arm64 ;;
+            Linux-X64)    asset=jq-linux-amd64;       binary=jq     ;;
+            Linux-ARM64)  asset=jq-linux-arm64;       binary=jq     ;;
+            macOS-X64)    asset=jq-macos-amd64;       binary=jq     ;;
+            macOS-ARM64)  asset=jq-macos-arm64;       binary=jq     ;;
+            Windows-X64)  asset=jq-windows-amd64.exe; binary=jq.exe ;;
             *) echo "unsupported runner: ${{ runner.os }}-${{ runner.arch }}"; exit 1 ;;
           esac
-          curl -L -o /tmp/jq "https://github.com/jqlang/jq/releases/download/jq-1.8.1/${asset}"
-          sudo install -m 0755 /tmp/jq /usr/local/bin/jq
-          jq --version | grep -q '^jq-1\.8\.'
+          dest="$RUNNER_TEMP/jq181"
+          mkdir -p "$dest"
+          curl -L -o "$dest/$binary" "https://github.com/jqlang/jq/releases/download/jq-1.8.1/${asset}"
+          chmod +x "$dest/$binary"
+          "$dest/$binary" --version | grep -q '^jq-1\.8\.'
+          echo "JQ_BIN=$dest/$binary" >> "$GITHUB_ENV"
 
       - name: Build
         run: cargo build --release
