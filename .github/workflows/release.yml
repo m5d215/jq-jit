@@ -13,28 +13,36 @@ env:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             target: linux-x86_64
           - os: macos-latest
             target: macos-arm64
+          - os: windows-latest
+            target: windows-x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
 
       - name: Install jq 1.8.1 (for differential tests)
+        shell: bash
         run: |
           case "${{ runner.os }}-${{ runner.arch }}" in
-            Linux-X64)   asset=jq-linux-amd64 ;;
-            Linux-ARM64) asset=jq-linux-arm64 ;;
-            macOS-X64)   asset=jq-macos-amd64 ;;
-            macOS-ARM64) asset=jq-macos-arm64 ;;
+            Linux-X64)    asset=jq-linux-amd64;       binary=jq     ;;
+            Linux-ARM64)  asset=jq-linux-arm64;       binary=jq     ;;
+            macOS-X64)    asset=jq-macos-amd64;       binary=jq     ;;
+            macOS-ARM64)  asset=jq-macos-arm64;       binary=jq     ;;
+            Windows-X64)  asset=jq-windows-amd64.exe; binary=jq.exe ;;
             *) echo "unsupported runner: ${{ runner.os }}-${{ runner.arch }}"; exit 1 ;;
           esac
-          curl -L -o /tmp/jq "https://github.com/jqlang/jq/releases/download/jq-1.8.1/${asset}"
-          sudo install -m 0755 /tmp/jq /usr/local/bin/jq
-          jq --version | grep -q '^jq-1\.8\.'
+          dest="$RUNNER_TEMP/jq181"
+          mkdir -p "$dest"
+          curl -L -o "$dest/$binary" "https://github.com/jqlang/jq/releases/download/jq-1.8.1/${asset}"
+          chmod +x "$dest/$binary"
+          "$dest/$binary" --version | grep -q '^jq-1\.8\.'
+          echo "JQ_BIN=$dest/$binary" >> "$GITHUB_ENV"
 
       - name: Build
         run: cargo build --release
@@ -42,7 +50,9 @@ jobs:
       - name: Run tests
         run: cargo test --release
 
-      - name: Package
+      - name: Package (tar.gz)
+        if: matrix.os != 'windows-latest'
+        shell: bash
         run: |
           staging="jq-jit-${{ matrix.target }}"
           mkdir -p "$staging"
@@ -50,11 +60,24 @@ jobs:
           cp LICENSE-MIT LICENSE-APACHE THIRD-PARTY-LICENSES.md README.md "$staging/"
           tar czf "${staging}.tar.gz" -C "$staging" .
 
+      - name: Package (zip)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          staging="jq-jit-${{ matrix.target }}"
+          mkdir -p "$staging"
+          cp target/release/jq-jit.exe "$staging/"
+          cp LICENSE-MIT LICENSE-APACHE THIRD-PARTY-LICENSES.md README.md "$staging/"
+          7z a "${staging}.zip" "./${staging}/*" >/dev/null
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: jq-jit-${{ matrix.target }}
-          path: jq-jit-${{ matrix.target }}.tar.gz
+          path: |
+            jq-jit-${{ matrix.target }}.tar.gz
+            jq-jit-${{ matrix.target }}.zip
+          if-no-files-found: ignore
 
   release:
     needs: build
@@ -68,7 +91,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-        run: gh release create "${{ github.ref_name }}" --generate-notes jq-jit-*.tar.gz
+        run: gh release create "${{ github.ref_name }}" --generate-notes jq-jit-*.tar.gz jq-jit-*.zip
 
       - name: Checkout homebrew-tap
         uses: actions/checkout@v6
