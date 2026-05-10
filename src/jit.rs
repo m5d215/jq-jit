@@ -5541,12 +5541,17 @@ extern "C" fn jit_rt_field_binop_field(
         };
         let ka = std::slice::from_raw_parts(ka_ptr, ka_len);
         let kb = std::slice::from_raw_parts(kb_ptr, kb_len);
-        // Single-pass scan for both fields
+        // Single-pass scan for both fields. When ka == kb (e.g. `.n + .n`) a
+        // matching entry must populate both slots — the else-if branch alone
+        // would leave vb empty and silently read the second operand as null.
+        let same_key = ka == kb;
         let mut va: Option<&Value> = None;
         let mut vb: Option<&Value> = None;
         for (k, v) in obj.iter() {
             let kb_entry = k.as_bytes();
-            if va.is_none() && kb_entry == ka { va = Some(v); if vb.is_some() { break; } }
+            if same_key {
+                if kb_entry == ka { va = Some(v); vb = Some(v); break; }
+            } else if va.is_none() && kb_entry == ka { va = Some(v); if vb.is_some() { break; } }
             else if vb.is_none() && kb_entry == kb { vb = Some(v); if va.is_some() { break; } }
         }
         // Fast path: both fields are Num (most common case for arithmetic)
@@ -6792,12 +6797,14 @@ extern "C" fn jit_rt_obj_from_fields(
             for (k, v) in src_obj.iter() {
                 if found == all_found { break; }
                 let k_bytes = k.as_bytes();
+                // Do NOT break after the first matching pair — multiple pairs
+                // may reference the same source field (e.g. `{a: .n, b: .n}`),
+                // and each must receive a copy of the value.
                 for (fi, &(_, _, sfp, sfl)) in pairs.iter().enumerate() {
                     if fi < 64 && (found & (1u64 << fi)) != 0 { continue; }
                     if k_bytes.len() == sfl && k_bytes == std::slice::from_raw_parts(sfp, sfl) {
                         val_buf[fi].write(v.clone());
                         found |= 1u64 << fi;
-                        break;
                     }
                 }
             }
