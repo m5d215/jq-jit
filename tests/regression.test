@@ -9920,3 +9920,14 @@ import "issue_638" as M; M::f
 import "issue_638" as M; M::to_multiprecision
 196
 [6,9,1]
+
+# Issue #641: deeply nested `range as $x | select` chains compile-time
+# blew up exponentially because the IfThenElse / `_ =>` cases in
+# `flatten_gen_pipe` and `flatten_gen_with_each_output` re-ran a full
+# `test_flattener` pre-check at every layer; combined with `range as $x`
+# falling through `flatten_gen_let_binding`'s collect-and-iterate
+# fallback, a 9-stage Project Euler P43 pipeline took ~30s to run.
+# The shape below is a small repro that completes in <100ms post-fix.
+[ range(0; 10) as $a | range(0; 10) as $b | select($b != $a) | range(0; 10) as $c | select($c != $a and $c != $b) | range(0; 10) as $d | select($d != $a and $d != $b and $d != $c) | select(($a*100+$b*10+$c) % 7 == 0) | [$a,$b,$c,$d] ] | length
+null
+728
