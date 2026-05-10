@@ -2600,6 +2600,19 @@ pub fn eval(
                         if let Some(parts) = detect_linear_recursive_gen(&func.body, fid) {
                             return eval_linear_recursive_gen(parts, input, env, cb);
                         }
+                        // Recursive zero-arg (or arity-mismatched) call: rename
+                        // the body's local bindings to fresh indices so each
+                        // frame's `as $x` / Reduce / Foreach / Label gets its
+                        // own slot. Without this, the callback-driven eval
+                        // model lets an outer frame's body run while an inner
+                        // frame still owns the shared slot, and the outer
+                        // read sees the inner value (#635). The non-zero-arg
+                        // recursive path already routes through `Recursive` /
+                        // `CacheMiss` for the same reason.
+                        let mut nv = env.borrow().next_var;
+                        let body = substitute_and_rename(&func.body, &[], &[], &mut nv);
+                        env.borrow_mut().next_var = nv;
+                        return stacker::maybe_grow(128 * 1024, 32 * 1024 * 1024, || eval(&body, input, env, cb));
                     }
                     stacker::maybe_grow(128 * 1024, 32 * 1024 * 1024, || eval(&func.body, input, env, cb))
                 }
