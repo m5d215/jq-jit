@@ -56,6 +56,21 @@ impl Scope {
         func_id
     }
 
+    /// Push a function body to `compiled_funcs` only, without registering it
+    /// in the name-lookup table. Used by module loading for nested defs that
+    /// must keep a slot for runtime FuncCall dispatch but should not be
+    /// callable by name from outside their parent.
+    fn define_anon_func(&mut self, nargs: usize, body: Expr, param_vars: Vec<u16>) -> usize {
+        let func_id = self.compiled_funcs.len();
+        self.compiled_funcs.push(CompiledFunc {
+            name: None,
+            nargs,
+            body,
+            param_vars,
+        });
+        func_id
+    }
+
     fn update_func_body(&mut self, func_id: usize, body: Expr, param_vars: Vec<u16>) {
         if let Some(f) = self.compiled_funcs.get_mut(func_id) {
             f.body = body;
@@ -1110,18 +1125,28 @@ impl Parser {
         // Register module's functions into our scope with namespace prefix.
         // Build a func_id mapping (module-internal → main scope) so that
         // intra-module FuncCall references get remapped correctly.
+        //
+        // Top-level defs go through `define_func` so the namespaced name is
+        // looked up by callers in the main script. Inner defs (nested inside
+        // an outer def) are listed in `compiled_funcs` but not in
+        // `scope.funcs` — they still need a slot in the main scope's
+        // `compiled_funcs` so their `FuncCall` references resolve at runtime,
+        // but they must not be reachable by name from outside their parent
+        // (#638). Without this, a nested recursive `def g` inside a module's
+        // exported `def f` triggered "undefined function id" at the recursive
+        // self-call site.
         let mut func_id_map: Vec<(usize, usize)> = Vec::new(); // (old, new)
-
-        // First pass: register all functions with placeholder bodies to get new func_ids
-        for (name, mod_func_id, nargs) in &mod_parser.scope.funcs {
-            let func = &mod_parser.scope.compiled_funcs[*mod_func_id];
-            let new_name = if namespace.is_empty() {
-                name.clone()
+        for (mod_func_id, mod_func) in mod_parser.scope.compiled_funcs.iter().enumerate() {
+            let top_level_name = mod_parser.scope.funcs.iter()
+                .find(|(_, fid, _)| *fid == mod_func_id)
+                .map(|(name, _, _)| name.clone());
+            let new_id = if let Some(name) = top_level_name {
+                let new_name = if namespace.is_empty() { name } else { format!("{}::{}", namespace, name) };
+                self.scope.define_func(&new_name, mod_func.nargs, Expr::Empty, mod_func.param_vars.clone())
             } else {
-                format!("{}::{}", namespace, name)
+                self.scope.define_anon_func(mod_func.nargs, Expr::Empty, mod_func.param_vars.clone())
             };
-            let new_id = self.scope.define_func(&new_name, *nargs, Expr::Empty, func.param_vars.clone());
-            func_id_map.push((*mod_func_id, new_id));
+            func_id_map.push((mod_func_id, new_id));
         }
 
         // Second pass: remap func_ids in bodies and install them
