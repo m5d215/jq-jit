@@ -9875,3 +9875,31 @@ null
 {n: 5, m: 7} | {a: .n, b: .m, c: .n}
 null
 {"a":5,"b":7,"c":5}
+
+# Issue #635: a zero-arg recursive `def` shared one var slot per `as`-bound
+# name across every recursive frame. The callback-driven eval model lets an
+# outer frame's body run while an inner frame still owns the slot, so an
+# outer `$x` read returned the inner value. The non-zero-arg case routed
+# through `substitute_and_rename` already; the Direct path now does the
+# same when the function is recursive.
+def f: . as $x | if . == 0 then null else (. - 1 | f) as $r | [$x, $r] end; 3 | f
+null
+[3,[2,[1,null]]]
+
+# Issue #635: function parameters were unaffected (the substitute_and_rename
+# path already covers them) — keep this around as a guard.
+def f($x): if $x == 0 then null else ($x - 1 | f($x - 1)) as $r | [$x, $r] end; f(3)
+null
+[3,[2,[1,null]]]
+
+# Issue #635: post-recursion `$x` read with a list-prepend body — verifies
+# the outer-frame `$x` survives a recursive call that itself rebinds `$x`.
+def f: . as $x | if . == 0 then [] else (. - 1 | f) as $r | $r + [$x] end; 5 | f
+null
+[1,2,3,4,5]
+
+# Issue #635: classic doubly-recursive numeric (no shared slot risk, but
+# guards that the rename path doesn't break the common case).
+def fib: . as $n | if $n < 2 then $n else ($n - 1 | fib) + ($n - 2 | fib) end; 10 | fib
+null
+55
