@@ -9903,3 +9903,20 @@ null
 def fib: . as $n | if $n < 2 then $n else ($n - 1 | fib) + ($n - 2 | fib) end; 10 | fib
 null
 55
+
+# Issue #638: a `def` exported from an imported module with a nested
+# recursive helper (`def g:` inside `def f:`) failed with
+# "undefined function id" because module loading only re-registered the
+# top-level `scope.funcs` entries; nested defs sat in `compiled_funcs`
+# without a remapping, so the FuncCall self-reference couldn't resolve.
+# Fixture lives at `tests/modules/issue_638.jq`.
+import "issue_638" as M; M::f
+3
+[3,2,1]
+
+# Issue #638: same root cause, distinct surface — a nested generator
+# that integer-divides until it hits 0. Pre-fix this collapsed to `[[]]`
+# (no error, just a silently-broken inner generator).
+import "issue_638" as M; M::to_multiprecision
+196
+[6,9,1]
