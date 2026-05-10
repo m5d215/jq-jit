@@ -9824,3 +9824,54 @@ nth(.; 0 | recurse([., .])) | (.. | scalars) |= .+1
 .a |= empty | .b += 1
 {"a":1,"b":2}
 {"b":3}
+
+# Issue #634: `.f OP .f` (same field on both sides) — the FieldBinopField
+# JIT fast path used a single-pass `if/else if` scan that filled only the
+# first slot when both keys matched, so the second operand silently read
+# as null. Verify all five arithmetic ops on a piped object input.
+{n: 5} | .n + .n
+null
+10
+
+{n: 5} | .n - .n
+null
+0
+
+{n: 5} | .n * .n
+null
+25
+
+{n: 6} | .n / .n
+null
+1
+
+{n: 7} | .n % .n
+null
+0
+
+# Issue #634: the same single-pass scan is used by the comparison ops.
+# Pre-fix `.n == .n` returned `false` because the second projection read null.
+{n: 5} | .n == .n
+null
+true
+
+{n: 5} | .n > .n
+null
+false
+
+# Issue #634: the original surfacing was a quadratic until-condition that
+# read the loop variable on both sides of `*`.
+def f: {n: 0} | until(.n * .n > 100; .n += 1) | .n; f
+null
+11
+
+# Issue #634: ObjFromFields fusion (introduced earlier) had the same shape
+# bug — multiple output fields sharing one source field only filled the
+# first pair and left the rest as null.
+{n: 5} | {a: .n, b: .n, c: .n}
+null
+{"a":5,"b":5,"c":5}
+
+{n: 5, m: 7} | {a: .n, b: .m, c: .n}
+null
+{"a":5,"b":7,"c":5}
