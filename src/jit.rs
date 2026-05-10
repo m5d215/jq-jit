@@ -517,6 +517,12 @@ struct Flattener {
     /// Pre-allocated Value constants for fused ops (hoisted out of per-call code).
     #[allow(clippy::vec_box)]
     value_constants: Vec<Box<Value>>,
+    /// True when this Flattener is a discardable feasibility probe (created by
+    /// `test_flattener`). Inner cases use this to skip their own pre-checks —
+    /// the caller's outer pre-check already covers the whole sub-tree, and
+    /// recursing into more pre-checks within a probe makes compile time
+    /// explode for `select`-heavy chains (#641).
+    is_test: bool,
 }
 
 impl Flattener {
@@ -525,7 +531,8 @@ impl Flattener {
                      collect_depth: 0, try_depth: 0, try_catch_target: None,
                      label_targets: HashMap::new(), funcs: Vec::new(),
                      limit_state: None, closure_ops: Vec::new(),
-                     expanding_funcs: HashSet::new(), value_constants: Vec::new() }
+                     expanding_funcs: HashSet::new(), value_constants: Vec::new(),
+                     is_test: false }
     }
 
     /// Materialize a Literal into a heap-allocated Value and return a stable pointer.
@@ -560,6 +567,7 @@ impl Flattener {
         t.limit_state = self.limit_state;
         t.closure_ops = self.closure_ops.clone();
         t.expanding_funcs = self.expanding_funcs.clone();
+        t.is_test = true;
         t
     }
 
@@ -3373,8 +3381,11 @@ impl Flattener {
                 true
             }
             Expr::IfThenElse { cond, then_branch, else_branch } if is_scalar(cond) => {
-                // Pre-check both branches
-                {
+                // Pre-check both branches. Skipped when already in a probe
+                // pass (#641): the outer probe already covers this sub-tree
+                // and the recursion inside makes compile time blow up
+                // exponentially for deep `select` chains.
+                if !self.is_test {
                     let mut test = self.test_flattener();
                     let t_in = test.alloc_slot();
                     if !test.flatten_gen_with_each_output(then_branch, t_in, action) { return false; }
@@ -3388,13 +3399,13 @@ impl Flattener {
                 self.emit(JitOp::Drop { slot: cond_val });
 
                 self.emit(JitOp::Label { id: then_lbl });
-                self.flatten_gen_with_each_output(then_branch, input_slot, action);
+                let then_ok = self.flatten_gen_with_each_output(then_branch, input_slot, action);
                 self.emit(JitOp::Jump { label: done_lbl });
 
                 self.emit(JitOp::Label { id: else_lbl });
-                self.flatten_gen_with_each_output(else_branch, input_slot, action);
+                let else_ok = self.flatten_gen_with_each_output(else_branch, input_slot, action);
                 self.emit(JitOp::Label { id: done_lbl });
-                true
+                then_ok && else_ok
             }
             Expr::LetBinding { var_index, value, body } if is_scalar(value) => {
                 let val = self.flatten_scalar(value, input_slot);
@@ -3540,8 +3551,11 @@ impl Flattener {
                     left: Box::new((**else_branch).clone()),
                     right: Box::new(right.clone()),
                 };
-                // Pre-check both branches
-                {
+                // Pre-check both branches before emitting any ops. Skipped
+                // when we're already inside a feasibility probe — the outer
+                // probe already covers this sub-tree, and recursing here is
+                // what makes deep `select | …` chains compile in 2^N (#641).
+                if !self.is_test {
                     let mut test = self.test_flattener();
                     let t_in = test.alloc_slot();
                     if !test.flatten_gen(&then_pipe, t_in) { return false; }
@@ -3555,13 +3569,13 @@ impl Flattener {
                 self.emit(JitOp::Drop { slot: cond_val });
 
                 self.emit(JitOp::Label { id: then_lbl });
-                self.flatten_gen(&then_pipe, input_slot);
+                let then_ok = self.flatten_gen(&then_pipe, input_slot);
                 self.emit(JitOp::Jump { label: done_lbl });
 
                 self.emit(JitOp::Label { id: else_lbl });
-                self.flatten_gen(&else_pipe, input_slot);
+                let else_ok = self.flatten_gen(&else_pipe, input_slot);
                 self.emit(JitOp::Label { id: done_lbl });
-                true
+                then_ok && else_ok
             }
             Expr::Range { from, to, step } => {
                 if !is_scalar(from) || !is_scalar(to) { return false; }
@@ -3737,8 +3751,9 @@ impl Flattener {
 
             // Generic fallback: for any generator left, iterate its outputs and apply right
             _ => {
-                // Pre-check: can we compile both left and right?
-                {
+                // Pre-check: can we compile both left and right? Skipped when
+                // we're already in a probe pass (#641 — see IfThenElse case).
+                if !self.is_test {
                     let mut test = self.test_flattener();
                     let t_in = test.alloc_slot();
                     if !test.flatten_gen(left, t_in) { return false; }
@@ -4838,6 +4853,49 @@ impl Flattener {
                     s.flatten_gen(body, input_slot);
                 });
                 self.emit(JitOp::Drop { slot: container });
+            }
+            // `range(...) as $x | body` — emit the range loop inline so each
+            // iteration just sets $x and runs body. Without this, the generic
+            // fallback below collects all range outputs into a fresh array per
+            // call before iterating, which makes deep `range as $x | …` chains
+            // allocate one Vec per outer iteration at every nested level (#641).
+            Expr::Range { from, to, step }
+                if is_scalar(from) && is_scalar(to) && step.as_ref().is_none_or(|s| is_scalar(s)) =>
+            {
+                let from_val = self.flatten_scalar(from, input_slot);
+                let to_val = self.flatten_scalar(to, input_slot);
+                let step_val = if let Some(s) = step {
+                    self.flatten_scalar(s, input_slot)
+                } else {
+                    let one = self.alloc_slot();
+                    self.emit(JitOp::Num { dst: one, val: 1.0, repr: None });
+                    one
+                };
+                let cur = self.alloc_var();
+                let to_v = self.alloc_var();
+                let step_v = self.alloc_var();
+                let cmp = self.alloc_var();
+                self.emit(JitOp::ToF64Var { dst_var: cur, src: from_val });
+                self.emit(JitOp::ToF64Var { dst_var: to_v, src: to_val });
+                self.emit(JitOp::ToF64Var { dst_var: step_v, src: step_val });
+                self.emit(JitOp::Drop { slot: from_val });
+                self.emit(JitOp::Drop { slot: to_val });
+                self.emit(JitOp::Drop { slot: step_val });
+                let head = self.alloc_label();
+                let body_lbl = self.alloc_label();
+                let done = self.alloc_label();
+                self.emit(JitOp::Label { id: head });
+                self.emit(JitOp::RangeCheck { dst_var: cmp, cur_var: cur, to_var: to_v, step_var: step_v });
+                self.emit(JitOp::BranchOnVar { var: cmp, nonzero_label: body_lbl, zero_label: done });
+                self.emit(JitOp::Label { id: body_lbl });
+                let num = self.alloc_slot();
+                self.emit(JitOp::F64Num { dst: num, src_var: cur });
+                self.emit(JitOp::SetVar { var_index, src: num });
+                self.emit(JitOp::Drop { slot: num });
+                self.flatten_gen(body, input_slot);
+                self.emit(JitOp::F64Add { dst_var: cur, a_var: cur, b_var: step_v });
+                self.emit(JitOp::Jump { label: head });
+                self.emit(JitOp::Label { id: done });
             }
             _ => {
                 // Generic fallback: collect value outputs, iterate each
