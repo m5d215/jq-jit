@@ -10033,3 +10033,15 @@ null
 def gcd($a; $b): if $b == 0 then $a else gcd($b; $a % $b) end; 100 as $LIMIT | ($LIMIT | sqrt | floor) as $MMAX | reduce (range(2; $MMAX + 1) as $m | range(1; $m) as $n | select(($m - $n) % 2 == 1 and gcd($m; $n) == 1) | (2 * $m * ($m + $n)) as $Lp | select($Lp <= $LIMIT) | range($Lp; $LIMIT + 1; $Lp)) as $L ([range(0; $LIMIT + 1) | 0]; .[$L] += 1) | [.[] | select(. == 1)] | length
 null
 11
+
+# Issue #655: Project Euler P60 sibling case of #653. Recursive DFS calls a
+# `compat($p; $q)` helper which calls Miller-Rabin `is_prime` (reduce over
+# bases, with a nested reduce for the squaring loop) on `concat($p; $q)` —
+# the exact "recursive def with params calling helper with nested reduce"
+# combination that overflowed `next_var` on v1.5.5 and aborted with
+# `null and number cannot be multiplied` within ~1s. Sized down to
+# LIMIT=200 (the bug fired even at LIMIT=1000) so the test runs in ~40 ms
+# and returns `null` (no 5-prime pair-set exists at that scale).
+200 as $LIMIT | ([range(0; $LIMIT + 1) | true] | .[0] = false | .[1] = false | reduce range(2; ($LIMIT | sqrt | floor) + 1) as $p (.; if .[$p] then reduce range($p * $p; $LIMIT + 1; $p) as $m (.; .[$m] = false) else . end ) | . as $sv | [range(2; $LIMIT + 1) | select($sv[.])]) as $primes | ($primes - [2, 5]) as $cand | def mulmod($a; $b; $n): ($a / 16384 | floor) as $ah | ($a % 16384) as $al | (($ah * $b) % $n * 16384 + $al * $b) % $n; def powmod($base; $e; $n): if $n <= 1 then 0 else {b: ($base % $n), e: $e, r: 1} | until(.e == 0; (if .e % 2 == 1 then mulmod(.r; .b; $n) else .r end) as $nr | {b: mulmod(.b; .b; $n), e: (.e / 2 | floor), r: $nr} ) | .r end; def is_prime($n): if $n < 2 then false elif $n == 2 or $n == 3 then true elif $n % 2 == 0 then false else ({s: 0, d: ($n - 1)} | until(.d % 2 == 1; {s: (.s + 1), d: (.d / 2 | floor)})) as $sd | $sd.s as $s | $sd.d as $d | reduce [2, 7, 61][] as $a (true; . and ( if $a >= $n then true else powmod($a; $d; $n) as $x | if $x == 1 or $x == $n - 1 then true else ({x: $x, found: false} | reduce range(0; $s - 1) as $_ (.; if .found then . else mulmod(.x; .x; $n) as $nx | if $nx == $n - 1 then {x: $nx, found: true} else {x: $nx, found: false} end end )) | .found end end)) end; def concat($a; $b): $a * pow(10; ($b | tostring | length)) + $b; def compat($p; $q): is_prime(concat($p; $q)) and is_prime(concat($q; $p)); def dfs($chosen; $sum; $startIdx; $best): if ($chosen | length) == 5 then if $best == null or $sum < $best then $sum else $best end else ($chosen | length) as $L | reduce range($startIdx; $cand | length) as $i ($best; . as $cur | $cand[$i] as $p | if $cur != null and ($sum + $p * (5 - $L)) >= $cur then $cur elif ($chosen | reduce .[] as $c (true; . and compat($c; $p))) then dfs($chosen + [$p]; $sum + $p; $i + 1; $cur) else $cur end ) end; dfs([]; 0; 0; null)
+null
+null
