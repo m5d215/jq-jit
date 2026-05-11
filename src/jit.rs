@@ -523,6 +523,13 @@ struct Flattener {
     /// recursing into more pre-checks within a probe makes compile time
     /// explode for `select`-heavy chains (#641).
     is_test: bool,
+    /// Set by `inline_func_calls` when it leaves a recursive FuncCall un-inlined
+    /// (the inner call's `func_id` is already in `expanding_funcs`). Callers
+    /// must treat the inlined tree as non-JIT-compilable in that case — the
+    /// JIT has no recursion-safe path for a recursive def and silently
+    /// emitting partial code returns the init value instead of the right
+    /// answer. (#648)
+    has_unresolved_recursion: bool,
 }
 
 impl Flattener {
@@ -532,7 +539,7 @@ impl Flattener {
                      label_targets: HashMap::new(), funcs: Vec::new(),
                      limit_state: None, closure_ops: Vec::new(),
                      expanding_funcs: HashSet::new(), value_constants: Vec::new(),
-                     is_test: false }
+                     is_test: false, has_unresolved_recursion: false }
     }
 
     /// Materialize a Literal into a heap-allocated Value and return a stable pointer.
@@ -568,25 +575,38 @@ impl Flattener {
         t.closure_ops = self.closure_ops.clone();
         t.expanding_funcs = self.expanding_funcs.clone();
         t.is_test = true;
+        t.has_unresolved_recursion = self.has_unresolved_recursion;
         t
     }
 
     /// Inline FuncCall nodes by substituting function bodies.
     /// Returns the expression with FuncCall replaced by the function body.
-    /// If a recursive call is detected, returns the original expression unchanged.
-    fn inline_func_calls(&self, expr: &Expr) -> Expr {
+    /// If a recursive call is detected, returns the original expression
+    /// unchanged and sets `has_unresolved_recursion` so callers can fall
+    /// back to eval. The previous `&self` signature meant `expanding_funcs`
+    /// could never be mutated, so the guard at the top of the FuncCall arm
+    /// never fired and recursive defs (`def gcd($a;$b): ... gcd(...) ...`)
+    /// caused unbounded inlining — manifesting as a stack overflow at JIT
+    /// compile time once `is_jit_compilable_with_funcs`'s Reduce scalar
+    /// fast path falsely accepted such filters (#648).
+    fn inline_func_calls(&mut self, expr: &Expr) -> Expr {
         match expr {
             Expr::FuncCall { func_id, args } => {
                 if *func_id >= self.funcs.len() { return expr.clone(); }
-                if self.expanding_funcs.contains(func_id) { return expr.clone(); }
-                let func = &self.funcs[*func_id];
+                if self.expanding_funcs.contains(func_id) {
+                    self.has_unresolved_recursion = true;
+                    return expr.clone();
+                }
+                let func = self.funcs[*func_id].clone();
                 let body = if !func.param_vars.is_empty() && !args.is_empty() {
                     crate::eval::substitute_params(&func.body, &func.param_vars, args)
                 } else {
                     func.body.clone()
                 };
-                // Recursively inline any FuncCalls in the resulting body
-                self.inline_func_calls(&body)
+                self.expanding_funcs.insert(*func_id);
+                let result = self.inline_func_calls(&body);
+                self.expanding_funcs.remove(func_id);
+                result
             }
             Expr::Pipe { left, right } => {
                 let new_left = Box::new(self.inline_func_calls(left));
@@ -8177,6 +8197,14 @@ impl JitCompiler {
         // Pre-inline function calls and apply semantic optimizations.
         // Always run to catch to_entries|from_entries and similar rewrites.
         let inlined = fl.inline_func_calls(expr);
+        // Recursive def left an un-inlined FuncCall in the tree. The JIT
+        // can't safely emit a recursive call (no host-stack management),
+        // and pressing on would produce a partial code path that returns
+        // garbage. Bail so the binary falls back to eval, which already
+        // handles recursion via `stacker::maybe_grow` (#648).
+        if fl.has_unresolved_recursion {
+            bail!("Expression not JIT-compilable: contains recursive function call");
+        }
         let compile_expr = &inlined;
         let input_slot = fl.alloc_slot(); // slot 0 = input ptr (read-only, owned by caller)
         // Use input_slot directly — flatten_gen only reads it, never writes/drops it.
@@ -9524,8 +9552,16 @@ pub fn is_jit_compilable(expr: &Expr) -> bool {
 pub fn is_jit_compilable_with_funcs(expr: &Expr, funcs: &[CompiledFunc]) -> bool {
     let mut fl = Flattener::new();
     fl.funcs = funcs.to_vec();
+    // Mirror `compile_with_funcs`'s inline step so we detect the same
+    // "recursive def in expr" shape it would reject. Without this, the
+    // Reduce scalar fast path in `flatten_gen` (line 2062) silently returns
+    // true even when the source generator references a recursive def — and
+    // the eventual `compile_with_funcs` then stack-overflows in
+    // `inline_func_calls` (#648).
+    let inlined = fl.inline_func_calls(expr);
+    if fl.has_unresolved_recursion { return false; }
     let input = fl.alloc_slot();
-    fl.flatten_gen(expr, input)
+    fl.flatten_gen(&inlined, input)
 }
 
 unsafe extern "C" fn collect_callback(value: *const Value, ctx: *mut u8) -> i64 {
