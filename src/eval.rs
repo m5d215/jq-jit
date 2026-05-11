@@ -2590,19 +2590,34 @@ pub fn eval(
                         // read sees the inner value (#635). The non-zero-arg
                         // recursive path already routes through `Recursive` /
                         // `CacheMiss` for the same reason.
-                        let mut nv = env.borrow().next_var;
+                        //
+                        // Roll `next_var` back when the frame returns: indices
+                        // only need to be unique among CONCURRENTLY-active
+                        // frames, not across an entire run's total calls.
+                        // Without the rollback, every recursive call (including
+                        // backtracking branches that already returned) leaves
+                        // its rename slots claimed forever, and a deep solver
+                        // (e.g. Sudoku) overflows the u16 counter back into
+                        // parse-time index territory — #653.
+                        let nv_before = env.borrow().next_var;
+                        let mut nv = nv_before;
                         let body = substitute_and_rename(&func.body, &[], &[], &mut nv);
                         env.borrow_mut().next_var = nv;
-                        return stacker::maybe_grow(128 * 1024, 32 * 1024 * 1024, || eval(&body, input, env, cb));
+                        let result = stacker::maybe_grow(128 * 1024, 32 * 1024 * 1024, || eval(&body, input, env, cb));
+                        env.borrow_mut().next_var = nv_before;
+                        return result;
                     }
                     stacker::maybe_grow(128 * 1024, 32 * 1024 * 1024, || eval(&func.body, input, env, cb))
                 }
                 FuncAction::CacheHit(body) => eval(&body, input, env, cb),
                 FuncAction::Recursive(func) => {
-                    let mut nv = env.borrow().next_var;
+                    let nv_before = env.borrow().next_var;
+                    let mut nv = nv_before;
                     let body = substitute_and_rename(&func.body, &func.param_vars, args, &mut nv);
                     env.borrow_mut().next_var = nv;
-                    stacker::maybe_grow(128 * 1024, 32 * 1024 * 1024, || eval(&body, input, env, cb))
+                    let result = stacker::maybe_grow(128 * 1024, 32 * 1024 * 1024, || eval(&body, input, env, cb));
+                    env.borrow_mut().next_var = nv_before;
+                    result
                 }
                 FuncAction::CacheMiss(func) => {
                     // Check if recursive (first call or unknown)
@@ -2619,10 +2634,13 @@ pub fn eval(
                         }
                     };
                     if is_recursive {
-                        let mut nv = env.borrow().next_var;
+                        let nv_before = env.borrow().next_var;
+                        let mut nv = nv_before;
                         let body = substitute_and_rename(&func.body, &func.param_vars, args, &mut nv);
                         env.borrow_mut().next_var = nv;
-                        stacker::maybe_grow(128 * 1024, 32 * 1024 * 1024, || eval(&body, input, env, cb))
+                        let result = stacker::maybe_grow(128 * 1024, 32 * 1024 * 1024, || eval(&body, input, env, cb));
+                        env.borrow_mut().next_var = nv_before;
+                        result
                     } else {
                         let body = substitute_params(&func.body, &func.param_vars, args);
                         let body_rc = Rc::new(body);
