@@ -2392,7 +2392,15 @@ pub fn eval(
                 }
                 return Err(e);
             }
-            let mut result = input.clone();
+            // Move `input` into `result` so `rt_setpath_mut`'s `Rc::make_mut`
+            // can mutate in place when the caller exclusively owns the value.
+            // The previous `input.clone()` bumped the refcount and forced a
+            // full container clone per iteration, defeating the in-place
+            // `reduce gen as $x (acc; .[$x] += 1)` shape whenever the source
+            // generator made the reduce fall off the JIT's fast path (#652).
+            // `eval_path`'s clone above is dropped before this point, so the
+            // move is safe as long as `input` itself was exclusively held.
+            let mut result = input;
             let mut del_paths = Vec::new();
             for path in &paths {
                 let old_val = crate::runtime::rt_getpath(&result, path).unwrap_or(Value::Null);
