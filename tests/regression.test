@@ -9956,3 +9956,16 @@ null
 [[1,2,3] as $arr | range(2) as $i | ($arr + [$i] | length)]
 null
 [4,4]
+
+# Issue #648: a recursive `def gcd` called from inside a `(range as $m
+# | range as $n | gcd(...))` generator that feeds a `reduce` blew up
+# the host stack at JIT compile time. `is_jit_compilable_with_funcs`'s
+# Reduce scalar fast path silently accepted the filter (it never probed
+# the source generator), and `compile_with_funcs` then entered
+# `inline_func_calls`, whose recursion guard was dead code (the method
+# took `&self` so `expanding_funcs` could never be inserted). The fix
+# routes recursive-def filters to eval and exits the inline pass
+# correctly.
+def gcd($a;$b): if $b == 0 then $a else gcd($b; $a % $b) end; reduce (range(2; 50) as $m | range(1; $m) as $n | gcd($m; $n)) as $g (0; . + $g)
+null
+2580
