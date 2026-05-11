@@ -9969,3 +9969,35 @@ null
 def gcd($a;$b): if $b == 0 then $a else gcd($b; $a % $b) end; reduce (range(2; 50) as $m | range(1; $m) as $n | gcd($m; $n)) as $g (0; . + $g)
 null
 2580
+
+# Issue #647: a 2-deep reduce that does an in-place update on the outer
+# accumulator from inside the inner reduce was 8–22× slower than the
+# interpreter. The inner reduce's `init: Input` was lowered as
+# `Clone(outer_acc_slot)` and stored in the inner reduce's own acc_index
+# var; during the inner loop the array carried refcount ≥ 2 (outer's
+# local slot + inner's var) and every PathInsert deep-cloned the whole
+# accumulator. For an N-element sieve over N outer iterations that's
+# O(N²) deep copies. The fix detects the pattern (direct inner reduce,
+# optionally wrapped in `if cond then … else . end`) and emits a fused
+# loop that TakeVars the outer acc once per outer iteration and runs
+# the inner body's in-place update directly on that slot. Verifies the
+# Eratosthenes shape returns the right element count.
+reduce range(2; 200) as $p ([range(0; 200) | 0]; if .[$p] == 0 then reduce range($p; 200; $p) as $m (.; .[$m] += 1) else . end) | length
+null
+200
+
+# #647: same shape, content check. The post-fix output must match the
+# interpreter byte-for-byte — the `add` aggregates every element so a
+# missed PathInsert (which the broken fused emit would have produced)
+# would show up immediately.
+reduce range(2; 50) as $p ([range(0; 50) | 0]; reduce range($p; 50; $p) as $m (.; .[$m] += 1)) | add
+null
+152
+
+# #647: `if cond then INNER else . end` with the `.[$m] = false` variant
+# (in-place assign, not RMW). Covers the fusion's assign branch — the
+# classic primality sieve starting the inner loop at p*p so prime cells
+# stay `true`.
+reduce range(2; 50) as $p ([range(0; 50) | true]; if .[$p] then reduce range($p * $p; 50; $p) as $m (.; .[$m] = false) else . end) | [.[2:][] | select(.)] | length
+null
+15

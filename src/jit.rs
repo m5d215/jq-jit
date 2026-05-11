@@ -1898,12 +1898,61 @@ impl Flattener {
                             this.emit(JitOp::Drop { slot: acc });
                         });
                     }
+                } else if let Some(fusion) = detect_nested_inplace_fusion(update) {
+                    // Fused nested reduce: the outer update body is an inner
+                    // `reduce SRC as $m (.; INPLACE)` (optionally wrapped in
+                    // `if cond then … else . end`). Without this path, the
+                    // inner reduce gets its own acc_index var seeded by
+                    // `Clone(input_slot)`, so during inner iteration the
+                    // array has refcount ≥ 2 (outer's local slot + inner's
+                    // var) and the first PathInsert deep-clones the whole
+                    // array — paid on every outer iteration. For an
+                    // N-element sieve over N outer iterations that's O(N²)
+                    // copies, the 8–22× slowdown in #647. Here we TakeVar
+                    // the outer acc into a slot, hold it uniquely, and run
+                    // the inner body's in-place update directly on that
+                    // slot — so PathInsert always sees refcount 1.
+                    let skip_cond = fusion.skip_cond;
+                    let inner_source = fusion.inner_source;
+                    let inner_var_index = fusion.inner_var_index;
+                    let inner_action = &fusion.inner_action;
+                    self.flatten_gen_with_each_output(source, input_slot, &|this, elem| {
+                        this.emit(JitOp::SetVar { var_index: *var_index, src: elem });
+                        let acc = this.alloc_slot();
+                        this.emit(JitOp::TakeVar { dst: acc, var_index: *acc_index });
+
+                        let skip_done = this.alloc_label();
+                        if let Some(cond) = skip_cond {
+                            let cond_val = this.flatten_scalar(cond, acc);
+                            let body_lbl = this.alloc_label();
+                            this.emit(JitOp::IfTruthy { src: cond_val, then_label: body_lbl, else_label: skip_done });
+                            this.emit(JitOp::Drop { slot: cond_val });
+                            this.emit(JitOp::Label { id: body_lbl });
+                        }
+
+                        let saved_inner = this.alloc_slot();
+                        this.emit(JitOp::GetVar { dst: saved_inner, var_index: inner_var_index });
+                        this.flatten_gen_with_each_output(inner_source, acc, &|this2, elem_m| {
+                            this2.emit(JitOp::SetVar { var_index: inner_var_index, src: elem_m });
+                            match inner_action {
+                                NestedInplaceAction::Update(info) => this2.emit_inplace_update_on_slot(acc, info),
+                                NestedInplaceAction::Assign(info) => this2.emit_inplace_assign_on_slot(acc, info),
+                            }
+                        });
+                        this.emit(JitOp::MoveToVar { var_index: inner_var_index, src: saved_inner });
+
+                        if skip_cond.is_some() {
+                            this.emit(JitOp::Label { id: skip_done });
+                        }
+
+                        this.emit(JitOp::MoveToVar { var_index: *acc_index, src: acc });
+                    });
                 } else {
                     // For each output of source, set $var and update acc
                     self.flatten_gen_with_each_output(source, input_slot, &|this, elem| {
                         this.emit(JitOp::SetVar { var_index: *var_index, src: elem });
                         let acc = this.alloc_slot();
-                        this.emit(JitOp::GetVar { dst: acc, var_index: *acc_index });
+                        this.emit(JitOp::TakeVar { dst: acc, var_index: *acc_index });
                         let new_acc = this.flatten_scalar(update, acc);
                         this.emit(JitOp::MoveToVar { var_index: *acc_index, src: new_acc });
                         this.emit(JitOp::Drop { slot: acc });
@@ -5112,22 +5161,31 @@ impl Flattener {
     /// Emit optimized in-place reduce update with LetBinding wrapping.
     /// Handles `path |= f` and `path += f` (which is LetBinding { body: Update }).
     fn emit_reduce_update_with_lets(&mut self, acc_index: u16, info: &InplaceUpdateInfo) {
-        // Save and set let-binding vars (for += desugaring: rhs evaluated first)
-        let mut saved_vars = Vec::new();
-        let acc_for_lets = self.alloc_slot();
-        self.emit(JitOp::GetVar { dst: acc_for_lets, var_index: acc_index });
-        for &(var_idx, ref value_expr) in &info.let_bindings {
-            let old = self.alloc_slot();
-            self.emit(JitOp::GetVar { dst: old, var_index: var_idx });
-            let val = self.flatten_scalar(value_expr, acc_for_lets);
-            self.emit(JitOp::MoveToVar { var_index: var_idx, src: val });
-            saved_vars.push((var_idx, old));
-        }
-        self.emit(JitOp::Drop { slot: acc_for_lets });
-
         // TakeVar: move acc out (refcount = 1)
         let acc = self.alloc_slot();
         self.emit(JitOp::TakeVar { dst: acc, var_index: acc_index });
+        self.emit_inplace_update_on_slot(acc, info);
+        self.emit(JitOp::MoveToVar { var_index: acc_index, src: acc });
+    }
+
+    /// Slot-based in-place update — applies `info` to `acc_slot` directly,
+    /// without going through `acc_index`. Used by the nested-reduce fusion
+    /// (#647) so the outer reduce can keep `acc_slot` uniquely held across
+    /// the entire inner loop, avoiding the per-outer-iter deep clone that
+    /// the var-based `TakeVar`/`MoveToVar` round trip otherwise triggers.
+    #[inline]
+    fn emit_inplace_update_on_slot(&mut self, acc: SlotId, info: &InplaceUpdateInfo) {
+        // Save and set let-binding vars (for += desugaring: rhs evaluated first).
+        // Values are evaluated against acc itself — flatten_scalar's `.`
+        // reference Clones the slot which is cheap (a single Rc bump).
+        let mut saved_vars = Vec::new();
+        for &(var_idx, ref value_expr) in &info.let_bindings {
+            let old = self.alloc_slot();
+            self.emit(JitOp::GetVar { dst: old, var_index: var_idx });
+            let val = self.flatten_scalar(value_expr, acc);
+            self.emit(JitOp::MoveToVar { var_index: var_idx, src: val });
+            saved_vars.push((var_idx, old));
+        }
 
         // PathExtract chain (multi-level)
         let mut containers = Vec::new();
@@ -5170,7 +5228,8 @@ impl Flattener {
         };
         self.emit(JitOp::Drop { slot: old_val });
 
-        // PathInsert chain (reverse)
+        // PathInsert chain (reverse). The last iteration leaves `current_val`
+        // equal to `acc` — we leave that slot intact for the caller.
         let mut current_val = new_val;
         for (container, key) in containers.iter().rev().zip(keys.iter().rev()) {
             self.emit(JitOp::PathInsert { container: *container, key: *key, val: current_val });
@@ -5178,8 +5237,7 @@ impl Flattener {
             self.emit(JitOp::Drop { slot: *key });
             current_val = *container;
         }
-
-        self.emit(JitOp::MoveToVar { var_index: acc_index, src: current_val });
+        debug_assert_eq!(current_val, acc);
 
         // Restore let-binding vars
         for (var_idx, old) in saved_vars.into_iter().rev() {
@@ -5189,26 +5247,30 @@ impl Flattener {
 
     /// Emit in-place assign for reduce: .[path] = val with TakeVar for zero-copy.
     fn emit_reduce_assign(&mut self, acc_index: u16, info: &InplaceAssignInfo) {
+        // TakeVar: move acc out (refcount = 1)
+        let acc = self.alloc_slot();
+        self.emit(JitOp::TakeVar { dst: acc, var_index: acc_index });
+        self.emit_inplace_assign_on_slot(acc, info);
+        self.emit(JitOp::MoveToVar { var_index: acc_index, src: acc });
+    }
+
+    /// Slot-based in-place assign — applies `info` to `acc_slot` directly.
+    /// Mirrors `emit_inplace_update_on_slot`'s contract for the
+    /// nested-reduce fusion path (#647).
+    #[inline]
+    fn emit_inplace_assign_on_slot(&mut self, acc: SlotId, info: &InplaceAssignInfo) {
         // Save and set let-binding vars
         let mut saved_vars = Vec::new();
-        let acc_for_lets = self.alloc_slot();
-        self.emit(JitOp::GetVar { dst: acc_for_lets, var_index: acc_index });
         for &(var_idx, ref value_expr) in &info.let_bindings {
             let old = self.alloc_slot();
             self.emit(JitOp::GetVar { dst: old, var_index: var_idx });
-            let val = self.flatten_scalar(value_expr, acc_for_lets);
+            let val = self.flatten_scalar(value_expr, acc);
             self.emit(JitOp::MoveToVar { var_index: var_idx, src: val });
             saved_vars.push((var_idx, old));
         }
 
-        // Evaluate value_expr while we still have acc in the var
-        // (value_expr may reference . which is the accumulator)
-        let assign_val = self.flatten_scalar(info.value_expr, acc_for_lets);
-        self.emit(JitOp::Drop { slot: acc_for_lets });
-
-        // TakeVar: move acc out (refcount = 1)
-        let acc = self.alloc_slot();
-        self.emit(JitOp::TakeVar { dst: acc, var_index: acc_index });
+        // Evaluate value_expr against acc (`.` references clone the slot).
+        let assign_val = self.flatten_scalar(info.value_expr, acc);
 
         // Build path keys and PathInsert chain
         let mut containers = Vec::new();
@@ -5248,15 +5310,15 @@ impl Flattener {
         self.emit(JitOp::Drop { slot: assign_val });
         self.emit(JitOp::Drop { slot: last_key });
 
-        // PathInsert chain back up (reverse)
+        // PathInsert chain back up (reverse). Same termination as the
+        // update variant — last iteration leaves `current` = `acc`.
         for (container, key) in containers.iter().rev().zip(keys_vec.iter().rev()) {
             self.emit(JitOp::PathInsert { container: *container, key: *key, val: current });
             self.emit(JitOp::Drop { slot: current });
             self.emit(JitOp::Drop { slot: *key });
             current = *container;
         }
-
-        self.emit(JitOp::MoveToVar { var_index: acc_index, src: current });
+        debug_assert_eq!(current, acc);
 
         // Restore let-binding vars
         for (var_idx, old) in saved_vars.into_iter().rev() {
@@ -5453,6 +5515,70 @@ fn detect_inplace_update(expr: &Expr) -> Option<InplaceUpdateInfo<'_>> {
         }
         _ => None,
     }
+}
+
+/// In-place action that an inner reduce body can perform on its acc slot.
+/// Drives the nested-reduce fusion in `flatten_scalar`'s Reduce arm (#647).
+enum NestedInplaceAction<'a> {
+    Update(InplaceUpdateInfo<'a>),
+    Assign(InplaceAssignInfo<'a>),
+}
+
+/// Detected shape of an outer reduce whose update body iterates an inner
+/// reduce that modifies the outer accumulator in place. The fused emit
+/// avoids the inner reduce's separate acc var, which would otherwise hold
+/// a parallel reference to the array and force a per-outer-iter deep
+/// clone on every PathInsert (#647 — Project Euler Eratosthenes / phi
+/// sieve shapes, 8–22× slower than the interpreter without this).
+struct NestedInplaceFusion<'a> {
+    /// `if cond then INNER else . end` skip. cond must be scalar; the
+    /// else branch must be `.` (passthrough). `None` when the update is
+    /// just the inner reduce with no skip.
+    skip_cond: Option<&'a Expr>,
+    /// Generator for the inner reduce.
+    inner_source: &'a Expr,
+    /// Iteration variable of the inner reduce.
+    inner_var_index: u16,
+    /// In-place action the inner reduce body performs on each iteration.
+    inner_action: NestedInplaceAction<'a>,
+}
+
+fn detect_nested_inplace_fusion(update: &Expr) -> Option<NestedInplaceFusion<'_>> {
+    if let Some((src, vi, action)) = detect_inner_reduce_inplace(update) {
+        return Some(NestedInplaceFusion {
+            skip_cond: None,
+            inner_source: src,
+            inner_var_index: vi,
+            inner_action: action,
+        });
+    }
+    if let Expr::IfThenElse { cond, then_branch, else_branch } = update {
+        if is_scalar(cond) && matches!(else_branch.as_ref(), Expr::Input) {
+            if let Some((src, vi, action)) = detect_inner_reduce_inplace(then_branch) {
+                return Some(NestedInplaceFusion {
+                    skip_cond: Some(cond),
+                    inner_source: src,
+                    inner_var_index: vi,
+                    inner_action: action,
+                });
+            }
+        }
+    }
+    None
+}
+
+fn detect_inner_reduce_inplace(expr: &Expr) -> Option<(&Expr, u16, NestedInplaceAction<'_>)> {
+    if let Expr::Reduce { source, init, var_index, acc_index: _, update } = expr {
+        if matches!(init.as_ref(), Expr::Input) {
+            if let Some(info) = detect_inplace_update(update) {
+                return Some((source, *var_index, NestedInplaceAction::Update(info)));
+            }
+            if let Some(info) = detect_inplace_assign(update) {
+                return Some((source, *var_index, NestedInplaceAction::Assign(info)));
+            }
+        }
+    }
+    None
 }
 
 /// Check if an expression tree contains any FuncCall references.
