@@ -10001,3 +10001,15 @@ null
 reduce range(2; 50) as $p ([range(0; 50) | true]; if .[$p] then reduce range($p * $p; 50; $p) as $m (.; .[$m] = false) else . end) | [.[2:][] | select(.)] | length
 null
 15
+
+# Issue #653: a recursive def's body locals get renamed to fresh indices per
+# frame (#635), but the per-frame `next_var` was never rolled back when the
+# frame returned. A deep backtracking solver (e.g. Sudoku) racked up tens of
+# thousands of total recursive calls, overflowing the u16 counter back into
+# parse-time index territory and clobbering helper-def parameter slots —
+# `valid_at($board; $r; ...)` ended up reading the board into `$r`. Solving
+# Project Euler P96 Grid 03 (the lightest backtracker that reliably overflows
+# `u16` mid-run) covers the rollback.
+def valid_at($board; $r; $c; $v): (($r / 3 | floor) * 3) as $br | (($c / 3 | floor) * 3) as $bc | reduce range(0; 9) as $k (true; . and $board[$r * 9 + $k] != $v and $board[$k * 9 + $c] != $v and $board[($br + ($k / 3 | floor)) * 9 + $bc + ($k % 3)] != $v); def first_empty: . as $board | reduce range(0; 81) as $i (null; if . != null then . elif $board[$i] == 0 then $i else . end); def solve: . as $board | if all($board[]; . != 0) then $board else first_empty as $idx | ($idx / 9 | floor) as $r | ($idx % 9) as $c | range(1; 10) as $v | select(valid_at($board; $r; $c; $v)) | ($board | .[$idx] = $v) | solve end; first(solve)
+[0,0,0,0,0,0,9,0,7,0,0,0,4,2,0,1,8,0,0,0,0,7,0,5,0,2,6,1,0,0,9,0,4,0,0,0,0,5,0,0,0,0,0,4,0,0,0,0,5,0,7,0,0,9,9,2,0,1,0,8,0,0,0,0,3,4,0,5,9,0,0,0,5,0,7,0,0,0,0,0,0]
+[4,6,2,8,3,1,9,5,7,7,9,5,4,2,6,1,8,3,3,8,1,7,9,5,4,2,6,1,7,3,9,8,4,2,6,5,6,5,9,3,1,2,7,4,8,2,4,8,5,6,7,3,1,9,9,2,6,1,7,8,5,3,4,8,3,4,2,5,9,6,7,1,5,1,7,6,4,3,8,9,2]
