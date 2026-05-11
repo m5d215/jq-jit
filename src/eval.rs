@@ -1394,42 +1394,23 @@ pub fn eval(
                 BinOp::Add if matches!(rhs.as_ref(), Expr::Collect { .. }) => {
                     // Optimize `arr + [elems]`: push directly instead of creating intermediate array
                     let gen = match rhs.as_ref() { Expr::Collect { generator } => generator, _ => unreachable!() };
-                    // When lhs is LoadVar and gen doesn't use that var, temporarily clear env
-                    // to reduce refcount and enable Rc::try_unwrap for in-place push.
-                    let loadvar_idx = if let Expr::LoadVar { var_index } = lhs.as_ref() {
-                        if !expr_uses_var(gen, *var_index) { Some(*var_index) } else { None }
-                    } else { None };
                     eval(lhs, input.clone(), env, &mut |lval| {
                         match lval {
                             Value::Arr(arr_rc) => {
-                                // First try direct try_unwrap
+                                // Try direct try_unwrap; on failure, deep-clone the Vec.
+                                // We previously had a "drop env's copy" fast path for
+                                // `LoadVar(vi) + [gen]`, but that mutated `vars[vi]` to
+                                // Null and left a hole that subsequent generator
+                                // iterations / sibling reads observed (#642).
                                 match Rc::try_unwrap(arr_rc) {
                                     Ok(mut vec) => {
                                         eval(gen, input.clone(), env, &mut |elem| { vec.push(elem); Ok(true) })?;
                                         cb(Value::Arr(Rc::new(vec)))
                                     }
                                     Err(arr_rc) => {
-                                        // If lhs was LoadVar, DROP env's copy to reduce refcount.
-                                        // Safe: the surrounding LetBinding will restore env[vi] anyway.
-                                        if let Some(vi) = loadvar_idx {
-                                            drop(std::mem::replace(&mut env.borrow_mut().vars[vi as usize], Value::Null));
-                                            match Rc::try_unwrap(arr_rc) {
-                                                Ok(mut vec) => {
-                                                    eval(gen, input.clone(), env, &mut |elem| { vec.push(elem); Ok(true) })?;
-                                                    cb(Value::Arr(Rc::new(vec)))
-                                                }
-                                                Err(arr_rc) => {
-                                                    // Other references exist, fall back to clone
-                                                    let mut vec = (*arr_rc).clone();
-                                                    eval(gen, input.clone(), env, &mut |elem| { vec.push(elem); Ok(true) })?;
-                                                    cb(Value::Arr(Rc::new(vec)))
-                                                }
-                                            }
-                                        } else {
-                                            let mut vec = (*arr_rc).clone();
-                                            eval(gen, input.clone(), env, &mut |elem| { vec.push(elem); Ok(true) })?;
-                                            cb(Value::Arr(Rc::new(vec)))
-                                        }
+                                        let mut vec = (*arr_rc).clone();
+                                        eval(gen, input.clone(), env, &mut |elem| { vec.push(elem); Ok(true) })?;
+                                        cb(Value::Arr(Rc::new(vec)))
                                     }
                                 }
                             }

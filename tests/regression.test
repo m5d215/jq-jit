@@ -9931,3 +9931,28 @@ import "issue_638" as M; M::to_multiprecision
 [ range(0; 10) as $a | range(0; 10) as $b | select($b != $a) | range(0; 10) as $c | select($c != $a and $c != $b) | range(0; 10) as $d | select($d != $a and $d != $b and $d != $c) | select(($a*100+$b*10+$c) % 7 == 0) | [$a,$b,$c,$d] ] | length
 null
 728
+
+# Issue #642: a recursive `def f($chain)` whose body iterates a generator
+# and recurses with `f($chain + [$n])` looped forever (1-arg form) or
+# emitted broken chains (multi-arg form). The eval-side
+# `BinOp.Add + Collect` "drop env's copy" fast path cleared
+# `vars[$chain]` to Null so Rc::try_unwrap could consume the array
+# in-place, but the outer `as $n` iteration re-read `$chain` on the next
+# step and saw the cleared slot. Removing that fast path (always
+# deep-clone when refcount > 1) restores correctness.
+def f($chain): if ($chain | length) >= 2 then $chain else [10, 20][] as $n | f($chain + [$n]) end; [f([])]
+null
+[[10,10],[10,20],[20,10],[20,20]]
+
+# Issue #642: 3-arg form. Pre-fix produced [[10,30],[40],[20,30],[40]] —
+# the second iteration of the inner `as $n` lost `$chain`'s prior element.
+{a: [10, 20], b: [30, 40]} as $by | def f($y; $rem; $chain): if ($rem | length) == 0 then $chain else $rem[] as $t | $by[$t][] as $n | select($n > $y) | f($n; ($rem - [$t]); ($chain + [$n])) end; [f(5; ["a", "b"]; [])]
+null
+[[10,30],[10,40],[20,30],[20,40]]
+
+# Issue #642: same root cause in a non-recursive form — `$arr` bound by
+# the outer `as`, then read across an iteration that also computes
+# `$arr + [$i]`. Pre-fix the second iteration saw `$arr` as null.
+[[1,2,3] as $arr | range(2) as $i | ($arr + [$i] | length)]
+null
+[4,4]
