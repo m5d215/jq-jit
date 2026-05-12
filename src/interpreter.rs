@@ -2543,6 +2543,68 @@ impl Filter {
         walk(&self.parsed.0)
     }
 
+    /// Counts AST nodes in the parsed filter. Proxies JIT compile cost: each
+    /// node turns into one or more Cranelift IR instructions during codegen.
+    /// Used by the binary's null-input heuristic — see `src/bin/jq-jit.rs`.
+    pub fn ast_node_count(&self) -> usize {
+        use crate::ir::{Expr, StringPart};
+        fn count(e: &Expr) -> usize {
+            1 + match e {
+                Expr::Pipe { left, right } | Expr::Comma { left, right }
+                | Expr::BinOp { lhs: left, rhs: right, .. }
+                | Expr::Alternative { primary: left, fallback: right } => count(left) + count(right),
+                Expr::UnaryOp { operand, .. } | Expr::Negate { operand }
+                | Expr::Collect { generator: operand } | Expr::Each { input_expr: operand }
+                | Expr::EachOpt { input_expr: operand } | Expr::Recurse { input_expr: operand } => count(operand),
+                Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => count(expr) + count(key),
+                Expr::IfThenElse { cond, then_branch, else_branch } => count(cond) + count(then_branch) + count(else_branch),
+                Expr::TryCatch { try_expr, catch_expr } => count(try_expr) + count(catch_expr),
+                Expr::Reduce { source, init, update, .. } => count(source) + count(init) + count(update),
+                Expr::Foreach { source, init, update, extract, .. } => {
+                    count(source) + count(init) + count(update)
+                        + extract.as_ref().map_or(0, |e| count(e))
+                }
+                Expr::Slice { expr, from, to } => {
+                    count(expr) + from.as_ref().map_or(0, |e| count(e)) + to.as_ref().map_or(0, |e| count(e))
+                }
+                Expr::ObjectConstruct { pairs } => pairs.iter().map(|(k, v)| count(k) + count(v)).sum(),
+                Expr::LetBinding { value, body, .. } => count(value) + count(body),
+                Expr::Label { body, .. } => count(body),
+                Expr::Break { value, .. } => count(value),
+                Expr::CallBuiltin { args, .. } | Expr::FuncCall { args, .. } => args.iter().map(count).sum(),
+                Expr::Update { path_expr, update_expr } | Expr::Assign { path_expr, value_expr: update_expr } => {
+                    count(path_expr) + count(update_expr)
+                }
+                Expr::ClosureOp { input_expr, key_expr, .. } => count(input_expr) + count(key_expr),
+                Expr::Format { expr, .. } | Expr::PathExpr { expr } | Expr::Debug { expr } | Expr::Stderr { expr } => count(expr),
+                Expr::Limit { count: c, generator } => count(c) + count(generator),
+                Expr::While { cond, update, .. } | Expr::Until { cond, update } => count(cond) + count(update),
+                Expr::Repeat { update, .. } => count(update),
+                Expr::AllShort { generator, predicate } | Expr::AnyShort { generator, predicate } => count(generator) + count(predicate),
+                Expr::Range { from, to, step } => {
+                    count(from) + count(to) + step.as_ref().map_or(0, |s| count(s))
+                }
+                Expr::SetPath { path, value } => count(path) + count(value),
+                Expr::GetPath { path } => count(path),
+                Expr::DelPaths { paths } => count(paths),
+                Expr::StringInterpolation { parts } => parts.iter().map(|p| match p {
+                    StringPart::Literal(_) => 0,
+                    StringPart::Expr(e) => count(e),
+                }).sum(),
+                Expr::Error { msg } => msg.as_ref().map_or(0, |e| count(e)),
+                Expr::AlternativeDestructure { alternatives } => alternatives.iter().map(count).sum(),
+                Expr::RegexTest { input_expr, re, flags, .. }
+                | Expr::RegexMatch { input_expr, re, flags, .. }
+                | Expr::RegexCapture { input_expr, re, flags, .. }
+                | Expr::RegexScan { input_expr, re, flags, .. } => count(input_expr) + count(re) + count(flags),
+                Expr::RegexSub { input_expr, re, tostr, flags }
+                | Expr::RegexGsub { input_expr, re, tostr, flags } => count(input_expr) + count(re) + count(tostr) + count(flags),
+                _ => 0,
+            }
+        }
+        count(&self.parsed.0)
+    }
+
     /// Returns true if this filter is a simple identity (`.`) that passes through input unchanged.
     /// Also recognizes semantic equivalences like `to_entries | from_entries`.
     pub fn is_identity(&self) -> bool {
