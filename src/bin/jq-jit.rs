@@ -2599,11 +2599,23 @@ fn real_main() {
     // since their runtime dominates regardless of input size.
     // Must be done before process_input closure captures &filter.
     const JIT_THRESHOLD: usize = 4096;
+    // For null_input, there is no input to amortize JIT compile cost against.
+    // The original heuristic ("always JIT for -n") assumed runtime work would
+    // dominate, but for filter ASTs in the few-hundred-node range with no loop
+    // constructs the Cranelift codegen pass alone runs ~30 ms — far more than
+    // the interpreter takes for the same workload (#658). Cap the AST size
+    // beyond which a null-input filter without loops falls back to the
+    // interpreter.
+    const NULL_INPUT_JIT_AST_LIMIT: usize = 100;
     if force_interp {
         // Self-diff mode (#323) — leave jit_fn empty and let
         // execute / execute_cb take the eval path.
-    } else if filter.has_loop_constructs() || null_input {
+    } else if filter.has_loop_constructs() {
         filter.compile_jit();
+    } else if null_input {
+        if filter.ast_node_count() <= NULL_INPUT_JIT_AST_LIMIT {
+            filter.compile_jit();
+        }
     } else if !null_input {
         if files.is_empty() {
             if raw_input && !slurp {
