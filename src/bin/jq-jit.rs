@@ -2220,10 +2220,8 @@ fn main() {
 }
 
 fn real_main() {
-    let force_interp = force_interpreter_enabled();
-    if force_interp {
-        jq_jit::interpreter::set_force_interpreter(true);
-    }
+    let mut force_interp = force_interpreter_enabled();
+    let mut force_jit = false;
     let args: Vec<String> = std::env::args().collect();
 
     let mut filter_str = None;
@@ -2277,6 +2275,8 @@ fn real_main() {
             "-M" | "--monochrome-output" => color_output = false,
             "--unbuffered" => unbuffered = true,
             "--seq" => seq = true,
+            "--force-jit" => { force_jit = true; force_interp = false; }
+            "--force-interp" | "--force-interpreter" => { force_interp = true; force_jit = false; }
             "-a" | "--ascii-output" => {
                 // Recognised but not yet implemented (#126). Emit a
                 // clear error instead of falling through to the filter
@@ -2457,6 +2457,12 @@ fn real_main() {
         i += 1;
     }
 
+    // CLI flag --force-interp / --force-jit (and JQJIT_FORCE_INTERPRETER) — apply
+    // after arg parsing so a CLI flag overrides the env var either way.
+    if force_interp {
+        jq_jit::interpreter::set_force_interpreter(true);
+    }
+
     let filter_str = match filter_str {
         Some(f) => f,
         None => {
@@ -2608,12 +2614,20 @@ fn real_main() {
     // interpreter.
     const NULL_INPUT_JIT_AST_LIMIT: usize = 100;
     if force_interp {
-        // Self-diff mode (#323) — leave jit_fn empty and let
-        // execute / execute_cb take the eval path.
+        // Self-diff mode (#323) / --force-interp — leave jit_fn empty and
+        // let execute / execute_cb take the eval path.
+    } else if force_jit {
+        // --force-jit bypasses the heuristics entirely.
+        filter.compile_jit();
     } else if filter.has_loop_constructs() {
         filter.compile_jit();
     } else if null_input {
-        if filter.ast_node_count() <= NULL_INPUT_JIT_AST_LIMIT {
+        // For null_input, eval.rs's "constant-range reduce on small input"
+        // exception (which makes `has_loop_constructs` gate on
+        // input-referencing source) does not apply — any Reduce/Foreach is
+        // a real runtime loop, and the AST-size cap only kicks in when the
+        // filter has no loop construct at all (the #658 shape).
+        if filter.has_any_runtime_loop_construct() || filter.ast_node_count() <= NULL_INPUT_JIT_AST_LIMIT {
             filter.compile_jit();
         }
     } else if !null_input {

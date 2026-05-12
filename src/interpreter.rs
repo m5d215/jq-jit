@@ -2543,6 +2543,68 @@ impl Filter {
         walk(&self.parsed.0)
     }
 
+    /// Returns true if the AST contains any runtime loop construct (Reduce,
+    /// Foreach, Recurse, Update, While, Until, Repeat) anywhere — including
+    /// inside `def` bodies. Used by the binary's null-input JIT gate: with no
+    /// input to amortize against, eval.rs's "small input + constant-range
+    /// reduce" exception (which makes `has_loop_constructs` gate on
+    /// input-referencing source and walk only the top-level expression) no
+    /// longer applies — any loop is a real runtime loop the JIT can usually
+    /// speed up enough to cover compile cost.
+    pub fn has_any_runtime_loop_construct(&self) -> bool {
+        use crate::ir::Expr;
+        fn walk(e: &Expr) -> bool {
+            match e {
+                Expr::Reduce { .. } | Expr::Foreach { .. } | Expr::Recurse { .. }
+                | Expr::Update { .. } | Expr::While { .. } | Expr::Until { .. }
+                | Expr::Repeat { .. } => true,
+                Expr::Pipe { left, right } | Expr::Comma { left, right }
+                | Expr::BinOp { lhs: left, rhs: right, .. }
+                | Expr::Alternative { primary: left, fallback: right } => walk(left) || walk(right),
+                Expr::UnaryOp { operand, .. } | Expr::Negate { operand }
+                | Expr::Collect { generator: operand } | Expr::Each { input_expr: operand }
+                | Expr::EachOpt { input_expr: operand } => walk(operand),
+                Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => walk(expr) || walk(key),
+                Expr::IfThenElse { cond, then_branch, else_branch } =>
+                    walk(cond) || walk(then_branch) || walk(else_branch),
+                Expr::TryCatch { try_expr, catch_expr } => walk(try_expr) || walk(catch_expr),
+                Expr::Slice { expr, from, to } => walk(expr)
+                    || from.as_ref().map_or(false, |e| walk(e))
+                    || to.as_ref().map_or(false, |e| walk(e)),
+                Expr::ObjectConstruct { pairs } => pairs.iter().any(|(k, v)| walk(k) || walk(v)),
+                Expr::LetBinding { value, body, .. } => walk(value) || walk(body),
+                Expr::Label { body, .. } => walk(body),
+                Expr::Break { value, .. } => walk(value),
+                Expr::CallBuiltin { args, .. } | Expr::FuncCall { args, .. } => args.iter().any(walk),
+                Expr::Assign { path_expr, value_expr } => walk(path_expr) || walk(value_expr),
+                Expr::ClosureOp { input_expr, key_expr, .. } => walk(input_expr) || walk(key_expr),
+                Expr::Format { expr: e, .. } | Expr::PathExpr { expr: e } | Expr::Debug { expr: e } | Expr::Stderr { expr: e } => walk(e),
+                Expr::Limit { count, generator } => walk(count) || walk(generator),
+                Expr::AllShort { generator, predicate } | Expr::AnyShort { generator, predicate } => walk(generator) || walk(predicate),
+                Expr::Range { from, to, step } => walk(from) || walk(to) || step.as_ref().map_or(false, |s| walk(s)),
+                Expr::SetPath { path, value } => walk(path) || walk(value),
+                Expr::GetPath { path } => walk(path),
+                Expr::DelPaths { paths } => walk(paths),
+                Expr::StringInterpolation { parts } => parts.iter().any(|p| match p {
+                    crate::ir::StringPart::Expr(e) => walk(e),
+                    crate::ir::StringPart::Literal(_) => false,
+                }),
+                Expr::Error { msg } => msg.as_ref().map_or(false, |e| walk(e)),
+                Expr::AlternativeDestructure { alternatives } => alternatives.iter().any(walk),
+                Expr::RegexTest { input_expr, re, flags, .. }
+                | Expr::RegexMatch { input_expr, re, flags, .. }
+                | Expr::RegexCapture { input_expr, re, flags, .. }
+                | Expr::RegexScan { input_expr, re, flags, .. } => walk(input_expr) || walk(re) || walk(flags),
+                Expr::RegexSub { input_expr, re, tostr, flags }
+                | Expr::RegexGsub { input_expr, re, tostr, flags } => walk(input_expr) || walk(re) || walk(tostr) || walk(flags),
+                _ => false,
+            }
+        }
+        // Also walk def bodies — a reduce buried inside `def f: reduce ...; f`
+        // is just as much a runtime loop as a top-level one (#658 follow-up).
+        walk(&self.parsed.0) || self.parsed.1.iter().any(|f| walk(&f.body))
+    }
+
     /// Counts AST nodes in the parsed filter. Proxies JIT compile cost: each
     /// node turns into one or more Cranelift IR instructions during codegen.
     /// Used by the binary's null-input heuristic — see `src/bin/jq-jit.rs`.
@@ -2602,7 +2664,9 @@ impl Filter {
                 _ => 0,
             }
         }
-        count(&self.parsed.0)
+        // Include def bodies — the JIT inlines them, so they contribute to
+        // codegen size as much as the top-level expression (#658 follow-up).
+        count(&self.parsed.0) + self.parsed.1.iter().map(|f| count(&f.body)).sum::<usize>()
     }
 
     /// Returns true if this filter is a simple identity (`.`) that passes through input unchanged.
