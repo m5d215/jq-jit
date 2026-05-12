@@ -10055,3 +10055,15 @@ null
 [range(0; 100) as $v | select($v % 17 == 0) | ($v / 10 | floor) as $d2 | ($v % 10) as $d1 | select($d2 != $d1) | range(0; 10) as $d0 | select($d0 != $d1 and $d0 != $d2) | select(($d0 * 100 + $d1 * 10 + $d2) % 7 == 0) | $d2 * 100 + $d1 * 10 + $d0] | add
 null
 1542
+
+# Issue #658 follow-up: the null-input JIT gate only walked the top-level
+# expression, so loop constructs hidden in `def` bodies were invisible. A
+# filter like `def steps: ...until(...)...; steps(N)` whose AST exceeds the
+# size cap was sent to the interpreter even though the inner until() makes
+# it a clear JIT win. The fix walks def bodies in both the loop-construct
+# detector and the AST-node counter. Output is unchanged either way; this
+# case exists only to pin the cross-version correctness contract while the
+# gate decision shifts.
+def steps($n): {n: $n, c: 0} | until(.n == 1; if .n % 2 == 0 then .n /= 2 else .n = .n*3 + 1 end | .c += 1) | .c; [range(1; 100) | steps(.)] | max
+null
+118
