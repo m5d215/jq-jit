@@ -2222,6 +2222,8 @@ fn main() {
 fn real_main() {
     let mut force_interp = force_interpreter_enabled();
     let mut force_jit = false;
+    let mut memo_max_entries: Option<usize> = None;
+    let mut debug_memo = false;
     let args: Vec<String> = std::env::args().collect();
 
     let mut filter_str = None;
@@ -2277,6 +2279,22 @@ fn real_main() {
             "--seq" => seq = true,
             "--force-jit" => { force_jit = true; force_interp = false; }
             "--force-interp" | "--force-interpreter" => { force_interp = true; force_jit = false; }
+            "--memo-max-entries" => {
+                i += 1;
+                if i < expanded_args.len() {
+                    match expanded_args[i].parse::<usize>() {
+                        Ok(n) => memo_max_entries = Some(n),
+                        Err(_) => {
+                            eprintln!("jq: --memo-max-entries expects a non-negative integer");
+                            process::exit(2);
+                        }
+                    }
+                } else {
+                    eprintln!("jq: --memo-max-entries expects a value");
+                    process::exit(2);
+                }
+            }
+            "--debug-memo" => debug_memo = true,
             "-a" | "--ascii-output" => {
                 // Recognised but not yet implemented (#126). Emit a
                 // clear error instead of falling through to the filter
@@ -2532,6 +2550,9 @@ fn real_main() {
             process::exit(3);
         }
     };
+    if let Some(n) = memo_max_entries {
+        filter.set_memo_max_entries(n);
+    }
 
     // projection_fields is set below after all pattern detections
 
@@ -21273,6 +21294,11 @@ fn real_main() {
     }
     let _ = out.flush();
 
+    if debug_memo {
+        let mut stderr = io::stderr().lock();
+        let _ = filter.dump_memo_stats(&mut stderr);
+    }
+
     if had_error {
         process::exit(5);
     }
@@ -21309,6 +21335,8 @@ fn print_usage() {
     eprintln!("  -M, --monochrome-output  Disable color output (default)");
     eprintln!("  --args                   Remaining args are string $ARGS.positional");
     eprintln!("  --jsonargs               Remaining args are JSON $ARGS.positional");
+    eprintln!("  --memo-max-entries N     Per-slot cap for memoize/1 cache (jqx; default 1000000)");
+    eprintln!("  --debug-memo             Print per-slot memoize cache stats to stderr on exit (jqx)");
     eprintln!("  --version                Show version");
     eprintln!("  -h, --help               Show this help");
 }

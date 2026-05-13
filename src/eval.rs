@@ -12,7 +12,7 @@ use std::rc::Rc;
 use anyhow::{Result, bail};
 
 use crate::ir::*;
-use crate::value::{Value, ObjInner, NumRepr, KeyStr};
+use crate::value::{Value, ObjInner, NumRepr, KeyStr, ValueKey};
 
 type GenResult = Result<bool>;
 pub type EnvRef = Rc<RefCell<Env>>;
@@ -82,6 +82,34 @@ impl std::fmt::Display for BreakError {
 }
 impl std::error::Error for BreakError {}
 
+/// Cached output sequence for a single memoize call site.
+///
+/// The vast majority of memoize use cases — fib, Collatz, totient, etc. —
+/// have single-output bodies, so we special-case that to skip an
+/// `Rc<Vec<Value>>` allocation and a 1-element iteration on every cache hit.
+#[derive(Clone)]
+pub enum MemoEntry {
+    Single(Value),
+    Many(Rc<Vec<Value>>),
+}
+
+/// Per-slot cache state: the entries themselves plus diagnostic counters.
+/// `hits` / `misses` are populated unconditionally — the branch is cheap and
+/// reading them is the whole point of `--debug-memo`.
+pub struct SlotState {
+    pub entries: HashMap<ValueKey, MemoEntry>,
+    pub hits: u64,
+    pub misses: u64,
+}
+
+impl SlotState {
+    fn new() -> Self {
+        SlotState { entries: HashMap::new(), hits: 0, misses: 0 }
+    }
+}
+
+pub type MemoSlot = Rc<RefCell<SlotState>>;
+
 pub struct Env {
     vars: Vec<Value>,
     funcs: Vec<Rc<CompiledFunc>>,
@@ -99,14 +127,41 @@ pub struct Env {
     /// Pointer-based substitution cache: func_id → (args_ptr, substituted_body).
     /// For non-LoadVar args from stable (cached) call sites.
     subst_ptr_cache: Vec<(usize, usize, Rc<Expr>)>,
+    /// One cache map per lexical `memoize(...)` occurrence in the program.
+    /// Lifetime is the whole program execution (persists across NDJSON inputs).
+    /// `Rc` so the eval path can clone a handle and drop the `Env` borrow
+    /// before invoking the memoized body (which may itself borrow `Env`).
+    pub memo_slots: Vec<MemoSlot>,
+    /// Per-slot upper bound on cache entries. New inserts past this cap are
+    /// silently dropped (the program continues, just without caching that
+    /// entry). Controlled by `--memo-max-entries` on the CLI.
+    pub memo_max_entries: usize,
+}
+
+const DEFAULT_MEMO_MAX_ENTRIES: usize = 1_000_000;
+
+pub fn default_memo_max_entries() -> usize {
+    DEFAULT_MEMO_MAX_ENTRIES
+}
+
+fn fresh_memo_slots(n: u32) -> Vec<MemoSlot> {
+    (0..n).map(|_| Rc::new(RefCell::new(SlotState::new()))).collect()
 }
 
 impl Env {
     pub fn new(funcs: Vec<CompiledFunc>) -> Self {
-        Env { vars: vec![Value::Null; 65536], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs: Vec::new(), closures: Vec::new(), recursive_cache: Vec::new(), subst_cache: Vec::new(), subst_ptr_cache: Vec::new() }
+        Env { vars: vec![Value::Null; 65536], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs: Vec::new(), closures: Vec::new(), recursive_cache: Vec::new(), subst_cache: Vec::new(), subst_ptr_cache: Vec::new(), memo_slots: Vec::new(), memo_max_entries: DEFAULT_MEMO_MAX_ENTRIES }
     }
     pub fn with_lib_dirs(funcs: Vec<CompiledFunc>, lib_dirs: Vec<String>) -> Self {
-        Env { vars: vec![Value::Null; 65536], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs, closures: Vec::new(), recursive_cache: Vec::new(), subst_cache: Vec::new(), subst_ptr_cache: Vec::new() }
+        Env { vars: vec![Value::Null; 65536], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs, closures: Vec::new(), recursive_cache: Vec::new(), subst_cache: Vec::new(), subst_ptr_cache: Vec::new(), memo_slots: Vec::new(), memo_max_entries: DEFAULT_MEMO_MAX_ENTRIES }
+    }
+    /// Allocate `n` memo cache slots. Called once per program after parsing,
+    /// using `ParseResult::memo_slots`.
+    pub fn set_memo_slots(&mut self, n: u32) {
+        self.memo_slots = fresh_memo_slots(n);
+    }
+    pub fn set_memo_max_entries(&mut self, n: usize) {
+        self.memo_max_entries = n;
     }
     /// Reset env state for reuse across multiple inputs.
     /// Keeps allocated buffers (vars, caches) but resets mutable state.
@@ -119,7 +174,9 @@ impl Env {
         self.next_label = 0;
         self.next_var = 256;
         self.closures.clear();
-        // Keep recursive_cache, subst_cache, subst_ptr_cache — they stay valid across inputs
+        // Keep recursive_cache, subst_cache, subst_ptr_cache, memo_slots —
+        // they stay valid across inputs (memo cache spans the whole program
+        // lifetime per #671 design).
     }
     #[inline(always)]
     fn get_var(&self, idx: u16) -> Value {
@@ -278,6 +335,11 @@ fn subst_inner(
         Expr::RegexGsub { input_expr, re, tostr, flags } => Expr::RegexGsub { input_expr: sb!(input_expr), re: sb!(re), tostr: sb!(tostr), flags: sb!(flags) },
         Expr::AlternativeDestructure { alternatives } => Expr::AlternativeDestructure {
             alternatives: alternatives.iter().map(|a| s!(a)).collect(),
+        },
+        Expr::Memoize { slot_id, key, body } => Expr::Memoize {
+            slot_id: *slot_id,
+            key: key.as_ref().map(|k| sb!(k)),
+            body: sb!(body),
         },
         Expr::Input | Expr::Empty | Expr::Not | Expr::Env | Expr::Builtins
         | Expr::ReadInput | Expr::ReadInputs | Expr::ModuleMeta | Expr::GenLabel
@@ -610,6 +672,16 @@ fn subst_cow(expr: &Expr, pv: &[u16], args: &[Expr]) -> Option<Expr> {
                 alternatives: alternatives.iter().zip(results).map(|(a, r)| r.unwrap_or_else(|| a.clone())).collect(),
             })
         }
+        Expr::Memoize { slot_id, key, body } => {
+            let k = key.as_ref().and_then(|k2| s!(k2));
+            let b = s!(body);
+            if k.is_none() && b.is_none() { return None; }
+            Some(Expr::Memoize {
+                slot_id: *slot_id,
+                key: if k.is_some() { k.map(Box::new) } else { key.clone() },
+                body: Box::new(b.unwrap_or_else(|| body.as_ref().clone())),
+            })
+        }
         // Leaf nodes never contain param var references
         Expr::Input | Expr::Empty | Expr::Not | Expr::Env | Expr::Builtins
         | Expr::ReadInput | Expr::ReadInputs | Expr::ModuleMeta | Expr::GenLabel
@@ -660,6 +732,9 @@ fn contains_func_call(expr: &Expr, target: usize) -> bool {
             c!(input_expr) || c!(re) || c!(tostr) || c!(flags)
         }
         Expr::AlternativeDestructure { alternatives } => alternatives.iter().any(|a| c!(a)),
+        Expr::Memoize { key, body, .. } => {
+            key.as_ref().is_some_and(|k| c!(k)) || c!(body)
+        }
         Expr::Input | Expr::Empty | Expr::Not | Expr::Env | Expr::Builtins
         | Expr::ReadInput | Expr::ReadInputs | Expr::ModuleMeta | Expr::GenLabel
         | Expr::Literal(_) | Expr::Loc { .. } | Expr::LoadVar { .. } | Expr::Error { msg: None } => false,
@@ -741,6 +816,8 @@ fn expr_uses_outer_input(expr: &Expr) -> bool {
         | Expr::RegexTest { .. } | Expr::RegexMatch { .. } | Expr::RegexCapture { .. }
         | Expr::RegexScan { .. } | Expr::RegexSub { .. } | Expr::RegexGsub { .. }
         | Expr::AlternativeDestructure { .. } => true,
+        // Memoize keys cache by current input → always uses input
+        Expr::Memoize { .. } => true,
     }
 }
 
@@ -810,6 +887,10 @@ fn expr_uses_var(expr: &Expr, target: u16) -> bool {
             expr_uses_var(input_expr, target) || expr_uses_var(re, target) || expr_uses_var(tostr, target) || expr_uses_var(flags, target)
         }
         Expr::AlternativeDestructure { alternatives } => alternatives.iter().any(|a| expr_uses_var(a, target)),
+        Expr::Memoize { key, body, .. } => {
+            key.as_ref().is_some_and(|k| expr_uses_var(k, target))
+                || expr_uses_var(body, target)
+        }
     }
 }
 
@@ -3163,6 +3244,93 @@ pub fn eval(
 
         Expr::CallBuiltin { name, args } => {
             eval_call_builtin(name, args, input, env, cb)
+        }
+
+        Expr::Memoize { slot_id, key, body } => {
+            let slot = {
+                let env_ref = env.borrow();
+                match env_ref.memo_slots.get(*slot_id as usize) {
+                    Some(s) => s.clone(),
+                    None => bail!("memoize slot {} not allocated", slot_id),
+                }
+            };
+            match key {
+                None => {
+                    // 1-arg form: cache key IS the current input.
+                    memo_lookup_or_run(&slot, ValueKey(input.clone()), body, input, env, cb)
+                }
+                Some(key_expr) => {
+                    // 2-arg form: each value yielded by `key` drives a separate
+                    // cache lookup; the body runs against the original input.
+                    eval(key_expr, input.clone(), env, &mut |k| {
+                        memo_lookup_or_run(&slot, ValueKey(k), body, input.clone(), env, cb)
+                    })
+                }
+            }
+        }
+    }
+}
+
+/// Shared cache-lookup-or-compute path for both arities of `memoize`.
+///
+/// On hit, re-yields the cached output sequence. On miss, runs `body`
+/// against `body_input` to completion (collecting every output), inserts
+/// the result subject to the per-slot cap, and yields it.
+///
+/// Body errors are propagated without poisoning the cache — the next call
+/// re-evaluates.
+fn memo_lookup_or_run(
+    slot: &MemoSlot,
+    cache_key: ValueKey,
+    body: &Expr,
+    body_input: Value,
+    env: &EnvRef,
+    cb: &mut dyn FnMut(Value) -> GenResult,
+) -> GenResult {
+    let cached = {
+        let mut state = slot.borrow_mut();
+        let hit = state.entries.get(&cache_key).cloned();
+        if hit.is_some() { state.hits += 1; } else { state.misses += 1; }
+        hit
+    };
+    if let Some(entry) = cached {
+        return match entry {
+            MemoEntry::Single(v) => cb(v),
+            MemoEntry::Many(rc) => {
+                for v in rc.iter() {
+                    if !cb(v.clone())? { return Ok(false); }
+                }
+                Ok(true)
+            }
+        };
+    }
+    // Miss: run the body to completion. We do not pass the consumer's `cb`
+    // directly — `memoize` must observe the full output sequence to cache
+    // it, even if the consumer wants to stop after the first value. This
+    // means `memoize` forces the body to fully evaluate; for the typical
+    // single-output pure body that is the natural case, but it is a
+    // documented difference for generator/side-effecting bodies.
+    let mut outputs: Vec<Value> = Vec::new();
+    eval(body, body_input, env, &mut |v| { outputs.push(v); Ok(true) })?;
+    let entry = if outputs.len() == 1 {
+        MemoEntry::Single(outputs[0].clone())
+    } else {
+        MemoEntry::Many(Rc::new(outputs))
+    };
+    {
+        let mut state = slot.borrow_mut();
+        let cap = env.borrow().memo_max_entries;
+        if state.entries.len() < cap {
+            state.entries.insert(cache_key, entry.clone());
+        }
+    }
+    match entry {
+        MemoEntry::Single(v) => cb(v),
+        MemoEntry::Many(rc) => {
+            for v in rc.iter() {
+                if !cb(v.clone())? { return Ok(false); }
+            }
+            Ok(true)
         }
     }
 }

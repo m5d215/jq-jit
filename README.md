@@ -14,7 +14,7 @@ Passes 100% of the official jq test suite (509/509) while being **8x-180x faster
 - **Streaming JSON parser** for memory-efficient NDJSON processing
 - **Memory-mapped file I/O** — mmap-based file reading with no upfront allocation
 - **Optimized value representation** with compact strings, mimalloc, and inline Cranelift codegen
-- **jqx extensions** — shell command execution (`exec`/`execv`) and CSV/TSV parsing (`fromcsv`/`fromcsvh`/`fromtsv`/`fromtsvh`)
+- **jqx extensions** — shell command execution (`exec`/`execv`), CSV/TSV parsing (`fromcsv`/`fromcsvh`/`fromtsv`/`fromtsvh`), and function-result memoization (`memoize`)
 
 ## Performance
 
@@ -187,6 +187,54 @@ jq-jit -Rsc 'fromcsvh(["name","age"])' < no-header.csv
 # Combine with exec
 jq-jit -n 'exec("cat data.csv") | fromcsvh | select(.age | tonumber > 25)'
 ```
+
+### Memoization
+
+| Function | Description |
+|----------|-------------|
+| `memoize(f)` | Cache the output sequence of `f` keyed by the current input value. |
+| `memoize(f; key)` | Same, but use `key` (evaluated against the input) as the cache key instead of the input itself. |
+
+Each lexical occurrence of `memoize(...)` gets its own cache; entries persist
+for the lifetime of the program (across NDJSON input records). Keys compare by
+structural equality, matching jq's `==` semantics (objects are order-independent,
+arrays element-wise). The body is run to completion on first call — multi-output
+generators are materialized so subsequent calls re-yield the same sequence.
+
+Self-recursive memoization Just Works: jq's `def` binds the same name inside
+the body, so recursive calls go through the memoized wrapper:
+
+```bash
+# Fibonacci — exponential without memo, linear with it
+jq-jit -n 'def fib: memoize(if . < 2 then . else ((. - 1) | fib) + ((. - 2) | fib) end); 80 | fib'
+
+# Collatz chain length — subgraph revisits become O(1)
+jq-jit -n 'def collatz: memoize(if . == 1 then 0 else (if . % 2 == 0 then ./2 else 3*. + 1 end | collatz) + 1 end); 27 | collatz'
+
+# 2-arg form: memoize a transformation by record id, ignoring the rest
+jq-jit -c 'memoize(.value * 2; .id)' <<< '{"id":1,"value":10}'
+```
+
+Eviction defaults to "unbounded for program lifetime" up to a per-slot cap of
+1,000,000 entries; control it with `--memo-max-entries N` on the CLI. Past the
+cap, new inserts are silently dropped (the program continues, just without
+caching new entries). Body errors do not poison the cache — the next call
+re-evaluates.
+
+Run with `--debug-memo` to print per-slot cache stats (hits / misses / entries)
+to stderr at program exit. Useful for confirming a `memoize(...)` is actually
+hitting:
+
+```bash
+jq-jit --debug-memo -n 'def fib: memoize(if . < 2 then . else ((. - 1) | fib) + ((. - 2) | fib) end); 30 | fib'
+# memoize stats: 1 slot(s)
+#   slot          hits        misses       entries
+#      0            28            31            31
+```
+
+The 1-arg form keys only by the current input. If your body closes over a
+`$var` that varies between calls, results will be stale — pull the var into
+the key explicitly with the 2-arg form: `memoize(. + $x; [., $x])`.
 
 ## Testing
 

@@ -10067,3 +10067,52 @@ null
 def steps($n): {n: $n, c: 0} | until(.n == 1; if .n % 2 == 0 then .n /= 2 else .n = .n*3 + 1 end | .c += 1) | .c; [range(1; 100) | steps(.)] | max
 null
 118
+
+# Issue #671: memoize/1 jqx extension — fib via self-recursive memo
+def fib: memoize(if . < 2 then . else ((. - 1) | fib) + ((. - 2) | fib) end); 30 | fib
+null
+832040
+
+# Issue #671: memoize/1 — Collatz length, exercises subgraph revisits
+def collatz_len: memoize(if . == 1 then 0 else (if . % 2 == 0 then ./2 else 3*. + 1 end | collatz_len) + 1 end); 27 | collatz_len
+null
+111
+
+# Issue #671: memoize/1 — distinct inputs each cached independently
+def sq: memoize(. * .); [1, 2, 3, 2, 1] | map(sq)
+null
+[1,4,9,4,1]
+
+# Issue #671: memoize/1 — body that yields multiple values is re-yielded on hit
+def two: memoize(., . + 1); [1, 1, 2] | map([two]) | add
+null
+[1,2,1,2,2,3]
+
+# Issue #671: memoize/1 — object-valued input keys hit by structural equality
+def tag: memoize(.a + .b); [{a: 1, b: 2}, {b: 2, a: 1}, {a: 3, b: 4}] | map(tag)
+null
+[3,3,7]
+
+# Issue #671: memoize/1 — closed-over $vars are NOT part of the cache key.
+# Pins the documented contract: `memoize` keys by current input only, so a
+# body that closes over a $var that differs between calls will return stale
+# results from the first call. Users who need this should pull the $var
+# into the input (e.g. `[., $x] | memoize(...)`) or use the 2-arg
+# `memoize(f; key)` form.
+def f($x): memoize(. + $x); 10 | [f(1), f(2)]
+null
+[11,11]
+
+# Issue #671: memoize/2 — explicit key includes $var so cache discriminates.
+# Same body as the staleness test above; adding `[., $x]` as the key keeps
+# each (input, $x) pair in its own cache entry.
+def f($x): memoize(. + $x; [., $x]); 10 | [f(1), f(2), f(1)]
+null
+[11,12,11]
+
+# Issue #671: memoize/2 — large input keyed by a small discriminator.
+# Body computes from full input; cache identity is just `.id`. Demonstrates
+# the documented pattern for "memoize a transformation by record id".
+def by_id: memoize(.value * 2; .id); [{id: 1, value: 10}, {id: 2, value: 20}, {id: 1, value: 999}] | map(by_id)
+null
+[20,40,20]

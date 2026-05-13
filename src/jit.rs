@@ -4689,6 +4689,10 @@ impl Flattener {
             Expr::CallBuiltin { args, .. } => {
                 for a in args { Self::collect_loadvar_indices(a, out); }
             }
+            Expr::Memoize { key, body, .. } => {
+                if let Some(k) = key { Self::collect_loadvar_indices(k, out); }
+                Self::collect_loadvar_indices(body, out);
+            }
         }
     }
 
