@@ -221,6 +221,17 @@ cap, new inserts are silently dropped (the program continues, just without
 caching new entries). Body errors do not poison the cache — the next call
 re-evaluates.
 
+Run with `--debug-memo` to print per-slot cache stats (hits / misses / entries)
+to stderr at program exit. Useful for confirming a `memoize(...)` is actually
+hitting:
+
+```bash
+jq-jit --debug-memo -n 'def fib: memoize(if . < 2 then . else ((. - 1) | fib) + ((. - 2) | fib) end); 30 | fib'
+# memoize stats: 1 slot(s)
+#   slot          hits        misses       entries
+#      0            28            31            31
+```
+
 The 1-arg form keys only by the current input. If your body closes over a
 `$var` that varies between calls, results will be stale — pull the var into
 the key explicitly with the 2-arg form: `memoize(. + $x; [., $x])`.

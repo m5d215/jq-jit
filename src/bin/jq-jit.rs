@@ -2223,6 +2223,7 @@ fn real_main() {
     let mut force_interp = force_interpreter_enabled();
     let mut force_jit = false;
     let mut memo_max_entries: Option<usize> = None;
+    let mut debug_memo = false;
     let args: Vec<String> = std::env::args().collect();
 
     let mut filter_str = None;
@@ -2293,6 +2294,7 @@ fn real_main() {
                     process::exit(2);
                 }
             }
+            "--debug-memo" => debug_memo = true,
             "-a" | "--ascii-output" => {
                 // Recognised but not yet implemented (#126). Emit a
                 // clear error instead of falling through to the filter
@@ -21292,6 +21294,11 @@ fn real_main() {
     }
     let _ = out.flush();
 
+    if debug_memo {
+        let mut stderr = io::stderr().lock();
+        let _ = filter.dump_memo_stats(&mut stderr);
+    }
+
     if had_error {
         process::exit(5);
     }
@@ -21329,6 +21336,7 @@ fn print_usage() {
     eprintln!("  --args                   Remaining args are string $ARGS.positional");
     eprintln!("  --jsonargs               Remaining args are JSON $ARGS.positional");
     eprintln!("  --memo-max-entries N     Per-slot cap for memoize/1 cache (jqx; default 1000000)");
+    eprintln!("  --debug-memo             Print per-slot memoize cache stats to stderr on exit (jqx)");
     eprintln!("  --version                Show version");
     eprintln!("  -h, --help               Show this help");
 }

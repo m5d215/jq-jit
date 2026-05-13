@@ -93,7 +93,22 @@ pub enum MemoEntry {
     Many(Rc<Vec<Value>>),
 }
 
-pub type MemoSlot = Rc<RefCell<HashMap<ValueKey, MemoEntry>>>;
+/// Per-slot cache state: the entries themselves plus diagnostic counters.
+/// `hits` / `misses` are populated unconditionally — the branch is cheap and
+/// reading them is the whole point of `--debug-memo`.
+pub struct SlotState {
+    pub entries: HashMap<ValueKey, MemoEntry>,
+    pub hits: u64,
+    pub misses: u64,
+}
+
+impl SlotState {
+    fn new() -> Self {
+        SlotState { entries: HashMap::new(), hits: 0, misses: 0 }
+    }
+}
+
+pub type MemoSlot = Rc<RefCell<SlotState>>;
 
 pub struct Env {
     vars: Vec<Value>,
@@ -130,7 +145,7 @@ pub fn default_memo_max_entries() -> usize {
 }
 
 fn fresh_memo_slots(n: u32) -> Vec<MemoSlot> {
-    (0..n).map(|_| Rc::new(RefCell::new(HashMap::new()))).collect()
+    (0..n).map(|_| Rc::new(RefCell::new(SlotState::new()))).collect()
 }
 
 impl Env {
@@ -3272,7 +3287,12 @@ fn memo_lookup_or_run(
     env: &EnvRef,
     cb: &mut dyn FnMut(Value) -> GenResult,
 ) -> GenResult {
-    let cached = slot.borrow().get(&cache_key).cloned();
+    let cached = {
+        let mut state = slot.borrow_mut();
+        let hit = state.entries.get(&cache_key).cloned();
+        if hit.is_some() { state.hits += 1; } else { state.misses += 1; }
+        hit
+    };
     if let Some(entry) = cached {
         return match entry {
             MemoEntry::Single(v) => cb(v),
@@ -3298,10 +3318,10 @@ fn memo_lookup_or_run(
         MemoEntry::Many(Rc::new(outputs))
     };
     {
-        let mut slot_mut = slot.borrow_mut();
+        let mut state = slot.borrow_mut();
         let cap = env.borrow().memo_max_entries;
-        if slot_mut.len() < cap {
-            slot_mut.insert(cache_key, entry.clone());
+        if state.entries.len() < cap {
+            state.entries.insert(cache_key, entry.clone());
         }
     }
     match entry {

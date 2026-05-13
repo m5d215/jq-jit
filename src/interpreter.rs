@@ -2429,6 +2429,31 @@ impl Filter {
         }
     }
 
+    /// Number of `memoize(...)` call sites in the parsed program.
+    pub fn memo_slot_count(&self) -> u32 {
+        self.memo_slots
+    }
+
+    /// Dump per-slot memoize cache stats (hits / misses / size) to the
+    /// given writer. Used by `--debug-memo`. No-op if the program contains
+    /// no `memoize` calls or if the Env was never materialized.
+    pub fn dump_memo_stats(&self, w: &mut dyn std::io::Write) -> std::io::Result<()> {
+        if self.memo_slots == 0 { return Ok(()); }
+        let cached = self.cached_env.borrow();
+        let env = match cached.as_ref() {
+            Some(e) => e,
+            None => return Ok(()),
+        };
+        let env_ref = env.borrow();
+        writeln!(w, "memoize stats: {} slot(s)", env_ref.memo_slots.len())?;
+        writeln!(w, "  {:>4}  {:>12}  {:>12}  {:>12}", "slot", "hits", "misses", "entries")?;
+        for (i, slot) in env_ref.memo_slots.iter().enumerate() {
+            let s = slot.borrow();
+            writeln!(w, "  {:>4}  {:>12}  {:>12}  {:>12}", i, s.hits, s.misses, s.entries.len())?;
+        }
+        Ok(())
+    }
+
     /// Try to JIT-compile this filter if not already JIT'd.
     /// Call this after determining the input is large enough to justify compilation.
     pub fn compile_jit(&mut self) {
