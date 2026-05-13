@@ -2117,7 +2117,9 @@ fn contains_input(expr: &crate::ir::Expr) -> bool {
         Expr::FuncCall { args, .. } => args.iter().any(contains_input),
         Expr::ClosureOp { .. } | Expr::AnyShort { .. } | Expr::AllShort { .. }
         | Expr::AlternativeDestructure { .. } => true, // conservative
-        Expr::Memoize { body, .. } => contains_input(body),
+        Expr::Memoize { key, body, .. } => {
+            key.as_ref().is_some_and(|k| contains_input(k)) || contains_input(body)
+        }
     }
 }
 

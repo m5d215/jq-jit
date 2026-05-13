@@ -193,6 +193,7 @@ jq-jit -n 'exec("cat data.csv") | fromcsvh | select(.age | tonumber > 25)'
 | Function | Description |
 |----------|-------------|
 | `memoize(f)` | Cache the output sequence of `f` keyed by the current input value. |
+| `memoize(f; key)` | Same, but use `key` (evaluated against the input) as the cache key instead of the input itself. |
 
 Each lexical occurrence of `memoize(...)` gets its own cache; entries persist
 for the lifetime of the program (across NDJSON input records). Keys compare by
@@ -209,6 +210,9 @@ jq-jit -n 'def fib: memoize(if . < 2 then . else ((. - 1) | fib) + ((. - 2) | fi
 
 # Collatz chain length — subgraph revisits become O(1)
 jq-jit -n 'def collatz: memoize(if . == 1 then 0 else (if . % 2 == 0 then ./2 else 3*. + 1 end | collatz) + 1 end); 27 | collatz'
+
+# 2-arg form: memoize a transformation by record id, ignoring the rest
+jq-jit -c 'memoize(.value * 2; .id)' <<< '{"id":1,"value":10}'
 ```
 
 Eviction defaults to "unbounded for program lifetime" up to a per-slot cap of
@@ -217,9 +221,9 @@ cap, new inserts are silently dropped (the program continues, just without
 caching new entries). Body errors do not poison the cache — the next call
 re-evaluates.
 
-Do not close over mutable state inside `memoize(...)`: only the input value is
-part of the cache key. A body that reads a `$var` set elsewhere in the program
-will return stale results if that var changes between calls.
+The 1-arg form keys only by the current input. If your body closes over a
+`$var` that varies between calls, results will be stale — pull the var into
+the key explicitly with the 2-arg form: `memoize(. + $x; [., $x])`.
 
 ## Testing
 

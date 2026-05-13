@@ -350,6 +350,22 @@ bench_gen "tojson/fromjson(100K)"       100000    '[range(.) | {a: ., b: "x"}] |
 bench_gen "null propagation(2M)"        2000000   '[range(.) | null] | map(.a.b.c?) | length'
 
 echo ""
+echo "--- Memoization (jqx) ---"
+header
+# fib via self-recursive memoize. Without memo, fib(N) is exponential — N=40
+# already takes minutes. With memo each value computed once, so this scales
+# linearly. Drives the "is memoize working" regression anchor.
+bench_gen "memo fib (1K)"               1000     'def fib: memoize(if . < 2 then . else ((. - 1) | fib) + ((. - 2) | fib) end); [range(.) | fib] | last'
+# Collatz chain length, summed. Exercises the "subgraph revisit" pattern
+# where memo collapses overlapping tails of the chains.
+bench_gen "memo collatz sum (10K)"      10000    'def c: memoize(if . == 1 then 0 else (if . % 2 == 0 then ./2 else 3*.+1 end | c) + 1 end); [range(1; .) | c] | add'
+# 2-arg memoize: body computes from the full record but cache is keyed by
+# .id. 100K inputs deduplicate onto 1K unique keys; the expensive body runs
+# only ~1K times. The outer record is bound to `$rec` so the `reduce`
+# update can reach `.v` past the accumulator.
+bench_gen "memo by .id (100K, 1K keys)" 100000   '[range(.) | {id: (. % 1000), v: .}] | map(. as $rec | memoize(reduce range(0; 100) as $i (0; . + $i * $rec.v); .id)) | length'
+
+echo ""
 echo "--- jaq-derived ---"
 header
 BENCH_DIR="$HOME/src/github.com/01mf02/jaq/examples/benches"

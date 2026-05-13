@@ -3320,7 +3320,14 @@ impl Parser {
             ("memoize", 1) => {
                 let body = args.into_iter().next().unwrap();
                 let slot_id = self.scope.alloc_memo_slot();
-                Ok(Expr::Memoize { slot_id, body: Box::new(body) })
+                Ok(Expr::Memoize { slot_id, key: None, body: Box::new(body) })
+            }
+            ("memoize", 2) => {
+                let mut it = args.into_iter();
+                let body = it.next().unwrap();
+                let key = it.next().unwrap();
+                let slot_id = self.scope.alloc_memo_slot();
+                Ok(Expr::Memoize { slot_id, key: Some(Box::new(key)), body: Box::new(body) })
             }
             ("recurse", 2) => {
                 let mut args = args.into_iter();
@@ -4224,8 +4231,10 @@ fn remap_func_ids(expr: Expr, map: &[(usize, usize)]) -> Expr {
         Expr::CallBuiltin { name, args } => Expr::CallBuiltin {
             name, args: args.into_iter().map(|a| remap_func_ids(a, map)).collect(),
         },
-        Expr::Memoize { slot_id, body } => Expr::Memoize {
-            slot_id, body: Box::new(remap_func_ids(*body, map)),
+        Expr::Memoize { slot_id, key, body } => Expr::Memoize {
+            slot_id,
+            key: key.map(|k| Box::new(remap_func_ids(*k, map))),
+            body: Box::new(remap_func_ids(*body, map)),
         },
         // Leaf nodes: no remapping needed
         Expr::Input | Expr::Literal(_) | Expr::LoadVar { .. } | Expr::Empty

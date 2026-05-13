@@ -338,12 +338,18 @@ pub enum Expr {
         args: Vec<Expr>,
     },
 
-    /// `memoize(body)` — jqx extension. Caches the body's output sequence
-    /// keyed by the input value. Each lexical occurrence in the program
-    /// gets a unique `slot_id` assigned during the compile pass; the cache
-    /// itself lives on the runtime `Env`.
+    /// `memoize(body)` / `memoize(body; key)` — jqx extension.
+    ///
+    /// Caches the body's output sequence per cache key. Each lexical
+    /// occurrence gets a unique `slot_id` assigned during the compile pass.
+    ///
+    /// With no `key` (1-arg form), the cache key is the current input value.
+    /// With an explicit `key` (2-arg form), the key expression is evaluated
+    /// against the current input — each value it yields drives one cache
+    /// lookup, and the body runs against the original input on miss.
     Memoize {
         slot_id: u32,
+        key: Option<Box<Expr>>,
         body: Box<Expr>,
     },
 }

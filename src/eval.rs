@@ -82,7 +82,18 @@ impl std::fmt::Display for BreakError {
 }
 impl std::error::Error for BreakError {}
 
-pub type MemoSlot = Rc<RefCell<HashMap<ValueKey, Rc<Vec<Value>>>>>;
+/// Cached output sequence for a single memoize call site.
+///
+/// The vast majority of memoize use cases — fib, Collatz, totient, etc. —
+/// have single-output bodies, so we special-case that to skip an
+/// `Rc<Vec<Value>>` allocation and a 1-element iteration on every cache hit.
+#[derive(Clone)]
+pub enum MemoEntry {
+    Single(Value),
+    Many(Rc<Vec<Value>>),
+}
+
+pub type MemoSlot = Rc<RefCell<HashMap<ValueKey, MemoEntry>>>;
 
 pub struct Env {
     vars: Vec<Value>,
@@ -310,7 +321,11 @@ fn subst_inner(
         Expr::AlternativeDestructure { alternatives } => Expr::AlternativeDestructure {
             alternatives: alternatives.iter().map(|a| s!(a)).collect(),
         },
-        Expr::Memoize { slot_id, body } => Expr::Memoize { slot_id: *slot_id, body: sb!(body) },
+        Expr::Memoize { slot_id, key, body } => Expr::Memoize {
+            slot_id: *slot_id,
+            key: key.as_ref().map(|k| sb!(k)),
+            body: sb!(body),
+        },
         Expr::Input | Expr::Empty | Expr::Not | Expr::Env | Expr::Builtins
         | Expr::ReadInput | Expr::ReadInputs | Expr::ModuleMeta | Expr::GenLabel
         | Expr::Literal(_) | Expr::Loc { .. } => expr.clone(),
@@ -642,7 +657,16 @@ fn subst_cow(expr: &Expr, pv: &[u16], args: &[Expr]) -> Option<Expr> {
                 alternatives: alternatives.iter().zip(results).map(|(a, r)| r.unwrap_or_else(|| a.clone())).collect(),
             })
         }
-        Expr::Memoize { slot_id, body } => s!(body).map(|b| Expr::Memoize { slot_id: *slot_id, body: Box::new(b) }),
+        Expr::Memoize { slot_id, key, body } => {
+            let k = key.as_ref().and_then(|k2| s!(k2));
+            let b = s!(body);
+            if k.is_none() && b.is_none() { return None; }
+            Some(Expr::Memoize {
+                slot_id: *slot_id,
+                key: if k.is_some() { k.map(Box::new) } else { key.clone() },
+                body: Box::new(b.unwrap_or_else(|| body.as_ref().clone())),
+            })
+        }
         // Leaf nodes never contain param var references
         Expr::Input | Expr::Empty | Expr::Not | Expr::Env | Expr::Builtins
         | Expr::ReadInput | Expr::ReadInputs | Expr::ModuleMeta | Expr::GenLabel
@@ -693,7 +717,9 @@ fn contains_func_call(expr: &Expr, target: usize) -> bool {
             c!(input_expr) || c!(re) || c!(tostr) || c!(flags)
         }
         Expr::AlternativeDestructure { alternatives } => alternatives.iter().any(|a| c!(a)),
-        Expr::Memoize { body, .. } => c!(body),
+        Expr::Memoize { key, body, .. } => {
+            key.as_ref().is_some_and(|k| c!(k)) || c!(body)
+        }
         Expr::Input | Expr::Empty | Expr::Not | Expr::Env | Expr::Builtins
         | Expr::ReadInput | Expr::ReadInputs | Expr::ModuleMeta | Expr::GenLabel
         | Expr::Literal(_) | Expr::Loc { .. } | Expr::LoadVar { .. } | Expr::Error { msg: None } => false,
@@ -846,7 +872,10 @@ fn expr_uses_var(expr: &Expr, target: u16) -> bool {
             expr_uses_var(input_expr, target) || expr_uses_var(re, target) || expr_uses_var(tostr, target) || expr_uses_var(flags, target)
         }
         Expr::AlternativeDestructure { alternatives } => alternatives.iter().any(|a| expr_uses_var(a, target)),
-        Expr::Memoize { body, .. } => expr_uses_var(body, target),
+        Expr::Memoize { key, body, .. } => {
+            key.as_ref().is_some_and(|k| expr_uses_var(k, target))
+                || expr_uses_var(body, target)
+        }
     }
 }
 
@@ -3202,7 +3231,7 @@ pub fn eval(
             eval_call_builtin(name, args, input, env, cb)
         }
 
-        Expr::Memoize { slot_id, body } => {
+        Expr::Memoize { slot_id, key, body } => {
             let slot = {
                 let env_ref = env.borrow();
                 match env_ref.memo_slots.get(*slot_id as usize) {
@@ -3210,34 +3239,75 @@ pub fn eval(
                     None => bail!("memoize slot {} not allocated", slot_id),
                 }
             };
-            let key = ValueKey(input.clone());
-            // Cache hit: re-yield the materialized output sequence.
-            let cached = slot.borrow().get(&key).cloned();
-            if let Some(outputs) = cached {
-                for v in outputs.iter() {
+            match key {
+                None => {
+                    // 1-arg form: cache key IS the current input.
+                    memo_lookup_or_run(&slot, ValueKey(input.clone()), body, input, env, cb)
+                }
+                Some(key_expr) => {
+                    // 2-arg form: each value yielded by `key` drives a separate
+                    // cache lookup; the body runs against the original input.
+                    eval(key_expr, input.clone(), env, &mut |k| {
+                        memo_lookup_or_run(&slot, ValueKey(k), body, input.clone(), env, cb)
+                    })
+                }
+            }
+        }
+    }
+}
+
+/// Shared cache-lookup-or-compute path for both arities of `memoize`.
+///
+/// On hit, re-yields the cached output sequence. On miss, runs `body`
+/// against `body_input` to completion (collecting every output), inserts
+/// the result subject to the per-slot cap, and yields it.
+///
+/// Body errors are propagated without poisoning the cache — the next call
+/// re-evaluates.
+fn memo_lookup_or_run(
+    slot: &MemoSlot,
+    cache_key: ValueKey,
+    body: &Expr,
+    body_input: Value,
+    env: &EnvRef,
+    cb: &mut dyn FnMut(Value) -> GenResult,
+) -> GenResult {
+    let cached = slot.borrow().get(&cache_key).cloned();
+    if let Some(entry) = cached {
+        return match entry {
+            MemoEntry::Single(v) => cb(v),
+            MemoEntry::Many(rc) => {
+                for v in rc.iter() {
                     if !cb(v.clone())? { return Ok(false); }
                 }
-                return Ok(true);
+                Ok(true)
             }
-            // Miss: run the body to completion, collecting every output.
-            // We do not pass the consumer's `cb` directly — `memoize` must
-            // observe the full output sequence to cache it, even if the
-            // consumer wants to stop after the first value. This means
-            // `memoize` forces the body to fully evaluate; for the typical
-            // single-output pure body that is the natural case, but it is
-            // a documented difference for generator/side-effecting bodies.
-            let mut outputs: Vec<Value> = Vec::new();
-            eval(body, input, env, &mut |v| { outputs.push(v); Ok(true) })?;
-            let outputs_rc = Rc::new(outputs);
-            // Cache subject to per-slot cap.
-            {
-                let mut slot_mut = slot.borrow_mut();
-                let cap = env.borrow().memo_max_entries;
-                if slot_mut.len() < cap {
-                    slot_mut.insert(key, outputs_rc.clone());
-                }
-            }
-            for v in outputs_rc.iter() {
+        };
+    }
+    // Miss: run the body to completion. We do not pass the consumer's `cb`
+    // directly — `memoize` must observe the full output sequence to cache
+    // it, even if the consumer wants to stop after the first value. This
+    // means `memoize` forces the body to fully evaluate; for the typical
+    // single-output pure body that is the natural case, but it is a
+    // documented difference for generator/side-effecting bodies.
+    let mut outputs: Vec<Value> = Vec::new();
+    eval(body, body_input, env, &mut |v| { outputs.push(v); Ok(true) })?;
+    let entry = if outputs.len() == 1 {
+        MemoEntry::Single(outputs[0].clone())
+    } else {
+        MemoEntry::Many(Rc::new(outputs))
+    };
+    {
+        let mut slot_mut = slot.borrow_mut();
+        let cap = env.borrow().memo_max_entries;
+        if slot_mut.len() < cap {
+            slot_mut.insert(cache_key, entry.clone());
+        }
+    }
+    match entry {
+        MemoEntry::Single(v) => cb(v),
+        MemoEntry::Many(rc) => {
+            for v in rc.iter() {
                 if !cb(v.clone())? { return Ok(false); }
             }
             Ok(true)
