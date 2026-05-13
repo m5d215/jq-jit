@@ -12,7 +12,7 @@ use std::rc::Rc;
 use anyhow::{Result, bail};
 
 use crate::ir::*;
-use crate::value::{Value, ObjInner, NumRepr, KeyStr};
+use crate::value::{Value, ObjInner, NumRepr, KeyStr, ValueKey};
 
 type GenResult = Result<bool>;
 pub type EnvRef = Rc<RefCell<Env>>;
@@ -82,6 +82,8 @@ impl std::fmt::Display for BreakError {
 }
 impl std::error::Error for BreakError {}
 
+pub type MemoSlot = Rc<RefCell<HashMap<ValueKey, Rc<Vec<Value>>>>>;
+
 pub struct Env {
     vars: Vec<Value>,
     funcs: Vec<Rc<CompiledFunc>>,
@@ -99,14 +101,41 @@ pub struct Env {
     /// Pointer-based substitution cache: func_id → (args_ptr, substituted_body).
     /// For non-LoadVar args from stable (cached) call sites.
     subst_ptr_cache: Vec<(usize, usize, Rc<Expr>)>,
+    /// One cache map per lexical `memoize(...)` occurrence in the program.
+    /// Lifetime is the whole program execution (persists across NDJSON inputs).
+    /// `Rc` so the eval path can clone a handle and drop the `Env` borrow
+    /// before invoking the memoized body (which may itself borrow `Env`).
+    pub memo_slots: Vec<MemoSlot>,
+    /// Per-slot upper bound on cache entries. New inserts past this cap are
+    /// silently dropped (the program continues, just without caching that
+    /// entry). Controlled by `--memo-max-entries` on the CLI.
+    pub memo_max_entries: usize,
+}
+
+const DEFAULT_MEMO_MAX_ENTRIES: usize = 1_000_000;
+
+pub fn default_memo_max_entries() -> usize {
+    DEFAULT_MEMO_MAX_ENTRIES
+}
+
+fn fresh_memo_slots(n: u32) -> Vec<MemoSlot> {
+    (0..n).map(|_| Rc::new(RefCell::new(HashMap::new()))).collect()
 }
 
 impl Env {
     pub fn new(funcs: Vec<CompiledFunc>) -> Self {
-        Env { vars: vec![Value::Null; 65536], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs: Vec::new(), closures: Vec::new(), recursive_cache: Vec::new(), subst_cache: Vec::new(), subst_ptr_cache: Vec::new() }
+        Env { vars: vec![Value::Null; 65536], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs: Vec::new(), closures: Vec::new(), recursive_cache: Vec::new(), subst_cache: Vec::new(), subst_ptr_cache: Vec::new(), memo_slots: Vec::new(), memo_max_entries: DEFAULT_MEMO_MAX_ENTRIES }
     }
     pub fn with_lib_dirs(funcs: Vec<CompiledFunc>, lib_dirs: Vec<String>) -> Self {
-        Env { vars: vec![Value::Null; 65536], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs, closures: Vec::new(), recursive_cache: Vec::new(), subst_cache: Vec::new(), subst_ptr_cache: Vec::new() }
+        Env { vars: vec![Value::Null; 65536], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs, closures: Vec::new(), recursive_cache: Vec::new(), subst_cache: Vec::new(), subst_ptr_cache: Vec::new(), memo_slots: Vec::new(), memo_max_entries: DEFAULT_MEMO_MAX_ENTRIES }
+    }
+    /// Allocate `n` memo cache slots. Called once per program after parsing,
+    /// using `ParseResult::memo_slots`.
+    pub fn set_memo_slots(&mut self, n: u32) {
+        self.memo_slots = fresh_memo_slots(n);
+    }
+    pub fn set_memo_max_entries(&mut self, n: usize) {
+        self.memo_max_entries = n;
     }
     /// Reset env state for reuse across multiple inputs.
     /// Keeps allocated buffers (vars, caches) but resets mutable state.
@@ -119,7 +148,9 @@ impl Env {
         self.next_label = 0;
         self.next_var = 256;
         self.closures.clear();
-        // Keep recursive_cache, subst_cache, subst_ptr_cache — they stay valid across inputs
+        // Keep recursive_cache, subst_cache, subst_ptr_cache, memo_slots —
+        // they stay valid across inputs (memo cache spans the whole program
+        // lifetime per #671 design).
     }
     #[inline(always)]
     fn get_var(&self, idx: u16) -> Value {
@@ -279,6 +310,7 @@ fn subst_inner(
         Expr::AlternativeDestructure { alternatives } => Expr::AlternativeDestructure {
             alternatives: alternatives.iter().map(|a| s!(a)).collect(),
         },
+        Expr::Memoize { slot_id, body } => Expr::Memoize { slot_id: *slot_id, body: sb!(body) },
         Expr::Input | Expr::Empty | Expr::Not | Expr::Env | Expr::Builtins
         | Expr::ReadInput | Expr::ReadInputs | Expr::ModuleMeta | Expr::GenLabel
         | Expr::Literal(_) | Expr::Loc { .. } => expr.clone(),
@@ -610,6 +642,7 @@ fn subst_cow(expr: &Expr, pv: &[u16], args: &[Expr]) -> Option<Expr> {
                 alternatives: alternatives.iter().zip(results).map(|(a, r)| r.unwrap_or_else(|| a.clone())).collect(),
             })
         }
+        Expr::Memoize { slot_id, body } => s!(body).map(|b| Expr::Memoize { slot_id: *slot_id, body: Box::new(b) }),
         // Leaf nodes never contain param var references
         Expr::Input | Expr::Empty | Expr::Not | Expr::Env | Expr::Builtins
         | Expr::ReadInput | Expr::ReadInputs | Expr::ModuleMeta | Expr::GenLabel
@@ -660,6 +693,7 @@ fn contains_func_call(expr: &Expr, target: usize) -> bool {
             c!(input_expr) || c!(re) || c!(tostr) || c!(flags)
         }
         Expr::AlternativeDestructure { alternatives } => alternatives.iter().any(|a| c!(a)),
+        Expr::Memoize { body, .. } => c!(body),
         Expr::Input | Expr::Empty | Expr::Not | Expr::Env | Expr::Builtins
         | Expr::ReadInput | Expr::ReadInputs | Expr::ModuleMeta | Expr::GenLabel
         | Expr::Literal(_) | Expr::Loc { .. } | Expr::LoadVar { .. } | Expr::Error { msg: None } => false,
@@ -741,6 +775,8 @@ fn expr_uses_outer_input(expr: &Expr) -> bool {
         | Expr::RegexTest { .. } | Expr::RegexMatch { .. } | Expr::RegexCapture { .. }
         | Expr::RegexScan { .. } | Expr::RegexSub { .. } | Expr::RegexGsub { .. }
         | Expr::AlternativeDestructure { .. } => true,
+        // Memoize keys cache by current input → always uses input
+        Expr::Memoize { .. } => true,
     }
 }
 
@@ -810,6 +846,7 @@ fn expr_uses_var(expr: &Expr, target: u16) -> bool {
             expr_uses_var(input_expr, target) || expr_uses_var(re, target) || expr_uses_var(tostr, target) || expr_uses_var(flags, target)
         }
         Expr::AlternativeDestructure { alternatives } => alternatives.iter().any(|a| expr_uses_var(a, target)),
+        Expr::Memoize { body, .. } => expr_uses_var(body, target),
     }
 }
 
@@ -3163,6 +3200,47 @@ pub fn eval(
 
         Expr::CallBuiltin { name, args } => {
             eval_call_builtin(name, args, input, env, cb)
+        }
+
+        Expr::Memoize { slot_id, body } => {
+            let slot = {
+                let env_ref = env.borrow();
+                match env_ref.memo_slots.get(*slot_id as usize) {
+                    Some(s) => s.clone(),
+                    None => bail!("memoize slot {} not allocated", slot_id),
+                }
+            };
+            let key = ValueKey(input.clone());
+            // Cache hit: re-yield the materialized output sequence.
+            let cached = slot.borrow().get(&key).cloned();
+            if let Some(outputs) = cached {
+                for v in outputs.iter() {
+                    if !cb(v.clone())? { return Ok(false); }
+                }
+                return Ok(true);
+            }
+            // Miss: run the body to completion, collecting every output.
+            // We do not pass the consumer's `cb` directly — `memoize` must
+            // observe the full output sequence to cache it, even if the
+            // consumer wants to stop after the first value. This means
+            // `memoize` forces the body to fully evaluate; for the typical
+            // single-output pure body that is the natural case, but it is
+            // a documented difference for generator/side-effecting bodies.
+            let mut outputs: Vec<Value> = Vec::new();
+            eval(body, input, env, &mut |v| { outputs.push(v); Ok(true) })?;
+            let outputs_rc = Rc::new(outputs);
+            // Cache subject to per-slot cap.
+            {
+                let mut slot_mut = slot.borrow_mut();
+                let cap = env.borrow().memo_max_entries;
+                if slot_mut.len() < cap {
+                    slot_mut.insert(key, outputs_rc.clone());
+                }
+            }
+            for v in outputs_rc.iter() {
+                if !cb(v.clone())? { return Ok(false); }
+            }
+            Ok(true)
         }
     }
 }

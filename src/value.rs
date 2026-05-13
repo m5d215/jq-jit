@@ -4,6 +4,7 @@
 
 use std::cell::{RefCell, UnsafeCell};
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 use anyhow::{Result, bail};
@@ -462,6 +463,114 @@ impl PartialEq for Value {
             (Value::Obj(ObjInner(a)), Value::Obj(ObjInner(b))) => a == b,
             _ => false,
         }
+    }
+}
+
+/// `Value` wrapper usable as a `HashMap` / `HashSet` key.
+///
+/// Required because:
+/// - `Value::PartialEq` keeps IEEE 754 semantics (`NaN != NaN`), so `Value`
+///   cannot implement `Eq` directly without violating reflexivity.
+/// - `==` on `Rc<ObjMap>` compares the derived `ObjMap::PartialEq`, which is
+///   order-sensitive over `entries: Vec`, but jq object equality is
+///   order-independent (see `runtime::values_equal`).
+///
+/// `ValueKey` provides an `Eq` + `Hash` pair consistent with
+/// `runtime::values_equal` plus NaN reflexivity (NaN as a cache key matches
+/// itself). Used as the key type for memoization caches and future hash-map
+/// values.
+#[derive(Debug, Clone)]
+pub struct ValueKey(pub Value);
+
+impl ValueKey {
+    fn key_eq(a: &Value, b: &Value) -> bool {
+        match (a, b) {
+            (Value::Null, Value::Null) => true,
+            (Value::True, Value::True) => true,
+            (Value::False, Value::False) => true,
+            (Value::Num(x, _), Value::Num(y, _)) => {
+                if x.is_nan() && y.is_nan() {
+                    true
+                } else {
+                    x == y
+                }
+            }
+            (Value::Str(x), Value::Str(y)) => x == y,
+            (Value::Arr(x), Value::Arr(y)) => {
+                x.len() == y.len()
+                    && x.iter().zip(y.iter()).all(|(a, b)| Self::key_eq(a, b))
+            }
+            (Value::Obj(ObjInner(x)), Value::Obj(ObjInner(y))) => {
+                x.len() == y.len()
+                    && x.iter().all(|(k, v)| {
+                        y.get(k.as_str()).is_some_and(|yv| Self::key_eq(v, yv))
+                    })
+            }
+            (Value::Error(x), Value::Error(y)) => x == y,
+            _ => false,
+        }
+    }
+
+    fn hash_value<H: Hasher>(v: &Value, state: &mut H) {
+        match v {
+            Value::Null => 0u8.hash(state),
+            Value::False => 1u8.hash(state),
+            Value::True => 2u8.hash(state),
+            Value::Num(n, _) => {
+                3u8.hash(state);
+                let bits = if n.is_nan() {
+                    f64::NAN.to_bits()
+                } else if *n == 0.0 {
+                    0u64
+                } else {
+                    n.to_bits()
+                };
+                bits.hash(state);
+            }
+            Value::Str(s) => {
+                4u8.hash(state);
+                s.as_str().hash(state);
+            }
+            Value::Arr(a) => {
+                5u8.hash(state);
+                a.len().hash(state);
+                for elem in a.iter() {
+                    Self::hash_value(elem, state);
+                }
+            }
+            Value::Obj(ObjInner(o)) => {
+                6u8.hash(state);
+                o.len().hash(state);
+                let mut combined: u64 = 0;
+                for (k, val) in o.iter() {
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    k.as_str().hash(&mut h);
+                    Self::hash_value(val, &mut h);
+                    combined ^= h.finish();
+                }
+                combined.hash(state);
+            }
+            Value::Error(e) => {
+                7u8.hash(state);
+                e.as_str().hash(state);
+            }
+        }
+    }
+}
+
+impl PartialEq for ValueKey {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        Self::key_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ValueKey {}
+
+impl Hash for ValueKey {
+    #[inline]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Self::hash_value(&self.0, state);
     }
 }
 

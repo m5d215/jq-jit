@@ -337,6 +337,15 @@ pub enum Expr {
         name: String,
         args: Vec<Expr>,
     },
+
+    /// `memoize(body)` — jqx extension. Caches the body's output sequence
+    /// keyed by the input value. Each lexical occurrence in the program
+    /// gets a unique `slot_id` assigned during the compile pass; the cache
+    /// itself lives on the runtime `Env`.
+    Memoize {
+        slot_id: u32,
+        body: Box<Expr>,
+    },
 }
 
 /// String interpolation part.
@@ -585,6 +594,8 @@ impl Expr {
             Expr::Recurse { .. } | Expr::Range { .. } | Expr::PathExpr { .. }
             | Expr::SetPath { .. } | Expr::GetPath { .. } | Expr::DelPaths { .. }
             | Expr::Break { .. } | Expr::FuncCall { .. } => false,
+            // Memoize body always reads input (the cache key)
+            Expr::Memoize { .. } => false,
         }
     }
 

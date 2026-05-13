@@ -10067,3 +10067,28 @@ null
 def steps($n): {n: $n, c: 0} | until(.n == 1; if .n % 2 == 0 then .n /= 2 else .n = .n*3 + 1 end | .c += 1) | .c; [range(1; 100) | steps(.)] | max
 null
 118
+
+# Issue #671: memoize/1 jqx extension — fib via self-recursive memo
+def fib: memoize(if . < 2 then . else ((. - 1) | fib) + ((. - 2) | fib) end); 30 | fib
+null
+832040
+
+# Issue #671: memoize/1 — Collatz length, exercises subgraph revisits
+def collatz_len: memoize(if . == 1 then 0 else (if . % 2 == 0 then ./2 else 3*. + 1 end | collatz_len) + 1 end); 27 | collatz_len
+null
+111
+
+# Issue #671: memoize/1 — distinct inputs each cached independently
+def sq: memoize(. * .); [1, 2, 3, 2, 1] | map(sq)
+null
+[1,4,9,4,1]
+
+# Issue #671: memoize/1 — body that yields multiple values is re-yielded on hit
+def two: memoize(., . + 1); [1, 1, 2] | map([two]) | add
+null
+[1,2,1,2,2,3]
+
+# Issue #671: memoize/1 — object-valued input keys hit by structural equality
+def tag: memoize(.a + .b); [{a: 1, b: 2}, {b: 2, a: 1}, {a: 3, b: 4}] | map(tag)
+null
+[3,3,7]

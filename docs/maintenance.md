@@ -173,6 +173,14 @@ $ JQJIT_TRACE=1 jq-jit '{a:.x, a:.x+1}' <<< '{"x":1}'
 
 JIT にまで降りる filter はここ。`flatten_scalar` / `flatten_gen` の match 群。複雑 path の Update/Assign は `__update__:idx:idx` closure op で eval にバックアウトする。
 
+### `memoize/1` は interpreter 専用
+
+`Expr::Memoize` は cache lookup が cold path なので JIT 化メリットがなく、
+`flatten_gen` の catch-all (`_ => false`) で reject。同じ理由で fast path
+（`detect_*` 群 / `simplify_expr` の rewrite）にも乗らない — `memoize` を
+含む filter は interpreter で評価される前提。値レベル cache のキーは
+`value::ValueKey`（`runtime::values_equal` 準拠 + NaN reflexive）で持つ。
+
 ---
 
 ## 3. 守るべき invariant

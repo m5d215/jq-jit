@@ -19,6 +19,9 @@ struct Scope {
     next_var: u16,
     /// Compiled function bodies.
     compiled_funcs: Vec<CompiledFunc>,
+    /// Next available memoize slot id. Each lexical occurrence of `memoize(...)`
+    /// gets a unique slot; the Env allocates one cache map per slot.
+    next_memo_slot: u32,
 }
 
 impl Scope {
@@ -28,7 +31,14 @@ impl Scope {
             funcs: Vec::new(),
             next_var: 0,
             compiled_funcs: Vec::new(),
+            next_memo_slot: 0,
         }
+    }
+
+    fn alloc_memo_slot(&mut self) -> u32 {
+        let id = self.next_memo_slot;
+        self.next_memo_slot += 1;
+        id
     }
 
     fn alloc_var(&mut self, name: &str) -> u16 {
@@ -719,6 +729,9 @@ pub struct Parser {
 pub struct ParseResult {
     pub expr: Expr,
     pub funcs: Vec<CompiledFunc>,
+    /// Total number of `memoize(...)` slots required by the program. The
+    /// runtime `Env` allocates one cache map per slot.
+    pub memo_slots: u32,
 }
 
 impl Parser {
@@ -746,6 +759,7 @@ impl Parser {
         Ok(ParseResult {
             expr,
             funcs: parser.scope.compiled_funcs,
+            memo_slots: parser.scope.next_memo_slot,
         })
     }
 
@@ -3303,6 +3317,11 @@ impl Parser {
                 // This is a recursive pattern - use Recurse node
                 Ok(Expr::Recurse { input_expr: Box::new(f) })
             }
+            ("memoize", 1) => {
+                let body = args.into_iter().next().unwrap();
+                let slot_id = self.scope.alloc_memo_slot();
+                Ok(Expr::Memoize { slot_id, body: Box::new(body) })
+            }
             ("recurse", 2) => {
                 let mut args = args.into_iter();
                 let f = args.next().unwrap();
@@ -4204,6 +4223,9 @@ fn remap_func_ids(expr: Expr, map: &[(usize, usize)]) -> Expr {
         },
         Expr::CallBuiltin { name, args } => Expr::CallBuiltin {
             name, args: args.into_iter().map(|a| remap_func_ids(a, map)).collect(),
+        },
+        Expr::Memoize { slot_id, body } => Expr::Memoize {
+            slot_id, body: Box::new(remap_func_ids(*body, map)),
         },
         // Leaf nodes: no remapping needed
         Expr::Input | Expr::Literal(_) | Expr::LoadVar { .. } | Expr::Empty

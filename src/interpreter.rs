@@ -310,6 +310,11 @@ pub struct Filter {
     lib_dirs: Vec<String>,
     /// Cached eval environment to avoid re-allocating per call.
     cached_env: std::cell::RefCell<Option<crate::eval::EnvRef>>,
+    /// Number of `memoize(...)` slots the program needs. Used to size the
+    /// per-program memo cache when the Env is materialized.
+    memo_slots: u32,
+    /// Per-slot upper bound on cache entries (CLI `--memo-max-entries`).
+    memo_max_entries: usize,
 }
 
 /// Extract string function condition from an expression (test/startswith/endswith/contains on Input).
@@ -2112,6 +2117,7 @@ fn contains_input(expr: &crate::ir::Expr) -> bool {
         Expr::FuncCall { args, .. } => args.iter().any(contains_input),
         Expr::ClosureOp { .. } | Expr::AnyShort { .. } | Expr::AllShort { .. }
         | Expr::AlternativeDestructure { .. } => true, // conservative
+        Expr::Memoize { body, .. } => contains_input(body),
     }
 }
 
@@ -2379,6 +2385,7 @@ impl Filter {
 
     pub fn with_options(program: &str, lib_dirs: &[String], use_jit: bool) -> Result<Self> {
         let result = crate::parser::Parser::parse_with_libs(program, lib_dirs)?;
+        let memo_slots = result.memo_slots;
         let parsed = (result.expr, result.funcs);
 
         // Try JIT compilation for the parsed expression.
@@ -2406,7 +2413,18 @@ impl Filter {
             _jit_compiler: jit_compiler,
             lib_dirs: lib_dirs.to_vec(),
             cached_env: std::cell::RefCell::new(None),
+            memo_slots,
+            memo_max_entries: crate::eval::default_memo_max_entries(),
         })
+    }
+
+    /// Set the per-slot memoize cache cap. Honoured by the eval Env when
+    /// it is first materialized; subsequent calls reuse the same cap.
+    pub fn set_memo_max_entries(&mut self, n: usize) {
+        self.memo_max_entries = n;
+        if let Some(ref env) = *self.cached_env.borrow() {
+            env.borrow_mut().set_memo_max_entries(n);
+        }
     }
 
     /// Try to JIT-compile this filter if not already JIT'd.
@@ -11343,7 +11361,26 @@ impl Filter {
         }
 
         let (ref expr, ref funcs) = self.parsed;
-        crate::eval::execute_ir_with_libs(expr, input.clone(), funcs.clone(), self.lib_dirs.clone())
+        // Mirror execute_cb's env setup so memoize slots are wired up.
+        let env = {
+            let mut cached = self.cached_env.borrow_mut();
+            if let Some(ref env) = *cached {
+                env.clone()
+            } else {
+                let mut e = crate::eval::Env::with_lib_dirs(funcs.clone(), self.lib_dirs.clone());
+                e.set_memo_slots(self.memo_slots);
+                e.set_memo_max_entries(self.memo_max_entries);
+                let env = std::rc::Rc::new(std::cell::RefCell::new(e));
+                *cached = Some(env.clone());
+                env
+            }
+        };
+        let mut outputs = Vec::new();
+        crate::eval::execute_ir_with_env_cb(expr, input.clone(), &env, &mut |v| {
+            match &v { Value::Error(e) => { eprintln!("jq: error: {}", e); }, _ => { outputs.push(v); } }
+            Ok(true)
+        })?;
+        Ok(outputs)
     }
 
     /// Execute the filter with a callback for each result (avoids Vec allocation).
@@ -11374,9 +11411,10 @@ impl Filter {
             if let Some(ref env) = *cached {
                 env.clone()
             } else {
-                let env = std::rc::Rc::new(std::cell::RefCell::new(
-                    crate::eval::Env::with_lib_dirs(funcs.clone(), self.lib_dirs.clone())
-                ));
+                let mut e = crate::eval::Env::with_lib_dirs(funcs.clone(), self.lib_dirs.clone());
+                e.set_memo_slots(self.memo_slots);
+                e.set_memo_max_entries(self.memo_max_entries);
+                let env = std::rc::Rc::new(std::cell::RefCell::new(e));
                 *cached = Some(env.clone());
                 env
             }
