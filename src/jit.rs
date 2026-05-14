@@ -5191,6 +5191,25 @@ impl Flattener {
             saved_vars.push((var_idx, old));
         }
 
+        // Conditional skip wrapper (#664): jump past the update body when the
+        // detected `if cond then . else UPDATE end` shape says to leave acc
+        // alone. Var restore still runs.
+        let skip_end = if let Some((cond, skip_on_truthy)) = info.skip_cond {
+            let cond_val = self.flatten_scalar(cond, acc);
+            let body_lbl = self.alloc_label();
+            let end_lbl = self.alloc_label();
+            if skip_on_truthy {
+                self.emit(JitOp::IfTruthy { src: cond_val, then_label: end_lbl, else_label: body_lbl });
+            } else {
+                self.emit(JitOp::IfTruthy { src: cond_val, then_label: body_lbl, else_label: end_lbl });
+            }
+            self.emit(JitOp::Drop { slot: cond_val });
+            self.emit(JitOp::Label { id: body_lbl });
+            Some(end_lbl)
+        } else {
+            None
+        };
+
         // PathExtract chain (multi-level)
         let mut containers = Vec::new();
         let mut keys = Vec::new();
@@ -5243,6 +5262,10 @@ impl Flattener {
         }
         debug_assert_eq!(current_val, acc);
 
+        if let Some(end_lbl) = skip_end {
+            self.emit(JitOp::Label { id: end_lbl });
+        }
+
         // Restore let-binding vars
         for (var_idx, old) in saved_vars.into_iter().rev() {
             self.emit(JitOp::MoveToVar { var_index: var_idx, src: old });
@@ -5272,6 +5295,23 @@ impl Flattener {
             self.emit(JitOp::MoveToVar { var_index: var_idx, src: val });
             saved_vars.push((var_idx, old));
         }
+
+        // Conditional skip wrapper (#664) — see emit_inplace_update_on_slot.
+        let skip_end = if let Some((cond, skip_on_truthy)) = info.skip_cond {
+            let cond_val = self.flatten_scalar(cond, acc);
+            let body_lbl = self.alloc_label();
+            let end_lbl = self.alloc_label();
+            if skip_on_truthy {
+                self.emit(JitOp::IfTruthy { src: cond_val, then_label: end_lbl, else_label: body_lbl });
+            } else {
+                self.emit(JitOp::IfTruthy { src: cond_val, then_label: body_lbl, else_label: end_lbl });
+            }
+            self.emit(JitOp::Drop { slot: cond_val });
+            self.emit(JitOp::Label { id: body_lbl });
+            Some(end_lbl)
+        } else {
+            None
+        };
 
         // Evaluate value_expr against acc (`.` references clone the slot).
         let assign_val = self.flatten_scalar(info.value_expr, acc);
@@ -5323,6 +5363,10 @@ impl Flattener {
             current = *container;
         }
         debug_assert_eq!(current, acc);
+
+        if let Some(end_lbl) = skip_end {
+            self.emit(JitOp::Label { id: end_lbl });
+        }
 
         // Restore let-binding vars
         for (var_idx, old) in saved_vars.into_iter().rev() {
@@ -5380,6 +5424,12 @@ struct InplaceUpdateInfo<'a> {
     path_components: Vec<PathComponent>,
     /// The update expression (applied to the old value at the path).
     update_expr: &'a Expr,
+    /// Optional conditional skip: `(cond, skip_on_truthy)`. Set when the body
+    /// matched `if cond then . else UPDATE end` (skip_on_truthy = true) or
+    /// `if cond then UPDATE else . end` (skip_on_truthy = false). The emit
+    /// jumps over the update body when the cond's truthiness equals
+    /// `skip_on_truthy`, leaving acc unchanged on the skipped iteration.
+    skip_cond: Option<(&'a Expr, bool)>,
 }
 
 /// Info for in-place reduce assign optimization (.[path] = val).
@@ -5390,6 +5440,8 @@ struct InplaceAssignInfo<'a> {
     path_components: Vec<PathComponent>,
     /// The value expression to assign.
     value_expr: &'a Expr,
+    /// Optional conditional skip — same semantics as `InplaceUpdateInfo`.
+    skip_cond: Option<(&'a Expr, bool)>,
 }
 
 /// Compile a filter expression into a fast `fn(&Value) -> bool` check for paths(f).
@@ -5481,6 +5533,7 @@ fn detect_inplace_assign(expr: &Expr) -> Option<InplaceAssignInfo<'_>> {
                     let_bindings: vec![],
                     path_components: pc,
                     value_expr,
+                    skip_cond: None,
                 })
             } else {
                 None
@@ -5491,8 +5544,44 @@ fn detect_inplace_assign(expr: &Expr) -> Option<InplaceAssignInfo<'_>> {
             info.let_bindings.insert(0, (*var_index, value.as_ref()));
             Some(info)
         }
+        // `if cond then . else ASSIGN end` / `if cond then ASSIGN else . end`
+        // — the body conditionally applies an in-place assign and otherwise
+        // leaves acc untouched. Without this arm the IfThenElse falls back to
+        // generic clone-based reduce update, paying a deep array clone on
+        // every iteration (#664). One IfThenElse layer only — the inner
+        // recursive call cannot itself match this arm because the recursed
+        // branch is required to be `Input` or compile-time assign-shaped.
+        Expr::IfThenElse { cond, then_branch, else_branch } if is_scalar(cond) => {
+            if matches!(then_branch.as_ref(), Expr::Input) {
+                let info = detect_inplace_assign_in_branch(else_branch)?;
+                return Some(InplaceAssignInfo { skip_cond: Some((cond.as_ref(), true)), ..info });
+            }
+            if matches!(else_branch.as_ref(), Expr::Input) {
+                let info = detect_inplace_assign_in_branch(then_branch)?;
+                return Some(InplaceAssignInfo { skip_cond: Some((cond.as_ref(), false)), ..info });
+            }
+            None
+        }
         _ => None,
     }
+}
+
+/// Match an Assign body inside an IfThenElse branch. Refuses any LetBinding
+/// here — pulling let bindings out across the surrounding cond would let the
+/// cond see vars that aren't in scope in the original AST.
+fn detect_inplace_assign_in_branch(expr: &Expr) -> Option<InplaceAssignInfo<'_>> {
+    if let Expr::Assign { path_expr, value_expr } = expr {
+        let pc = extract_simple_path(path_expr)?;
+        if !pc.is_empty() && is_scalar(value_expr) {
+            return Some(InplaceAssignInfo {
+                let_bindings: vec![],
+                path_components: pc,
+                value_expr,
+                skip_cond: None,
+            });
+        }
+    }
+    None
 }
 
 /// Detect an in-place update pattern in a reduce update expression.
@@ -5506,6 +5595,7 @@ fn detect_inplace_update(expr: &Expr) -> Option<InplaceUpdateInfo<'_>> {
                     let_bindings: vec![],
                     path_components: pc,
                     update_expr,
+                    skip_cond: None,
                 })
             } else {
                 None
@@ -5517,8 +5607,37 @@ fn detect_inplace_update(expr: &Expr) -> Option<InplaceUpdateInfo<'_>> {
             info.let_bindings.insert(0, (*var_index, value.as_ref()));
             Some(info)
         }
+        Expr::IfThenElse { cond, then_branch, else_branch } if is_scalar(cond) => {
+            if matches!(then_branch.as_ref(), Expr::Input) {
+                let info = detect_inplace_update_in_branch(else_branch)?;
+                return Some(InplaceUpdateInfo { skip_cond: Some((cond.as_ref(), true)), ..info });
+            }
+            if matches!(else_branch.as_ref(), Expr::Input) {
+                let info = detect_inplace_update_in_branch(then_branch)?;
+                return Some(InplaceUpdateInfo { skip_cond: Some((cond.as_ref(), false)), ..info });
+            }
+            None
+        }
         _ => None,
     }
+}
+
+/// Match an Update body inside an IfThenElse branch. Same scoping caveat as
+/// `detect_inplace_assign_in_branch` — refuses LetBinding to keep `+=`-style
+/// rhs vars from leaking out past the conditional.
+fn detect_inplace_update_in_branch(expr: &Expr) -> Option<InplaceUpdateInfo<'_>> {
+    if let Expr::Update { path_expr, update_expr } = expr {
+        let pc = extract_simple_path(path_expr)?;
+        if !pc.is_empty() && is_scalar(update_expr) {
+            return Some(InplaceUpdateInfo {
+                let_bindings: vec![],
+                path_components: pc,
+                update_expr,
+                skip_cond: None,
+            });
+        }
+    }
+    None
 }
 
 /// In-place action that an inner reduce body can perform on its acc slot.
