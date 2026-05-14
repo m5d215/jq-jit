@@ -2667,6 +2667,15 @@ pub fn eval(
                 CacheHit(Rc<Expr>),
                 CacheMiss(Rc<CompiledFunc>),
             }
+            // An arg that itself calls the same def re-enters with the
+            // same parser-allocated parameter slots. In the CPS eval model
+            // the inner frame's writes leak through the outer's
+            // continuation: the outer LetBinding for $y fires its cb while
+            // $x is still bound to the inner's value, so the outer body
+            // reads the inner's $x. Route through the rename path so the
+            // outer frame gets its own slots — same fix the recursive-body
+            // arms already apply (#679).
+            let arg_recursive = args.iter().any(|a| contains_func_call(a, *func_id));
             let action = {
                 let e = env.borrow();
                 let func = match e.funcs.get(*func_id) {
@@ -2679,7 +2688,7 @@ pub fn eval(
                     let is_recursive = e.recursive_cache.iter()
                         .find(|(k, _)| *k == *func_id)
                         .map(|&(_, r)| r);
-                    if is_recursive == Some(true) {
+                    if is_recursive == Some(true) || arg_recursive {
                         FuncAction::Recursive(func)
                     } else if is_recursive == Some(false) {
                         // Known non-recursive: try cache lookup in same borrow

@@ -10143,3 +10143,26 @@ null
 [range(0; 5) | 0] | reduce range(0; 3) as $a (.; reduce range(0; $a + 1) as $b (.; if $a + $b >= 5 then . else .[$a + $b] |= . + 1 end))
 null
 [1,1,2,1,1]
+
+# Issue #679: nested user-def call as the 2nd arg of the same def. Both calls
+# share parser-allocated $x / $y slots; without the arg-recursion rename
+# guard the outer's $x reads the inner's [4,4] instead of [3,3], producing
+# [10,10]. Expected sum: 3+4+2 = 9.
+def big_add($x; $y): [$x[0] + $y[0], $x[1] + $y[1]]; big_add([3,3]; big_add([4,4]; [2,2]))
+null
+[9,9]
+
+# Issue #679: same hazard with the outer's first arg supplied by piped input
+# (`.` as $x). The arg-recursion check must look at every arg, not just the
+# raw call's positional ones, since the inner call is still the 2nd arg.
+def big_add($x; $y): [$x[0] + $y[0], $x[1] + $y[1]]; [3,3] | big_add(.; big_add([4,4]; [2,2]))
+null
+[9,9]
+
+# Issue #679: inner call in 1st arg position must still produce the correct
+# answer — this shape was never buggy (the inner restores before the outer
+# let-x's cb fires) but the rename path is what triggers now, so guard
+# against regressions in the rename code itself.
+def big_add($x; $y): [$x[0] + $y[0], $x[1] + $y[1]]; big_add(big_add([3,3]; [4,4]); [2,2])
+null
+[9,9]
