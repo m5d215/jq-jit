@@ -2422,8 +2422,10 @@ impl Filter {
 
     /// Set the per-slot memoize cache cap. Honoured by the eval Env when
     /// it is first materialized; subsequent calls reuse the same cap.
+    /// No-op for programs with no `memoize(...)` to keep `Env` slim.
     pub fn set_memo_max_entries(&mut self, n: usize) {
         self.memo_max_entries = n;
+        if self.memo_slots == 0 { return; }
         if let Some(ref env) = *self.cached_env.borrow() {
             env.borrow_mut().set_memo_max_entries(n);
         }
@@ -2445,9 +2447,13 @@ impl Filter {
             None => return Ok(()),
         };
         let env_ref = env.borrow();
-        writeln!(w, "memoize stats: {} slot(s)", env_ref.memo_slots.len())?;
+        let memo = match env_ref.memo.as_ref() {
+            Some(m) => m,
+            None => return Ok(()),
+        };
+        writeln!(w, "memoize stats: {} slot(s)", memo.slots.len())?;
         writeln!(w, "  {:>4}  {:>12}  {:>12}  {:>12}", "slot", "hits", "misses", "entries")?;
-        for (i, slot) in env_ref.memo_slots.iter().enumerate() {
+        for (i, slot) in memo.slots.iter().enumerate() {
             let s = slot.borrow();
             writeln!(w, "  {:>4}  {:>12}  {:>12}  {:>12}", i, s.hits, s.misses, s.entries.len())?;
         }
@@ -11395,8 +11401,10 @@ impl Filter {
                 env.clone()
             } else {
                 let mut e = crate::eval::Env::with_lib_dirs(funcs.clone(), self.lib_dirs.clone());
-                e.set_memo_slots(self.memo_slots);
-                e.set_memo_max_entries(self.memo_max_entries);
+                if self.memo_slots > 0 {
+                    e.set_memo_slots(self.memo_slots);
+                    e.set_memo_max_entries(self.memo_max_entries);
+                }
                 let env = std::rc::Rc::new(std::cell::RefCell::new(e));
                 *cached = Some(env.clone());
                 env
@@ -11439,8 +11447,10 @@ impl Filter {
                 env.clone()
             } else {
                 let mut e = crate::eval::Env::with_lib_dirs(funcs.clone(), self.lib_dirs.clone());
-                e.set_memo_slots(self.memo_slots);
-                e.set_memo_max_entries(self.memo_max_entries);
+                if self.memo_slots > 0 {
+                    e.set_memo_slots(self.memo_slots);
+                    e.set_memo_max_entries(self.memo_max_entries);
+                }
                 let env = std::rc::Rc::new(std::cell::RefCell::new(e));
                 *cached = Some(env.clone());
                 env
