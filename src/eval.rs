@@ -2080,12 +2080,34 @@ pub fn eval(
                     if matches!(path_expr.as_ref(), Expr::Input) => value_expr.as_ref(),
                 _ => update.as_ref(),
             };
-            let mut acc = if let Ok(v) = eval_one(init, &input, env) {
-                v
+            // For init = `.`, move input directly into the accumulator (no clone).
+            // For sources that don't reference outer input (e.g. range), pass
+            // Value::Null and drop our own input ref — without this the outer
+            // reduce's input.clone() pins the Rc at refcount ≥ 2 across every
+            // iteration, so nested `.[$i] = .[$i] + 1` bodies fall off the
+            // in-place fast path and deep-copy the array on each step (#664).
+            let init_is_input = matches!(init.as_ref(), Expr::Input);
+            let source_needs_input = expr_uses_outer_input(source);
+            let (mut acc, source_input) = if init_is_input {
+                if source_needs_input {
+                    (input.clone(), input)
+                } else {
+                    (input, Value::Null)
+                }
             } else {
-                let mut a = Value::Null;
-                eval(init, input.clone(), env, &mut |v| { a = v; Ok(true) })?;
-                a
+                let acc_val = if let Ok(v) = eval_one(init, &input, env) {
+                    v
+                } else {
+                    let mut a = Value::Null;
+                    eval(init, input.clone(), env, &mut |v| { a = v; Ok(true) })?;
+                    a
+                };
+                if source_needs_input {
+                    (acc_val, input)
+                } else {
+                    drop(input);
+                    (acc_val, Value::Null)
+                }
             };
             let vi = *var_index;
             let ai = *acc_index;
@@ -2121,7 +2143,7 @@ pub fn eval(
             } else { None };
             if let Some((tmp_vi, ref bindings, inner_body)) = fused {
                 // Fused Reduce+destructure: batch $var store + array destructure into 2 borrow_muts
-                eval(source, input.clone(), env, &mut |val| {
+                eval(source, source_input, env, &mut |val| {
                     let acc_val = std::mem::replace(&mut acc, Value::Null);
                     // Setup: store $var, destructure acc, null tmp (1 borrow_mut)
                     let (old_var, old_tmp, destructured) = {
@@ -2182,7 +2204,7 @@ pub fn eval(
                     } else { None }
                 } else { None };
                 if let Some((add_rhs, _temp_var)) = add_inplace {
-                    eval(source, input.clone(), env, &mut |val| {
+                    eval(source, source_input, env, &mut |val| {
                         let old_var = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], val);
                         let rhs_val = {
                             let mut r = Value::Null;
@@ -2213,7 +2235,7 @@ pub fn eval(
                     })?;
                     cb(acc)
                 } else {
-                    eval(source, input.clone(), env, &mut |val| {
+                    eval(source, source_input, env, &mut |val| {
                         let acc_val = std::mem::replace(&mut acc, Value::Null);
                         let old_var = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], val);
                         eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
@@ -2223,7 +2245,7 @@ pub fn eval(
                     cb(acc)
                 }
             } else {
-                eval(source, input.clone(), env, &mut |val| {
+                eval(source, source_input, env, &mut |val| {
                     let acc_val = std::mem::replace(&mut acc, Value::Null);
                     let (old_var, old_acc) = {
                         let mut e = env.borrow_mut();
