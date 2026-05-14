@@ -2533,6 +2533,32 @@ pub fn eval(
         }
 
         Expr::Assign { path_expr, value_expr } => {
+            // Scalar-value fast path: compute new_val via eval_one so the
+            // generator form's `input.clone()` never sits alive in an outer
+            // callback frame. Once paths are collected, `input` has refcount
+            // 1 again, so we can move it into `result` and rt_setpath_mut's
+            // Rc::make_mut mutates in place instead of deep-cloning the
+            // accumulator on every iteration (#659).
+            if let Ok(new_val) = eval_one(value_expr, &input, env) {
+                let mut paths = Vec::new();
+                let path_result = eval_path(path_expr, input.clone(), env, &mut |p| { paths.push(p); Ok(true) });
+                if let Err(e) = path_result {
+                    let msg = format!("{}", e);
+                    if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
+                        bail!("Invalid path expression with result {}", json);
+                    }
+                    return Err(e);
+                }
+                let mut result = input;
+                for path in &paths {
+                    let path_slice = match path {
+                        Value::Arr(a) => a.as_slice(),
+                        _ => bail!("Path must be specified as an array"),
+                    };
+                    crate::runtime::rt_setpath_mut(&mut result, path_slice, new_val.clone())?;
+                }
+                return cb(result);
+            }
             eval(value_expr, input.clone(), env, &mut |new_val| {
                 let mut paths = Vec::new();
                 let path_result = eval_path(path_expr, input.clone(), env, &mut |p| { paths.push(p); Ok(true) });

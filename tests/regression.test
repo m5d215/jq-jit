@@ -10116,3 +10116,10 @@ null
 def by_id: memoize(.value * 2; .id); [{id: 1, value: 10}, {id: 2, value: 20}, {id: 1, value: 999}] | map(by_id)
 null
 [20,40,20]
+
+# Issue #659: reduce with destructured pattern + conditional .[$k] = $p body.
+# Validates the in-place fast path (#659) that avoids deep-cloning the
+# accumulator on every iteration when the value expression is scalar.
+reduce ([2,1,2],[3,2,3],[5,3,5],[3,2,4]) as [$p,$s,$c] ([null,null,null,null,null,null]; ($p - $s + $c) as $k | if $k >= 2 and (.[$k] == null or $p < .[$k]) then .[$k] = $p else . end) | .[2:]
+null
+[null,2,3,3,null,5]
