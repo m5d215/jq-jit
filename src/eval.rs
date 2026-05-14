@@ -110,6 +110,15 @@ impl SlotState {
 
 pub type MemoSlot = Rc<RefCell<SlotState>>;
 
+/// Memoize state: per-program slots plus the per-slot cap.
+/// Boxed onto `Env` so programs without `memoize(...)` pay zero per-Env
+/// footprint and the cold path stays out of the central `eval()` match's
+/// hot cache lines (#673).
+pub struct MemoState {
+    pub slots: Vec<MemoSlot>,
+    pub max_entries: usize,
+}
+
 pub struct Env {
     vars: Vec<Value>,
     funcs: Vec<Rc<CompiledFunc>>,
@@ -127,15 +136,11 @@ pub struct Env {
     /// Pointer-based substitution cache: func_id → (args_ptr, substituted_body).
     /// For non-LoadVar args from stable (cached) call sites.
     subst_ptr_cache: Vec<(usize, usize, Rc<Expr>)>,
-    /// One cache map per lexical `memoize(...)` occurrence in the program.
-    /// Lifetime is the whole program execution (persists across NDJSON inputs).
-    /// `Rc` so the eval path can clone a handle and drop the `Env` borrow
-    /// before invoking the memoized body (which may itself borrow `Env`).
-    pub memo_slots: Vec<MemoSlot>,
-    /// Per-slot upper bound on cache entries. New inserts past this cap are
-    /// silently dropped (the program continues, just without caching that
-    /// entry). Controlled by `--memo-max-entries` on the CLI.
-    pub memo_max_entries: usize,
+    /// One cache map per lexical `memoize(...)` occurrence in the program,
+    /// plus the per-slot entry cap. `None` for programs that don't use
+    /// `memoize(...)` so the Env stays small. Lifetime is the whole program
+    /// execution (persists across NDJSON inputs).
+    pub memo: Option<Box<MemoState>>,
 }
 
 const DEFAULT_MEMO_MAX_ENTRIES: usize = 1_000_000;
@@ -150,18 +155,24 @@ fn fresh_memo_slots(n: u32) -> Vec<MemoSlot> {
 
 impl Env {
     pub fn new(funcs: Vec<CompiledFunc>) -> Self {
-        Env { vars: vec![Value::Null; 65536], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs: Vec::new(), closures: Vec::new(), recursive_cache: Vec::new(), subst_cache: Vec::new(), subst_ptr_cache: Vec::new(), memo_slots: Vec::new(), memo_max_entries: DEFAULT_MEMO_MAX_ENTRIES }
+        Env { vars: vec![Value::Null; 65536], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs: Vec::new(), closures: Vec::new(), recursive_cache: Vec::new(), subst_cache: Vec::new(), subst_ptr_cache: Vec::new(), memo: None }
     }
     pub fn with_lib_dirs(funcs: Vec<CompiledFunc>, lib_dirs: Vec<String>) -> Self {
-        Env { vars: vec![Value::Null; 65536], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs, closures: Vec::new(), recursive_cache: Vec::new(), subst_cache: Vec::new(), subst_ptr_cache: Vec::new(), memo_slots: Vec::new(), memo_max_entries: DEFAULT_MEMO_MAX_ENTRIES }
+        Env { vars: vec![Value::Null; 65536], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs, closures: Vec::new(), recursive_cache: Vec::new(), subst_cache: Vec::new(), subst_ptr_cache: Vec::new(), memo: None }
     }
     /// Allocate `n` memo cache slots. Called once per program after parsing,
-    /// using `ParseResult::memo_slots`.
+    /// using `ParseResult::memo_slots`. No-op when `n == 0` so non-memoize
+    /// programs never allocate `MemoState`.
     pub fn set_memo_slots(&mut self, n: u32) {
-        self.memo_slots = fresh_memo_slots(n);
+        if n == 0 { return; }
+        let max_entries = self.memo.as_ref().map_or(DEFAULT_MEMO_MAX_ENTRIES, |m| m.max_entries);
+        self.memo = Some(Box::new(MemoState { slots: fresh_memo_slots(n), max_entries }));
     }
     pub fn set_memo_max_entries(&mut self, n: usize) {
-        self.memo_max_entries = n;
+        match &mut self.memo {
+            Some(m) => m.max_entries = n,
+            None => self.memo = Some(Box::new(MemoState { slots: Vec::new(), max_entries: n })),
+        }
     }
     /// Reset env state for reuse across multiple inputs.
     /// Keeps allocated buffers (vars, caches) but resets mutable state.
@@ -174,7 +185,7 @@ impl Env {
         self.next_label = 0;
         self.next_var = 256;
         self.closures.clear();
-        // Keep recursive_cache, subst_cache, subst_ptr_cache, memo_slots —
+        // Keep recursive_cache, subst_cache, subst_ptr_cache, memo —
         // they stay valid across inputs (memo cache spans the whole program
         // lifetime per #671 design).
     }
@@ -3249,7 +3260,7 @@ pub fn eval(
         Expr::Memoize { slot_id, key, body } => {
             let slot = {
                 let env_ref = env.borrow();
-                match env_ref.memo_slots.get(*slot_id as usize) {
+                match env_ref.memo.as_ref().and_then(|m| m.slots.get(*slot_id as usize)) {
                     Some(s) => s.clone(),
                     None => bail!("memoize slot {} not allocated", slot_id),
                 }
@@ -3319,7 +3330,7 @@ fn memo_lookup_or_run(
     };
     {
         let mut state = slot.borrow_mut();
-        let cap = env.borrow().memo_max_entries;
+        let cap = env.borrow().memo.as_ref().map_or(DEFAULT_MEMO_MAX_ENTRIES, |m| m.max_entries);
         if state.entries.len() < cap {
             state.entries.insert(cache_key, entry.clone());
         }
