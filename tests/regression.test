@@ -10131,3 +10131,15 @@ null
 [range(0; 5) | 0] | reduce range(0; 3) as $a (.; reduce range(0; $a + 1) as $b (.; if $a + $b >= 5 then . else .[$a + $b] = .[$a + $b] + 1 end))
 null
 [1,1,2,1,1]
+
+# Issue #664: same shape but with the conditional reversed — `if cond then
+# ASSIGN else . end`. Same in-place path must engage so the body stays fast.
+[range(0; 5) | 0] | reduce range(0; 3) as $a (.; reduce range(0; $a + 1) as $b (.; if $a + $b < 5 then .[$a + $b] = .[$a + $b] + 1 else . end))
+null
+[1,1,2,1,1]
+
+# Issue #664: update variant — `.[$k] |= . + 1` inside `if cond then . else
+# UPDATE end`. Hits the inplace-update path's conditional skip wrapper.
+[range(0; 5) | 0] | reduce range(0; 3) as $a (.; reduce range(0; $a + 1) as $b (.; if $a + $b >= 5 then . else .[$a + $b] |= . + 1 end))
+null
+[1,1,2,1,1]
