@@ -6,6 +6,10 @@
 //! - `diff_harness` — spawn `jq-jit` and reference `jq-1.8.x`, capture
 //!   stdout/exit-code, resolve the reference binary on $JQ_BIN / Homebrew /
 //!   $PATH. Used by every test that compares against external jq.
+//! - `filter_strategy` — shared `FilterExpr` / `JsonShape` AST + proptest
+//!   combinators used by `fuzz_restricted`, `metamorphic`, and (#686)
+//!   `fuzz_axis_*` harnesses. Single source of truth for the AST and the
+//!   conservative base; harnesses layer their own weights and exotics.
 //! - `json_normalize` — value-level JSON normalisation (sort keys, fold
 //!   integer-valued floats) so equality is semantic, not textual. Used by
 //!   both diff tests and the official/regression compat suites.
@@ -20,5 +24,6 @@
 #![allow(dead_code)]
 
 pub mod diff_harness;
+pub mod filter_strategy;
 pub mod jq_test_format;
 pub mod json_normalize;
