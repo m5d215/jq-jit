@@ -756,8 +756,13 @@ fn contains_func_call(expr: &Expr, target: usize) -> bool {
 /// This tracks input flow: Pipe's right side gets new input from left's output.
 fn expr_uses_outer_input(expr: &Expr) -> bool {
     match expr {
-        Expr::Input => true,
-        Expr::LoadVar { .. } | Expr::Literal(_) | Expr::Empty | Expr::Not
+        // `Expr::Not` evaluates `!(input.is_truthy())` — it reads `.`.
+        // Misclassifying it as input-free caused the Reduce fast path
+        // to feed `Value::Null` to the source when the source contained
+        // `not` (e.g. `reduce ({a: not}) as $x (null; . + $x)` on input
+        // `[]` returning `{a:true}` instead of `{a:false}`). See #683.
+        Expr::Input | Expr::Not => true,
+        Expr::LoadVar { .. } | Expr::Literal(_) | Expr::Empty
         | Expr::Env | Expr::Builtins | Expr::ReadInput | Expr::ReadInputs
         | Expr::ModuleMeta | Expr::GenLabel | Expr::Loc { .. } => false,
         // Pipe: only left receives our input; right gets left's output

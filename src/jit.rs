@@ -677,8 +677,18 @@ impl Flattener {
                         }
                     }
                 }
-                // Beta-reduction: Pipe(E, F) → F[E/Input] when E is scalar and F has free Input
-                if new_left.is_simple_scalar() && new_right.is_input_free() {
+                // Beta-reduction: Pipe(E, F) → F[E/Input] when E is scalar
+                // and F has free Input. Additionally require F to actually
+                // *reference* Input — without that check, F being input-free
+                // by virtue of having no Input nodes at all makes the
+                // substitution a no-op, silently dropping E's evaluation
+                // (including any error it would raise). See #683 — a
+                // `Pipe(.x, 0)` source inside `reduce` collapsed to `0` and
+                // suppressed the "Cannot index boolean" error on `.x`.
+                if new_left.is_simple_scalar()
+                    && new_right.is_input_free()
+                    && new_right.references_input()
+                {
                     return new_right.substitute_input(&new_left);
                 }
                 Expr::Pipe { left: new_left, right: new_right }
@@ -1408,10 +1418,15 @@ impl Flattener {
                 for (k, v) in pairs {
                     // Fast path: literal string key avoids creating/dropping a Value
                     if let Expr::Literal(Literal::Str(s)) = k {
-                        // Fused path: if value is .field from input, use ObjCopyField
-                        // to combine field extraction + push into a single runtime call
+                        // Fused path: if value is `.field?` (IndexOpt) from
+                        // input, use ObjCopyField to combine field extraction
+                        // + push into a single runtime call. Restricted to
+                        // IndexOpt because the ObjCopyField runtime swallows
+                        // type errors (treats non-object/non-null as null),
+                        // which is the IndexOpt semantics but not the plain
+                        // Index semantics — Index must error. See #683.
                         let used_copy_field = if all_unique_str_keys {
-                            if let Expr::Index { expr: base, key } | Expr::IndexOpt { expr: base, key } = v {
+                            if let Expr::IndexOpt { expr: base, key } = v {
                                 if matches!(base.as_ref(), Expr::Input) {
                                     if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                                         self.emit(JitOp::ObjCopyField {
@@ -1680,6 +1695,25 @@ impl Flattener {
                 out
             }
             Expr::Reduce { source, init, var_index, acc_index, update } => {
+                // Pre-check source compilability. The dispatch below uses
+                // `flatten_gen_with_each_output(source, …)` without checking
+                // the return value, so a source that can't be JIT-compiled
+                // silently emits no loop body — leaving the accumulator at
+                // its init value and masking any error the source would
+                // have raised (e.g. `reduce (if values then . else . end |
+                // reverse) as $x (null; .+$x)` on `false` returned `null`
+                // instead of erroring). Bail to the interpreter when the
+                // source isn't compilable. See #683.
+                {
+                    let mut test = self.test_flattener();
+                    let t_in = test.alloc_slot();
+                    if !test.flatten_gen(source, t_in) {
+                        self.has_unresolved_recursion = true;
+                        let out = self.alloc_slot();
+                        self.emit(JitOp::Null { dst: out });
+                        return out;
+                    }
+                }
                 // Detect reduce gen as $x ([]; . + [f($x)]) → [gen | f(.)]
                 // where init is [] and update is . + [inner] with inner not using accumulator
                 if matches!(init.as_ref(), Expr::Collect { generator } if matches!(generator.as_ref(), Expr::Empty)) {
@@ -2382,8 +2416,11 @@ impl Flattener {
                     };
                     for (k, v) in pairs {
                         if let Expr::Literal(Literal::Str(s)) = k {
+                            // Restricted to IndexOpt for the same reason as
+                            // the sibling ObjCopyField site — see comment at
+                            // the other call site and #683.
                             let used_copy_field = if all_unique_str_keys {
-                                if let Expr::Index { expr: base, key } | Expr::IndexOpt { expr: base, key } = v {
+                                if let Expr::IndexOpt { expr: base, key } = v {
                                     if matches!(base.as_ref(), Expr::Input) {
                                         if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                                             self.emit(JitOp::ObjCopyField {
@@ -6574,7 +6611,12 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 return 0;
             }
         }
-        // Fast path: reverse (op 9)
+        // Fast path: reverse (op 9). `reverse` desugars to
+        // `[.[length - 1 - range(0; length)]]`, so non-empty strings
+        // error via `.[idx]` on a string. Empty string and null yield
+        // `[]` (the range is empty). Non-array/non-string inputs fall
+        // through to the slow path, which produces the right error
+        // message. See #683.
         if op == 9 {
             match &*input {
                 Value::Arr(a) => {
@@ -6583,11 +6625,11 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                     std::ptr::write(dst, Value::Arr(Rc::new(r)));
                     return 0;
                 }
-                Value::Str(s) => {
-                    std::ptr::write(dst, Value::from_string(s.chars().rev().collect()));
+                Value::Null => {
+                    std::ptr::write(dst, Value::Arr(Rc::new(vec![])));
                     return 0;
                 }
-                Value::Null => {
+                Value::Str(s) if s.is_empty() => {
                     std::ptr::write(dst, Value::Arr(Rc::new(vec![])));
                     return 0;
                 }
@@ -6691,15 +6733,24 @@ extern "C" fn jit_rt_throw_error(msg: *const Value, env: *mut JitEnv) -> i64 {
     }
 }
 /// In-place reverse: Rc::make_mut avoids inner Vec clone when refcount == 1.
+///
+/// `reverse` is `def reverse: [.[length - 1 - range(0; length)]];`. For a
+/// non-empty string that desugaring indexes the string with numbers,
+/// which jq rejects ("Cannot index string with number"). The empty
+/// string yields `[]` because the `range` is empty. Mirror the runtime
+/// `rt_reverse` shape here instead of silently reversing codepoints —
+/// surfaced by the metamorphic harness (#683) via
+/// `reduce ((type) | ({a: reverse})) as $x ...` on `null`.
 extern "C" fn jit_rt_reverse_inplace(v: *mut Value) -> i64 {
     unsafe {
         match &mut *v {
             Value::Arr(a) => { Rc::make_mut(a).reverse(); 0 }
-            Value::Str(s) => {
-                *v = Value::from_string(s.chars().rev().collect());
-                0
-            }
             Value::Null => { *v = Value::Arr(Rc::new(vec![])); 0 }
+            Value::Str(s) if s.is_empty() => { *v = Value::Arr(Rc::new(vec![])); 0 }
+            Value::Str(_) => {
+                set_jit_error("Cannot index string with number".to_string());
+                GEN_ERROR
+            }
             _ => { set_jit_error(format!("{} cannot be reversed", (*v).type_name())); GEN_ERROR }
         }
     }
@@ -8461,6 +8512,13 @@ impl JitCompiler {
         if !fl.flatten_gen(compile_expr, input_slot) {
             bail!("Expression not JIT-compilable");
         }
+        // Sub-trees can request a JIT bailout mid-flatten (e.g. a reduce
+        // source whose `flatten_gen_with_each_output` would silently emit
+        // no loop body — see #683 and the Reduce arm in flatten_scalar).
+        // Bail here so the binary falls back to the interpreter.
+        if fl.has_unresolved_recursion {
+            bail!("Expression not JIT-compilable: subtree requested bailout");
+        }
         fl.emit(JitOp::ReturnContinue);
 
         // Store closure ops for runtime access
@@ -9810,7 +9868,12 @@ pub fn is_jit_compilable_with_funcs(expr: &Expr, funcs: &[CompiledFunc]) -> bool
     let inlined = fl.inline_func_calls(expr);
     if fl.has_unresolved_recursion { return false; }
     let input = fl.alloc_slot();
-    fl.flatten_gen(&inlined, input)
+    let ok = fl.flatten_gen(&inlined, input);
+    // Subtrees may set `has_unresolved_recursion` mid-flatten to request
+    // a JIT bailout (see #683 — Reduce arm in flatten_scalar). Re-check
+    // here so the feasibility query agrees with `compile_with_funcs`.
+    if fl.has_unresolved_recursion { return false; }
+    ok
 }
 
 unsafe extern "C" fn collect_callback(value: *const Value, ctx: *mut u8) -> i64 {

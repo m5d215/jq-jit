@@ -627,6 +627,76 @@ impl Expr {
         }
     }
 
+    /// Returns true if this expression contains at least one free `Input`
+    /// node — i.e. at least one place where `substitute_input` would
+    /// actually rewrite something. Distinct from `is_input_free`, which
+    /// only checks whether Input refs (if any) are *free* (not bound by
+    /// Pipe/Reduce/Foreach/etc.).
+    ///
+    /// Use this to guard beta-reductions like
+    /// `Pipe(E, F) → F[E/Input] when F.is_input_free()`: if `F` has no
+    /// Input nodes, the substitution is identity and `E`'s evaluation
+    /// (including any error it would raise) gets silently dropped. See
+    /// #683.
+    pub fn references_input(&self) -> bool {
+        match self {
+            Expr::Input | Expr::Not => true,
+            Expr::Literal(_) | Expr::LoadVar { .. } | Expr::Empty
+            | Expr::Env | Expr::Builtins | Expr::ReadInput | Expr::ReadInputs
+            | Expr::ModuleMeta | Expr::GenLabel | Expr::Loc { .. } => false,
+            Expr::BinOp { lhs, rhs, .. } => lhs.references_input() || rhs.references_input(),
+            Expr::UnaryOp { operand, .. } | Expr::Negate { operand } => operand.references_input(),
+            Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => {
+                expr.references_input() || key.references_input()
+            }
+            Expr::Collect { generator } => generator.references_input(),
+            Expr::Comma { left, right } => left.references_input() || right.references_input(),
+            Expr::Each { input_expr } | Expr::EachOpt { input_expr } => input_expr.references_input(),
+            Expr::IfThenElse { cond, then_branch, else_branch } => {
+                cond.references_input()
+                    || then_branch.references_input()
+                    || else_branch.references_input()
+            }
+            Expr::ObjectConstruct { pairs } => {
+                pairs.iter().any(|(k, v)| k.references_input() || v.references_input())
+            }
+            Expr::Alternative { primary, fallback } => {
+                primary.references_input() || fallback.references_input()
+            }
+            Expr::Format { expr, .. } => expr.references_input(),
+            // Debug/Stderr pass through current input.
+            Expr::Debug { .. } | Expr::Stderr { .. } => true,
+            Expr::Slice { expr, from, to } => {
+                expr.references_input()
+                    || from.as_ref().is_some_and(|e| e.references_input())
+                    || to.as_ref().is_some_and(|e| e.references_input())
+            }
+            Expr::StringInterpolation { parts } => parts.iter().any(|p| match p {
+                StringPart::Literal(_) => false,
+                StringPart::Expr(e) => e.references_input(),
+            }),
+            // CallBuiltin implicitly receives current input as its first arg.
+            Expr::CallBuiltin { .. } => true,
+            Expr::Error { msg } => msg.as_ref().is_some_and(|m| m.references_input()),
+            // Conservative: anything below this point may use input but is
+            // also a binding construct — assume it does so the beta-reduction
+            // bails out and falls through to the structural Pipe code.
+            Expr::Pipe { .. } | Expr::Reduce { .. } | Expr::Foreach { .. }
+            | Expr::LetBinding { .. } | Expr::TryCatch { .. } | Expr::While { .. }
+            | Expr::Until { .. } | Expr::Repeat { .. } | Expr::Label { .. }
+            | Expr::Update { .. } | Expr::Assign { .. } | Expr::AllShort { .. }
+            | Expr::AnyShort { .. } | Expr::Limit { .. }
+            | Expr::Range { .. } | Expr::Recurse { .. }
+            | Expr::PathExpr { .. } | Expr::SetPath { .. } | Expr::GetPath { .. }
+            | Expr::DelPaths { .. }
+            | Expr::FuncCall { .. } | Expr::Break { .. }
+            | Expr::RegexTest { .. } | Expr::RegexMatch { .. } | Expr::RegexCapture { .. }
+            | Expr::RegexScan { .. } | Expr::RegexSub { .. } | Expr::RegexGsub { .. }
+            | Expr::ClosureOp { .. } | Expr::AlternativeDestructure { .. }
+            | Expr::Memoize { .. } => true,
+        }
+    }
+
     /// Substitute all Input nodes with `replacement`.
     /// Only valid when `is_input_free()` is true.
     pub fn substitute_input(&self, replacement: &Expr) -> Expr {

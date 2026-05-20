@@ -10166,3 +10166,58 @@ null
 def big_add($x; $y): [$x[0] + $y[0], $x[1] + $y[1]]; big_add(big_add([3,3]; [4,4]); [2,2])
 null
 [9,9]
+
+# Issue #683: Reduce source containing `not` was evaluated against
+# `Value::Null` instead of the outer input. `expr_uses_outer_input`
+# misclassified `Expr::Not` as input-free, so the source_needs_input
+# branch fed Null and `not` on Null returned true instead of negating
+# the actual input. Surfaced by the metamorphic harness via
+# `[{a: not}] | add` ≢ `reduce ({a: not}) as $x (null; . + $x)` on `[]`.
+reduce ({a: (not)}) as $x (null; . + $x)
+[]
+{"a":false}
+
+# Issue #683: JIT Pipe beta-reduction `Pipe(E, F) → F[E/Input]` fired even
+# when F had no Input refs, making the substitution a no-op and silently
+# dropping E's evaluation. `.x | 0` on `false` collapsed to `0`, hiding
+# the "Cannot index boolean" error. Wrapping in try/catch lets us pin the
+# error class with a stable expected value. Adding `F.references_input()`
+# to the beta-reduction guard preserves the would-be error.
+try (reduce (.x | 0) as $x (null; . + $x)) catch "ERROR"
+false
+"ERROR"
+
+# Issue #683: JIT `reverse` fast path silently reversed string codepoints
+# (`"null"` → `"llun"`) instead of erroring. `reverse` desugars to
+# `[.[length - 1 - range(0; length)]]`, which indexes the input with
+# numbers — strings reject that. Empty string still yields `[]` (range
+# empty). Surfaced via `[type | {a: reverse}] | add` ≢ corresponding
+# reduce form on `null` (both must error identically).
+try (reverse) catch "ERROR"
+"abc"
+"ERROR"
+
+# Issue #683: Reduce-in-scalar-position dispatches via
+# `flatten_gen_with_each_output(source, …)` and ignored its return
+# value, so a source the JIT couldn't compile silently emitted no loop
+# body — leaving the accumulator at its init value and masking any
+# error the source would have raised. `values` desugars to
+# `if (type != "null") then . else empty end`, whose `empty` branch
+# makes the whole if non-scalar — exactly the shape the per-iteration
+# dispatch bails on. Pre-check the source at the top of the Reduce
+# arm; on failure mark the Flattener for compile-time bailout so the
+# binary falls back to the interpreter.
+try (reduce ((if values then . else . end) | reverse) as $x (null; . + $x)) catch "ERROR"
+false
+"ERROR"
+
+# Issue #683: ObjCopyField fused fast path for `{key: .field}` and
+# `{key: .field?}` silently treated non-object/non-null input as null,
+# swallowing the would-be type error from plain `.field`. `false |
+# {a: .a}` should error ("Cannot index boolean with string \"a\"")
+# but jq-jit's JIT returned `{"a":null}` instead. Restricting the
+# optimization to IndexOpt (`.field?`) — whose semantics actually do
+# swallow the error — preserves the plain Index error class.
+try {a: .a} catch "ERROR"
+false
+"ERROR"
