@@ -56,6 +56,17 @@
 //! When a divergence shrinks, paste the minimal `(filter, input)` into
 //! `tests/regression.test` with reference jq's output as expected, fix
 //! the underlying rewrite or guard, then re-run.
+//!
+//! ## Strategy provenance
+//!
+//! Single-valued filter generation, the JSON input distribution, and
+//! the AST printer all come from
+//! `tests/common/filter_strategy.rs` (#688). This file owns the
+//! `MultiFilter` wrapper that partitions filters into single-valued
+//! vs multi-valued (needed for equivalences (4) and (6)) and the
+//! equivalence-test plumbing. Single-valued shapes nest inside
+//! `MultiFilter::Single(FilterExpr)`; the multi-valued generators
+//! (`,`, `range`, `.[]`, `limit`) live only in this file.
 
 mod common;
 
@@ -65,35 +76,29 @@ use proptest::prelude::*;
 use proptest::test_runner::{TestCaseError, TestRunner};
 
 use common::diff_harness::{jq_jit_path, run_filter};
+use common::filter_strategy::{
+    base_filter_strategy, base_json_strategy, conservative_json_leaf,
+    conservative_leaf_strategy, render, render_json, FilterExpr, JsonShape,
+};
 use common::json_normalize::normalize;
 
-// ===== filter AST =====
+// =====================================================================
+// MultiFilter — single-valued / multi-valued partition
+// =====================================================================
+//
+// Multi-valued generators (the ones the single-valued strategy must
+// reject for equivalences (4) and (6)) live in a separate AST tree so
+// the type system enforces the partition. The leaves below
+// `MultiFilter::Single` are guaranteed single-valued by the shared
+// strategy in `tests/common/filter_strategy.rs`; the four multi-valued
+// constructors (`Comma`, `RangeN`, `EachUnchecked`, `Limit`) can only
+// be produced by `multi_filter_strategy`.
 
-#[derive(Debug, Clone)]
-enum Filter {
-    Identity,
-    Field(String),
-    Index(i32),
-    IntLit(i32),
-    UnaryBuiltin(&'static str),
-    Pipe(Box<Filter>, Box<Filter>),
-    ArrayCons(Vec<Filter>),
-    ObjCons(Vec<(String, Filter)>),
-    Map(Box<Filter>),
-    If(Box<Filter>, Box<Filter>, Box<Filter>),
-    /// `.f1 OP .f2`
-    FieldCmpField(String, &'static str, String),
-    /// `.f OP N`
-    FieldCmpInt(String, &'static str, i32),
-}
-
-/// Multi-valued generators that the single-valued strategy must reject.
-/// Kept in a separate AST node tree so the multi-valued strategy can
-/// produce them and the single-valued one cannot.
 #[derive(Debug, Clone)]
 enum MultiFilter {
-    /// Single-valued island; anything below this point is single-valued.
-    Single(Filter),
+    /// Single-valued island; the wrapped `FilterExpr` is guaranteed
+    /// single-valued by the shared `single_filter_strategy` below.
+    Single(FilterExpr),
     Comma(Box<MultiFilter>, Box<MultiFilter>),
     /// `range(n)` — produces 0,1,…,n-1.
     RangeN(u32),
@@ -102,61 +107,6 @@ enum MultiFilter {
     /// `limit(n; gen)` — produces ≤n values from `gen`.
     Limit(u32, Box<MultiFilter>),
     Pipe(Box<MultiFilter>, Box<MultiFilter>),
-}
-
-const IDENTS: &[&str] = &["a", "b", "x", "y"];
-
-const SAFE_BUILTINS: &[&str] = &[
-    "length",
-    "type",
-    "tostring",
-    "not",
-    "keys",
-    "values",
-    "reverse",
-    "sort",
-    "to_entries",
-];
-
-const CMP_OPS: &[&str] = &["==", "!=", "<", ">", "<=", ">="];
-
-fn render(f: &Filter) -> String {
-    match f {
-        Filter::Identity => ".".into(),
-        Filter::Field(n) => format!(".{}", n),
-        Filter::Index(n) => format!(".[{}]", n),
-        Filter::IntLit(n) => n.to_string(),
-        Filter::UnaryBuiltin(n) => (*n).to_string(),
-        Filter::Pipe(a, b) => format!("({}) | ({})", render(a), render(b)),
-        Filter::ArrayCons(items) => {
-            if items.is_empty() {
-                "[]".into()
-            } else {
-                let parts: Vec<String> = items.iter().map(render).collect();
-                format!("[{}]", parts.join(", "))
-            }
-        }
-        Filter::ObjCons(pairs) => {
-            if pairs.is_empty() {
-                "{}".into()
-            } else {
-                let parts: Vec<String> = pairs
-                    .iter()
-                    .map(|(k, v)| format!("{}: ({})", k, render(v)))
-                    .collect();
-                format!("{{{}}}", parts.join(", "))
-            }
-        }
-        Filter::Map(inner) => format!("map({})", render(inner)),
-        Filter::If(c, t, e) => format!(
-            "if ({}) then ({}) else ({}) end",
-            render(c),
-            render(t),
-            render(e)
-        ),
-        Filter::FieldCmpField(a, op, b) => format!(".{} {} .{}", a, op, b),
-        Filter::FieldCmpInt(f, op, n) => format!(".{} {} {}", f, op, n),
-    }
 }
 
 fn render_multi(f: &MultiFilter) -> String {
@@ -170,50 +120,30 @@ fn render_multi(f: &MultiFilter) -> String {
     }
 }
 
-// ===== strategies =====
-
-fn ident_strategy() -> impl Strategy<Value = String> {
-    prop::sample::select(IDENTS).prop_map(|s| s.to_string())
-}
-
-fn cmp_op_strategy() -> impl Strategy<Value = &'static str> {
-    prop::sample::select(CMP_OPS)
-}
-
-fn leaf_single() -> impl Strategy<Value = Filter> {
-    prop_oneof![
-        Just(Filter::Identity),
-        ident_strategy().prop_map(Filter::Field),
-        (-2i32..=2).prop_map(Filter::Index),
-        (-3i32..=3).prop_map(Filter::IntLit),
-        prop::sample::select(SAFE_BUILTINS).prop_map(Filter::UnaryBuiltin),
-        (ident_strategy(), cmp_op_strategy(), ident_strategy())
-            .prop_map(|(a, op, b)| Filter::FieldCmpField(a, op, b)),
-        (ident_strategy(), cmp_op_strategy(), -3i32..=3)
-            .prop_map(|(f, op, n)| Filter::FieldCmpInt(f, op, n)),
-    ]
-}
+// =====================================================================
+// Strategies
+// =====================================================================
 
 /// Single-valued filter strategy. Every filter produced yields exactly
 /// one value per input (or errors). Mirrors the
 /// `is_single_valued_expr` precondition in `src/interpreter.rs`.
-fn single_filter_strategy() -> impl Strategy<Value = Filter> {
-    leaf_single().prop_recursive(3, 16, 3, |inner| {
-        prop_oneof![
-            (inner.clone(), inner.clone())
-                .prop_map(|(a, b)| Filter::Pipe(Box::new(a), Box::new(b))),
-            prop::collection::vec(inner.clone(), 0..=3).prop_map(Filter::ArrayCons),
-            prop::collection::vec((ident_strategy(), inner.clone()), 0..=3)
-                .prop_map(Filter::ObjCons),
-            inner.clone().prop_map(|f| Filter::Map(Box::new(f))),
-            (inner.clone(), inner.clone(), inner.clone())
-                .prop_map(|(c, t, e)| Filter::If(Box::new(c), Box::new(t), Box::new(e))),
-        ]
-    })
+///
+/// Built on top of [`conservative_leaf_strategy`] from the shared
+/// `filter_strategy` module: the leaves are the safe single-valued
+/// shapes (`Identity`, `Field`, `Index`, `IntLiteral`, safe builtins,
+/// comparison-only `Field*Binop`), and the recursive composition uses
+/// the shared `base_filter_strategy` which only adds single-valued-
+/// preserving constructors (`Pipe`, `ArrayConstruct`,
+/// `ObjectConstruct`, `Map`, `If`). Multi-valued shapes like `Comma`
+/// and `Limit` are excluded from the base by design — they only
+/// appear via `MultiFilter` below.
+fn single_filter_strategy() -> impl Strategy<Value = FilterExpr> {
+    base_filter_strategy(conservative_leaf_strategy(), 3, 16, 3)
 }
 
 /// Multi-valued strategy. Includes generators (`,`, `range`, `.[]`,
-/// `limit`) plus all single-valued shapes.
+/// `limit`) plus all single-valued shapes (via the `MultiFilter::Single`
+/// wrapper).
 fn multi_filter_strategy() -> impl Strategy<Value = MultiFilter> {
     let leaf = prop_oneof![
         single_filter_strategy().prop_map(MultiFilter::Single),
@@ -226,63 +156,19 @@ fn multi_filter_strategy() -> impl Strategy<Value = MultiFilter> {
                 .prop_map(|(a, b)| MultiFilter::Comma(Box::new(a), Box::new(b))),
             (inner.clone(), inner.clone())
                 .prop_map(|(a, b)| MultiFilter::Pipe(Box::new(a), Box::new(b))),
-            (1u32..=3, inner.clone()).prop_map(|(n, g)| MultiFilter::Limit(n, Box::new(g))),
+            (1u32..=3, inner.clone())
+                .prop_map(|(n, g)| MultiFilter::Limit(n, Box::new(g))),
         ]
     })
 }
 
-// ===== JSON input shape =====
-
-#[derive(Debug, Clone)]
-enum Json {
-    Null,
-    Bool(bool),
-    Int(i32),
-    Str(String),
-    Arr(Vec<Json>),
-    Obj(Vec<(String, Json)>),
+fn json_strategy() -> impl Strategy<Value = JsonShape> {
+    base_json_strategy(conservative_json_leaf(), 3, 12, 3)
 }
 
-fn render_json(v: &Json) -> String {
-    match v {
-        Json::Null => "null".into(),
-        Json::Bool(b) => b.to_string(),
-        Json::Int(n) => n.to_string(),
-        Json::Str(s) => serde_json::to_string(s).unwrap(),
-        Json::Arr(items) => {
-            let parts: Vec<String> = items.iter().map(render_json).collect();
-            format!("[{}]", parts.join(","))
-        }
-        Json::Obj(pairs) => {
-            let parts: Vec<String> = pairs
-                .iter()
-                .map(|(k, v)| format!("{}:{}", serde_json::to_string(k).unwrap(), render_json(v)))
-                .collect();
-            format!("{{{}}}", parts.join(","))
-        }
-    }
-}
-
-fn json_leaf() -> impl Strategy<Value = Json> {
-    prop_oneof![
-        Just(Json::Null),
-        any::<bool>().prop_map(Json::Bool),
-        (-3i32..=3).prop_map(Json::Int),
-        prop::sample::select(vec!["", "a", "ab", "hello"])
-            .prop_map(|s| Json::Str(s.to_string())),
-    ]
-}
-
-fn json_strategy() -> impl Strategy<Value = Json> {
-    json_leaf().prop_recursive(3, 12, 3, |inner| {
-        prop_oneof![
-            prop::collection::vec(inner.clone(), 0..=3).prop_map(Json::Arr),
-            prop::collection::vec((ident_strategy(), inner.clone()), 0..=3).prop_map(Json::Obj),
-        ]
-    })
-}
-
-// ===== runner =====
+// =====================================================================
+// Runner / equivalence assertion plumbing
+// =====================================================================
 
 fn run_one(filter: &str, input: &str, timeout: Duration) -> Option<common::diff_harness::RunOutput> {
     run_filter(jq_jit_path(), filter, input, timeout)
@@ -393,7 +279,9 @@ where
     }
 }
 
-// ===== tests =====
+// =====================================================================
+// Tests
+// =====================================================================
 
 /// 1. `f`  ≡  `f | .`
 #[test]
