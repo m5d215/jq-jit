@@ -223,6 +223,9 @@ invariant 回帰は `tests/regression.test` の "Issue #30" ブロックと
 - `src/interpreter.rs` の `simplify_expr` pipe ハンドラ（`is_single_valued` ローカル helper）
 
 新しい generator-ish な `Expr` variant を足したら `is_single_valued` の reject リストにも入れる。判定が微妙なら "safe default は false" で、rewrite を発火させない方にブレる。
+`tests/enforce_is_single_valued.rs` が `is_single_valued_expr` の全 variant 分類を
+`tests/enforce_is_single_valued.allowlist`（`reject` / `accept_explicit` / `recurse` / `default_false`）と
+突き合わせる。新しい variant を足したら allowlist の更新も強制される。
 
 ### `first()` / `limit(1)` 書き換えのスコープ
 
@@ -256,13 +259,21 @@ eval env にコピーする。個別の handler は seeding を意識せずに�
 - cached Env を reuse するなら `reset_delegated_env(&env, &[&delegated_expr])`
 
 を呼ぶ。`Rc::new(RefCell::new(crate::eval::Env::new(vec![])))` を直接書いては
-いけない（書くと let-binding がまた消える）。
+いけない（書くと let-binding がまた消える）。`tests/enforce_jit_env_seeding.rs`
+が `src/jit.rs` 内の bare `Env::new` 直書きを `tests/enforce_jit_env_seeding.allowlist`
+の grandfathered count で固定して検知する。
+また `tests/enforce_closure_op_env_seeding.rs` が新規 `__<op>__:` dispatcher の
+seeding 漏れ（`new_delegated_env` / `reset_delegated_env` 呼び出し欠落）を検知する
+（eval 委譲しない tag は `tests/enforce_closure_op_env_seeding.allowlist` に
+理由付きで登録）。
 
 また、`collect_loadvar_indices` は **全 `Expr` variant を再帰的に歩く契約**。
 Index / ObjectConstruct / StringInterpolation / CallBuiltin / FuncCall 等に
 LoadVar が埋もれていても拾える。新しい `Expr` variant を足した時は、この
 walker にも再帰呼び出しを追加すること（足し忘れると let-binding が潜って
-silently null になる）。
+silently null になる）。`tests/enforce_collect_loadvar_exhaustive.rs` が
+`src/ir.rs` の `Expr` enum を parse して、walker 本体に各 variant が出現することを
+強制する。
 
 ### `paths` / `paths(f)` は root を落とす
 
@@ -279,7 +290,7 @@ raw-byte fast path は「missing field を null で返す」動きをするも�
 対策:
 
 - `detect_expr` は top-level `try EXPR`（Empty catch）を **剥がさない**。剥がすと fast path 一式が `(expr)?` でもそのまま発火して、null-masking が観測される。今は剥がしていない。
-- 新しい raw-byte fast path を足す時は、**非期待型の入力でも正しく error を raise する**ように書くか、そうでないなら入力型を先頭バイトで判別して bail。bail は構造的に名前付きで返す: `src/fast_path.rs` の `RawApplyOutcome::Bail`（#83 Phase B、pilot は `apply_field_access_raw`）。caller 側で `RawApplyOutcome::Bail` の時は `process_input` 経由で `Filter::execute_cb` に落とすと、Phase A の typed probe + generic eval が引き継ぐ。inline `match raw[0]` の implicit fall-through だと「commit point」が review で見えないので、新規 apply-site は必ずこの形を踏襲する。
+- 新しい raw-byte fast path を足す時は、**非期待型の入力でも正しく error を raise する**ように書くか、そうでないなら入力型を先頭バイトで判別して bail。bail は構造的に名前付きで返す: `src/fast_path.rs` の `RawApplyOutcome::Bail`（#83 Phase B、pilot は `apply_field_access_raw`）。caller 側で `RawApplyOutcome::Bail` の時は `process_input` 経由で `Filter::execute_cb` に落とすと、Phase A の typed probe + generic eval が引き継ぐ。inline `match raw[0]` の implicit fall-through だと「commit point」が review で見えないので、新規 apply-site は必ずこの形を踏襲する。`tests/enforce_raw_apply_bail.rs` が `pub fn apply_*_raw` 全件について `-> RawApplyOutcome` 返り値と本体内の `RawApplyOutcome::Bail` 出現を静的に検査する。
 - 検出（手動）: `diff ループ` で `f` と `(f)?` の両方を jq と突き合わせる。`(f)?` だけ divergence したら null-masking。
 - 検出（自動・常設）: `tests/fuzz_error_wrap.rs` (#172) が
   ランダムな single-valued な `(filter, input)` を生成して、jq が error する時

@@ -1,0 +1,23 @@
+# Closure-op tags exempted from the
+# `tests/enforce_closure_op_env_seeding.rs` env-seeding check.
+#
+# Format: `<tag>` per line (without the `__` … `__:` wrapper). Anything
+# after the tag on the same line is treated as a comment.
+#
+# A tag belongs here only if it is NOT an eval-delegation dispatcher —
+# i.e. its handler never calls `eval_*_standalone` or `eval::eval` with
+# the delegated expression, so a delegated `eval::Env` is never built.
+#
+# Currently exempted tags:
+#
+# - `loc`     — `__loc__:<file>:<line>` carries a constant value emitted
+#               by `JitOp::CallBuiltin` and the handler just constructs
+#               a `{"file":..., "line":...}` literal. No eval delegation.
+#
+# - `jqerror` — `__jqerror__:` is a runtime error-message prefix used by
+#               `set_jit_error` / try-catch unwinding to disambiguate
+#               jq-raised errors from host panics. It is not a closure-op
+#               dispatcher.
+
+loc       constant value, no eval delegation
+jqerror   error-message marker, no eval delegation

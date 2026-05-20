@@ -1,0 +1,103 @@
+# Classification of every `Expr` variant for the `is_single_valued_expr`
+# helper in `src/interpreter.rs` (maintenance.md §3
+# "`[gen] | add` は single-valued 要素のみ畳める").
+#
+# Format: `<Variant>  <classification>` per line.
+# Anything else on the line is treated as a comment.
+#
+# Classifications:
+#
+#   reject           — explicit `Expr::X { .. } => false` arm. For variants
+#                      that yield 0 or many values (generator-ish). The
+#                      `[gen] | add` rewrite must not fold these.
+#
+#   accept_explicit  — explicit `Expr::X { .. } => true` (or in a `| ... =>`
+#                      group). For leaf variants known to always yield
+#                      exactly one value.
+#
+#   recurse          — explicit arm that delegates the decision to
+#                      sub-expressions (e.g. Pipe checks both sides).
+#
+#   default_false    — falls through to the catch-all `_ => false`. Safe
+#                      default for "we don't know, conservatively assume
+#                      multi-valued". A new variant added with this
+#                      classification can't accidentally enable a
+#                      generator-folding rewrite.
+#
+# Adding a new `Expr` variant without updating this allowlist fails the
+# enforcement test in `tests/enforce_is_single_valued.rs`, forcing a
+# deliberate classification choice.
+
+# --- accept: yields exactly one value ---
+Input               accept_explicit
+Literal             accept_explicit
+LoadVar             accept_explicit
+Not                 accept_explicit
+Slice               accept_explicit
+StringInterpolation accept_explicit
+ObjectConstruct     accept_explicit
+RegexTest           accept_explicit
+RegexSub            accept_explicit
+RegexGsub           accept_explicit
+Collect             accept_explicit
+
+# --- recurse: depends on sub-expressions ---
+BinOp               recurse
+UnaryOp             recurse
+Negate              recurse
+Index               recurse
+Pipe                recurse
+IfThenElse          recurse
+Alternative         recurse
+LetBinding          recurse
+
+# --- reject: generator-ish, yields 0 or many ---
+Empty               reject
+Each                reject
+EachOpt             reject
+Comma               reject
+Recurse             reject
+Range               reject
+Limit               reject
+RegexMatch          reject
+RegexScan           reject
+RegexCapture        reject
+IndexOpt            reject
+TryCatch            reject
+
+# --- default_false: conservatively assume multi-valued / unknown ---
+# These currently fall through to `_ => false`. Promote to an explicit
+# classification (and add an arm to `is_single_valued_expr`) only with a
+# matching audit — promoting to `accept_explicit` is what enables a
+# `[gen] | add` rewrite to fold a previously-rejected shape.
+Reduce              default_false
+Foreach             default_false
+Label               default_false
+Break               default_false
+Update              default_false
+Assign              default_false
+PathExpr            default_false
+SetPath             default_false
+GetPath             default_false
+DelPaths            default_false
+FuncCall            default_false
+While               default_false
+Until               default_false
+Repeat              default_false
+AllShort            default_false
+AnyShort            default_false
+Error               default_false
+Format              default_false
+ClosureOp           default_false
+AlternativeDestructure default_false
+Loc                 default_false
+Env                 default_false
+Builtins            default_false
+ReadInput           default_false
+ReadInputs          default_false
+Debug               default_false
+Stderr              default_false
+ModuleMeta          default_false
+GenLabel            default_false
+CallBuiltin         default_false
+Memoize             default_false

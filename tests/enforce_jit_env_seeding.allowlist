@@ -1,0 +1,25 @@
+# Grandfathered bare `Rc::new(RefCell::new(crate::eval::Env::new(...)))`
+# sites in src/jit.rs. Format: `<path>  <count>`.
+#
+# `tests/enforce_jit_env_seeding.rs` enforces this count exactly: any new
+# bare construction site (regression of maintenance.md §3 "JIT → eval
+# 委譲時の env seeding") fails the test, and reducing the count without
+# updating this file also fails.
+#
+# Shrink-only policy: route the site through `new_delegated_env` /
+# `reset_delegated_env` and lower the count here. When the count reaches
+# zero, remove the line. The goal is for `new_delegated_env` to be the
+# only place that calls `Env::new` directly.
+#
+# Currently allowlisted sites (all in src/jit.rs):
+#
+# - Two `thread_local!` cache `get_or_insert_with` closures that build the
+#   cached `eval::Env` lazily and call `reset_delegated_env` immediately
+#   after to seed it. (Sites: the `PATHS_FILTER_ENV` cache in the
+#   `__paths_filtered__:` handler and the `CLOSURE_OP_ENV` cache in the
+#   `__closure_op__:` handler.) These satisfy the invariant in practice
+#   because the seeding happens inline; the test for closure-op env
+#   seeding (tests/enforce_closure_op_env_seeding.rs) verifies that.
+# - The body of `new_delegated_env` itself, which IS the helper.
+
+src/jit.rs  3
