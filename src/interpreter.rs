@@ -26,6 +26,22 @@ pub fn force_interpreter() -> bool {
     FORCE_INTERPRETER.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Layer-pinning knob for issue #685: when set, [`simplify_expr`] returns its
+/// input unchanged, disabling every fast-path-detection rewrite (the (b)
+/// layer in `docs/maintenance.md` §2). Used by
+/// `tests/selfdiff_layers.rs` to isolate which fast-path layer is
+/// responsible when the 2-way self-diff disagrees.
+static DISABLE_SIMPLIFY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_disable_simplify(on: bool) {
+    DISABLE_SIMPLIFY.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn disable_simplify() -> bool {
+    DISABLE_SIMPLIFY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Comparison value: either numeric or string.
 #[derive(Debug, Clone)]
 pub enum CmpVal {
@@ -612,7 +628,14 @@ pub(crate) fn is_single_valued_expr(e: &crate::ir::Expr) -> bool {
 /// Pipe(Input, X) → X, Pipe(X, Input) → X.
 /// Pipe(E, F) → F[E/.] when E is scalar and F has free Input.
 /// Also applies semantic rewrites (to_entries|from_entries → identity).
+///
+/// Short-circuits to identity when [`disable_simplify`] is on (issue #685
+/// layer-pinning knob `JQJIT_DISABLE_SIMPLIFY`). All recursive calls also
+/// route through this guard, so a single top-level guard suffices.
 fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
+    if disable_simplify() {
+        return expr.clone();
+    }
     use crate::ir::{Expr, Literal, UnaryOp};
     match expr {
         Expr::Pipe { left, right } => {

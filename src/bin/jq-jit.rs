@@ -171,6 +171,33 @@ fn force_interpreter_enabled() -> bool {
     })
 }
 
+/// Layer-pinning knob (issue #685): when `JQJIT_DISABLE_RAW_BYTE` is set,
+/// every `detect_*` raw-byte fast path in this binary is skipped and the
+/// dispatch falls through to `process_input` / `Filter::execute_cb`. JIT
+/// and `simplify_expr` stay on. Combined with `JQJIT_DISABLE_SIMPLIFY`
+/// and `JQJIT_FORCE_INTERPRETER`, this gives the 4-way matrix used by
+/// `tests/selfdiff_layers.rs` to localize divergence to one layer.
+fn disable_raw_byte_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("JQJIT_DISABLE_RAW_BYTE")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false)
+    })
+}
+
+/// Layer-pinning knob (issue #685): when `JQJIT_DISABLE_SIMPLIFY` is set,
+/// the `simplify_expr` rewrite pass short-circuits to identity. The
+/// raw-byte detectors and JIT remain on. See `disable_raw_byte_enabled`.
+fn disable_simplify_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("JQJIT_DISABLE_SIMPLIFY")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false)
+    })
+}
+
 fn jqjit_trace_fast_path(name: &str, filter_text: &str) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static EMITTED: AtomicBool = AtomicBool::new(false);
@@ -2221,6 +2248,8 @@ fn main() {
 
 fn real_main() {
     let mut force_interp = force_interpreter_enabled();
+    let disable_raw_byte = disable_raw_byte_enabled();
+    let disable_simplify = disable_simplify_enabled();
     let mut force_jit = false;
     let mut memo_max_entries: Option<usize> = None;
     let mut debug_memo = false;
@@ -2480,6 +2509,13 @@ fn real_main() {
     if force_interp {
         jq_jit::interpreter::set_force_interpreter(true);
     }
+    // Layer-pinning knob (issue #685). `disable_raw_byte` is consumed
+    // locally below where `use_raw_fast_paths` is computed; the simplify
+    // knob threads into `interpreter::set_disable_simplify` so the
+    // `simplify_expr` pass returns identity.
+    if disable_simplify {
+        jq_jit::interpreter::set_disable_simplify(true);
+    }
 
     let filter_str = match filter_str {
         Some(f) => f,
@@ -2714,8 +2750,13 @@ fn real_main() {
     // Raw byte fast paths bypass Value construction and cannot inject color codes.
     // Disable them when color output is requested.
     // Self-diff mode (#323) also disables them so every filter shape is
-    // serviced by Filter::execute_cb on the eval path.
-    let use_raw_fast_paths = (use_compact_buf || use_pretty_buf) && !color_output && !force_interp;
+    // serviced by Filter::execute_cb on the eval path. Layer-pinning knob
+    // `JQJIT_DISABLE_RAW_BYTE` (#685) is the single gate for the (a) layer
+    // — every `detect_*` site downstream is gated on this one flag.
+    let use_raw_fast_paths = (use_compact_buf || use_pretty_buf)
+        && !color_output
+        && !force_interp
+        && !disable_raw_byte;
 
     // JQJIT_TRACE: emit a single [trace] line naming the first fast path that
     // fires. `trace_detect!` wraps `Option`-returning detectors; `trace_is!`
