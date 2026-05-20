@@ -32,6 +32,7 @@ determines the file prefix and how the test is consumed.
 | `fuzz_full.rs` | fuzz | Same idea, *full* grammar. `#[ignore]` because it surfaces known type-dispatch divergences (#83) until the contract lands. | proptest generators | jq-1.8.x |
 | `fuzz_error_wrap.rs` | fuzz | Property: `(filter)?` produces empty output whenever `filter` would error. Locks in the bug class behind the 2026-04-26 sweep (#172). | proptest generators | jq-1.8.x |
 | `selfdiff_jit_interp.rs` | selfdiff | JIT/fast-path output equals generic-interpreter output, runs the regression corpus twice with `JQJIT_FORCE_INTERPRETER=1` toggled. | `tests/regression.test` | none |
+| `selfdiff_layers.rs` | selfdiff | 4-way layer-pinned diff: baseline / no-raw-byte / no-simplify / pure-interp. When 2-way `selfdiff_jit_interp` flags a divergence, the matrix here points at the offending layer. | `tests/regression.test` | none |
 | `contract_fast_path.rs` | contract | Per-fast-path unit tests: hit, bail, edge cases. ~424 `#[test]` fns, one file per fast path category. | inline | none |
 | `contract_value_factories.rs` | contract | `Value::object_from_pairs` / `_from_normalized_pairs` / number factories: dedup, repr preservation. | inline | none |
 | `coverage_fast_path.rs` | coverage | Every `detect_*` fast path in `src/bin/jq-jit.rs` is hit by at least one corpus case. Runs the corpus with `JQJIT_TRACE=1` and asserts the trace coverage. | scrapes `src/`, runs `tests/differential/corpus.test`, allowlist `tests/coverage_fast_path.allowlist` | none |
@@ -62,7 +63,7 @@ When adding a new diff or compat test, reuse these — do **not** copy
 
 | Path | Format | Consumed by |
 |---|---|---|
-| `tests/regression.test` | 3-line group: filter / input / expected output | `compat_regression`, `selfdiff_jit_interp` |
+| `tests/regression.test` | 3-line group: filter / input / expected output | `compat_regression`, `selfdiff_jit_interp`, `selfdiff_layers` |
 | `tests/official/jq.test` | Same format, plus `%%FAIL` blocks (skipped) | `compat_official` |
 | `tests/differential/corpus.test` | 3-line group: filter / input / (no expected; reference `jq` is the oracle) | `diff_corpus`, `coverage_fast_path` |
 | `tests/corpus/<name>.{jq,json}` | filter file + input file pair | `diff_scenarios` |
@@ -79,8 +80,10 @@ The 3-line group format is documented in `tests/common/jq_test_format.rs`.
 | `JQJIT_PROPTEST_CASES` | 256 (`fuzz_restricted`) / 200 (`fuzz_error_wrap`) / 500 (`fuzz_full`) | `fuzz_*` | proptest case budget. Crank to 100k+ for nightly sweeps. |
 | `JQJIT_PROPTEST_TIMEOUT_SECS` | 3 | `fuzz_*` | Per-subprocess wall-clock cap. |
 | `JQJIT_TRACE` | unset | the binary, used by `coverage_fast_path` | Print `[trace] filter='…' matched=<name>` to stderr for each invocation. |
-| `JQJIT_FORCE_INTERPRETER` | unset | the binary, used by `selfdiff_jit_interp` | Disable all raw-byte fast paths and JIT compilation; route through the generic interpreter. |
-| `JIT_INTERP_DIFF_LIMIT` | unset | `selfdiff_jit_interp` | Truncate the regression corpus to the first N cases (local dev). |
+| `JQJIT_FORCE_INTERPRETER` | unset | the binary, used by `selfdiff_jit_interp` / `selfdiff_layers` | Disable all raw-byte fast paths and JIT compilation; route through the generic interpreter. |
+| `JQJIT_DISABLE_RAW_BYTE` | unset | the binary, used by `selfdiff_layers` | Layer-pinning knob (#685): skip every `detect_*` raw-byte fast path in `src/bin/jq-jit.rs`. JIT and `simplify_expr` stay on. |
+| `JQJIT_DISABLE_SIMPLIFY` | unset | the binary, used by `selfdiff_layers` | Layer-pinning knob (#685): short-circuit `simplify_expr` to identity. Raw-byte detectors and JIT stay on. |
+| `JIT_INTERP_DIFF_LIMIT` | unset | `selfdiff_jit_interp`, `selfdiff_layers` | Truncate the regression corpus to the first N cases (local dev). |
 
 ## Decision tree: where do I put a new test case?
 
