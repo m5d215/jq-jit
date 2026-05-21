@@ -31,6 +31,11 @@ determines the file prefix and how the test is consumed.
 | `fuzz_restricted.rs` | fuzz | Random `(filter, input)` pairs from a deliberately *narrow* grammar (no `try/catch`, no `..`, integer-only inputs). Default-on. | proptest generators | jq-1.8.x |
 | `fuzz_full.rs` | fuzz | Same idea, *full* grammar. `#[ignore]` because it surfaces known type-dispatch divergences (#83) until the contract lands. | proptest generators | jq-1.8.x |
 | `fuzz_error_wrap.rs` | fuzz | Property: `(filter)?` produces empty output whenever `filter` would error. Locks in the bug class behind the 2026-04-26 sweep (#172). | proptest generators | jq-1.8.x |
+| `fuzz_axis_recurse.rs` | fuzz | Per-exclusion mini-axis (#686): `..` recurse re-enabled, every other shape held constant. Default 200 cases. | proptest generators | jq-1.8.x |
+| `fuzz_axis_float_input.rs` | fuzz | Per-exclusion mini-axis (#686): float JSON input values re-enabled. Default 200 cases. | proptest generators | jq-1.8.x |
+| `fuzz_axis_iterate.rs` | fuzz | Per-exclusion mini-axis (#686): bare `.[]` (iterate-all) re-enabled. Default 200 cases. | proptest generators | jq-1.8.x |
+| `fuzz_axis_assign.rs` | fuzz | Per-exclusion mini-axis (#686): `.f = …` / `.f \|= …` / `.f += …` assignment forms re-enabled. Default 200 cases. | proptest generators | jq-1.8.x |
+| `fuzz_axis_const_pipe.rs` | fuzz | Per-exclusion mini-axis (#686): `Pipe(_, <constant-rhs>)` biased to surface simplify-fold divergences. Default 200 cases. | proptest generators | jq-1.8.x |
 | `selfdiff_jit_interp.rs` | selfdiff | JIT/fast-path output equals generic-interpreter output, runs the regression corpus twice with `JQJIT_FORCE_INTERPRETER=1` toggled. | `tests/regression.test` | none |
 | `selfdiff_layers.rs` | selfdiff | 4-way layer-pinned diff: baseline / no-raw-byte / no-simplify / pure-interp. When 2-way `selfdiff_jit_interp` flags a divergence, the matrix here points at the offending layer. | `tests/regression.test` | none |
 | `contract_fast_path.rs` | contract | Per-fast-path unit tests: hit, bail, edge cases. ~424 `#[test]` fns, one file per fast path category. | inline | none |
@@ -77,7 +82,7 @@ The 3-line group format is documented in `tests/common/jq_test_format.rs`.
 |---|---|---|---|
 | `JQ_BIN` | unset | every `diff_*` and `fuzz_*` test | Override the reference jq binary. Must be jq-1.8.x. |
 | `CI` | (set by GitHub Actions) | every `diff_*` and `fuzz_*` test | When set and no jq-1.8.x is found, the test panics instead of skipping. |
-| `JQJIT_PROPTEST_CASES` | 256 (`fuzz_restricted`) / 200 (`fuzz_error_wrap`) / 500 (`fuzz_full`) | `fuzz_*` | proptest case budget. Crank to 100k+ for nightly sweeps. |
+| `JQJIT_PROPTEST_CASES` | 256 (`fuzz_restricted`) / 200 (`fuzz_error_wrap`, `fuzz_axis_*`) / 500 (`fuzz_full`) | `fuzz_*` | proptest case budget. Crank to 100k+ for nightly sweeps. |
 | `JQJIT_PROPTEST_TIMEOUT_SECS` | 3 | `fuzz_*` | Per-subprocess wall-clock cap. |
 | `JQJIT_TRACE` | unset | the binary, used by `coverage_fast_path` | Print `[trace] filter='…' matched=<name>` to stderr for each invocation. |
 | `JQJIT_FORCE_INTERPRETER` | unset | the binary, used by `selfdiff_jit_interp` / `selfdiff_layers` | Disable all raw-byte fast paths and JIT compilation; route through the generic interpreter. |
@@ -148,7 +153,7 @@ CI workflows are at `.github/workflows/ci.yml` (push/PR) and `release.yml`
 |---|---|---|
 | `compat_official`, `compat_regression` | always | always |
 | `contract_*`, `coverage_fast_path`, `enforce_value_factories`, `selfdiff_jit_interp` | always | always |
-| `diff_corpus`, `diff_scenarios`, `fuzz_restricted`, `fuzz_error_wrap` | runs if jq-1.8.x is found, else skipped (eprintln) | always (CI installs jq-1.8.1) |
+| `diff_corpus`, `diff_scenarios`, `fuzz_restricted`, `fuzz_error_wrap`, `fuzz_axis_*` | runs if jq-1.8.x is found, else skipped (eprintln) | always (CI installs jq-1.8.1) |
 | `fuzz_full` | `#[ignore]` — needs `-- --ignored` | not run |
 
 To run a single test: `cargo test --release --test <file_stem>`. Examples:
