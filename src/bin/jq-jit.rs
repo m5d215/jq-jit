@@ -1492,12 +1492,35 @@ fn resolved_would_error(
         // `if .x cmp N then … else … end`: each branch's `Const` cond
         // evaluator falls through to `false` when the field isn't a
         // number, taking the wrong branch (#341). Bail any CondChain
-        // whose Const-branch fields aren't numeric.
-        ResolvedRemap::CondChain(branches, _) => {
-            branches.iter().any(|b| {
+        // whose Const-branch fields aren't numeric. Branch outputs are
+        // also checked: a `Computed`/`Remap` output that would itself
+        // bail when emitted directly (e.g. `FieldCmpField` on a
+        // null/null pair landing on the emitter's null-literal
+        // fallback at line ~1581) must bail here too — the metamorphic
+        // harness surfaced this via `{a: (if .c >= .a then .a > .c else 0 end)}`
+        // on `{a:null,c:null}`, which emitted `{a:null}` instead of
+        // `{a:false}`.
+        ResolvedRemap::CondChain(branches, else_out) => {
+            fn output_would_err(
+                out: &ResolvedBranchOutput,
+                raw: &[u8],
+                ranges: &[(usize, usize)],
+            ) -> bool {
+                match out {
+                    ResolvedBranchOutput::Computed(rv) => resolved_would_error(rv, raw, ranges),
+                    ResolvedBranchOutput::Remap(items) => {
+                        items.iter().any(|rv| resolved_would_error(rv, raw, ranges))
+                    }
+                    _ => false,
+                }
+            }
+            let cond_bail = branches.iter().any(|b| {
                 matches!(b.cond_rhs, ResolvedCondRhs::Const(_))
                     && parse_json_num(bytes_of(b.cond_field_idx)).is_none()
-            })
+            });
+            let output_bail = branches.iter().any(|b| output_would_err(&b.output, raw, ranges))
+                || output_would_err(else_out, raw, ranges);
+            cond_bail || output_bail
         }
         // `.a + ":" + (.b | tostring)`: `Field` parts silently coerce
         // non-string fields to raw bytes (jq raises

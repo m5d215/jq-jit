@@ -10221,3 +10221,18 @@ false
 try {a: .a} catch "ERROR"
 false
 "ERROR"
+
+# Issue #686 axis fuzz follow-up: raw-byte `detect_computed_remap` for
+# `{key: (if .a cmp .b then <FieldCmpField> else <const> end)}` shape
+# bailed only when the conditional's own field check would emit `null`
+# (#341), missing the case where the branch *output* would. With both
+# `.a` and `.c` null, the if-cond `.c >= .a` evaluates true on the
+# null/null branch, and the then-branch `.a > .c` lands on the
+# `FieldCmpField` emitter's null-literal fallback (line ~1581) instead
+# of computing the actual ordering. Surfaced by the metamorphic
+# harness as `[X] | add ≢ reduce X as $x (null; . + $x)` for this X.
+# Fix: extend `ResolvedRemap::CondChain`'s `resolved_would_error` to
+# also probe each branch output.
+{a: (if (.c >= .a) then (.a > .c) else 0 end)}
+{"a":null,"c":null}
+{"a":false}
