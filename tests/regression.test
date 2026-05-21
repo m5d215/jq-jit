@@ -10236,3 +10236,35 @@ false
 {a: (if (.c >= .a) then (.a > .c) else 0 end)}
 {"a":null,"c":null}
 {"a":false}
+
+# Issue #693 (release v1.7.0 fuzz regression): JIT's
+# `flatten_obj_construct_gen` rewrote `{k1: scalar, k2: gen}` as
+# `gen as $v | {k1: scalar, k2: $v}`, keeping scalars inline while
+# binding only generators. When the trailing generator was `empty`,
+# the LetBinding produced zero outputs and the body — including the
+# leading scalar slot's would-be error — was skipped. jq evaluates
+# slots left-to-right, so an earlier slot's error must propagate even
+# when a later slot is empty. Fix: bind every slot value in source
+# order, so the scalar is evaluated (and may error) before the empty
+# generator short-circuits.
+try {a: (0|.a), b: empty} catch "ERROR"
+null
+"ERROR"
+
+# Earlier-slot error + later empty in non-trailing position
+try {a: 1, b: (0|.a), c: empty} catch "ERROR"
+null
+"ERROR"
+
+# Original fuzz-found shape (via `.a |= ...` axis): the `?` at the
+# outer level should catch the would-be error from the inner update,
+# yielding no output. Pre-fix the JIT silently produced `{}`.
+[((.a |= ({a: (((0) | (.)) | (.a > .a)), a: (values)})) | .)?]
+{}
+[]
+
+# Empty in earlier slot still short-circuits correctly (no error from
+# later slots leaks). jq matches.
+[{a: empty, b: (0|.a)}]
+null
+[]

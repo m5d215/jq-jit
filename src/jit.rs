@@ -3878,21 +3878,22 @@ impl Flattener {
         // Only handle generator values (keys must be scalar)
         if !pairs.iter().all(|(k, _)| is_scalar(k)) { return false; }
 
-        // Convert: {k1: gen1, k2: gen2} =>
-        //   gen1 as $__v0 | gen2 as $__v1 | {k1: $__v0, k2: $__v1}
-        // Use high var indices to avoid conflicts (starting at 10000)
+        // Convert: {k1: v1, k2: v2, ...} =>
+        //   v1 as $__v0 | v2 as $__v1 | ... | {k1: $__v0, k2: $__v1, ...}
+        // Bind *every* value (scalar or generator) in source order so left-to-right
+        // evaluation matches jq: an earlier slot's error must propagate even when a
+        // later slot is `empty` (#693). Keeping scalars inline would defer their
+        // evaluation past any subsequent generator's bind, swallowing the error if
+        // that generator yields zero outputs.
+        // Use high var indices to avoid conflicts (starting at 10000).
         let base_var: u16 = 10000;
-        let mut scalar_pairs = Vec::new();
-        let mut bindings = Vec::new();
+        let mut scalar_pairs = Vec::with_capacity(pairs.len());
+        let mut bindings = Vec::with_capacity(pairs.len());
 
         for (i, (k, v)) in pairs.iter().enumerate() {
-            if is_scalar(v) {
-                scalar_pairs.push((k.clone(), v.clone()));
-            } else {
-                let var_idx = base_var + i as u16;
-                bindings.push((var_idx, v.clone()));
-                scalar_pairs.push((k.clone(), Expr::LoadVar { var_index: var_idx }));
-            }
+            let var_idx = base_var + i as u16;
+            bindings.push((var_idx, v.clone()));
+            scalar_pairs.push((k.clone(), Expr::LoadVar { var_index: var_idx }));
         }
 
         // Build the scalar object construct
