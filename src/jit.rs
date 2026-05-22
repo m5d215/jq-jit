@@ -6056,29 +6056,51 @@ extern "C" fn jit_rt_field_is_truthy(base: *const Value, key_ptr: *const u8, key
 /// op encoding: 5=Eq, 6=Ne, 7=Lt, 8=Gt, 9=Le, 10=Ge
 extern "C" fn jit_rt_field_cmp_num(base: *const Value, key_ptr: *const u8, key_len: usize, rhs: f64, op: i32) -> i64 {
     unsafe {
+        // Fold the four "field is null" sources into one branch: absent key
+        // on an object, an explicit null at the key, or a null/absent
+        // base. The pre-fix path returned 0 for all of these, which is
+        // wrong for jq's ordering (null < every number), so `if .x <= N`
+        // on a missing-or-null field skipped its then-branch — surfaced
+        // by #698 / the fuzz_axis_assign hit on PR #697.
+        let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key_ptr, key_len));
         let field_val = match &*base {
-            Value::Obj(ObjInner(o)) => {
-                let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key_ptr, key_len));
-                match o.get(key) {
-                    Some(v) => v,
-                    None => return 0,
-                }
-            }
+            Value::Obj(ObjInner(o)) => o.get(key),
+            Value::Null => None,
+            // `.field` on a non-object/non-null base is a runtime error in
+            // jq. Surfacing that error from this fast path would need a
+            // bail channel the op doesn't have, so keep the existing
+            // permissive behavior (treat as false) and let the generic
+            // path handle programs that depend on the error.
             _ => return 0,
         };
-        if let Value::Num(lhs, _) = field_val {
-            let result = match op {
-                5 => lhs == &rhs,
-                6 => lhs != &rhs,
-                7 => lhs < &rhs,
-                8 => lhs > &rhs,
-                9 => lhs <= &rhs,
-                10 => lhs >= &rhs,
-                _ => return 0,
-            };
-            if result { 1 } else { 0 }
-        } else {
-            0
+        match field_val {
+            Some(Value::Num(lhs, _)) => {
+                let result = match op {
+                    5 => lhs == &rhs,
+                    6 => lhs != &rhs,
+                    7 => lhs < &rhs,
+                    8 => lhs > &rhs,
+                    9 => lhs <= &rhs,
+                    10 => lhs >= &rhs,
+                    _ => return 0,
+                };
+                if result { 1 } else { 0 }
+            }
+            // Absent key (None) or explicit null. jq: null < every number,
+            // and null is never == a number.
+            None | Some(Value::Null) => match op {
+                5 => 0,           // null == num → false
+                6 => 1,           // null != num → true
+                7 | 9 => 1,       // null < num, null <= num → true
+                8 | 10 => 0,      // null > num, null >= num → false
+                _ => 0,
+            },
+            // Other types compare as `string > number`, `array > number`,
+            // etc. in jq's ordering. The fast path only supports numeric
+            // operands; falling through to 0 here is the pre-fix behavior
+            // and the wider type-ordering coverage stays on the generic
+            // path.
+            _ => 0,
         }
     }
 }

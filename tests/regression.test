@@ -10323,3 +10323,20 @@ reduce range(2) as $a (.; reduce range(2) as $b (.; reduce range(2) as $c (.; .[
 reduce range(3) as $a (.; if $a == 1 then . else reduce range(2) as $b (.; .[$a*2+$b] += 1) end)
 [0,0,0,0,0,0]
 [1,1,0,0,1,1]
+
+# Issue #698: FieldCmpNum fast path used to return 0 (false) for null
+# base / absent key / explicit null at the key, breaking jq's
+# null-vs-number ordering (null < every number). Surfaced by
+# fuzz_axis_assign on PR #697 — the `if .a <= 0` cond skipped its
+# then-branch when `.a` was null, so `.a |= {a: (...)}` produced no
+# update output and `|=` collapsed to del(.a). With the fix, null
+# satisfies `<= 0`, the then-branch runs, and the assignment lands.
+.a |= ({a: (if (.a <= 0) then (.) else (values) end)})
+{}
+{"a":{"a":null}}
+
+# Same regression with literal then — narrows the FieldCmpNum null fix
+# to the cond branch independent of values/empty in the else.
+.a |= {a: (if (.a <= 0) then 99 else empty end)}
+{}
+{"a":{"a":99}}
