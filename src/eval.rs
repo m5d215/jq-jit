@@ -883,7 +883,7 @@ fn expr_uses_outer_input(expr: &Expr) -> bool {
 }
 
 /// Check if an expression references a specific variable (for reduce optimization).
-fn expr_uses_var(expr: &Expr, target: u16) -> bool {
+pub(crate) fn expr_uses_var(expr: &Expr, target: u16) -> bool {
     match expr {
         Expr::LoadVar { var_index } => *var_index == target,
         Expr::Input | Expr::Empty | Expr::Not | Expr::Env | Expr::Builtins

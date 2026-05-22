@@ -10309,3 +10309,17 @@ mutate(.a.b = 42)
 mutate(.a = 1) // 0
 {"a":null}
 {"a":1}
+
+# #666 / #647: depth-3 nested reduce where each layer is `reduce SRC as $v
+# (.; ...)` and the leaf is a path-update operator. detect_inplace_action
+# now recurses through InnerReduce layers so the outer acc is held in-place
+# across the full nest — previously depth-3+ fell off to the generic clone
+# path. The result must match the unmarked semantics.
+reduce range(2) as $a (.; reduce range(2) as $b (.; reduce range(2) as $c (.; .[($a*4+$b*2+$c)] += 1)))
+[0,0,0,0,0,0,0,0]
+[1,1,1,1,1,1,1,1]
+
+# Depth-3 with `if cond then INNER else . end` skip at a middle layer.
+reduce range(3) as $a (.; if $a == 1 then . else reduce range(2) as $b (.; .[$a*2+$b] += 1) end)
+[0,0,0,0,0,0]
+[1,1,0,0,1,1]

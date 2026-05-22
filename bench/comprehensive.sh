@@ -327,6 +327,16 @@ header
 bench_gen ".[] |= f (100K)"            100000    '[range(.)] | [.[] |= . + 1] | length'
 bench_gen ".[] += 1 (100K)"            100000    '[range(.)] | .[] += 1 | length'
 bench_gen ".[k] = v reduce(50K)"       50000    'reduce range(.) as $i ({}; .["k\($i)"] = $i) | length'
+# Anchor for #666 (also #647 / #664) — the P126 cuboid-layer shape:
+# 4-deep nested reduce over a 5000-element accumulator with `.[idx] += 1`
+# bottoming out the nest, plus LetBinding / skip-if-cond wrappers at every
+# layer. Without deep-fusion in detect_inplace_action, every outer-pair
+# iteration pays a 5000-element clone before the depth-2 fusion engages
+# at the innermost two layers; with the fusion the entire nest mutates
+# the same in-place slot. The natural P126 form takes 228s on the JIT
+# (#664) without this; expectation here is < 10× of stock jq on a
+# proportionally-sized accumulator.
+bench_gen "p126-shape nested reduce"   5000      '[range(0; .)] | reduce range(1; 30) as $a (.; reduce range($a; 60) as $b (.; if 2*$a*$b >= length then . else (((length/2 - $a*$b) / ($a+$b)) | floor) as $c_max | reduce range($b; $c_max+1) as $c (.; (2*($a*$b + $b*$c + $c*$a)) as $base | if $base >= length then . else ($a+$b+$c) as $s | reduce range(1; 30) as $n (.; ($base + 4*$s*($n-1) + 4*($n-1)*($n-2)) as $layer | if $layer >= length then . else .[$layer] += 1 end) end) end)) | add'
 
 echo ""
 echo "--- String-heavy generators ---"
