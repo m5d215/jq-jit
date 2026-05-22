@@ -343,6 +343,13 @@ bench_gen "p126-shape nested reduce"   5000      '[range(0; .)] | reduce range(1
 # `detect_inplace_update_in_branch` (no Mutate arm), turning the 4-deep
 # 20000-element variant from ~0.8s into ~180s (#666 follow-up).
 bench_gen "p126-shape w/ mutate"        5000      '[range(0; .)] | reduce range(1; 30) as $a (.; reduce range($a; 60) as $b (.; if 2*$a*$b >= length then . else (((length/2 - $a*$b) / ($a+$b)) | floor) as $c_max | reduce range($b; $c_max+1) as $c (.; (2*($a*$b + $b*$c + $c*$a)) as $base | if $base >= length then . else ($a+$b+$c) as $s | reduce range(1; 30) as $n (.; ($base + 4*$s*($n-1) + 4*($n-1)*($n-2)) as $layer | if $layer >= length then . else mutate(.[$layer] += 1) end) end) end)) | add'
+# Anchors `NestedInplaceAction::Sequence` (#666 follow-up): a 2-field
+# object accumulator updated by two serial `mutate(...)` calls in pipe.
+# Without Sequence fusion the second mutate Cloned the (already updated)
+# acc and went through a full setpath deep-clone of the object per
+# iteration — ~1.9× slower than the equivalent `{s: $ns, m: ..}`
+# reconstruct form on the same input. P150 shape (minimum-sum-subarray).
+bench_gen "p150-shape serial mutate"    100000    'reduce range(0; .) as $k ({s: 0, m: 999999999}; (.s + $k) as $ns | mutate(.s = $ns) | if $ns < .m then mutate(.m = $ns) else . end) | .m'
 
 echo ""
 echo "--- String-heavy generators ---"

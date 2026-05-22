@@ -1940,27 +1940,24 @@ impl Flattener {
                             this.emit(JitOp::Drop { slot: acc });
                         });
                     }
-                } else if let Some(action @ NestedInplaceAction::InnerReduce { .. })
-                    = detect_inplace_action(update)
-                {
-                    // Fused nested reduce: the outer update body is one or
-                    // more inner `reduce SRC as $m (.; ...)` layers
-                    // bottoming out in a path-update operator (optionally
-                    // wrapped in `if cond then … else . end` at any
-                    // layer). Without this path, each inner reduce gets
-                    // its own acc_index var seeded by `Clone(input_slot)`,
-                    // so during inner iteration the array has refcount
-                    // ≥ 2 (outer's local slot + inner's var) and the first
-                    // PathInsert deep-clones the whole array — paid on
-                    // every outer iteration. For an N-element sieve over
-                    // N outer iterations that's O(N²) copies (#647,
-                    // 8–22× slowdown). Here we TakeVar the outer acc
-                    // into a slot, hold it uniquely, and run the entire
-                    // nest's in-place updates directly on that slot — so
-                    // PathInsert / SetPathMut always sees refcount 1.
-                    // `emit_inplace_action` recurses through `InnerReduce`
-                    // layers so the fusion is depth-unbounded (#666,
-                    // P126/P135 4-deep nested counters).
+                } else if let Some(action) = detect_inplace_action(update).filter(|a|
+                    matches!(a, NestedInplaceAction::InnerReduce { .. } | NestedInplaceAction::Sequence { .. })
+                ) {
+                    // Fused compound update on the outer acc: the body is
+                    // either an inner reduce nest (`InnerReduce`, #647 /
+                    // #666) or a pipe chain of in-place ops (`Sequence`,
+                    // #666 follow-up — `mutate(.s = ..) | if cond then
+                    // mutate(.m = ..) else . end` against a record-shaped
+                    // acc). The leaf Update/Assign variants are handled by
+                    // `flatten_gen_with_reduce` via inplace_info /
+                    // assign_info — only the compound shapes need this
+                    // path. Without it, each inner reduce or pipe leg
+                    // would seed its own slot from the acc and pay a deep
+                    // clone of the container per iteration. Here we
+                    // TakeVar the outer acc into a slot, hold it uniquely,
+                    // and run the entire body's in-place ops directly on
+                    // that slot — every leaf PathInsert / SetPathMut sees
+                    // refcount 1.
                     self.flatten_gen_with_each_output(source, input_slot, &|this, elem| {
                         this.emit(JitOp::SetVar { var_index: *var_index, src: elem });
                         let acc = this.alloc_slot();
@@ -2530,9 +2527,9 @@ impl Flattener {
                 // 4-deep shape (#666) bypasses emit_inplace_action entirely
                 // and falls into the generic per-iter Clone path inside
                 // flatten_gen_with_reduce.
-                if let Some(action @ NestedInplaceAction::InnerReduce { .. })
-                    = detect_inplace_action(update)
-                {
+                if let Some(action) = detect_inplace_action(update).filter(|a|
+                    matches!(a, NestedInplaceAction::InnerReduce { .. } | NestedInplaceAction::Sequence { .. })
+                ) {
                     let var_idx = *var_index;
                     let acc_idx = *acc_index;
                     self.flatten_gen_with_each_output(source, input_slot, &|this, elem| {
@@ -5558,6 +5555,25 @@ impl Flattener {
                     self.emit(JitOp::MoveToVar { var_index: vi, src: old });
                 }
             }
+            NestedInplaceAction::Sequence { let_bindings, actions } => {
+                // Same save/set/restore pattern as InnerReduce — the
+                // bindings scope across every child action so they're set
+                // once on the way in and restored once on the way out.
+                let mut saved_lets = Vec::new();
+                for &(vi, value_expr) in let_bindings {
+                    let old = self.alloc_slot();
+                    self.emit(JitOp::GetVar { dst: old, var_index: vi });
+                    let val = self.flatten_scalar(value_expr, acc);
+                    self.emit(JitOp::MoveToVar { var_index: vi, src: val });
+                    saved_lets.push((vi, old));
+                }
+                for child in actions {
+                    self.emit_inplace_action(acc, child);
+                }
+                for (vi, old) in saved_lets.into_iter().rev() {
+                    self.emit(JitOp::MoveToVar { var_index: vi, src: old });
+                }
+            }
         }
     }
 }
@@ -5933,6 +5949,21 @@ enum NestedInplaceAction<'a> {
         /// the fusion can span any nesting depth.
         action: Box<NestedInplaceAction<'a>>,
     },
+    /// `Pipe(left, right)` chain of in-place ops on the same acc slot. e.g.
+    /// `(.s + $k) as $ns | mutate(.s = $ns) | mutate(.m = $ns)` runs both
+    /// `mutate` calls against the same in-place acc. Without this the reduce
+    /// body would fall to the generic emit (`flatten_scalar(update, acc)`),
+    /// which compiles each Mutate as a `Clone(acc) + setpath` pair — that
+    /// bumps the inner Rc refcount and forces a deep clone of the
+    /// accumulator container per mutate per iteration. The P150 shape
+    /// (#666 follow-up) is `mutate(.s = ..) | if cond then mutate(.m = ..)
+    /// else . end` against a 2-field object accumulator; without Sequence
+    /// fusion it was ~1.9× slower than the unmarked `{s: .., m: ..}`
+    /// object-construct shape on the same input.
+    Sequence {
+        let_bindings: Vec<(u16, &'a Expr)>,
+        actions: Vec<NestedInplaceAction<'a>>,
+    },
 }
 
 /// Detect what (if anything) the body of an outer reduce can do in place
@@ -5951,11 +5982,57 @@ fn detect_inplace_action(expr: &Expr) -> Option<NestedInplaceAction<'_>> {
     if let Some(info) = detect_inplace_assign(expr) {
         return Some(NestedInplaceAction::Assign(info));
     }
+    // Pipe-chain of in-place ops, optionally wrapped in LetBindings.
+    // Sits between the leaf attempts and `detect_inner_reduce_chain` so
+    // that a pure `Pipe(Mutate, Mutate)` body is classified as a Sequence
+    // before falling into the reduce-chain peel (which would then fail).
+    if let Some(seq) = detect_inplace_sequence(expr, Vec::new()) {
+        return Some(seq);
+    }
     // Inner reduce with arbitrary mix of LetBinding / skip-if wrappers
     // around it. The leaf case above takes precedence so paths that
     // could be classified either way (e.g. a LetBinding chain that
     // bottoms out in `.[$x] += 1`) go through the leaf emit.
     detect_inner_reduce_chain(expr, Vec::new())
+}
+
+/// Peel `(value) as $x | REST` LetBinding wrappers around a `Pipe(left,
+/// right)` chain whose halves each detect as in-place actions. Returns a
+/// `Sequence` carrying the let-bindings to set before the chain runs.
+/// Nested Pipes flatten — `a | b | c` is `Pipe(Pipe(a,b), c)` and yields
+/// `Sequence([a_action, b_action, c_action])`.
+fn detect_inplace_sequence<'a>(
+    expr: &'a Expr,
+    mut let_bindings: Vec<(u16, &'a Expr)>,
+) -> Option<NestedInplaceAction<'a>> {
+    if let Expr::LetBinding { var_index, value, body } = expr {
+        if !is_scalar(value) { return None; }
+        let_bindings.push((*var_index, value.as_ref()));
+        return detect_inplace_sequence(body, let_bindings);
+    }
+    if let Expr::Pipe { left, right } = expr {
+        let left_action = detect_inplace_action(left)?;
+        let right_action = detect_inplace_action(right)?;
+        let mut actions = Vec::new();
+        // Flatten nested Sequences with empty let_bindings — they can
+        // merge into the parent. A child Sequence with its own
+        // let_bindings keeps its boundary (the inner lets are scoped to
+        // that subsequence and must be saved/restored separately).
+        match left_action {
+            NestedInplaceAction::Sequence { let_bindings: lb, actions: a } if lb.is_empty() => {
+                actions.extend(a);
+            }
+            other => actions.push(other),
+        }
+        match right_action {
+            NestedInplaceAction::Sequence { let_bindings: lb, actions: a } if lb.is_empty() => {
+                actions.extend(a);
+            }
+            other => actions.push(other),
+        }
+        return Some(NestedInplaceAction::Sequence { let_bindings, actions });
+    }
+    None
 }
 
 /// Peel layers of `(value) as $x | REST`, `if cond then . else REST end`

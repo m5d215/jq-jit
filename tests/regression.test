@@ -10345,6 +10345,19 @@ reduce range(3) as $a (.; if $a == 1 then . else reduce range(2) as $b (.; mutat
 [0,0,0,0,0,0]
 [1,1,0,0,1,1]
 
+# Sequence fusion: `(.s + $k) as $ns | mutate(.s = $ns) | mutate(.m = $ns)`
+# is a pipe-chain of in-place ops. Without `NestedInplaceAction::Sequence`
+# (#666 follow-up) the reduce body fell back to `flatten_scalar(update,
+# acc)` which compiles each Mutate as a `Clone(acc) + setpath` pair;
+# refcount > 1 inside setpath forced a deep clone of the object accumulator
+# per mutate per iteration. P150 (minimum-sum-subarray with record-shaped
+# acc) hit this — the unmarked `{s: .., m: ..}` reconstruct shape was
+# ~1.9× faster than the serial-mutate form. With Sequence fusion the
+# second mutate sees the same in-place acc the first one updated.
+reduce range(0; 5) as $k ({s: 0, m: 999}; (.s + $k) as $ns | mutate(.s = $ns) | if $ns < .m then mutate(.m = $ns) else . end)
+null
+{"s":10,"m":0}
+
 # Issue #698: FieldCmpNum fast path used to return 0 (false) for null
 # base / absent key / explicit null at the key, breaking jq's
 # null-vs-number ordering (null < every number). Surfaced by
