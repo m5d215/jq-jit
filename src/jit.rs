@@ -1932,53 +1932,32 @@ impl Flattener {
                             this.emit(JitOp::Drop { slot: acc });
                         });
                     }
-                } else if let Some(fusion) = detect_nested_inplace_fusion(update) {
-                    // Fused nested reduce: the outer update body is an inner
-                    // `reduce SRC as $m (.; INPLACE)` (optionally wrapped in
-                    // `if cond then … else . end`). Without this path, the
-                    // inner reduce gets its own acc_index var seeded by
-                    // `Clone(input_slot)`, so during inner iteration the
-                    // array has refcount ≥ 2 (outer's local slot + inner's
-                    // var) and the first PathInsert deep-clones the whole
-                    // array — paid on every outer iteration. For an
-                    // N-element sieve over N outer iterations that's O(N²)
-                    // copies, the 8–22× slowdown in #647. Here we TakeVar
-                    // the outer acc into a slot, hold it uniquely, and run
-                    // the inner body's in-place update directly on that
-                    // slot — so PathInsert always sees refcount 1.
-                    let skip_cond = fusion.skip_cond;
-                    let inner_source = fusion.inner_source;
-                    let inner_var_index = fusion.inner_var_index;
-                    let inner_action = &fusion.inner_action;
+                } else if let Some(action @ NestedInplaceAction::InnerReduce { .. })
+                    = detect_inplace_action(update)
+                {
+                    // Fused nested reduce: the outer update body is one or
+                    // more inner `reduce SRC as $m (.; ...)` layers
+                    // bottoming out in a path-update operator (optionally
+                    // wrapped in `if cond then … else . end` at any
+                    // layer). Without this path, each inner reduce gets
+                    // its own acc_index var seeded by `Clone(input_slot)`,
+                    // so during inner iteration the array has refcount
+                    // ≥ 2 (outer's local slot + inner's var) and the first
+                    // PathInsert deep-clones the whole array — paid on
+                    // every outer iteration. For an N-element sieve over
+                    // N outer iterations that's O(N²) copies (#647,
+                    // 8–22× slowdown). Here we TakeVar the outer acc
+                    // into a slot, hold it uniquely, and run the entire
+                    // nest's in-place updates directly on that slot — so
+                    // PathInsert / SetPathMut always sees refcount 1.
+                    // `emit_inplace_action` recurses through `InnerReduce`
+                    // layers so the fusion is depth-unbounded (#666,
+                    // P126/P135 4-deep nested counters).
                     self.flatten_gen_with_each_output(source, input_slot, &|this, elem| {
                         this.emit(JitOp::SetVar { var_index: *var_index, src: elem });
                         let acc = this.alloc_slot();
                         this.emit(JitOp::TakeVar { dst: acc, var_index: *acc_index });
-
-                        let skip_done = this.alloc_label();
-                        if let Some(cond) = skip_cond {
-                            let cond_val = this.flatten_scalar(cond, acc);
-                            let body_lbl = this.alloc_label();
-                            this.emit(JitOp::IfTruthy { src: cond_val, then_label: body_lbl, else_label: skip_done });
-                            this.emit(JitOp::Drop { slot: cond_val });
-                            this.emit(JitOp::Label { id: body_lbl });
-                        }
-
-                        let saved_inner = this.alloc_slot();
-                        this.emit(JitOp::GetVar { dst: saved_inner, var_index: inner_var_index });
-                        this.flatten_gen_with_each_output(inner_source, acc, &|this2, elem_m| {
-                            this2.emit(JitOp::SetVar { var_index: inner_var_index, src: elem_m });
-                            match inner_action {
-                                NestedInplaceAction::Update(info) => this2.emit_inplace_update_on_slot(acc, info),
-                                NestedInplaceAction::Assign(info) => this2.emit_inplace_assign_on_slot(acc, info),
-                            }
-                        });
-                        this.emit(JitOp::MoveToVar { var_index: inner_var_index, src: saved_inner });
-
-                        if skip_cond.is_some() {
-                            this.emit(JitOp::Label { id: skip_done });
-                        }
-
+                        this.emit_inplace_action(acc, &action);
                         this.emit(JitOp::MoveToVar { var_index: *acc_index, src: acc });
                     });
                 } else {
@@ -2488,7 +2467,25 @@ impl Flattener {
                 self.emit(JitOp::MoveToVar { var_index: *acc_index, src: acc_val });
                 let old_var = self.alloc_slot();
                 self.emit(JitOp::GetVar { dst: old_var, var_index: *var_index });
-                if !self.flatten_gen_with_reduce(source, *var_index, *acc_index, update, input_slot) {
+                // Engage the nested-reduce in-place fusion at the top-level
+                // (generator-context) Reduce too — top-level filters compile
+                // through flatten_gen first, so without this hook the P126
+                // 4-deep shape (#666) bypasses emit_inplace_action entirely
+                // and falls into the generic per-iter Clone path inside
+                // flatten_gen_with_reduce.
+                if let Some(action @ NestedInplaceAction::InnerReduce { .. })
+                    = detect_inplace_action(update)
+                {
+                    let var_idx = *var_index;
+                    let acc_idx = *acc_index;
+                    self.flatten_gen_with_each_output(source, input_slot, &|this, elem| {
+                        this.emit(JitOp::SetVar { var_index: var_idx, src: elem });
+                        let acc = this.alloc_slot();
+                        this.emit(JitOp::TakeVar { dst: acc, var_index: acc_idx });
+                        this.emit_inplace_action(acc, &action);
+                        this.emit(JitOp::MoveToVar { var_index: acc_idx, src: acc });
+                    });
+                } else if !self.flatten_gen_with_reduce(source, *var_index, *acc_index, update, input_slot) {
                     return false;
                 }
                 let out = self.alloc_slot();
@@ -5437,6 +5434,75 @@ impl Flattener {
             self.emit(JitOp::MoveToVar { var_index: var_idx, src: old });
         }
     }
+
+    /// Apply a `NestedInplaceAction` against `acc`, recursing through
+    /// `InnerReduce` layers as needed. The outer Reduce arm wraps this
+    /// in TakeVar/MoveToVar so `acc` is held with refcount 1 across the
+    /// whole nest — every leaf PathInsert / SetPathMut sees a unique
+    /// container and skips the deep clone. The closure captures `acc`
+    /// and `child` by reference and dispatches back into this method,
+    /// which lets the recursion span any depth without duplicating the
+    /// emit boilerplate per layer.
+    fn emit_inplace_action(&mut self, acc: SlotId, action: &NestedInplaceAction) {
+        match action {
+            NestedInplaceAction::Update(info) => self.emit_inplace_update_on_slot(acc, info),
+            NestedInplaceAction::Assign(info) => self.emit_inplace_assign_on_slot(acc, info),
+            NestedInplaceAction::InnerReduce { let_bindings, skip_cond, source, var_index, action: child } => {
+                let var_idx = *var_index;
+
+                // Save and set the let-bindings around this layer. Values
+                // are evaluated against acc — flatten_scalar's `.` clones
+                // the slot (cheap Rc bump) so the in-place property of acc
+                // survives this evaluation.
+                let mut saved_lets = Vec::new();
+                for &(vi, value_expr) in let_bindings {
+                    let old = self.alloc_slot();
+                    self.emit(JitOp::GetVar { dst: old, var_index: vi });
+                    let val = self.flatten_scalar(value_expr, acc);
+                    self.emit(JitOp::MoveToVar { var_index: vi, src: val });
+                    saved_lets.push((vi, old));
+                }
+
+                let skip_done = self.alloc_label();
+                if let Some((cond, skip_on_truthy)) = skip_cond {
+                    let cond_val = self.flatten_scalar(cond, acc);
+                    let body_lbl = self.alloc_label();
+                    if *skip_on_truthy {
+                        self.emit(JitOp::IfTruthy {
+                            src: cond_val,
+                            then_label: skip_done,
+                            else_label: body_lbl,
+                        });
+                    } else {
+                        self.emit(JitOp::IfTruthy {
+                            src: cond_val,
+                            then_label: body_lbl,
+                            else_label: skip_done,
+                        });
+                    }
+                    self.emit(JitOp::Drop { slot: cond_val });
+                    self.emit(JitOp::Label { id: body_lbl });
+                }
+
+                let saved_inner = self.alloc_slot();
+                self.emit(JitOp::GetVar { dst: saved_inner, var_index: var_idx });
+                self.flatten_gen_with_each_output(source, acc, &|this, elem| {
+                    this.emit(JitOp::SetVar { var_index: var_idx, src: elem });
+                    this.emit_inplace_action(acc, child);
+                });
+                self.emit(JitOp::MoveToVar { var_index: var_idx, src: saved_inner });
+
+                if skip_cond.is_some() {
+                    self.emit(JitOp::Label { id: skip_done });
+                }
+
+                // Restore the let-bindings (reverse order)
+                for (vi, old) in saved_lets.into_iter().rev() {
+                    self.emit(JitOp::MoveToVar { var_index: vi, src: old });
+                }
+            }
+        }
+    }
 }
 
 /// Path component for simple path extraction.
@@ -5632,11 +5698,11 @@ fn detect_inplace_assign(expr: &Expr) -> Option<InplaceAssignInfo<'_>> {
         // branch is required to be `Input` or compile-time assign-shaped.
         Expr::IfThenElse { cond, then_branch, else_branch } if is_scalar(cond) => {
             if matches!(then_branch.as_ref(), Expr::Input) {
-                let info = detect_inplace_assign_in_branch(else_branch)?;
+                let info = detect_inplace_assign_in_branch(else_branch, cond)?;
                 return Some(InplaceAssignInfo { skip_cond: Some((cond.as_ref(), true)), ..info });
             }
             if matches!(else_branch.as_ref(), Expr::Input) {
-                let info = detect_inplace_assign_in_branch(then_branch)?;
+                let info = detect_inplace_assign_in_branch(then_branch, cond)?;
                 return Some(InplaceAssignInfo { skip_cond: Some((cond.as_ref(), false)), ..info });
             }
             None
@@ -5645,10 +5711,14 @@ fn detect_inplace_assign(expr: &Expr) -> Option<InplaceAssignInfo<'_>> {
     }
 }
 
-/// Match an Assign body inside an IfThenElse branch. Refuses any LetBinding
-/// here — pulling let bindings out across the surrounding cond would let the
-/// cond see vars that aren't in scope in the original AST.
-fn detect_inplace_assign_in_branch(expr: &Expr) -> Option<InplaceAssignInfo<'_>> {
+/// Match an Assign body inside an IfThenElse branch. LetBindings are allowed
+/// as long as none of the bound vars are referenced in `cond` — the emit
+/// path sets let_bindings before evaluating skip_cond, so a cond that reads
+/// the let var would observe a value the original AST didn't have in scope.
+/// `+=`-style desugared rhs vars are fresh and never appear in cond, so
+/// they pass this check trivially and unblock #666's nested-reduce fusion
+/// when the leaf is `if cond then . else .[$x] += 1 end`.
+fn detect_inplace_assign_in_branch<'a>(expr: &'a Expr, cond: &Expr) -> Option<InplaceAssignInfo<'a>> {
     if let Expr::Assign { path_expr, value_expr } = expr {
         let pc = extract_simple_path(path_expr)?;
         if !pc.is_empty() && is_scalar(value_expr) {
@@ -5659,6 +5729,13 @@ fn detect_inplace_assign_in_branch(expr: &Expr) -> Option<InplaceAssignInfo<'_>>
                 skip_cond: None,
             });
         }
+    }
+    if let Expr::LetBinding { var_index, value, body } = expr {
+        if !is_scalar(value) { return None; }
+        if crate::eval::expr_uses_var(cond, *var_index) { return None; }
+        let mut info = detect_inplace_assign_in_branch(body, cond)?;
+        info.let_bindings.insert(0, (*var_index, value.as_ref()));
+        return Some(info);
     }
     None
 }
@@ -5703,11 +5780,11 @@ fn detect_inplace_update(expr: &Expr) -> Option<InplaceUpdateInfo<'_>> {
         }
         Expr::IfThenElse { cond, then_branch, else_branch } if is_scalar(cond) => {
             if matches!(then_branch.as_ref(), Expr::Input) {
-                let info = detect_inplace_update_in_branch(else_branch)?;
+                let info = detect_inplace_update_in_branch(else_branch, cond)?;
                 return Some(InplaceUpdateInfo { skip_cond: Some((cond.as_ref(), true)), ..info });
             }
             if matches!(else_branch.as_ref(), Expr::Input) {
-                let info = detect_inplace_update_in_branch(then_branch)?;
+                let info = detect_inplace_update_in_branch(then_branch, cond)?;
                 return Some(InplaceUpdateInfo { skip_cond: Some((cond.as_ref(), false)), ..info });
             }
             None
@@ -5716,10 +5793,12 @@ fn detect_inplace_update(expr: &Expr) -> Option<InplaceUpdateInfo<'_>> {
     }
 }
 
-/// Match an Update body inside an IfThenElse branch. Same scoping caveat as
-/// `detect_inplace_assign_in_branch` — refuses LetBinding to keep `+=`-style
-/// rhs vars from leaking out past the conditional.
-fn detect_inplace_update_in_branch(expr: &Expr) -> Option<InplaceUpdateInfo<'_>> {
+/// Match an Update body inside an IfThenElse branch. Same scoping discipline
+/// as `detect_inplace_assign_in_branch` — LetBindings whose vars don't appear
+/// in `cond` are safe to lift out (they would otherwise be set inside the
+/// kept branch only, but the emit path is the same because cond never reads
+/// them).
+fn detect_inplace_update_in_branch<'a>(expr: &'a Expr, cond: &Expr) -> Option<InplaceUpdateInfo<'a>> {
     if let Expr::Update { path_expr, update_expr } = expr {
         let pc = extract_simple_path(path_expr)?;
         if !pc.is_empty() && is_scalar(update_expr) {
@@ -5731,68 +5810,135 @@ fn detect_inplace_update_in_branch(expr: &Expr) -> Option<InplaceUpdateInfo<'_>>
             });
         }
     }
+    if let Expr::LetBinding { var_index, value, body } = expr {
+        if !is_scalar(value) { return None; }
+        if crate::eval::expr_uses_var(cond, *var_index) { return None; }
+        let mut info = detect_inplace_update_in_branch(body, cond)?;
+        info.let_bindings.insert(0, (*var_index, value.as_ref()));
+        return Some(info);
+    }
     None
 }
 
 /// In-place action that an inner reduce body can perform on its acc slot.
 /// Drives the nested-reduce fusion in `flatten_scalar`'s Reduce arm (#647).
+/// `InnerReduce` recursion lets the fusion span arbitrary depth — without it
+/// the depth-3+ cases from #666 (P126/P135 4-deep nested counters) fall off
+/// to the generic reduce path that clones the outer acc on every iteration.
 enum NestedInplaceAction<'a> {
     Update(InplaceUpdateInfo<'a>),
     Assign(InplaceAssignInfo<'a>),
+    InnerReduce {
+        /// LetBindings to evaluate against acc and set on the way in,
+        /// restore on the way out. Comes from `(value) as $x | inner_reduce`
+        /// sequences that surround the inner reduce at this layer.
+        /// Each value_expr must be `is_scalar`.
+        let_bindings: Vec<(u16, &'a Expr)>,
+        /// Skip the entire layer (loop body + everything below) when cond
+        /// fires. `(cond, skip_on_truthy)` matches the leaf semantics:
+        /// skip_on_truthy=true skips on truthy cond (e.g.
+        /// `if cond then . else INNER end`). skip_cond is evaluated
+        /// against acc AFTER let_bindings are set.
+        skip_cond: Option<(&'a Expr, bool)>,
+        /// Generator for this inner reduce.
+        source: &'a Expr,
+        /// Iteration variable of this inner reduce.
+        var_index: u16,
+        /// What the inner reduce body does on each iteration. Recursive so
+        /// the fusion can span any nesting depth.
+        action: Box<NestedInplaceAction<'a>>,
+    },
 }
 
-/// Detected shape of an outer reduce whose update body iterates an inner
-/// reduce that modifies the outer accumulator in place. The fused emit
-/// avoids the inner reduce's separate acc var, which would otherwise hold
-/// a parallel reference to the array and force a per-outer-iter deep
-/// clone on every PathInsert (#647 — Project Euler Eratosthenes / phi
-/// sieve shapes, 8–22× slower than the interpreter without this).
-struct NestedInplaceFusion<'a> {
-    /// `if cond then INNER else . end` skip. cond must be scalar; the
-    /// else branch must be `.` (passthrough). `None` when the update is
-    /// just the inner reduce with no skip.
-    skip_cond: Option<&'a Expr>,
-    /// Generator for the inner reduce.
-    inner_source: &'a Expr,
-    /// Iteration variable of the inner reduce.
-    inner_var_index: u16,
-    /// In-place action the inner reduce body performs on each iteration.
-    inner_action: NestedInplaceAction<'a>,
-}
-
-fn detect_nested_inplace_fusion(update: &Expr) -> Option<NestedInplaceFusion<'_>> {
-    if let Some((src, vi, action)) = detect_inner_reduce_inplace(update) {
-        return Some(NestedInplaceFusion {
-            skip_cond: None,
-            inner_source: src,
-            inner_var_index: vi,
-            inner_action: action,
-        });
+/// Detect what (if anything) the body of an outer reduce can do in place
+/// when its acc is held uniquely in a slot. Returns the action tree to
+/// execute per outer iteration. Handles arbitrary depth — each inner
+/// layer can be a `reduce SRC as $v (.; ...)`, optionally wrapped in
+/// any combination of `(value) as $x |` LetBindings and `if cond then
+/// BODY else . end` (or `if cond then . else BODY end`) skip gates.
+fn detect_inplace_action(expr: &Expr) -> Option<NestedInplaceAction<'_>> {
+    // Leaf path-update operator. detect_inplace_update / _assign already
+    // handle their own `if cond then BODY else . end` wrapping and the
+    // LetBinding chain from `+=`-style desugar.
+    if let Some(info) = detect_inplace_update(expr) {
+        return Some(NestedInplaceAction::Update(info));
     }
-    if let Expr::IfThenElse { cond, then_branch, else_branch } = update {
-        if is_scalar(cond) && matches!(else_branch.as_ref(), Expr::Input) {
-            if let Some((src, vi, action)) = detect_inner_reduce_inplace(then_branch) {
-                return Some(NestedInplaceFusion {
-                    skip_cond: Some(cond),
-                    inner_source: src,
-                    inner_var_index: vi,
-                    inner_action: action,
+    if let Some(info) = detect_inplace_assign(expr) {
+        return Some(NestedInplaceAction::Assign(info));
+    }
+    // Inner reduce with arbitrary mix of LetBinding / skip-if wrappers
+    // around it. The leaf case above takes precedence so paths that
+    // could be classified either way (e.g. a LetBinding chain that
+    // bottoms out in `.[$x] += 1`) go through the leaf emit.
+    detect_inner_reduce_chain(expr, Vec::new())
+}
+
+/// Peel layers of `(value) as $x | REST`, `if cond then . else REST end`
+/// (or the `then REST else . end` flavor) until we either land on a
+/// `reduce SRC as $v (.; INNER_ACTION)` or give up. `let_bindings`
+/// accumulates the bindings we've peeled so far so they can be emitted
+/// once on this layer.
+fn detect_inner_reduce_chain<'a>(
+    expr: &'a Expr,
+    mut let_bindings: Vec<(u16, &'a Expr)>,
+) -> Option<NestedInplaceAction<'a>> {
+    // Peel one LetBinding (value must be scalar to be safely evaluated
+    // against acc; non-scalar values would yield multiple bindings, a
+    // shape this fusion path doesn't model).
+    if let Expr::LetBinding { var_index, value, body } = expr {
+        if is_scalar(value) {
+            let_bindings.push((*var_index, value.as_ref()));
+            return detect_inner_reduce_chain(body, let_bindings);
+        }
+        return None;
+    }
+    // Peel one skip-if wrapper. The body of the kept branch must itself
+    // detect as an InnerReduce; we can't compose a skip with a leaf here
+    // because the leaf carries its own `skip_cond` and we'd overwrite it.
+    if let Expr::IfThenElse { cond, then_branch, else_branch } = expr {
+        if is_scalar(cond) {
+            let (body, skip_on_truthy) =
+                if matches!(then_branch.as_ref(), Expr::Input) {
+                    (else_branch.as_ref(), true)
+                } else if matches!(else_branch.as_ref(), Expr::Input) {
+                    (then_branch.as_ref(), false)
+                } else {
+                    return None;
+                };
+            let inner = detect_inner_reduce_chain(body, Vec::new())?;
+            if let NestedInplaceAction::InnerReduce {
+                let_bindings: inner_lets,
+                skip_cond: None,
+                source,
+                var_index,
+                action,
+            } = inner
+            {
+                let_bindings.extend(inner_lets);
+                return Some(NestedInplaceAction::InnerReduce {
+                    let_bindings,
+                    skip_cond: Some((cond, skip_on_truthy)),
+                    source,
+                    var_index,
+                    action,
                 });
             }
+            return None;
         }
     }
-    None
-}
-
-fn detect_inner_reduce_inplace(expr: &Expr) -> Option<(&Expr, u16, NestedInplaceAction<'_>)> {
-    if let Expr::Reduce { source, init, var_index, acc_index: _, update } = expr {
+    // Direct inner reduce. `init = .` is required: any other init starts
+    // the inner reduce with a different value, so the fusion would
+    // mutate the wrong target.
+    if let Expr::Reduce { init, source, var_index, update, .. } = expr {
         if matches!(init.as_ref(), Expr::Input) {
-            if let Some(info) = detect_inplace_update(update) {
-                return Some((source, *var_index, NestedInplaceAction::Update(info)));
-            }
-            if let Some(info) = detect_inplace_assign(update) {
-                return Some((source, *var_index, NestedInplaceAction::Assign(info)));
-            }
+            let action = detect_inplace_action(update)?;
+            return Some(NestedInplaceAction::InnerReduce {
+                let_bindings,
+                skip_cond: None,
+                source,
+                var_index: *var_index,
+                action: Box::new(action),
+            });
         }
     }
     None
@@ -5910,29 +6056,51 @@ extern "C" fn jit_rt_field_is_truthy(base: *const Value, key_ptr: *const u8, key
 /// op encoding: 5=Eq, 6=Ne, 7=Lt, 8=Gt, 9=Le, 10=Ge
 extern "C" fn jit_rt_field_cmp_num(base: *const Value, key_ptr: *const u8, key_len: usize, rhs: f64, op: i32) -> i64 {
     unsafe {
+        // Fold the four "field is null" sources into one branch: absent key
+        // on an object, an explicit null at the key, or a null/absent
+        // base. The pre-fix path returned 0 for all of these, which is
+        // wrong for jq's ordering (null < every number), so `if .x <= N`
+        // on a missing-or-null field skipped its then-branch — surfaced
+        // by #698 / the fuzz_axis_assign hit on PR #697.
+        let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key_ptr, key_len));
         let field_val = match &*base {
-            Value::Obj(ObjInner(o)) => {
-                let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key_ptr, key_len));
-                match o.get(key) {
-                    Some(v) => v,
-                    None => return 0,
-                }
-            }
+            Value::Obj(ObjInner(o)) => o.get(key),
+            Value::Null => None,
+            // `.field` on a non-object/non-null base is a runtime error in
+            // jq. Surfacing that error from this fast path would need a
+            // bail channel the op doesn't have, so keep the existing
+            // permissive behavior (treat as false) and let the generic
+            // path handle programs that depend on the error.
             _ => return 0,
         };
-        if let Value::Num(lhs, _) = field_val {
-            let result = match op {
-                5 => lhs == &rhs,
-                6 => lhs != &rhs,
-                7 => lhs < &rhs,
-                8 => lhs > &rhs,
-                9 => lhs <= &rhs,
-                10 => lhs >= &rhs,
-                _ => return 0,
-            };
-            if result { 1 } else { 0 }
-        } else {
-            0
+        match field_val {
+            Some(Value::Num(lhs, _)) => {
+                let result = match op {
+                    5 => lhs == &rhs,
+                    6 => lhs != &rhs,
+                    7 => lhs < &rhs,
+                    8 => lhs > &rhs,
+                    9 => lhs <= &rhs,
+                    10 => lhs >= &rhs,
+                    _ => return 0,
+                };
+                if result { 1 } else { 0 }
+            }
+            // Absent key (None) or explicit null. jq: null < every number,
+            // and null is never == a number.
+            None | Some(Value::Null) => match op {
+                5 => 0,           // null == num → false
+                6 => 1,           // null != num → true
+                7 | 9 => 1,       // null < num, null <= num → true
+                8 | 10 => 0,      // null > num, null >= num → false
+                _ => 0,
+            },
+            // Other types compare as `string > number`, `array > number`,
+            // etc. in jq's ordering. The fast path only supports numeric
+            // operands; falling through to 0 here is the pre-fix behavior
+            // and the wider type-ordering coverage stays on the generic
+            // path.
+            _ => 0,
         }
     }
 }
