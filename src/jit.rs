@@ -295,6 +295,14 @@ fn is_scalar(expr: &Expr) -> bool {
         Expr::Update { path_expr, update_expr } => {
             extract_simple_path(path_expr).is_some() && is_scalar(update_expr)
         }
+        // mutate(path = v) / mutate(path |= f) is semantically identical to
+        // its wrapped Assign/Update — same scalar-ness so containing Reduces
+        // don't bail to interpreter for missing the arm. #666 follow-up: the
+        // marker was a perf regression because is_scalar(Mutate) = false
+        // poisoned `is_scalar(reduce.update)` and the JIT Reduce arm bailed.
+        Expr::Mutate { path_expr, value_expr, .. } => {
+            extract_simple_path(path_expr).is_some() && is_scalar(value_expr)
+        }
         // Regex operations produce exactly one value
         Expr::RegexTest { input_expr, re, flags } => is_scalar(input_expr) && is_scalar(re) && is_scalar(flags),
         // match/capture are generators (0 or 1 outputs) — non-match produces empty
@@ -2082,6 +2090,55 @@ impl Flattener {
                 let result = self.flatten_scalar(&body, input_slot);
                 self.expanding_funcs.remove(func_id);
                 result
+            }
+            // mutate(path = v) / mutate(path |= f) — semantically identical
+            // to the wrapped Assign/Update at the JIT layer. Dispatch to the
+            // same scalar-emit code so containing scalar contexts (e.g. a
+            // standalone `mutate(.a = 10)` at the top of the filter) don't
+            // fall through to the default Null emit. See is_scalar.
+            Expr::Mutate { path_expr, value_expr, kind: MutateKind::Assign } => {
+                if let Some(path_components) = extract_simple_path(path_expr) {
+                    let val = self.flatten_scalar(value_expr, input_slot);
+                    let path_arr = self.build_path_array(&path_components, input_slot);
+                    let inp = self.alloc_slot();
+                    self.emit(JitOp::Clone { dst: inp, src: input_slot });
+                    let out = self.alloc_slot();
+                    self.emit_propagating(JitOp::CallBuiltin { dst: out, name: "setpath".to_string(), args: vec![inp, path_arr, val] });
+                    self.emit(JitOp::Drop { slot: inp });
+                    self.emit(JitOp::Drop { slot: path_arr });
+                    self.emit(JitOp::Drop { slot: val });
+                    out
+                } else {
+                    let out = self.alloc_slot();
+                    self.emit(JitOp::Null { dst: out });
+                    out
+                }
+            }
+            Expr::Mutate { path_expr, value_expr, kind: MutateKind::Update } => {
+                if let Some(path_components) = extract_simple_path(path_expr) {
+                    let path_arr = self.build_path_array(&path_components, input_slot);
+                    let inp = self.alloc_slot();
+                    self.emit(JitOp::Clone { dst: inp, src: input_slot });
+                    let path_clone = self.alloc_slot();
+                    self.emit(JitOp::Clone { dst: path_clone, src: path_arr });
+                    let old_val = self.alloc_slot();
+                    self.emit_propagating(JitOp::CallBuiltin { dst: old_val, name: "getpath".to_string(), args: vec![inp, path_clone] });
+                    self.emit(JitOp::Drop { slot: inp });
+                    self.emit(JitOp::Drop { slot: path_clone });
+                    let new_val = self.flatten_scalar(value_expr, old_val);
+                    self.emit(JitOp::Drop { slot: old_val });
+                    let inp2 = self.alloc_slot();
+                    self.emit(JitOp::Clone { dst: inp2, src: input_slot });
+                    let out = self.alloc_slot();
+                    self.emit_propagating(JitOp::CallBuiltin { dst: out, name: "setpath".to_string(), args: vec![inp2, path_arr, new_val] });
+                    self.emit(JitOp::Drop { slot: inp2 });
+                    self.emit(JitOp::Drop { slot: new_val });
+                    out
+                } else {
+                    let out = self.alloc_slot();
+                    self.emit(JitOp::Null { dst: out });
+                    out
+                }
             }
             // Assign with simple path: setpath(path, value)
             Expr::Assign { path_expr, value_expr } => {
@@ -5730,6 +5787,21 @@ fn detect_inplace_assign_in_branch<'a>(expr: &'a Expr, cond: &Expr) -> Option<In
             });
         }
     }
+    // Mirror the Mutate peel from `detect_inplace_assign` — otherwise an
+    // `if cond then . else mutate(.x = v) end` leaf bails the nested-reduce
+    // fusion at any depth where the skip-if wraps the mutate(...) marker.
+    // (#666 follow-up: P126 4-deep shape is the worst-case regression here.)
+    if let Expr::Mutate { path_expr, value_expr, kind: MutateKind::Assign } = expr {
+        let pc = extract_simple_path(path_expr)?;
+        if !pc.is_empty() && is_scalar(value_expr) {
+            return Some(InplaceAssignInfo {
+                let_bindings: vec![],
+                path_components: pc,
+                value_expr,
+                skip_cond: None,
+            });
+        }
+    }
     if let Expr::LetBinding { var_index, value, body } = expr {
         if !is_scalar(value) { return None; }
         if crate::eval::expr_uses_var(cond, *var_index) { return None; }
@@ -5806,6 +5878,19 @@ fn detect_inplace_update_in_branch<'a>(expr: &'a Expr, cond: &Expr) -> Option<In
                 let_bindings: vec![],
                 path_components: pc,
                 update_expr,
+                skip_cond: None,
+            });
+        }
+    }
+    // Mirror the Mutate peel from `detect_inplace_update` — see the analogous
+    // comment in `detect_inplace_assign_in_branch`.
+    if let Expr::Mutate { path_expr, value_expr, kind: MutateKind::Update } = expr {
+        let pc = extract_simple_path(path_expr)?;
+        if !pc.is_empty() && is_scalar(value_expr) {
+            return Some(InplaceUpdateInfo {
+                let_bindings: vec![],
+                path_components: pc,
+                update_expr: value_expr,
                 skip_cond: None,
             });
         }

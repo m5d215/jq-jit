@@ -10324,6 +10324,27 @@ reduce range(3) as $a (.; if $a == 1 then . else reduce range(2) as $b (.; .[$a*
 [0,0,0,0,0,0]
 [1,1,0,0,1,1]
 
+# #666 follow-up: `mutate(...)` must be transparent to the nested-reduce
+# in-place fusion at any depth. Earlier the marker poisoned `is_scalar`
+# on the enclosing Reduce (the helper had no Mutate arm), forcing
+# `flatten_gen`'s Reduce arm to bail to the interpreter — the leaf still
+# trace-printed `mode=in_place refcount=1` because eval's Mutate arm
+# called rt_setpath_mut, but the surrounding loop dropped off the JIT.
+# Depth-3 with mutate(...) at the leaf must match the unmarked shape.
+reduce range(2) as $a (.; reduce range(2) as $b (.; reduce range(2) as $c (.; mutate(.[($a*4+$b*2+$c)] += 1))))
+[0,0,0,0,0,0,0,0]
+[1,1,1,1,1,1,1,1]
+
+# Same depth with an `if cond then . else mutate(...) end` skip-if
+# wrapping the leaf. detect_inplace_*_in_branch had only an `Update` /
+# `Assign` arm — the Mutate-wrapped equivalent bailed the fusion at the
+# branch peel even though the bare `Update`/`Assign` form fused, so
+# adding mutate(...) around the leaf used to silently turn a 0.8s
+# 4-deep reduce into a 180s+ run (the P126 cuboid-counter shape).
+reduce range(3) as $a (.; if $a == 1 then . else reduce range(2) as $b (.; mutate(.[$a*2+$b] += 1)) end)
+[0,0,0,0,0,0]
+[1,1,0,0,1,1]
+
 # Issue #698: FieldCmpNum fast path used to return 0 (false) for null
 # base / absent key / explicit null at the key, breaking jq's
 # null-vs-number ordering (null < every number). Surfaced by

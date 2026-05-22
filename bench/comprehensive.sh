@@ -337,6 +337,12 @@ bench_gen ".[k] = v reduce(50K)"       50000    'reduce range(.) as $i ({}; .["k
 # (#664) without this; expectation here is < 10× of stock jq on a
 # proportionally-sized accumulator.
 bench_gen "p126-shape nested reduce"   5000      '[range(0; .)] | reduce range(1; 30) as $a (.; reduce range($a; 60) as $b (.; if 2*$a*$b >= length then . else (((length/2 - $a*$b) / ($a+$b)) | floor) as $c_max | reduce range($b; $c_max+1) as $c (.; (2*($a*$b + $b*$c + $c*$a)) as $base | if $base >= length then . else ($a+$b+$c) as $s | reduce range(1; 30) as $n (.; ($base + 4*$s*($n-1) + 4*($n-1)*($n-2)) as $layer | if $layer >= length then . else .[$layer] += 1 end) end) end)) | add'
+# Same shape with `mutate(...)` wrapping the leaf. The marker must be
+# transparent to the nested-reduce fusion at every depth — anchors the
+# regression where mutate(...) at the leaf used to bail the fusion via
+# `detect_inplace_update_in_branch` (no Mutate arm), turning the 4-deep
+# 20000-element variant from ~0.8s into ~180s (#666 follow-up).
+bench_gen "p126-shape w/ mutate"        5000      '[range(0; .)] | reduce range(1; 30) as $a (.; reduce range($a; 60) as $b (.; if 2*$a*$b >= length then . else (((length/2 - $a*$b) / ($a+$b)) | floor) as $c_max | reduce range($b; $c_max+1) as $c (.; (2*($a*$b + $b*$c + $c*$a)) as $base | if $base >= length then . else ($a+$b+$c) as $s | reduce range(1; 30) as $n (.; ($base + 4*$s*($n-1) + 4*($n-1)*($n-2)) as $layer | if $layer >= length then . else mutate(.[$layer] += 1) end) end) end)) | add'
 
 echo ""
 echo "--- String-heavy generators ---"
