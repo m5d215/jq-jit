@@ -2022,6 +2022,7 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                             }
                             Expr::Update { path_expr, update_expr } => is_single_output(path_expr) && is_single_output(update_expr),
                             Expr::Assign { path_expr, value_expr } => is_single_output(path_expr) && is_single_output(value_expr),
+                            Expr::Mutate { path_expr, value_expr, .. } => is_single_output(path_expr) && is_single_output(value_expr),
                             Expr::Alternative { primary, fallback } => is_single_output(primary) && is_single_output(fallback),
                             _ => false,
                         }
@@ -2261,6 +2262,7 @@ fn expr_is_single_output(e: &crate::ir::Expr) -> bool {
         }
         Expr::Update { path_expr, update_expr } => expr_is_single_output(path_expr) && expr_is_single_output(update_expr),
         Expr::Assign { path_expr, value_expr } => expr_is_single_output(path_expr) && expr_is_single_output(value_expr),
+        Expr::Mutate { path_expr, value_expr, .. } => expr_is_single_output(path_expr) && expr_is_single_output(value_expr),
         Expr::Alternative { primary, fallback } => expr_is_single_output(primary) && expr_is_single_output(fallback),
         _ => false,
     }
@@ -2534,7 +2536,7 @@ impl Filter {
         }
         fn check(e: &Expr) -> bool {
             match e {
-                Expr::Update { .. } => true,
+                Expr::Update { .. } | Expr::Mutate { .. } => true,
                 Expr::While { .. } | Expr::Until { .. } | Expr::Repeat { .. } => true,
                 Expr::Reduce { source, .. } | Expr::Foreach { source, .. } => {
                     references_input(source)
@@ -2575,6 +2577,7 @@ impl Filter {
                 Expr::Update { path_expr, update_expr } | Expr::Assign { path_expr, value_expr: update_expr } => {
                     walk(path_expr) || walk(update_expr)
                 }
+                Expr::Mutate { path_expr, value_expr, .. } => walk(path_expr) || walk(value_expr),
                 _ => false,
             }
         }
@@ -2604,6 +2607,7 @@ impl Filter {
                 Expr::Label { body, .. } => walk(body),
                 Expr::CallBuiltin { args, .. } => args.iter().any(|a| walk(a)),
                 Expr::Update { path_expr, update_expr } | Expr::Assign { path_expr, value_expr: update_expr } => walk(path_expr) || walk(update_expr),
+                Expr::Mutate { path_expr, value_expr, .. } => walk(path_expr) || walk(value_expr),
                 Expr::ClosureOp { input_expr, key_expr, .. } => walk(input_expr) || walk(key_expr),
                 Expr::Format { expr: e, .. } => walk(e),
                 Expr::Limit { count, generator } => walk(count) || walk(generator),
@@ -2631,7 +2635,8 @@ impl Filter {
         fn walk(e: &Expr) -> bool {
             match e {
                 Expr::Reduce { .. } | Expr::Foreach { .. } | Expr::Recurse { .. }
-                | Expr::Update { .. } | Expr::While { .. } | Expr::Until { .. }
+                | Expr::Update { .. } | Expr::Mutate { .. }
+                | Expr::While { .. } | Expr::Until { .. }
                 | Expr::Repeat { .. } => true,
                 Expr::Pipe { left, right } | Expr::Comma { left, right }
                 | Expr::BinOp { lhs: left, rhs: right, .. }
@@ -2712,6 +2717,7 @@ impl Filter {
                 Expr::Update { path_expr, update_expr } | Expr::Assign { path_expr, value_expr: update_expr } => {
                     count(path_expr) + count(update_expr)
                 }
+                Expr::Mutate { path_expr, value_expr, .. } => count(path_expr) + count(value_expr),
                 Expr::ClosureOp { input_expr, key_expr, .. } => count(input_expr) + count(key_expr),
                 Expr::Format { expr, .. } | Expr::PathExpr { expr } | Expr::Debug { expr } | Expr::Stderr { expr } => count(expr),
                 Expr::Limit { count: c, generator } => count(c) + count(generator),
