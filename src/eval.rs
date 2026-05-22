@@ -14,6 +14,37 @@ use anyhow::{Result, bail};
 use crate::ir::*;
 use crate::value::{Value, ObjInner, NumRepr, KeyStr, ValueKey};
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static MUTATE_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Enable or disable `--trace-mutate` emission. Set from the CLI startup.
+pub fn set_mutate_trace_enabled(on: bool) {
+    MUTATE_TRACE_ENABLED.store(on, Ordering::Relaxed);
+}
+
+/// Emit one trace line per `mutate(...)` invocation. Reports whether the
+/// in-place fast path will engage (input container refcount = 1) or copy-
+/// on-write will kick in (refcount > 1). Scalars are reported as `n/a`.
+fn trace_mutate_event(kind: MutateKind, input: &Value) {
+    if !MUTATE_TRACE_ENABLED.load(Ordering::Relaxed) { return; }
+    let (container, refc) = match input {
+        Value::Arr(rc) => ("array", Some(Rc::strong_count(rc))),
+        Value::Obj(ObjInner(rc)) => ("object", Some(Rc::strong_count(rc))),
+        _ => (input.type_name(), None),
+    };
+    let kind_str = match kind { MutateKind::Update => "update", MutateKind::Assign => "assign" };
+    match refc {
+        Some(n) => {
+            let mode = if n <= 1 { "in_place" } else { "copy_fallback" };
+            eprintln!("[trace:mutate] kind={} container={} refcount={} mode={}", kind_str, container, n, mode);
+        }
+        None => {
+            eprintln!("[trace:mutate] kind={} container={} refcount=n/a mode=in_place", kind_str, container);
+        }
+    }
+}
+
 type GenResult = Result<bool>;
 pub type EnvRef = Rc<RefCell<Env>>;
 
@@ -298,6 +329,9 @@ fn subst_inner(
         },
         Expr::Update { path_expr, update_expr } => Expr::Update { path_expr: sb!(path_expr), update_expr: sb!(update_expr) },
         Expr::Assign { path_expr, value_expr } => Expr::Assign { path_expr: sb!(path_expr), value_expr: sb!(value_expr) },
+        Expr::Mutate { path_expr, value_expr, kind } => Expr::Mutate {
+            path_expr: sb!(path_expr), value_expr: sb!(value_expr), kind: *kind,
+        },
         Expr::PathExpr { expr: e } => Expr::PathExpr { expr: sb!(e) },
         Expr::SetPath { path, value } => Expr::SetPath { path: sb!(path), value: sb!(value) },
         Expr::GetPath { path } => Expr::GetPath { path: sb!(path) },
@@ -508,6 +542,15 @@ fn subst_cow(expr: &Expr, pv: &[u16], args: &[Expr]) -> Option<Expr> {
             Some(Expr::Assign {
                 path_expr: Box::new(p.unwrap_or_else(|| path_expr.as_ref().clone())),
                 value_expr: Box::new(v.unwrap_or_else(|| value_expr.as_ref().clone())),
+            })
+        }
+        Expr::Mutate { path_expr, value_expr, kind } => {
+            let p = s!(path_expr); let v = s!(value_expr);
+            if p.is_none() && v.is_none() { return None; }
+            Some(Expr::Mutate {
+                path_expr: Box::new(p.unwrap_or_else(|| path_expr.as_ref().clone())),
+                value_expr: Box::new(v.unwrap_or_else(|| value_expr.as_ref().clone())),
+                kind: *kind,
             })
         }
         Expr::PathExpr { expr: e } => s!(e).map(|v| Expr::PathExpr { expr: Box::new(v) }),
@@ -722,6 +765,7 @@ fn contains_func_call(expr: &Expr, target: usize) -> bool {
         Expr::ObjectConstruct { pairs } => pairs.iter().any(|(k, v)| c!(k) || c!(v)),
         Expr::Range { from, to, step } => c!(from) || c!(to) || step.as_ref().is_some_and(|s| c!(s)),
         Expr::Update { path_expr, update_expr } | Expr::Assign { path_expr, value_expr: update_expr } => c!(path_expr) || c!(update_expr),
+        Expr::Mutate { path_expr, value_expr, .. } => c!(path_expr) || c!(value_expr),
         Expr::PathExpr { expr: e } | Expr::GetPath { path: e } | Expr::DelPaths { paths: e }
         | Expr::Debug { expr: e } | Expr::Stderr { expr: e } | Expr::Format { expr: e, .. } => c!(e),
         Expr::SetPath { path, value } => c!(path) || c!(value),
@@ -783,7 +827,8 @@ fn expr_uses_outer_input(expr: &Expr) -> bool {
         // `. as $x | getpath(["a"])` quietly return `null` instead of the
         // proper `Cannot index <type> with string "a"`. See #556.
         Expr::GetPath { .. } | Expr::SetPath { .. } | Expr::DelPaths { .. }
-        | Expr::PathExpr { .. } | Expr::Update { .. } | Expr::Assign { .. } => true,
+        | Expr::PathExpr { .. } | Expr::Update { .. } | Expr::Assign { .. }
+        | Expr::Mutate { .. } => true,
         Expr::IfThenElse { cond, then_branch, else_branch } => {
             expr_uses_outer_input(cond) || expr_uses_outer_input(then_branch) || expr_uses_outer_input(else_branch)
         }
@@ -857,6 +902,9 @@ fn expr_uses_var(expr: &Expr, target: u16) -> bool {
         | Expr::SetPath { path: left, value: right }
         | Expr::TryCatch { try_expr: left, catch_expr: right } => {
             expr_uses_var(left, target) || expr_uses_var(right, target)
+        }
+        Expr::Mutate { path_expr, value_expr, .. } => {
+            expr_uses_var(path_expr, target) || expr_uses_var(value_expr, target)
         }
         Expr::IfThenElse { cond, then_branch, else_branch } => {
             expr_uses_var(cond, target) || expr_uses_var(then_branch, target) || expr_uses_var(else_branch, target)
@@ -2606,6 +2654,27 @@ pub fn eval(
                 }
                 cb(result)
             })
+        }
+
+        Expr::Mutate { path_expr, value_expr, kind } => {
+            // mutate(...) is semantically identical to its wrapped Update/
+            // Assign at the eval layer — the in-place fast path is already
+            // engaged because the Update/Assign handlers move `input` into
+            // `result` rather than cloning. The marker's payoff is in the
+            // JIT, where it suppresses the input Clone before setpath calls
+            // so refcount stays at 1 in nested `reduce` contexts. See #666.
+            trace_mutate_event(*kind, &input);
+            let forwarded = match kind {
+                MutateKind::Update => Expr::Update {
+                    path_expr: path_expr.clone(),
+                    update_expr: value_expr.clone(),
+                },
+                MutateKind::Assign => Expr::Assign {
+                    path_expr: path_expr.clone(),
+                    value_expr: value_expr.clone(),
+                },
+            };
+            eval(&forwarded, input, env, cb)
         }
 
         Expr::PathExpr { expr: path_expr } => {

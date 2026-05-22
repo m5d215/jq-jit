@@ -164,6 +164,22 @@ pub enum Expr {
         value_expr: Box<Expr>,
     },
 
+    /// `mutate(path-update)` — jqx extension. Same semantics as the wrapped
+    /// `Assign` (`path = v`) or `Update` (`path |= f`, `+=`, `-=`, ...) but
+    /// signals to the JIT that the user wants the in-place fast path engaged
+    /// unconditionally. Inside `mutate(...)`, the input slot is consumed
+    /// rather than cloned before reaching `rt_setpath_mut`, so accumulator
+    /// refcount stays at 1 even in nested `reduce`/`foreach` contexts and the
+    /// `Rc::make_mut` inside `rt_setpath_mut` mutates without a deep clone.
+    /// When the input refcount happens to be > 1 (e.g. a `$var` alias), the
+    /// runtime silently falls back to copy-on-write, preserving semantic
+    /// equivalence with the unmarked form. See issue #666.
+    Mutate {
+        path_expr: Box<Expr>,
+        value_expr: Box<Expr>,
+        kind: MutateKind,
+    },
+
     /// Path expression: `path(expr)`
     PathExpr {
         expr: Box<Expr>,
@@ -499,6 +515,15 @@ pub enum UnaryOp {
     GetModuleMeta,
 }
 
+/// Which path-update operator a `mutate(...)` node wraps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutateKind {
+    /// `path = v` (Expr::Assign equivalent).
+    Assign,
+    /// `path |= f` (Expr::Update equivalent — `+=`, `-=`, etc. desugar to `|=`).
+    Update,
+}
+
 /// Closure operations (operations that take a key expression).
 #[derive(Debug, Clone, Copy)]
 pub enum ClosureOpKind {
@@ -590,8 +615,8 @@ impl Expr {
             Expr::Pipe { .. } | Expr::Reduce { .. } | Expr::Foreach { .. }
             | Expr::LetBinding { .. } | Expr::TryCatch { .. } | Expr::While { .. }
             | Expr::Until { .. } | Expr::Repeat { .. } | Expr::Label { .. }
-            | Expr::Update { .. } | Expr::Assign { .. } | Expr::AllShort { .. }
-            | Expr::AnyShort { .. } | Expr::Limit { .. } => false,
+            | Expr::Update { .. } | Expr::Assign { .. } | Expr::Mutate { .. }
+            | Expr::AllShort { .. } | Expr::AnyShort { .. } | Expr::Limit { .. } => false,
             // Regex/closure ops — conservatively refuse
             Expr::RegexTest { .. } | Expr::RegexMatch { .. } | Expr::RegexCapture { .. }
             | Expr::RegexScan { .. } | Expr::RegexSub { .. } | Expr::RegexGsub { .. }
@@ -684,8 +709,8 @@ impl Expr {
             Expr::Pipe { .. } | Expr::Reduce { .. } | Expr::Foreach { .. }
             | Expr::LetBinding { .. } | Expr::TryCatch { .. } | Expr::While { .. }
             | Expr::Until { .. } | Expr::Repeat { .. } | Expr::Label { .. }
-            | Expr::Update { .. } | Expr::Assign { .. } | Expr::AllShort { .. }
-            | Expr::AnyShort { .. } | Expr::Limit { .. }
+            | Expr::Update { .. } | Expr::Assign { .. } | Expr::Mutate { .. }
+            | Expr::AllShort { .. } | Expr::AnyShort { .. } | Expr::Limit { .. }
             | Expr::Range { .. } | Expr::Recurse { .. }
             | Expr::PathExpr { .. } | Expr::SetPath { .. } | Expr::GetPath { .. }
             | Expr::DelPaths { .. }
@@ -866,6 +891,11 @@ impl Expr {
             Expr::Assign { path_expr, value_expr } => Expr::Assign {
                 path_expr: Box::new(path_expr.substitute_var(var_index, replacement)),
                 value_expr: Box::new(value_expr.substitute_var(var_index, replacement)),
+            },
+            Expr::Mutate { path_expr, value_expr, kind } => Expr::Mutate {
+                path_expr: Box::new(path_expr.substitute_var(var_index, replacement)),
+                value_expr: Box::new(value_expr.substitute_var(var_index, replacement)),
+                kind: *kind,
             },
             Expr::TryCatch { try_expr, catch_expr } => Expr::TryCatch {
                 try_expr: Box::new(try_expr.substitute_var(var_index, replacement)),

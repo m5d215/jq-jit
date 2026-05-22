@@ -3010,6 +3010,28 @@ impl Flattener {
                 true
             }
 
+            Expr::Mutate { path_expr, value_expr, kind } => {
+                // jqx extension: marker for the in-place fast path. The JIT
+                // codegen is currently identical to the unmarked Update/Assign
+                // — the perf payoff comes via `detect_inplace_assign`/
+                // `detect_inplace_update` peeling the wrapper inside `reduce`
+                // accumulators (and from eval already moving input into the
+                // setpath call rather than cloning). Forwarding here keeps
+                // standalone `mutate(...)` JIT-compilable instead of bailing
+                // to interpreter. See #666.
+                let forwarded = match kind {
+                    MutateKind::Update => Expr::Update {
+                        path_expr: path_expr.clone(),
+                        update_expr: value_expr.clone(),
+                    },
+                    MutateKind::Assign => Expr::Assign {
+                        path_expr: path_expr.clone(),
+                        value_expr: value_expr.clone(),
+                    },
+                };
+                self.flatten_gen(&forwarded, input_slot)
+            }
+
             Expr::Label { var_index, body } => {
                 let done_label = self.alloc_label();
                 self.label_targets.insert(*var_index, done_label);
@@ -4661,6 +4683,10 @@ impl Flattener {
                 Self::collect_loadvar_indices(path_expr, out);
                 Self::collect_loadvar_indices(value_expr, out);
             }
+            Expr::Mutate { path_expr, value_expr, .. } => {
+                Self::collect_loadvar_indices(path_expr, out);
+                Self::collect_loadvar_indices(value_expr, out);
+            }
             Expr::PathExpr { expr } => Self::collect_loadvar_indices(expr, out),
             Expr::SetPath { path, value } => {
                 Self::collect_loadvar_indices(path, out);
@@ -5564,6 +5590,21 @@ fn extract_ne_type<'a>(expr: &'a Expr) -> Option<&'a str> {
 /// Detect an in-place assign pattern: .[path] = val
 fn detect_inplace_assign(expr: &Expr) -> Option<InplaceAssignInfo<'_>> {
     match expr {
+        // `mutate(path = v)` is transparent for in-place detection — peel
+        // the wrapper and descend into the Assign. See #666.
+        Expr::Mutate { path_expr, value_expr, kind: MutateKind::Assign } => {
+            let pc = extract_simple_path(path_expr)?;
+            if !pc.is_empty() && is_scalar(value_expr) {
+                Some(InplaceAssignInfo {
+                    let_bindings: vec![],
+                    path_components: pc,
+                    value_expr,
+                    skip_cond: None,
+                })
+            } else {
+                None
+            }
+        }
         Expr::Assign { path_expr, value_expr } => {
             let pc = extract_simple_path(path_expr)?;
             if !pc.is_empty() && is_scalar(value_expr) {
@@ -5626,6 +5667,21 @@ fn detect_inplace_assign_in_branch(expr: &Expr) -> Option<InplaceAssignInfo<'_>>
 /// Handles direct `path |= f` and `path += f` (which is `LetBinding { body: Update }`).
 fn detect_inplace_update(expr: &Expr) -> Option<InplaceUpdateInfo<'_>> {
     match expr {
+        // `mutate(path |= f)` is transparent for in-place detection — peel
+        // the wrapper and descend into the Update. See #666.
+        Expr::Mutate { path_expr, value_expr, kind: MutateKind::Update } => {
+            let pc = extract_simple_path(path_expr)?;
+            if !pc.is_empty() && is_scalar(value_expr) {
+                Some(InplaceUpdateInfo {
+                    let_bindings: vec![],
+                    path_components: pc,
+                    update_expr: value_expr,
+                    skip_cond: None,
+                })
+            } else {
+                None
+            }
+        }
         Expr::Update { path_expr, update_expr } => {
             let pc = extract_simple_path(path_expr)?;
             if !pc.is_empty() && is_scalar(update_expr) {

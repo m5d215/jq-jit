@@ -14,7 +14,7 @@ Passes 100% of the official jq test suite (509/509) while being **8x-180x faster
 - **Streaming JSON parser** for memory-efficient NDJSON processing
 - **Memory-mapped file I/O** — mmap-based file reading with no upfront allocation
 - **Optimized value representation** with compact strings, mimalloc, and inline Cranelift codegen
-- **jqx extensions** — shell command execution (`exec`/`execv`), CSV/TSV parsing (`fromcsv`/`fromcsvh`/`fromtsv`/`fromtsvh`), and function-result memoization (`memoize`)
+- **jqx extensions** — shell command execution (`exec`/`execv`), CSV/TSV parsing (`fromcsv`/`fromcsvh`/`fromtsv`/`fromtsvh`), function-result memoization (`memoize`), and the in-place path-update marker (`mutate`)
 
 ## Performance
 
@@ -187,6 +187,40 @@ jq-jit -Rsc 'fromcsvh(["name","age"])' < no-header.csv
 # Combine with exec
 jq-jit -n 'exec("cat data.csv") | fromcsvh | select(.age | tonumber > 25)'
 ```
+
+### Mutate
+
+| Function | Description |
+|----------|-------------|
+| `mutate(path = v)` / `mutate(path \|= f)` / `mutate(path += v)` (and `-=`, `*=`, `/=`, `%=`, `//=`) | Marker for the in-place fast path on a path-update operator. Semantically identical to the unmarked form; signals to the JIT that the surrounding code wants the in-place update to engage. |
+
+The wrapped expression must be exactly one path-update operator at the leaf —
+composite forms (`if`/`then`/`else`, `reduce`, `,`, `|`) must distribute the
+marker inward by wrapping each leaf separately. Anything else is a parse
+error.
+
+```bash
+# Reduce accumulator stays in-place across iterations
+jq-jit -n '[range(0; 1000) | 0] | reduce range(0; 1000) as $i (.; mutate(.[$i] = $i*$i))'
+
+# Operator-assign forms work the same
+echo '{"n":0}' | jq-jit 'mutate(.n += 1)'
+```
+
+When the input's refcount happens to be greater than 1 at runtime (for example
+because a `$var` aliases the same container), the runtime silently falls back
+to copy-on-write, so the result is always equal to the unmarked form. Use
+`--trace-mutate` to print one line per invocation indicating whether the
+in-place path engaged or copy fallback kicked in:
+
+```bash
+jq-jit --trace-mutate -n '[1,2,3] | mutate(.[0] = 99)'
+# stderr: [trace:mutate] kind=assign container=array refcount=1 mode=in_place
+```
+
+`mutate` is a jq-jit extension; stock jq does not provide it. See issue
+[#666](https://github.com/m5d215/jq-jit/issues/666) for the motivating
+benchmarks and the persistent-vector follow-up tracked in [#695](https://github.com/m5d215/jq-jit/issues/695).
 
 ### Memoization
 

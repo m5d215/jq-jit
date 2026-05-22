@@ -76,6 +76,7 @@ Label               default_false
 Break               default_false
 Update              default_false
 Assign              default_false
+Mutate              default_false
 PathExpr            default_false
 SetPath             default_false
 GetPath             default_false
