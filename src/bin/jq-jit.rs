@@ -2347,6 +2347,7 @@ fn real_main() {
                 }
             }
             "--debug-memo" => debug_memo = true,
+            "--trace-mutate" => jq_jit::eval::set_mutate_trace_enabled(true),
             "-a" | "--ascii-output" => {
                 // Recognised but not yet implemented (#126). Emit a
                 // clear error instead of falling through to the filter
@@ -21401,6 +21402,7 @@ fn print_usage() {
     eprintln!("  --jsonargs               Remaining args are JSON $ARGS.positional");
     eprintln!("  --memo-max-entries N     Per-slot cap for memoize/1 cache (jqx; default 1000000)");
     eprintln!("  --debug-memo             Print per-slot memoize cache stats to stderr on exit (jqx)");
+    eprintln!("  --trace-mutate           Print one line per mutate(...) invocation to stderr (jqx)");
     eprintln!("  --version                Show version");
     eprintln!("  -h, --help               Show this help");
 }

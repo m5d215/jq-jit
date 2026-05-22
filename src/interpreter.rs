@@ -2127,6 +2127,7 @@ fn contains_input(expr: &crate::ir::Expr) -> bool {
         Expr::Limit { count, generator } => contains_input(count) || contains_input(generator),
         Expr::Error { msg } => msg.as_ref().map_or(false, |m| contains_input(m)),
         Expr::Update { path_expr, update_expr } | Expr::Assign { path_expr, value_expr: update_expr } => contains_input(path_expr) || contains_input(update_expr),
+        Expr::Mutate { path_expr, value_expr, .. } => contains_input(path_expr) || contains_input(value_expr),
         // GetPath/SetPath/DelPaths/PathExpr implicitly operate on the current input
         Expr::GetPath { .. } | Expr::SetPath { .. } | Expr::DelPaths { .. } | Expr::PathExpr { .. } => true,
         Expr::Recurse { input_expr: e } => contains_input(e),

@@ -3317,6 +3317,16 @@ impl Parser {
                 // This is a recursive pattern - use Recurse node
                 Ok(Expr::Recurse { input_expr: Box::new(f) })
             }
+            ("mutate", 1) => {
+                let body = args.into_iter().next().unwrap();
+                // jqx extension. Body must be a top-level path-update operator
+                // (`=`, `|=`, `+=`, `-=`, `*=`, `/=`, `%=`, `//=`); composite
+                // forms must distribute the marker inward (wrap each leaf
+                // separately). `+=` and friends desugar to `LetBinding(body:
+                // Update)` upstream, so peel intermediate `LetBinding`s before
+                // checking the leaf. See issue #666.
+                wrap_mutate(body)
+            }
             ("memoize", 1) => {
                 let body = args.into_iter().next().unwrap();
                 let slot_id = self.scope.alloc_memo_slot();
@@ -4064,6 +4074,32 @@ fn obj_pat_field_expr(value: Expr, key: Expr) -> Expr {
     }
 }
 
+/// Recursively wrap the leaf path-update of a `mutate(...)` body in
+/// `Expr::Mutate`. Peels intermediate `LetBinding` wrappers — `+=`/`-=`/
+/// etc. desugar to `LetBinding { body: Update }` at parse time, and any
+/// hand-written `let ... in path-update` inside `mutate(...)` is treated
+/// the same way. Any leaf that is not `Expr::Assign` or `Expr::Update` is
+/// a parse error: composite forms like `if/then/else`, `reduce`, `,`, and
+/// `|` must distribute the marker inward by wrapping each leaf instead.
+fn wrap_mutate(body: Expr) -> Result<Expr> {
+    match body {
+        Expr::Assign { path_expr, value_expr } => Ok(Expr::Mutate {
+            path_expr, value_expr, kind: MutateKind::Assign,
+        }),
+        Expr::Update { path_expr, update_expr } => Ok(Expr::Mutate {
+            path_expr, value_expr: update_expr, kind: MutateKind::Update,
+        }),
+        Expr::LetBinding { var_index, value, body } => Ok(Expr::LetBinding {
+            var_index, value, body: Box::new(wrap_mutate(*body)?),
+        }),
+        _ => bail!(
+            "mutate(...) body must be a top-level path-update operator \
+             (=, |=, +=, -=, *=, /=, %=, //=); wrap composite forms by \
+             distributing mutate inward across each leaf"
+        ),
+    }
+}
+
 /// Remap FuncCall func_ids in an expression tree using a mapping table.
 fn remap_func_ids(expr: Expr, map: &[(usize, usize)]) -> Expr {
     match expr {
@@ -4146,6 +4182,11 @@ fn remap_func_ids(expr: Expr, map: &[(usize, usize)]) -> Expr {
         Expr::Assign { path_expr, value_expr } => Expr::Assign {
             path_expr: Box::new(remap_func_ids(*path_expr, map)),
             value_expr: Box::new(remap_func_ids(*value_expr, map)),
+        },
+        Expr::Mutate { path_expr, value_expr, kind } => Expr::Mutate {
+            path_expr: Box::new(remap_func_ids(*path_expr, map)),
+            value_expr: Box::new(remap_func_ids(*value_expr, map)),
+            kind,
         },
         Expr::PathExpr { expr } => Expr::PathExpr { expr: Box::new(remap_func_ids(*expr, map)) },
         Expr::SetPath { path, value } => Expr::SetPath {

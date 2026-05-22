@@ -10268,3 +10268,44 @@ null
 [{a: empty, b: (0|.a)}]
 null
 []
+
+# Issue #666: mutate(...) marker is semantically identical to the unmarked
+# path-update operator. Same output as `.a = 10` on the same input.
+mutate(.a = 10)
+{"a":1,"b":2}
+{"a":10,"b":2}
+
+# `+=` desugar (LetBinding wrapping Update) still wraps as Mutate. Result
+# must match `.a += 5`.
+mutate(.a += 5)
+{"a":1}
+{"a":6}
+
+# Update form (`|=`) wrapped by mutate.
+mutate(.a |= . + 1)
+{"a":1}
+{"a":2}
+
+# Reduce loop with mutate hits the in-place fast path
+# (detect_inplace_assign peels the Mutate wrapper).
+reduce range(5) as $i (.; mutate(.[$i] = $i*$i))
+[]
+[0,1,4,9,16]
+
+# Compound assign desugars via LetBinding inside mutate too.
+mutate(.[1] *= .[2])
+[2,3,4]
+[2,12,4]
+
+# Nested object update under mutate.
+mutate(.a.b = 42)
+{"a":{"b":1,"c":2}}
+{"a":{"b":42,"c":2}}
+
+# mutate(...) // 0 — Mutate is a single-output node, so `// 0` returns the
+# Mutate result (alternative short-circuit). Confirms Mutate is classified
+# default_false in is_single_valued_expr (i.e. not eagerly folded as a
+# single-output node by [gen] | add and friends).
+mutate(.a = 1) // 0
+{"a":null}
+{"a":1}
