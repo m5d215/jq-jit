@@ -495,6 +495,14 @@ enum JitOp {
     /// Handles null + push → [val] (jq null identity for addition).
     ArrPush { arr: SlotId, val: SlotId },
 
+    /// `--trace-mutate` diagnostic emit. Reads `slot`'s Value, dispatches to
+    /// `eval::trace_mutate_event` so the JIT and eval paths share output
+    /// format. The MUTATE_TRACE_ENABLED check inside short-circuits when the
+    /// CLI flag is off, so leaving these in the IR for every `mutate(...)`
+    /// site costs only a function call's worth of overhead in the default
+    /// configuration. Does not consume `slot`. See #702.
+    TraceMutate { kind: MutateKind, slot: SlotId },
+
     // Termination
     ReturnContinue,
     ReturnError,
@@ -2095,6 +2103,12 @@ impl Flattener {
             // fall through to the default Null emit. See is_scalar.
             Expr::Mutate { path_expr, value_expr, kind: MutateKind::Assign } => {
                 if let Some(path_components) = extract_simple_path(path_expr) {
+                    // Trace before the Clone — match eval-mode semantics, where
+                    // the reported refcount is the one setpath would observe
+                    // if input were moved directly (refcount = 1 in the simple
+                    // case, > 1 when escape analysis can't reclaim the slot).
+                    // See #702.
+                    self.emit(JitOp::TraceMutate { kind: MutateKind::Assign, slot: input_slot });
                     let val = self.flatten_scalar(value_expr, input_slot);
                     let path_arr = self.build_path_array(&path_components, input_slot);
                     let inp = self.alloc_slot();
@@ -2113,6 +2127,7 @@ impl Flattener {
             }
             Expr::Mutate { path_expr, value_expr, kind: MutateKind::Update } => {
                 if let Some(path_components) = extract_simple_path(path_expr) {
+                    self.emit(JitOp::TraceMutate { kind: MutateKind::Update, slot: input_slot });
                     let path_arr = self.build_path_array(&path_components, input_slot);
                     let inp = self.alloc_slot();
                     self.emit(JitOp::Clone { dst: inp, src: input_slot });
@@ -3070,6 +3085,14 @@ impl Flattener {
                 // setpath call rather than cloning). Forwarding here keeps
                 // standalone `mutate(...)` JIT-compilable instead of bailing
                 // to interpreter. See #666.
+                //
+                // Emit the `--trace-mutate` event before forwarding so the
+                // generator-position top-level `mutate(...)` (the README
+                // repro shape) produces output. The trace observes
+                // `input_slot`'s refcount — same semantics as the eval-path
+                // trace, which fires on `input` before dispatching to the
+                // Update/Assign body. (#702)
+                self.emit(JitOp::TraceMutate { kind: *kind, slot: input_slot });
                 let forwarded = match kind {
                     MutateKind::Update => Expr::Update {
                         path_expr: path_expr.clone(),
@@ -5294,6 +5317,14 @@ impl Flattener {
     /// the var-based `TakeVar`/`MoveToVar` round trip otherwise triggers.
     #[inline]
     fn emit_inplace_update_on_slot(&mut self, acc: SlotId, info: &InplaceUpdateInfo) {
+        // `--trace-mutate` event from the fusion path. Only emitted when the
+        // info was peeled from a `mutate(...)` wrapper — natural `path |= f`
+        // gets no trace, matching the eval-mode contract. The MUTATE_TRACE
+        // gate inside the runtime helper short-circuits when the flag is off,
+        // so this is free in the default configuration. See #702.
+        if let Some(kind) = info.mutate_kind {
+            self.emit(JitOp::TraceMutate { kind, slot: acc });
+        }
         // Save and set let-binding vars (for += desugaring: rhs evaluated first).
         // Values are evaluated against acc itself — flatten_scalar's `.`
         // reference Clones the slot which is cheap (a single Rc bump).
@@ -5401,6 +5432,10 @@ impl Flattener {
     /// nested-reduce fusion path (#647).
     #[inline]
     fn emit_inplace_assign_on_slot(&mut self, acc: SlotId, info: &InplaceAssignInfo) {
+        // `--trace-mutate` event — see emit_inplace_update_on_slot. (#702)
+        if let Some(kind) = info.mutate_kind {
+            self.emit(JitOp::TraceMutate { kind, slot: acc });
+        }
         // Save and set let-binding vars
         let mut saved_vars = Vec::new();
         for &(var_idx, ref value_expr) in &info.let_bindings {
@@ -5633,6 +5668,12 @@ struct InplaceUpdateInfo<'a> {
     /// jumps over the update body when the cond's truthiness equals
     /// `skip_on_truthy`, leaving acc unchanged on the skipped iteration.
     skip_cond: Option<(&'a Expr, bool)>,
+    /// Set when this info was peeled from a `mutate(...)` wrapper. Drives
+    /// the `--trace-mutate` event from the fusion emit path so the JIT
+    /// reports the same in_place / copy_fallback line as the eval path.
+    /// `None` for natural `path |= f` (no marker — no trace, matching eval).
+    /// See #702.
+    mutate_kind: Option<MutateKind>,
 }
 
 /// Info for in-place reduce assign optimization (.[path] = val).
@@ -5645,6 +5686,9 @@ struct InplaceAssignInfo<'a> {
     value_expr: &'a Expr,
     /// Optional conditional skip — same semantics as `InplaceUpdateInfo`.
     skip_cond: Option<(&'a Expr, bool)>,
+    /// Set when this info was peeled from a `mutate(...)` wrapper.
+    /// See `InplaceUpdateInfo::mutate_kind`.
+    mutate_kind: Option<MutateKind>,
 }
 
 /// Compile a filter expression into a fast `fn(&Value) -> bool` check for paths(f).
@@ -5739,6 +5783,7 @@ fn detect_inplace_assign(expr: &Expr) -> Option<InplaceAssignInfo<'_>> {
                     path_components: pc,
                     value_expr,
                     skip_cond: None,
+                    mutate_kind: Some(MutateKind::Assign),
                 })
             } else {
                 None
@@ -5752,6 +5797,7 @@ fn detect_inplace_assign(expr: &Expr) -> Option<InplaceAssignInfo<'_>> {
                     path_components: pc,
                     value_expr,
                     skip_cond: None,
+                    mutate_kind: None,
                 })
             } else {
                 None
@@ -5800,6 +5846,7 @@ fn detect_inplace_assign_in_branch<'a>(expr: &'a Expr, cond: &Expr) -> Option<In
                 path_components: pc,
                 value_expr,
                 skip_cond: None,
+                mutate_kind: None,
             });
         }
     }
@@ -5815,6 +5862,7 @@ fn detect_inplace_assign_in_branch<'a>(expr: &'a Expr, cond: &Expr) -> Option<In
                 path_components: pc,
                 value_expr,
                 skip_cond: None,
+                mutate_kind: Some(MutateKind::Assign),
             });
         }
     }
@@ -5842,6 +5890,7 @@ fn detect_inplace_update(expr: &Expr) -> Option<InplaceUpdateInfo<'_>> {
                     path_components: pc,
                     update_expr: value_expr,
                     skip_cond: None,
+                    mutate_kind: Some(MutateKind::Update),
                 })
             } else {
                 None
@@ -5855,6 +5904,7 @@ fn detect_inplace_update(expr: &Expr) -> Option<InplaceUpdateInfo<'_>> {
                     path_components: pc,
                     update_expr,
                     skip_cond: None,
+                    mutate_kind: None,
                 })
             } else {
                 None
@@ -5895,6 +5945,7 @@ fn detect_inplace_update_in_branch<'a>(expr: &'a Expr, cond: &Expr) -> Option<In
                 path_components: pc,
                 update_expr,
                 skip_cond: None,
+                mutate_kind: None,
             });
         }
     }
@@ -5908,6 +5959,7 @@ fn detect_inplace_update_in_branch<'a>(expr: &'a Expr, cond: &Expr) -> Option<In
                 path_components: pc,
                 update_expr: value_expr,
                 skip_cond: None,
+                mutate_kind: Some(MutateKind::Update),
             });
         }
     }
@@ -7430,6 +7482,17 @@ extern "C" fn jit_rt_arr_push(arr: *mut Value, val: *const Value) {
         }
     }
 }
+
+/// `--trace-mutate` runtime emit for JIT-compiled `mutate(...)` sites.
+/// `kind_byte` matches the ABI in `JitOp::TraceMutate` codegen: 0 = Assign,
+/// 1 = Update. Dispatches to the same `eval::trace_mutate_event` the AST
+/// evaluator uses, so JIT and eval paths emit byte-identical trace lines.
+/// The flag check inside `trace_mutate_event` keeps this cheap when the
+/// CLI flag is off. See #702.
+extern "C" fn jit_rt_trace_mutate(kind_byte: i32, v: *const Value) {
+    let kind = if kind_byte == 0 { MutateKind::Assign } else { MutateKind::Update };
+    unsafe { crate::eval::trace_mutate_event(kind, &*v); }
+}
 // System math wrappers — use platform-optimized implementations (not libm pure-Rust)
 extern "C" fn sys_sin(x: f64) -> f64 { x.sin() }
 extern "C" fn sys_cos(x: f64) -> f64 { x.cos() }
@@ -8581,6 +8644,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 *use_count.entry(*arr).or_insert(0) += 1;
                 *use_count.entry(*val).or_insert(0) += 1;
             }
+            JitOp::TraceMutate { slot, .. } => { *use_count.entry(*slot).or_insert(0) += 1; }
             JitOp::CallBuiltin { args, .. } => {
                 for a in args { *use_count.entry(*a).or_insert(0) += 1; }
             }
@@ -8667,6 +8731,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                     *use_count.entry(*arr).or_insert(0) += 1;
                     *use_count.entry(*val).or_insert(0) += 1;
                 }
+                JitOp::TraceMutate { slot, .. } => { *use_count.entry(*slot).or_insert(0) += 1; }
                 JitOp::CallBuiltin { args, .. } => {
                     for a in args { *use_count.entry(*a).or_insert(0) += 1; }
                 }
@@ -8843,6 +8908,7 @@ impl JitCompiler {
             ("jit_rt_sort_inplace", jit_rt_sort_inplace as *const u8),
             ("jit_rt_collect_range", jit_rt_collect_range as *const u8),
             ("jit_rt_arr_push", jit_rt_arr_push as *const u8),
+            ("jit_rt_trace_mutate", jit_rt_trace_mutate as *const u8),
             ("jit_rt_libm_sin", sys_sin as *const u8),
             ("jit_rt_libm_cos", sys_cos as *const u8),
             ("jit_rt_libm_tan", sys_tan as *const u8),
@@ -10118,6 +10184,14 @@ impl JitCompiler {
                         let v = slot_addr(&mut b, *val);
                         b.ins().call(rt["arr_push"], &[a, v]);
                     }
+                    JitOp::TraceMutate { kind, slot } => {
+                        let kind_byte = b.ins().iconst(types::I32, match kind {
+                            MutateKind::Assign => 0,
+                            MutateKind::Update => 1,
+                        });
+                        let s = slot_addr(&mut b, *slot);
+                        b.ins().call(rt["trace_mutate"], &[kind_byte, s]);
+                    }
                 }
             }
 
@@ -10219,6 +10293,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("sort_inplace", [p], [p]);     // v: *mut Value -> status
     decl!("collect_range", [p, f], []);  // dst, n (f64)
     decl!("arr_push", [p, p], []);       // arr: *mut Value, val: *const Value
+    decl!("trace_mutate", [i, p], []);   // kind_byte (0=Assign,1=Update), v: *const Value
     // Libm transcendental functions (f64 -> f64)
     decl!("libm_sin", [f], [f]);
     decl!("libm_cos", [f], [f]);

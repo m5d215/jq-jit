@@ -26,7 +26,12 @@ pub fn set_mutate_trace_enabled(on: bool) {
 /// Emit one trace line per `mutate(...)` invocation. Reports whether the
 /// in-place fast path will engage (input container refcount = 1) or copy-
 /// on-write will kick in (refcount > 1). Scalars are reported as `n/a`.
-fn trace_mutate_event(kind: MutateKind, input: &Value) {
+///
+/// Called from both the AST evaluator (`Expr::Mutate` arm) and the JIT
+/// runtime helper (`jit_rt_trace_mutate`) so the two paths emit identical
+/// trace lines. The `MUTATE_TRACE_ENABLED` short-circuit at the top makes
+/// this cheap to leave inline at every `mutate(...)` call site.
+pub(crate) fn trace_mutate_event(kind: MutateKind, input: &Value) {
     if !MUTATE_TRACE_ENABLED.load(Ordering::Relaxed) { return; }
     let (container, refc) = match input {
         Value::Arr(rc) => ("array", Some(Rc::strong_count(rc))),
