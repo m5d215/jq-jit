@@ -722,6 +722,92 @@ impl Expr {
         }
     }
 
+    /// Returns true when **every execution path** through this expression
+    /// is guaranteed to evaluate at least one Input node. Strictly stronger
+    /// than [`references_input`] (which only checks that Input appears
+    /// somewhere in the tree).
+    ///
+    /// Required for soundness of `Pipe(E, F) → F[E/Input]`: `references_input`
+    /// alone allows the substitution when F's Input sits in a branch that
+    /// can be skipped at runtime (e.g. `if 0 then 0 else . end`, where the
+    /// else is dead under jq's truthiness). In the original Pipe, E runs
+    /// once unconditionally and its errors propagate; after substitution,
+    /// E only runs when the dead branch is selected, so the error is
+    /// silently dropped. See #702 (CI repro:
+    /// `reduce ((.a) | (if 0 then 0 else . end)) as $x (null; .+$x)`).
+    pub fn input_used_unconditionally(&self) -> bool {
+        match self {
+            // Input itself trivially uses Input.
+            Expr::Input | Expr::Not => true,
+            // Leaves that don't read input.
+            Expr::Literal(_) | Expr::LoadVar { .. } | Expr::Empty
+            | Expr::Env | Expr::Builtins | Expr::ReadInput | Expr::ReadInputs
+            | Expr::ModuleMeta | Expr::GenLabel | Expr::Loc { .. } => false,
+            // BinOp: both sides always evaluated EXCEPT for `and`/`or`,
+            // which short-circuit on the lhs's truthiness. `rhs` of and/or
+            // therefore can be skipped — only count lhs there.
+            Expr::BinOp { op, lhs, rhs } => {
+                if matches!(op, BinOp::And | BinOp::Or) {
+                    lhs.input_used_unconditionally()
+                } else {
+                    lhs.input_used_unconditionally() || rhs.input_used_unconditionally()
+                }
+            }
+            Expr::UnaryOp { operand, .. } | Expr::Negate { operand } => {
+                operand.input_used_unconditionally()
+            }
+            Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => {
+                expr.input_used_unconditionally() || key.input_used_unconditionally()
+            }
+            // Conditional branches: either then or else runs at runtime.
+            // For unconditional use, cond must use Input, OR both branches must.
+            Expr::IfThenElse { cond, then_branch, else_branch } => {
+                cond.input_used_unconditionally()
+                    || (then_branch.input_used_unconditionally()
+                        && else_branch.input_used_unconditionally())
+            }
+            // Alternative: primary always runs; fallback only on null/false/error.
+            Expr::Alternative { primary, .. } => primary.input_used_unconditionally(),
+            // TryCatch: try_expr always runs (but its errors are caught — so
+            // an inlined erroring E in try_expr would have its error swallowed
+            // rather than dropped; that's a separate semantic shift the
+            // caller must also block, but for *this* predicate's purpose,
+            // try_expr's Input is unconditionally evaluated).
+            Expr::TryCatch { try_expr, .. } => try_expr.input_used_unconditionally(),
+            // Pipe: left receives the outer input, right receives left's
+            // output. Only left's Input refs are "the outer input".
+            Expr::Pipe { left, .. } => left.input_used_unconditionally(),
+            // Comma: both branches always evaluated against the same input.
+            Expr::Comma { left, right } => {
+                left.input_used_unconditionally() || right.input_used_unconditionally()
+            }
+            // ObjectConstruct: every pair is evaluated.
+            Expr::ObjectConstruct { pairs } => {
+                pairs.iter().any(|(k, v)| k.input_used_unconditionally() || v.input_used_unconditionally())
+            }
+            Expr::Format { expr, .. } => expr.input_used_unconditionally(),
+            Expr::Slice { expr, from, to } => {
+                expr.input_used_unconditionally()
+                    || from.as_ref().is_some_and(|e| e.input_used_unconditionally())
+                    || to.as_ref().is_some_and(|e| e.input_used_unconditionally())
+            }
+            Expr::StringInterpolation { parts } => parts.iter().any(|p| match p {
+                StringPart::Literal(_) => false,
+                StringPart::Expr(e) => e.input_used_unconditionally(),
+            }),
+            // Debug/Stderr pass through current input — unconditional.
+            Expr::Debug { .. } | Expr::Stderr { .. } => true,
+            // CallBuiltin always receives current input as its first arg.
+            Expr::CallBuiltin { .. } => true,
+            // Everything else: be conservative and say "not unconditional"
+            // so the beta-reduction caller bails out. This intentionally
+            // covers all binding constructs (Reduce/Foreach/LetBinding/...),
+            // generators (Range/Recurse/...), and any op whose
+            // execution path we haven't carefully proven.
+            _ => false,
+        }
+    }
+
     /// Substitute all Input nodes with `replacement`.
     /// Only valid when `is_input_free()` is true.
     pub fn substitute_input(&self, replacement: &Expr) -> Expr {

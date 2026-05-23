@@ -694,16 +694,28 @@ impl Flattener {
                     }
                 }
                 // Beta-reduction: Pipe(E, F) → F[E/Input] when E is scalar
-                // and F has free Input. Additionally require F to actually
-                // *reference* Input — without that check, F being input-free
-                // by virtue of having no Input nodes at all makes the
-                // substitution a no-op, silently dropping E's evaluation
-                // (including any error it would raise). See #683 — a
-                // `Pipe(.x, 0)` source inside `reduce` collapsed to `0` and
-                // suppressed the "Cannot index boolean" error on `.x`.
+                // and F has free Input. Soundness requires that the
+                // substitution doesn't elide E's evaluation on any
+                // runtime path:
+                //
+                // - `references_input` was the original guard (#683) — it
+                //   blocks `Pipe(.x, 0)` collapsing to `0`, where there's
+                //   no Input ref at all.
+                // - But it isn't enough when F's Input sits behind a
+                //   conditional that can be skipped at runtime. The
+                //   canonical repro is `(.a) | (if 0 then 0 else . end)`
+                //   — `references_input` is true (because of `else .`),
+                //   yet the else branch is dead under jq's truthiness
+                //   (0 is truthy → then runs), so `.a` never runs and
+                //   its "Cannot index ..." error vanishes (#702).
+                //
+                // `input_used_unconditionally` is the stricter check:
+                // every execution path through F must evaluate Input.
+                // It implies `references_input`, so we drop the weaker
+                // guard.
                 if new_left.is_simple_scalar()
                     && new_right.is_input_free()
-                    && new_right.references_input()
+                    && new_right.input_used_unconditionally()
                 {
                     return new_right.substitute_input(&new_left);
                 }
