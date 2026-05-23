@@ -42,3 +42,12 @@ jobs:
 
       - name: Run tests
         run: cargo test --release
+
+      - name: Upload proptest regressions
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proptest-regressions-${{ matrix.os }}
+          path: tests/proptest-regressions/
+          if-no-files-found: ignore
+          retention-days: 30
