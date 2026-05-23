@@ -73,7 +73,7 @@ mod common;
 use std::time::Duration;
 
 use proptest::prelude::*;
-use proptest::test_runner::{TestCaseError, TestRunner};
+use proptest::test_runner::{FileFailurePersistence, TestCaseError, TestRunner};
 
 use common::diff_harness::{jq_jit_path, run_filter};
 use common::filter_strategy::{
@@ -255,9 +255,16 @@ fn proptest_timeout() -> Duration {
 }
 
 fn proptest_config() -> ProptestConfig {
+    // `Direct` over `SourceParallel`: proptest's `SourceParallel` walks up
+    // looking for a sibling `lib.rs`/`main.rs`, and silently falls back to
+    // a flat `<source>.<sibling>` file when the crate uses the `src/lib.rs`
+    // layout (as this one does). Hardcoding the path keeps the regressions
+    // file in a predictable location for the CI artifact upload.
     ProptestConfig {
         cases: proptest_cases(),
-        failure_persistence: None,
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
+            "tests/proptest-regressions/metamorphic.txt",
+        ))),
         max_shrink_time: 15_000,
         ..ProptestConfig::default()
     }
