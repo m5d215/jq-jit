@@ -14,7 +14,7 @@ Passes 100% of the official jq test suite (509/509) while being **8x-180x faster
 - **Streaming JSON parser** for memory-efficient NDJSON processing
 - **Memory-mapped file I/O** — mmap-based file reading with no upfront allocation
 - **Optimized value representation** with compact strings, mimalloc, and inline Cranelift codegen
-- **jqx extensions** — shell command execution (`exec`/`execv`), CSV/TSV parsing (`fromcsv`/`fromcsvh`/`fromtsv`/`fromtsvh`), function-result memoization (`memoize`), and the in-place path-update marker (`mutate`)
+- **jqx extensions** — shell command execution (`exec`/`execv`), CSV/TSV parsing (`fromcsv`/`fromcsvh`/`fromtsv`/`fromtsvh`), function-result memoization (`memoize`), and the in-place path-update contract (`mutate`)
 
 ## Performance
 
@@ -192,7 +192,7 @@ jq-jit -n 'exec("cat data.csv") | fromcsvh | select(.age | tonumber > 25)'
 
 | Function | Description |
 |----------|-------------|
-| `mutate(path = v)` / `mutate(path \|= f)` / `mutate(path += v)` (and `-=`, `*=`, `/=`, `%=`, `//=`) | Marker for the in-place fast path on a path-update operator. Semantically identical to the unmarked form; signals to the JIT that the surrounding code wants the in-place update to engage. |
+| `mutate(path = v)` / `mutate(path \|= f)` / `mutate(path += v)` (and `-=`, `*=`, `/=`, `%=`, `//=`) | Contract that the wrapped path-update runs on the in-place fast path when the container's refcount allows. Semantically identical to the unmarked form. |
 
 The wrapped expression must be exactly one path-update operator at the leaf —
 composite forms (`if`/`then`/`else`, `reduce`, `,`, `|`) must distribute the
@@ -207,20 +207,35 @@ jq-jit -n '[range(0; 1000) | 0] | reduce range(0; 1000) as $i (.; mutate(.[$i] =
 echo '{"n":0}' | jq-jit 'mutate(.n += 1)'
 ```
 
-When the input's refcount happens to be greater than 1 at runtime (for example
-because a `$var` aliases the same container), the runtime silently falls back
-to copy-on-write, so the result is always equal to the unmarked form. Use
-`--trace-mutate` to print one line per invocation indicating whether the
-in-place path engaged or copy fallback kicked in:
+`mutate(...)` is a contract, not a performance switch. The runtime check is
+strict: refcount = 1 → in-place mutation, refcount > 1 → silent copy-on-write
+fallback. The result is always equal to the unmarked form.
+
+Since v1.8.0, the JIT's static escape analysis ([#697](https://github.com/m5d215/jq-jit/pull/697),
+[#699](https://github.com/m5d215/jq-jit/pull/699),
+[#700](https://github.com/m5d215/jq-jit/pull/700)) engages the in-place fast
+path on the unmarked form for most shapes encountered in practice — including
+the original P126 / P135 motivating cases. In those shapes, `mutate(...)`
+and the unmarked form produce identical wall-clock times. The contract
+remains useful as a documentation marker, a regression guard against future
+JIT changes, and an observability anchor for `--trace-mutate`.
+
+Use `--trace-mutate` to verify per-invocation whether the in-place path
+engaged:
 
 ```bash
 jq-jit --trace-mutate -n '[1,2,3] | mutate(.[0] = 99)'
 # stderr: [trace:mutate] kind=assign container=array refcount=1 mode=in_place
 ```
 
+As of v1.8.0, trace events are only emitted through the interpreter path
+(e.g. `--force-interp`); JIT-mode tracing is tracked in
+[#702](https://github.com/m5d215/jq-jit/issues/702).
+
 `mutate` is a jq-jit extension; stock jq does not provide it. See issue
 [#666](https://github.com/m5d215/jq-jit/issues/666) for the motivating
-benchmarks and the persistent-vector follow-up tracked in [#695](https://github.com/m5d215/jq-jit/issues/695).
+benchmarks and the persistent-vector follow-up tracked in
+[#695](https://github.com/m5d215/jq-jit/issues/695).
 
 ### Memoization
 
