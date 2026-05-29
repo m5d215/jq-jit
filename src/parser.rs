@@ -3626,9 +3626,19 @@ impl Parser {
                     }),
                     else_branch: Box::new(first_match),
                 };
+                // jq's nth(n; g) floors the index: nth(0.5) == nth(0), and a
+                // non-numeric index raises (floor errors on non-numbers). The
+                // foreach counter is integer-valued, so binding the raw float
+                // made `counter == $n` never match for fractional n (silently
+                // empty) and let a string index fall through to empty instead
+                // of erroring (#719). Flooring at the binding fixes both and
+                // leaves integer / negative indices unchanged.
                 Ok(Expr::LetBinding {
                     var_index: n_var,
-                    value: Box::new(n_expr),
+                    value: Box::new(Expr::UnaryOp {
+                        op: UnaryOp::Floor,
+                        operand: Box::new(n_expr),
+                    }),
                     body: Box::new(body),
                 })
             }
