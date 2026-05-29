@@ -3504,7 +3504,7 @@ fn rt_strftime(v: &Value, fmt: &Value) -> Result<Value> {
 /// regression tests (`#113`) only exercise `%Y` for these edge cases, so
 /// the clamp doesn't shift any tested output.
 fn format_broken(t: &BrokenTime, fmt: &str) -> String {
-    use chrono::NaiveDate;
+    use chrono::{NaiveDate, TimeZone, Utc};
     let mon = (t.mon.clamp(0, 11) + 1) as u32;
     let mday = t.mday.clamp(1, 31) as u32;
     let hour = t.hour.clamp(0, 23) as u32;
@@ -3514,10 +3514,16 @@ fn format_broken(t: &BrokenTime, fmt: &str) -> String {
         .or_else(|| NaiveDate::from_ymd_opt(t.year, mon, 1))
         .or_else(|| NaiveDate::from_ymd_opt(t.year, 1, 1))
         .unwrap_or_else(|| NaiveDate::from_ymd_opt(1900, 1, 1).unwrap());
-    let dt = date
+    let ndt = date
         .and_hms_opt(hour, min, sec)
         .unwrap_or_else(|| date.and_hms_opt(0, 0, 0).unwrap());
-    dt.format(fmt).to_string()
+    // A broken-down time array carries no timezone offset, so jq treats it as
+    // UTC. Format through a UTC `DateTime` rather than the naive value: the
+    // naive `Display` impl returns `Err` for tz specifiers (`%z`/`%Z`), which
+    // `to_string()` turns into a process-aborting panic (#710). With UTC
+    // attached, `%z` renders `+0000` and `%Z` renders `UTC`, matching jq; all
+    // non-tz specifiers format identically to the naive path.
+    Utc.from_utc_datetime(&ndt).format(fmt).to_string()
 }
 
 fn rt_strptime(v: &Value, fmt: &Value) -> Result<Value> {

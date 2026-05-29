@@ -10425,3 +10425,18 @@ null
 nth(2.9; 10,20,30,40)
 null
 30
+
+# Issue #710: strftime %z on broken-down array renders UTC offset, no panic.
+strftime("%z")
+[2023,10,14,22,13,20,2,317]
+"+0000"
+
+# Issue #710: strftime %Z on broken-down array renders UTC, no panic.
+strftime("%Z")
+[2023,10,14,22,13,20,2,317]
+"UTC"
+
+# Issue #710: gmtime | strftime %z stays UTC, no panic.
+gmtime|strftime("%z")
+1697321600
+"+0000"
