@@ -10440,3 +10440,53 @@ strftime("%Z")
 gmtime|strftime("%z")
 1697321600
 "+0000"
+
+# Issue #711: first(p) in assignment LHS forwards the path.
+first(.[]) = 0
+[1,2,3]
+[0,2,3]
+
+# Issue #711: limit(n; p) in assignment LHS forwards the path.
+limit(1; .[]) = 9
+[1,2]
+[9,2]
+
+# Issue #711: first over a nested path forwards the deep path.
+first(.a.b) = 0
+{"a":{"b":1}}
+{"a":{"b":0}}
+
+# Issue #711: path(first(p)) yields the first element's path.
+path(first(.[]))
+[1]
+[0]
+
+# Issue #711: path through label forwards the inner path.
+path(label $out | .a)
+{"a":1}
+["a"]
+
+# Issue #711: reduce with empty source forwards the INIT path.
+path(reduce empty as $x (.a; .))
+{"a":1}
+["a"]
+
+# Issue #711: path(nth(i; p)) yields the i-th element's path.
+path(nth(2; .[]))
+[10,20,30,40]
+[2]
+
+# Issue #711: nth floors a fractional index in path context.
+path(nth(1.7; .[]))
+[10,20,30]
+[1]
+
+# Issue #711: nth past the end yields no path (assignment is a no-op).
+nth(5; .[]) = 99
+[10,20,30]
+[10,20,30]
+
+# Issue #711: nth in assignment LHS forwards the path.
+nth(1; .[]) = 99
+[10,20,30]
+[10,99,30]
