@@ -3663,3 +3663,20 @@ tojson
 
 tojson
 {"a": 1.5e-10, "b": 1e1000}
+
+# ---------- Issue #719: fractional limit/nth count rounding ----------
+
+[limit(1.5; 1,2,3)]
+null
+
+[limit(0.5; range(10))]
+null
+
+[limit(2.9; .[])]
+[10,20,30,40,50]
+
+nth(0.5; 10,20,30)
+null
+
+nth(2.9; 10,20,30,40)
+null

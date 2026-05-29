@@ -10374,3 +10374,54 @@ null
 .a |= {a: (if (.a <= 0) then 99 else empty end)}
 {}
 {"a":{"a":99}}
+
+# Issue #719: limit with a fractional count emits ceil(n) items, not floor(n).
+# eval floored via `*n as i64`; jq breaks when a 1-based counter reaches n.
+[limit(1.5; 1,2,3)]
+null
+[1,2]
+
+# Issue #719: fractional count below 1 still keeps the first item.
+[limit(0.5; 1,2,3)]
+null
+[1]
+
+# Issue #719: 2.9 rounds up to 3 items.
+[limit(2.9; 1,2,3)]
+null
+[1,2,3]
+
+# Issue #719: integer count is unchanged (n items).
+[limit(2.0; 1,2,3)]
+null
+[1,2]
+
+# Issue #719: -0.0 == 0 yields empty (not the negative-count error).
+[limit(-0.0; 1,2,3)]
+null
+[]
+
+# Issue #719: fractional limit over an input array generator.
+[limit(2.5; .[])]
+[10,20,30,40]
+[10,20,30]
+
+# Issue #719: fractional count sourced from input.
+[limit(.n; range(10))]
+{"n":2.7}
+[0,1,2]
+
+# Issue #719: nth floors a fractional index (nth(0.5) == nth(0)).
+nth(0.5; 10,20,30,40)
+null
+10
+
+# Issue #719: nth floors 1.5 to index 1.
+nth(1.5; 10,20,30,40)
+null
+20
+
+# Issue #719: nth floors 2.9 to index 2.
+nth(2.9; 10,20,30,40)
+null
+30

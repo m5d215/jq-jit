@@ -2937,13 +2937,20 @@ pub fn eval(
                 // float-formatted counts (#539).
                 match &cv {
                     Value::Num(n, _) => {
-                        let limit = *n as i64;
-                        if limit == 0 { return Ok(true); }
-                        if limit < 0 {
+                        let n = *n;
+                        // jq emits while a 1-based counter stays below `n` and
+                        // breaks once it reaches `n` — i.e. ceil(n) items for
+                        // positive n. Comparing the integer counter against the
+                        // raw f64 (instead of truncating `n` to an integer)
+                        // matches jq for fractional counts: `*n as i64` floored,
+                        // dropping the ceil item (#719). The JIT path already
+                        // does this float compare (jit.rs emit_yield); this
+                        // aligns the eval/interpreter path with it and with jq.
+                        if n < 0.0 {
                             bail!("__jqerror__:\"limit doesn't support negative count\"");
                         }
-                        let limit = limit as usize;
-                        let mut emitted = 0;
+                        if n == 0.0 { return Ok(true); } // 0.0 and -0.0 → empty
+                        let mut emitted: i64 = 0;
                         let mut stopped_by_outer = false;
                         let result = eval(generator, input.clone(), env, &mut |val| {
                             emitted += 1;
@@ -2951,7 +2958,7 @@ pub fn eval(
                             if !cont {
                                 stopped_by_outer = true;
                                 Ok(false)
-                            } else if emitted >= limit {
+                            } else if emitted as f64 >= n {
                                 Ok(false)
                             } else {
                                 Ok(true)
