@@ -4696,6 +4696,16 @@ fn is_valid_slice_object(v: &Value) -> bool {
     valid("start") && valid("end")
 }
 
+thread_local! {
+    // Active path-mode `foreach` element bindings: (element-var index, source
+    // path). When a bare `$x` reference to a registered element var is
+    // evaluated in path mode — as the `nth(n; g)` desugar's extract does — it
+    // forwards the element's source path instead of being rejected as a value.
+    // Outside a path-mode `foreach`, the stack is empty and variables behave
+    // as ordinary (non-path) values. See #711.
+    static FOREACH_PATH_BIND: RefCell<Vec<(u16, Value)>> = const { RefCell::new(Vec::new()) };
+}
+
 fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
     match expr {
         Expr::Input => cb(Value::Arr(Rc::new(vec![]))),
@@ -4972,6 +4982,188 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             if !cont { return Ok(false); }
             if any_truthy { return Ok(true); }
             eval_path(fallback, input, env, cb)
+        }
+        Expr::LoadVar { var_index } => {
+            // Inside a path-mode `foreach` (the `nth(n; g)` desugar), a bare
+            // reference to the element variable forwards that element's source
+            // path. Outside that context a variable is an ordinary value, so a
+            // `null`/`true`/`false` that equals the input is the identity path
+            // and anything else is an invalid path expression (mirrors the
+            // catch-all). See #711.
+            if let Some(p) = FOREACH_PATH_BIND.with(|s| {
+                s.borrow().iter().rev().find(|(idx, _)| idx == var_index).map(|(_, p)| p.clone())
+            }) {
+                return cb(p);
+            }
+            let v = env.borrow().get_var(*var_index);
+            if matches!(&v, Value::Null | Value::True | Value::False) && v == input {
+                return cb(Value::Arr(Rc::new(vec![])));
+            }
+            bail!("__pathexpr_result__:{}", crate::value::value_to_json(&v));
+        }
+        Expr::Label { var_index, body } => {
+            // Forward the body's paths; a matching `break` ends the label
+            // cleanly (mirrors the value-mode handler). #711.
+            let label_id = {
+                let mut e = env.borrow_mut();
+                let id = e.next_label;
+                e.next_label = id + 1;
+                e.set_var(*var_index, Value::number(id as f64));
+                id
+            };
+            match eval_path(body, input, env, cb) {
+                Err(e) => {
+                    if let Some(be) = e.downcast_ref::<BreakError>() {
+                        if be.0 == label_id { return Ok(true); }
+                    }
+                    Err(e)
+                }
+                other => other,
+            }
+        }
+        Expr::Break { var_index, .. } => {
+            let label = env.borrow().get_var(*var_index);
+            if let Value::Num(n, NumRepr(None)) = &label {
+                return Err(BreakError(*n as u64).into());
+            }
+            bail!("break: invalid label")
+        }
+        Expr::Limit { count, generator } => {
+            // Forward the generator's paths, stopping after the same count as
+            // value context (ceil(n) for positive n). Covers `first(p)` =
+            // `limit(1; p)` and the `nth` desugar's `limit(1; foreach …)`. #711.
+            let mut stopped_by_outer = false;
+            let result = eval(count, input.clone(), env, &mut |cv| {
+                let n = match &cv {
+                    Value::Num(n, _) => *n,
+                    Value::Null | Value::True | Value::False => {
+                        bail!("__jqerror__:\"limit doesn't support negative count\"");
+                    }
+                    other => {
+                        let msg = format!(
+                            "{} and number (1) cannot be subtracted",
+                            crate::runtime::errdesc_pub(other),
+                        );
+                        bail!(
+                            "__jqerror__:{}",
+                            crate::value::value_to_json_precise(&Value::from_string(msg)),
+                        );
+                    }
+                };
+                if n < 0.0 {
+                    bail!("__jqerror__:\"limit doesn't support negative count\"");
+                }
+                if n == 0.0 { return Ok(true); }
+                let mut emitted: i64 = 0;
+                let inner = eval_path(generator, input.clone(), env, &mut |p| {
+                    emitted += 1;
+                    let cont = cb(p)?;
+                    if !cont {
+                        stopped_by_outer = true;
+                        Ok(false)
+                    } else if emitted as f64 >= n {
+                        Ok(false)
+                    } else {
+                        Ok(true)
+                    }
+                })?;
+                Ok(inner && !stopped_by_outer)
+            });
+            match result {
+                Ok(_) if stopped_by_outer => Ok(false),
+                other => other,
+            }
+        }
+        Expr::Foreach { source, init, var_index, acc_index, update, extract } => {
+            // Forward the path of selected source elements. The source is
+            // evaluated in PATH mode so each element's path is available; the
+            // element var is bound to the element VALUE (for use in
+            // update/cond) and registered in FOREACH_PATH_BIND so a bare `$x`
+            // in the extract forwards the element path — this is what makes the
+            // `nth(n; g)` desugar path-transparent. #711.
+            let vi = *var_index;
+            let ai = *acc_index;
+            { let mut e = env.borrow_mut(); e.ensure_var(vi); e.ensure_var(ai); }
+            eval(init, input.clone(), env, &mut |init_val| {
+                let mut acc = init_val;
+                eval_path(source, input.clone(), env, &mut |src_path| {
+                    let elem_val = crate::runtime::rt_getpath(&input, &src_path).unwrap_or(Value::Null);
+                    let acc_val = std::mem::replace(&mut acc, Value::Null);
+                    let (old_var, old_acc) = {
+                        let mut e = env.borrow_mut();
+                        let ov = std::mem::replace(&mut e.vars[vi as usize], elem_val);
+                        let oa = std::mem::replace(&mut e.vars[ai as usize], acc_val.clone());
+                        (ov, oa)
+                    };
+                    let mut stopped = false;
+                    let update_result = eval(update, acc_val, env, &mut |new_acc| {
+                        acc = new_acc.clone();
+                        env.borrow_mut().vars[ai as usize] = new_acc.clone();
+                        let cont = if let Some(extract_expr) = extract {
+                            FOREACH_PATH_BIND.with(|s| s.borrow_mut().push((vi, src_path.clone())));
+                            let r = eval_path(extract_expr, new_acc.clone(), env, cb);
+                            FOREACH_PATH_BIND.with(|s| { s.borrow_mut().pop(); });
+                            r?
+                        } else {
+                            // No extract: foreach yields the accumulator value,
+                            // which is not a path.
+                            bail!("__pathexpr_result__:{}", crate::value::value_to_json(&new_acc));
+                        };
+                        if !cont { stopped = true; }
+                        Ok(cont)
+                    });
+                    {
+                        let mut e = env.borrow_mut();
+                        e.vars[ai as usize] = old_acc;
+                        e.vars[vi as usize] = old_var;
+                    }
+                    update_result?;
+                    Ok(!stopped)
+                })
+            })
+        }
+        Expr::Reduce { source, init, var_index, acc_index, update } => {
+            // The accumulator threads as a PATH: INIT seeds the path(s) and
+            // each source element runs UPDATE in path mode relative to the
+            // current accumulator path. With an empty source the INIT path is
+            // forwarded unchanged: `path(reduce empty as $x (.a; .))` → ["a"].
+            // #711.
+            let vi = *var_index;
+            let ai = *acc_index;
+            { let mut e = env.borrow_mut(); e.ensure_var(vi); e.ensure_var(ai); }
+            let mut acc_paths: Vec<Value> = Vec::new();
+            eval_path(init, input.clone(), env, &mut |p| { acc_paths.push(p); Ok(true) })?;
+            let mut source_vals: Vec<Value> = Vec::new();
+            eval(source, input.clone(), env, &mut |v| { source_vals.push(v); Ok(true) })?;
+            for sv in source_vals {
+                let (old_var, old_acc) = {
+                    let mut e = env.borrow_mut();
+                    let ov = std::mem::replace(&mut e.vars[vi as usize], sv);
+                    (ov, e.vars[ai as usize].clone())
+                };
+                let mut next: Vec<Value> = Vec::new();
+                for ap in &acc_paths {
+                    let base_val = crate::runtime::rt_getpath(&input, ap).unwrap_or(Value::Null);
+                    env.borrow_mut().vars[ai as usize] = base_val.clone();
+                    let ap_vec: Vec<Value> = match ap { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
+                    eval_path(update, base_val, env, &mut |rp| {
+                        let mut p = ap_vec.clone();
+                        if let Value::Arr(rpa) = &rp { p.extend(rpa.iter().cloned()); }
+                        next.push(Value::Arr(Rc::new(p)));
+                        Ok(true)
+                    })?;
+                }
+                {
+                    let mut e = env.borrow_mut();
+                    e.vars[ai as usize] = old_acc;
+                    e.vars[vi as usize] = old_var;
+                }
+                acc_paths = next;
+            }
+            for p in acc_paths {
+                if !cb(p)? { return Ok(false); }
+            }
+            Ok(true)
         }
         _ => {
             // Non-path-safe expression: evaluate, then accept the value as
