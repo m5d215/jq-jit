@@ -69,7 +69,13 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             match &args[1] {
                 Value::Num(n, _) => {
                     if *n < 0.0 { bail!("flatten depth must not be negative"); }
-                    rt_flatten(&args[0], Some(*n as usize))
+                    // An integer depth flattens that many levels, but a fractional
+                    // depth flattens *fully* (every remaining level) rather than
+                    // flooring: jq's stdlib reduce never reaches a clean stop at a
+                    // non-integer `$d`, so it keeps recursing. `flatten(0.5)` on
+                    // `[[1]]` → `[1]`, not `[[1]]`. #720 (cf. #537 non-numeric).
+                    let depth = if *n == n.floor() { Some(*n as usize) } else { None };
+                    rt_flatten(&args[0], depth)
                 }
                 Value::Null | Value::True | Value::False => {
                     bail!("flatten depth must not be negative");
