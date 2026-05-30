@@ -1004,6 +1004,54 @@ impl Flattener {
         }
     }
 
+    /// Yield a value that may be a stream packed in an array.
+    ///
+    /// `match`/`capture` with the `g` (global) flag return a `Value::Arr` of
+    /// all match objects, which jq streams one-per-value; a non-global match
+    /// returns a single match *object* (never an array). Dispatch on the
+    /// runtime kind so the JIT generator path streams the global array while
+    /// still yielding the single-match object verbatim (#748).
+    fn emit_yield_each_if_array(&mut self, slot: SlotId) {
+        let kind_var = self.alloc_var();
+        let arr_lbl = self.alloc_label();
+        let single_lbl = self.alloc_label();
+        let done_lbl = self.alloc_label();
+        self.emit(JitOp::GetKind { dst_var: kind_var, src: slot });
+        // Array -> stream each; object/other -> yield the value once.
+        self.emit(JitOp::BranchKind {
+            kind_var,
+            arr_label: arr_lbl,
+            obj_label: single_lbl,
+            other_label: single_lbl,
+        });
+        // Array: yield each element.
+        self.emit(JitOp::Label { id: arr_lbl });
+        {
+            let idx = self.alloc_var();
+            let len = self.alloc_var();
+            let head = self.alloc_label();
+            let body = self.alloc_label();
+            let end = self.alloc_label();
+            self.emit(JitOp::GetLen { dst_var: len, src: slot });
+            self.emit(JitOp::InitVar { var: idx });
+            self.emit(JitOp::Label { id: head });
+            self.emit(JitOp::LoopCheck { idx_var: idx, len_var: len, body_label: body, done_label: end });
+            self.emit(JitOp::Label { id: body });
+            let elem = self.alloc_slot();
+            self.emit(JitOp::ArrayGet { dst: elem, arr: slot, idx_var: idx });
+            self.emit_yield(elem);
+            self.emit(JitOp::Drop { slot: elem });
+            self.emit(JitOp::IncVar { var: idx });
+            self.emit(JitOp::Jump { label: head });
+            self.emit(JitOp::Label { id: end });
+        }
+        self.emit(JitOp::Jump { label: done_lbl });
+        // Single object (non-global match): yield once.
+        self.emit(JitOp::Label { id: single_lbl });
+        self.emit_yield(slot);
+        self.emit(JitOp::Label { id: done_lbl });
+    }
+
     fn emit_literal(&mut self, dst: SlotId, lit: &Literal) {
         match lit {
             Literal::Null => self.emit(JitOp::Null { dst }),
@@ -2649,8 +2697,11 @@ impl Flattener {
                 self.flatten_gen_try_catch(try_expr, catch_expr, input_slot)
             }
 
-            // RegexMatch/RegexCapture: 0-or-1 output generator
-            // match("re") yields one object or empty (non-match throws error → empty)
+            // RegexMatch/RegexCapture: 0-or-N output generator.
+            // Non-global `match("re")` yields one object or empty (non-match
+            // throws error → empty). Global `match("re";"g")` returns a
+            // `Value::Arr` of all matches that jq streams one-per-value (#748),
+            // so emit_yield_each_if_array dispatches on the runtime result kind.
             Expr::RegexMatch { input_expr, re, flags } | Expr::RegexCapture { input_expr, re, flags } => {
                 let is_capture = matches!(expr, Expr::RegexCapture { .. });
                 if !is_scalar(input_expr) || !is_scalar(re) || !is_scalar(flags) { return false; }
@@ -2668,7 +2719,7 @@ impl Flattener {
                 self.try_depth += 1;
                 self.emit(JitOp::TryCatchBegin);
                 self.emit(JitOp::CallBuiltin { dst: out, name: builtin_name.to_string(), args: vec![inp, re_val, flags_val] });
-                self.emit_yield(out);
+                self.emit_yield_each_if_array(out);
                 self.emit(JitOp::Drop { slot: out });
                 self.emit(JitOp::TryCatchEnd);
                 self.try_depth -= 1;
