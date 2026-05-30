@@ -10520,3 +10520,28 @@ recurse(empty)
 [recurse(empty)]
 {"a":1}
 [{"a":1}]
+
+# Issue #714: nested zero-arg def captures the outer def's filter parameter.
+def g(f): def w: f; w; g(10)
+5
+10
+
+# Issue #714: captured filter param sees the caller's input.
+def g(f): def w: f; w; g(.+1)
+5
+6
+
+# Issue #714: nested def using map(f) captures f (walk pattern).
+def outer(f): def m: map(f); m; outer(.+1)
+[1,2,3]
+[2,3,4]
+
+# Issue #714: doubly-nested def captures the outer filter param.
+def g(f): def w: def u: f; u; w; g(10)
+5
+10
+
+# Issue #714: recursive nested def with captured filter param (user-defined walk).
+def mywalk(f): def w: if type=="object" then map_values(w) elif type=="array" then map(w) else . end | f; w; mywalk(if type=="number" then .+1 else . end)
+{"a":[1,2],"b":3}
+{"a":[2,3],"b":4}
