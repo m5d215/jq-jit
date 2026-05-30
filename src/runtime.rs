@@ -2993,9 +2993,15 @@ fn apply_regex_flags(pattern: &str, flags: &Value) -> Result<(String, bool)> {
     let mut global = false;
     for ch in flags_str.chars() {
         match ch {
-            'i' | 'x' | 's' => inline.push(ch),
+            'i' | 'x' => inline.push(ch),
+            // In jq's engine (Oniguruma) `m` is dotall — `.` matches newline —
+            // which the underlying regex spells `s`. jq's own `s` (single-line
+            // anchors) is already this engine's default, so it needs no inline
+            // flag. The two were mapped PCRE-style (`s` = dotall), i.e. swapped.
+            // `"a\nb" | test("a.b";"m")` must be true, `…;"s"` false. #723.
+            'm' => inline.push('s'),
             'g' => global = true,
-            // l, m, n, p have no inline equivalent in onig — accepted but ignored.
+            // l, n, p (and jq's `s`) have no inline equivalent here — accepted, ignored.
             _ => {}
         }
     }

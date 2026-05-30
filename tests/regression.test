@@ -2780,8 +2780,9 @@ true
 {"x":"a\nb"}
 false
 
-# Escape-bearing string with newline-spanning regex: relies on decoded value
-.x | test("a.b"; "s")
+# Escape-bearing string with newline-spanning regex: relies on decoded value.
+# `m` is jq's dotall flag (Oniguruma); `.` matches the decoded newline. #723.
+.x | test("a.b"; "m")
 {"x":"a\nb"}
 true
 
@@ -10670,3 +10671,18 @@ flatten(1)
 del(.[1.5:3.5])
 [1,2,3,4,5]
 [1,5]
+
+# Issue #723: jq `m` flag is dotall (Oniguruma) — `.` matches a newline.
+"a\nb" | test("a.b";"m")
+null
+true
+
+# Issue #723: jq `s` flag is single-line anchors, not dotall.
+"a\nb" | test("a.b";"s")
+null
+false
+
+# Issue #723: dotall `m` lets a match span the newline.
+"a\nb" | [match("a.b";"m").string]
+null
+["a\nb"]
