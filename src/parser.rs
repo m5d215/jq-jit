@@ -1299,6 +1299,69 @@ impl Parser {
         })
     }
 
+    /// Allocate the shared variables for a `?//` alternative-destructuring
+    /// chain. All alternatives bind the same set of names, so each unique name
+    /// gets one slot (jq requires the alternatives to agree on variables). The
+    /// caller is responsible for snapshotting/truncating `scope.vars`.
+    fn alloc_alt_destructure_vars(&mut self, alt_patterns: &[Pattern]) -> std::collections::HashMap<String, u16> {
+        let mut var_names: Vec<String> = Vec::new();
+        for pat in alt_patterns {
+            self.collect_pattern_var_names(pat, &mut var_names);
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut var_map = std::collections::HashMap::new();
+        for name in var_names.into_iter().filter(|n| seen.insert(n.clone())) {
+            let idx = self.scope.alloc_var(&name);
+            var_map.insert(name, idx);
+        }
+        var_map
+    }
+
+    /// Build the `?//` try-catch chain that binds `value_expr` through each
+    /// alternative pattern in turn — the first whose destructuring (and body)
+    /// succeeds wins; the last alternative runs without a catch so its error
+    /// propagates. Mirrors the chain in `parse_as_binding`, but without the
+    /// outer `LetBinding`, so callers like reduce/foreach can supply the bound
+    /// value through their own element slot. See #712.
+    fn build_alt_destructure(
+        &mut self,
+        value_expr: &Expr,
+        alt_patterns: &[Pattern],
+        var_map: &std::collections::HashMap<String, u16>,
+        body: &Expr,
+    ) -> Result<Expr> {
+        // The fallback chain is `try (bind P1 | body) catch (bind P2 | body) …`.
+        // jq's `try … catch` runs the catch with `.` set to the *error*, which
+        // would clobber the input the body expects (e.g. a reduce UPDATE's
+        // accumulator). Capture the original input in `$__altdot__` up front
+        // and restore it at the head of every alternative's body, so each body
+        // sees the same `.` regardless of which alternative fires. The bind
+        // step only sets variables and leaves `.` untouched, so this is a
+        // no-op for the first (try) alternative and a correction for the rest.
+        let dot_var = self.scope.alloc_var("__altdot__");
+        let restored_body = Expr::Pipe {
+            left: Box::new(Expr::LoadVar { var_index: dot_var }),
+            right: Box::new(body.clone()),
+        };
+        let mut result: Option<Expr> = None;
+        for pattern in alt_patterns.iter().rev() {
+            let binding = self.build_binding_with_varmap(value_expr.clone(), pattern, var_map, restored_body.clone())?;
+            result = Some(match result {
+                None => binding,
+                Some(prev) => Expr::TryCatch {
+                    try_expr: Box::new(binding),
+                    catch_expr: Box::new(prev),
+                },
+            });
+        }
+        let chain = result.expect("alt_patterns is non-empty");
+        Ok(Expr::LetBinding {
+            var_index: dot_var,
+            value: Box::new(Expr::Input),
+            body: Box::new(chain),
+        })
+    }
+
     fn collect_pattern_var_names(&self, pattern: &Pattern, names: &mut Vec<String>) {
         match pattern {
             Pattern::Var(name) => names.push(name.clone()),
@@ -2624,121 +2687,138 @@ impl Parser {
     }
 
     fn parse_reduce(&mut self) -> Result<Expr> {
-        // reduce SOURCE as $VAR|PATTERN (INIT; UPDATE)
+        // reduce SOURCE as PATTERN ('?//' PATTERN)* (INIT; UPDATE)
         let source = self.parse_or()?;
         self.expect(&Token::As)?;
 
-        if matches!(self.current(), Token::Variable(_)) && !matches!(self.peek(), Token::Comma | Token::Colon) {
-            // Simple variable binding
-            let var_name = match self.advance() {
-                Token::Variable(name) => name,
-                _ => unreachable!(),
-            };
+        // Parse the pattern chain syntactically (no var alloc yet). A bare
+        // `$x` parses as Pattern::Var, so the simple-variable case is just a
+        // single-element chain. `?//` alternatives extend it. See #712.
+        let first_pattern = self.parse_pattern()?;
+        let mut alt_patterns: Vec<Pattern> = vec![first_pattern];
+        while self.eat(&Token::AltDestructure) {
+            alt_patterns.push(self.parse_pattern()?);
+        }
 
-            // Parse INIT before binding $var: jq scopes the binding to UPDATE
-            // only, so a stray reference to $var inside INIT is a compile error
-            // (#202).
-            self.expect(&Token::LParen)?;
-            let init = self.parse_pipe()?;
-            self.expect(&Token::Semicolon)?;
-            // Snapshot scope so a same-name `$x` shadow doesn't leak after
-            // this reduce expression closes (#499).
-            let saved_vars = self.scope.vars.len();
-            let var_idx = self.scope.alloc_var(&var_name);
-            let acc_idx = self.scope.alloc_var("__acc__");
-            let update = self.parse_pipe()?;
-            self.expect(&Token::RParen)?;
-            self.scope.vars.truncate(saved_vars);
+        // Parse INIT before binding any pattern var: jq scopes the binding to
+        // UPDATE only, so a stray reference inside INIT is a compile error
+        // (#202).
+        self.expect(&Token::LParen)?;
+        let init = self.parse_pipe()?;
+        self.expect(&Token::Semicolon)?;
+        // Snapshot scope so a same-name `$x` shadow doesn't leak after this
+        // reduce expression closes (#499).
+        let saved_vars = self.scope.vars.len();
 
-            Ok(Expr::Reduce {
-                source: Box::new(source),
-                init: Box::new(init),
-                var_index: var_idx,
-                acc_index: acc_idx,
-                update: Box::new(update),
-            })
-        } else {
-            // Destructuring pattern — parse INIT before allocating pattern vars
-            // for the same scoping reason as the simple case above. parse_pattern
-            // is purely syntactic (no var alloc), so we can run it now and
-            // defer alloc_pattern_vars until after INIT.
-            let pattern = self.parse_pattern()?;
-
-            self.expect(&Token::LParen)?;
-            let init = self.parse_pipe()?;
-            self.expect(&Token::Semicolon)?;
-            let saved_vars = self.scope.vars.len();
+        if alt_patterns.len() == 1 {
+            if let Pattern::Var(var_name) = &alt_patterns[0] {
+                // Simple single-variable binding (no destructure tmp).
+                let var_idx = self.scope.alloc_var(var_name);
+                let acc_idx = self.scope.alloc_var("__acc__");
+                let update = self.parse_pipe()?;
+                self.expect(&Token::RParen)?;
+                self.scope.vars.truncate(saved_vars);
+                return Ok(Expr::Reduce {
+                    source: Box::new(source),
+                    init: Box::new(init),
+                    var_index: var_idx,
+                    acc_index: acc_idx,
+                    update: Box::new(update),
+                });
+            }
+            // Single destructuring pattern.
+            let pattern = alt_patterns.into_iter().next().unwrap();
             let allocs = self.alloc_pattern_vars(&pattern);
             let tmp_var = self.scope.alloc_var("__reduce_item__");
             let acc_idx = self.scope.alloc_var("__acc__");
             let update_raw = self.parse_pipe()?;
             self.expect(&Token::RParen)?;
             self.scope.vars.truncate(saved_vars);
-
             let update = self.build_binding(
                 Expr::LoadVar { var_index: tmp_var },
                 pattern,
                 allocs,
                 update_raw,
             )?;
-
-            Ok(Expr::Reduce {
+            return Ok(Expr::Reduce {
                 source: Box::new(source),
                 init: Box::new(init),
                 var_index: tmp_var,
                 acc_index: acc_idx,
                 update: Box::new(update),
-            })
+            });
         }
+
+        // `?//` alternative destructuring: allocate shared vars once, then
+        // wrap UPDATE in the try-catch chain that binds the element value
+        // (held in the reduce's own slot) through each alternative.
+        let var_map = self.alloc_alt_destructure_vars(&alt_patterns);
+        let tmp_var = self.scope.alloc_var("__reduce_item__");
+        let acc_idx = self.scope.alloc_var("__acc__");
+        let update_raw = self.parse_pipe()?;
+        self.expect(&Token::RParen)?;
+        let update = self.build_alt_destructure(
+            &Expr::LoadVar { var_index: tmp_var },
+            &alt_patterns,
+            &var_map,
+            &update_raw,
+        )?;
+        self.scope.vars.truncate(saved_vars);
+
+        Ok(Expr::Reduce {
+            source: Box::new(source),
+            init: Box::new(init),
+            var_index: tmp_var,
+            acc_index: acc_idx,
+            update: Box::new(update),
+        })
     }
 
     fn parse_foreach(&mut self) -> Result<Expr> {
-        // foreach SOURCE as $VAR|PATTERN (INIT; UPDATE [; EXTRACT])
+        // foreach SOURCE as PATTERN ('?//' PATTERN)* (INIT; UPDATE [; EXTRACT])
         let source = self.parse_or()?;
         self.expect(&Token::As)?;
 
-        // Support both $var and destructuring patterns
-        if matches!(self.current(), Token::Variable(_)) && !matches!(self.peek(), Token::Comma | Token::Colon) {
-            // Simple variable binding
-            let var_name = match self.advance() {
-                Token::Variable(name) => name,
-                _ => unreachable!(),
-            };
+        // Parse the pattern chain syntactically (a bare `$x` is Pattern::Var).
+        // See #712.
+        let first_pattern = self.parse_pattern()?;
+        let mut alt_patterns: Vec<Pattern> = vec![first_pattern];
+        while self.eat(&Token::AltDestructure) {
+            alt_patterns.push(self.parse_pattern()?);
+        }
 
-            // Parse INIT before binding $var (#202).
-            self.expect(&Token::LParen)?;
-            let init = self.parse_pipe()?;
-            self.expect(&Token::Semicolon)?;
-            // Snapshot scope so a same-name `$x` shadow doesn't leak after
-            // this foreach expression closes (#499).
-            let saved_vars = self.scope.vars.len();
-            let var_idx = self.scope.alloc_var(&var_name);
-            let acc_idx = self.scope.alloc_var("__acc__");
-            let update = self.parse_pipe()?;
-            let extract = if self.eat(&Token::Semicolon) {
-                Some(Box::new(self.parse_pipe()?))
-            } else {
-                None
-            };
-            self.expect(&Token::RParen)?;
-            self.scope.vars.truncate(saved_vars);
+        // Parse INIT before binding any pattern var (#202).
+        self.expect(&Token::LParen)?;
+        let init = self.parse_pipe()?;
+        self.expect(&Token::Semicolon)?;
+        // Snapshot scope so a same-name `$x` shadow doesn't leak after this
+        // foreach expression closes (#499).
+        let saved_vars = self.scope.vars.len();
 
-            Ok(Expr::Foreach {
-                source: Box::new(source),
-                init: Box::new(init),
-                var_index: var_idx,
-                acc_index: acc_idx,
-                update: Box::new(update),
-                extract,
-            })
-        } else {
-            // Destructuring pattern — same INIT-before-bind ordering.
-            let pattern = self.parse_pattern()?;
-
-            self.expect(&Token::LParen)?;
-            let init = self.parse_pipe()?;
-            self.expect(&Token::Semicolon)?;
-            let saved_vars = self.scope.vars.len();
+        if alt_patterns.len() == 1 {
+            if let Pattern::Var(var_name) = &alt_patterns[0] {
+                // Simple single-variable binding (no destructure tmp).
+                let var_idx = self.scope.alloc_var(var_name);
+                let acc_idx = self.scope.alloc_var("__acc__");
+                let update = self.parse_pipe()?;
+                let extract = if self.eat(&Token::Semicolon) {
+                    Some(Box::new(self.parse_pipe()?))
+                } else {
+                    None
+                };
+                self.expect(&Token::RParen)?;
+                self.scope.vars.truncate(saved_vars);
+                return Ok(Expr::Foreach {
+                    source: Box::new(source),
+                    init: Box::new(init),
+                    var_index: var_idx,
+                    acc_index: acc_idx,
+                    update: Box::new(update),
+                    extract,
+                });
+            }
+            // Single destructuring pattern.
+            let pattern = alt_patterns.into_iter().next().unwrap();
             let allocs = self.alloc_pattern_vars(&pattern);
             let tmp_var = self.scope.alloc_var("__foreach_item__");
             let acc_idx = self.scope.alloc_var("__acc__");
@@ -2769,15 +2849,47 @@ impl Parser {
                 None
             };
 
-            Ok(Expr::Foreach {
+            return Ok(Expr::Foreach {
                 source: Box::new(source),
                 init: Box::new(init),
                 var_index: tmp_var,
                 acc_index: acc_idx,
                 update: Box::new(update),
                 extract,
-            })
+            });
         }
+
+        // `?//` alternative destructuring: allocate shared vars once, then
+        // wrap UPDATE and EXTRACT in the try-catch alternative chain binding
+        // the element value (held in the foreach's own slot).
+        let var_map = self.alloc_alt_destructure_vars(&alt_patterns);
+        let tmp_var = self.scope.alloc_var("__foreach_item__");
+        let acc_idx = self.scope.alloc_var("__acc__");
+        let update_raw = self.parse_pipe()?;
+        let extract_raw = if self.eat(&Token::Semicolon) {
+            Some(self.parse_pipe()?)
+        } else {
+            None
+        };
+        self.expect(&Token::RParen)?;
+
+        let item_ref = Expr::LoadVar { var_index: tmp_var };
+        let update = self.build_alt_destructure(&item_ref, &alt_patterns, &var_map, &update_raw)?;
+        let extract = if let Some(extract_expr) = extract_raw {
+            Some(Box::new(self.build_alt_destructure(&item_ref, &alt_patterns, &var_map, &extract_expr)?))
+        } else {
+            None
+        };
+        self.scope.vars.truncate(saved_vars);
+
+        Ok(Expr::Foreach {
+            source: Box::new(source),
+            init: Box::new(init),
+            var_index: tmp_var,
+            acc_index: acc_idx,
+            update: Box::new(update),
+            extract,
+        })
     }
 
     fn parse_funcall_or_builtin(&mut self, name: &str) -> Result<Expr> {
