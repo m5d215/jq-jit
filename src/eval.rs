@@ -2840,9 +2840,15 @@ pub fn eval(
         }
 
         Expr::SetPath { path, value } => {
-            if !expr_uses_outer_input(path) && !expr_uses_outer_input(value) {
-                // path and value don't reference `.` — avoid cloning input so
-                // Rc refcount stays 1 and rt_setpath_mut can mutate in-place.
+            if !expr_uses_outer_input(path) && !expr_uses_outer_input(value)
+                && path.is_single_output() && value.is_single_output() {
+                // path and value don't reference `.` and each yields exactly one
+                // output — avoid cloning input so Rc refcount stays 1 and
+                // rt_setpath_mut can mutate in-place. Multi-output or `empty`
+                // generators must take the iterating branch below: `setpath(p; g)`
+                // emits one result per `g` value (and nothing for `empty`); the
+                // last-value-wins shortcut here collapsed `(1,2)` to `2` and
+                // turned `empty` into `null` (#717).
                 let pv = {
                     let mut r = Value::Null;
                     eval(path, Value::Null, env, &mut |v| { r = v; Ok(true) })?;
@@ -2861,8 +2867,11 @@ pub fn eval(
                     cb(crate::runtime::rt_setpath(&base, &pv, &val)?)
                 }
             } else {
-                eval(path, input.clone(), env, &mut |pv| {
-                    eval(value, input.clone(), env, &mut |v| {
+                // jq iterates the value generator in the outer loop and the
+                // path generator in the inner loop: `setpath((["a"],["b"]); (1,2))`
+                // yields a/1, b/1, a/2, b/2. Match that nesting order.
+                eval(value, input.clone(), env, &mut |v| {
+                    eval(path, input.clone(), env, &mut |pv| {
                         cb(crate::runtime::rt_setpath(&input, &pv, &v)?)
                     })
                 })
