@@ -10490,3 +10490,23 @@ nth(5; .[]) = 99
 nth(1; .[]) = 99
 [10,20,30]
 [10,99,30]
+
+# Issue #712: ?// alternative destructuring in reduce binding.
+reduce .[] as $a ?// $a (0; .+$a)
+[1,2]
+3
+
+# Issue #712: ?// in foreach binding (array-or-scalar).
+[foreach .[] as [$a] ?// $a (0; .+$a; $a)]
+[[10],20,[30]]
+[10,20,30]
+
+# Issue #712: multi-alternative ?// chain in reduce, accumulator preserved.
+reduce .[] as [$a] ?// {a:$a} ?// $a (0; .+$a)
+[[1],{"a":2},3]
+6
+
+# Issue #712: object-or-scalar ?// in reduce.
+reduce .[] as {$x} ?// $x (0; .+$x)
+[{"x":5},7]
+12
