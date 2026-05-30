@@ -7899,7 +7899,10 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
         // Fast path: split(sep) — avoid call_builtin dispatch
         if name == "split" && args.len() == 2 {
             if let (Value::Str(s), Value::Str(p)) = (&args[0], &args[1]) {
-                let parts: Vec<Value> = if p.is_empty() {
+                let parts: Vec<Value> = if s.is_empty() {
+                    // jq: "" | split(sep) => [] for any sep (matches rt_split)
+                    Vec::new()
+                } else if p.is_empty() {
                     if s.is_ascii() {
                         (0..s.len()).map(|i| Value::from_str(&s.as_str()[i..i+1])).collect()
                     } else {
