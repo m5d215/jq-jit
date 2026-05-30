@@ -10686,3 +10686,28 @@ false
 "a\nb" | [match("a.b";"m").string]
 null
 ["a\nb"]
+
+# Issue #724: strptime fills the parsed field for a year-only format.
+strptime("%Y")
+"2023"
+[2023,0,0,0,0,0,6,-1]
+
+# Issue #724: month-only format fills the month and derives yday/wday.
+strptime("%m")
+"06"
+[1900,5,0,0,0,0,4,150]
+
+# Issue #724: a full date fills every field with the exact calendar wday/yday.
+strptime("%Y-%m-%d")
+"2023-06-15"
+[2023,5,15,0,0,0,4,165]
+
+# Issue #724: %y resolves the century with the POSIX pivot (00-68 -> 2000s).
+strptime("%y")
+"23"
+[2023,0,0,0,0,0,6,-1]
+
+# Issue #724: time-only format fills hms; date stays default, wday/yday sentinels.
+strptime("%H:%M:%S")
+"10:30:45"
+[1900,0,0,10,30,45,6,-1]

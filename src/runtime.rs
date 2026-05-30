@@ -3544,22 +3544,89 @@ fn format_broken(t: &BrokenTime, fmt: &str) -> String {
 fn rt_strptime(v: &Value, fmt: &Value) -> Result<Value> {
     match (v, fmt) {
         (Value::Str(s), Value::Str(f)) => {
-            // chrono's parse_from_str is stricter than libc's strptime: a
-            // mismatch returns Err. The libc path silently kept a zeroed
-            // tm on failure and produced [1900,0,0,0,0,0,0,0]; preserve
-            // that surface so callers like `fromdateiso8601` (which does
-            // its own validation in `rt_fromisodate`) keep observing the
-            // same shape.
-            match chrono::NaiveDateTime::parse_from_str(s.as_str(), f.as_str()) {
-                Ok(ndt) => {
-                    let t = ndt_to_broken(&ndt);
-                    Ok(broken_to_value(&t, 0.0))
-                }
-                Err(_) => Ok(broken_to_value(&BrokenTime { year: 1900, ..BrokenTime::default() }, 0.0)),
+            // Fast path: a full date+time format resolves directly.
+            if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(s.as_str(), f.as_str()) {
+                return Ok(broken_to_value(&ndt_to_broken(&ndt), 0.0));
             }
+            // Partial format (date-only, time-only, single field, …): libc's
+            // strptime fills whatever fields it parses, but chrono's
+            // `parse_from_str` is all-or-nothing and previously fell straight to
+            // the zeroed `[1900,0,…]` placeholder. Parse field-by-field with
+            // `chrono::format::Parsed` instead. #724.
+            let mut parsed = chrono::format::Parsed::new();
+            if chrono::format::parse(&mut parsed, s.as_str(), chrono::format::StrftimeItems::new(f.as_str())).is_ok() {
+                return Ok(broken_to_value(&parsed_to_broken(&parsed), 0.0));
+            }
+            // Total mismatch: keep the historical zeroed-tm surface so callers
+            // like `fromdateiso8601` (which validate in `rt_fromisodate`)
+            // observe the same shape.
+            Ok(broken_to_value(&BrokenTime { year: 1900, ..BrokenTime::default() }, 0.0))
         }
         _ => bail!("strptime/1 requires string inputs and arguments"),
     }
+}
+
+/// Build a broken-down-time from a partially-parsed format, mirroring libc
+/// `strptime`: unset fields keep their defaults (year 1900, everything else 0),
+/// and `wday`/`yday` are derived from the parsed date the way jq does.
+fn parsed_to_broken(p: &chrono::format::Parsed) -> BrokenTime {
+    use chrono::Datelike;
+    // A fully-resolvable date (e.g. `%Y-%m-%d`, `%Y-%j`, `%Y-%U-%w`) gives exact
+    // calendar `wday`/`yday`.
+    let full_date = p.to_naive_date().ok();
+    let (year, mon0, mday, date_seen) = match full_date {
+        Some(d) => (d.year(), d.month0() as i32, d.day() as i32, true),
+        None => {
+            // `%y` sets only the mod-100 year; resolve the century with the
+            // POSIX pivot (00–68 → 2000s, 69–99 → 1900s) the way libc does.
+            let year = p.year()
+                .or_else(|| p.year_mod_100().map(|y2| if y2 < 69 { 2000 + y2 } else { 1900 + y2 }))
+                .unwrap_or(1900);
+            let mon0 = p.month().map(|m| m as i32 - 1).unwrap_or(0);
+            let mday = p.day().map(|d| d as i32).unwrap_or(0);
+            let seen = p.year().is_some() || p.year_mod_100().is_some()
+                || p.month().is_some() || p.day().is_some();
+            (year, mon0, mday, seen)
+        }
+    };
+    let hour = match (p.hour_div_12(), p.hour_mod_12()) {
+        (Some(d), Some(m)) => (d * 12 + m) as i32,
+        _ => 0,
+    };
+    let min = p.minute().map(|m| m as i32).unwrap_or(0);
+    let sec = p.second().map(|s| s as i32).unwrap_or(0);
+    let (wday, yday) = if let Some(d) = full_date {
+        (d.weekday().num_days_from_sunday() as i32, d.ordinal0() as i32)
+    } else if date_seen {
+        // Partial date: jq's libc fills `yday` from month/day and `wday` from
+        // the normalized civil date (`mday` may be 0 = last day of the prior
+        // month). `yday` is `days-before-month + mday - 1`, so a day-less parse
+        // yields the `-1` jq emits for year/month-only formats.
+        (civil_wday(year, mon0, mday), days_before_month(mon0, year) + mday - 1)
+    } else {
+        // No date field at all (time-only): jq leaves the tm_wday/tm_yday
+        // sentinels, which surface as 6 / -1.
+        (6, -1)
+    };
+    BrokenTime { year, mon: mon0, mday, hour, min, sec, wday, yday }
+}
+
+/// Day-of-year (0-indexed) of the first of month `mon0` in `year`.
+fn days_before_month(mon0: i32, year: i32) -> i32 {
+    use chrono::Datelike;
+    chrono::NaiveDate::from_ymd_opt(year, (mon0.rem_euclid(12) + 1) as u32, 1)
+        .map(|d| d.ordinal0() as i32)
+        .unwrap_or(0)
+}
+
+/// Weekday (0 = Sunday) of the civil date `(year, mon0, mday)`, normalizing
+/// `mday` libc-style (0 → last day of the prior month, underflow allowed).
+fn civil_wday(year: i32, mon0: i32, mday: i32) -> i32 {
+    use chrono::{Datelike, Duration, NaiveDate};
+    NaiveDate::from_ymd_opt(year, (mon0.rem_euclid(12) + 1) as u32, 1)
+        .and_then(|first| first.checked_add_signed(Duration::days((mday - 1) as i64)))
+        .map(|d| d.weekday().num_days_from_sunday() as i32)
+        .unwrap_or(6)
 }
 
 fn rt_strflocaltime_impl(input: &Value, fmt: &Value) -> Result<Value> {
