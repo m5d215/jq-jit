@@ -10625,3 +10625,18 @@ null
 [reduce .x as $i ((0,100); . + $i)]
 {"x":5}
 [5,100]
+
+# Issue #720: a fractional flatten depth flattens fully, not floored.
+flatten(0.5)
+[[1]]
+[1]
+
+# Issue #720: fractional depth flattens every remaining level.
+flatten(1.5)
+[[[[1]]]]
+[1]
+
+# Issue #720: an integer depth still flattens exactly that many levels.
+flatten(1)
+[[[1]]]
+[[1]]
