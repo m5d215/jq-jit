@@ -10640,3 +10640,18 @@ flatten(1.5)
 flatten(1)
 [[[1]]]
 [[1]]
+
+# Issue #721: a large high-precision finite double prints in fixed-point.
+.+0
+1.2345678e22
+12345678000000000000000
+
+# Issue #721: a low-precision large double still prints in scientific form.
+.+0
+1e22
+1e+22
+
+# Issue #721: a value just under 1e16 prints fixed.
+.+0
+123456789012345680
+123456789012345680
