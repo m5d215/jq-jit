@@ -5539,21 +5539,35 @@ pub fn push_jq_number_str(buf: &mut String, n: f64) {
         }
     }
 
-    // Use Rust's shortest-representation (like jq's jvp_dtoa)
+    // jq's dtoa chooses fixed vs scientific from the *shortest* decimal: it
+    // emits exponential form iff `decpt <= -4 || decpt > sigdigits + 15`,
+    // where `decpt` is the decimal-point position (1 past the leading digit's
+    // place) and `sigdigits` is the count of significant digits. Rust's
+    // `Display` never uses scientific notation, so `s` is always the
+    // fixed-point form jq's dtoa would print.
     let s = format!("{}", n);
     let abs = n.abs();
 
-    // For very small numbers (abs < 1e-4), always use scientific notation (matching %g)
+    // Small side: `decpt <= -4` is exactly `abs < 1e-4` for finite nonzero
+    // values, so this matches jq without parsing the digits.
     if abs != 0.0 && abs < 1e-4 {
         buf.push_str(&format_as_scientific_lowercase(n));
         return;
     }
 
-    // For large numbers: compare fixed vs scientific length, prefer shorter
+    // Large side: below 1e16 jq is always fixed-point (`decpt <= 16 <=
+    // sigdigits + 15`); at or above 1e16 apply `decpt > sigdigits + 15`. This
+    // keeps large high-precision values like `1.2345678e22` fixed
+    // (`12345678000000000000000`) while `1e22` — fewer significant digits —
+    // stays scientific (`1e+22`). A magnitude-only threshold mis-classified
+    // high-precision large values. #721 (cf. #143/#236/#415).
     if abs >= 1e16 {
-        let sci = format_as_scientific_lowercase(n);
-        if sci.len() < s.len() {
-            buf.push_str(&sci);
+        let exp_str = format!("{:e}", n); // shortest sci form, e.g. "1.2345678e22"
+        let (mantissa, exp) = exp_str.split_once('e').expect("LowerExp always emits 'e'");
+        let exp: i32 = exp.parse().expect("LowerExp exponent is an integer");
+        let sigdigits = mantissa.bytes().filter(u8::is_ascii_digit).count() as i32;
+        if exp + 1 > sigdigits + 15 {
+            buf.push_str(&format_as_scientific_lowercase(n));
             return;
         }
     }
