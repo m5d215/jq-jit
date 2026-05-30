@@ -10590,3 +10590,18 @@ empty = 9
 empty |= 9
 {"a":1}
 {"a":1}
+
+# Issue #717: setpath iterates its value generator (one output per value).
+[setpath([]; (1,2))]
+null
+[1,2]
+
+# Issue #717: setpath with an empty value generator emits nothing.
+[setpath(["a"]; empty)]
+{}
+[]
+
+# Issue #717: value is the outer loop, path the inner loop.
+[setpath((["a"],["b"]); (1,2))]
+{}
+[{"a":1},{"b":1},{"a":2},{"b":2}]
