@@ -19,6 +19,12 @@ struct Scope {
     next_var: u16,
     /// Compiled function bodies.
     compiled_funcs: Vec<CompiledFunc>,
+    /// Captured outer filter-parameter slots per func_id. A nested `def` that
+    /// references an enclosing def's filter parameter is lambda-lifted: the
+    /// captured slot becomes a hidden trailing parameter, and every call site
+    /// forwards `LoadVar{captured_slot}`. Parse-time only — `eval` just sees
+    /// the extra args/param_vars. See #714.
+    func_captures: std::collections::HashMap<usize, Vec<u16>>,
     /// Next available memoize slot id. Each lexical occurrence of `memoize(...)`
     /// gets a unique slot; the Env allocates one cache map per slot.
     next_memo_slot: u32,
@@ -31,6 +37,7 @@ impl Scope {
             funcs: Vec::new(),
             next_var: 0,
             compiled_funcs: Vec::new(),
+            func_captures: std::collections::HashMap::new(),
             next_memo_slot: 0,
         }
     }
@@ -92,6 +99,29 @@ impl Scope {
         self.funcs.iter().rev()
             .find(|(n, _, na)| n == name && *na == nargs)
             .map(|(_, id, _)| *id)
+    }
+
+    /// Record the captured outer filter-param slots for a lambda-lifted func.
+    fn set_func_captures(&mut self, func_id: usize, captures: Vec<u16>) {
+        if !captures.is_empty() {
+            self.func_captures.insert(func_id, captures);
+        }
+    }
+
+    /// Trailing capture args (`LoadVar{slot}` per captured slot) a call to
+    /// `func_id` must forward, in declared order. Empty for ordinary funcs.
+    fn func_capture_args(&self, func_id: usize) -> Vec<Expr> {
+        self.func_captures.get(&func_id)
+            .map(|caps| caps.iter().map(|&v| Expr::LoadVar { var_index: v }).collect())
+            .unwrap_or_default()
+    }
+
+    /// Build a `FuncCall`, appending any lambda-lifted capture args after the
+    /// caller-supplied `args` (#714). Use at every call-emission site so
+    /// captures are forwarded uniformly.
+    fn make_funccall(&self, func_id: usize, mut args: Vec<Expr>) -> Expr {
+        args.extend(self.func_capture_args(func_id));
+        Expr::FuncCall { func_id, args }
     }
 
     fn save_func_scope(&self) -> usize {
@@ -905,6 +935,46 @@ impl Parser {
                 value: Box::new(Expr::LoadVar { var_index: filter_var }),
                 body: Box::new(body),
             };
+        }
+
+        // Lambda-lift captured enclosing filter parameters (#714). A filter
+        // parameter is passed by beta-substitution into the def's body, but a
+        // *nested* def's body lives in a separate func slot the outer
+        // substitution never reaches — so a nested reference to an enclosing
+        // filter param would resolve to an unbound slot (`null`). Promote each
+        // captured enclosing filter param to a hidden trailing parameter:
+        // rewrite the body to read the hidden slot, forward it through the
+        // def's own recursive self-calls, and record it so every call site
+        // (handled in the call-emission paths) passes the captured slot along.
+        // Value params and let-bindings already work via the env, so only
+        // `\x00fparam:`-prefixed (filter) params from the enclosing scope need
+        // this.
+        let mut captured: Vec<u16> = Vec::new();
+        for (vname, vidx) in self.scope.vars[..saved_vars].iter() {
+            if vname.starts_with('\x00')
+                && vname.starts_with("\x00fparam:")
+                && !param_vars.contains(vidx)
+                && !captured.contains(vidx)
+                && crate::eval::expr_uses_var(&body, *vidx)
+            {
+                captured.push(*vidx);
+            }
+        }
+        let mut param_vars = param_vars;
+        if !captured.is_empty() {
+            let hidden: Vec<u16> = captured.iter()
+                .map(|c| self.scope.alloc_var(&format!("\x00fparam:cap:{}", c)))
+                .collect();
+            let hidden_loadvars: Vec<Expr> = hidden.iter()
+                .map(|&h| Expr::LoadVar { var_index: h })
+                .collect();
+            // References to the captured params become the hidden params.
+            body = crate::eval::substitute_params(&body, &captured, &hidden_loadvars);
+            // Forward the hidden params through the def's recursive self-calls
+            // (emitted as plain calls before the captures were known).
+            body = crate::eval::append_call_args(&body, func_id, &hidden_loadvars);
+            param_vars.extend(hidden);
+            self.scope.set_func_captures(func_id, captured);
         }
 
         // Update the function body (replacing placeholder)
@@ -2966,7 +3036,7 @@ impl Parser {
     fn compile_builtin_noargs(&self, name: &str) -> Result<Expr> {
         // User-defined 0-arg functions shadow same-named builtins.
         if let Some(func_id) = self.scope.lookup_func(name, 0) {
-            return Ok(Expr::FuncCall { func_id, args: vec![] });
+            return Ok(self.scope.make_funccall(func_id, vec![]));
         }
         match name {
             "not" => Ok(Expr::Not),
@@ -3187,7 +3257,8 @@ impl Parser {
             _ => {
                 // Check user-defined functions
                 if let Some(func_id) = self.scope.lookup_func(name, 0) {
-                    Ok(Expr::FuncCall { func_id, args: vec![] })
+                    // Forward any lambda-lifted capture params (#714).
+                    Ok(self.scope.make_funccall(func_id, vec![]))
                 } else {
                     // Check for filter parameter reference (bare identifier like `x` in `def f(x):`)
                     let fparam_name = format!("\x00fparam:{}", name);
@@ -3208,7 +3279,8 @@ impl Parser {
     fn compile_funcall(&mut self, name: &str, args: Vec<Expr>) -> Result<Expr> {
         // User-defined functions shadow builtins (matches jq semantics).
         if let Some(func_id) = self.scope.lookup_func(name, args.len()) {
-            return Ok(Expr::FuncCall { func_id, args });
+            // Append any lambda-lifted capture params after the user args (#714).
+            return Ok(self.scope.make_funccall(func_id, args));
         }
         match (name, args.len()) {
             // Standard library functions
@@ -4112,7 +4184,7 @@ impl Parser {
             _ => {
                 // Check user-defined functions
                 if let Some(func_id) = self.scope.lookup_func(name, args.len()) {
-                    Ok(Expr::FuncCall { func_id, args })
+                    Ok(self.scope.make_funccall(func_id, args))
                 } else {
                     bail!("unknown function '{}' with {} args", name, args.len())
                 }

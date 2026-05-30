@@ -397,6 +397,108 @@ fn subst_inner(
     }
 }
 
+/// Append `extra` arguments to every `FuncCall` that targets `target` within
+/// `expr`, recursively. Used by the parser to forward a lambda-lifted nested
+/// def's hidden capture parameters through the def's own recursive self-calls,
+/// which were emitted (as zero-arg calls) before the captures were known.
+/// Exhaustive (no catch-all) so a new `Expr` variant forces review. See #714.
+pub(crate) fn append_call_args(expr: &Expr, target: usize, extra: &[Expr]) -> Expr {
+    macro_rules! r { ($e:expr) => { append_call_args($e, target, extra) } }
+    macro_rules! rb { ($e:expr) => { Box::new(r!($e)) } }
+    match expr {
+        Expr::FuncCall { func_id, args } => {
+            let mut new_args: Vec<Expr> = args.iter().map(|a| r!(a)).collect();
+            if *func_id == target {
+                new_args.extend(extra.iter().cloned());
+            }
+            Expr::FuncCall { func_id: *func_id, args: new_args }
+        }
+        Expr::Pipe { left, right } => Expr::Pipe { left: rb!(left), right: rb!(right) },
+        Expr::Comma { left, right } => Expr::Comma { left: rb!(left), right: rb!(right) },
+        Expr::BinOp { op, lhs, rhs } => Expr::BinOp { op: *op, lhs: rb!(lhs), rhs: rb!(rhs) },
+        Expr::UnaryOp { op, operand } => Expr::UnaryOp { op: *op, operand: rb!(operand) },
+        Expr::Index { expr: e, key } => Expr::Index { expr: rb!(e), key: rb!(key) },
+        Expr::IndexOpt { expr: e, key } => Expr::IndexOpt { expr: rb!(e), key: rb!(key) },
+        Expr::Each { input_expr } => Expr::Each { input_expr: rb!(input_expr) },
+        Expr::EachOpt { input_expr } => Expr::EachOpt { input_expr: rb!(input_expr) },
+        Expr::IfThenElse { cond, then_branch, else_branch } => Expr::IfThenElse {
+            cond: rb!(cond), then_branch: rb!(then_branch), else_branch: rb!(else_branch),
+        },
+        Expr::LetBinding { var_index, value, body } => Expr::LetBinding {
+            var_index: *var_index, value: rb!(value), body: rb!(body),
+        },
+        Expr::TryCatch { try_expr, catch_expr } => Expr::TryCatch { try_expr: rb!(try_expr), catch_expr: rb!(catch_expr) },
+        Expr::Collect { generator } => Expr::Collect { generator: rb!(generator) },
+        Expr::Negate { operand } => Expr::Negate { operand: rb!(operand) },
+        Expr::Alternative { primary, fallback } => Expr::Alternative { primary: rb!(primary), fallback: rb!(fallback) },
+        Expr::Reduce { source, init, var_index, acc_index, update } => Expr::Reduce {
+            source: rb!(source), init: rb!(init), var_index: *var_index, acc_index: *acc_index, update: rb!(update),
+        },
+        Expr::Foreach { source, init, var_index, acc_index, update, extract } => Expr::Foreach {
+            source: rb!(source), init: rb!(init), var_index: *var_index, acc_index: *acc_index,
+            update: rb!(update), extract: extract.as_ref().map(|e| rb!(e)),
+        },
+        Expr::ObjectConstruct { pairs } => Expr::ObjectConstruct {
+            pairs: pairs.iter().map(|(k, v)| (r!(k), r!(v))).collect(),
+        },
+        Expr::Recurse { input_expr } => Expr::Recurse { input_expr: rb!(input_expr) },
+        Expr::Range { from, to, step } => Expr::Range {
+            from: rb!(from), to: rb!(to), step: step.as_ref().map(|s| rb!(s)),
+        },
+        Expr::Update { path_expr, update_expr } => Expr::Update { path_expr: rb!(path_expr), update_expr: rb!(update_expr) },
+        Expr::Assign { path_expr, value_expr } => Expr::Assign { path_expr: rb!(path_expr), value_expr: rb!(value_expr) },
+        Expr::Mutate { path_expr, value_expr, kind } => Expr::Mutate {
+            path_expr: rb!(path_expr), value_expr: rb!(value_expr), kind: *kind,
+        },
+        Expr::PathExpr { expr: e } => Expr::PathExpr { expr: rb!(e) },
+        Expr::SetPath { path, value } => Expr::SetPath { path: rb!(path), value: rb!(value) },
+        Expr::GetPath { path } => Expr::GetPath { path: rb!(path) },
+        Expr::DelPaths { paths } => Expr::DelPaths { paths: rb!(paths) },
+        Expr::StringInterpolation { parts } => Expr::StringInterpolation {
+            parts: parts.iter().map(|p| match p {
+                StringPart::Literal(s) => StringPart::Literal(s.clone()),
+                StringPart::Expr(e) => StringPart::Expr(r!(e)),
+            }).collect(),
+        },
+        Expr::Limit { count, generator } => Expr::Limit { count: rb!(count), generator: rb!(generator) },
+        Expr::While { cond, update } => Expr::While { cond: rb!(cond), update: rb!(update) },
+        Expr::Until { cond, update } => Expr::Until { cond: rb!(cond), update: rb!(update) },
+        Expr::Repeat { update } => Expr::Repeat { update: rb!(update) },
+        Expr::AllShort { generator, predicate } => Expr::AllShort { generator: rb!(generator), predicate: rb!(predicate) },
+        Expr::AnyShort { generator, predicate } => Expr::AnyShort { generator: rb!(generator), predicate: rb!(predicate) },
+        Expr::Label { var_index, body } => Expr::Label { var_index: *var_index, body: rb!(body) },
+        Expr::Break { var_index, value } => Expr::Break { var_index: *var_index, value: rb!(value) },
+        Expr::Error { msg } => Expr::Error { msg: msg.as_ref().map(|m| rb!(m)) },
+        Expr::Format { name, expr: e } => Expr::Format { name: name.clone(), expr: rb!(e) },
+        Expr::ClosureOp { op, input_expr, key_expr } => Expr::ClosureOp {
+            op: *op, input_expr: rb!(input_expr), key_expr: rb!(key_expr),
+        },
+        Expr::CallBuiltin { name, args } => Expr::CallBuiltin {
+            name: name.clone(), args: args.iter().map(|a| r!(a)).collect(),
+        },
+        Expr::Slice { expr: e, from, to } => Expr::Slice {
+            expr: rb!(e), from: from.as_ref().map(|f| rb!(f)), to: to.as_ref().map(|t| rb!(t)),
+        },
+        Expr::Debug { expr: e } => Expr::Debug { expr: rb!(e) },
+        Expr::Stderr { expr: e } => Expr::Stderr { expr: rb!(e) },
+        Expr::RegexTest { input_expr, re, flags } => Expr::RegexTest { input_expr: rb!(input_expr), re: rb!(re), flags: rb!(flags) },
+        Expr::RegexMatch { input_expr, re, flags } => Expr::RegexMatch { input_expr: rb!(input_expr), re: rb!(re), flags: rb!(flags) },
+        Expr::RegexCapture { input_expr, re, flags } => Expr::RegexCapture { input_expr: rb!(input_expr), re: rb!(re), flags: rb!(flags) },
+        Expr::RegexScan { input_expr, re, flags } => Expr::RegexScan { input_expr: rb!(input_expr), re: rb!(re), flags: rb!(flags) },
+        Expr::RegexSub { input_expr, re, tostr, flags } => Expr::RegexSub { input_expr: rb!(input_expr), re: rb!(re), tostr: rb!(tostr), flags: rb!(flags) },
+        Expr::RegexGsub { input_expr, re, tostr, flags } => Expr::RegexGsub { input_expr: rb!(input_expr), re: rb!(re), tostr: rb!(tostr), flags: rb!(flags) },
+        Expr::AlternativeDestructure { alternatives } => Expr::AlternativeDestructure {
+            alternatives: alternatives.iter().map(|a| r!(a)).collect(),
+        },
+        Expr::Memoize { slot_id, key, body } => Expr::Memoize {
+            slot_id: *slot_id, key: key.as_ref().map(|k| rb!(k)), body: rb!(body),
+        },
+        Expr::LoadVar { .. } | Expr::Input | Expr::Empty | Expr::Not | Expr::Env
+        | Expr::Builtins | Expr::ReadInput | Expr::ReadInputs | Expr::ModuleMeta
+        | Expr::GenLabel | Expr::Literal(_) | Expr::Loc { .. } => expr.clone(),
+    }
+}
+
 /// COW substitution: returns None if no param vars were found (no changes needed).
 /// Avoids deep-cloning unchanged subtrees.
 fn subst_cow(expr: &Expr, pv: &[u16], args: &[Expr]) -> Option<Expr> {
