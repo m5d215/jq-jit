@@ -31,6 +31,16 @@ unsafe extern "C" {
     fn fmin(x: f64, y: f64) -> f64;
     fn fmod(x: f64, y: f64) -> f64;
     fn nextafter(x: f64, y: f64) -> f64;
+    // Standard C `strftime`, used to render `%Z` as the zone abbreviation in
+    // strflocaltime (#725). The `libc` crate omits this binding on the Windows
+    // MSVC target, so declare it ourselves; it exists in every CRT (glibc,
+    // Apple libc, Windows UCRT).
+    fn strftime(
+        s: *mut libc::c_char,
+        maxsize: usize,
+        format: *const libc::c_char,
+        timeptr: *const libc::tm,
+    ) -> usize;
 }
 
 /// Dispatch a builtin call by name.
@@ -3685,10 +3695,10 @@ fn local_tz_abbrev(epoch: i64) -> Option<String> {
             }
         }
         let mut buf = [0u8; 64];
-        let n = libc::strftime(
+        let n = strftime(
             buf.as_mut_ptr() as *mut libc::c_char,
             buf.len(),
-            c"%Z".as_ptr(),
+            c"%Z".as_ptr() as *const libc::c_char,
             &tmv,
         );
         // `strftime` returns 0 both on overflow and on a legitimately empty
