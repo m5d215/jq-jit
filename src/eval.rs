@@ -2388,6 +2388,62 @@ pub fn eval(
             // in-place fast path and deep-copy the array on each step (#664).
             let init_is_input = matches!(init.as_ref(), Expr::Input);
             let source_needs_input = expr_uses_outer_input(source);
+            // INIT is a generator: jq 1.8.1 runs the reduce once per INIT value
+            // and emits one accumulator each — nothing for an `empty` INIT. The
+            // single-accumulator fast paths below assume exactly one INIT value;
+            // previously a multi-output INIT collapsed to its last value and an
+            // `empty` INIT silently became `null`. Peek with the leaf evaluator
+            // first (no allocation, no generator side effects) so the common
+            // single-value case is byte-for-byte the old fast path; only a true
+            // generator INIT (0 or ≥2 outputs) takes the per-INIT loop. #718
+            let vi = *var_index;
+            let ai = *acc_index;
+            { let mut e = env.borrow_mut(); e.ensure_var(vi); e.ensure_var(ai); }
+            let init_single: Option<Value> = if init_is_input {
+                None
+            } else if let Ok(v) = eval_one(init, &input, env) {
+                Some(v)
+            } else {
+                let mut vs = Vec::new();
+                eval(init, input.clone(), env, &mut |v| { vs.push(v); Ok(true) })?;
+                if vs.len() == 1 {
+                    Some(vs.pop().unwrap())
+                } else {
+                    // 0 or ≥2 INIT values: run the reduce once per value. jq
+                    // threads the reduce's input through a single register, so it
+                    // is clobbered after the first INIT value: the source sees the
+                    // real input only on the first iteration and `null` thereafter.
+                    // Hence `reduce .[] as $x ((0,100); .+$x)` on `[1,2,3]` emits
+                    // the first result (6) then errors "Cannot iterate over null",
+                    // while an input-independent source like `(1,2)` is unaffected
+                    // (`reduce (1,2) as $x ((10,20); .+$x)` → 13, 23). #718.
+                    let mut first = true;
+                    for init_val in vs {
+                        let src_input = if first { input.clone() } else { Value::Null };
+                        first = false;
+                        let mut acc = init_val;
+                        eval(source, src_input, env, &mut |sv| {
+                            let acc_val = std::mem::replace(&mut acc, Value::Null);
+                            let (old_var, old_acc) = {
+                                let mut e = env.borrow_mut();
+                                let ov = std::mem::replace(&mut e.vars[vi as usize], sv);
+                                let oa = std::mem::replace(&mut e.vars[ai as usize], acc_val.clone());
+                                (ov, oa)
+                            };
+                            let r = eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) });
+                            {
+                                let mut e = env.borrow_mut();
+                                e.vars[ai as usize] = old_acc;
+                                e.vars[vi as usize] = old_var;
+                            }
+                            r?;
+                            Ok(true)
+                        })?;
+                        if !cb(acc)? { return Ok(false); }
+                    }
+                    return Ok(true);
+                }
+            };
             let (mut acc, source_input) = if init_is_input {
                 if source_needs_input {
                     (input.clone(), input)
@@ -2395,13 +2451,7 @@ pub fn eval(
                     (input, Value::Null)
                 }
             } else {
-                let acc_val = if let Ok(v) = eval_one(init, &input, env) {
-                    v
-                } else {
-                    let mut a = Value::Null;
-                    eval(init, input.clone(), env, &mut |v| { a = v; Ok(true) })?;
-                    a
-                };
+                let acc_val = init_single.unwrap();
                 if source_needs_input {
                     (acc_val, input)
                 } else {
@@ -2409,9 +2459,6 @@ pub fn eval(
                     (acc_val, Value::Null)
                 }
             };
-            let vi = *var_index;
-            let ai = *acc_index;
-            { let mut e = env.borrow_mut(); e.ensure_var(vi); e.ensure_var(ai); }
             let acc_used_in_update = expr_uses_var(update, ai);
             // Detect fused Reduce+destructure pattern:
             // update = LetBinding(tmp, Input, LetBinding(a, Index(tmp, 0), LetBinding(b, Index(tmp, 1), inner)))
