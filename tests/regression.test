@@ -10580,3 +10580,13 @@ null
 [label $o | range(5) | if .==2 then break $o else . end]
 null
 [0,1]
+
+# Issue #716: assignment with an empty LHS path echoes the input unchanged.
+empty = 9
+{"a":1}
+{"a":1}
+
+# Issue #716: empty-path update (|=) likewise returns the input, not null.
+empty |= 9
+{"a":1}
+{"a":1}

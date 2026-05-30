@@ -2127,8 +2127,14 @@ fn contains_input(expr: &crate::ir::Expr) -> bool {
         Expr::Range { from, to, step } => contains_input(from) || contains_input(to) || step.as_ref().map_or(false, |s| contains_input(s)),
         Expr::Limit { count, generator } => contains_input(count) || contains_input(generator),
         Expr::Error { msg } => msg.as_ref().map_or(false, |m| contains_input(m)),
-        Expr::Update { path_expr, update_expr } | Expr::Assign { path_expr, value_expr: update_expr } => contains_input(path_expr) || contains_input(update_expr),
-        Expr::Mutate { path_expr, value_expr, .. } => contains_input(path_expr) || contains_input(value_expr),
+        // Assignment forms (`p = v`, `p |= f`, `p += v`, …) always read the
+        // current input as the document being updated and return it (possibly
+        // modified), regardless of whether the path/value sub-exprs mention
+        // `.`. Classifying e.g. `empty = 9` by its sub-exprs marked it
+        // input-free, so the fast path evaluated it against `null` and emitted
+        // `null` instead of echoing the input unchanged (#716). Same family as
+        // the SetPath/GetPath/PathExpr arm below and eval.rs's #556 fix.
+        Expr::Update { .. } | Expr::Assign { .. } | Expr::Mutate { .. } => true,
         // GetPath/SetPath/DelPaths/PathExpr implicitly operate on the current input
         Expr::GetPath { .. } | Expr::SetPath { .. } | Expr::DelPaths { .. } | Expr::PathExpr { .. } => true,
         // `recurse(f)` always emits the input value first (`def recurse(f):
