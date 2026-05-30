@@ -10655,3 +10655,18 @@ flatten(1)
 .+0
 123456789012345680
 123456789012345680
+
+# Issue #722: a negative fractional slice end normalizes before rounding.
+.[:-0.5]
+[1]
+[1]
+
+# Issue #722: negative fractional start and end on a read slice.
+.[-2.5:-0.5]
+[1,2,3,4,5]
+[3,4,5]
+
+# Issue #722: del with a fractional slice deletes the same range as jq.
+del(.[1.5:3.5])
+[1,2,3,4,5]
+[1,5]
