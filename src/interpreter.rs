@@ -2131,7 +2131,12 @@ fn contains_input(expr: &crate::ir::Expr) -> bool {
         Expr::Mutate { path_expr, value_expr, .. } => contains_input(path_expr) || contains_input(value_expr),
         // GetPath/SetPath/DelPaths/PathExpr implicitly operate on the current input
         Expr::GetPath { .. } | Expr::SetPath { .. } | Expr::DelPaths { .. } | Expr::PathExpr { .. } => true,
-        Expr::Recurse { input_expr: e } => contains_input(e),
+        // `recurse(f)` always emits the input value first (`def recurse(f):
+        // ., (f | recurse(f))`), so it is input-dependent regardless of `f`.
+        // Classifying by the body alone wrongly marked `recurse(empty)` (and
+        // any input-free `f`) as input-free, evaluating it against `null` and
+        // emitting `null` instead of the input (#713).
+        Expr::Recurse { .. } => true,
         // debug/stderr pass through the current input
         Expr::Debug { .. } | Expr::Stderr { .. } => true,
         Expr::Label { body, .. } => contains_input(body),
