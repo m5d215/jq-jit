@@ -71,6 +71,7 @@ use crate::value::{
     json_object_filter_by_key_str, json_object_filter_by_value_type,
     json_object_get_field_raw, json_object_get_fields_raw_buf, json_object_merge_literal,
     json_object_values_tostring, json_with_entries_select_value_cmp, push_tojson_raw,
+    raw_contains_non_canonical_number,
     json_object_get_nested_field_raw, json_object_get_num, json_object_get_two_nums,
     json_object_has_all_keys, json_object_has_any_key, json_object_has_key,
     json_object_update_field_case, json_object_update_field_gsub,
@@ -188,7 +189,17 @@ where
     match raw.first().copied() {
         Some(b'{') => {
             match json_object_get_field_raw(raw, 0, field) {
-                Some((vs, ve)) => emit(&raw[vs..ve]),
+                // A non-canonical number in the field value (`1e10`,
+                // `0.0000001`, `nan`) must be re-rendered through Value to
+                // match jq's canonical output, so bail to the generic path
+                // rather than echoing the source lexeme (#729).
+                Some((vs, ve)) => {
+                    let v = &raw[vs..ve];
+                    if raw_contains_non_canonical_number(v) {
+                        return RawApplyOutcome::Bail;
+                    }
+                    emit(v);
+                }
                 None => emit(b"null"),
             }
             RawApplyOutcome::Emit
@@ -233,6 +244,12 @@ where
     E: FnMut(&[u8]),
 {
     if json_object_get_fields_raw_buf(raw, 0, fields, ranges_buf) {
+        // A non-canonical number in any emitted field value must be
+        // re-rendered through Value to match jq's canonical output; bail to
+        // the generic path rather than echo the source lexeme (#729).
+        if ranges_buf.iter().any(|(vs, ve)| raw_contains_non_canonical_number(&raw[*vs..*ve])) {
+            return RawApplyOutcome::Bail;
+        }
         for (vs, ve) in ranges_buf.iter() {
             emit(&raw[*vs..*ve]);
         }
@@ -283,6 +300,13 @@ where
     }
     let ranges = &ranges_buf[..fields.len()];
     if bail_check(ranges, raw) {
+        return RawApplyOutcome::Bail;
+    }
+    // A non-canonical number in any referenced field value would leak its raw
+    // lexeme through a passthrough cell (`{x:.b}` with `.b == 2e3`), so bail to
+    // the generic path which re-renders it canonically (#729). Computed cells
+    // (`.b + 0`) over-bail harmlessly — the generic path yields the same value.
+    if ranges.iter().any(|(vs, ve)| raw_contains_non_canonical_number(&raw[*vs..*ve])) {
         return RawApplyOutcome::Bail;
     }
     emit(ranges, raw);
@@ -945,79 +969,6 @@ pub fn apply_obj_merge_computed_raw(
 /// type name. Returns None for unrecognised type names so callers
 /// can Bail on detector regression.
 #[inline]
-/// Walk `bytes` and return true when it contains a non-canonical numeric
-/// literal — `1e10` (lowercase `e`), `+1`, or the special-float literals
-/// `nan` / `inf` / `infinity` (case-insensitive). String contents are
-/// skipped (a stray `e` inside a string isn't a number's exponent
-/// marker). Mirrors the helper in `bin/jq-jit.rs`. See #598.
-fn raw_contains_non_canonical_number(bytes: &[u8]) -> bool {
-    static LUT: [bool; 256] = {
-        let mut t = [false; 256];
-        let chars: &[u8] = &[b'"', b'+', b'e', b'E', b'n', b'N', b'i', b'I', b'.'];
-        let mut k = 0;
-        while k < chars.len() { t[chars[k] as usize] = true; k += 1; }
-        t
-    };
-    let mut i = 0;
-    while i < bytes.len() {
-        while i < bytes.len() && !LUT[bytes[i] as usize] { i += 1; }
-        if i >= bytes.len() { return false; }
-        match bytes[i] {
-            b'"' => {
-                i += 1;
-                while i < bytes.len() {
-                    match memchr::memchr2(b'"', b'\\', &bytes[i..]) {
-                        Some(off) => {
-                            i += off;
-                            if bytes[i] == b'"' { i += 1; break; }
-                            // \uD[8-F]XX is a surrogate codepoint — defer to
-                            // the slow parser to handle lone surrogates and
-                            // pair decoding (#615).
-                            if i + 5 < bytes.len()
-                                && bytes[i + 1] == b'u'
-                                && (bytes[i + 2] == b'D' || bytes[i + 2] == b'd')
-                                && matches!(bytes[i + 3],
-                                    b'8' | b'9' | b'A' | b'B' | b'C' | b'D' | b'E' | b'F'
-                                         | b'a' | b'b' | b'c' | b'd' | b'e' | b'f')
-                            {
-                                return true;
-                            }
-                            i = i.saturating_add(2);
-                        }
-                        None => return false,
-                    }
-                }
-            }
-            b'+' => return true,
-            b'n' | b'N' if bytes.get(i..i+3).is_some_and(|s| s.eq_ignore_ascii_case(b"nan")) => return true,
-            b'i' | b'I' if bytes.get(i..i+8).is_some_and(|s| s.eq_ignore_ascii_case(b"infinity"))
-                || bytes.get(i..i+3).is_some_and(|s| s.eq_ignore_ascii_case(b"inf")) => return true,
-            b'e' | b'E' => {
-                if i > 0 {
-                    let prev = bytes[i - 1];
-                    if prev.is_ascii_digit() || prev == b'.' {
-                        return true;
-                    }
-                }
-                i += 1;
-            }
-            b'.' => {
-                // 6+ leading zeros in the fractional part means effective
-                // exponent < -6, which jq's decnum normalises to scientific
-                // (#611). Need the previous byte to be a digit so we don't
-                // mistake `[.foo]` style tokens for numeric literals.
-                if bytes.get(i + 1..i + 7) == Some(&[b'0'; 6][..])
-                    && i > 0 && bytes[i - 1].is_ascii_digit()
-                {
-                    return true;
-                }
-                i += 1;
-            }
-            _ => i += 1,
-        }
-    }
-    false
-}
 
 fn type_byte_matches(type_name: &str, b: u8) -> Option<bool> {
     Some(match type_name {
@@ -2156,6 +2107,12 @@ pub fn apply_with_entries_tostring_raw(
     raw: &[u8],
     buf: &mut Vec<u8>,
 ) -> RawApplyOutcome {
+    // `tostring` on a number must use jq's canonical repr (`2e3` -> `"2E+3"`,
+    // not `"2000"`). The raw helper stringifies the f64 form, so bail to the
+    // generic path whenever a value holds a non-canonical number (#729).
+    if raw_contains_non_canonical_number(raw) {
+        return RawApplyOutcome::Bail;
+    }
     if json_object_values_tostring(raw, 0, buf) {
         RawApplyOutcome::Emit
     } else {
@@ -2713,6 +2670,15 @@ pub fn apply_field_unary_num_raw(
         UnaryOp::ToString => {
             // Only the numeric-field shape stays in the fast path; strings,
             // arrays, etc. need the generic path's `tostring` semantics.
+            // A non-canonical number must keep jq's canonical repr through
+            // tostring (`2e3` -> `"2E+3"`, not `"2000"`), which is lost once
+            // parsed to f64 — bail to the generic path for those (#729).
+            match json_object_get_field_raw(raw, 0, field) {
+                Some((vs, ve)) if raw_contains_non_canonical_number(&raw[vs..ve]) => {
+                    return RawApplyOutcome::Bail;
+                }
+                _ => {}
+            }
             match json_object_get_num(raw, 0, field) {
                 Some(n) => {
                     buf.push(b'"');
@@ -3536,9 +3502,14 @@ pub fn apply_field_update_str_concat_raw(
 /// Field absent emits the input object unchanged (jq's `del(.x)` on
 /// `{}` returns `{}` — no error).
 pub fn apply_del_field_raw(raw: &[u8], field: &str, buf: &mut Vec<u8>) -> RawApplyOutcome {
+    let save = buf.len();
+    // `json_object_del_field` canonicalises retained number reprs in place and
+    // returns false (rolling back its writes) when a composite value holds a
+    // non-canonical number needing the generic path (#729).
     if json_object_del_field(raw, 0, field, buf) {
         RawApplyOutcome::Emit
     } else {
+        buf.truncate(save);
         RawApplyOutcome::Bail
     }
 }
@@ -3553,9 +3524,14 @@ pub fn apply_del_fields_raw(
     fields: &[&str],
     buf: &mut Vec<u8>,
 ) -> RawApplyOutcome {
+    let save = buf.len();
+    // `json_object_del_fields` canonicalises retained number reprs in place and
+    // returns false (rolling back) on a composite value needing the generic
+    // path (#729).
     if json_object_del_fields(raw, 0, fields, buf) {
         RawApplyOutcome::Emit
     } else {
+        buf.truncate(save);
         RawApplyOutcome::Bail
     }
 }
@@ -3820,6 +3796,10 @@ where
             if val == b"null" || val == b"false" {
                 emit(fallback_bytes);
             } else {
+                // Canonicalise non-canonical numbers via the generic path (#729).
+                if raw_contains_non_canonical_number(val) {
+                    return RawApplyOutcome::Bail;
+                }
                 emit(val);
             }
         }
@@ -3851,10 +3831,15 @@ where
     if raw.is_empty() || (raw.first() != Some(&b'{') && raw != b"null") {
         return RawApplyOutcome::Bail;
     }
+    // Canonicalise non-canonical numbers in whichever field value is emitted
+    // via the generic path (#729).
     let primary_emitted = match json_object_get_field_raw(raw, 0, primary_field) {
         Some((vs, ve)) => {
             let pval = &raw[vs..ve];
             if pval != b"null" && pval != b"false" {
+                if raw_contains_non_canonical_number(pval) {
+                    return RawApplyOutcome::Bail;
+                }
                 emit(pval);
                 true
             } else {
@@ -3865,7 +3850,13 @@ where
     };
     if !primary_emitted {
         match json_object_get_field_raw(raw, 0, fallback_field) {
-            Some((vs, ve)) => emit(&raw[vs..ve]),
+            Some((vs, ve)) => {
+                let fval = &raw[vs..ve];
+                if raw_contains_non_canonical_number(fval) {
+                    return RawApplyOutcome::Bail;
+                }
+                emit(fval);
+            }
             None => emit(b"null"),
         }
     }
@@ -3959,6 +3950,14 @@ where
     E: FnOnce(&[(usize, usize)], &[u8]),
 {
     if json_object_get_fields_raw_buf(raw, 0, fields, ranges_buf) {
+        // A non-canonical number in any field value must be re-rendered through
+        // Value to match jq's canonical output; bail to the generic path rather
+        // than echo the source lexeme (#729).
+        if ranges_buf[..fields.len()].iter()
+            .any(|(vs, ve)| raw_contains_non_canonical_number(&raw[*vs..*ve]))
+        {
+            return RawApplyOutcome::Bail;
+        }
         emit_structural(&ranges_buf[..fields.len()], raw);
         RawApplyOutcome::Emit
     } else {
@@ -3992,7 +3991,12 @@ where
     match raw.first().copied() {
         Some(b'{') => match json_object_get_nested_field_raw(raw, 0, fields) {
             Some((vs, ve)) => {
-                emit(&raw[vs..ve]);
+                let v = &raw[vs..ve];
+                // Canonicalise non-canonical numbers via the generic path (#729).
+                if raw_contains_non_canonical_number(v) {
+                    return RawApplyOutcome::Bail;
+                }
+                emit(v);
                 RawApplyOutcome::Emit
             }
             None => RawApplyOutcome::Bail,

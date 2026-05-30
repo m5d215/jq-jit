@@ -10719,3 +10719,73 @@ strptime("%y")
 strptime("%H:%M:%S")
 "10:30:45"
 [1900,0,0,10,30,45,6,-1]
+
+# Issue #729: raw-byte field-access fast path canonicalizes number reprs
+.a
+{"a":1e10}
+1E+10
+
+# Issue #729: nested field access canonicalizes (1.5e-3 -> decimal)
+.a.b
+{"a":{"b":1.5e-3}}
+0.0015
+
+# Issue #729: multi-field access stream canonicalizes each value
+[.a,.b]
+{"a":1e10,"b":2e3}
+[1E+10,2E+3]
+
+# Issue #729: field remap object construction canonicalizes
+{x:.b}
+{"b":2e3}
+{"x":2E+3}
+
+# Issue #729: shorthand object construction canonicalizes
+{a,b}
+{"a":1e10,"b":2}
+{"a":1E+10,"b":2}
+
+# Issue #729: standalone array construction canonicalizes
+[.x,.y]
+{"x":1e10,"y":2e3}
+[1E+10,2E+3]
+
+# Issue #729: .[] iterate canonicalizes each element
+[.[]]
+[1e10,2e3]
+[1E+10,2E+3]
+
+# Issue #729: tostring uses jq's canonical repr, not the f64 decimal
+.b|tostring
+{"b":2e3}
+"2E+3"
+
+# Issue #729: to_entries canonicalizes value reprs
+to_entries
+{"b":2e3}
+[{"key":"b","value":2E+3}]
+
+# Issue #729: with_entries(.value|=tostring) canonicalizes before stringifying
+with_entries(.value|=tostring)
+{"a":1.5,"b":2e3}
+{"a":"1.5","b":"2E+3"}
+
+# Issue #729: del(field) canonicalizes retained values
+del(.c)
+{"a":1e10,"c":3}
+{"a":1E+10}
+
+# Issue #729: alternative // passthrough canonicalizes
+.a // 5
+{"a":1e10}
+1E+10
+
+# Issue #729: dynamic-key object construction canonicalizes the value
+{(.k):.v}
+{"k":"x","v":1e10}
+{"x":1E+10}
+
+# Issue #729: conditional remap output canonicalizes passthrough values
+if .b>0 then {y:.c} else 0 end
+{"b":1,"c":1e10}
+{"y":1E+10}

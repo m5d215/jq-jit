@@ -1698,6 +1698,7 @@ pub fn json_object_del_field(b: &[u8], pos: usize, field: &str, buf: &mut Vec<u8
 
     // Fast path for compact input: stream pairs directly, skip target field (no Vec alloc)
     if is_json_compact(&b[pos..]) {
+        let buf_start = buf.len();
         buf.push(b'{');
         let mut i = pos + 1;
         if i < b.len() && b[i] == b'}' { buf.push(b'}'); return true; }
@@ -1714,11 +1715,18 @@ pub fn json_object_del_field(b: &[u8], pos: usize, field: &str, buf: &mut Vec<u8
             i = j + 1;
             if i >= b.len() || b[i] != b':' { break; }
             i += 1;
+            let val_start = i;
             let val_end = match skip_json_value(b, i) { Ok(e) => e, Err(_) => break };
             if !key_matches {
                 if !first_out { buf.push(b','); }
                 first_out = false;
-                buf.extend_from_slice(&b[key_start..val_end]); // "key":value as one chunk
+                buf.extend_from_slice(&b[key_start..val_start]); // "key":
+                // Canonicalise a non-canonical number repr in the retained
+                // value rather than echo the source lexeme (#729).
+                if !append_canonical_value(buf, &b[val_start..val_end]) {
+                    buf.truncate(buf_start);
+                    return false;
+                }
             }
             i = val_end;
             if i < b.len() && b[i] == b',' { i += 1; } else { break; }
@@ -1728,6 +1736,7 @@ pub fn json_object_del_field(b: &[u8], pos: usize, field: &str, buf: &mut Vec<u8
     }
 
     // General path for non-compact input: stream directly (no Vec alloc)
+    let buf_start = buf.len();
     buf.push(b'{');
     let mut i = pos + 1;
     while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
@@ -1754,7 +1763,11 @@ pub fn json_object_del_field(b: &[u8], pos: usize, field: &str, buf: &mut Vec<u8
             first_out = false;
             buf.extend_from_slice(&b[key_start..key_end]);
             buf.push(b':');
-            buf.extend_from_slice(&b[i..val_end]);
+            // Canonicalise a non-canonical number repr (#729).
+            if !append_canonical_value(buf, &b[i..val_end]) {
+                buf.truncate(buf_start);
+                return false;
+            }
         }
         i = val_end;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
@@ -1771,6 +1784,7 @@ pub fn json_object_del_field(b: &[u8], pos: usize, field: &str, buf: &mut Vec<u8
 /// Delete multiple fields from a JSON object, writing compact output.
 pub fn json_object_del_fields(b: &[u8], pos: usize, fields: &[&str], buf: &mut Vec<u8>) -> bool {
     if pos >= b.len() || b[pos] != b'{' { return false; }
+    let buf_start = buf.len();
     buf.push(b'{');
     let mut i = pos + 1;
     // Skip whitespace
@@ -1801,7 +1815,11 @@ pub fn json_object_del_fields(b: &[u8], pos: usize, fields: &[&str], buf: &mut V
             first_out = false;
             buf.extend_from_slice(&b[key_start..key_end]);
             buf.push(b':');
-            buf.extend_from_slice(&b[i..val_end]);
+            // Canonicalise a non-canonical number repr (#729).
+            if !append_canonical_value(buf, &b[i..val_end]) {
+                buf.truncate(buf_start);
+                return false;
+            }
         }
         i = val_end;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
@@ -1820,6 +1838,7 @@ pub fn json_object_del_fields(b: &[u8], pos: usize, fields: &[&str], buf: &mut V
 pub fn json_object_filter_by_key_str(b: &[u8], pos: usize, test_op: &str, test_arg: &str, buf: &mut Vec<u8>) -> bool {
     if pos >= b.len() || b[pos] != b'{' { return false; }
     let arg_bytes = test_arg.as_bytes();
+    let buf_start = buf.len();
     buf.push(b'{');
     let mut i = pos + 1;
     while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
@@ -1859,7 +1878,11 @@ pub fn json_object_filter_by_key_str(b: &[u8], pos: usize, test_op: &str, test_a
             first_out = false;
             buf.extend_from_slice(&b[key_start..key_end]);
             buf.push(b':');
-            buf.extend_from_slice(&b[i..val_end]);
+            // Canonicalise a non-canonical number repr (#729).
+            if !append_canonical_value(buf, &b[i..val_end]) {
+                buf.truncate(buf_start);
+                return false;
+            }
         }
         i = val_end;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
@@ -3081,7 +3104,7 @@ pub fn json_each_value_raw(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {
                     let mut pairs: Vec<(usize, usize, usize, usize)> = Vec::new();
                     if json_object_dedup_pairs(b, pos, &mut pairs).is_none() { return false; }
                     for (_, _, vs, ve) in &pairs {
-                        buf.extend_from_slice(&b[*vs..*ve]);
+                        if !append_canonical_value(buf, &b[*vs..*ve]) { buf.truncate(buf_start); return false; }
                         buf.push(b'\n');
                     }
                     return true;
@@ -3096,7 +3119,7 @@ pub fn json_each_value_raw(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {
                 while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
                 let vs = i;
                 i = match skip_json_value(b, i) { Ok(e) => e, Err(_) => return false };
-                buf.extend_from_slice(&b[vs..i]);
+                if !append_canonical_value(buf, &b[vs..i]) { buf.truncate(buf_start); return false; }
                 buf.push(b'\n');
                 while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
                 if i >= b.len() { return false; }
@@ -3108,13 +3131,14 @@ pub fn json_each_value_raw(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {
             true
         }
         b'[' => {
+            let buf_start = buf.len();
             let mut i = pos + 1;
             while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
             if i < b.len() && b[i] == b']' { return true; }
             loop {
                 let vs = i;
                 i = match skip_json_value(b, i) { Ok(e) => e, Err(_) => return false };
-                buf.extend_from_slice(&b[vs..i]);
+                if !append_canonical_value(buf, &b[vs..i]) { buf.truncate(buf_start); return false; }
                 buf.push(b'\n');
                 while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
                 if i >= b.len() { return false; }
@@ -3250,7 +3274,7 @@ pub fn json_to_entries_raw(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {
                 buf.extend_from_slice(b"{\"key\":");
                 buf.extend_from_slice(&b[*ks..*ke]);
                 buf.extend_from_slice(b",\"value\":");
-                buf.extend_from_slice(&b[*vs..*ve]);
+                if !append_canonical_value(buf, &b[*vs..*ve]) { buf.truncate(buf_start); return false; }
                 buf.push(b'}');
             }
             buf.extend_from_slice(b"]\n");
@@ -3271,7 +3295,7 @@ pub fn json_to_entries_raw(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {
         buf.extend_from_slice(b"{\"key\":");
         buf.extend_from_slice(&b[key_start..key_end]);
         buf.extend_from_slice(b",\"value\":");
-        buf.extend_from_slice(&b[vs..i]);
+        if !append_canonical_value(buf, &b[vs..i]) { buf.truncate(buf_start); return false; }
         buf.push(b'}');
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
         if i >= b.len() { return false; }
@@ -5590,6 +5614,158 @@ pub fn canonical_repr_bytes(repr: &str) -> std::borrow::Cow<'_, str> {
 /// output form. Returns `None` if the repr is already canonical (or not
 /// scientific). Handles:
 /// - case + sign: `e` → `E+`/`E-`, no leading `+` on the mantissa,
+/// Returns true if `bytes` contains a JSON number whose lexical form
+/// would normalise differently from jq's canonical output (e.g. `1e10`
+/// → `1E+10`, `+1` → `1`, `1e-5` → `0.00001`). Used to disable raw-byte
+/// passthrough so the canonical form lands on stdout (issues #110, #143);
+/// the raw-byte field-access / iterate / remap fast paths use it to bail to
+/// the canonicalising generic path on the values they emit (#729).
+///
+/// Also catches the special-float literals `nan`, `NaN`, `Infinity` (and
+/// their `-`-prefixed variants) that jq's input parser accepts but
+/// re-renders as `null` / `±1.7976931348623157e+308` (issue #513).
+/// Without this check, identity passthrough would emit invalid JSON.
+#[inline]
+pub fn raw_contains_non_canonical_number(bytes: &[u8]) -> bool {
+    // 256-bit byte LUT: true when this byte is one of the "interesting"
+    // chars we need to slow-scan. Lets us memchr-equivalent skip ahead
+    // through the bulk of structural bytes / digits / whitespace / etc.,
+    // which dominate typical NDJSON. (#598 regression fix.)
+    static LUT: [bool; 256] = {
+        let mut t = [false; 256];
+        let chars: &[u8] = &[b'"', b'+', b'e', b'E', b'n', b'N', b'i', b'I', b'.'];
+        let mut k = 0;
+        while k < chars.len() { t[chars[k] as usize] = true; k += 1; }
+        t
+    };
+    let mut i = 0;
+    while i < bytes.len() {
+        // Skip ahead to the next interesting byte. The hot loop is just
+        // a tight LUT lookup the optimiser can vectorise.
+        while i < bytes.len() && !LUT[bytes[i] as usize] { i += 1; }
+        if i >= bytes.len() { return false; }
+        match bytes[i] {
+            b'"' => {
+                // Skip string contents — a stray `e` inside a string isn't
+                // a number's exponent marker. Use memchr to jump to the
+                // next `"` or `\` instead of byte-by-byte.
+                i += 1;
+                while i < bytes.len() {
+                    match memchr::memchr2(b'"', b'\\', &bytes[i..]) {
+                        Some(off) => {
+                            i += off;
+                            if bytes[i] == b'"' { i += 1; break; }
+                            // \uD[8-F]XX is a surrogate codepoint — jq either
+                            // errors (lone high), replaces with U+FFFD (lone
+                            // low), or decodes to UTF-8 (valid pair). Identity
+                            // passthrough must defer to the slow parser to
+                            // pick the right behavior (#615).
+                            if i + 5 < bytes.len()
+                                && bytes[i + 1] == b'u'
+                                && (bytes[i + 2] == b'D' || bytes[i + 2] == b'd')
+                                && matches!(bytes[i + 3],
+                                    b'8' | b'9' | b'A' | b'B' | b'C' | b'D' | b'E' | b'F'
+                                         | b'a' | b'b' | b'c' | b'd' | b'e' | b'f')
+                            {
+                                return true;
+                            }
+                            // backslash: skip the escape sequence
+                            i = i.saturating_add(2);
+                        }
+                        None => { i = bytes.len(); break; }
+                    }
+                }
+            }
+            b'+' => return true,
+            // Special-float literals accepted by parse_json_value:
+            // `nan` / `inf` / `infinity` (case-insensitive), with optional
+            // `+`/`-` prefix. jq normalises these to `null` (NaN) or
+            // `±1.7976931348623157e+308` (Infinity) — the raw input bytes
+            // would otherwise leak through as invalid JSON
+            // (issues #513, #515).
+            b'n' | b'N' if bytes.get(i..i+3).is_some_and(|s| s.eq_ignore_ascii_case(b"nan")) => return true,
+            b'i' | b'I' if bytes.get(i..i+8).is_some_and(|s| s.eq_ignore_ascii_case(b"infinity"))
+                || bytes.get(i..i+3).is_some_and(|s| s.eq_ignore_ascii_case(b"inf")) => return true,
+            b'e' | b'E' => {
+                // Only flag when this `e`/`E` is part of a number — the
+                // immediately preceding byte is a digit or `.`.
+                if i > 0 {
+                    let prev = bytes[i - 1];
+                    if prev.is_ascii_digit() || prev == b'.' {
+                        return true;
+                    }
+                }
+                i += 1;
+            }
+            b'.' => {
+                // Numbers with a fractional part of 6+ leading zeros need
+                // canonicalisation: jq's decnum normalises anything with
+                // effective exponent < -6 to scientific form. e.g.
+                // `0.0000001` → `1E-7`, `0.0000000` → `0E-7` (#611).
+                if bytes.get(i + 1..i + 7) == Some(&[b'0'; 6][..])
+                    && i > 0 && bytes[i - 1].is_ascii_digit()
+                {
+                    return true;
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    false
+}
+
+/// Append a single JSON value's raw bytes `val` to `buf`, canonicalising number
+/// reprs to jq's output form (#729) at minimal cost. A scalar number lexeme is
+/// normalised in place — the hot path stays a plain copy when it is already
+/// canonical (`normalize_jq_repr` returns `None`). Strings/bools/null copy
+/// verbatim. A composite (`{`/`[`) copies verbatim unless it actually carries a
+/// non-canonical number, in which case this returns `false` so the caller can
+/// hand the record to the generic (canonicalising) path — only that rare value
+/// pays the scan. Returns `true` when `val` was appended.
+#[inline]
+pub fn append_canonical_value(buf: &mut Vec<u8>, val: &[u8]) -> bool {
+    match val.first() {
+        Some(c) if c.is_ascii_digit() || *c == b'-' => {
+            // Scalar number lexeme. A plain integer (only digits and a leading
+            // `-`) is always canonical, so the hot path skips the relatively
+            // expensive `normalize_jq_repr` parse and just copies. Only numbers
+            // carrying `.`/`e`/`E`/`+` need the full normalisation.
+            if val.iter().all(|&x| x.is_ascii_digit() || x == b'-') {
+                buf.extend_from_slice(val);
+            } else {
+                match normalize_jq_repr(unsafe { std::str::from_utf8_unchecked(val) }) {
+                    Some(canon) => buf.extend_from_slice(canon.as_bytes()),
+                    None => buf.extend_from_slice(val),
+                }
+            }
+            true
+        }
+        Some(b'"') => {
+            buf.extend_from_slice(val);
+            true
+        }
+        Some(b'{') | Some(b'[') => {
+            // Composite: only a value that actually holds a non-canonical number
+            // pays the scan and defers; everything else stays a copy.
+            if raw_contains_non_canonical_number(val) {
+                return false;
+            }
+            buf.extend_from_slice(val);
+            true
+        }
+        // `true`/`false`/`null` carry no numbers; the special-float literals
+        // (`nan`/`inf`/`+...`) do and must defer to the generic path.
+        _ => {
+            if raw_contains_non_canonical_number(val) {
+                return false;
+            }
+            buf.extend_from_slice(val);
+            true
+        }
+    }
+}
+
 /// - decimal vs scientific threshold: small-exponent scientific literals
 ///   expand to decimal (`1e-5` → `0.00001`) while larger magnitudes keep
 ///   `E+N` (`1e10` → `1E+10`).
