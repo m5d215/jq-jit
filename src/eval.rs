@@ -118,6 +118,16 @@ impl std::fmt::Display for BreakError {
 }
 impl std::error::Error for BreakError {}
 
+/// The value a `try ... catch` / `?` receives when it catches a `break`
+/// signal. jq surfaces the break as `{"__jq": <label id>}`; matching the
+/// shape lets `catch`/`?` handle it like any other error. Only the shape is
+/// guaranteed — the id is an internal counter and need not match jq's. #715.
+fn break_catch_value(label_id: u64) -> Value {
+    let mut obj = crate::value::new_objmap();
+    obj.insert("__jq".into(), Value::number(label_id as f64));
+    Value::object_from_map(obj)
+}
+
 /// Cached output sequence for a single memoize call site.
 ///
 /// The vast majority of memoize use cases — fib, Collatz, totient, etc. —
@@ -2149,7 +2159,14 @@ pub fn eval(
                 Ok(cont) => Ok(cont),
                 Err(e) if cb_error.get() => Err(e),
                 Err(e) => {
-                    if e.downcast_ref::<BreakError>().is_some() { return Err(e); }
+                    // jq makes `break` a catchable signal: a `try`/`?` in the
+                    // unwind path catches it (surfacing `{"__jq": id}`) and
+                    // execution continues — only an uncaught break reaches its
+                    // label. A break that came from the downstream callback is
+                    // excluded above by `cb_error`. See #715.
+                    if let Some(be) = e.downcast_ref::<BreakError>() {
+                        return eval(catch_expr, break_catch_value(be.0), env, cb);
+                    }
                     let msg = format!("{}", e);
                     // halt / halt_error are non-recoverable: jq lets them
                     // propagate past `try ... catch` so the process exits with
@@ -5019,7 +5036,11 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             match result {
                 Ok(cont) => Ok(cont),
                 Err(e) => {
-                    if e.downcast_ref::<BreakError>().is_some() { return Err(e); }
+                    // A caught `break` surfaces as `{"__jq": id}`, mirroring the
+                    // value-mode handler (#715).
+                    if let Some(be) = e.downcast_ref::<BreakError>() {
+                        return eval(catch_expr, break_catch_value(be.0), env, cb);
+                    }
                     let msg = format!("{}", e);
                     // halt / halt_error are non-recoverable: jq lets them
                     // propagate past `try ... catch` so the process exits with
