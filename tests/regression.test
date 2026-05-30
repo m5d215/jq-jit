@@ -10605,3 +10605,23 @@ null
 [setpath((["a"],["b"]); (1,2))]
 {}
 [{"a":1},{"b":1},{"a":2},{"b":2}]
+
+# Issue #718: reduce runs once per INIT value; empty source keeps each INIT.
+[reduce empty as $x (1,2; .)]
+null
+[1,2]
+
+# Issue #718: an empty INIT generator yields no output.
+[reduce .[] as $x (empty; . + $x)]
+[1,2,3]
+[]
+
+# Issue #718: an input-independent source iterates cleanly per INIT value.
+[reduce (1,2) as $x ((10,20); . + $x)]
+null
+[13,23]
+
+# Issue #718: after the first INIT value the source input is null (jq quirk).
+[reduce .x as $i ((0,100); . + $i)]
+{"x":5}
+[5,100]
