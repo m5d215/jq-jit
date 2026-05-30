@@ -370,9 +370,14 @@ enum JitOp {
     // Control flow
     IfTruthy { src: SlotId, then_label: LabelId, else_label: LabelId },
     /// Combined field access + truthiness check: avoids clone+drop of the field value.
-    FieldIsTruthy { base: SlotId, field: String, then_label: LabelId, else_label: LabelId },
-    /// Combined field access + numeric comparison + branch: avoids creating intermediate Values.
-    FieldCmpNum { base: SlotId, field: String, value: f64, op: i32, then_label: LabelId, else_label: LabelId },
+    /// Writes 1/0 into `dst_var`. Sets the pending JIT error for a non-indexable
+    /// base (`.field` on a non-object/non-null) — the caller must follow with
+    /// `JumpIfError` before branching on the result (#751).
+    FieldIsTruthy { base: SlotId, field: String, dst_var: u32 },
+    /// Combined field access + numeric comparison: avoids creating intermediate
+    /// Values. Writes 1/0 into `dst_var`. Sets the pending JIT error for a
+    /// non-indexable base — caller must follow with `JumpIfError` (#751).
+    FieldCmpNum { base: SlotId, field: String, value: f64, op: i32, dst_var: u32 },
     /// Branch on type tag comparison: loads tag byte from src and compares against expected.
     /// tags is a bitmask of matching tag values (bit 0 = Null, 1 = False, 2 = True, 3 = Num, etc.)
     TypeCmpBranch { src: SlotId, tags: u8, then_label: LabelId, else_label: LabelId },
@@ -2388,6 +2393,13 @@ impl Flattener {
                     let then_lbl = self.alloc_label();
                     let else_lbl = self.alloc_label();
                     let done_lbl = self.alloc_label();
+                    // The fused `.field` ops (FieldCmpNum/FieldIsTruthy) write a
+                    // 0/1 result into a var and set the pending JIT error for a
+                    // non-indexable base; `field_cond_var` records the var so we
+                    // can emit `JumpIfError` + `BranchOnVar` after, surfacing
+                    // jq's "Cannot index ..." error instead of silently taking
+                    // the else branch (#751).
+                    let mut field_cond_var: Option<u32> = None;
                     // Optimization: if cond is .field OP num on input, use combined FieldCmpNum
                     let used_fused = if let Expr::BinOp { op, lhs, rhs } = cond.as_ref() {
                         if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge) {
@@ -2419,7 +2431,9 @@ impl Flattener {
                                 } else { None }
                             });
                             if let Some((field, value, op_code)) = field_num {
-                                self.emit(JitOp::FieldCmpNum { base: input_slot, field, value, op: op_code, then_label: then_lbl, else_label: else_lbl });
+                                let v = self.alloc_var();
+                                self.emit(JitOp::FieldCmpNum { base: input_slot, field, value, op: op_code, dst_var: v });
+                                field_cond_var = Some(v);
                                 true
                             } else { false }
                         } else { false }
@@ -2428,7 +2442,9 @@ impl Flattener {
                     let used_fused = used_fused || if let Expr::Index { expr: base, key } | Expr::IndexOpt { expr: base, key } = cond.as_ref() {
                         if matches!(base.as_ref(), Expr::Input) {
                             if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
-                                self.emit(JitOp::FieldIsTruthy { base: input_slot, field: field.clone(), then_label: then_lbl, else_label: else_lbl });
+                                let v = self.alloc_var();
+                                self.emit(JitOp::FieldIsTruthy { base: input_slot, field: field.clone(), dst_var: v });
+                                field_cond_var = Some(v);
                                 true
                             } else { false }
                         } else { false }
@@ -2457,6 +2473,17 @@ impl Flattener {
                             } else { false }
                         } else { false }
                     } else { false };
+                    // A fused `.field` op wrote its 0/1 result into a var and may
+                    // have set the pending error (non-indexable base). Bail to
+                    // the error block before branching, then branch on the var.
+                    let err_lbl = if let Some(v) = field_cond_var {
+                        let el = self.alloc_label();
+                        self.emit(JitOp::JumpIfError { label: el });
+                        self.emit(JitOp::BranchOnVar { var: v, nonzero_label: then_lbl, zero_label: else_lbl });
+                        Some(el)
+                    } else {
+                        None
+                    };
                     if !used_fused {
                         let cond_val = self.flatten_scalar(cond, input_slot);
                         self.emit(JitOp::IfTruthy { src: cond_val, then_label: then_lbl, else_label: else_lbl });
@@ -2469,6 +2496,18 @@ impl Flattener {
 
                     self.emit(JitOp::Label { id: else_lbl });
                     self.flatten_gen(else_branch, input_slot);
+                    // Error block for the fused `.field` cond (#751): the runtime
+                    // op already set the pending error; propagate it (to the
+                    // enclosing try/catch, else out of the JIT fn).
+                    if let Some(el) = err_lbl {
+                        self.emit(JitOp::Jump { label: done_lbl });
+                        self.emit(JitOp::Label { id: el });
+                        if let Some((catch_label, error_slot)) = self.try_catch_target {
+                            self.emit(JitOp::CheckError { error_dst: error_slot, catch_label });
+                        } else {
+                            self.emit(JitOp::ReturnError);
+                        }
+                    }
                     self.emit(JitOp::Label { id: done_lbl });
                     true
                 } else {
@@ -6324,7 +6363,16 @@ extern "C" fn jit_rt_field_is_truthy(base: *const Value, key_ptr: *const u8, key
                     None => 0,
                 }
             }
-            _ => 0,
+            // `.field` on null is null → falsy, no error.
+            Value::Null => 0,
+            // `.field` on any other type is a runtime error in jq (#751). Set
+            // the pending error; the caller checks the error flag via
+            // JumpIfError and bails before branching on the (meaningless) 0.
+            _ => {
+                let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key_ptr, key_len));
+                set_jit_error(format!("Cannot index {} with string \"{}\"", (*base).type_name(), key));
+                0
+            }
         }
     }
 }
@@ -6344,11 +6392,13 @@ extern "C" fn jit_rt_field_cmp_num(base: *const Value, key_ptr: *const u8, key_l
             Value::Obj(ObjInner(o)) => o.get(key),
             Value::Null => None,
             // `.field` on a non-object/non-null base is a runtime error in
-            // jq. Surfacing that error from this fast path would need a
-            // bail channel the op doesn't have, so keep the existing
-            // permissive behavior (treat as false) and let the generic
-            // path handle programs that depend on the error.
-            _ => return 0,
+            // jq (#751). Set the pending error; the caller checks the error
+            // flag via JumpIfError and bails before branching on the
+            // (meaningless) 0 this returns.
+            _ => {
+                set_jit_error(format!("Cannot index {} with string \"{}\"", (*base).type_name(), key));
+                return 0;
+            }
         };
         match field_val {
             Some(Value::Num(lhs, _)) => {
@@ -6400,7 +6450,8 @@ extern "C" fn jit_rt_field_binop_field(
                 }
             }
             _ => {
-                set_jit_error(format!("Cannot index {} with string", (*base).type_name()));
+                let ka_str = std::str::from_utf8_unchecked(std::slice::from_raw_parts(ka_ptr, ka_len));
+                set_jit_error(format!("Cannot index {} with string \"{}\"", (*base).type_name(), ka_str));
                 std::ptr::write(dst, Value::Null);
                 return GEN_ERROR;
             }
@@ -6463,7 +6514,8 @@ extern "C" fn jit_rt_field_binop_const(
                 }
             }
             _ => {
-                set_jit_error(format!("Cannot index {} with string", (*base).type_name()));
+                let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key_ptr, key_len));
+                set_jit_error(format!("Cannot index {} with string \"{}\"", (*base).type_name(), key));
                 std::ptr::write(dst, Value::Null);
                 return GEN_ERROR;
             }
@@ -9687,7 +9739,7 @@ impl JitCompiler {
                         b.ins().brif(is_truthy, label_blocks[*then_label as usize], &[], label_blocks[*else_label as usize], &[]);
                         terminated = true;
                     }
-                    JitOp::FieldIsTruthy { base, field, then_label, else_label } => {
+                    JitOp::FieldIsTruthy { base, field, dst_var } => {
                         let ba = slot_addr(&mut b, *base);
                         let leaked = Box::leak(field.clone().into_boxed_str());
                         self._string_constants.push(leaked);
@@ -9695,12 +9747,12 @@ impl JitCompiler {
                         let kl = b.ins().iconst(ptr_ty, leaked.len() as i64);
                         let call = b.ins().call(rt["field_is_truthy"], &[ba, kp, kl]);
                         let truthy = b.inst_results(call)[0];
-                        let zero = b.ins().iconst(ptr_ty, 0);
-                        let is_t = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, truthy, zero);
-                        b.ins().brif(is_t, label_blocks[*then_label as usize], &[], label_blocks[*else_label as usize], &[]);
-                        terminated = true;
+                        // Store 0/1 into the var; a non-indexable base sets the
+                        // pending error, which the following JumpIfError catches
+                        // before this result is branched on (#751).
+                        b.def_var(vars[*dst_var as usize], truthy);
                     }
-                    JitOp::FieldCmpNum { base, field, value, op, then_label, else_label } => {
+                    JitOp::FieldCmpNum { base, field, value, op, dst_var } => {
                         let ba = slot_addr(&mut b, *base);
                         let leaked = Box::leak(field.clone().into_boxed_str());
                         self._string_constants.push(leaked);
@@ -9710,10 +9762,9 @@ impl JitCompiler {
                         let op_i32 = b.ins().iconst(types::I32, *op as i64);
                         let call = b.ins().call(rt["field_cmp_num"], &[ba, kp, kl, rhs_f64, op_i32]);
                         let result = b.inst_results(call)[0];
-                        let zero = b.ins().iconst(ptr_ty, 0);
-                        let is_t = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, result, zero);
-                        b.ins().brif(is_t, label_blocks[*then_label as usize], &[], label_blocks[*else_label as usize], &[]);
-                        terminated = true;
+                        // Store 0/1 into the var; a non-indexable base sets the
+                        // pending error (#751), caught by the following JumpIfError.
+                        b.def_var(vars[*dst_var as usize], result);
                     }
                     JitOp::TypeCmpBranch { src, tags, then_label, else_label } => {
                         // Load tag byte (offset 0) from Value at slot
