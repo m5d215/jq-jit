@@ -10789,3 +10789,24 @@ del(.c)
 if .b>0 then {y:.c} else 0 end
 {"b":1,"c":1e10}
 {"y":1E+10}
+
+# Issue #730: collect/select comparison fast path keeps rows with operands
+# > 2^53 (parse_json_num no longer rejects 16+ digit integers)
+[.[]|select(.>9007199254740993)]
+[9007199254740992,9007199254740994]
+[9007199254740994]
+
+# Issue #730: large element passes a small-threshold comparison (was dropped)
+[.[]|select(.>5)]
+[9007199254740994,3]
+[9007199254740994]
+
+# Issue #730: >= against a 16-digit threshold keeps the matching element
+[.[]|select(.>=9007199254740994)]
+[9007199254740993,9007199254740994]
+[9007199254740994]
+
+# Issue #730: scalar comparison against a 16-digit field value
+.x>5
+{"x":9007199254740994}
+true

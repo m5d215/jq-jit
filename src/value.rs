@@ -1151,7 +1151,15 @@ pub fn parse_json_num(b: &[u8]) -> Option<f64> {
         return num_str.parse::<f64>().ok();
     }
     if k != b.len() { return None; } // trailing garbage
-    if (k - start) > 15 { return None; }
+    if (k - start) > 15 {
+        // Integers with more than 15 digits overflow / lose precision in the
+        // i64 accumulator above. They are still valid JSON numbers, so parse
+        // them through f64 (jq-jit's number model) rather than rejecting them
+        // as non-numeric — returning None here made comparison fast paths drop
+        // rows for operands > 2^53 (#730).
+        let num_str = unsafe { std::str::from_utf8_unchecked(b) };
+        return num_str.parse::<f64>().ok();
+    }
     Some(if neg { -(n as f64) } else { n as f64 })
 }
 
