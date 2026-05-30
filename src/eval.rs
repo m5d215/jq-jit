@@ -4363,16 +4363,20 @@ fn jq_utf8_lossy(bytes: &[u8]) -> String {
     out
 }
 
+// jq normalizes a negative slice bound (`n + len`) *before* converting it to an
+// integer; rounding the raw float first mis-placed fractional negatives like
+// `-0.5`, because e.g. `(-0.5).ceil() == 0` discards the negativity and `len` is
+// never added. Normalize, then floor (start) / ceil (end), then clamp. #722.
 fn slice_index_start(n: f64, len: i64) -> usize {
     if n.is_nan() { return 0; }
-    let i = n.floor() as i64;
-    if i < 0 { (len + i).max(0) as usize } else { i.min(len) as usize }
+    let norm = if n < 0.0 { n + len as f64 } else { n };
+    (norm.floor() as i64).clamp(0, len) as usize
 }
 
 fn slice_index_end(n: f64, len: i64) -> usize {
     if n.is_nan() { return len as usize; }
-    let i = n.ceil() as i64;
-    if i < 0 { (len + i).max(0) as usize } else { i.min(len) as usize }
+    let norm = if n < 0.0 { n + len as f64 } else { n };
+    (norm.ceil() as i64).clamp(0, len) as usize
 }
 
 pub fn eval_slice(base: &Value, from: &Value, to: &Value) -> Result<Value> {
@@ -6228,8 +6232,8 @@ fn eval_del(f: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> G
                 }
                 DelOp::Slice { base, from, to } => {
                     if matches!(base, Expr::Input) {
-                        let from_idx = eval_slice_idx_val(from, len, 0, &input, env)?;
-                        let to_idx = eval_slice_idx_val(to, len, len, &input, env)?;
+                        let from_idx = eval_slice_idx_val(from, len, 0, false, &input, env)?;
+                        let to_idx = eval_slice_idx_val(to, len, len, true, &input, env)?;
                         for i in from_idx..to_idx {
                             if i >= 0 && i < len {
                                 indices_to_del.insert(i);
@@ -6303,8 +6307,8 @@ fn apply_del_op(op: &DelOp, current: Value, env: &EnvRef) -> Result<Value> {
             let new_val = match &container {
                 Value::Arr(a) => {
                     let len = a.len() as i64;
-                    let from_idx = eval_slice_idx_val(from, len, 0, &current, env)?;
-                    let to_idx = eval_slice_idx_val(to, len, len, &current, env)?;
+                    let from_idx = eval_slice_idx_val(from, len, 0, false, &current, env)?;
+                    let to_idx = eval_slice_idx_val(to, len, len, true, &current, env)?;
                     let mut result = Vec::new();
                     for i in 0..from_idx.min(len) { result.push(a[i as usize].clone()); }
                     for i in to_idx.max(0)..len { result.push(a[i as usize].clone()); }
@@ -6330,14 +6334,25 @@ fn apply_del_op(op: &DelOp, current: Value, env: &EnvRef) -> Result<Value> {
     }
 }
 
-fn eval_slice_idx_val(expr: &Option<&Expr>, len: i64, default: i64, input: &Value, env: &EnvRef) -> Result<i64> {
+fn eval_slice_idx_val(expr: &Option<&Expr>, len: i64, default: i64, is_end: bool, input: &Value, env: &EnvRef) -> Result<i64> {
     if let Some(e) = expr {
-        let mut val = default;
+        let mut fval: Option<f64> = None;
         eval(e, input.clone(), env, &mut |v| {
-            if let Value::Num(n, _) = &v { val = *n as i64; }
+            if let Value::Num(n, _) = &v { fval = Some(*n); }
             Ok(true)
         })?;
-        if val < 0 { Ok((len + val).max(0)) } else { Ok(val.min(len)) }
+        match fval {
+            // jq normalizes a negative bound (`n + len`) before converting it to
+            // an integer; the start floors and the end ceils. Truncating `n as
+            // i64` before adding `len` mis-placed fractional bounds for
+            // `del(.[a:b])` (e.g. `del(.[1.5:3.5])` deleted [1,3) not [1,4)). #722.
+            Some(n) if !n.is_nan() => {
+                let norm = if n < 0.0 { n + len as f64 } else { n };
+                let i = if is_end { norm.ceil() as i64 } else { norm.floor() as i64 };
+                Ok(i.clamp(0, len))
+            }
+            _ => Ok(default),
+        }
     } else {
         Ok(default)
     }

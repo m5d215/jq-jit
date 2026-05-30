@@ -2377,19 +2377,22 @@ fn validate_slice_spec(spec: &crate::value::ObjMap) -> Result<()> {
 /// jq's `.[N:M]` semantics: missing/null endpoints open to `(0, len)`, negative
 /// indices count from the end, and the result is clamped to `[0, len]`.
 fn slice_indices(slice_spec: &crate::value::ObjMap, len: i64) -> (usize, usize) {
+    let lenf = len as f64;
+    // Normalize a negative bound (`n + len`) before rounding, matching jq:
+    // rounding the raw float first mis-placed fractional negatives like `-0.5`
+    // (`(-0.5).ceil() == 0` discards the negativity, so `len` was never added).
+    // This path drives slice-assign and `del(.[a:b])`. #722.
     let start = match slice_spec.get("start") {
-        Some(Value::Num(n, _)) => n.floor() as i64,
+        Some(Value::Num(n, _)) => (if *n < 0.0 { n + lenf } else { *n }).floor() as i64,
         _ => 0,
     };
     let end = match slice_spec.get("end") {
-        Some(Value::Num(n, _)) => n.ceil() as i64,
+        Some(Value::Num(n, _)) => (if *n < 0.0 { n + lenf } else { *n }).ceil() as i64,
         Some(Value::Null) | None => len,
         _ => 0,
     };
-    let si_raw = if start < 0 { (len + start).max(0) } else { start.min(len) };
-    let ei_raw = if end < 0 { (len + end).max(0) } else { end.min(len) };
-    let si = si_raw as usize;
-    let ei = (ei_raw as usize).max(si);
+    let si = start.clamp(0, len) as usize;
+    let ei = (end.clamp(0, len) as usize).max(si);
     (si, ei)
 }
 
