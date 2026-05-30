@@ -206,7 +206,7 @@ fn normalize(output: &str) -> String {
 /// (`tests/selfdiff_jit_interp.rs`). The 4-way harness inherits these so
 /// known upstream-tracked divergences do not double-fail. Keep in sync
 /// with `selfdiff_jit_interp.rs::KNOWN_DIVERGENCES`.
-const KNOWN_DIVERGENCES: &[usize] = &[2197, 2202, 2207, 2333, 2338];
+const KNOWN_DIVERGENCES: &[usize] = &[2205, 2210, 2215, 2341, 2346];
 
 #[test]
 fn layer_pinned_self_diff() {

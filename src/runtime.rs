@@ -31,6 +31,16 @@ unsafe extern "C" {
     fn fmin(x: f64, y: f64) -> f64;
     fn fmod(x: f64, y: f64) -> f64;
     fn nextafter(x: f64, y: f64) -> f64;
+    // Standard C `strftime`, used to render `%Z` as the zone abbreviation in
+    // strflocaltime (#725). The `libc` crate omits this binding on the Windows
+    // MSVC target, so declare it ourselves; it exists in every CRT (glibc,
+    // Apple libc, Windows UCRT).
+    fn strftime(
+        s: *mut libc::c_char,
+        maxsize: usize,
+        format: *const libc::c_char,
+        timeptr: *const libc::tm,
+    ) -> usize;
 }
 
 /// Dispatch a builtin call by name.
@@ -3629,6 +3639,85 @@ fn civil_wday(year: i32, mon0: i32, mday: i32) -> i32 {
         .unwrap_or(6)
 }
 
+/// Rewrite a strftime format string, replacing each `%Z` specifier with the
+/// literal `abbrev`, escaping any `%` in `abbrev` so chrono treats it as text.
+/// `%%` (a literal percent) is passed through untouched.
+fn splice_local_zone(fmt: &str, abbrev: &str) -> String {
+    let mut out = String::with_capacity(fmt.len());
+    let mut chars = fmt.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            match chars.peek() {
+                Some('Z') => {
+                    chars.next();
+                    for ac in abbrev.chars() {
+                        if ac == '%' {
+                            out.push('%');
+                        }
+                        out.push(ac);
+                    }
+                }
+                Some('%') => {
+                    chars.next();
+                    out.push('%');
+                    out.push('%');
+                }
+                _ => out.push('%'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Return the local timezone abbreviation for `epoch` (e.g. `JST`, `UTC`) via
+/// libc, matching jq's `strftime("%Z")`. chrono cannot supply zone names, so we
+/// fill a `tm` with `localtime_r`/`localtime_s` and let libc `strftime` render
+/// `%Z`. Returns `None` on conversion failure; an empty zone name yields
+/// `Some("")`.
+#[cfg(any(unix, windows))]
+fn local_tz_abbrev(epoch: i64) -> Option<String> {
+    use std::ffi::CStr;
+    unsafe {
+        let t = epoch as libc::time_t;
+        let mut tmv: libc::tm = std::mem::zeroed();
+        #[cfg(unix)]
+        {
+            if libc::localtime_r(&t, &mut tmv).is_null() {
+                return None;
+            }
+        }
+        #[cfg(windows)]
+        {
+            if libc::localtime_s(&mut tmv, &t) != 0 {
+                return None;
+            }
+        }
+        let mut buf = [0u8; 64];
+        let n = strftime(
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            c"%Z".as_ptr() as *const libc::c_char,
+            &tmv,
+        );
+        // `strftime` returns 0 both on overflow and on a legitimately empty
+        // result; 64 bytes never overflows for a zone name, so treat 0 as "".
+        if n == 0 {
+            return Some(String::new());
+        }
+        CStr::from_ptr(buf.as_ptr() as *const libc::c_char)
+            .to_str()
+            .ok()
+            .map(|s| s.to_string())
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn local_tz_abbrev(_epoch: i64) -> Option<String> {
+    None
+}
+
 fn rt_strflocaltime_impl(input: &Value, fmt: &Value) -> Result<Value> {
     let fmt_str = match fmt {
         Value::Str(s) => s.clone(),
@@ -3649,7 +3738,18 @@ fn rt_strflocaltime_impl(input: &Value, fmt: &Value) -> Result<Value> {
             let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
                 .ok_or_else(|| anyhow::anyhow!("strflocaltime: epoch out of range"))?
                 .with_timezone(&chrono::Local);
-            Ok(Value::from_str(&dt.format(fmt_str.as_str()).to_string()))
+            // chrono renders `%Z` as the numeric offset (e.g. `+09:00`) because
+            // it has no IANA zone database. jq delegates to libc `strftime`,
+            // which emits the zone abbreviation (`JST`, `UTC`, ...). Splice the
+            // libc-provided abbreviation into the format string before chrono
+            // formats it, so every other specifier keeps chrono's behaviour.
+            if fmt_str.contains("%Z") {
+                let abbrev = local_tz_abbrev(secs).unwrap_or_default();
+                let fmt_final = splice_local_zone(fmt_str.as_str(), abbrev.as_str());
+                Ok(Value::from_str(&dt.format(fmt_final.as_str()).to_string()))
+            } else {
+                Ok(Value::from_str(&dt.format(fmt_str.as_str()).to_string()))
+            }
         }
         _ => bail!("strflocaltime/1 requires parsed datetime inputs"),
     }

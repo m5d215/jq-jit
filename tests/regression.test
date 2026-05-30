@@ -1384,6 +1384,14 @@ strftime("%Y")
 # for #113 is covered by the `[]` and `[1900]` cases above, both of
 # which format a zeroed tm_year and are platform-independent.)
 
+# Issue #725: %Z renders the zone abbreviation, not a numeric offset. A
+# broken-down-time array carries no offset so jq treats it as UTC; the
+# localtime variant (strflocaltime on an epoch number) is TZ-dependent and
+# verified manually (TZ=Asia/Tokyo -> "JST", TZ=UTC -> "UTC").
+strftime("%Z")
+[0,0,0,1,0,124,1,0]
+"UTC"
+
 # Issue #114: halt short-circuits but emits already-yielded values
 2, halt, 3
 1

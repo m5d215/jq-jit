@@ -153,7 +153,7 @@ fn normalize(output: &str) -> String {
 ///   without also flipping `have_decnum` to `true` breaks the upstream
 ///   `tests/official/jq.test` decnum consistency check (#443). Tracked
 ///   in #415.
-const KNOWN_DIVERGENCES: &[usize] = &[2197, 2202, 2207, 2333, 2338];
+const KNOWN_DIVERGENCES: &[usize] = &[2205, 2210, 2215, 2341, 2346];
 
 #[test]
 fn jit_vs_interpreter_self_diff() {
