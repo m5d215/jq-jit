@@ -10545,3 +10545,38 @@ def g(f): def w: def u: f; u; w; g(10)
 def mywalk(f): def w: if type=="object" then map_values(w) elif type=="array" then map(w) else . end | f; w; mywalk(if type=="number" then .+1 else . end)
 {"a":[1,2],"b":3}
 {"a":[2,3],"b":4}
+
+# Issue #715: try catches break, surfacing a value (constant catch).
+label $out | try break $out catch "c"
+null
+"c"
+
+# Issue #715: postfix ? swallows break and execution continues.
+[label $out | (break $out)?, 1]
+null
+[1]
+
+# Issue #715: a try inside the label catches break; the loop continues.
+[label $out | range(5) | try (if .==2 then break $out else . end) catch "x"]
+null
+[0,1,"x",3,4]
+
+# Issue #715: emitted values before the break survive; the break is caught.
+[label $out | try (1, break $out, 2) catch "c"]
+null
+[1,"c"]
+
+# Issue #715: a caught break is an object (shape {"__jq": id}).
+[label $out | try break $out catch (type, has("__jq"))]
+null
+["object",true]
+
+# Issue #715: // does NOT catch break (it reaches the label).
+[label $out | (break $out) // "alt"]
+null
+[]
+
+# Issue #715: an uncaught break still terminates the label normally.
+[label $o | range(5) | if .==2 then break $o else . end]
+null
+[0,1]
