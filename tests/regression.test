@@ -10510,3 +10510,13 @@ reduce .[] as [$a] ?// {a:$a} ?// $a (0; .+$a)
 reduce .[] as {$x} ?// $x (0; .+$x)
 [{"x":5},7]
 12
+
+# Issue #713: recurse(empty) emits the input, not null.
+recurse(empty)
+5
+5
+
+# Issue #713: recurse(empty) collected is the singleton input.
+[recurse(empty)]
+{"a":1}
+[{"a":1}]
