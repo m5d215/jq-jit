@@ -677,6 +677,87 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
 /// Long values are truncated with "..." appended.
 pub fn errdesc_pub(v: &Value) -> String { errdesc(v) }
 
+/// Constant-fold an object-key expression the way jq's compiler does, so a
+/// constant non-string key can be rejected at compile time (#726). jq folds
+/// exactly literals and binary arithmetic/comparison operators whose operands
+/// both fold; it does NOT fold `and`/`or`, the alternative `//`, unary
+/// operators, pipes, commas, indexing, `if`, variables, or anything
+/// input-dependent (those defer to runtime — e.g. `{(-1):2}` and `{(1|.+1):2}`
+/// are runtime errors in jq, not compile errors). A fold whose operation would
+/// error (e.g. `1 + "a"`) returns `None` so the runtime error surfaces
+/// normally. Returns the folded value, or `None` when the expression is not a
+/// compile-time constant under jq's rules.
+pub fn const_fold(expr: &crate::ir::Expr) -> Option<Value> {
+    use crate::ir::{BinOp, Expr, Literal};
+    use std::cmp::Ordering;
+    let bool_val = |b: bool| if b { Value::True } else { Value::False };
+    match expr {
+        Expr::Literal(lit) => Some(match lit {
+            Literal::Null => Value::Null,
+            Literal::True => Value::True,
+            Literal::False => Value::False,
+            Literal::Num(n, repr) => Value::number_opt(*n, repr.clone()),
+            Literal::Str(s) => Value::from_str(s),
+        }),
+        Expr::BinOp { op, lhs, rhs } => {
+            let a = const_fold(lhs)?;
+            let b = const_fold(rhs)?;
+            match op {
+                BinOp::Add => rt_add(&a, &b).ok(),
+                BinOp::Sub => rt_sub(&a, &b).ok(),
+                BinOp::Mul => rt_mul(&a, &b).ok(),
+                BinOp::Div => rt_div(&a, &b).ok(),
+                BinOp::Mod => rt_mod(&a, &b).ok(),
+                BinOp::Eq => Some(bool_val(compare_values(&a, &b) == Ordering::Equal)),
+                BinOp::Ne => Some(bool_val(compare_values(&a, &b) != Ordering::Equal)),
+                BinOp::Lt => Some(bool_val(compare_values(&a, &b) == Ordering::Less)),
+                BinOp::Le => Some(bool_val(compare_values(&a, &b) != Ordering::Greater)),
+                BinOp::Gt => Some(bool_val(compare_values(&a, &b) == Ordering::Greater)),
+                BinOp::Ge => Some(bool_val(compare_values(&a, &b) != Ordering::Less)),
+                // jq compiles `and`/`or` to short-circuiting branches, not a
+                // foldable binary op, so they defer to runtime.
+                BinOp::And | BinOp::Or => None,
+            }
+        }
+        // Array literal: jq folds `[...]` to a constant array when every
+        // element folds (`[]`, `[1,2]`, `[1+1]`, `[1,[2]]`), and defers when
+        // any element is input-dependent or a call (`[.]`, `[range(3)]`).
+        Expr::Collect { generator } => {
+            Some(Value::Arr(std::rc::Rc::new(const_fold_seq(generator)?)))
+        }
+        // Object literal: jq folds `{...}` to a constant object when every key
+        // folds to a string and every value folds (`{}`, `{a:1}`, `{"a":1}`).
+        Expr::ObjectConstruct { pairs } => {
+            let mut obj = new_objmap();
+            for (k, v) in pairs {
+                let key = match const_fold(k)? {
+                    Value::Str(s) => s,
+                    _ => return None,
+                };
+                obj.insert(key, const_fold(v)?);
+            }
+            Some(Value::object_from_map(obj))
+        }
+        _ => None,
+    }
+}
+
+/// Fold a generator expression into a constant sequence of values, for the
+/// array-literal case of [`const_fold`]. Returns `None` if any element is not
+/// a compile-time constant.
+fn const_fold_seq(expr: &crate::ir::Expr) -> Option<Vec<Value>> {
+    use crate::ir::Expr;
+    match expr {
+        Expr::Empty => Some(Vec::new()),
+        Expr::Comma { left, right } => {
+            let mut items = const_fold_seq(left)?;
+            items.extend(const_fold_seq(right)?);
+            Some(items)
+        }
+        other => Some(vec![const_fold(other)?]),
+    }
+}
+
 fn errdesc(v: &Value) -> String {
     // For numbers, prefer the canonical form of the original repr (so
     // `1.0` stays `"1.0"`, `1e30` becomes `"1E+30"` matching jq's decnum

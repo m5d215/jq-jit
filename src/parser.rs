@@ -2640,6 +2640,19 @@ impl Parser {
                 self.advance();
                 let key_expr = self.parse_pipe()?;
                 self.expect(&Token::RParen)?;
+                // A constant non-string key is a compile-time error in jq, so it
+                // cannot be caught by `try`/`?` (#726). Fold the key the way jq's
+                // compiler does and reject a non-string result here, before the
+                // program runs. Runtime-computed keys (`{(.k):2}`) fold to None
+                // and keep their runtime error.
+                if let Some(v) = crate::runtime::const_fold(&key_expr) {
+                    if !matches!(v, crate::value::Value::Str(_)) {
+                        bail!(
+                            "Cannot use {} as object key",
+                            crate::runtime::errdesc_pub(&v)
+                        );
+                    }
+                }
                 self.expect(&Token::Colon)?;
                 let val = self.parse_pipe_nocomma()?;
                 Ok((key_expr, val))
