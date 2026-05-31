@@ -2670,20 +2670,35 @@ pub fn apply_field_unary_num_raw(
         UnaryOp::ToString => {
             // Only the numeric-field shape stays in the fast path; strings,
             // arrays, etc. need the generic path's `tostring` semantics.
-            // A non-canonical number must keep jq's canonical repr through
-            // tostring (`2e3` -> `"2E+3"`, not `"2000"`), which is lost once
-            // parsed to f64 — bail to the generic path for those (#729).
+            // Locate the field once and reuse its byte range for both the
+            // canonical-repr check and the parse — `json_object_get_field_raw`
+            // shares `json_object_get_num`'s last-wins dedup, so a second
+            // object walk just to parse would be pure overhead (#729 perf).
             match json_object_get_field_raw(raw, 0, field) {
-                Some((vs, ve)) if raw_contains_non_canonical_number(&raw[vs..ve]) => {
-                    return RawApplyOutcome::Bail;
-                }
-                _ => {}
-            }
-            match json_object_get_num(raw, 0, field) {
-                Some(n) => {
-                    buf.push(b'"');
-                    push_jq_number_bytes(buf, n);
-                    buf.extend_from_slice(b"\"\n");
+                Some((vs, ve)) => {
+                    let val = &raw[vs..ve];
+                    // A non-canonical number must keep jq's canonical repr
+                    // through tostring (`2e3` -> `"2E+3"`, not `"2000"`),
+                    // which is lost once parsed to f64 — bail for those (#729).
+                    if raw_contains_non_canonical_number(val) {
+                        return RawApplyOutcome::Bail;
+                    }
+                    // Mirror `json_object_get_num`: a 16+ digit integer is not
+                    // kept in the fast path (it needs the generic f64 route).
+                    // The canonical check above guarantees no `.`/`e`/`E`, so a
+                    // numeric value here is a plain integer and its digit count
+                    // is its width.
+                    if val.iter().filter(|c| c.is_ascii_digit()).count() > 15 {
+                        return RawApplyOutcome::Bail;
+                    }
+                    match parse_json_num(val) {
+                        Some(n) => {
+                            buf.push(b'"');
+                            push_jq_number_bytes(buf, n);
+                            buf.extend_from_slice(b"\"\n");
+                        }
+                        None => return RawApplyOutcome::Bail,
+                    }
                 }
                 None => return RawApplyOutcome::Bail,
             }

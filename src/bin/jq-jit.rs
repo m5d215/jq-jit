@@ -5108,13 +5108,11 @@ fn real_main() {
                     let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        // A non-canonical number in the value (or key) must be
-                        // re-rendered through Value; bail to the generic path
-                        // rather than echo the source lexeme (#729).
-                        if raw_contains_non_canonical_number(raw) {
-                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                        } else if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                        // The key is a string (emitted verbatim) and the value
+                        // goes through `emit_resolved_value`, which canonicalises
+                        // any non-canonical number repr itself (#729) — so no
+                        // whole-record pre-scan is needed here.
+                        if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
                             let (ks, ke) = ranges_buf[key_idx];
                             let key_val = &raw[ks..ke];
                             // Key must be a string
@@ -14068,11 +14066,11 @@ fn real_main() {
                 let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    // Canonicalise non-canonical numbers via the generic path (#729).
-                    if raw_contains_non_canonical_number(raw) {
-                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
-                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                    } else if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                    // The key is a string (emitted verbatim) and the value goes
+                    // through `emit_resolved_value`, which canonicalises any
+                    // non-canonical number repr itself (#729) — so no whole-record
+                    // pre-scan is needed here.
+                    if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
                         let (ks, ke) = ranges_buf[key_idx];
                         let key_val = &raw[ks..ke];
                         if key_val.len() >= 2 && key_val[0] == b'"' {
