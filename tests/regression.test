@@ -10810,3 +10810,28 @@ if .b>0 then {y:.c} else 0 end
 .x>5
 {"x":9007199254740994}
 true
+
+# Issue #729 perf: dynamic-key object still canonicalizes the value (single-walk emit, no whole-record pre-scan)
+{(.name):.x}
+{"name":"k","x":2e3}
+{"k":2E+3}
+
+# Issue #729 perf: dynamic-key object with computed value stays canonical
+{(.name):(.x*2)}
+{"name":"k","x":21}
+{"k":42}
+
+# Issue #729 perf: dynamic-key object passes a clean 16-digit integer through verbatim
+{(.name):.x}
+{"name":"k","x":1234567890123456}
+{"k":1234567890123456}
+
+# Issue #729 perf: tostring fast path keeps a clean integer in-path
+.x|tostring
+{"x":12345}
+"12345"
+
+# Issue #729 perf: tostring bails a 16-digit integer to the generic path (matches json_object_get_num guard)
+.x|tostring
+{"x":1234567890123456}
+"1234567890123456"
