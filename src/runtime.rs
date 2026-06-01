@@ -2251,21 +2251,19 @@ fn rt_str_index(v: &Value, target: &Value, is_rindex: bool) -> Result<Value> {
                 Ok(Value::Null)
             }
         }
-        (Value::Arr(a), _) => {
-            if is_rindex {
-                for (i, item) in a.iter().enumerate().rev() {
-                    if values_equal(item, target) {
-                        return Ok(Value::number(i as f64));
-                    }
-                }
-                Ok(Value::Null)
-            } else {
-                for (i, item) in a.iter().enumerate() {
-                    if values_equal(item, target) {
-                        return Ok(Value::number(i as f64));
-                    }
-                }
-                Ok(Value::Null)
+        (Value::Arr(_), _) => {
+            // jq defines `index(x): indices(x)|.[0]` and
+            // `rindex(x): indices(x)|.[-1:][0]`. Delegating to `rt_indices`
+            // covers both element search (scalar needle) and contiguous
+            // subsequence search (array needle); the previous element-only
+            // comparison returned null for an array needle (#779).
+            match rt_indices(v, target)? {
+                Value::Arr(list) => Ok(if is_rindex {
+                    list.last().cloned().unwrap_or(Value::Null)
+                } else {
+                    list.first().cloned().unwrap_or(Value::Null)
+                }),
+                _ => Ok(Value::Null),
             }
         }
         // jq's def is `index(x): indices(x) | .[0]` (and `rindex(x): ... | .[-1:][0]`),

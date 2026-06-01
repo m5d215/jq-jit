@@ -11274,3 +11274,23 @@ def f: label $o | (10, break $o, 20); try (f, 99) catch "c"
 null
 10
 99
+
+# Issue #779 index with an array argument is a contiguous-subsequence search
+index([1,2])
+[0,1,2]
+1
+
+# Issue #779 rindex with an array argument returns the last subsequence start
+rindex([2,3])
+[1,2,3,2,3]
+3
+
+# Issue #779 index still works for a scalar element needle
+index(1)
+[0,1,2]
+1
+
+# Issue #779 index with a no-match array needle returns null
+index([9])
+[0,1,2]
+null
