@@ -3675,20 +3675,93 @@ fn rt_strptime(v: &Value, fmt: &Value) -> Result<Value> {
             }
             // Partial format (date-only, time-only, single field, …): libc's
             // strptime fills whatever fields it parses, but chrono's
-            // `parse_from_str` is all-or-nothing and previously fell straight to
-            // the zeroed `[1900,0,…]` placeholder. Parse field-by-field with
-            // `chrono::format::Parsed` instead. #724.
+            // `parse_from_str` is all-or-nothing. `parse_and_remainder` resolves
+            // the partial fields and, crucially, reports any unconsumed input so
+            // trailing garbage is rejected like jq rather than silently dropped.
+            // #724 / #772.
             let mut parsed = chrono::format::Parsed::new();
-            if chrono::format::parse(&mut parsed, s.as_str(), chrono::format::StrftimeItems::new(f.as_str())).is_ok() {
-                return Ok(broken_to_value(&parsed_to_broken(&parsed), 0.0));
+            if let Ok(rem) = chrono::format::parse_and_remainder(
+                &mut parsed, s.as_str(), chrono::format::StrftimeItems::new(f.as_str()),
+            ) {
+                if rem.is_empty() {
+                    return Ok(broken_to_value(&parsed_to_broken(&parsed), 0.0));
+                }
             }
-            // Total mismatch: keep the historical zeroed-tm surface so callers
-            // like `fromdateiso8601` (which validate in `rt_fromisodate`)
-            // observe the same shape.
-            Ok(broken_to_value(&BrokenTime { year: 1900, ..BrokenTime::default() }, 0.0))
+            // The format did not cleanly match (mismatch, trailing input,
+            // out-of-range field, or a conflicting double-set). jq's libc
+            // `strptime` is last-wins on duplicate field specifiers (e.g.
+            // `%m %B` set the month twice), which chrono rejects as a conflict;
+            // recover that one case by parsing each format item independently.
+            // A genuine mismatch / out-of-range / trailing input still fails and
+            // propagates jq's error rather than the old zeroed placeholder. #772
+            if let Some(bt) = strptime_last_wins(s.as_str(), f.as_str()) {
+                return Ok(broken_to_value(&bt, 0.0));
+            }
+            bail!(r#"date "{}" does not match format "{}""#, s, f)
         }
         _ => bail!("strptime/1 requires string inputs and arguments"),
     }
+}
+
+/// Parse `s` against `f` one format item at a time, so a field that is set by
+/// more than one specifier (jq's libc `strptime` is last-wins on `%m %B` etc.)
+/// does not abort the whole parse the way `chrono::format::parse` does on a
+/// conflict. Returns `None` if any item fails to match, an out-of-range field
+/// is seen, or input is left over (trailing garbage) — all of which jq treats
+/// as an error.
+fn strptime_last_wins(s: &str, f: &str) -> Option<BrokenTime> {
+    use chrono::format::{parse_and_remainder, Parsed, StrftimeItems};
+    // Each item parses against the remaining input with its own `Parsed`, so a
+    // later item's value can override an earlier one without a conflict error.
+    let mut cursor = s;
+    let mut per_item: Vec<Parsed> = Vec::new();
+    for item in StrftimeItems::new(f) {
+        let mut p = Parsed::new();
+        match parse_and_remainder(&mut p, cursor, std::iter::once(item)) {
+            Ok(rem) => cursor = rem,
+            Err(_) => return None,
+        }
+        per_item.push(p);
+    }
+    if !cursor.is_empty() {
+        return None;
+    }
+    // Merge in reverse so the last occurrence of each field wins: the first set
+    // of a field sticks and chrono rejects later (i.e. earlier-in-format)
+    // conflicting writes, which we ignore.
+    let mut m = Parsed::new();
+    for p in per_item.iter().rev() {
+        merge_parsed_field(&mut m, p);
+    }
+    Some(parsed_to_broken(&m))
+}
+
+/// Copy whatever fields `p` set into `m`, ignoring chrono's conflict errors
+/// (the caller merges in reverse order, so the first writer — the last format
+/// item — wins). Covers the field set that `parsed_to_broken` consults.
+fn merge_parsed_field(m: &mut chrono::format::Parsed, p: &chrono::format::Parsed) {
+    if let Some(v) = p.year() { let _ = m.set_year(v as i64); }
+    if let Some(v) = p.year_div_100() { let _ = m.set_year_div_100(v as i64); }
+    if let Some(v) = p.year_mod_100() { let _ = m.set_year_mod_100(v as i64); }
+    if let Some(v) = p.isoyear() { let _ = m.set_isoyear(v as i64); }
+    if let Some(v) = p.isoyear_div_100() { let _ = m.set_isoyear_div_100(v as i64); }
+    if let Some(v) = p.isoyear_mod_100() { let _ = m.set_isoyear_mod_100(v as i64); }
+    if let Some(v) = p.month() { let _ = m.set_month(v as i64); }
+    if let Some(v) = p.week_from_sun() { let _ = m.set_week_from_sun(v as i64); }
+    if let Some(v) = p.week_from_mon() { let _ = m.set_week_from_mon(v as i64); }
+    if let Some(v) = p.isoweek() { let _ = m.set_isoweek(v as i64); }
+    if let Some(v) = p.weekday() { let _ = m.set_weekday(v); }
+    if let Some(v) = p.ordinal() { let _ = m.set_ordinal(v as i64); }
+    if let Some(v) = p.day() { let _ = m.set_day(v as i64); }
+    match (p.hour_div_12(), p.hour_mod_12()) {
+        (Some(d), Some(mm)) => { let _ = m.set_hour((d * 12 + mm) as i64); }
+        (Some(d), None) => { let _ = m.set_ampm(d == 1); }
+        (None, Some(mm)) => { let _ = m.set_hour12(if mm == 0 { 12 } else { mm as i64 }); }
+        (None, None) => {}
+    }
+    if let Some(v) = p.minute() { let _ = m.set_minute(v as i64); }
+    if let Some(v) = p.second() { let _ = m.set_second(v as i64); }
+    if let Some(v) = p.nanosecond() { let _ = m.set_nanosecond(v as i64); }
 }
 
 /// Build a broken-down-time from a partially-parsed format, mirroring libc
