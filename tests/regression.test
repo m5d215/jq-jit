@@ -11264,3 +11264,13 @@ null
 [label $a | (1, (label $b | (2, break $a, 3)), 4)]
 null
 [1,2]
+
+# Issue #777 label: a self-contained break inside a def must not leak into an enclosing try/catch
+def f: label $o | break $o; try f catch "c"
+null
+
+# Issue #777 label: break in a def drops only the def's tail, sibling try branches survive
+def f: label $o | (10, break $o, 20); try (f, 99) catch "c"
+null
+10
+99

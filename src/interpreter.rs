@@ -2841,7 +2841,18 @@ impl Filter {
         if push_const_json(expr, &mut buf) {
             return Some(vec![buf]);
         }
-        // Evaluate with null input using eval
+        // This fast path evaluates `self.simplified` against a `null` input
+        // with an env that carries no user functions. That is only faithful
+        // when the program defines none: a `FuncCall` would otherwise hit an
+        // empty func table and raise "undefined function", which an enclosing
+        // `try`/`catch` silently turns into bogus output (#777 — e.g.
+        // `def f: label $o|break $o; try f catch "c"` wrongly yielded "c").
+        // Const-foldable input-free exprs are already returned above via
+        // `push_const_json`; anything left that references user defs must run
+        // on the authoritative input-carrying path instead, so bail.
+        if !self.parsed.1.is_empty() {
+            return None;
+        }
         let mut outputs = Vec::new();
         let env: crate::eval::EnvRef = std::rc::Rc::new(std::cell::RefCell::new(crate::eval::Env::new(vec![])));
         let result = crate::eval::eval(expr, crate::value::Value::Null, &env, &mut |v| {

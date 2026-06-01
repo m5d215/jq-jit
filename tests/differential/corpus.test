@@ -3850,3 +3850,9 @@ null
 
 [label $x | (label $x | break $x), 99]
 null
+
+def f: label $o | break $o; try f catch "c"
+null
+
+def f: label $o | (10, break $o, 20); try (f, 99) catch "c"
+null
