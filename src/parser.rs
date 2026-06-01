@@ -28,6 +28,14 @@ struct Scope {
     /// Next available memoize slot id. Each lexical occurrence of `memoize(...)`
     /// gets a unique slot; the Env allocates one cache map per slot.
     next_memo_slot: u32,
+    /// Monotonic binding counter shared by `def`s and filter parameters, so the
+    /// lexically innermost binding of a name can be identified when a 0-arg call
+    /// could resolve to either (#766). Higher = bound later = more local.
+    next_bind_seq: u32,
+    /// `var_index` → binding sequence, for filter-parameter vars.
+    var_bind_seq: std::collections::HashMap<u16, u32>,
+    /// `func_id` → binding sequence, for user-defined functions.
+    func_bind_seq: std::collections::HashMap<usize, u32>,
 }
 
 impl Scope {
@@ -39,7 +47,25 @@ impl Scope {
             compiled_funcs: Vec::new(),
             func_captures: std::collections::HashMap::new(),
             next_memo_slot: 0,
+            next_bind_seq: 0,
+            var_bind_seq: std::collections::HashMap::new(),
+            func_bind_seq: std::collections::HashMap::new(),
         }
+    }
+
+    /// Allocate the next shared binding sequence number (#766).
+    fn next_bind_seq(&mut self) -> u32 {
+        let s = self.next_bind_seq;
+        self.next_bind_seq += 1;
+        s
+    }
+
+    /// Whether the def `func_id` is lexically more local (bound later) than the
+    /// filter-parameter var `var_idx` of the same name. Innermost wins (#766).
+    fn func_shadows_param(&self, func_id: usize, var_idx: u16) -> bool {
+        let fs = self.func_bind_seq.get(&func_id).copied().unwrap_or(0);
+        let vs = self.var_bind_seq.get(&var_idx).copied().unwrap_or(0);
+        fs > vs
     }
 
     fn alloc_memo_slot(&mut self) -> u32 {
@@ -52,6 +78,8 @@ impl Scope {
         let idx = self.next_var;
         self.next_var += 1;
         self.vars.push((name.to_string(), idx));
+        let seq = self.next_bind_seq();
+        self.var_bind_seq.insert(idx, seq);
         idx
     }
 
@@ -64,6 +92,8 @@ impl Scope {
     fn define_func(&mut self, name: &str, nargs: usize, body: Expr, param_vars: Vec<u16>) -> usize {
         let func_id = self.compiled_funcs.len();
         self.funcs.push((name.to_string(), func_id, nargs));
+        let seq = self.next_bind_seq();
+        self.func_bind_seq.insert(func_id, seq);
         self.compiled_funcs.push(CompiledFunc {
             name: Some(name.to_string()),
             nargs,
@@ -3112,9 +3142,23 @@ impl Parser {
     }
 
     fn compile_builtin_noargs(&self, name: &str) -> Result<Expr> {
-        // User-defined 0-arg functions shadow same-named builtins.
-        if let Some(func_id) = self.scope.lookup_func(name, 0) {
-            return Ok(self.scope.make_funccall(func_id, vec![]));
+        // A bare 0-arg name can resolve to a user `def` or a filter parameter
+        // (including the implicit `x` filter introduced by a `$x` value param).
+        // Both shadow same-named builtins, and between the two the lexically
+        // innermost binding wins: a parameter shadows an enclosing `def`, while
+        // a `def` nested inside the parameter's body shadows the parameter (#766).
+        let func = self.scope.lookup_func(name, 0);
+        let fparam = self.scope.lookup_var(&format!("\x00fparam:{}", name));
+        match (func, fparam) {
+            (Some(func_id), Some(var_idx)) => {
+                if self.scope.func_shadows_param(func_id, var_idx) {
+                    return Ok(self.scope.make_funccall(func_id, vec![]));
+                }
+                return Ok(Expr::LoadVar { var_index: var_idx });
+            }
+            (Some(func_id), None) => return Ok(self.scope.make_funccall(func_id, vec![])),
+            (None, Some(var_idx)) => return Ok(Expr::LoadVar { var_index: var_idx }),
+            (None, None) => {}
         }
         match name {
             "not" => Ok(Expr::Not),
@@ -3333,23 +3377,13 @@ impl Parser {
                 Ok(Expr::Literal(Literal::Str("<stdin>".to_string())))
             }
             _ => {
-                // Check user-defined functions
-                if let Some(func_id) = self.scope.lookup_func(name, 0) {
-                    // Forward any lambda-lifted capture params (#714).
-                    Ok(self.scope.make_funccall(func_id, vec![]))
-                } else {
-                    // Check for filter parameter reference (bare identifier like `x` in `def f(x):`)
-                    let fparam_name = format!("\x00fparam:{}", name);
-                    if let Some(var_idx) = self.scope.lookup_var(&fparam_name) {
-                        Ok(Expr::LoadVar { var_index: var_idx })
-                    } else {
-                        // Treat as a 0-arg builtin via runtime
-                        Ok(Expr::UnaryOp {
-                            op: name_to_unary_op(name)?,
-                            operand: Box::new(Expr::Input),
-                        })
-                    }
-                }
+                // User defs and filter parameters were already resolved at the
+                // top of this function (#766), so anything reaching here is a
+                // 0-arg builtin handled via runtime.
+                Ok(Expr::UnaryOp {
+                    op: name_to_unary_op(name)?,
+                    operand: Box::new(Expr::Input),
+                })
             }
         }
     }

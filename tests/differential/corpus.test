@@ -3752,3 +3752,20 @@ null
 
 def f: {$x}; "ok"
 null
+
+# ---------- Issue #766: param shadows enclosing def of the same name ----------
+
+def x: 1; def f($x): x; f(5)
+null
+
+def x: 1; def f(x): x; f(2)
+null
+
+def f($x): def x: 9; x; f(5)
+null
+
+def f(g): def g: 2; g; f(1)
+null
+
+def x: 1; [x, (def f($x): x; f(5))]
+null
