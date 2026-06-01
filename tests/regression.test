@@ -10905,3 +10905,48 @@ del(.[(0,1):(3,4)])
 del(.a[(0,2):(1,4)])
 {"a":[10,20,30,40,50,60]}
 {"a":[50,60]}
+
+# Issue #762 datetime: strptime applies %p alone (PM sets hour 12)
+strptime("%p")
+"PM"
+[1900,0,0,12,0,0,6,-1]
+
+# Issue #762 datetime: strptime applies %p alone (AM keeps hour 0)
+strptime("%p")
+"AM"
+[1900,0,0,0,0,0,6,-1]
+
+# Issue #762 datetime: strptime combines %I and %p (5 PM -> 17)
+strptime("%I:%M %p")
+"05:30 PM"
+[1900,0,0,17,30,0,6,-1]
+
+# Issue #762 datetime: strptime 12 AM with %I/%p is midnight (hour 0)
+strptime("%I:%M %p")
+"12:00 AM"
+[1900,0,0,0,0,0,6,-1]
+
+# Issue #762 datetime: strptime applies %C alone (century 21 -> year 2100, jq's boundary wday)
+strptime("%C")
+"21"
+[2100,0,0,0,0,0,3,-1]
+
+# Issue #762 datetime: strptime applies %C with a leap century (no wday correction)
+strptime("%C")
+"20"
+[2000,0,0,0,0,0,5,-1]
+
+# Issue #762 datetime: strptime combines %C and %y (century + 2-digit year)
+strptime("%C %y")
+"20 05"
+[2005,0,0,0,0,0,5,-1]
+
+# Issue #762 datetime: strptime combines %p and %C across the format
+strptime("%p %C")
+"PM 21"
+[2100,0,0,12,0,0,3,-1]
+
+# Issue #762 datetime: strptime %C with a full date resolves the calendar wday
+strptime("%C %y-%m-%d")
+"21 24-03-15"
+[2124,2,15,0,0,0,3,74]
