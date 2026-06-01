@@ -912,6 +912,13 @@ def id: .; id | id | id
 def twice(f): f | f; twice(. + 1)
 0
 
+# an unused def referencing an undefined function is ignored (#807)
+def e: undefined_fn; 5
+null
+
+def e($p): undefined_fn(1,2); 5
+null
+
 # ---------- Issue #65 parser coverage: mutual recursion ----------
 
 def even: . == 0 or (. > 0 and (. - 1 | odd)); def odd: . > 0 and (. - 1 | even); 4 | even
