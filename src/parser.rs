@@ -230,6 +230,15 @@ struct Lexer {
     chars: Vec<char>,
     pos: usize,
     tokens: Vec<Token>,
+    /// Source char offset where each token in `tokens` begins. Parallel to
+    /// `tokens`; backfilled per tokenize iteration so multi-token emitters
+    /// (string interpolation) share the start of their originating token.
+    /// Converted to 1-based line numbers in `token_lines` after tokenize so
+    /// `$__loc__` can report the actual source line (#778).
+    token_starts: Vec<usize>,
+    /// 1-based source line for each token in `tokens`, computed from
+    /// `token_starts` at the end of `tokenize`.
+    token_lines: Vec<usize>,
 }
 
 impl Lexer {
@@ -238,6 +247,8 @@ impl Lexer {
             chars: input.chars().collect(),
             pos: 0,
             tokens: Vec::new(),
+            token_starts: Vec::new(),
+            token_lines: Vec::new(),
         }
     }
 
@@ -246,6 +257,7 @@ impl Lexer {
             self.skip_whitespace_and_comments();
             if self.pos >= self.chars.len() { break; }
 
+            let tok_start = self.pos;
             let ch = self.chars[self.pos];
             match ch {
                 '|' => {
@@ -442,8 +454,31 @@ impl Lexer {
                     bail!("unexpected character '{}' at position {}", ch, self.pos);
                 }
             }
+            // Attribute every token emitted this iteration (one, or several for
+            // string interpolation) to the char offset where the iteration began.
+            while self.token_starts.len() < self.tokens.len() {
+                self.token_starts.push(tok_start);
+            }
         }
         self.tokens.push(Token::Eof);
+        while self.token_starts.len() < self.tokens.len() {
+            self.token_starts.push(self.chars.len());
+        }
+        // Convert char offsets to 1-based line numbers in a single forward pass
+        // (token_starts is non-decreasing across the main token stream).
+        self.token_lines.clear();
+        self.token_lines.reserve(self.token_starts.len());
+        let mut cursor = 0usize;
+        let mut line = 1usize;
+        for &start in &self.token_starts {
+            while cursor < start {
+                if self.chars[cursor] == '\n' {
+                    line += 1;
+                }
+                cursor += 1;
+            }
+            self.token_lines.push(line);
+        }
         Ok(self.tokens.clone())
     }
 
@@ -780,6 +815,11 @@ enum StringSegment {
 /// Parser state.
 pub struct Parser {
     tokens: Vec<Token>,
+    /// 1-based source line for each token in `tokens` (parallel vector).
+    /// Used to give `$__loc__` the actual source line (#778). May be empty
+    /// for parsers built without line info, in which case lookups fall back
+    /// to line 1.
+    token_lines: Vec<usize>,
     pos: usize,
     scope: Scope,
     lib_dirs: Vec<String>,
@@ -812,8 +852,10 @@ impl Parser {
     pub fn parse_with_libs(input: &str, lib_dirs: &[String]) -> Result<ParseResult> {
         let mut lexer = Lexer::new(input);
         let tokens = lexer.tokenize()?;
+        let token_lines = std::mem::take(&mut lexer.token_lines);
         let mut parser = Parser {
             tokens,
+            token_lines,
             pos: 0,
             scope: Scope::new(),
             lib_dirs: lib_dirs.to_vec(),
@@ -889,6 +931,12 @@ impl Parser {
 
     fn current(&self) -> &Token {
         self.tokens.get(self.pos).unwrap_or(&Token::Eof)
+    }
+
+    /// 1-based source line of the token at the current cursor, for `$__loc__`
+    /// (#778). Falls back to line 1 when line info is unavailable.
+    fn current_line(&self) -> usize {
+        self.token_lines.get(self.pos).copied().unwrap_or(1)
     }
 
     fn peek(&self) -> &Token {
@@ -1258,6 +1306,7 @@ impl Parser {
 
         let mut lexer = Lexer::new(&content);
         let tokens = lexer.tokenize()?;
+        let mod_token_lines = std::mem::take(&mut lexer.token_lines);
 
         // Add the module's directory to lib_dirs for resolving relative imports
         let mut mod_lib_dirs = self.lib_dirs.clone();
@@ -1275,6 +1324,7 @@ impl Parser {
         mod_scope.next_var = self.scope.next_var;
         let mut mod_parser = Parser {
             tokens,
+            token_lines: mod_token_lines,
             pos: 0,
             scope: mod_scope,
             lib_dirs: mod_lib_dirs,
@@ -2585,6 +2635,7 @@ impl Parser {
             }
 
             Token::Variable(name) => {
+                let loc_line = self.current_line();
                 self.advance();
                 // Check for $var::name (namespace access for data imports)
                 if self.at(&Token::Colon) && matches!(self.tokens.get(self.pos + 1), Some(Token::Colon)) {
@@ -2598,7 +2649,7 @@ impl Parser {
                     }
                 }
                 if name == "__loc__" {
-                    Ok(Expr::Loc { file: "<top-level>".to_string(), line: 1 })
+                    Ok(Expr::Loc { file: "<top-level>".to_string(), line: loc_line as i64 })
                 } else if name == "ENV" {
                     Ok(Expr::Env)
                 } else {
@@ -2700,6 +2751,7 @@ impl Parser {
                 }
             }
             Token::Variable(name) => {
+                let loc_line = self.current_line();
                 self.advance();
                 if self.eat(&Token::Colon) {
                     let val = self.parse_pipe_nocomma()?;
@@ -2709,7 +2761,7 @@ impl Parser {
                 } else {
                     // Shorthand: {$x} = {"x": $x}
                     let val_expr = if name == "__loc__" {
-                        Expr::Loc { file: "<top-level>".to_string(), line: 1 }
+                        Expr::Loc { file: "<top-level>".to_string(), line: loc_line as i64 }
                     } else if name == "ENV" {
                         Expr::Env
                     } else {
