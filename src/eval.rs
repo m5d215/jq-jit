@@ -1728,6 +1728,91 @@ fn eval_assign_body(
     })
 }
 
+/// `while(cond; update)` with full generator semantics.
+///
+/// jq desugars it to `def _while: if cond then ., (update | _while) else empty
+/// end; _while;`. The update is therefore a *generator*: each value it yields is
+/// an independent successor that re-enters the loop. The common case (update
+/// yields exactly one value) stays a tight tail-iteration; an empty update
+/// terminates the chain (#760), and a multi-valued update fans out (#767).
+fn eval_while_gen(
+    cond: &Expr, update: &Expr, always_true: bool, mut current: Value,
+    env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult,
+) -> GenResult {
+    loop {
+        if !always_true {
+            let is_true = if let Ok(v) = eval_one(cond, &current, env) {
+                v.is_truthy()
+            } else {
+                let mut t = false;
+                eval(cond, current.clone(), env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
+                t
+            };
+            if !is_true { return Ok(true); }
+        }
+        if !cb(current.clone())? { return Ok(false); }
+        // Advance through `update`, honouring its generator semantics.
+        if let Ok(next) = eval_one(update, &current, env) {
+            current = next; // single value → tail-iterate (hot path)
+            continue;
+        }
+        let mut succ: Vec<Value> = Vec::new();
+        eval(update, current.clone(), env, &mut |v| { succ.push(v); Ok(true) })?;
+        match succ.len() {
+            0 => return Ok(true),                  // empty update → no successor (#760)
+            1 => current = succ.pop().unwrap(),    // single value → tail-iterate
+            _ => {                                 // multi-valued → fan out (#767)
+                for u in succ {
+                    if !eval_while_gen(cond, update, always_true, u, env, cb)? {
+                        return Ok(false);
+                    }
+                }
+                return Ok(true);
+            }
+        }
+    }
+}
+
+/// `until(cond; update)` with full generator semantics.
+///
+/// jq desugars it to `def _until: if cond then . else (update | _until) end;
+/// _until;`. As with `while`, the update is a generator: an empty update yields
+/// no successor (so the loop terminates emitting nothing) and a multi-valued
+/// update fans out, each value re-entering the loop.
+fn eval_until_gen(
+    cond: &Expr, update: &Expr, mut current: Value,
+    env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult,
+) -> GenResult {
+    loop {
+        let is_true = if let Ok(v) = eval_one(cond, &current, env) {
+            v.is_truthy()
+        } else {
+            let mut t = false;
+            eval(cond, current.clone(), env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
+            t
+        };
+        if is_true { return cb(current); }
+        if let Ok(next) = eval_one(update, &current, env) {
+            current = next; // single value → tail-iterate (hot path)
+            continue;
+        }
+        let mut succ: Vec<Value> = Vec::new();
+        eval(update, current.clone(), env, &mut |v| { succ.push(v); Ok(true) })?;
+        match succ.len() {
+            0 => return Ok(true),                  // empty update → no successor
+            1 => current = succ.pop().unwrap(),    // single value → tail-iterate
+            _ => {                                 // multi-valued → fan out
+                for u in succ {
+                    if !eval_until_gen(cond, update, u, env, cb)? {
+                        return Ok(false);
+                    }
+                }
+                return Ok(true);
+            }
+        }
+    }
+}
+
 pub fn eval(
     expr: &Expr, input: Value, env: &EnvRef,
     cb: &mut dyn FnMut(Value) -> GenResult,
@@ -1945,9 +2030,25 @@ pub fn eval(
                         } else if let Ok(next) = eval_one(update, &current, env) {
                             current = next;
                         } else {
-                            let mut next = Value::Null;
-                            eval(update, current, env, &mut |v| { next = v; Ok(true) })?;
-                            current = next;
+                            // `update` is a generator here: 0, 1, or many successors.
+                            let mut succ: Vec<Value> = Vec::new();
+                            eval(update, current.clone(), env, &mut |v| { succ.push(v); Ok(true) })?;
+                            match succ.len() {
+                                0 => break,                        // empty update terminates (#760)
+                                1 => current = succ.pop().unwrap(),
+                                _ => {
+                                    // Multi-valued update (#767): each successor spawns an
+                                    // independent continuation of `while(cond; update)`, whose
+                                    // values flow through the piped `right`. Delegate to the
+                                    // generator helper so the linear fast path stays untouched.
+                                    for u in succ {
+                                        let go = eval_while_gen(cond, update, always_true, u, env,
+                                            &mut |wv| eval(right, wv, env, cb))?;
+                                        if !go { return Ok(false); }
+                                    }
+                                    break;
+                                }
+                            }
                         }
                     }
                     Ok(true)
@@ -3169,50 +3270,11 @@ pub fn eval(
 
         Expr::While { cond, update } => {
             let always_true = matches!(cond.as_ref(), Expr::Literal(Literal::True));
-            let mut current = input;
-            loop {
-                if !always_true {
-                    let is_true = if let Ok(v) = eval_one(cond, &current, env) {
-                        v.is_truthy()
-                    } else {
-                        let mut t = false;
-                        eval(cond, current.clone(), env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
-                        t
-                    };
-                    if !is_true { break; }
-                }
-                if !cb(current.clone())? { return Ok(false); }
-                if let Ok(next) = eval_one(update, &current, env) {
-                    current = next;
-                } else {
-                    let mut next = Value::Null;
-                    eval(update, current, env, &mut |v| { next = v; Ok(true) })?;
-                    current = next;
-                }
-            }
-            Ok(true)
+            eval_while_gen(cond, update, always_true, input, env, cb)
         }
 
         Expr::Until { cond, update } => {
-            let mut current = input;
-            loop {
-                let is_true = if let Ok(v) = eval_one(cond, &current, env) {
-                    v.is_truthy()
-                } else {
-                    let mut t = false;
-                    eval(cond, current.clone(), env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
-                    t
-                };
-                if is_true { break; }
-                if let Ok(next) = eval_one(update, &current, env) {
-                    current = next;
-                } else {
-                    let mut next = Value::Null;
-                    eval(update, current, env, &mut |v| { next = v; Ok(true) })?;
-                    current = next;
-                }
-            }
-            cb(current)
+            eval_until_gen(cond, update, input, env, cb)
         }
 
         Expr::Repeat { update } => {
