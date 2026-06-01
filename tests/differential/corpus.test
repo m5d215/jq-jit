@@ -1837,6 +1837,11 @@ null
 [range(65; 70)] | implode
 null
 
+# NOTE: implode of an *infinite* codepoint (#814) is NOT in the corpus —
+# jq casts the codepoint with `(int)`, and `(int)inf` is implementation-
+# defined, so the system jq may differ across platforms. Covered in
+# tests/regression.test (jq-jit basis) instead.
+
 # ---------- Issue #65 parser coverage: nested try chains ----------
 
 try (try error("inner") catch error("outer")) catch .

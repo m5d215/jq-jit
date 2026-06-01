@@ -1773,8 +1773,15 @@ fn rt_implode(v: &Value) -> Result<Value> {
             for item in a.iter() {
                 match item {
                     Value::Num(n, _) => {
-                        if n.is_nan() || n.is_infinite() {
+                        // NaN is rejected ("number (null) can't be imploded"),
+                        // but jq clamps an *infinite* codepoint to U+FFFD rather
+                        // than erroring (#814).
+                        if n.is_nan() {
                             bail!("{} can't be imploded, unicode codepoint needs to be numeric", errdesc(item));
+                        }
+                        if n.is_infinite() {
+                            s.push('\u{FFFD}');
+                            continue;
                         }
                         let n_val = *n as i64;
                         // Negative, surrogate range (0xD800-0xDFFF), or > 0x10FFFF → replacement char
