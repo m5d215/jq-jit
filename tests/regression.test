@@ -11469,3 +11469,18 @@ null
 def e: g; def g: undefined_fn; 5
 null
 5
+
+# Issue #808: @format reads the piped value, not the env input
+. as $x | $x | @json
+{"a":1}
+"{\"a\":1}"
+
+# Issue #808: @text on a piped bound variable
+5 as $x | $x | @text
+null
+"5"
+
+# Issue #808: @base64 on a piped bound string
+"abc" as $x | $x | @base64
+null
+"YWJj"

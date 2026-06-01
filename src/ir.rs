@@ -1023,6 +1023,13 @@ impl Expr {
             Expr::Error { msg } => Expr::Error {
                 msg: msg.as_ref().map(|e| Box::new(e.substitute_var(var_index, replacement))),
             },
+            // `@fmt EXPR` formats its operand: a `$x` in the operand must be
+            // substituted, otherwise inlining `E as $x | $x | @json` leaves a
+            // dangling LoadVar that the input-free fast path reads as null (#808).
+            Expr::Format { name, expr } => Expr::Format {
+                name: name.clone(),
+                expr: Box::new(expr.substitute_var(var_index, replacement)),
+            },
             _ => self.clone(),
         }
     }
