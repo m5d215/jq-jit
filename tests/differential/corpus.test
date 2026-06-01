@@ -3841,3 +3841,12 @@ path(getpath(["a","b"]))
 
 path(getpath(["a","b"]))
 {"a":{}}
+
+[label $out | ((label $out | 2), break $out)]
+null
+
+[label $x | (1,(label $x|(2,(label $x|3),break $x,4)),break $x,5)]
+null
+
+[label $x | (label $x | break $x), 99]
+null

@@ -11244,3 +11244,23 @@ path(getpath(["a","b"]))
 path(getpath(["a","b"]))
 {"a":{}}
 ["a","b"]
+
+# Issue #776 label: an outer break is not captured by a finished inner same-name label
+[label $out | ((label $out | 2), break $out)]
+null
+[2]
+
+# Issue #776 label: triply-nested same-name labels each break to their own scope
+[label $x | (1,(label $x|(2,(label $x|3),break $x,4)),break $x,5)]
+null
+[1,2,3]
+
+# Issue #776 label: an inner break targets the inner label, outer continues
+[label $x | (label $x | break $x), 99]
+null
+[99]
+
+# Issue #776 label: a same-name break inside reaches the nearest enclosing label
+[label $a | (1, (label $b | (2, break $a, 3)), 4)]
+null
+[1,2]
