@@ -1112,6 +1112,13 @@ null
 @text
 42
 
+# @format reads the piped value, not the env input (#808)
+. as $x | $x | @json
+{"a":1}
+
+"abc" as $x | $x | @base64
+null
+
 # ---------- Issue #65 parser coverage: format with interpolation ----------
 
 @csv "\(.a),\(.b)"
