@@ -196,8 +196,8 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "split" => {
             // split(re; flags) — regex split
             let pat_str = coerce_regex_pat_str(&args[1])?;
-            let (pat, _) = apply_regex_flags(&pat_str, &args[2])?;
-            rt_regex_split(&args[0], &Value::from_string(pat), &Value::Null)
+            let (pat, _, not_empty) = apply_regex_flags(&pat_str, &args[2])?;
+            rt_regex_split_ne(&args[0], &Value::from_string(pat), not_empty)
         }
         "join" => binary_arg(args, rt_join),
         "index" | "rindex" => binary_arg(args, |a, b| rt_str_index(a, b, name == "rindex")),
@@ -214,10 +214,10 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                 } else {
                     args[2].clone()
                 };
-                let (pat, _) = apply_regex_flags(&pat_str, &combined)?;
-                rt_test(&args[0], &Value::from_string(pat))
+                let (pat, _, not_empty) = apply_regex_flags(&pat_str, &combined)?;
+                rt_test(&args[0], &Value::from_string(pat), not_empty)
             } else {
-                binary_arg(args, rt_test)
+                binary_arg(args, |a, b| rt_test(a, b, false))
             }
         }
         "match" => {
@@ -229,15 +229,15 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                 } else {
                     args[2].clone()
                 };
-                let (pat, global) = apply_regex_flags(&pat_str, &combined)?;
+                let (pat, global, not_empty) = apply_regex_flags(&pat_str, &combined)?;
                 let re = Value::from_string(pat);
                 if global {
-                    rt_match_global(&args[0], &re)
+                    rt_match_global(&args[0], &re, not_empty)
                 } else {
-                    rt_match(&args[0], &re)
+                    rt_match(&args[0], &re, not_empty)
                 }
             } else {
-                binary_arg(args, rt_match)
+                binary_arg(args, |a, b| rt_match(a, b, false))
             }
         }
         "capture" => {
@@ -249,34 +249,34 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                 } else {
                     args[2].clone()
                 };
-                let (pat, global) = apply_regex_flags(&pat_str, &combined)?;
+                let (pat, global, not_empty) = apply_regex_flags(&pat_str, &combined)?;
                 let re = Value::from_string(pat);
                 if global {
-                    rt_capture_global(&args[0], &re)
+                    rt_capture_global(&args[0], &re, not_empty)
                 } else {
-                    rt_capture(&args[0], &re)
+                    rt_capture(&args[0], &re, not_empty)
                 }
             } else {
-                binary_arg(args, rt_capture)
+                binary_arg(args, |a, b| rt_capture(a, b, false))
             }
         }
         "scan" => {
             if args.len() >= 3 {
                 let pat_str = coerce_regex_pat_str(&args[1])?;
-                let (pat, _) = apply_regex_flags(&pat_str, &args[2])?;
-                rt_scan(&args[0], &Value::from_string(pat))
+                let (pat, _, not_empty) = apply_regex_flags(&pat_str, &args[2])?;
+                rt_scan(&args[0], &Value::from_string(pat), not_empty)
             } else {
-                binary_arg(args, rt_scan)
+                binary_arg(args, |a, b| rt_scan(a, b, false))
             }
         }
         "sub" | "gsub" => {
             if args.len() >= 4 {
                 // sub/gsub with flags: input, regex, replacement, flags
                 let pat_str = coerce_regex_pat_str(&args[1])?;
-                let (pat, _) = apply_regex_flags(&pat_str, &args[3])?;
-                rt_sub_gsub(&args[0], &Value::from_string(pat), &args[2], name == "gsub")
+                let (pat, _, not_empty) = apply_regex_flags(&pat_str, &args[3])?;
+                rt_sub_gsub(&args[0], &Value::from_string(pat), &args[2], name == "gsub", not_empty)
             } else if args.len() >= 3 {
-                rt_sub_gsub(&args[0], &args[1], &args[2], name == "gsub")
+                rt_sub_gsub(&args[0], &args[1], &args[2], name == "gsub", false)
             } else {
                 bail!("{} requires 3 arguments", name);
             }
@@ -2141,17 +2141,17 @@ fn rt_split(v: &Value, sep: &Value) -> Result<Value> {
     }
 }
 
-fn rt_regex_split(v: &Value, re: &Value, flags: &Value) -> Result<Value> {
+fn rt_regex_split_ne(v: &Value, re: &Value, not_empty: bool) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
-            let (pat, _global) = apply_regex_flags(r.as_str(), flags)?;
-            with_regex(&pat, |regex| {
+            with_regex(r.as_str(), |regex| {
                 // jq enumerates an empty match adjacent to a non-empty
                 // one; Rust's `Regex::split` skips it. Walk
                 // `jq_match_spans` instead so the slices line up with
                 // jq's output for zero-width regexes like `a*`. See #444.
+                // The `n` flag drops the zero-width matches (#773).
                 let s_str = s.as_str();
-                let spans = jq_match_spans(regex, s_str);
+                let spans = drop_empty_spans(jq_match_spans(regex, s_str), not_empty);
                 let mut parts: Vec<Value> = Vec::with_capacity(spans.len() + 1);
                 let mut last = 0;
                 for (start, end) in spans {
@@ -3065,10 +3065,24 @@ fn coerce_regex_pat_str(re: &Value) -> Result<String> {
     }
 }
 
-fn apply_regex_flags(pattern: &str, flags: &Value) -> Result<(String, bool)> {
+/// Drop zero-width spans when the `n` (ignore-empty-matches) flag is set.
+/// jq maps `n` to Oniguruma's `ONIG_OPTION_FIND_NOT_EMPTY`; since
+/// `jq_match_spans` already enumerates empty matches (#444), filtering them
+/// here reproduces the flag without a different engine (#773).
+#[inline]
+fn drop_empty_spans(mut spans: Vec<(usize, usize)>, not_empty: bool) -> Vec<(usize, usize)> {
+    if not_empty {
+        spans.retain(|&(start, end)| start != end);
+    }
+    spans
+}
+
+/// Returns `(pattern_with_inline_flags, global, not_empty)`. `not_empty` is the
+/// jq `n` flag (#773).
+fn apply_regex_flags(pattern: &str, flags: &Value) -> Result<(String, bool, bool)> {
     let flags_str = match flags {
         Value::Str(s) => s.as_str(),
-        Value::Null => return Ok((pattern.to_string(), false)),
+        Value::Null => return Ok((pattern.to_string(), false, false)),
         // jq rejects non-string non-null flags with the standard errdesc
         // wording (#461).
         _ => bail!("{} is not a string", errdesc(flags)),
@@ -3083,6 +3097,7 @@ fn apply_regex_flags(pattern: &str, flags: &Value) -> Result<(String, bool)> {
     // each inline flag at most once. #764 / #774
     let mut inline = String::new();
     let mut global = false;
+    let mut not_empty = false;
     for ch in flags_str.chars() {
         let inline_flag = match ch {
             'i' | 'x' => Some(ch),
@@ -3096,7 +3111,11 @@ fn apply_regex_flags(pattern: &str, flags: &Value) -> Result<(String, bool)> {
             // `p` reduces to the same dotall as `m` — it must not be ignored. #764
             'm' | 'p' => Some('s'),
             'g' => { global = true; None }
-            // l, n (and jq's `s`) have no inline equivalent here — accepted, ignored.
+            // jq's `n` ignores zero-width matches. Oniguruma spells this as an
+            // engine option (FIND_NOT_EMPTY) with no inline equivalent here, so
+            // it is handled by filtering empty spans, not via the pattern. #773
+            'n' => { not_empty = true; None }
+            // l (and jq's `s`) have no inline equivalent here — accepted, ignored.
             _ => None,
         };
         if let Some(f) = inline_flag {
@@ -3108,13 +3127,20 @@ fn apply_regex_flags(pattern: &str, flags: &Value) -> Result<(String, bool)> {
     } else {
         format!("(?{}){}", inline, pattern)
     };
-    Ok((pat, global))
+    Ok((pat, global, not_empty))
 }
 
-fn rt_test(v: &Value, re: &Value) -> Result<Value> {
+fn rt_test(v: &Value, re: &Value, not_empty: bool) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
-            let matched = with_regex(r, |regex| regex.is_match(s))?;
+            let matched = with_regex(r, |regex| {
+                if not_empty {
+                    // With `n`, a successful test requires a non-empty match.
+                    !drop_empty_spans(jq_match_spans(regex, s), true).is_empty()
+                } else {
+                    regex.is_match(s)
+                }
+            })?;
             Ok(Value::from_bool(matched))
         }
         // jq distinguishes input-side and regex-side type errors. Non-string
@@ -3126,19 +3152,37 @@ fn rt_test(v: &Value, re: &Value) -> Result<Value> {
     }
 }
 
-fn rt_match(v: &Value, re: &Value) -> Result<Value> {
+fn rt_match(v: &Value, re: &Value, not_empty: bool) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
             with_regex(r, |regex| {
                 let capture_names: Vec<Option<&str>> = regex.capture_names().skip(1).collect();
                 let num_groups = regex.captures_len();
+                // With `n`, the first match is the first non-empty span.
+                let start_at = if not_empty {
+                    match drop_empty_spans(jq_match_spans(regex, s), true).first() {
+                        Some(&(start, _)) => Some(start),
+                        None => bail!("match failed"),
+                    }
+                } else {
+                    None
+                };
                 if num_groups <= 1 {
-                    match regex.find(s) {
+                    let m = match start_at {
+                        Some(start) => regex.find_at(s, start).filter(|m| m.start() == start),
+                        None => regex.find(s),
+                    };
+                    match m {
                         Some(m) => Ok(build_match_obj(&m, None, &capture_names, s)),
                         None => bail!("match failed"),
                     }
                 } else {
-                    match regex.captures(s) {
+                    let caps = match start_at {
+                        Some(start) => regex.captures_at(s, start)
+                            .filter(|c| c.get(0).map(|m| m.start()) == Some(start)),
+                        None => regex.captures(s),
+                    };
+                    match caps {
                         Some(caps) => {
                             let m = caps.get(0).unwrap();
                             Ok(build_match_obj(&m, Some(&caps), &capture_names, s))
@@ -3194,14 +3238,14 @@ fn build_match_obj(m: &regex::Match, caps: Option<&regex::Captures>, capture_nam
     Value::object_from_map(result)
 }
 
-fn rt_match_global(v: &Value, re: &Value) -> Result<Value> {
+fn rt_match_global(v: &Value, re: &Value, not_empty: bool) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
             with_regex(r, |regex| {
                 let capture_names: Vec<Option<&str>> = regex.capture_names().skip(1).collect();
                 let num_groups = regex.captures_len();
                 let mut results = Vec::new();
-                let spans = jq_match_spans(regex, s);
+                let spans = drop_empty_spans(jq_match_spans(regex, s), not_empty);
                 if num_groups <= 1 {
                     for (start, _) in &spans {
                         if let Some(m) = regex.find_at(s, *start) {
@@ -3234,11 +3278,21 @@ fn rt_match_global(v: &Value, re: &Value) -> Result<Value> {
     }
 }
 
-fn rt_capture(v: &Value, re: &Value) -> Result<Value> {
+fn rt_capture(v: &Value, re: &Value, not_empty: bool) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
             with_regex(r, |regex| {
-                match regex.captures(s) {
+                // With `n`, capture from the first non-empty match.
+                let caps = if not_empty {
+                    match drop_empty_spans(jq_match_spans(regex, s), true).first() {
+                        Some(&(start, _)) => regex.captures_at(s, start)
+                            .filter(|c| c.get(0).map(|m| m.start()) == Some(start)),
+                        None => None,
+                    }
+                } else {
+                    regex.captures(s)
+                };
+                match caps {
                     Some(caps) => {
                         let mut result = new_objmap();
                         for name in regex.capture_names().flatten() {
@@ -3261,12 +3315,12 @@ fn rt_capture(v: &Value, re: &Value) -> Result<Value> {
     }
 }
 
-pub fn rt_capture_global(v: &Value, re: &Value) -> Result<Value> {
+pub fn rt_capture_global(v: &Value, re: &Value, not_empty: bool) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
             with_regex(r, |regex| {
                 let mut results: Vec<Value> = Vec::new();
-                for (start, _) in jq_match_spans(regex, s) {
+                for (start, _) in drop_empty_spans(jq_match_spans(regex, s), not_empty) {
                     let caps = match regex.captures_at(s, start) {
                         Some(c) if c.get(0).map(|m| m.start()) == Some(start) => c,
                         _ => continue,
@@ -3291,12 +3345,12 @@ pub fn rt_capture_global(v: &Value, re: &Value) -> Result<Value> {
     }
 }
 
-fn rt_scan(v: &Value, re: &Value) -> Result<Value> {
+fn rt_scan(v: &Value, re: &Value, not_empty: bool) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
             with_regex(r, |regex| {
                 let has_captures = regex.captures_len() > 1;
-                let spans = jq_match_spans(regex, s);
+                let spans = drop_empty_spans(jq_match_spans(regex, s), not_empty);
                 let results: Vec<Value> = if has_captures {
                     spans.iter()
                         .filter_map(|(start, _)| regex.captures_at(s, *start)
@@ -3326,11 +3380,27 @@ fn rt_scan(v: &Value, re: &Value) -> Result<Value> {
     }
 }
 
-fn rt_sub_gsub(v: &Value, re: &Value, replacement: &Value, global: bool) -> Result<Value> {
+fn rt_sub_gsub(v: &Value, re: &Value, replacement: &Value, global: bool, not_empty: bool) -> Result<Value> {
     match (v, re, replacement) {
         (Value::Str(s), Value::Str(r), Value::Str(rep)) => {
             let result = with_regex(r, |regex| {
-                if global {
+                if not_empty {
+                    // With `n`, replace only the non-empty matches. `replace`/
+                    // `replace_all` cannot skip zero-width matches, so walk the
+                    // filtered spans and splice the literal replacement (this
+                    // builtin path takes a plain string replacement). #773
+                    let spans = drop_empty_spans(jq_match_spans(regex, s), true);
+                    let mut out = String::with_capacity(s.len());
+                    let mut last = 0;
+                    for (start, end) in spans {
+                        out.push_str(&s[last..start]);
+                        out.push_str(rep.as_str());
+                        last = end;
+                        if !global { break; }
+                    }
+                    out.push_str(&s[last..]);
+                    out
+                } else if global {
                     regex.replace_all(s, rep.as_str()).to_string()
                 } else {
                     regex.replace(s, rep.as_str()).to_string()
@@ -3354,7 +3424,7 @@ pub struct SubGsubSegment {
 /// Find regex matches and return segments for capture-aware sub/gsub replacement.
 /// Returns segments alternating: literal, capture_obj, literal, capture_obj, ..., literal.
 pub fn sub_gsub_segments(input: &str, pattern: &str, flags: &Value, global: bool) -> Result<Vec<SubGsubSegment>> {
-    let (pat, flag_global) = apply_regex_flags(pattern, flags)?;
+    let (pat, flag_global, not_empty) = apply_regex_flags(pattern, flags)?;
     let is_global = global || flag_global;
     with_regex(&pat, |regex| {
         let mut segments = Vec::new();
@@ -3387,7 +3457,8 @@ pub fn sub_gsub_segments(input: &str, pattern: &str, flags: &Value, global: bool
             // zero-width regexes (`a*`, etc.). `captures_iter` /
             // `find_iter` skip those. Walk `jq_match_spans` so the
             // segment list matches jq's output. See #444.
-            let spans = jq_match_spans(regex, input);
+            // With the `n` flag, drop the zero-width matches (#773).
+            let spans = drop_empty_spans(jq_match_spans(regex, input), not_empty);
             if has_captures {
                 for (start, _end) in spans {
                     if let Some(caps) = regex.captures_at(input, start) {
@@ -3405,6 +3476,19 @@ pub fn sub_gsub_segments(input: &str, pattern: &str, flags: &Value, global: bool
                             process_match(m, None);
                         }
                     }
+                }
+            }
+        } else if not_empty {
+            // Non-global `sub` with `n`: replace the first non-empty match.
+            if let Some(&(start, _)) = drop_empty_spans(jq_match_spans(regex, input), true).first() {
+                if has_captures {
+                    if let Some(caps) = regex.captures_at(input, start) {
+                        if let Some(m) = caps.get(0).filter(|m| m.start() == start) {
+                            process_match(m, Some(&caps));
+                        }
+                    }
+                } else if let Some(m) = regex.find_at(input, start).filter(|m| m.start() == start) {
+                    process_match(m, None);
                 }
             }
         } else if has_captures {
