@@ -11364,3 +11364,18 @@ null
 if (.a >= .a) then .x else .a end
 {"a":0,"x":9}
 9
+
+# Issue #736 destructure: a ?// fallback runs the body with the original ., not the caught error
+5 as [$a] ?// $a | . + $a
+7
+12
+
+# Issue #736 destructure: value_expr reading . is evaluated against the original input in the fallback
+. as [$a] ?// $a | . + $a
+7
+14
+
+# Issue #736 destructure: nested ?// alternatives restore . for the body
+. as {$x} ?// [$x] ?// $x | {d:.,x:$x}
+[42]
+{"d":[42],"x":42}

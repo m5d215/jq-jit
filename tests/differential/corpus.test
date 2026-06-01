@@ -3937,3 +3937,18 @@ if (.a >= .a) then .a else .x end
 
 if (.a >= .b) then .a else .x end
 {"a":1,"b":5}
+
+5 as [$a] ?// $a | . + $a
+7
+
+. as [$a] ?// $a | . + $a
+7
+
+. as [$a] ?// $a | . + $a
+[3]
+
+(1,2,3) as [$a] ?// $a | . + $a
+10
+
+reduce .[] as [$a] ?// $a (0; . + $a)
+[1,[2],3]
