@@ -11294,3 +11294,33 @@ index(1)
 index([9])
 [0,1,2]
 null
+
+# Issue #780 escaped solidus: identity output decodes \/ to /
+.
+"http:\/\/x.com"
+"http://x.com"
+
+# Issue #780 escaped solidus: field access decodes \/
+.a
+{"a":"x\/y"}
+"x/y"
+
+# Issue #780 escaped solidus: object keys decode \/
+keys
+{"a\/b":1}
+["a/b"]
+
+# Issue #780 escaped solidus: tojson decodes \/ (no leak in the serialized string)
+tojson
+"a\/b"
+"\"a/b\""
+
+# Issue #780 escaped solidus: an escaped backslash before a solidus is not collapsed
+.
+"a\\\/b"
+"a\\/b"
+
+# Issue #780 escaped solidus: to_entries decodes \/ in both key and value
+to_entries
+{"a\/b":"c\/d"}
+[{"key":"a/b","value":"c/d"}]
