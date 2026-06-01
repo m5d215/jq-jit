@@ -3724,3 +3724,17 @@ del(.[(0,1):(3,4)])
 
 strptime("%C %y-%m-%d")
 "21 24-03-15"
+
+# ---------- Issue #764/#774: regex p flag and duplicated flags ----------
+
+gsub(".";"X";"p")
+"\n"
+
+[match("a.b";"p").string]
+"a\nb"
+
+test("ab";"ii")
+"AB"
+
+test("a.b";"mp")
+"a\nb"
