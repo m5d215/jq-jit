@@ -11035,3 +11035,33 @@ null
 def outer: def inner: $z; inner; "ok"
 null
 "ok"
+
+# Issue #766 eval: a $x value-param's implicit filter shadows an outer def of the same name
+def x: 1; def f($x): x; f(5)
+null
+5
+
+# Issue #766 eval: a filter param shadows an outer def of the same name
+def x: 1; def f(x): x; f(2)
+null
+2
+
+# Issue #766 eval: a def nested in the body shadows the enclosing param (innermost wins)
+def f($x): def x: 9; x; f(5)
+null
+9
+
+# Issue #766 eval: an inner def shadows a filter param of the same name
+def f(g): def g: 2; g; f(1)
+null
+2
+
+# Issue #766 eval: a filter param shadows a same-named builtin
+def f(length): length; f(5)
+null
+5
+
+# Issue #766 eval: outer def and param coexist by lexical scope
+def x: 1; [x, (def f($x): x; f(5))]
+null
+[1,5]
