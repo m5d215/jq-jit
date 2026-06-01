@@ -876,6 +876,13 @@ fromjson
 . as $orig | . as [$a, $b] | [$orig, $a, $b]
 [5, 6]
 
+# `. as $v` stays bound to the outer value inside a rebound-`.` body (#818)
+. as $v | [.[] | $v]
+[1,2]
+
+. as $v | map($v)
+[10,20]
+
 # ---------- Issue #65 parser coverage: alternative destructuring ?// ----------
 
 . as [$a] ?// $a | $a
