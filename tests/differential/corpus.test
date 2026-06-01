@@ -3796,3 +3796,21 @@ walk(if type=="number" then .+(1,2) else . end)
 
 walk(if type=="number" then .,.+1 else . end)
 {"a":1,"b":[2,3]}
+
+[2,nan,1]|sort_by(.)
+null
+
+[nan,1,nan]|group_by(.)
+null
+
+[nan,1,nan]|unique_by(.)
+null
+
+[[1],[]]|sort_by(.[])
+null
+
+[[1,2],[1],[]]|sort_by(.[])
+null
+
+[[1,2],[1]]|min_by(.[])
+null
