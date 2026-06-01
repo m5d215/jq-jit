@@ -1192,6 +1192,23 @@ null
 [truncate_stream({a:[1,2]} | tostream)]
 -1
 
+# combinations on a length-0 input yields a single empty combination (#805)
+[combinations]
+null
+
+[combinations]
+{}
+
+# combinations honors early termination (#815)
+first(combinations)
+[[1,2],[3,4]]
+
+[limit(2; combinations)]
+[[1,2],[3,4]]
+
+[isempty(combinations)]
+[[1],[2]]
+
 # ---------- Issue #65 parser coverage: path / leaf ----------
 
 [paths]

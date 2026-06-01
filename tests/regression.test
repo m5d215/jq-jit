@@ -1437,6 +1437,31 @@ null
 [1,2]
 [[1,1],[1,2],[2,1],[2,2]]
 
+# Issue #805: combinations on null returns a single empty combination (length == 0)
+[combinations]
+null
+[[]]
+
+# Issue #805: combinations on {} returns a single empty combination
+[combinations]
+{}
+[[]]
+
+# Issue #815: first(combinations) truncates the Cartesian product after one tuple
+first(combinations)
+[[1,2],[3,4]]
+[1,3]
+
+# Issue #815: limit(2; combinations) stops after two tuples
+[limit(2; combinations)]
+[[1,2],[3,4]]
+[[1,3],[1,4]]
+
+# Issue #815: isempty(combinations) on a non-empty product is false (no spurious extra outputs)
+[isempty(combinations)]
+[[1],[2]]
+[false]
+
 # Issue #135: modf splits number into [fractional, integer] truncated toward zero
 modf
 1.5
