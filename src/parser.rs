@@ -833,6 +833,11 @@ pub struct Parser {
     /// inside transitively-called defs) are errors — jq never compiles the body
     /// of an uncalled def. #765
     deferred_unbound: Vec<(Option<usize>, String)>,
+    /// Unknown function/builtin references parked instead of erroring eagerly,
+    /// as `(enclosing_func_id, name, nargs)`. Same reachability rule as
+    /// `deferred_unbound`: jq resolves function names lazily, so an undefined
+    /// name in the body of an uncalled def is not an error. #807
+    deferred_unknown_func: Vec<(Option<usize>, String, usize)>,
 }
 
 /// Result of parsing: expression + compiled functions.
@@ -861,6 +866,7 @@ impl Parser {
             lib_dirs: lib_dirs.to_vec(),
             current_func: None,
             deferred_unbound: Vec::new(),
+            deferred_unknown_func: Vec::new(),
         };
 
         // Pre-register $ENV
@@ -890,6 +896,23 @@ impl Parser {
         }
     }
 
+    /// Record an unknown function/builtin reference (attributed to the def
+    /// currently being parsed) and return a placeholder that errors with jq's
+    /// message if it is ever evaluated. Deferred so a never-called def whose
+    /// body names an undefined function does not abort compilation — jq
+    /// resolves function names lazily. The real decision is made by
+    /// `check_unbound_reachability`. #807
+    fn defer_unknown_func(&mut self, name: &str, nargs: usize) -> Expr {
+        self.deferred_unknown_func
+            .push((self.current_func, name.to_string(), nargs));
+        Expr::Error {
+            msg: Some(Box::new(Expr::Literal(Literal::Str(format!(
+                "{}/{} is not defined",
+                name, nargs
+            ))))),
+        }
+    }
+
     /// Resolve `$name`, deferring the "not defined" error for an unbound
     /// reference (see `defer_unbound_var`). #765
     fn load_or_defer_var(&mut self, name: &str) -> Expr {
@@ -899,12 +922,14 @@ impl Parser {
         }
     }
 
-    /// Turn parked unbound `$var` references into errors, but only those that
-    /// are actually reachable: a top-level reference, or one inside a def that
-    /// the top-level program calls (transitively). jq never compiles the body
-    /// of an uncalled def, so a free variable there is not an error. #765
+    /// Turn parked unbound `$var` references and unknown function references
+    /// into errors, but only those that are actually reachable: a top-level
+    /// reference, or one inside a def that the top-level program calls
+    /// (transitively). jq never compiles the body of an uncalled def, so a
+    /// free variable (#765) or undefined function name (#807) there is not an
+    /// error.
     fn check_unbound_reachability(&self, program: &Expr) -> Result<()> {
-        if self.deferred_unbound.is_empty() {
+        if self.deferred_unbound.is_empty() && self.deferred_unknown_func.is_empty() {
             return Ok(());
         }
         let mut reachable: std::collections::HashSet<usize> = std::collections::HashSet::new();
@@ -917,13 +942,18 @@ impl Parser {
                 }
             }
         }
+        let is_reachable = |fid: &Option<usize>| match fid {
+            None => true, // top-level reference
+            Some(id) => reachable.contains(id),
+        };
         for (fid, name) in &self.deferred_unbound {
-            let is_reachable = match fid {
-                None => true, // top-level reference
-                Some(id) => reachable.contains(id),
-            };
-            if is_reachable {
+            if is_reachable(fid) {
                 bail!("${} is not defined", name);
+            }
+        }
+        for (fid, name, nargs) in &self.deferred_unknown_func {
+            if is_reachable(fid) {
+                bail!("{}/{} is not defined", name, nargs);
             }
         }
         Ok(())
@@ -1330,6 +1360,7 @@ impl Parser {
             lib_dirs: mod_lib_dirs,
             current_func: None,
             deferred_unbound: Vec::new(),
+            deferred_unknown_func: Vec::new(),
         };
 
         // Skip module statement
@@ -3195,7 +3226,7 @@ impl Parser {
         }
     }
 
-    fn compile_builtin_noargs(&self, name: &str) -> Result<Expr> {
+    fn compile_builtin_noargs(&mut self, name: &str) -> Result<Expr> {
         // A bare 0-arg name can resolve to a user `def` or a filter parameter
         // (including the implicit `x` filter introduced by a `$x` value param).
         // Both shadow same-named builtins, and between the two the lexically
@@ -3433,11 +3464,19 @@ impl Parser {
             _ => {
                 // User defs and filter parameters were already resolved at the
                 // top of this function (#766), so anything reaching here is a
-                // 0-arg builtin handled via runtime.
-                Ok(Expr::UnaryOp {
-                    op: name_to_unary_op(name)?,
-                    operand: Box::new(Expr::Input),
-                })
+                // 0-arg builtin handled via runtime — or an undefined name.
+                // jq resolves names lazily, so an undefined 0-arg name is only
+                // an error when reachable: defer it instead of erroring eagerly
+                // (#807). The deferred placeholder errors at runtime if it is
+                // reached, and `check_unbound_reachability` turns it into a
+                // compile error if its enclosing def is actually called.
+                match name_to_unary_op(name) {
+                    Ok(op) => Ok(Expr::UnaryOp {
+                        op,
+                        operand: Box::new(Expr::Input),
+                    }),
+                    Err(_) => Ok(self.defer_unknown_func(name, 0)),
+                }
             }
         }
     }
@@ -4359,7 +4398,9 @@ impl Parser {
                 if let Some(func_id) = self.scope.lookup_func(name, args.len()) {
                     Ok(self.scope.make_funccall(func_id, args))
                 } else {
-                    bail!("unknown function '{}' with {} args", name, args.len())
+                    // Undefined function name. jq resolves names lazily, so this
+                    // is only an error when reachable: defer it (#807).
+                    Ok(self.defer_unknown_func(name, args.len()))
                 }
             }
         }
