@@ -3327,7 +3327,10 @@ pub fn eval(
                         // dropping the ceil item (#719). The JIT path already
                         // does this float compare (jit.rs emit_yield); this
                         // aligns the eval/interpreter path with it and with jq.
-                        if n < 0.0 {
+                        // jq orders NaN below every number, so `count < 0` is
+                        // true for NaN and it takes the negative-count error
+                        // path rather than acting as an unbounded count (#813).
+                        if n < 0.0 || n.is_nan() {
                             bail!("__jqerror__:\"limit doesn't support negative count\"");
                         }
                         if n == 0.0 { return Ok(true); } // 0.0 and -0.0 → empty
@@ -5547,7 +5550,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                         return Ok(true);
                     }
                 };
-                if n < 0.0 {
+                if n < 0.0 || n.is_nan() {
                     bail!("__jqerror__:\"limit doesn't support negative count\"");
                 }
                 if n == 0.0 { return Ok(true); }

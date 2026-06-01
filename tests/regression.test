@@ -11529,3 +11529,23 @@ null
 [3,-1.9] | scalb(.[0]; .[1])
 null
 1.5
+
+# Issue #813: limit with a NaN count errors (NaN sorts below 0, not unbounded)
+[limit(nan; 1,2,3)?]
+null
+[]
+
+# Issue #813: limit with a NaN count and an empty generator still errors
+[limit(nan; empty)?]
+null
+[]
+
+# Issue #813: getpath with a NaN index is out of range (null), not truncated to 0
+getpath([nan])
+[10,20]
+null
+
+# Issue #813: .[nan] and getpath([nan]) agree (both null)
+.[nan]
+[10,20]
+null

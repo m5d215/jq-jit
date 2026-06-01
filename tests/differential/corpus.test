@@ -3076,6 +3076,14 @@ null
 getpath(["a", 0])
 null
 
+# a NaN index is out of range (null), not truncated to 0 (#813)
+getpath([nan])
+[10,20]
+
+# limit with a NaN count errors (caught by ? → empty) (#813)
+[limit(nan; 1,2,3)?]
+null
+
 getpath(["a", "b", "c"])
 null
 
