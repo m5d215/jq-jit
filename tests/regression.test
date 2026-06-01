@@ -10950,3 +10950,28 @@ strptime("%p %C")
 strptime("%C %y-%m-%d")
 "21 24-03-15"
 [2124,2,15,0,0,0,3,74]
+
+# Issue #763 datetime: strftime("%x") renders a 4-digit year (macOS libc %m/%d/%Y)
+gmtime|strftime("%x")
+1700000000
+"11/14/2023"
+
+# Issue #763 datetime: strftime %x at the epoch
+gmtime|strftime("%x")
+0
+"01/01/1970"
+
+# Issue #763 datetime: strftime %x composes with other specifiers
+gmtime|strftime("%Y-%m-%d %x %X")
+1700000000
+"2023-11-14 11/14/2023 22:13:20"
+
+# Issue #763 datetime: strftime %%x is a literal percent then x, not the %x specifier
+gmtime|strftime("100%% %x")
+1700000000
+"100% 11/14/2023"
+
+# Issue #763 datetime: strftime %D keeps its own 2-digit year (only %x was wrong)
+gmtime|strftime("%D")
+1700000000
+"11/14/23"

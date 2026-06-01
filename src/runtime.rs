@@ -3598,7 +3598,7 @@ fn rt_strftime(v: &Value, fmt: &Value) -> Result<Value> {
             let secs = *n as i64;
             let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
                 .ok_or_else(|| anyhow::anyhow!("strftime: epoch out of range"))?;
-            Ok(Value::from_str(&dt.format(fmt_str).to_string()))
+            Ok(Value::from_str(&dt.format(&rewrite_strftime_compat(fmt_str)).to_string()))
         }
         _ => bail!("strftime/1 requires parsed datetime inputs"),
     }
@@ -3609,6 +3609,31 @@ fn rt_strftime(v: &Value, fmt: &Value) -> Result<Value> {
 /// `[]` and `[1900]` cases store mday=0 which chrono rejects). Existing
 /// regression tests (`#113`) only exercise `%Y` for these edge cases, so
 /// the clamp doesn't shift any tested output.
+/// Rewrite `strftime` specifiers where chrono's rendering diverges from the
+/// macOS libc that jq delegates to (the project's reference, see
+/// `docs/maintenance.md`). Currently only `%x`: chrono renders it with a
+/// 2-digit year, jq's `%x` is `%m/%d/%Y` with a 4-digit year. `%%` is preserved
+/// (a literal percent, not a specifier). #763
+fn rewrite_strftime_compat(fmt: &str) -> std::borrow::Cow<'_, str> {
+    if !fmt.contains("%x") {
+        return std::borrow::Cow::Borrowed(fmt);
+    }
+    let mut out = String::with_capacity(fmt.len() + 8);
+    let mut chars = fmt.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            match chars.peek() {
+                Some('x') => { chars.next(); out.push_str("%m/%d/%Y"); }
+                Some('%') => { chars.next(); out.push_str("%%"); }
+                _ => out.push('%'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 fn format_broken(t: &BrokenTime, fmt: &str) -> String {
     use chrono::{NaiveDate, TimeZone, Utc};
     let mon = (t.mon.clamp(0, 11) + 1) as u32;
@@ -3629,7 +3654,7 @@ fn format_broken(t: &BrokenTime, fmt: &str) -> String {
     // `to_string()` turns into a process-aborting panic (#710). With UTC
     // attached, `%z` renders `+0000` and `%Z` renders `UTC`, matching jq; all
     // non-tz specifiers format identically to the naive path.
-    Utc.from_utc_datetime(&ndt).format(fmt).to_string()
+    Utc.from_utc_datetime(&ndt).format(&rewrite_strftime_compat(fmt)).to_string()
 }
 
 fn rt_strptime(v: &Value, fmt: &Value) -> Result<Value> {
@@ -3843,12 +3868,13 @@ fn rt_strflocaltime_impl(input: &Value, fmt: &Value) -> Result<Value> {
             // which emits the zone abbreviation (`JST`, `UTC`, ...). Splice the
             // libc-provided abbreviation into the format string before chrono
             // formats it, so every other specifier keeps chrono's behaviour.
-            if fmt_str.contains("%Z") {
+            let fmt_x = rewrite_strftime_compat(fmt_str.as_str());
+            if fmt_x.contains("%Z") {
                 let abbrev = local_tz_abbrev(secs).unwrap_or_default();
-                let fmt_final = splice_local_zone(fmt_str.as_str(), abbrev.as_str());
+                let fmt_final = splice_local_zone(&fmt_x, abbrev.as_str());
                 Ok(Value::from_str(&dt.format(fmt_final.as_str()).to_string()))
             } else {
-                Ok(Value::from_str(&dt.format(fmt_str.as_str()).to_string()))
+                Ok(Value::from_str(&dt.format(&fmt_x).to_string()))
             }
         }
         _ => bail!("strflocaltime/1 requires parsed datetime inputs"),
