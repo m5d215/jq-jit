@@ -2529,9 +2529,16 @@ impl Parser {
                     Token::Variable(name) => {
                         // Register label-typed bindings under a sentinel prefix so they
                         // can only be referenced via `break $name`, never as a bare $name.
+                        // The binding is lexically scoped to the body: pop it afterwards
+                        // so a sibling `break $name` following an inner `label $name`
+                        // resolves to the still-live *outer* label rather than the
+                        // already-finished inner one (which `lookup_var` would otherwise
+                        // pick as the innermost match, dropping the whole output). #776
+                        let saved_vars = self.scope.vars.len();
                         let var_idx = self.scope.alloc_var(&format!("\x00label:{}", name));
                         self.expect(&Token::Pipe)?;
                         let body = self.parse_pipe()?;
+                        self.scope.vars.truncate(saved_vars);
                         Ok(Expr::Label {
                             var_index: var_idx,
                             body: Box::new(body),
