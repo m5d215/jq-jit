@@ -10865,3 +10865,43 @@ while(.<3; empty)
 [while(.<3; .+1, .+10) | .]
 0
 [0,1,2]
+
+# Issue #761 eval: slice with generator bounds yields the Cartesian product (from outer, to inner)
+[.[(0,1):(3,4)]]
+[1,2,3,4,5]
+[[1,2,3],[1,2,3,4],[2,3],[2,3,4]]
+
+# Issue #761 eval: slice product nests from outer, to middle, base inner
+[.[][(0,1):(2,3)]]
+[[1,2,3],[4,5,6]]
+[[1,2],[4,5],[1,2,3],[4,5,6],[2],[5],[2,3],[5,6]]
+
+# Issue #761 eval: empty slice bound generator yields nothing
+[.[(empty):3]]
+[1,2,3,4,5]
+[]
+
+# Issue #761 path: path() of a generator-bound slice yields one path per combination
+[path(.[(0,1):(3,4)])]
+[1,2,3,4,5]
+[[{"start":0,"end":3}],[{"start":0,"end":4}],[{"start":1,"end":3}],[{"start":1,"end":4}]]
+
+# Issue #761 eval: assigning through a generator-bound slice composes over every combination
+.[(0,1):(3,4)] = [99]
+[1,2,3,4,5]
+[99,99]
+
+# Issue #761 eval: updating through a generator-bound slice composes over every combination
+.[(0,1):(2,3)] |= reverse
+[1,2,3,4,5]
+[3,2,1,4,5]
+
+# Issue #761 eval: del over a generator-bound slice removes the union of all ranges
+del(.[(0,1):(3,4)])
+[1,2,3,4,5]
+[5]
+
+# Issue #761 eval: del over a nested generator-bound slice removes the union
+del(.a[(0,2):(1,4)])
+{"a":[10,20,30,40,50,60]}
+{"a":[50,60]}
