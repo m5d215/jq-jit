@@ -3572,17 +3572,51 @@ pub fn eval(
         }
 
         Expr::Slice { expr: base_expr, from, to } => {
-            eval(base_expr, input.clone(), env, &mut |base| {
-                let from_val = if let Some(f) = from {
-                    let mut v = Value::Null;
-                    eval(f, input.clone(), env, &mut |fv| { v = fv; Ok(true) })?; v
-                } else { Value::Null };
-                let to_val = if let Some(t) = to {
-                    let mut v = Value::Null;
-                    eval(t, input.clone(), env, &mut |tv| { v = tv; Ok(true) })?; v
-                } else { Value::Null };
-                cb(eval_slice(&base, &from_val, &to_val)?)
-            })
+            // jq yields the Cartesian product of the bound generators, nested
+            // from (outer) → to (middle) → base (inner). A missing bound is a
+            // single Null (slice-from-start / slice-to-end); an *empty* bound
+            // generator contributes no values, so the whole slice yields nothing. #761
+            //
+            // Fast path: both bounds resolve to a single value (the common
+            // `.[a:b]` shape) — no product, no intermediate Vec.
+            let from_one = match from { None => Some(Value::Null), Some(f) => eval_one(f, &input, env).ok() };
+            let to_one = match to { None => Some(Value::Null), Some(t) => eval_one(t, &input, env).ok() };
+            if let (Some(fv), Some(tv)) = (&from_one, &to_one) {
+                return eval(base_expr, input.clone(), env, &mut |base| {
+                    cb(eval_slice(&base, fv, tv)?)
+                });
+            }
+            // Slow path: at least one bound is a generator (or empty).
+            let from_vals: Vec<Value> = match (&from_one, from) {
+                (Some(v), _) => vec![v.clone()],
+                (None, Some(f)) => {
+                    let mut vs = Vec::new();
+                    eval(f, input.clone(), env, &mut |v| { vs.push(v); Ok(true) })?;
+                    vs
+                }
+                (None, None) => vec![Value::Null],
+            };
+            if from_vals.is_empty() { return Ok(true); }
+            let to_vals: Vec<Value> = match (&to_one, to) {
+                (Some(v), _) => vec![v.clone()],
+                (None, Some(t)) => {
+                    let mut vs = Vec::new();
+                    eval(t, input.clone(), env, &mut |v| { vs.push(v); Ok(true) })?;
+                    vs
+                }
+                (None, None) => vec![Value::Null],
+            };
+            if to_vals.is_empty() { return Ok(true); }
+            for fv in &from_vals {
+                for tv in &to_vals {
+                    if !eval(base_expr, input.clone(), env, &mut |base| {
+                        cb(eval_slice(&base, fv, tv)?)
+                    })? {
+                        return Ok(false);
+                    }
+                }
+            }
+            Ok(true)
         }
 
         Expr::Loc { file, line } => {
@@ -4947,6 +4981,31 @@ thread_local! {
     static FOREACH_PATH_BIND: RefCell<Vec<(u16, Value)>> = const { RefCell::new(Vec::new()) };
 }
 
+/// Emit one slice path component `{start, end}` appended to base path `bp`,
+/// type-checking the receiver the same way jq does. Shared by the single-bound
+/// fast path and the Cartesian-product slow path of path-context slicing (#761).
+fn emit_slice_path(
+    input: &Value, bp: &Value, from_val: &Value, to_val: &Value,
+    cb: &mut dyn FnMut(Value) -> GenResult,
+) -> GenResult {
+    // Type-check the receiver: jq errors on path slicing of non-array/string/null.
+    let base = crate::runtime::rt_getpath(input, bp).unwrap_or(Value::Null);
+    match &base {
+        Value::Arr(_) | Value::Str(_) | Value::Null => {}
+        other => bail!("Cannot index {} with object", other.type_name()),
+    }
+    // jq preserves the literal slice expressions in path output without
+    // clamping to the receiver's actual length. Omitted bounds → null.
+    let mut p = match bp { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
+    p.push(Value::object_from_map({
+        let mut m = crate::value::new_objmap();
+        m.insert("start".into(), from_val.clone());
+        m.insert("end".into(), to_val.clone());
+        m
+    }));
+    cb(Value::Arr(Rc::new(p)))
+}
+
 fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
     match expr {
         Expr::Input => cb(Value::Arr(Rc::new(vec![]))),
@@ -5110,32 +5169,46 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             })
         }
         Expr::Slice { expr: base_expr, from, to } => {
-            eval_path(base_expr, input.clone(), env, &mut |bp| {
-                // Type-check the receiver: jq errors on path slicing of non-array/string/null.
-                let base = crate::runtime::rt_getpath(&input, &bp).unwrap_or(Value::Null);
-                match &base {
-                    Value::Arr(_) | Value::Str(_) | Value::Null => {}
-                    other => bail!("Cannot index {} with object", other.type_name()),
+            // Slice bounds are generators: produce the Cartesian product of
+            // path components, nested from (outer) → to (middle) → base (inner),
+            // mirroring the value-context handler. #761
+            let from_one = match from { None => Some(Value::Null), Some(f) => eval_one(f, &input, env).ok() };
+            let to_one = match to { None => Some(Value::Null), Some(t) => eval_one(t, &input, env).ok() };
+            if let (Some(fv), Some(tv)) = (&from_one, &to_one) {
+                return eval_path(base_expr, input.clone(), env, &mut |bp| {
+                    emit_slice_path(&input, &bp, fv, tv, cb)
+                });
+            }
+            let from_vals: Vec<Value> = match (&from_one, from) {
+                (Some(v), _) => vec![v.clone()],
+                (None, Some(f)) => {
+                    let mut vs = Vec::new();
+                    eval(f, input.clone(), env, &mut |v| { vs.push(v); Ok(true) })?;
+                    vs
                 }
-                let from_val = if let Some(f) = from {
-                    let mut v = Value::Null;
-                    eval(f, input.clone(), env, &mut |fv| { v = fv; Ok(true) })?; v
-                } else { Value::Null };
-                let to_val = if let Some(t) = to {
-                    let mut v = Value::Null;
-                    eval(t, input.clone(), env, &mut |tv| { v = tv; Ok(true) })?; v
-                } else { Value::Null };
-                // jq preserves the literal slice expressions in path output without
-                // clamping to the receiver's actual length. Omitted bounds → null.
-                let mut p = match &bp { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
-                p.push(Value::object_from_map({
-                    let mut m = crate::value::new_objmap();
-                    m.insert("start".into(), from_val);
-                    m.insert("end".into(), to_val);
-                    m
-                }));
-                cb(Value::Arr(Rc::new(p)))
-            })
+                (None, None) => vec![Value::Null],
+            };
+            if from_vals.is_empty() { return Ok(true); }
+            let to_vals: Vec<Value> = match (&to_one, to) {
+                (Some(v), _) => vec![v.clone()],
+                (None, Some(t)) => {
+                    let mut vs = Vec::new();
+                    eval(t, input.clone(), env, &mut |v| { vs.push(v); Ok(true) })?;
+                    vs
+                }
+                (None, None) => vec![Value::Null],
+            };
+            if to_vals.is_empty() { return Ok(true); }
+            for fv in &from_vals {
+                for tv in &to_vals {
+                    if !eval_path(base_expr, input.clone(), env, &mut |bp| {
+                        emit_slice_path(&input, &bp, fv, tv, cb)
+                    })? {
+                        return Ok(false);
+                    }
+                }
+            }
+            Ok(true)
         }
         Expr::CallBuiltin { name, args } if name == "getpath" && args.len() == 1 => {
             // In path context, getpath(p) = the path p itself
@@ -6294,11 +6367,17 @@ fn eval_del(f: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> G
                 }
                 DelOp::Slice { base, from, to } => {
                     if matches!(base, Expr::Input) {
-                        let from_idx = eval_slice_idx_val(from, len, 0, false, &input, env)?;
-                        let to_idx = eval_slice_idx_val(to, len, len, true, &input, env)?;
-                        for i in from_idx..to_idx {
-                            if i >= 0 && i < len {
-                                indices_to_del.insert(i);
+                        // Generator bounds: delete the union over the Cartesian
+                        // product of (from, to) endpoints. #761
+                        let from_idxs = eval_slice_idx_vals(from, len, 0, false, &input, env)?;
+                        let to_idxs = eval_slice_idx_vals(to, len, len, true, &input, env)?;
+                        for &fi in &from_idxs {
+                            for &ti in &to_idxs {
+                                for i in fi..ti {
+                                    if i >= 0 && i < len {
+                                        indices_to_del.insert(i);
+                                    }
+                                }
                             }
                         }
                     } else {
@@ -6369,11 +6448,20 @@ fn apply_del_op(op: &DelOp, current: Value, env: &EnvRef) -> Result<Value> {
             let new_val = match &container {
                 Value::Arr(a) => {
                     let len = a.len() as i64;
-                    let from_idx = eval_slice_idx_val(from, len, 0, false, &current, env)?;
-                    let to_idx = eval_slice_idx_val(to, len, len, true, &current, env)?;
-                    let mut result = Vec::new();
-                    for i in 0..from_idx.min(len) { result.push(a[i as usize].clone()); }
-                    for i in to_idx.max(0)..len { result.push(a[i as usize].clone()); }
+                    // Generator bounds: delete the union over the Cartesian
+                    // product of (from, to) endpoints. #761
+                    let from_idxs = eval_slice_idx_vals(from, len, 0, false, &current, env)?;
+                    let to_idxs = eval_slice_idx_vals(to, len, len, true, &current, env)?;
+                    let mut del: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+                    for &fi in &from_idxs {
+                        for &ti in &to_idxs {
+                            for i in fi.max(0)..ti.min(len) { del.insert(i); }
+                        }
+                    }
+                    let mut result = Vec::with_capacity(a.len());
+                    for i in 0..len {
+                        if !del.contains(&i) { result.push(a[i as usize].clone()); }
+                    }
                     Value::Arr(Rc::new(result))
                 }
                 _ => container,
@@ -6396,28 +6484,32 @@ fn apply_del_op(op: &DelOp, current: Value, env: &EnvRef) -> Result<Value> {
     }
 }
 
-fn eval_slice_idx_val(expr: &Option<&Expr>, len: i64, default: i64, is_end: bool, input: &Value, env: &EnvRef) -> Result<i64> {
-    if let Some(e) = expr {
-        let mut fval: Option<f64> = None;
-        eval(e, input.clone(), env, &mut |v| {
-            if let Value::Num(n, _) = &v { fval = Some(*n); }
-            Ok(true)
-        })?;
-        match fval {
+/// Resolve a `del(.[a:b])` slice bound to its normalized array indices.
+///
+/// The bound is a *generator* (#761): every value it yields is an independent
+/// endpoint, so the result is a list of indices (the caller takes the Cartesian
+/// product of the two bounds). An absent bound contributes the single default;
+/// an empty generator contributes nothing (so the slice deletes nothing).
+fn eval_slice_idx_vals(expr: &Option<&Expr>, len: i64, default: i64, is_end: bool, input: &Value, env: &EnvRef) -> Result<Vec<i64>> {
+    let Some(e) = expr else { return Ok(vec![default]); };
+    let mut out = Vec::new();
+    eval(e, input.clone(), env, &mut |v| {
+        let i = match &v {
             // jq normalizes a negative bound (`n + len`) before converting it to
             // an integer; the start floors and the end ceils. Truncating `n as
             // i64` before adding `len` mis-placed fractional bounds for
             // `del(.[a:b])` (e.g. `del(.[1.5:3.5])` deleted [1,3) not [1,4)). #722.
-            Some(n) if !n.is_nan() => {
-                let norm = if n < 0.0 { n + len as f64 } else { n };
+            Value::Num(n, _) if !n.is_nan() => {
+                let norm = if *n < 0.0 { n + len as f64 } else { *n };
                 let i = if is_end { norm.ceil() as i64 } else { norm.floor() as i64 };
-                Ok(i.clamp(0, len))
+                i.clamp(0, len)
             }
-            _ => Ok(default),
-        }
-    } else {
-        Ok(default)
-    }
+            _ => default,
+        };
+        out.push(i);
+        Ok(true)
+    })?;
+    Ok(out)
 }
 
 // bsearch(target): binary search on sorted array
