@@ -3769,3 +3769,18 @@ null
 
 def x: 1; [x, (def f($x): x; f(5))]
 null
+
+[sub("a";"x","y")]
+"a"
+
+[gsub("a";"x","y")]
+"aa"
+
+sub("a";empty)
+"a"
+
+[gsub("(?<c>.)";.c,"Z")]
+"ab"
+
+[gsub("(?<c>.)";if .c=="a" then "x","y" else "z" end)]
+"ab"
