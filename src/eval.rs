@@ -5354,12 +5354,23 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             Ok(true)
         }
         Expr::CallBuiltin { name, args } if name == "getpath" && args.len() == 1 => {
-            // In path context, getpath(p) = the path p itself
-            eval(&args[0], input, env, cb)
+            // In path context, getpath(p) yields the path p — but jq still
+            // traverses the input along p and raises a type error if an
+            // intermediate value cannot be indexed. `rt_getpath` performs that
+            // exact check (lenient on missing keys, strict on type mismatch), so
+            // validate before emitting the path. #775
+            eval(&args[0], input.clone(), env, &mut |pv| {
+                crate::runtime::rt_getpath(&input, &pv)?;
+                cb(pv)
+            })
         }
         Expr::GetPath { path } => {
-            // In path context, getpath(p) = the path p itself
-            eval(path, input, env, cb)
+            // In path context, getpath(p) = the path p itself, validated against
+            // the input the same way as the CallBuiltin form above. #775
+            eval(path, input.clone(), env, &mut |pv| {
+                crate::runtime::rt_getpath(&input, &pv)?;
+                cb(pv)
+            })
         }
         Expr::FuncCall { func_id, .. } => {
             let func = env.borrow().funcs.get(*func_id).cloned();

@@ -11226,3 +11226,21 @@ null
 strptime("%Y-%m-%d")
 "2024-01-15"
 [2024,0,15,0,0,0,1,14]
+
+# Issue #775 path: path(getpath(P)) errors when an intermediate value is not indexable
+path(getpath(["a","b"]))
+{"a":1}
+
+# Issue #775 path: indexing a string with a number errors in path position too
+path(getpath([0]))
+"hello"
+
+# Issue #775 path: a valid path traverses and returns the path array
+path(getpath(["a","b"]))
+{"a":{"b":1}}
+["a","b"]
+
+# Issue #775 path: a missing key is lenient (descends into null), not an error
+path(getpath(["a","b"]))
+{"a":{}}
+["a","b"]
