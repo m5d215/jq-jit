@@ -3856,3 +3856,18 @@ null
 
 def f: label $o | (10, break $o, 20); try (f, 99) catch "c"
 null
+
+index([1,2])
+[0,1,2]
+
+rindex([2,3])
+[1,2,3,2,3]
+
+index([1,2])
+[1,2,1,2]
+
+rindex([1,2])
+[1,2,1,2]
+
+index({"a":1})
+[{"a":1},2,{"a":1}]
