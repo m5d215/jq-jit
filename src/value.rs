@@ -4025,6 +4025,20 @@ pub fn push_tojson_raw(buf: &mut Vec<u8>, b: &[u8]) {
                     buf.extend_from_slice(num_bytes);
                 }
             }
+            b'a'..=b'z' | b'A'..=b'Z' => {
+                // Bare literal tokens (true/false/null/nan). An input-parsed
+                // NaN reaches this raw fast path without normalization; jq
+                // renders NaN as `null` in JSON, so the literal `nan` token
+                // would otherwise leak as invalid JSON. #771
+                let start = i;
+                while i < len && b[i].is_ascii_alphabetic() { i += 1; }
+                let tok = &b[start..i];
+                if tok.eq_ignore_ascii_case(b"nan") {
+                    buf.extend_from_slice(b"null");
+                } else {
+                    buf.extend_from_slice(tok);
+                }
+            }
             c => { buf.push(c); i += 1; }
         }
     }
@@ -5517,6 +5531,8 @@ pub fn format_jq_number(n: f64) -> String {
 /// through f64. Falls back to f64 dtoa otherwise. Used by @csv / @tsv
 /// formatters where jq preserves the literal shape (#475).
 pub fn push_value_num_repr_str(buf: &mut String, n: f64, repr: Option<&Rc<str>>) {
+    // jq renders a NaN cell as empty in CSV/TSV (not the JSON `null`). #771
+    if n.is_nan() { return; }
     if let Some(r) = repr.filter(|r| is_valid_json_number(r) && repr_is_exact_for_f64(r, n)) {
         if let Some(canonical) = normalize_jq_repr(r) {
             buf.push_str(&canonical);
@@ -5530,6 +5546,8 @@ pub fn push_value_num_repr_str(buf: &mut String, n: f64, repr: Option<&Rc<str>>)
 
 /// Same as [`push_value_num_repr_str`] but writes UTF-8 bytes to a `Vec<u8>`.
 pub fn push_value_num_repr_bytes(buf: &mut Vec<u8>, n: f64, repr: Option<&Rc<str>>) {
+    // jq renders a NaN cell as empty in CSV/TSV (not the JSON `null`). #771
+    if n.is_nan() { return; }
     if let Some(r) = repr.filter(|r| is_valid_json_number(r) && repr_is_exact_for_f64(r, n)) {
         if let Some(canonical) = normalize_jq_repr(r) {
             buf.extend_from_slice(canonical.as_bytes());
