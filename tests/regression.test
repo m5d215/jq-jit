@@ -10835,3 +10835,33 @@ true
 .x|tostring
 {"x":1234567890123456}
 "1234567890123456"
+
+# Issue #760 eval: while(cond; empty) terminates after emitting the input once
+while(.<3; empty)
+0
+0
+
+# Issue #760 eval: while(cond; empty) piped continuation also terminates
+[while(.<3; empty) | .+1]
+0
+[1]
+
+# Issue #760 eval: until(cond; empty) with a false cond emits nothing and terminates
+[until(.>3; empty)]
+0
+[]
+
+# Issue #767 eval: while folds a multi-valued update into independent successors
+[limit(8; while(.<3; .+1, .+2))]
+0
+[0,1,2,2]
+
+# Issue #767 eval: until fans out a multi-valued update into independent successors
+[limit(8; until(.>=3; .+1, .+2))]
+0
+[3,4,3,3,4]
+
+# Issue #767 eval: piped while with a multi-valued update threads each successor through the continuation
+[while(.<3; .+1, .+10) | .]
+0
+[0,1,2]
