@@ -3080,20 +3080,29 @@ fn apply_regex_flags(pattern: &str, flags: &Value) -> Result<(String, bool)> {
     if !flags_str.chars().all(|c| matches!(c, 'g' | 'i' | 'l' | 'm' | 'n' | 'p' | 's' | 'x')) {
         bail!("{} is not a valid modifier string", flags_str);
     }
+    // jq tolerates a repeated flag (e.g. "ii", "mp" both map to dotall), but the
+    // Rust engine rejects a duplicated inline flag like `(?ii)`/`(?ss)`. Collect
+    // each inline flag at most once. #764 / #774
     let mut inline = String::new();
     let mut global = false;
     for ch in flags_str.chars() {
-        match ch {
-            'i' | 'x' => inline.push(ch),
+        let inline_flag = match ch {
+            'i' | 'x' => Some(ch),
             // In jq's engine (Oniguruma) `m` is dotall — `.` matches newline —
             // which the underlying regex spells `s`. jq's own `s` (single-line
             // anchors) is already this engine's default, so it needs no inline
             // flag. The two were mapped PCRE-style (`s` = dotall), i.e. swapped.
             // `"a\nb" | test("a.b";"m")` must be true, `…;"s"` false. #723.
-            'm' => inline.push('s'),
-            'g' => global = true,
-            // l, n, p (and jq's `s`) have no inline equivalent here — accepted, ignored.
-            _ => {}
+            // jq's `p` enables both its `s` (single-line anchors) and `m`
+            // (dotall) modes. The single-line half is this engine's default, so
+            // `p` reduces to the same dotall as `m` — it must not be ignored. #764
+            'm' | 'p' => Some('s'),
+            'g' => { global = true; None }
+            // l, n (and jq's `s`) have no inline equivalent here — accepted, ignored.
+            _ => None,
+        };
+        if let Some(f) = inline_flag {
+            if !inline.contains(f) { inline.push(f); }
         }
     }
     let pat = if inline.is_empty() {

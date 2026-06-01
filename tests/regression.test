@@ -10975,3 +10975,33 @@ gmtime|strftime("100%% %x")
 gmtime|strftime("%D")
 1700000000
 "11/14/23"
+
+# Issue #764 regex: the p flag enables dotall so . matches a newline
+gsub(".";"X";"p")
+"\n"
+"X"
+
+# Issue #764 regex: p flag dotall lets . span a newline
+[match("a.b";"p").string]
+"a\nb"
+["a\nb"]
+
+# Issue #764 regex: p does not turn ^ into a per-line anchor (single-line anchors)
+test("^b";"p")
+"a\nb"
+false
+
+# Issue #764 regex: p combined with m (both dotall) is tolerated, not a duplicate-flag error
+test("a.b";"mp")
+"a\nb"
+true
+
+# Issue #774 regex: a duplicated valid flag (ii) is tolerated like jq
+test("ab";"ii")
+"AB"
+true
+
+# Issue #774 regex: repeated dotall flag (mm) is tolerated
+test("a.b";"mm")
+"a\nb"
+true
