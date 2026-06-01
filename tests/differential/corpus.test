@@ -3898,3 +3898,30 @@ to_entries
 
 .
 "a\\\/b"
+
+test("";"n")
+"a"
+
+gsub("b*";"X";"n")
+"abba"
+
+match("a*";"n")
+"Xaa"
+
+[scan("a*";"n")]
+"Xaa baa"
+
+[match("";"gn")]
+"abc"
+
+split("a*";"n")
+"XaaYaZ"
+
+[splits(" *";"n")]
+"a b  c"
+
+sub("a*";"X";"n")
+"Xaa"
+
+capture("(?<x>a+)";"gn")
+"aXaa"

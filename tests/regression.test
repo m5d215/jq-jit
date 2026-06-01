@@ -11324,3 +11324,28 @@ tojson
 to_entries
 {"a\/b":"c\/d"}
 [{"key":"a/b","value":"c/d"}]
+
+# Issue #773 regex n flag: test ignores empty matches
+test("";"n")
+"a"
+false
+
+# Issue #773 regex n flag: gsub skips zero-width matches
+gsub("b*";"X";"n")
+"abba"
+"aXa"
+
+# Issue #773 regex n flag: match returns the first non-empty match
+match("a*";"n")
+"Xaa"
+{"offset":1,"length":2,"string":"aa","captures":[]}
+
+# Issue #773 regex n flag: scan drops empty matches
+[scan("b*";"n")]
+"abba"
+["bb"]
+
+# Issue #773 regex n flag: global match with n yields only non-empty matches
+[match("a*";"gn")]
+"Xaa baa"
+[{"offset":1,"length":2,"string":"aa","captures":[]},{"offset":5,"length":2,"string":"aa","captures":[]}]
