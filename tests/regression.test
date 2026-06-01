@@ -11484,3 +11484,18 @@ null
 "abc" as $x | $x | @base64
 null
 "YWJj"
+
+# Issue #809: a fused .field op after |= still raises the index-type error (caught by ?, collected empty)
+[.[0]|=. | (.a==1)?]
+[1,2]
+[]
+
+# Issue #809: fused .field arithmetic after map_values raises on the array element
+[(map_values(.) | .a+1)?]
+[1]
+[]
+
+# Issue #809: fused .field op after .[]|=. raises on a non-object element
+[(.[]|=. | .a==1 and true)?]
+[1,2]
+[]
