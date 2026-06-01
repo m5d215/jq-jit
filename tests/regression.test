@@ -11130,3 +11130,43 @@ walk(if type=="number" then .,.+1 else . end)
 walk(if type=="number" then .+1 else . end)
 {"a":1,"b":[2,3]}
 {"a":2,"b":[3,4]}
+
+# Issue #770 _by: sort_by applies jq's NaN-smallest total order
+[2,nan,1]|sort_by(.)
+null
+[null,1,2]
+
+# Issue #770 _by: max_by ignores NaN (never the maximum)
+[2,nan,1]|max_by(.)
+null
+2
+
+# Issue #770 _by: min_by treats NaN as the minimum
+[2,nan,1]|min_by(.)
+null
+null
+
+# Issue #770 _by: group_by keeps each NaN key in its own group (NaN != NaN)
+[nan,1,nan]|group_by(.)
+null
+[[null],[null],[1]]
+
+# Issue #770 _by: unique_by never dedups NaN keys
+[nan,1,nan]|unique_by(.)
+null
+[null,null,1]
+
+# Issue #770 _by: a multi-valued key orders a shorter prefix first
+[[1],[]]|sort_by(.[])
+null
+[[],[1]]
+
+# Issue #770 _by: min_by over multi-valued keys honours prefix ordering
+[[1,2],[1]]|min_by(.[])
+null
+[1]
+
+# Issue #770 _by: group_by over multi-valued keys distinguishes prefix lengths
+[[1,2],[1]]|group_by(.[])
+null
+[[[1]],[[1,2]]]

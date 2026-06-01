@@ -4723,13 +4723,11 @@ fn sort_indexed_by_key(indexed: &mut [(usize, &Value)]) {
             });
         }
         Value::Num(..) => {
-            indexed.sort_by(|(_, ka), (_, kb)| {
-                if let (Value::Num(a, _), Value::Num(b, _)) = (ka, kb) {
-                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-                } else {
-                    crate::runtime::compare_values(ka, kb)
-                }
-            });
+            // `partial_cmp` returns None for NaN and would collapse to Equal,
+            // leaving NaN keys misordered (and dropped by group_by/unique_by).
+            // jq's total order (#115) places NaN below every number, which
+            // `compare_values` implements. #770
+            indexed.sort_by(|(_, ka), (_, kb)| crate::runtime::compare_values(ka, kb));
         }
         _ => {
             indexed.sort_by(|(_, ka), (_, kb)| crate::runtime::compare_values(ka, kb));
@@ -4926,18 +4924,24 @@ fn eval_closure_op(op: ClosureOpKind, container: &Value, key_expr: &Expr, _input
         _ => bail!("Cannot iterate over {}", crate::runtime::errdesc_pub(container)),
     };
 
-    // Fast path: f64 key extraction — avoids eval overhead and Vec<Value> allocations
+    // Fast path: f64 key extraction — avoids eval overhead and Vec<Value> allocations.
+    // A NaN key disqualifies this path: its raw IEEE comparator neither orders
+    // NaN (jq sorts it smallest) nor keeps NaN keys distinct under group_by /
+    // unique_by (NaN is never equal to itself). Such inputs fall through to the
+    // Value-based paths, which route ordering through `compare_values` and
+    // grouping through `values_equal`. #770
     if !a.is_empty() {
-        if let Some(first_key) = try_eval_key_f64(key_expr, &a[0]) {
+        if let Some(first_key) = try_eval_key_f64(key_expr, &a[0]).filter(|k| !k.is_nan()) {
             let mut f64_keys: Vec<f64> = Vec::with_capacity(a.len());
             f64_keys.push(first_key);
             let mut all_f64 = true;
             for item in &a[1..] {
-                if let Some(k) = try_eval_key_f64(key_expr, item) {
-                    f64_keys.push(k);
-                } else {
-                    all_f64 = false;
-                    break;
+                match try_eval_key_f64(key_expr, item) {
+                    Some(k) if !k.is_nan() => f64_keys.push(k),
+                    _ => {
+                        all_f64 = false;
+                        break;
+                    }
                 }
             }
             if all_f64 {
@@ -4963,54 +4967,65 @@ fn eval_closure_op(op: ClosureOpKind, container: &Value, key_expr: &Expr, _input
         }
     }
 
-    let mut keyed: Vec<(Vec<Value>, Value)> = Vec::new();
+    // Multi-valued key path: jq collects every output of the key expression
+    // into an array and orders those arrays with its standard value comparison —
+    // lexicographically, with a shorter prefix sorting before a longer one
+    // (`[] < [1] < [1,2]`). The previous hand-rolled comparator zipped to the
+    // shorter length and treated a prefix as equal, and never applied jq's NaN
+    // ordering. Wrapping the collected keys in `Value::Arr` lets `compare_values`
+    // (ordering) and `values_equal` (grouping) handle both correctly. #770
+    let mut keyed: Vec<(Value, Value)> = Vec::new();
     for item in a.iter() {
         let mut keys = Vec::new();
         eval(key_expr, item.clone(), env, &mut |k| { keys.push(k); Ok(true) })?;
-        keyed.push((keys, item.clone()));
+        keyed.push((Value::Arr(Rc::new(keys)), item.clone()));
     }
     match op {
         ClosureOpKind::SortBy => {
-            keyed.sort_by(|(ka, _), (kb, _)| { ka.iter().zip(kb.iter()).map(|(a, b)| crate::runtime::compare_values(a, b)).find(|o| *o != std::cmp::Ordering::Equal).unwrap_or(std::cmp::Ordering::Equal) });
+            keyed.sort_by(|(ka, _), (kb, _)| crate::runtime::compare_values(ka, kb));
             cb(Value::Arr(Rc::new(keyed.into_iter().map(|(_, v)| v).collect())))
         }
         ClosureOpKind::GroupBy => {
-            keyed.sort_by(|(ka, _), (kb, _)| { ka.iter().zip(kb.iter()).map(|(a, b)| crate::runtime::compare_values(a, b)).find(|o| *o != std::cmp::Ordering::Equal).unwrap_or(std::cmp::Ordering::Equal) });
-            let mut groups: Vec<Value> = Vec::new(); let mut cg: Vec<Value> = Vec::new(); let mut ck: Option<Vec<Value>> = None;
-            for (keys, val) in keyed {
-                if let Some(ref pk) = ck { if keys.len()==pk.len()&&keys.iter().zip(pk.iter()).all(|(a,b)| crate::runtime::values_equal(a,b)) { cg.push(val); } else { groups.push(Value::Arr(Rc::new(std::mem::take(&mut cg)))); cg.push(val); ck=Some(keys); } } else { cg.push(val); ck=Some(keys); }
+            keyed.sort_by(|(ka, _), (kb, _)| crate::runtime::compare_values(ka, kb));
+            let mut groups: Vec<Value> = Vec::new(); let mut cg: Vec<Value> = Vec::new(); let mut ck: Option<Value> = None;
+            for (key, val) in keyed {
+                if let Some(ref pk) = ck {
+                    if crate::runtime::values_equal(&key, pk) { cg.push(val); }
+                    else { groups.push(Value::Arr(Rc::new(std::mem::take(&mut cg)))); cg.push(val); ck = Some(key); }
+                } else { cg.push(val); ck = Some(key); }
             }
             if !cg.is_empty() { groups.push(Value::Arr(Rc::new(cg))); }
             cb(Value::Arr(Rc::new(groups)))
         }
         ClosureOpKind::UniqueBy => {
             // jq: unique_by(f) = group_by(f) | map(.[0]) — sorted by key, deduped.
-            keyed.sort_by(|(ka, _), (kb, _)| { ka.iter().zip(kb.iter()).map(|(a, b)| crate::runtime::compare_values(a, b)).find(|o| *o != std::cmp::Ordering::Equal).unwrap_or(std::cmp::Ordering::Equal) });
+            keyed.sort_by(|(ka, _), (kb, _)| crate::runtime::compare_values(ka, kb));
             let mut result: Vec<Value> = Vec::new();
-            let mut prev: Option<Vec<Value>> = None;
-            for (keys, val) in keyed {
-                let is_dup = match &prev {
-                    Some(pk) => pk.len() == keys.len() && pk.iter().zip(keys.iter()).all(|(a, b)| crate::runtime::values_equal(a, b)),
-                    None => false,
-                };
+            let mut prev: Option<Value> = None;
+            for (key, val) in keyed {
+                let is_dup = prev.as_ref().is_some_and(|pk| crate::runtime::values_equal(pk, &key));
                 if !is_dup {
                     result.push(val);
-                    prev = Some(keys);
+                    prev = Some(key);
                 }
             }
             cb(Value::Arr(Rc::new(result)))
         }
         ClosureOpKind::MinBy => {
             if keyed.is_empty() { cb(Value::Null) } else {
-                let mut mi = 0; for i in 1..keyed.len() { if keyed[i].0.iter().zip(keyed[mi].0.iter()).map(|(a,b)| crate::runtime::compare_values(a,b)).find(|o|*o!=std::cmp::Ordering::Equal).unwrap_or(std::cmp::Ordering::Equal) == std::cmp::Ordering::Less { mi=i; } }
+                let mut mi = 0;
+                for i in 1..keyed.len() {
+                    if crate::runtime::compare_values(&keyed[i].0, &keyed[mi].0) == std::cmp::Ordering::Less { mi = i; }
+                }
                 cb(keyed[mi].1.clone())
             }
         }
         ClosureOpKind::MaxBy => {
             if keyed.is_empty() { cb(Value::Null) } else {
-                let mut mi = 0; for i in 1..keyed.len() {
-                    let cmp = keyed[i].0.iter().zip(keyed[mi].0.iter()).map(|(a,b)| crate::runtime::compare_values(a,b)).find(|o|*o!=std::cmp::Ordering::Equal).unwrap_or(std::cmp::Ordering::Equal);
-                    if cmp == std::cmp::Ordering::Greater || cmp == std::cmp::Ordering::Equal { mi=i; }
+                let mut mi = 0;
+                for i in 1..keyed.len() {
+                    let cmp = crate::runtime::compare_values(&keyed[i].0, &keyed[mi].0);
+                    if cmp == std::cmp::Ordering::Greater || cmp == std::cmp::Ordering::Equal { mi = i; }
                 }
                 cb(keyed[mi].1.clone())
             }
