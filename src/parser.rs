@@ -1495,30 +1495,15 @@ impl Parser {
         let body = self.parse_pipe()?;
         self.scope.vars.truncate(saved_vars);
 
-        // Build: try (bind pattern1 | body) catch try (bind pattern2 | body) catch ... bind patternN | body
-        // The last alternative runs WITHOUT a try-catch so its error propagates —
-        // per the jq spec, "if they all fail, then an error is emitted" (issue #76).
-        let tmp_idx = self.scope.alloc_var("__altdestruct_tmp__");
-        let tmp_ref = Expr::LoadVar { var_index: tmp_idx };
-
-        let mut result: Option<Expr> = None;
-        for pattern in alt_patterns.into_iter().rev() {
-            let binding = self.build_binding_with_varmap(tmp_ref.clone(), &pattern, &var_map, body.clone())?;
-            result = Some(match result {
-                None => binding,
-                Some(prev) => Expr::TryCatch {
-                    try_expr: Box::new(binding),
-                    catch_expr: Box::new(prev),
-                },
-            });
-        }
-        let result = result.expect("alt_patterns has at least two entries here");
-
-        Ok(Expr::LetBinding {
-            var_index: tmp_idx,
-            value: Box::new(value_expr),
-            body: Box::new(result),
-        })
+        // Build the `try (bind P1 | body) catch (bind P2 | body) …` chain through
+        // the shared helper, which captures the original `.` up front and
+        // restores it at the head of every alternative's body. Without that, a
+        // fallback alternative would run `body` with `.` set to the caught
+        // destructuring *error* string instead of the original input (#736).
+        // The helper clones `value_expr` into each alternative rather than
+        // sharing it through a tmp slot; only one alternative ultimately runs
+        // (first success wins), matching jq.
+        self.build_alt_destructure(&value_expr, &alt_patterns, &var_map, &body)
     }
 
     /// Allocate the shared variables for a `?//` alternative-destructuring
@@ -1565,9 +1550,19 @@ impl Parser {
             left: Box::new(Expr::LoadVar { var_index: dot_var }),
             right: Box::new(body.clone()),
         };
+        // Evaluate the bound value against the restored `.` too: in a catch
+        // arm the ambient `.` is the caught error, so a `value_expr` that reads
+        // `.` (e.g. `. as [$a] ?// $a`) would otherwise destructure the error
+        // string instead of the original input (#736). For value_exprs that
+        // ignore `.` (a `LoadVar` element slot, as in reduce/foreach #712) this
+        // pipe is a harmless no-op.
+        let restored_value = Expr::Pipe {
+            left: Box::new(Expr::LoadVar { var_index: dot_var }),
+            right: Box::new(value_expr.clone()),
+        };
         let mut result: Option<Expr> = None;
         for pattern in alt_patterns.iter().rev() {
-            let binding = self.build_binding_with_varmap(value_expr.clone(), pattern, var_map, restored_body.clone())?;
+            let binding = self.build_binding_with_varmap(restored_value.clone(), pattern, var_map, restored_body.clone())?;
             result = Some(match result {
                 None => binding,
                 Some(prev) => Expr::TryCatch {
