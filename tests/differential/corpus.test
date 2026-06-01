@@ -149,6 +149,13 @@ null
 .[] |= . + 1
 [1,2,3]
 
+# a fused .field op after a _modify still raises the index-type error (#809)
+[.[0]|=. | (.a==1)?]
+[1,2]
+
+[(map_values(.) | .a+1)?]
+[1]
+
 # ---------- Issue #31: JIT→eval delegation must seed $vars buried deep in update ----------
 
 [100] as $r | (.a, .b) |= $r[0]

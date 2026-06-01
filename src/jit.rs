@@ -951,7 +951,14 @@ impl Flattener {
             JitOp::Index { .. } | JitOp::IndexField { .. } |
             JitOp::BinOp { .. } | JitOp::AddMove { .. } | JitOp::UnaryOp { .. } |
             JitOp::Negate { .. } | JitOp::CallBuiltin { .. } |
-            JitOp::MutateInplace { .. } | JitOp::ThrowError { .. }
+            JitOp::MutateInplace { .. } | JitOp::ThrowError { .. } |
+            // The fused field-op runtimes index `.field` on the base and return
+            // GEN_ERROR for a non-object base ("Cannot index <type> with string").
+            // Without a CheckError that error is set but never propagated, so the
+            // null in dst leaks out — e.g. `.[0]|=. | .a==1` returned null instead
+            // of erroring once the surrounding _modify pushed it onto the JIT
+            // path (#809).
+            JitOp::FieldBinopConst { .. } | JitOp::FieldBinopField { .. }
         );
         self.ops.push(op);
         if is_fallible {
