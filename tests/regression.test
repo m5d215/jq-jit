@@ -11065,3 +11065,38 @@ null
 def x: 1; [x, (def f($x): x; f(5))]
 null
 [1,5]
+
+# Issue #768 regex: sub keeps every value of a multi-valued replacement generator
+[sub("a";"x","y")]
+"a"
+["x","y"]
+
+# Issue #768 regex: gsub applies the i-th replacement value to all matches in lockstep
+[gsub("a";"x","y")]
+"aa"
+["xx","yy"]
+
+# Issue #768 regex: an empty replacement generator preserves the original string (sub)
+sub("a";empty)
+"a"
+"a"
+
+# Issue #768 regex: an empty replacement generator preserves the original string (gsub)
+gsub("a";empty)
+"aa"
+"aa"
+
+# Issue #768 regex: per-match captures combine in lockstep
+[gsub("(?<c>.)";.c,"Z")]
+"ab"
+["ab","ZZ"]
+
+# Issue #768 regex: uneven generator lengths drop exhausted matches at higher indices
+[gsub("(?<c>.)";if .c=="a" then "x","y" else "z" end)]
+"ab"
+["xz","y"]
+
+# Issue #768 regex: a multi-valued sub feeds downstream folds value by value
+reduce sub("a";"x","y") as $s ("";.+$s)
+"a"
+"xy"

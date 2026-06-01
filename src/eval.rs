@@ -3628,38 +3628,61 @@ pub fn eval(
                             crate::runtime::errdesc_pub(&rv),
                         ))?;
                         let segments = crate::runtime::sub_gsub_segments(input_str, re_str, &fv, is_global)?;
-                        let mut result = String::new();
+                        // jq treats the replacement as a generator and applies the
+                        // i-th value of every match in lockstep — NOT a Cartesian
+                        // product (#768). So the number of outputs is the largest
+                        // number of values any single match yields; a match whose
+                        // generator runs out at index i contributes nothing (drops
+                        // the match) for that output. When *every* match yields
+                        // nothing (or there are no matches at all), jq emits the
+                        // original string unchanged.
+                        let mut reps: Vec<Vec<Value>> = Vec::new();
                         for seg in &segments {
-                            result.push_str(&seg.literal);
                             if let Some(ref cap_obj) = seg.captures {
-                                let mut replacement = Value::Null;
-                                eval(tostr, cap_obj.clone(), env, &mut |tv| {
-                                    replacement = tv;
-                                    Ok(true)
-                                })?;
-                                // jq's sub/gsub concatenates the replacement
-                                // into the running string via `+`. String
-                                // works as expected; null is the additive
-                                // identity (drops the match); other types
-                                // surface jq's standard addition error
-                                // referencing the partial result built so
-                                // far (#545). The previous `.to_string()`
-                                // catch-all silently coerced non-strings.
-                                match &replacement {
-                                    Value::Str(s) => result.push_str(s),
-                                    Value::Null => {},
-                                    other => {
-                                        let partial = Value::from_string(result);
-                                        bail!(
-                                            "{} and {} cannot be added",
-                                            crate::runtime::errdesc_pub(&partial),
-                                            crate::runtime::errdesc_pub(other),
-                                        );
+                                let mut vals = Vec::new();
+                                eval(tostr, cap_obj.clone(), env, &mut |tv| { vals.push(tv); Ok(true) })?;
+                                reps.push(vals);
+                            }
+                        }
+                        let n = reps.iter().map(|v| v.len()).max().unwrap_or(0);
+                        if n == 0 {
+                            // No matches, or every replacement generator was empty:
+                            // the original string is preserved as a single output.
+                            return cb(s.clone());
+                        }
+                        for i in 0..n {
+                            let mut result = String::new();
+                            let mut cap_idx = 0;
+                            for seg in &segments {
+                                result.push_str(&seg.literal);
+                                if seg.captures.is_some() {
+                                    let rep = reps[cap_idx].get(i);
+                                    cap_idx += 1;
+                                    // jq concatenates the replacement via `+`: a
+                                    // string appends, null is the additive identity
+                                    // (drops the match), other types surface jq's
+                                    // standard addition error referencing the partial
+                                    // result built so far (#545). A missing value at
+                                    // this index likewise drops the match.
+                                    match rep {
+                                        Some(Value::Str(rs)) => result.push_str(rs),
+                                        Some(Value::Null) | None => {},
+                                        Some(other) => {
+                                            let partial = Value::from_string(result);
+                                            bail!(
+                                                "{} and {} cannot be added",
+                                                crate::runtime::errdesc_pub(&partial),
+                                                crate::runtime::errdesc_pub(other),
+                                            );
+                                        }
                                     }
                                 }
                             }
+                            if !cb(Value::from_string(result))? {
+                                return Ok(false);
+                            }
                         }
-                        cb(Value::from_string(result))
+                        Ok(true)
                     })
                 })
             })
