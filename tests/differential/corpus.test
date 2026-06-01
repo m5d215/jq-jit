@@ -3714,3 +3714,13 @@ while(.<3; empty)
 
 del(.[(0,1):(3,4)])
 [1,2,3,4,5]
+
+# ---------- Issue #762: strptime %C century specifier ----------
+# jq delegates strptime to libc, so any partial parse (mday = 0) has a
+# platform-divergent wday/yday: glibc → 8/367, BSD → 6/-1, MSVC leaves yday
+# at the 367 sentinel even when the year is set. Only a FULL date (year +
+# month + day all resolved) yields a calendar wday/yday stable on all three,
+# so that is the only shape probed here.
+
+strptime("%C %y-%m-%d")
+"21 24-03-15"

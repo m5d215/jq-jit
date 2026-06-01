@@ -3668,21 +3668,31 @@ fn parsed_to_broken(p: &chrono::format::Parsed) -> BrokenTime {
     let (year, mon0, mday, date_seen) = match full_date {
         Some(d) => (d.year(), d.month0() as i32, d.day() as i32, true),
         None => {
-            // `%y` sets only the mod-100 year; resolve the century with the
-            // POSIX pivot (00–68 → 2000s, 69–99 → 1900s) the way libc does.
+            // Resolve the year from `%Y` (`year`), `%C` (`year_div_100`), and
+            // `%y` (`year_mod_100`). `%C %y` combine to `C*100 + y2`; `%C` alone
+            // gives `C*100`; `%y` alone resolves the century with the POSIX pivot
+            // (00–68 → 2000s, 69–99 → 1900s) the way libc does. #762
             let year = p.year()
-                .or_else(|| p.year_mod_100().map(|y2| if y2 < 69 { 2000 + y2 } else { 1900 + y2 }))
+                .or_else(|| match (p.year_div_100(), p.year_mod_100()) {
+                    (Some(c), Some(y2)) => Some(c * 100 + y2),
+                    (Some(c), None) => Some(c * 100),
+                    (None, Some(y2)) => Some(if y2 < 69 { 2000 + y2 } else { 1900 + y2 }),
+                    (None, None) => None,
+                })
                 .unwrap_or(1900);
             let mon0 = p.month().map(|m| m as i32 - 1).unwrap_or(0);
             let mday = p.day().map(|d| d as i32).unwrap_or(0);
-            let seen = p.year().is_some() || p.year_mod_100().is_some()
+            let seen = p.year().is_some() || p.year_div_100().is_some() || p.year_mod_100().is_some()
                 || p.month().is_some() || p.day().is_some();
             (year, mon0, mday, seen)
         }
     };
+    // `%H`/`%I` set the 12-hour parts, `%p` the AM/PM half-day. jq fills each
+    // independently: `%p` alone (PM → 12, AM → 0) and `%I` alone (no `%p` → the
+    // literal 12-hour value) must still apply, not just the both-present case. #762
     let hour = match (p.hour_div_12(), p.hour_mod_12()) {
-        (Some(d), Some(m)) => (d * 12 + m) as i32,
-        _ => 0,
+        (None, None) => 0,
+        (d, m) => (d.unwrap_or(0) * 12 + m.unwrap_or(0)) as i32,
     };
     let min = p.minute().map(|m| m as i32).unwrap_or(0);
     let sec = p.second().map(|s| s as i32).unwrap_or(0);
@@ -3693,7 +3703,16 @@ fn parsed_to_broken(p: &chrono::format::Parsed) -> BrokenTime {
         // the normalized civil date (`mday` may be 0 = last day of the prior
         // month). `yday` is `days-before-month + mday - 1`, so a day-less parse
         // yields the `-1` jq emits for year/month-only formats.
-        (civil_wday(year, mon0, mday), days_before_month(mon0, year) + mday - 1)
+        let mut wday = civil_wday(year, mon0, mday);
+        // A day-less January (mon 0, mday 0) normalizes to Dec 31 of `year-1`,
+        // crossing the year boundary. jq's own day arithmetic miscounts that
+        // crossing by one day when `year` is a non-leap century, so e.g.
+        // `strptime("%C")` on "21" reports wday 3, not the civil 4. Reproduce
+        // the quirk for bit-exact parity (also affects `%Y`/`%y`). #762
+        if mon0 == 0 && mday == 0 && year % 100 == 0 && year % 400 != 0 {
+            wday = (wday + 6) % 7;
+        }
+        (wday, days_before_month(mon0, year) + mday - 1)
     } else {
         // No date field at all (time-only): jq leaves the tm_wday/tm_yday
         // sentinels, which surface as 6 / -1.
