@@ -11195,3 +11195,34 @@ null
 [nan]|@csv
 null
 ""
+
+# Issue #772 strptime errors on a total mismatch instead of the [1900,..] placeholder
+strptime("%Y-%m-%d")
+"abc"
+
+# Issue #772 strptime errors on an out-of-range field
+strptime("%Y-%m-%d")
+"2024-13-15"
+
+# Issue #772 strptime errors on trailing input after a full match
+strptime("%Y-%m-%d")
+"2024-01-15X"
+
+# Issue #772 strptime errors on trailing input after a single field
+strptime("%Y")
+"2023x"
+
+# Issue #772 strptime keeps the last value of a double-set field (last-wins)
+"2024 03 February"|strptime("%Y %m %B")
+null
+[2024,1,0,0,0,0,3,30]
+
+# Issue #772 strptime last-wins also applies to the hour (%H then %I)
+"2024-06-15 03 09"|strptime("%Y-%m-%d %H %I")
+null
+[2024,5,15,9,0,0,6,166]
+
+# Issue #772 strptime still resolves a valid partial date (no regression)
+strptime("%Y-%m-%d")
+"2024-01-15"
+[2024,0,15,0,0,0,1,14]
