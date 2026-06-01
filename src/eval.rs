@@ -3358,16 +3358,28 @@ pub fn eval(
                         bail!("__jqerror__:\"limit doesn't support negative count\"");
                     }
                     // String / array / object surface jq's `$n - 1`
-                    // arithmetic error from the limit reduce.
+                    // arithmetic error from the limit reduce. jq computes that
+                    // update lazily — only once the generator yields its first
+                    // item — so an empty generator produces no error at all
+                    // (#806). Defer the error until `generator` yields.
                     other => {
                         let msg = format!(
                             "{} and number (1) cannot be subtracted",
                             crate::runtime::errdesc_pub(other),
                         );
-                        bail!(
+                        let err = format!(
                             "__jqerror__:{}",
                             crate::value::value_to_json_precise(&Value::from_string(msg)),
                         );
+                        let mut yielded = false;
+                        eval(generator, input.clone(), env, &mut |_val| {
+                            yielded = true;
+                            Ok(false)
+                        })?;
+                        if yielded {
+                            bail!("{}", err);
+                        }
+                        Ok(true)
                     }
                 }
             })
@@ -5511,15 +5523,28 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                     Value::Null | Value::True | Value::False => {
                         bail!("__jqerror__:\"limit doesn't support negative count\"");
                     }
+                    // A string/array/object count surfaces jq's `$n - 1`
+                    // arithmetic error lazily — only when the generator yields
+                    // its first path — so an empty generator produces nothing
+                    // rather than erroring (#806).
                     other => {
                         let msg = format!(
                             "{} and number (1) cannot be subtracted",
                             crate::runtime::errdesc_pub(other),
                         );
-                        bail!(
+                        let err = format!(
                             "__jqerror__:{}",
                             crate::value::value_to_json_precise(&Value::from_string(msg)),
                         );
+                        let mut yielded = false;
+                        eval_path(generator, input.clone(), env, &mut |_p| {
+                            yielded = true;
+                            Ok(false)
+                        })?;
+                        if yielded {
+                            bail!("{}", err);
+                        }
+                        return Ok(true);
                     }
                 };
                 if n < 0.0 {

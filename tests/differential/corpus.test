@@ -38,6 +38,19 @@ null
 [limit(1; 1,2,3)]
 null
 
+# limit/nth tolerate an off-type count when the generator is empty (#806)
+[limit("a"; empty)]
+null
+
+[limit({}; empty)]
+null
+
+[nth("a"; empty)]
+null
+
+[nth({}; empty)]
+null
+
 # ---------- PR #27 bug 4: foreach emits per update yield ----------
 
 [foreach range(3) as $i (0; . + $i; .)]
