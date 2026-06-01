@@ -3829,3 +3829,15 @@ null
 
 ["a",nan,1]|@csv
 null
+
+path(getpath(["a","b"]))
+{"a":1}
+
+path(getpath([0]))
+"hello"
+
+path(getpath(["a","b"]))
+{"a":{"b":1}}
+
+path(getpath(["a","b"]))
+{"a":{}}
