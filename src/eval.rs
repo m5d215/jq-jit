@@ -1075,6 +1075,111 @@ pub(crate) fn expr_uses_var(expr: &Expr, target: u16) -> bool {
     }
 }
 
+/// Push the `func_id` of every `FuncCall` that appears anywhere in `expr` onto
+/// `out` (one level deep — the caller follows callees transitively). Exhaustive
+/// over `Expr` so a call buried in any sub-expression is found, which is what
+/// makes the #765 reachability check sound. Mirrors `expr_uses_var`'s structure.
+pub(crate) fn collect_func_calls(expr: &Expr, out: &mut Vec<usize>) {
+    match expr {
+        Expr::Input | Expr::Empty | Expr::Not | Expr::Env | Expr::Builtins
+        | Expr::ReadInput | Expr::ReadInputs | Expr::ModuleMeta | Expr::GenLabel
+        | Expr::Literal(_) | Expr::Loc { .. } | Expr::LoadVar { .. } => {}
+        Expr::Pipe { left, right } | Expr::Comma { left, right }
+        | Expr::BinOp { lhs: left, rhs: right, .. }
+        | Expr::Alternative { primary: left, fallback: right }
+        | Expr::While { cond: left, update: right }
+        | Expr::Until { cond: left, update: right }
+        | Expr::Limit { count: left, generator: right }
+        | Expr::Index { expr: left, key: right }
+        | Expr::IndexOpt { expr: left, key: right }
+        | Expr::Update { path_expr: left, update_expr: right }
+        | Expr::Assign { path_expr: left, value_expr: right }
+        | Expr::SetPath { path: left, value: right }
+        | Expr::TryCatch { try_expr: left, catch_expr: right } => {
+            collect_func_calls(left, out);
+            collect_func_calls(right, out);
+        }
+        Expr::Mutate { path_expr, value_expr, .. } => {
+            collect_func_calls(path_expr, out);
+            collect_func_calls(value_expr, out);
+        }
+        Expr::IfThenElse { cond, then_branch, else_branch } => {
+            collect_func_calls(cond, out);
+            collect_func_calls(then_branch, out);
+            collect_func_calls(else_branch, out);
+        }
+        Expr::LetBinding { value, body, .. } => {
+            collect_func_calls(value, out);
+            collect_func_calls(body, out);
+        }
+        Expr::Each { input_expr } | Expr::EachOpt { input_expr }
+        | Expr::Recurse { input_expr } | Expr::Repeat { update: input_expr }
+        | Expr::Negate { operand: input_expr } | Expr::UnaryOp { operand: input_expr, .. }
+        | Expr::Collect { generator: input_expr }
+        | Expr::PathExpr { expr: input_expr } | Expr::GetPath { path: input_expr }
+        | Expr::DelPaths { paths: input_expr } | Expr::Debug { expr: input_expr }
+        | Expr::Stderr { expr: input_expr } | Expr::Format { expr: input_expr, .. } => {
+            collect_func_calls(input_expr, out);
+        }
+        Expr::Reduce { source, init, update, .. }
+        | Expr::Foreach { source, init, update, .. } => {
+            collect_func_calls(source, out);
+            collect_func_calls(init, out);
+            collect_func_calls(update, out);
+        }
+        Expr::Range { from, to, step } => {
+            collect_func_calls(from, out);
+            collect_func_calls(to, out);
+            if let Some(s) = step { collect_func_calls(s, out); }
+        }
+        Expr::FuncCall { func_id, args } => {
+            out.push(*func_id);
+            for a in args { collect_func_calls(a, out); }
+        }
+        Expr::CallBuiltin { args, .. } => { for a in args { collect_func_calls(a, out); } }
+        Expr::ObjectConstruct { pairs } => {
+            for (k, v) in pairs { collect_func_calls(k, out); collect_func_calls(v, out); }
+        }
+        Expr::StringInterpolation { parts } => {
+            for p in parts { if let StringPart::Expr(e) = p { collect_func_calls(e, out); } }
+        }
+        Expr::AllShort { generator, predicate } | Expr::AnyShort { generator, predicate } => {
+            collect_func_calls(generator, out);
+            collect_func_calls(predicate, out);
+        }
+        Expr::Label { body, .. } | Expr::Break { value: body, .. } => collect_func_calls(body, out),
+        Expr::Error { msg } => { if let Some(m) = msg { collect_func_calls(m, out); } }
+        Expr::ClosureOp { input_expr, key_expr, .. } => {
+            collect_func_calls(input_expr, out);
+            collect_func_calls(key_expr, out);
+        }
+        Expr::Slice { expr, from, to } => {
+            collect_func_calls(expr, out);
+            if let Some(f) = from { collect_func_calls(f, out); }
+            if let Some(t) = to { collect_func_calls(t, out); }
+        }
+        Expr::RegexTest { input_expr, re, flags } | Expr::RegexMatch { input_expr, re, flags }
+        | Expr::RegexCapture { input_expr, re, flags } | Expr::RegexScan { input_expr, re, flags } => {
+            collect_func_calls(input_expr, out);
+            collect_func_calls(re, out);
+            collect_func_calls(flags, out);
+        }
+        Expr::RegexSub { input_expr, re, tostr, flags } | Expr::RegexGsub { input_expr, re, tostr, flags } => {
+            collect_func_calls(input_expr, out);
+            collect_func_calls(re, out);
+            collect_func_calls(tostr, out);
+            collect_func_calls(flags, out);
+        }
+        Expr::AlternativeDestructure { alternatives } => {
+            for a in alternatives { collect_func_calls(a, out); }
+        }
+        Expr::Memoize { key, body, .. } => {
+            if let Some(k) = key { collect_func_calls(k, out); }
+            collect_func_calls(body, out);
+        }
+    }
+}
+
 /// Extract f64 from a leaf expression (LoadVar, Input, Literal) or simple
 /// numeric BinOp without cloning. Used by the zero-clone BinOp fast path.
 #[inline(always)]

@@ -753,6 +753,16 @@ pub struct Parser {
     pos: usize,
     scope: Scope,
     lib_dirs: Vec<String>,
+    /// The `compiled_funcs` id of the function body currently being parsed, or
+    /// `None` at the top level. Used to attribute a deferred unbound-variable
+    /// reference to its enclosing def. #765
+    current_func: Option<usize>,
+    /// Unbound `$var` references parked instead of erroring eagerly, as
+    /// `(enclosing_func_id, name)`. After the whole program is parsed, only
+    /// those reachable from the top-level expression (top-level refs, plus refs
+    /// inside transitively-called defs) are errors — jq never compiles the body
+    /// of an uncalled def. #765
+    deferred_unbound: Vec<(Option<usize>, String)>,
 }
 
 /// Result of parsing: expression + compiled functions.
@@ -777,6 +787,8 @@ impl Parser {
             pos: 0,
             scope: Scope::new(),
             lib_dirs: lib_dirs.to_vec(),
+            current_func: None,
+            deferred_unbound: Vec::new(),
         };
 
         // Pre-register $ENV
@@ -786,11 +798,63 @@ impl Parser {
         if !parser.at_eof() {
             bail!("unexpected token {:?} at position {}", parser.current(), parser.pos);
         }
+        parser.check_unbound_reachability(&expr)?;
         Ok(ParseResult {
             expr,
             funcs: parser.scope.compiled_funcs,
             memo_slots: parser.scope.next_memo_slot,
         })
+    }
+
+    /// Record an unbound `$name` reference (attributed to the def currently
+    /// being parsed) and return a placeholder that errors with jq's message if
+    /// it is ever evaluated. The eager error is deferred so a never-called def
+    /// with a free variable does not abort compilation; the real decision is
+    /// made by `check_unbound_reachability`. #765
+    fn defer_unbound_var(&mut self, name: &str) -> Expr {
+        self.deferred_unbound.push((self.current_func, name.to_string()));
+        Expr::Error {
+            msg: Some(Box::new(Expr::Literal(Literal::Str(format!("${} is not defined", name))))),
+        }
+    }
+
+    /// Resolve `$name`, deferring the "not defined" error for an unbound
+    /// reference (see `defer_unbound_var`). #765
+    fn load_or_defer_var(&mut self, name: &str) -> Expr {
+        match self.scope.lookup_var(name) {
+            Some(idx) => Expr::LoadVar { var_index: idx },
+            None => self.defer_unbound_var(name),
+        }
+    }
+
+    /// Turn parked unbound `$var` references into errors, but only those that
+    /// are actually reachable: a top-level reference, or one inside a def that
+    /// the top-level program calls (transitively). jq never compiles the body
+    /// of an uncalled def, so a free variable there is not an error. #765
+    fn check_unbound_reachability(&self, program: &Expr) -> Result<()> {
+        if self.deferred_unbound.is_empty() {
+            return Ok(());
+        }
+        let mut reachable: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut stack: Vec<usize> = Vec::new();
+        crate::eval::collect_func_calls(program, &mut stack);
+        while let Some(fid) = stack.pop() {
+            if reachable.insert(fid) {
+                if let Some(f) = self.scope.compiled_funcs.get(fid) {
+                    crate::eval::collect_func_calls(&f.body, &mut stack);
+                }
+            }
+        }
+        for (fid, name) in &self.deferred_unbound {
+            let is_reachable = match fid {
+                None => true, // top-level reference
+                Some(id) => reachable.contains(id),
+            };
+            if is_reachable {
+                bail!("${} is not defined", name);
+            }
+        }
+        Ok(())
     }
 
     fn current(&self) -> &Token {
@@ -921,7 +985,13 @@ impl Parser {
         let func_id = self.scope.define_func(&name, params.len(), Expr::Empty, param_vars.clone());
 
         let saved_funcs = self.scope.save_func_scope();
+        // Attribute any unbound `$var` parked while parsing this body to this
+        // def, so the reachability check can ignore it if the def is never
+        // called (#765). Nested defs save/restore around their own bodies.
+        let saved_current_func = self.current_func;
+        self.current_func = Some(func_id);
         let mut body = self.parse_pipe()?;
+        self.current_func = saved_current_func;
         self.scope.restore_func_scope(saved_funcs);
         self.expect(&Token::Semicolon)?;
 
@@ -1178,6 +1248,8 @@ impl Parser {
             pos: 0,
             scope: mod_scope,
             lib_dirs: mod_lib_dirs,
+            current_func: None,
+            deferred_unbound: Vec::new(),
         };
 
         // Skip module statement
@@ -2493,10 +2565,7 @@ impl Parser {
                 } else if name == "ENV" {
                     Ok(Expr::Env)
                 } else {
-                    match self.scope.lookup_var(&name) {
-                        Some(idx) => Ok(Expr::LoadVar { var_index: idx }),
-                        None => bail!("${} is not defined", name),
-                    }
+                    Ok(self.load_or_defer_var(&name))
                 }
             }
 
@@ -2598,9 +2667,7 @@ impl Parser {
                 if self.eat(&Token::Colon) {
                     let val = self.parse_pipe_nocomma()?;
                     // $var: value — key is the variable's value converted to string
-                    let idx = self.scope.lookup_var(&name)
-                        .ok_or_else(|| anyhow::anyhow!("${} is not defined", name))?;
-                    let key_expr = Expr::LoadVar { var_index: idx };
+                    let key_expr = self.load_or_defer_var(&name);
                     Ok((key_expr, val))
                 } else {
                     // Shorthand: {$x} = {"x": $x}
@@ -2609,9 +2676,7 @@ impl Parser {
                     } else if name == "ENV" {
                         Expr::Env
                     } else {
-                        let idx = self.scope.lookup_var(&name)
-                            .ok_or_else(|| anyhow::anyhow!("${} is not defined", name))?;
-                        Expr::LoadVar { var_index: idx }
+                        self.load_or_defer_var(&name)
                     };
                     Ok((
                         Expr::Literal(Literal::Str(name)),

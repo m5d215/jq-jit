@@ -11005,3 +11005,33 @@ true
 test("a.b";"mm")
 "a\nb"
 true
+
+# Issue #765 eval: a free variable in an uncalled nested def does not error
+def g: def f: $x; "inner"; g
+null
+"inner"
+
+# Issue #765 eval: an uncalled def with a free variable is not compiled
+def f: $x; "inner"
+null
+"inner"
+
+# Issue #765 eval: a free variable reached only through an uncalled def is fine
+def f: $x; def g: f; "z"
+null
+"z"
+
+# Issue #765 eval: an unbound var in a def that is never called is ignored
+def f: .+$x; def g: 1; g
+null
+1
+
+# Issue #765 eval: a free variable in an uncalled def's object shorthand is fine
+def f: {$x}; "ok"
+null
+"ok"
+
+# Issue #765 eval: deeply nested uncalled def with a free variable is fine
+def outer: def inner: $z; inner; "ok"
+null
+"ok"

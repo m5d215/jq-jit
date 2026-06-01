@@ -3738,3 +3738,17 @@ test("ab";"ii")
 
 test("a.b";"mp")
 "a\nb"
+
+# ---------- Issue #765: free var in an uncalled def is not eagerly rejected ----------
+
+def g: def f: $x; "inner"; g
+null
+
+def f: $x; def g: f; "z"
+null
+
+def f: .+$x; def g: 1; g
+null
+
+def f: {$x}; "ok"
+null
