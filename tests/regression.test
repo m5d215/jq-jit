@@ -11170,3 +11170,28 @@ null
 [[1,2],[1]]|group_by(.[])
 null
 [[[1]],[[1,2]]]
+
+# Issue #771 tojson: an input-parsed NaN normalizes to null (raw fast path)
+tojson
+nan
+"null"
+
+# Issue #771 tojson: NaN inside a nested input value normalizes to null
+tojson
+[1,nan,2]
+"[1,null,2]"
+
+# Issue #771 @csv: a NaN cell renders empty, not the JSON null
+[1,nan,3]|@csv
+null
+"1,,3"
+
+# Issue #771 @tsv: a NaN cell renders empty, not the JSON null
+[1,nan,3]|@tsv
+null
+"1\t\t3"
+
+# Issue #771 @csv: a lone NaN cell produces an empty row field
+[nan]|@csv
+null
+""

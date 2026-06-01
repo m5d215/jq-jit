@@ -3814,3 +3814,18 @@ null
 
 [[1,2],[1]]|min_by(.[])
 null
+
+tojson
+nan
+
+tojson
+[nan,1,2.5]
+
+[1,nan,3]|@csv
+null
+
+[1,nan,3]|@tsv
+null
+
+["a",nan,1]|@csv
+null
