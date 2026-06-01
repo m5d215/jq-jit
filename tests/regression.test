@@ -11499,3 +11499,33 @@ null
 [(.[]|=. | .a==1 and true)?]
 [1,2]
 []
+
+# Issue #810: significand normalizes subnormals without overflowing to DBL_MAX
+1e-308 | significand
+null
+1.7976931348623157
+
+# Issue #810: significand of an infinity stays infinite (printed as DBL_MAX), not null
+1e1000 | significand
+null
+1.7976931348623157e+308
+
+# Issue #811: asinh of a large argument is ~709.9, not DBL_MAX
+1e308 | asinh
+null
+709.889355822726
+
+# Issue #811: acosh of a large argument is ~709.9, not DBL_MAX
+1e308 | acosh
+null
+709.889355822726
+
+# Issue #812: scalb truncates its fractional exponent (x * 2^trunc(n))
+[1,0.5] | scalb(.[0]; .[1])
+null
+1
+
+# Issue #812: scalb with a negative fractional exponent truncates toward zero
+[3,-1.9] | scalb(.[0]; .[1])
+null
+1.5

@@ -370,12 +370,16 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             Value::Num(n, _) => Ok(Value::number(n.tanh())),
             _ => bail!("{} number required", errdesc(v)),
         }),
+        // Rust std's f64::asinh/acosh compute ln(2x) internally, which
+        // overflows to +inf (→ DBL_MAX) once 2x exceeds DBL_MAX (|x| ≳ 9e307).
+        // libm (a musl port, like the libm jq links) uses log1p/scaling and
+        // stays accurate for large arguments (~709.9 at 1e308) (#811).
         "asinh" => unary_op(args, |v| match v {
-            Value::Num(n, _) => Ok(Value::number(n.asinh())),
+            Value::Num(n, _) => Ok(Value::number(libm::asinh(*n))),
             _ => bail!("{} number required", errdesc(v)),
         }),
         "acosh" => unary_op(args, |v| match v {
-            Value::Num(n, _) => Ok(Value::number(n.acosh())),
+            Value::Num(n, _) => Ok(Value::number(libm::acosh(*n))),
             _ => bail!("{} number required", errdesc(v)),
         }),
         "atanh" => unary_op(args, |v| match v {
@@ -464,7 +468,11 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
         "scalb" => ternary_arg(args, |a, b| match (a, b) {
-            (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(*x * 2f64.powf(*y))),
+            // C scalb / jq truncate the exponent to an integer: x * 2^trunc(n).
+            // `2f64.powf(n)` honoured the fraction (scalb(1; 0.5) → √2 instead
+            // of 1). Use scalbn with the truncated exponent, matching the
+            // sibling scalbln/ldexp (`f64 as i32` truncates toward zero) (#812).
+            (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(libm::scalbn(*x, *y as i32))),
             _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
         // Additional libc binary wrappers (#473).
@@ -521,9 +529,14 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                 Value::Num(n, _) => {
                     let r = match name {
                         "significand" => {
-                            // significand(x) = x * 2^(-ilogb(x))
+                            // significand(x) = x * 2^(-ilogb(x)). Compute via
+                            // scalbn so the exponent is applied directly to the
+                            // mantissa field — `2f64.powi(-e)` overflows to +inf
+                            // for subnormals (e ≈ -1030 → 2^1030 = inf, x*inf →
+                            // inf), and infinities stayed inf rather than NaN.
+                            // scalbn handles subnormals/inf/0 correctly (#810).
                             let e = libm::ilogb(*n);
-                            *n * 2f64.powi(-e)
+                            libm::scalbn(*n, -e)
                         }
                         "exponent" => libm::ilogb(*n) as f64,
                         "logb" => unsafe { logb(*n) },

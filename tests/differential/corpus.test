@@ -1733,6 +1733,14 @@ null
 
 # ---------- Issue #65 parser coverage: numeric conversions + math ----------
 
+# scalb truncates its fractional exponent (#812). NOTE: significand's
+# subnormal/infinity results are intentionally NOT in the corpus — Windows
+# jq (MSVC libm) diverges from jq-jit's libm there, so they live in
+# tests/regression.test (jq-jit basis) only.
+[1,0.5] | scalb(.[0]; .[1])
+
+[3,-1.9] | scalb(.[0]; .[1])
+
 sqrt
 16
 
