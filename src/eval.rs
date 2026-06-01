@@ -5838,9 +5838,28 @@ fn eval_call_builtin(name: &str, args: &[Expr], input: Value, env: &EnvRef, cb: 
 /// Yield each Cartesian-product combination of an array of arrays, in
 /// lexicographic order. Empty input array yields a single empty
 /// combination (matching jq).
+/// jq's `length` of a value is 0 for: null, an empty array/object/string, and
+/// the number 0. (Booleans have no length and error.) Used so `combinations`
+/// can mirror jq's `if length == 0 then [] else ...` short-circuit (#805).
+fn input_length_is_zero(v: &Value) -> bool {
+    match v {
+        Value::Null => true,
+        Value::Arr(a) => a.is_empty(),
+        Value::Obj(o) => o.is_empty(),
+        Value::Str(s) => s.as_str().is_empty(),
+        Value::Num(n, _) => *n == 0.0,
+        Value::True | Value::False | Value::Error(_) => false,
+    }
+}
+
 fn eval_combinations(input: &Value, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
     let arrays = match input {
         Value::Arr(a) => a.clone(),
+        // jq's `combinations` is `if length == 0 then [] else .[0][] as $x | ... end`,
+        // so any length-0 input (null, {}, "", 0) yields a single empty combination
+        // before the `.[0]` indexing in the else branch runs (#805). A non-array
+        // input with a non-zero length falls through to the array-indexing error.
+        _ if input_length_is_zero(input) => return cb(Value::Arr(Rc::new(vec![]))),
         _ => bail!("combinations requires array of arrays input"),
     };
     let mut current: Vec<Value> = Vec::with_capacity(arrays.len());
@@ -5851,8 +5870,9 @@ fn eval_combinations(input: &Value, cb: &mut dyn FnMut(Value) -> GenResult) -> G
         cb: &mut dyn FnMut(Value) -> GenResult,
     ) -> GenResult {
         if idx == arrays.len() {
-            cb(Value::Arr(Rc::new(current.clone())))?;
-            return Ok(true);
+            // Propagate the callback's continue/stop signal so an outer
+            // first/limit/isempty can truncate the Cartesian product (#815).
+            return cb(Value::Arr(Rc::new(current.clone())));
         }
         let inner = match &arrays[idx] {
             Value::Arr(a) => a.clone(),
@@ -5860,8 +5880,11 @@ fn eval_combinations(input: &Value, cb: &mut dyn FnMut(Value) -> GenResult) -> G
         };
         for v in inner.iter() {
             current.push(v.clone());
-            rec(arrays, idx + 1, current, cb)?;
+            let cont = rec(arrays, idx + 1, current, cb)?;
             current.pop();
+            if !cont {
+                return Ok(false);
+            }
         }
         Ok(true)
     }
