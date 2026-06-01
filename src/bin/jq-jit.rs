@@ -183,7 +183,7 @@ fn print_jq_error(msg: &str) {
     }
 }
 
-use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_value_has_duplicate_keys, json_stream_has_duplicate_keys, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, parse_json_num, json_value_length, json_object_keys_unsorted_to_buf,json_object_keys_join_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_object_del_field, json_object_del_fields, json_object_merge_literal, json_object_sort_keys, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_object_set_field_raw, json_object_update_field_num, json_object_update_field_num_chain,json_object_select_then_update_num, json_object_select_then_update_str_concat, json_object_select_compound_then_update_num, json_object_select_str_then_update_num, is_json_compact, push_json_compact_raw, push_tojson_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_compact_line_color, push_pretty_line, push_pretty_line_color, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line_color, value_to_json_pretty_color, walk_json_transform_nums, pool_value, skip_json_value, raw_contains_non_canonical_number, append_canonical_value};
+use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_value_has_duplicate_keys, json_stream_has_duplicate_keys, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, parse_json_num, json_value_length, json_object_keys_unsorted_to_buf,json_object_keys_join_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_object_del_field, json_object_del_fields, json_object_merge_literal, json_object_sort_keys, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_object_set_field_raw, json_object_update_field_num, json_object_update_field_num_chain,json_object_select_then_update_num, json_object_select_then_update_str_concat, json_object_select_compound_then_update_num, json_object_select_str_then_update_num, is_json_compact, push_json_compact_raw, push_tojson_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_compact_line_color, push_pretty_line, push_pretty_line_color, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line_color, value_to_json_pretty_color, walk_json_transform_nums, pool_value, skip_json_value, raw_contains_non_canonical_number, append_canonical_value, raw_contains_escaped_solidus, push_raw_canon_solidus};
 use jq_jit::interpreter::Filter;
 use jq_jit::fast_path::{
     apply_arith_chain_cmp_raw, apply_field_access_raw, apply_field_alternative_raw,
@@ -1463,6 +1463,9 @@ fn emit_resolved_value(
                     Ok(v) => buf.extend_from_slice(value_to_json_precise(&v).as_bytes()),
                     Err(_) => buf.extend_from_slice(val),
                 }
+            } else if raw_contains_escaped_solidus(val) {
+                // `\/` → `/` (jq never escapes the solidus, #780).
+                push_raw_canon_solidus(buf, val);
             } else {
                 buf.extend_from_slice(val);
             }
@@ -2668,7 +2671,11 @@ fn real_main() {
                     push_json_pretty_raw($buf, $raw, 2, false);
                     $buf.push(b'\n');
                 } else if is_json_compact($raw) {
-                    $buf.extend_from_slice($raw);
+                    if raw_contains_escaped_solidus($raw) {
+                        push_raw_canon_solidus($buf, $raw);
+                    } else {
+                        $buf.extend_from_slice($raw);
+                    }
                     $buf.push(b'\n');
                 } else {
                     push_json_compact_raw($buf, $raw);
@@ -2678,7 +2685,11 @@ fn real_main() {
                 push_json_pretty_raw($buf, $raw, 2, false);
                 $buf.push(b'\n');
             } else if is_json_compact($raw) {
-                $buf.extend_from_slice($raw);
+                if raw_contains_escaped_solidus($raw) {
+                    push_raw_canon_solidus($buf, $raw);
+                } else {
+                    $buf.extend_from_slice($raw);
+                }
                 $buf.push(b'\n');
             } else {
                 push_json_compact_raw($buf, $raw);
@@ -3358,7 +3369,14 @@ fn real_main() {
                         if std::ptr::eq(result, input) && is_json_compact(raw)
                             && !raw_contains_non_canonical_number(raw)
                         {
-                            cbuf.extend_from_slice(raw);
+                            // `\/` in input strings must be canonicalised to `/`
+                            // (jq never escapes the solidus, #780). The verbatim
+                            // copy would leak it, so normalise only when present.
+                            if raw_contains_escaped_solidus(raw) {
+                                push_raw_canon_solidus(cbuf, raw);
+                            } else {
+                                cbuf.extend_from_slice(raw);
+                            }
                             cbuf.push(b'\n');
                             if cbuf.len() >= 1 << 17 {
                                 let _ = out.write_all(cbuf);
@@ -3632,7 +3650,7 @@ fn real_main() {
                                         // null → empty
                                     } else {
                                         // number, boolean — output as-is
-                                        compact_buf.extend_from_slice(val);
+                                        if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                     }
                                 }
                                 compact_buf.push(b'"');
@@ -3712,7 +3730,7 @@ fn real_main() {
                                     compact_buf.extend_from_slice(b"false");
                                 } else {
                                     // number
-                                    compact_buf.extend_from_slice(val);
+                                    if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                 }
                             }
                             compact_buf.push(b'\n');
@@ -5939,6 +5957,7 @@ fn real_main() {
                     let stream_clean = whole_file_compact
                         && !raw_contains_non_canonical_number(content)
                         && !raw_contains_del_byte(content)
+                        && !raw_contains_escaped_solidus(content)
                         && !json_stream_has_duplicate_keys(content);
                     if stream_clean {
                         let _ = out.write_all(content);
@@ -5950,7 +5969,11 @@ fn real_main() {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 push_compact_line(&mut compact_buf, &v);
                             } else if is_json_compact(raw) && !raw_contains_non_canonical_number(raw) && !raw_contains_del_byte(raw) {
-                                compact_buf.extend_from_slice(raw);
+                                if raw_contains_escaped_solidus(raw) {
+                                    push_raw_canon_solidus(&mut compact_buf, raw);
+                                } else {
+                                    compact_buf.extend_from_slice(raw);
+                                }
                                 compact_buf.push(b'\n');
                             } else if !raw_contains_non_canonical_number(raw) && !raw_contains_del_byte(raw) {
                                 push_json_compact_raw(&mut compact_buf, raw);
@@ -6088,7 +6111,7 @@ fn real_main() {
                                         if val[0] == b'{' || val[0] == b'[' {
                                             push_json_pretty_raw_at(&mut compact_buf, val, 2, false, 1);
                                         } else {
-                                            compact_buf.extend_from_slice(val);
+                                            if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                         }
                                     }
                                     compact_buf.extend_from_slice(b"\n]\n");
@@ -6096,7 +6119,7 @@ fn real_main() {
                                     compact_buf.push(b'[');
                                     for (i, (vs, ve)) in ranges.iter().enumerate() {
                                         if i > 0 { compact_buf.push(b','); }
-                                        compact_buf.extend_from_slice(&raw[*vs..*ve]);
+                                        { let _vv = &raw[*vs..*ve]; if raw_contains_escaped_solidus(_vv) { push_raw_canon_solidus(&mut compact_buf, _vv); } else { compact_buf.extend_from_slice(_vv); } }
                                     }
                                     compact_buf.extend_from_slice(b"]\n");
                                 }
@@ -6158,7 +6181,7 @@ fn real_main() {
                                         if val[0] == b'{' || val[0] == b'[' {
                                             push_json_pretty_raw_at(&mut compact_buf, val, 2, false, 1);
                                         } else {
-                                            compact_buf.extend_from_slice(val);
+                                            if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                         }
                                     }
                                     compact_buf.extend_from_slice(b"\n}\n");
@@ -6193,7 +6216,7 @@ fn real_main() {
                                 |ranges, raw| {
                                     for (i, (vs, ve)) in ranges.iter().enumerate() {
                                         compact_buf.extend_from_slice(&key_prefixes[i]);
-                                        compact_buf.extend_from_slice(&raw[*vs..*ve]);
+                                        { let _vv = &raw[*vs..*ve]; if raw_contains_escaped_solidus(_vv) { push_raw_canon_solidus(&mut compact_buf, _vv); } else { compact_buf.extend_from_slice(_vv); } }
                                     }
                                     compact_buf.extend_from_slice(b"}\n");
                                 },
@@ -7152,7 +7175,7 @@ fn real_main() {
                             match (ff_format.as_str(), content) {
                                 ("text", Some(_)) => {
                                     // @text on string: identity — output the JSON string as-is
-                                    compact_buf.extend_from_slice(val);
+                                    if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                     compact_buf.push(b'\n');
                                     RawApplyOutcome::Emit
                                 }
@@ -7176,7 +7199,7 @@ fn real_main() {
                                 ("json" | "text", None) => {
                                     // @json/@text on non-string scalars: wrap raw bytes in quotes
                                     compact_buf.push(b'"');
-                                    compact_buf.extend_from_slice(val);
+                                    if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                     compact_buf.extend_from_slice(b"\"\n");
                                     RawApplyOutcome::Emit
                                 }
@@ -7287,7 +7310,7 @@ fn real_main() {
                                     if val[0] == b'"' && val.len() >= 2 {
                                         compact_buf.extend_from_slice(&val[1..val.len()-1]);
                                     } else {
-                                        compact_buf.extend_from_slice(val);
+                                        if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                     }
                                 }
                             }
@@ -7422,7 +7445,7 @@ fn real_main() {
                                         }
                                     } else {
                                         // Number/bool/null: copy as-is (jq tostring behavior)
-                                        compact_buf.extend_from_slice(val);
+                                        if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                     }
                                 }
                             }
@@ -7847,7 +7870,7 @@ fn real_main() {
                             raw,
                             alt_field,
                             fallback_bytes,
-                            |bytes| compact_buf.extend_from_slice(bytes),
+                            |bytes| if raw_contains_escaped_solidus(bytes) { push_raw_canon_solidus(&mut compact_buf, bytes); } else { compact_buf.extend_from_slice(bytes); },
                         );
                         match outcome {
                             RawApplyOutcome::Emit => compact_buf.push(b'\n'),
@@ -7870,7 +7893,7 @@ fn real_main() {
                             raw,
                             prim_field,
                             fallback_field,
-                            |bytes| compact_buf.extend_from_slice(bytes),
+                            |bytes| if raw_contains_escaped_solidus(bytes) { push_raw_canon_solidus(&mut compact_buf, bytes); } else { compact_buf.extend_from_slice(bytes); },
                         );
                         match outcome {
                             RawApplyOutcome::Emit => compact_buf.push(b'\n'),
@@ -7994,7 +8017,7 @@ fn real_main() {
                                             if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
                                                 push_json_pretty_raw(&mut compact_buf, val, 2, false);
                                             } else {
-                                                compact_buf.extend_from_slice(val);
+                                                if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                             }
                                             compact_buf.push(b'\n');
                                         } else {
@@ -8058,7 +8081,7 @@ fn real_main() {
                                                 if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
                                                     push_json_pretty_raw(&mut compact_buf, val, 2, false);
                                                 } else {
-                                                    compact_buf.extend_from_slice(val);
+                                                    if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                                 }
                                                 compact_buf.push(b'\n');
                                             }
@@ -8111,7 +8134,7 @@ fn real_main() {
                                             if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
                                                 push_json_pretty_raw(&mut compact_buf, val, 2, false);
                                             } else {
-                                                compact_buf.extend_from_slice(val);
+                                                if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                             }
                                             compact_buf.push(b'\n');
                                         } else {
@@ -8392,7 +8415,7 @@ fn real_main() {
                                     if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
                                         push_json_pretty_raw(&mut compact_buf, val, 2, false);
                                     } else {
-                                        compact_buf.extend_from_slice(val);
+                                        if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                     }
                                     compact_buf.push(b'\n');
                                 }
@@ -9160,7 +9183,7 @@ fn real_main() {
                                 if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
                                     push_json_pretty_raw(&mut compact_buf, val, 2, false);
                                 } else {
-                                    compact_buf.extend_from_slice(val);
+                                    if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                 }
                                 compact_buf.push(b'\n');
                             } else {
@@ -10803,7 +10826,7 @@ fn real_main() {
                                 if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
                                     push_json_pretty_raw(&mut compact_buf, val, 2, false);
                                 } else {
-                                    compact_buf.extend_from_slice(val);
+                                    if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                 }
                                 compact_buf.push(b'\n');
                             } else {
@@ -11902,7 +11925,7 @@ fn real_main() {
                             if pass {
                                 if !first_elem { compact_buf.push(b','); }
                                 first_elem = false;
-                                compact_buf.extend_from_slice(val);
+                                if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                             }
                         });
                         if ok {
@@ -12630,7 +12653,7 @@ fn real_main() {
                                 } else if val == b"null" {
                                     // null → empty
                                 } else {
-                                    compact_buf.extend_from_slice(val);
+                                    if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                 }
                             }
                             compact_buf.push(b'"');
@@ -12706,7 +12729,7 @@ fn real_main() {
                             } else if val == b"false" {
                                 compact_buf.extend_from_slice(b"false");
                             } else {
-                                compact_buf.extend_from_slice(val);
+                                if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                             }
                         }
                         compact_buf.push(b'\n');
@@ -14936,7 +14959,7 @@ fn real_main() {
                                     if val[0] == b'{' || val[0] == b'[' {
                                         push_json_pretty_raw_at(&mut compact_buf, val, 2, false, 1);
                                     } else {
-                                        compact_buf.extend_from_slice(val);
+                                        if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                     }
                                 }
                                 compact_buf.extend_from_slice(b"\n]\n");
@@ -14944,7 +14967,7 @@ fn real_main() {
                                 compact_buf.push(b'[');
                                 for (i, (vs, ve)) in ranges.iter().enumerate() {
                                     if i > 0 { compact_buf.push(b','); }
-                                    compact_buf.extend_from_slice(&raw[*vs..*ve]);
+                                    { let _vv = &raw[*vs..*ve]; if raw_contains_escaped_solidus(_vv) { push_raw_canon_solidus(&mut compact_buf, _vv); } else { compact_buf.extend_from_slice(_vv); } }
                                 }
                                 compact_buf.extend_from_slice(b"]\n");
                             }
@@ -15282,7 +15305,7 @@ fn real_main() {
                         raw,
                         alt_field,
                         fallback_bytes,
-                        |bytes| compact_buf.extend_from_slice(bytes),
+                        |bytes| if raw_contains_escaped_solidus(bytes) { push_raw_canon_solidus(&mut compact_buf, bytes); } else { compact_buf.extend_from_slice(bytes); },
                     );
                     match outcome {
                         RawApplyOutcome::Emit => compact_buf.push(b'\n'),
@@ -15305,7 +15328,7 @@ fn real_main() {
                         raw,
                         prim_field,
                         fallback_field,
-                        |bytes| compact_buf.extend_from_slice(bytes),
+                        |bytes| if raw_contains_escaped_solidus(bytes) { push_raw_canon_solidus(&mut compact_buf, bytes); } else { compact_buf.extend_from_slice(bytes); },
                     );
                     match outcome {
                         RawApplyOutcome::Emit => compact_buf.push(b'\n'),
@@ -15417,7 +15440,7 @@ fn real_main() {
                                         if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
                                             push_json_pretty_raw(&mut compact_buf, val, 2, false);
                                         } else {
-                                            compact_buf.extend_from_slice(val);
+                                            if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                         }
                                         compact_buf.push(b'\n');
                                     } else {
@@ -15479,7 +15502,7 @@ fn real_main() {
                                             if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
                                                 push_json_pretty_raw(&mut compact_buf, val, 2, false);
                                             } else {
-                                                compact_buf.extend_from_slice(val);
+                                                if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                             }
                                             compact_buf.push(b'\n');
                                         }
@@ -15528,7 +15551,7 @@ fn real_main() {
                                         if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
                                             push_json_pretty_raw(&mut compact_buf, val, 2, false);
                                         } else {
-                                            compact_buf.extend_from_slice(val);
+                                            if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                         }
                                         compact_buf.push(b'\n');
                                     } else {
@@ -15800,7 +15823,7 @@ fn real_main() {
                                 if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
                                     push_json_pretty_raw(&mut compact_buf, val, 2, false);
                                 } else {
-                                    compact_buf.extend_from_slice(val);
+                                    if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                 }
                                 compact_buf.push(b'\n');
                             }
@@ -16554,7 +16577,7 @@ fn real_main() {
                             if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
                                 push_json_pretty_raw(&mut compact_buf, val, 2, false);
                             } else {
-                                compact_buf.extend_from_slice(val);
+                                if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                             }
                             compact_buf.push(b'\n');
                         } else {
@@ -18098,7 +18121,7 @@ fn real_main() {
                             if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
                                 push_json_pretty_raw(&mut compact_buf, val, 2, false);
                             } else {
-                                compact_buf.extend_from_slice(val);
+                                if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                             }
                             compact_buf.push(b'\n');
                         } else {
@@ -18586,7 +18609,7 @@ fn real_main() {
                                     if val[0] == b'{' || val[0] == b'[' {
                                         push_json_pretty_raw_at(&mut compact_buf, val, 2, false, 1);
                                     } else {
-                                        compact_buf.extend_from_slice(val);
+                                        if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                     }
                                 }
                                 compact_buf.extend_from_slice(b"\n}\n");
@@ -18621,7 +18644,7 @@ fn real_main() {
                             |ranges, raw| {
                                 for (i, (vs, ve)) in ranges.iter().enumerate() {
                                     compact_buf.extend_from_slice(&key_prefixes[i]);
-                                    compact_buf.extend_from_slice(&raw[*vs..*ve]);
+                                    { let _vv = &raw[*vs..*ve]; if raw_contains_escaped_solidus(_vv) { push_raw_canon_solidus(&mut compact_buf, _vv); } else { compact_buf.extend_from_slice(_vv); } }
                                 }
                                 compact_buf.extend_from_slice(b"}\n");
                             },
@@ -19605,7 +19628,7 @@ fn real_main() {
                     let outcome = apply_field_format_raw(raw, ff_field, |val, content_no_quotes| {
                         match (ff_format.as_str(), content_no_quotes) {
                             ("text", Some(_)) => {
-                                compact_buf.extend_from_slice(val);
+                                if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                 compact_buf.push(b'\n');
                                 RawApplyOutcome::Emit
                             }
@@ -19627,7 +19650,7 @@ fn real_main() {
                             }
                             ("json" | "text", None) => {
                                 compact_buf.push(b'"');
-                                compact_buf.extend_from_slice(val);
+                                if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                 compact_buf.extend_from_slice(b"\"\n");
                                 RawApplyOutcome::Emit
                             }
@@ -19742,7 +19765,7 @@ fn real_main() {
                                 if val[0] == b'"' && val.len() >= 2 {
                                     compact_buf.extend_from_slice(&val[1..val.len()-1]);
                                 } else {
-                                    compact_buf.extend_from_slice(val);
+                                    if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                 }
                             }
                         }
@@ -19865,7 +19888,7 @@ fn real_main() {
                                         }
                                     }
                                 } else {
-                                    compact_buf.extend_from_slice(val);
+                                    if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                 }
                             }
                         }
@@ -20597,7 +20620,7 @@ fn real_main() {
                         if pass {
                             if !first_elem { compact_buf.push(b','); }
                             first_elem = false;
-                            compact_buf.extend_from_slice(val);
+                            if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                         }
                     });
                     if ok {
@@ -21218,7 +21241,9 @@ fn real_main() {
                 // this flag instead of repeating memchr per record.
                 let body_has_escapes = memchr::memchr(b'\\', cbody).is_some();
                 let bulk_safe = whole_compact2
-                    && (!body_has_escapes || !raw_contains_surrogate_escape(cbody));
+                    && (!body_has_escapes
+                        || (!raw_contains_surrogate_escape(cbody)
+                            && !raw_contains_escaped_solidus(cbody)));
                 if bulk_safe {
                     let _ = out.write_all(cbody);
                     Ok(())
@@ -21229,7 +21254,11 @@ fn real_main() {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, Some(raw), &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         } else if is_json_compact(raw) {
-                            compact_buf.extend_from_slice(raw);
+                            if body_has_escapes && raw_contains_escaped_solidus(raw) {
+                                push_raw_canon_solidus(&mut compact_buf, raw);
+                            } else {
+                                compact_buf.extend_from_slice(raw);
+                            }
                             compact_buf.push(b'\n');
                         } else {
                             push_json_compact_raw(&mut compact_buf, raw);
