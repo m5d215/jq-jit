@@ -6324,8 +6324,16 @@ fn eval_walk(f: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> 
     // Optimization: walk(if type == "T" then F else . end)
     // For values whose type != T, f is identity, so skip eval entirely.
     // Only call eval(F, ...) on matching-type leaf values.
+    // The in-place fast path folds the then-branch to a single value, so it is
+    // only valid when that branch yields exactly one output. A multi-valued
+    // branch (`.,.+1`, `.+(1,2)`, …) must backtrack: each leaf forks the
+    // surrounding reconstruction, which the generic `walk_value_cb` handles
+    // correctly (arrays collect every fork via `map`, objects keep the first
+    // via `map_values`, and the trailing `f` forks at every level). #769
     if let Some((type_name, then_body)) = detect_walk_type_guard(f) {
-        return walk_type_guarded(type_name, then_body, f, input, env, cb);
+        if then_body.is_single_output() {
+            return walk_type_guarded(type_name, then_body, f, input, env, cb);
+        }
     }
     walk_value_cb(f, input, env, cb)
 }

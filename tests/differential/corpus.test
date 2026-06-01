@@ -3784,3 +3784,15 @@ sub("a";empty)
 
 [gsub("(?<c>.)";if .c=="a" then "x","y" else "z" end)]
 "ab"
+
+[walk(if type=="number" then .,.+1 else . end)]
+[1]
+
+[walk(if type=="number" then .,.+1 else . end)]
+[1,2]
+
+walk(if type=="number" then .+(1,2) else . end)
+{"a":1}
+
+walk(if type=="number" then .,.+1 else . end)
+{"a":1,"b":[2,3]}

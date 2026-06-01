@@ -11100,3 +11100,33 @@ gsub("a";empty)
 reduce sub("a";"x","y") as $s ("";.+$s)
 "a"
 "xy"
+
+# Issue #769 walk: a multi-valued f forks the array reconstruction (Cartesian per leaf)
+[walk(if type=="number" then .,.+1 else . end)]
+[1]
+[[1,2]]
+
+# Issue #769 walk: lockstep flatten across multiple array elements
+[walk(if type=="number" then .,.+1 else . end)]
+[1,2]
+[[1,2,2,3]]
+
+# Issue #769 walk: a multi-valued binop on a leaf forks
+[walk(if type=="number" then .+(1,2) else . end)]
+[1]
+[[2,3]]
+
+# Issue #769 walk: objects keep the first fork per key (map_values semantics)
+walk(if type=="number" then .+(1,2) else . end)
+{"a":1}
+{"a":2}
+
+# Issue #769 walk: nested array under an object forks the inner array only
+walk(if type=="number" then .,.+1 else . end)
+{"a":1,"b":[2,3]}
+{"a":1,"b":[2,3,3,4]}
+
+# Issue #769 walk: single-valued branch still folds to one output
+walk(if type=="number" then .+1 else . end)
+{"a":1,"b":[2,3]}
+{"a":2,"b":[3,4]}
