@@ -3954,7 +3954,15 @@ impl Parser {
                         cond: Box::new(Expr::BinOp {
                             op: BinOp::Eq,
                             lhs: Box::new(Expr::Input),
-                            rhs: Box::new(Expr::LoadVar { var_index: n_var }),
+                            // Floor the index per-item rather than eagerly at the
+                            // binding: jq evaluates the index lazily, so a
+                            // non-numeric index errors only once the generator
+                            // yields. An empty generator therefore produces no
+                            // output instead of an eager floor error (#806).
+                            rhs: Box::new(Expr::UnaryOp {
+                                op: UnaryOp::Floor,
+                                operand: Box::new(Expr::LoadVar { var_index: n_var }),
+                            }),
                         }),
                         then_branch: Box::new(Expr::LoadVar { var_index: x_var }),
                         else_branch: Box::new(Expr::Empty),
@@ -3978,17 +3986,16 @@ impl Parser {
                 };
                 // jq's nth(n; g) floors the index: nth(0.5) == nth(0), and a
                 // non-numeric index raises (floor errors on non-numbers). The
-                // foreach counter is integer-valued, so binding the raw float
-                // made `counter == $n` never match for fractional n (silently
-                // empty) and let a string index fall through to empty instead
-                // of erroring (#719). Flooring at the binding fixes both and
-                // leaves integer / negative indices unchanged.
+                // foreach counter is integer-valued, so `counter == $n` never
+                // matched for fractional n (silently empty) and a string index
+                // fell through to empty instead of erroring (#719). The floor
+                // now lives in the per-item comparison above so it stays lazy:
+                // the negative-index guard sees the raw value (`"a" < 0` is
+                // false, so a string index proceeds to the deferred error) and
+                // an empty generator never forces the floor at all (#806).
                 Ok(Expr::LetBinding {
                     var_index: n_var,
-                    value: Box::new(Expr::UnaryOp {
-                        op: UnaryOp::Floor,
-                        operand: Box::new(n_expr),
-                    }),
+                    value: Box::new(n_expr),
                     body: Box::new(body),
                 })
             }

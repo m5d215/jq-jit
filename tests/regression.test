@@ -11424,3 +11424,28 @@ if (.a >= .a) then .x else .a end
 . as {$x} ?// [$x] ?// $x | {d:.,x:$x}
 [42]
 {"d":[42],"x":42}
+
+# Issue #806: limit with an off-type count and an empty generator yields nothing (no error)
+[limit("a"; empty)]
+null
+[]
+
+# Issue #806: limit with an object count and an empty generator yields nothing
+[limit({}; empty)]
+null
+[]
+
+# Issue #806: limit with a non-number count still errors on a non-empty generator
+[limit("a"; 1,2,3)?]
+null
+[]
+
+# Issue #806: nth with an off-type index and an empty generator yields nothing
+[nth("a"; empty)]
+null
+[]
+
+# Issue #806: nth still floors a fractional index over a non-empty generator
+nth(0.5; 10,20,30)
+null
+10
