@@ -285,7 +285,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             // limit needs special handling as a generator
             Ok(Value::Null)
         }),
-        "first" | "last" | "nth" | "range" | "while" | "until" | "repeat" | "recurse" | "recurse_down"
+        "first" | "last" | "nth" | "range" | "while" | "until" | "repeat" | "recurse"
         | "getpath" | "setpath" | "delpaths" => {
             // These need special handling
             match name {

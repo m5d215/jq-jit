@@ -3182,7 +3182,7 @@ impl Parser {
             | "gmtime" | "localtime" | "mktime" | "now" | "abs"
             | "not" | "env" | "builtins" | "input" | "inputs"
             | "debug" | "stderr" | "modulemeta" | "path"
-            | "with_entries" | "recurse" | "recurse_down"
+            | "with_entries" | "recurse"
             | "has" | "in" | "contains" | "inside"
             | "getpath" | "setpath" | "delpaths"
             | "to_number" | "to_string" | "type_error"
@@ -3290,11 +3290,16 @@ impl Parser {
                     }),
                 })
             }
-            "recurse" | "recurse_down" => {
+            "recurse" => {
                 // jq: `def recurse: recurse(.[]?);`
                 // `EachOpt(Input)` represents `.[]?` and lets eval/JIT take
                 // the descent fast path; `recurse(.)` (which is infinite)
                 // takes the slow custom-step path instead. See #497.
+                // Note: `recurse_down/0` (a deprecated alias removed from jq
+                // before 1.8) is intentionally NOT handled here — jq 1.8.1
+                // compile-errors on it, and it is not a documented jqx
+                // extension, so it falls through to the undefined-function
+                // path ("recurse_down/0 is not defined") (#821).
                 Ok(Expr::Recurse {
                     input_expr: Box::new(Expr::EachOpt { input_expr: Box::new(Expr::Input) }),
                 })
