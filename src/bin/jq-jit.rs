@@ -8084,6 +8084,11 @@ fn real_main() {
                                                     if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                                 }
                                                 compact_buf.push(b'\n');
+                                            } else {
+                                                // A missing field is `null`, like `.x` — the
+                                                // absent-field case must still emit, not drop
+                                                // the output (#734).
+                                                compact_buf.extend_from_slice(b"null\n");
                                             }
                                         }
                                     }
@@ -15505,6 +15510,10 @@ fn real_main() {
                                                 if raw_contains_escaped_solidus(val) { push_raw_canon_solidus(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                             }
                                             compact_buf.push(b'\n');
+                                        } else {
+                                            // A missing field is `null`, like `.x` — emit it
+                                            // rather than dropping the output (#734).
+                                            compact_buf.extend_from_slice(b"null\n");
                                         }
                                     }
                                 }

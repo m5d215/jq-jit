@@ -11349,3 +11349,18 @@ match("a*";"n")
 [match("a*";"gn")]
 "Xaa baa"
 [{"offset":1,"length":2,"string":"aa","captures":[]},{"offset":5,"length":2,"string":"aa","captures":[]}]
+
+# Issue #734 cond_chain: a then-branch reading a missing field yields null, not empty
+if (.a >= .a) then .x else .a end
+{"a":0}
+null
+
+# Issue #734 cond_chain: an else-branch missing field with field-vs-field condition yields null
+if (.a >= .b) then .x else .y end
+{"a":0,"b":5}
+null
+
+# Issue #734 cond_chain: present selected field still returns its value
+if (.a >= .a) then .x else .a end
+{"a":0,"x":9}
+9

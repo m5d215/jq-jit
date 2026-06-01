@@ -3925,3 +3925,15 @@ sub("a*";"X";"n")
 
 capture("(?<x>a+)";"gn")
 "aXaa"
+
+if (.a >= .a) then .x else .a end
+{"a":0}
+
+if (.a >= .b) then .x else .y end
+{"a":0,"b":5}
+
+if (.a >= .a) then .a else .x end
+{"a":0}
+
+if (.a >= .b) then .a else .x end
+{"a":1,"b":5}
