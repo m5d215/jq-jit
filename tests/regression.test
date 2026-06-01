@@ -9809,6 +9809,26 @@ null
 2
 []
 
+# Issue #804: truncate_stream with a null depth passes events through unchanged
+[truncate_stream({a:[1,2]} | tostream)]
+null
+[[["a",0],1],[["a",1],2],[["a",1]],[["a"]]]
+
+# Issue #804: truncate_stream with a string depth drops every event (length > string is false)
+[truncate_stream({a:[1,2]} | tostream)]
+"x"
+[]
+
+# Issue #804: truncate_stream with an object depth drops every event
+[truncate_stream([[0],1])]
+{}
+[]
+
+# Issue #804: truncate_stream with a negative depth slices from the end
+[truncate_stream({a:[1,2]} | tostream)]
+-1
+[[[0],1],[[1],2],[[1]],[["a"]]]
+
 # Issue #551: (.. | scalars) |= f preserves all leaves after switching Update
 # from rt_setpath to rt_setpath_mut (Rc::make_mut). Verifies every scalar
 # in a deep binary tree still gets updated, not just the last branch.

@@ -1182,6 +1182,16 @@ null
 [truncate_stream({a:[1,2]} | tostream)]
 2
 
+# truncate_stream tolerates a non-number depth (#804)
+[truncate_stream({a:[1,2]} | tostream)]
+null
+
+[truncate_stream({a:[1,2]} | tostream)]
+"x"
+
+[truncate_stream({a:[1,2]} | tostream)]
+-1
+
 # ---------- Issue #65 parser coverage: path / leaf ----------
 
 [paths]

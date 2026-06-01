@@ -6030,11 +6030,14 @@ fn eval_truncate_stream(
     env: &EnvRef,
     cb: &mut dyn FnMut(Value) -> GenResult,
 ) -> GenResult {
-    let depth = match &input {
-        Value::Num(n, _) if n.is_finite() && *n >= 0.0 => *n as usize,
-        Value::Num(_, _) => bail!("truncate_stream: depth must be a non-negative integer"),
-        _ => bail!("truncate_stream: depth must be a number"),
-    };
+    // jq's `truncate_stream` is `. as $n | null | stream | ... if (.[0]|length) > $n
+    // then setpath([0]; .[0][$n:]) else empty end`, so the depth `$n` (taken from
+    // `.`) is used both in a value comparison and as a slice bound. A non-number
+    // depth is therefore handled leniently rather than rejected: `null` passes the
+    // events through unchanged, while a string/array/object depth makes the
+    // `length > $n` comparison false and drops every event. We mirror those
+    // semantics instead of hard-requiring a numeric depth (#804).
+    let depth = input.clone();
     eval(f, input.clone(), env, &mut |event| {
         let arr = match &event {
             Value::Arr(a) => a.clone(),
@@ -6047,10 +6050,40 @@ fn eval_truncate_stream(
             Value::Arr(p) => p.clone(),
             _ => bail!("truncate_stream: stream event missing path"),
         };
-        if path_arr.len() <= depth {
+        let path_len = path_arr.len();
+        // `(.[0]|length) > $n` in jq's type ordering (null < bool < number < ...).
+        // A number is always greater than null/bool and always less than
+        // string/array/object, so only a Num depth participates numerically.
+        let keep = match &depth {
+            Value::Null | Value::True | Value::False => true,
+            Value::Num(n, _) => (path_len as f64) > *n,
+            _ => false,
+        };
+        if !keep {
             return Ok(true);
         }
-        let new_path: Vec<Value> = path_arr.iter().skip(depth).cloned().collect();
+        // `.[0][$n:]` slice bound. null means "from the start"; a number is
+        // floored and clamped like any jq array slice; anything else is an
+        // error ("must be integers"), matching jq when a bool depth survives
+        // the comparison above.
+        let start: usize = match &depth {
+            Value::Null => 0,
+            Value::Num(n, _) => {
+                let mut i = n.floor();
+                if i < 0.0 {
+                    i += path_len as f64;
+                }
+                if i < 0.0 {
+                    0
+                } else if i > path_len as f64 {
+                    path_len
+                } else {
+                    i as usize
+                }
+            }
+            _ => bail!("Array/string slice indices must be integers"),
+        };
+        let new_path: Vec<Value> = path_arr.iter().skip(start).cloned().collect();
         let mut new_event: Vec<Value> = Vec::with_capacity(arr.len());
         new_event.push(Value::Arr(Rc::new(new_path)));
         for v in arr.iter().skip(1) { new_event.push(v.clone()); }
