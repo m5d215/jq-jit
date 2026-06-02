@@ -1568,45 +1568,55 @@ impl Parser {
         var_map: &std::collections::HashMap<String, u16>,
         body: &Expr,
     ) -> Result<Expr> {
-        // The fallback chain is `try (bind P1 | body) catch (bind P2 | body) …`.
-        // jq's `try … catch` runs the catch with `.` set to the *error*, which
-        // would clobber the input the body expects (e.g. a reduce UPDATE's
-        // accumulator). Capture the original input in `$__altdot__` up front
-        // and restore it at the head of every alternative's body, so each body
-        // sees the same `.` regardless of which alternative fires. The bind
-        // step only sets variables and leaves `.` untouched, so this is a
-        // no-op for the first (try) alternative and a correction for the rest.
+        // jq applies `?//` *per source value*: for each value of `value_expr`
+        // it tries P1, and only the values that fail P1 fall through to P2,
+        // etc. The source generator must therefore be bound ONCE, outside the
+        // try/catch — binding it per alternative (re-running it inside every
+        // `catch`) re-applies the fallback to values that already matched an
+        // earlier pattern, so `({a:1},2) as {a:$x} ?// $x | $x` leaked the
+        // whole `{a:1}` through the fallback alongside its real match (#819).
+        //
+        // Capture the original input in `$__altdot__` and the per-element
+        // source value in `$__altsrc__`. Each alternative is run as
+        // `$__altdot__ | (BIND-Pi | BODY)`, so the catch arm's `.` (set to the
+        // caught error by `try … catch`) is restored to the original input for
+        // both the pattern's computed keys and the body (#736/#803). The
+        // source binding sits outside the try/catch, evaluated against the
+        // original `.`, so reduce/foreach element sources (#712) and
+        // `.`-reading sources (#736) still see the right input.
         let dot_var = self.scope.alloc_var("__altdot__");
-        let restored_body = Expr::Pipe {
-            left: Box::new(Expr::LoadVar { var_index: dot_var }),
-            right: Box::new(body.clone()),
-        };
-        // Evaluate the bound value against the restored `.` too: in a catch
-        // arm the ambient `.` is the caught error, so a `value_expr` that reads
-        // `.` (e.g. `. as [$a] ?// $a`) would otherwise destructure the error
-        // string instead of the original input (#736). For value_exprs that
-        // ignore `.` (a `LoadVar` element slot, as in reduce/foreach #712) this
-        // pipe is a harmless no-op.
-        let restored_value = Expr::Pipe {
-            left: Box::new(Expr::LoadVar { var_index: dot_var }),
-            right: Box::new(value_expr.clone()),
-        };
+        let src_var = self.scope.alloc_var("__altsrc__");
         let mut result: Option<Expr> = None;
         for pattern in alt_patterns.iter().rev() {
-            let binding = self.build_binding_with_varmap(restored_value.clone(), pattern, var_map, restored_body.clone())?;
+            let binding = self.build_binding_with_varmap(
+                Expr::LoadVar { var_index: src_var },
+                pattern,
+                var_map,
+                body.clone(),
+            )?;
+            let restored = Expr::Pipe {
+                left: Box::new(Expr::LoadVar { var_index: dot_var }),
+                right: Box::new(binding),
+            };
             result = Some(match result {
-                None => binding,
+                None => restored,
                 Some(prev) => Expr::TryCatch {
-                    try_expr: Box::new(binding),
+                    try_expr: Box::new(restored),
                     catch_expr: Box::new(prev),
                 },
             });
         }
         let chain = result.expect("alt_patterns is non-empty");
+        // `value_expr as $__altsrc__ | chain`, iterated per source value.
+        let src_binding = Expr::LetBinding {
+            var_index: src_var,
+            value: Box::new(value_expr.clone()),
+            body: Box::new(chain),
+        };
         Ok(Expr::LetBinding {
             var_index: dot_var,
             value: Box::new(Expr::Input),
-            body: Box::new(chain),
+            body: Box::new(src_binding),
         })
     }
 

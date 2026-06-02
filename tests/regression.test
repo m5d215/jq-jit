@@ -11619,3 +11619,18 @@ null
 [.[0,1] | .[0,1]]
 [[1,2],[3,4]]
 [1,2,3,4]
+
+# Issue #819: ?// fallback only applies to source values that fail the first pattern
+[({a:1},2) as {a:$x} ?// $x | $x]
+null
+[1,2]
+
+# Issue #819: array-pattern ?// leak across generator values
+[([1],2,[3]) as [$a] ?// $a | $a]
+null
+[1,2,3]
+
+# Issue #819: a matched value does not leak through the fallback (downstream stays typed)
+[({a:1},2) as {a:$x} ?// $x | $x | .+0]
+null
+[1,2]
