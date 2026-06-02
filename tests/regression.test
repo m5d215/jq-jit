@@ -11659,3 +11659,18 @@ path(reduce empty as $x (.a; .b))
 path(reduce 1 as $x (.a; .))
 {"a":{"b":2}}
 ["a"]
+
+# Issue #836: try/catch catch-branch is path-tracked (path)
+path(try error catch .b)
+{"b":2}
+["b"]
+
+# Issue #836: try/catch catch-branch is path-tracked (update)
+(try error catch .b) |= .+10
+{"b":2}
+{"b":12}
+
+# Issue #836: try/catch catch-branch is path-tracked (del)
+del(try error catch .b)
+{"b":2}
+{}

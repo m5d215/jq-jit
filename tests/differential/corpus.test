@@ -4070,3 +4070,14 @@ if (.a >= .b) then .a else .x end
 
 reduce .[] as [$a] ?// $a (0; . + $a)
 [1,[2],3]
+
+# ---------- Issue #836: try/catch catch-branch path tracking ----------
+
+path(try error catch .b)
+{"b":2}
+
+(try error catch .b) |= .+10
+{"b":2}
+
+del(try error catch .b)
+{"b":2}
