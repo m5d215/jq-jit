@@ -885,6 +885,13 @@ fromjson
 
 # ---------- Issue #65 parser coverage: alternative destructuring ?// ----------
 
+# ?// applies the fallback per source value, not across the whole generator (#819)
+[({a:1},2) as {a:$x} ?// $x | $x]
+null
+
+[([1],2,[3]) as [$a] ?// $a | $a]
+null
+
 . as [$a] ?// $a | $a
 "hello"
 
