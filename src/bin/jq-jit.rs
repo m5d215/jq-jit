@@ -80,6 +80,30 @@ fn raw_contains_surrogate_escape(bytes: &[u8]) -> bool {
     false
 }
 
+/// Returns true if `bytes` contains a JSON `\uXXXX` escape (a real escape,
+/// not a literal backslash-then-`u` produced by `\\u...`). The raw-byte
+/// `tojson`/`@json` fast path (`push_tojson_raw`) copies the input document
+/// verbatim and cannot reproduce jq's `\u` normalisation: a printable
+/// codepoint decodes to its UTF-8 form, a lone high surrogate is a parse
+/// error, a lone low surrogate becomes U+FFFD, and a valid pair combines
+/// into one codepoint. Callers defer to the real parser when this returns
+/// true so those semantics apply (#850). A `memchr` jump between backslashes
+/// keeps escape-free documents on the fast path.
+#[inline]
+fn raw_contains_unicode_escape(bytes: &[u8]) -> bool {
+    let mut start = 0;
+    while let Some(off) = memchr::memchr(b'\\', &bytes[start..]) {
+        let p = start + off;
+        if p + 1 < bytes.len() && bytes[p + 1] == b'u' {
+            return true;
+        }
+        // Skip the escaped character so `\\u...` (literal backslash + `u`)
+        // is not mistaken for a `\u` escape.
+        start = p + 2;
+    }
+    false
+}
+
 
 fn jqjit_trace_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -12458,11 +12482,19 @@ fn real_main() {
                     // tojson: single-pass compact + escape
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        push_tojson_raw(&mut compact_buf, raw);
-                        compact_buf.push(b'\n');
-                        if compact_buf.len() >= 1 << 17 {
-                            let _ = out.write_all(&compact_buf);
-                            compact_buf.clear();
+                        if raw_contains_unicode_escape(raw) {
+                            // The raw copy can't reproduce jq's `\u` normalisation
+                            // (printable decode, lone-surrogate validation /
+                            // substitution); defer to the real parser (#850).
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        } else {
+                            push_tojson_raw(&mut compact_buf, raw);
+                            compact_buf.push(b'\n');
+                            if compact_buf.len() >= 1 << 17 {
+                                let _ = out.write_all(&compact_buf);
+                                compact_buf.clear();
+                            }
                         }
                         Ok(())
                     })
@@ -21175,11 +21207,18 @@ fn real_main() {
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    push_tojson_raw(&mut compact_buf, raw);
-                    compact_buf.push(b'\n');
-                    if compact_buf.len() >= 1 << 17 {
-                        let _ = out.write_all(&compact_buf);
-                        compact_buf.clear();
+                    if raw_contains_unicode_escape(raw) {
+                        // Defer `\u`-containing documents to the real parser so
+                        // jq's surrogate/printable normalisation applies (#850).
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                    } else {
+                        push_tojson_raw(&mut compact_buf, raw);
+                        compact_buf.push(b'\n');
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
                     }
                     Ok(())
                 })
