@@ -12525,8 +12525,18 @@ fn real_main() {
                     })
                 };
                 if let Err(e) = parse_result {
+                    // jq parses the document stream lazily and emits each valid
+                    // document's result before it reaches a malformed token, then
+                    // exits 5 (#856). Flush the buffered output we already
+                    // produced for the leading documents before reporting the
+                    // parse error and exiting.
+                    if !compact_buf.is_empty() {
+                        let _ = out.write_all(&compact_buf);
+                        compact_buf.clear();
+                    }
+                    let _ = out.flush();
                     eprintln!("jq: error (at <stdin>:0): {}", e);
-                    process::exit(2);
+                    process::exit(5);
                 }
             }
         }
@@ -21341,8 +21351,16 @@ fn real_main() {
                 })
             };
             if let Err(e) = parse_result {
+                // Flush the results already produced for valid leading documents
+                // before reporting the later parse error, and exit 5 like jq
+                // (#856).
+                if !compact_buf.is_empty() {
+                    let _ = out.write_all(&compact_buf);
+                    compact_buf.clear();
+                }
+                let _ = out.flush();
                 eprintln!("jq: error: {}", e);
-                process::exit(2);
+                process::exit(5);
             }
         }
         if slurp && !slurp_values.is_empty() {
