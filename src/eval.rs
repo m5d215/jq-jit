@@ -5425,10 +5425,15 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             match result {
                 Ok(cont) => Ok(cont),
                 Err(e) => {
-                    // A caught `break` surfaces as `{"__jq": id}`, mirroring the
-                    // value-mode handler (#715).
+                    // In path context the catch branch is itself a path
+                    // expression, evaluated against the caught value (the error
+                    // payload, or the rethrown input for a bare `error`). jq
+                    // tracks `path(try error catch .b)` as `["b"]` and raises a
+                    // path-mode type error when the caught value can't accept
+                    // the navigation. Evaluating it in VALUE mode dropped the
+                    // tracking (#836).
                     if let Some(be) = e.downcast_ref::<BreakError>() {
-                        return eval(catch_expr, break_catch_value(be.0), env, cb);
+                        return eval_path(catch_expr, break_catch_value(be.0), env, cb);
                     }
                     let msg = format!("{}", e);
                     // halt / halt_error are non-recoverable: jq lets them
@@ -5440,7 +5445,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                     } else {
                         Value::from_str(&msg)
                     };
-                    eval(catch_expr, catch_val, env, cb)
+                    eval_path(catch_expr, catch_val, env, cb)
                 }
             }
         }
