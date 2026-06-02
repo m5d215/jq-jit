@@ -1405,7 +1405,11 @@ fn rt_max(v: &Value) -> Result<Value> {
         Value::Arr(a) => {
             let mut max = &a[0];
             for v in &a[1..] {
-                if compare_values(v, max) == std::cmp::Ordering::Greater {
+                // jq's `max` keeps the LAST maximal element on ties (its C fold
+                // updates on `>=`), so representation-distinct equal maxima
+                // settle on the last one (`[1.0,1]|max` → `1`, `[-0,0]|max` →
+                // `0`). `min` stays strict (keeps the first). See #852.
+                if compare_values(v, max) != std::cmp::Ordering::Less {
                     max = v;
                 }
             }

@@ -11699,3 +11699,18 @@ del(try error catch .b)
 path(reduce range(2) as $x (.a; .))
 {"a":1}
 ["a"]
+
+# Issue #852: max keeps the LAST maximal element on ties (min keeps first)
+max
+[1.0,1]
+1
+
+# Issue #852: max keeps the last of three representation-distinct equal maxima
+max
+[1.0,1,1.00]
+1.00
+
+# Issue #852: min still keeps the first maximal element on ties
+min
+[1.0,1]
+1.0
