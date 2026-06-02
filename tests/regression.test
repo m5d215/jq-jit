@@ -11714,3 +11714,103 @@ max
 min
 [1.0,1]
 1.0
+
+# Issue #849: @html escapes an embedded NUL to the two-char sequence \0
+implode|@html
+[97,0,98]
+"a\\0b"
+
+# Issue #849: @html NUL escape is two characters
+implode|@html|length
+[0]
+2
+
+# Issue #849: @sh escapes an embedded NUL to \0 inside the quoted word
+implode|@sh
+[97,0,98]
+"'a\\0b'"
+
+# Issue #851: scan represents an unmatched optional capture as null
+[scan("(a)?b")]
+"b"
+[[null]]
+
+# Issue #851: scan alternation leaves the unmatched branch as null
+[scan("(x)|(y)")]
+"y"
+[[null,"y"]]
+
+# Issue #847: IN/1 membership test on a matching input
+IN(1)
+1
+true
+
+# Issue #847: IN/1 with null candidate against a non-null input
+IN(null)
+5
+false
+
+# Issue #847: a piped input value found in the candidate list
+2|IN(1,2,3)
+null
+true
+
+# Issue #846: IN/2 evaluates the candidate set against the input
+IN(1; .[])
+[1,2,3]
+true
+
+# Issue #846: IN/2 with a constant source and identity candidate set
+IN(false; .)
+null
+false
+
+# Issue #848: pick with a non-path argument reports jq's path error, not the sentinel
+try pick(1) catch .
+{"a":1}
+"Invalid path expression with result 1"
+
+# Issue #848: pick error is catchable across argument shapes
+try pick(.a,3) catch .
+{"a":1}
+"Invalid path expression with result 3"
+
+# Issue #841: comma-separated array index deletes use descending order
+del(.a[1], .a[2])
+{"a":[1,2,3,4]}
+{"a":[1,4]}
+
+# Issue #841: three comma-separated index deletes
+del(.a[0], .a[1], .a[2])
+{"a":[1,2,3,4]}
+{"a":[4]}
+
+# Issue #841: comma-separated slice deletes
+del(.a[1:2], .a[3:4])
+{"a":[1,2,3,4,5]}
+{"a":[1,3,5]}
+
+# Issue #842: a slice path on a non-array container errors (here: object)
+try del(.[1:3]) catch "ERR"
+{}
+"ERR"
+
+# Issue #842: a slice path on a string errors
+try del(.[1:3]) catch "ERR"
+"abcdef"
+"ERR"
+
+# Issue #843: a slice under a missing object key is a no-op (no autovivify)
+del(.a[1:3])
+{}
+{}
+
+# Issue #843: a slice under a deleted key does not autovivify to null
+del(.a, .a[1:3])
+{"a":[0,1,2,3]}
+{}
+
+# Issue #841/#2111: generator-bound slice deletes the union of indices
+del(.a[(0,2):(1,4)])
+{"a":[10,20,30,40,50,60]}
+{"a":[50,60]}

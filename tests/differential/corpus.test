@@ -4106,3 +4106,55 @@ max
 
 min
 [1.0,1]
+
+# ---------- Issue #849: @html/@sh escape embedded NUL to \0 ----------
+
+implode|@html
+[97,0,98]
+
+implode|@sh
+[97,0,98]
+
+# ---------- Issue #851: scan null capture ----------
+
+[scan("(a)?b")]
+"b"
+
+[scan("(x)|(y)")]
+"y"
+
+# ---------- Issue #846/#847: IN/1 and IN/2 ----------
+
+IN(1)
+1
+
+IN(null)
+5
+
+IN(1; .[])
+[1,2,3]
+
+IN(false; .)
+null
+
+# ---------- Issue #848: pick non-path error message ----------
+
+try pick(1) catch .
+{"a":1}
+
+try pick(.a,3) catch .
+{"a":1}
+
+# ---------- Issue #841/#842/#843: del comma-paths, slice guards ----------
+
+del(.a[1], .a[2])
+{"a":[1,2,3,4]}
+
+del(.a[1:2], .a[3:4])
+{"a":[1,2,3,4,5]}
+
+del(.[1:3])
+{}
+
+del(.a, .a[1:3])
+{"a":[0,1,2,3]}

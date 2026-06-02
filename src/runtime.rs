@@ -2776,7 +2776,38 @@ pub fn rt_delpaths(v: &Value, paths: &Value) -> Result<Value> {
             // `delpaths([["a"],["a","b"]]) on {"a":1,...}` errors on the
             // second path (descending into `.a` = number); jq returns the
             // object minus `.a`. See #432.
-            let mut sorted_paths: Vec<&Value> = ps.iter().collect();
+            // Expand any terminal slice component (`[..parent, {start,end}]`)
+            // into the explicit element-index paths it covers, resolved against
+            // the ORIGINAL array at `parent`. jq deletes the UNION of all
+            // sibling deletions computed against the pre-deletion array; doing
+            // the expansion up front lets the descending index delete below
+            // produce that union even for overlapping or generator-bound slices
+            // (`del(.a[(0,2):(1,4)])`) and mixed index/slice deletes, instead of
+            // draining each slice against the already-shortened array. A slice
+            // whose parent is not an array is left intact so `delete_path`
+            // raises jq's type error (non-array container) or no-ops (missing
+            // key). See #841/#842/#843.
+            let mut expanded: Vec<Value> = Vec::with_capacity(ps.len());
+            for path in ps.iter() {
+                if let Value::Arr(pa) = path {
+                    if let Some(Value::Obj(ObjInner(spec))) = pa.last() {
+                        let parent: Vec<Value> = pa[..pa.len() - 1].to_vec();
+                        let parent_val = rt_getpath(v, &Value::Arr(Rc::new(parent.clone())));
+                        if let Ok(Value::Arr(arr)) = parent_val {
+                            validate_slice_spec(spec)?;
+                            let (si, ei) = slice_indices(spec, arr.len() as i64);
+                            for idx in si..ei {
+                                let mut np = parent.clone();
+                                np.push(Value::number(idx as f64));
+                                expanded.push(Value::Arr(Rc::new(np)));
+                            }
+                            continue;
+                        }
+                    }
+                }
+                expanded.push(path.clone());
+            }
+            let mut sorted_paths: Vec<&Value> = expanded.iter().collect();
             sorted_paths.sort_by(|a, b| compare_values(a, b));
             let mut filtered: Vec<&Value> = Vec::with_capacity(sorted_paths.len());
             for path in sorted_paths {
@@ -3391,7 +3422,9 @@ fn rt_scan(v: &Value, re: &Value, not_empty: bool) -> Result<Value> {
                             let groups: Vec<Value> = (1..caps.len())
                                 .map(|i| match caps.get(i) {
                                     Some(m) => Value::from_str(m.as_str()),
-                                    None => Value::from_str(""),
+                                    // An unmatched optional capture is null, like
+                                    // `match`/`capture` (not the empty string). #851
+                                    None => Value::Null,
                                 })
                                 .collect();
                             Value::Arr(Rc::new(groups))

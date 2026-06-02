@@ -4215,47 +4215,56 @@ impl Parser {
                     }),
                 })
             }
-            // IN/2: IN(s; b) = reduce s as $x (false; . or ($x | IN(b)))
+            // IN/2: jq's `IN(src; s)` is `any(src == s; .)` — BOTH `src` and the
+            // candidate set `s` are evaluated against the original input. The old
+            // desugar fed the candidate set the reduce accumulator (the update's
+            // `.`), so `IN(1; .[])` iterated `false` and `IN(false; .)` compared
+            // against the accumulator. Bind the original input as `$dot` and pipe
+            // the candidate set from it: #846
+            //   . as $dot
+            //   | reduce src as $x (false;
+            //       . or (first(($dot | s) | if . == $x then true else empty) // false))
             ("IN", 2) => {
                 let mut args = args.into_iter();
+                let src = args.next().unwrap();
                 let s = args.next().unwrap();
-                let b = args.next().unwrap();
+                let dot_var = self.scope.alloc_var("__in2_dot__");
                 let x_var = self.scope.alloc_var("__in2_x__");
                 let acc_var = self.scope.alloc_var("__in2_acc__");
-                let check_var = self.scope.alloc_var("__in2_chk__");
-                // IN($x; b) = $x | IN(b) = $x as $chk | first(b | if . == $chk then true else empty end) // false
-                let in_check = Expr::LetBinding {
-                    var_index: check_var,
-                    value: Box::new(Expr::LoadVar { var_index: x_var }),
-                    body: Box::new(Expr::Alternative {
-                        primary: Box::new(Expr::Limit {
-                            count: Box::new(Expr::Literal(Literal::Num(1.0, None))),
-                            generator: Box::new(Expr::Pipe {
-                                left: Box::new(b),
-                                right: Box::new(Expr::IfThenElse {
-                                    cond: Box::new(Expr::BinOp {
-                                        op: BinOp::Eq,
-                                        lhs: Box::new(Expr::Input),
-                                        rhs: Box::new(Expr::LoadVar { var_index: check_var }),
-                                    }),
-                                    then_branch: Box::new(Expr::Literal(Literal::True)),
-                                    else_branch: Box::new(Expr::Empty),
+                let in_check = Expr::Alternative {
+                    primary: Box::new(Expr::Limit {
+                        count: Box::new(Expr::Literal(Literal::Num(1.0, None))),
+                        generator: Box::new(Expr::Pipe {
+                            left: Box::new(Expr::Pipe {
+                                left: Box::new(Expr::LoadVar { var_index: dot_var }),
+                                right: Box::new(s),
+                            }),
+                            right: Box::new(Expr::IfThenElse {
+                                cond: Box::new(Expr::BinOp {
+                                    op: BinOp::Eq,
+                                    lhs: Box::new(Expr::Input),
+                                    rhs: Box::new(Expr::LoadVar { var_index: x_var }),
                                 }),
+                                then_branch: Box::new(Expr::Literal(Literal::True)),
+                                else_branch: Box::new(Expr::Empty),
                             }),
                         }),
-                        fallback: Box::new(Expr::Literal(Literal::False)),
                     }),
+                    fallback: Box::new(Expr::Literal(Literal::False)),
                 };
-                // reduce s as $x (false; . or in_check)
-                Ok(Expr::Reduce {
-                    source: Box::new(s),
-                    init: Box::new(Expr::Literal(Literal::False)),
-                    var_index: x_var,
-                    acc_index: acc_var,
-                    update: Box::new(Expr::BinOp {
-                        op: BinOp::Or,
-                        lhs: Box::new(Expr::Input),
-                        rhs: Box::new(in_check),
+                Ok(Expr::LetBinding {
+                    var_index: dot_var,
+                    value: Box::new(Expr::Input),
+                    body: Box::new(Expr::Reduce {
+                        source: Box::new(src),
+                        init: Box::new(Expr::Literal(Literal::False)),
+                        var_index: x_var,
+                        acc_index: acc_var,
+                        update: Box::new(Expr::BinOp {
+                            op: BinOp::Or,
+                            lhs: Box::new(Expr::Input),
+                            rhs: Box::new(in_check),
+                        }),
                     }),
                 })
             }
