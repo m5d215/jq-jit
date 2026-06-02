@@ -11549,3 +11549,18 @@ null
 .[nan]
 [10,20]
 null
+
+# Issue #814: implode clamps an infinite codepoint to U+FFFD instead of erroring
+[infinite] | implode
+null
+"�"
+
+# Issue #814: implode clamps -infinite to U+FFFD, mixed with valid codepoints
+[65,infinite,66] | implode
+null
+"A�B"
+
+# Issue #814: implode still errors on a NaN codepoint
+[[nan] | implode?]
+null
+[]
