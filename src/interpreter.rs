@@ -2685,39 +2685,64 @@ impl Filter {
     /// Returns true if the filter uses `input` or `inputs` anywhere.
     pub fn uses_inputs(&self) -> bool {
         use crate::ir::Expr;
-        fn walk(e: &Expr) -> bool {
+        // `funcs` lets us follow a `FuncCall` into its body: `def f: input; f`
+        // hides the stream read behind the call, and without descending we'd
+        // report no-inputs and skip seeding the queue (#853). `visited` guards
+        // against recursive/mutually-recursive defs.
+        fn walk(e: &Expr, funcs: &[crate::ir::CompiledFunc], visited: &mut Vec<usize>) -> bool {
+            macro_rules! walk { ($x:expr) => { walk($x, funcs, visited) }; }
             match e {
                 Expr::ReadInput | Expr::ReadInputs => true,
                 Expr::Pipe { left, right } | Expr::Comma { left, right }
                 | Expr::BinOp { lhs: left, rhs: right, .. }
-                | Expr::Alternative { primary: left, fallback: right } => walk(left) || walk(right),
+                | Expr::Alternative { primary: left, fallback: right } => walk!(left) || walk!(right),
                 Expr::UnaryOp { operand, .. } | Expr::Negate { operand }
                 | Expr::Collect { generator: operand } | Expr::Each { input_expr: operand }
-                | Expr::EachOpt { input_expr: operand } | Expr::Recurse { input_expr: operand } => walk(operand),
-                Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => walk(expr) || walk(key),
-                Expr::IfThenElse { cond, then_branch, else_branch } => walk(cond) || walk(then_branch) || walk(else_branch),
-                Expr::TryCatch { try_expr, catch_expr } => walk(try_expr) || walk(catch_expr),
-                Expr::Reduce { source, init, update, .. } => walk(source) || walk(init) || walk(update),
-                Expr::Foreach { source, init, update, extract, .. } => walk(source) || walk(init) || walk(update) || extract.as_ref().map_or(false, |e| walk(e)),
-                Expr::Slice { expr, from, to } => walk(expr) || from.as_ref().map_or(false, |e| walk(e)) || to.as_ref().map_or(false, |e| walk(e)),
-                Expr::ObjectConstruct { pairs } => pairs.iter().any(|(k, v)| walk(k) || walk(v)),
-                Expr::LetBinding { value, body, .. } => walk(value) || walk(body),
-                Expr::Label { body, .. } => walk(body),
-                Expr::CallBuiltin { args, .. } => args.iter().any(|a| walk(a)),
-                Expr::Update { path_expr, update_expr } | Expr::Assign { path_expr, value_expr: update_expr } => walk(path_expr) || walk(update_expr),
-                Expr::Mutate { path_expr, value_expr, .. } => walk(path_expr) || walk(value_expr),
-                Expr::ClosureOp { input_expr, key_expr, .. } => walk(input_expr) || walk(key_expr),
-                Expr::Format { expr: e, .. } => walk(e),
-                Expr::Limit { count, generator } => walk(count) || walk(generator),
-                Expr::While { cond, update, .. } | Expr::Until { cond, update } => walk(cond) || walk(update),
-                Expr::Repeat { update, .. } => walk(update),
+                | Expr::EachOpt { input_expr: operand } | Expr::Recurse { input_expr: operand } => walk!(operand),
+                Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => walk!(expr) || walk!(key),
+                Expr::IfThenElse { cond, then_branch, else_branch } => walk!(cond) || walk!(then_branch) || walk!(else_branch),
+                Expr::TryCatch { try_expr, catch_expr } => walk!(try_expr) || walk!(catch_expr),
+                Expr::Reduce { source, init, update, .. } => walk!(source) || walk!(init) || walk!(update),
+                Expr::Foreach { source, init, update, extract, .. } => walk!(source) || walk!(init) || walk!(update) || extract.as_ref().map_or(false, |e| walk!(e)),
+                Expr::Slice { expr, from, to } => walk!(expr) || from.as_ref().map_or(false, |e| walk!(e)) || to.as_ref().map_or(false, |e| walk!(e)),
+                Expr::ObjectConstruct { pairs } => pairs.iter().any(|(k, v)| walk!(k) || walk!(v)),
+                Expr::LetBinding { value, body, .. } => walk!(value) || walk!(body),
+                Expr::Label { body, .. } => walk!(body),
+                Expr::CallBuiltin { args, .. } => args.iter().any(|a| walk!(a)),
+                Expr::Update { path_expr, update_expr } | Expr::Assign { path_expr, value_expr: update_expr } => walk!(path_expr) || walk!(update_expr),
+                Expr::Mutate { path_expr, value_expr, .. } => walk!(path_expr) || walk!(value_expr),
+                Expr::ClosureOp { input_expr, key_expr, .. } => walk!(input_expr) || walk!(key_expr),
+                // Path-expression forms wrap a sub-expression that may pull from
+                // the input stream (`getpath([input])`, `setpath([input];9)`,
+                // `delpaths([[input]])`, `path(input|.a)`). Omitting these made
+                // `uses_inputs()` report false, so the binary never seeded the
+                // input queue and `input` raised a bogus `break` (#853).
+                Expr::GetPath { path } => walk!(path),
+                Expr::SetPath { path, value } => walk!(path) || walk!(value),
+                Expr::DelPaths { paths } => walk!(paths),
+                Expr::PathExpr { expr: e } | Expr::Debug { expr: e } => walk!(e),
+                Expr::StringInterpolation { parts } => parts.iter().any(|p| {
+                    matches!(p, crate::ir::StringPart::Expr(e) if walk!(e))
+                }),
+                Expr::Format { expr: e, .. } => walk!(e),
+                Expr::Limit { count, generator } => walk!(count) || walk!(generator),
+                Expr::While { cond, update, .. } | Expr::Until { cond, update } => walk!(cond) || walk!(update),
+                Expr::Repeat { update, .. } => walk!(update),
                 Expr::Range { from, to, step } => {
-                    walk(from) || walk(to) || step.as_ref().map_or(false, |s| walk(s))
+                    walk!(from) || walk!(to) || step.as_ref().map_or(false, |s| walk!(s))
+                }
+                // A user-defined call hides the stream read in its body; descend
+                // into it (guarding recursion via `visited`) plus its arguments.
+                Expr::FuncCall { func_id, args } => {
+                    if args.iter().any(|a| walk!(a)) { return true; }
+                    if visited.contains(func_id) { return false; }
+                    visited.push(*func_id);
+                    funcs.get(*func_id).map_or(false, |f| walk(&f.body, funcs, visited))
                 }
                 _ => false,
             }
         }
-        walk(&self.parsed.0)
+        walk(&self.parsed.0, &self.parsed.1, &mut Vec::new())
     }
 
     /// Returns true if the AST contains any runtime loop construct (Reduce,
