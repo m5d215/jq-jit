@@ -444,6 +444,7 @@ enum JitOp {
     // Range loop
     ToF64Var { dst_var: u32, src: SlotId },
     F64Less { dst_var: u32, a_var: u32, b_var: u32 },
+    F64Equal { dst_var: u32, a_var: u32, b_var: u32 },
     F64Add { dst_var: u32, a_var: u32, b_var: u32 },
     F64Sub { dst_var: u32, a_var: u32, b_var: u32 },
     F64Mul { dst_var: u32, a_var: u32, b_var: u32 },
@@ -3275,11 +3276,15 @@ impl Flattener {
                 self.emit(JitOp::F64Less { dst_var: cmp, a_var: zero_var, b_var: limit_var });
                 self.emit(JitOp::BranchOnVar { var: cmp, nonzero_label: start_label, zero_label });
                 self.emit(JitOp::Label { id: zero_label });
-                // limit <= 0: check if negative (error) or zero (skip)
-                let neg_cmp = self.alloc_var();
-                self.emit(JitOp::F64Less { dst_var: neg_cmp, a_var: limit_var, b_var: zero_var });
+                // Reached when `0 < limit` is false — i.e. limit is <= 0 or NaN.
+                // Skip (empty) only for an exact zero; a negative OR NaN count
+                // is an error (jq orders NaN below 0). NaN fails every F64Less
+                // comparison, so distinguish it from 0 with an equality test:
+                // `limit == 0` is true only for an exact zero (#813).
+                let eq_zero = self.alloc_var();
+                self.emit(JitOp::F64Equal { dst_var: eq_zero, a_var: limit_var, b_var: zero_var });
                 let error_label = self.alloc_label();
-                self.emit(JitOp::BranchOnVar { var: neg_cmp, nonzero_label: error_label, zero_label: done_label });
+                self.emit(JitOp::BranchOnVar { var: eq_zero, nonzero_label: done_label, zero_label: error_label });
                 self.emit(JitOp::Label { id: error_label });
                 // Negative limit: throw error
                 let err_msg = self.alloc_slot();
@@ -10024,6 +10029,17 @@ impl JitCompiler {
                         let a_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), a_bits);
                         let b_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), b_bits);
                         let cmp = b.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::LessThan, a_f, b_f);
+                        let result = b.ins().uextend(ptr_ty, cmp);
+                        b.def_var(vars[*dst_var as usize], result);
+                    }
+                    JitOp::F64Equal { dst_var, a_var, b_var: bv } => {
+                        let a_bits = b.use_var(vars[*a_var as usize]);
+                        let b_bits = b.use_var(vars[*bv as usize]);
+                        let a_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), a_bits);
+                        let b_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), b_bits);
+                        // Ordered equality: NaN == anything is false, so a NaN
+                        // operand yields 0 here (used to flag a NaN limit count).
+                        let cmp = b.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::Equal, a_f, b_f);
                         let result = b.ins().uextend(ptr_ty, cmp);
                         b.def_var(vars[*dst_var as usize], result);
                     }
