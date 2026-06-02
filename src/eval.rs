@@ -2014,8 +2014,12 @@ pub fn eval(
             if let Ok(v) = eval_one(expr, &input, env) {
                 return cb(v);
             }
-            eval(base_expr, input.clone(), env, &mut |base| {
-                eval(key_expr, input.clone(), env, &mut |key| {
+            // jq iterates the subscript generator in the OUTER loop and the
+            // base generator in the inner loop, so the leftmost generator
+            // varies fastest: `.[0,1][0,1]` yields .[0][0], .[1][0], .[0][1],
+            // .[1][1]. Nesting base outer reversed that order (#817).
+            eval(key_expr, input.clone(), env, &mut |key| {
+                eval(base_expr, input.clone(), env, &mut |base| {
                     match eval_index(&base, &key, false) {
                         Ok(v) => cb(v),
                         Err(msg) => bail!("{}", msg),
@@ -2025,8 +2029,9 @@ pub fn eval(
         }
 
         Expr::IndexOpt { expr: base_expr, key: key_expr } => {
-            eval(base_expr, input.clone(), env, &mut |base| {
-                eval(key_expr, input.clone(), env, &mut |key| {
+            // Subscript generator outer, base inner — see Expr::Index (#817).
+            eval(key_expr, input.clone(), env, &mut |key| {
+                eval(base_expr, input.clone(), env, &mut |base| {
                     match eval_index(&base, &key, true) {
                         Ok(v) => cb(v),
                         Err(_) => Ok(true),
@@ -3308,7 +3313,7 @@ pub fn eval(
         }
 
         Expr::StringInterpolation { parts } => {
-            eval_interp_parts(parts, 0, String::new(), input, env, cb)
+            eval_interp_parts(parts, parts.len() as isize - 1, String::new(), input, env, cb)
         }
 
         Expr::Limit { count, generator } => {
@@ -5099,10 +5104,15 @@ pub fn eval_closure_op_standalone(op: ClosureOpKind, container: &Value, key_expr
     Ok(result)
 }
 
-fn eval_interp_parts(parts: &[StringPart], idx: usize, cur: String, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
-    if idx >= parts.len() { return cb(Value::from_str(&cur)); }
-    match &parts[idx] {
-        StringPart::Literal(s) => { let mut n = cur; n.push_str(s); eval_interp_parts(parts, idx+1, n, input, env, cb) }
+// Build the interpolated string by recursing from the LAST part to the first,
+// prepending each piece to the `suffix` accumulated from the parts to its
+// right. This makes the rightmost generator hole the outermost loop, so the
+// leftmost hole varies fastest — matching jq: `"\(1,2)\(3,4)"` yields
+// "13","23","14","24". Iterating left-to-right reversed that order (#817).
+fn eval_interp_parts(parts: &[StringPart], idx: isize, suffix: String, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
+    if idx < 0 { return cb(Value::from_str(&suffix)); }
+    match &parts[idx as usize] {
+        StringPart::Literal(s) => { let mut n = s.clone(); n.push_str(&suffix); eval_interp_parts(parts, idx-1, n, input, env, cb) }
         StringPart::Expr(e) => {
             eval(e, input.clone(), env, &mut |val| {
                 // String interpolation runs `tostring` semantics on the
@@ -5112,8 +5122,8 @@ fn eval_interp_parts(parts: &[StringPart], idx: usize, cur: String, input: Value
                 // `value_to_json_tojson` to keep the literal form when the
                 // f64 round-trips it exactly. See #560.
                 let s = match &val { Value::Str(s) => s.to_string(), _ => crate::value::value_to_json_tojson(&val) };
-                let mut n = cur.clone(); n.push_str(&s);
-                eval_interp_parts(parts, idx+1, n, input.clone(), env, cb)
+                let mut n = s; n.push_str(&suffix);
+                eval_interp_parts(parts, idx-1, n, input.clone(), env, cb)
             })
         }
     }
@@ -5170,50 +5180,65 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
         Expr::Index { expr: be, key: ke } => {
             let cb_called = std::cell::Cell::new(false);
             let input_for_check = input.clone();
+            // Collect the base paths first (preserving the path-validity error
+            // recovery below), then iterate subscript-outer / base-inner so the
+            // leftmost generator varies fastest, matching jq's order for
+            // `path(.[0,1][0,1])` (#817). Validating per (key, base) is
+            // equivalent to the old (base, key) loop — only the iteration
+            // order differs.
+            let mut base_paths: Vec<Value> = Vec::new();
             let result = eval_path(be, input.clone(), env, &mut |bp| {
                 cb_called.set(true);
+                base_paths.push(bp);
+                Ok(true)
+            })
+            .and_then(|_| {
                 eval(ke, input.clone(), env, &mut |key| {
-                    // jq errors `path(.field)` when the base value at the
-                    // current path can't accept the key type (issue #46).
-                    // Only objects (with string keys), arrays (with number
-                    // keys), and null (a no-op) are valid bases.
-                    let base_val = crate::runtime::rt_getpath(&input_for_check, &bp).unwrap_or(Value::Null);
-                    match (&base_val, &key) {
-                        (Value::Obj(_), Value::Str(_)) => {}
-                        (Value::Arr(_), Value::Num(_, _)) => {}
-                        // jq accepts `path(.[arr])` on an array — the array
-                        // key becomes a single path component. Updates via
-                        // this path still fail in rt_setpath with `Cannot
-                        // update field at array index of array`. See #467.
-                        (Value::Arr(_), Value::Arr(_)) => {}
-                        // jq treats `.[OBJ]` on array/string as a slice when
-                        // OBJ has both `start` and `end` keys with Num/Null
-                        // values. Otherwise it errors with `Array/string
-                        // slice indices must be integers`. See #596.
-                        (Value::Arr(_) | Value::Str(_), Value::Obj(_)) => {
-                            if !is_valid_slice_object(&key) {
-                                bail!("Array/string slice indices must be integers");
+                    for bp in &base_paths {
+                        // jq errors `path(.field)` when the base value at the
+                        // current path can't accept the key type (issue #46).
+                        // Only objects (with string keys), arrays (with number
+                        // keys), and null (a no-op) are valid bases.
+                        let base_val = crate::runtime::rt_getpath(&input_for_check, bp).unwrap_or(Value::Null);
+                        match (&base_val, &key) {
+                            (Value::Obj(_), Value::Str(_)) => {}
+                            (Value::Arr(_), Value::Num(_, _)) => {}
+                            // jq accepts `path(.[arr])` on an array — the array
+                            // key becomes a single path component. Updates via
+                            // this path still fail in rt_setpath with `Cannot
+                            // update field at array index of array`. See #467.
+                            (Value::Arr(_), Value::Arr(_)) => {}
+                            // jq treats `.[OBJ]` on array/string as a slice when
+                            // OBJ has both `start` and `end` keys with Num/Null
+                            // values. Otherwise it errors with `Array/string
+                            // slice indices must be integers`. See #596.
+                            (Value::Arr(_) | Value::Str(_), Value::Obj(_)) => {
+                                if !is_valid_slice_object(&key) {
+                                    bail!("Array/string slice indices must be integers");
+                                }
+                            }
+                            // null accepts string/number/object keys (the slicing
+                            // form), but jq errors on bool/null/array keys with
+                            // `Cannot index null with <type>` (#594).
+                            (Value::Null, Value::Str(_) | Value::Num(_, _) | Value::Obj(_)) => {}
+                            _ => {
+                                // jq's wording: string keys keep the quoted
+                                // value (`string "x"`), other key types use
+                                // the bare type name (`number`, `boolean`,
+                                // `null`). Aligns with the read-side fix from
+                                // #440. See #500.
+                                let key_desc = match &key {
+                                    Value::Str(s) => format!("string \"{}\"", s),
+                                    other => other.type_name().to_string(),
+                                };
+                                bail!("Cannot index {} with {}", base_val.type_name(), key_desc);
                             }
                         }
-                        // null accepts string/number/object keys (the slicing
-                        // form), but jq errors on bool/null/array keys with
-                        // `Cannot index null with <type>` (#594).
-                        (Value::Null, Value::Str(_) | Value::Num(_, _) | Value::Obj(_)) => {}
-                        _ => {
-                            // jq's wording: string keys keep the quoted
-                            // value (`string "x"`), other key types use
-                            // the bare type name (`number`, `boolean`,
-                            // `null`). Aligns with the read-side fix from
-                            // #440. See #500.
-                            let key_desc = match &key {
-                                Value::Str(s) => format!("string \"{}\"", s),
-                                other => other.type_name().to_string(),
-                            };
-                            bail!("Cannot index {} with {}", base_val.type_name(), key_desc);
-                        }
+                        let mut p = match bp { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
+                        p.push(key.clone());
+                        if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); }
                     }
-                    let mut p = match &bp { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
-                    p.push(key); cb(Value::Arr(Rc::new(p)))
+                    Ok(true)
                 })
             });
             match result {
