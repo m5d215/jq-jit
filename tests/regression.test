@@ -11740,3 +11740,28 @@ implode|@sh
 [scan("(x)|(y)")]
 "y"
 [[null,"y"]]
+
+# Issue #847: IN/1 membership test on a matching input
+IN(1)
+1
+true
+
+# Issue #847: IN/1 with null candidate against a non-null input
+IN(null)
+5
+false
+
+# Issue #847: a piped input value found in the candidate list
+2|IN(1,2,3)
+null
+true
+
+# Issue #846: IN/2 evaluates the candidate set against the input
+IN(1; .[])
+[1,2,3]
+true
+
+# Issue #846: IN/2 with a constant source and identity candidate set
+IN(false; .)
+null
+false

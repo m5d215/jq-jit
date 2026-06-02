@@ -4123,3 +4123,17 @@ implode|@sh
 
 [scan("(x)|(y)")]
 "y"
+
+# ---------- Issue #846/#847: IN/1 and IN/2 ----------
+
+IN(1)
+1
+
+IN(null)
+5
+
+IN(1; .[])
+[1,2,3]
+
+IN(false; .)
+null

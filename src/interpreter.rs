@@ -2921,7 +2921,13 @@ impl Filter {
     /// (evaluated once with null input). Returns None if expression depends on input.
     /// The result is a list of JSON output lines (one per output value).
     pub fn detect_input_free_output(&self) -> Option<Vec<Vec<u8>>> {
-        let expr = self.detect_expr()?;
+        // Use the ORIGINAL parsed expr, not the simplified one. The simplifier
+        // can rewrite a binding (e.g. the `. as $x` / `LIT as $x` that `IN(x)`
+        // desugars to) into a shape whose input-dependence `contains_input`
+        // no longer sees, so evaluating the simplified form against `null` lost
+        // the binding and `IN(1)` returned `false`. The original expr is the
+        // authoritative one the generic path evaluates. See #847.
+        let expr = &self.parsed.0;
         if contains_input(expr) { return None; }
         // Already handled by literal_output?
         let mut buf = Vec::new();
