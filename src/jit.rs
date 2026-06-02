@@ -7152,7 +7152,8 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 }
                 let mut m = &a[0];
                 for v in &a[1..] {
-                    if crate::runtime::compare_values(v, m) == std::cmp::Ordering::Greater { m = v; }
+                    // jq's `max` keeps the LAST maximal element on ties (#852).
+                    if crate::runtime::compare_values(v, m) != std::cmp::Ordering::Less { m = v; }
                 }
                 std::ptr::write(dst, m.clone());
                 return 0;
