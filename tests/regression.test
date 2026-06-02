@@ -11564,3 +11564,13 @@ null
 [[nan] | implode?]
 null
 []
+
+# Issue #821: recurse_down/0 is no longer a builtin alias, so a user def is honored
+def recurse_down: recurse; [recurse_down]
+[1,[2]]
+[[1,[2]],1,[2],2]
+
+# Issue #821: recurse/0 still descends (unaffected by removing the recurse_down alias)
+[recurse]
+[1,[2,[3]]]
+[[1,[2,[3]]],1,[2,[3]],2,[3],3]
