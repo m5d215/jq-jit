@@ -129,6 +129,62 @@ impl std::fmt::Display for BreakError {
 }
 impl std::error::Error for BreakError {}
 
+thread_local! {
+    /// Lossless payload slot for the most recently raised `error(value)`
+    /// (#844). `Value` holds `Rc`s, so it cannot live inside an
+    /// `anyhow::Error` (which requires `Send + Sync`); instead `error`
+    /// stashes the value here and bails with the `Send + Sync` [`ErrorValue`]
+    /// marker. The matching `catch` takes the value straight back. This
+    /// mirrors jit.rs's `JIT_ERROR_VALUE` channel. The slot is safe as a
+    /// single cell because error propagation is synchronous LIFO unwinding:
+    /// only one `error(value)` is ever in flight, and the catching `try`
+    /// takes it immediately. A stale value left by an uncaught error is
+    /// overwritten by the next `error` and is never read by the string path
+    /// (which only fires when the `ErrorValue` downcast fails).
+    static ERROR_PAYLOAD: std::cell::RefCell<Option<Value>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Typed marker error carrying an `error(value)` payload losslessly (#844).
+///
+/// The string channel (`__jqerror__:<JSON>`) serializes the payload with
+/// `value_to_json_precise`, which is lossy for non-finite numbers anywhere
+/// in the value: `nan` becomes `null` and `±infinite` saturates to the
+/// nearest finite f64. Round-tripping that JSON back in a `catch` branch
+/// therefore corrupts the caught value. The exact `Value` rides in
+/// [`ERROR_PAYLOAD`] instead; `Display` still emits the `__jqerror__:<JSON>`
+/// form so uncaught errors print exactly as before.
+#[derive(Debug)]
+struct ErrorValue {
+    display: String,
+}
+impl ErrorValue {
+    /// Stash `value` in the thread-local payload slot and build the marker
+    /// error whose `Display` reproduces the legacy `__jqerror__:<JSON>` text.
+    fn raise(value: Value) -> anyhow::Error {
+        let display = format!("__jqerror__:{}", crate::value::value_to_json_precise(&value));
+        ERROR_PAYLOAD.with(|slot| *slot.borrow_mut() = Some(value));
+        ErrorValue { display }.into()
+    }
+}
+impl std::fmt::Display for ErrorValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.display)
+    }
+}
+impl std::error::Error for ErrorValue {}
+
+/// Take the payload stashed by the most recent `error(value)`. Falls back to
+/// re-parsing the marker's `display` JSON if the slot is somehow empty.
+fn take_error_payload(ev: &ErrorValue) -> Value {
+    if let Some(v) = ERROR_PAYLOAD.with(|slot| slot.borrow_mut().take()) {
+        return v;
+    }
+    match ev.display.strip_prefix("__jqerror__:") {
+        Some(json) => crate::value::json_to_value(json).unwrap_or_else(|_| Value::from_str(&ev.display)),
+        None => Value::from_str(&ev.display),
+    }
+}
+
 /// The value a `try ... catch` / `?` receives when it catches a `break`
 /// signal. jq surfaces the break as `{"__jq": <label id>}`; matching the
 /// shape lets `catch`/`?` handle it like any other error. Only the shape is
@@ -2389,6 +2445,12 @@ pub fn eval(
                     if let Some(be) = e.downcast_ref::<BreakError>() {
                         return eval(catch_expr, break_catch_value(be.0), env, cb);
                     }
+                    // A typed `error(value)` payload is recovered losslessly,
+                    // dodging the lossy JSON round-trip (#844).
+                    if let Some(ev) = e.downcast_ref::<ErrorValue>() {
+                        let v = take_error_payload(ev);
+                        return eval(catch_expr, v, env, cb);
+                    }
                     let msg = format!("{}", e);
                     // halt / halt_error are non-recoverable: jq lets them
                     // propagate past `try ... catch` so the process exits with
@@ -3542,12 +3604,15 @@ pub fn eval(
         }
 
         Expr::Error { msg } => {
+            // Carry the payload as a typed `ErrorValue` so a downstream
+            // `catch` recovers the exact value, including non-finite numbers
+            // that the JSON channel would corrupt (#844).
             if let Some(msg_expr) = msg {
                 eval(msg_expr, input, env, &mut |val| {
-                    bail!("__jqerror__:{}", crate::value::value_to_json_precise(&val))
+                    Err(ErrorValue::raise(val))
                 })
             } else {
-                bail!("__jqerror__:{}", crate::value::value_to_json_precise(&input))
+                Err(ErrorValue::raise(input))
             }
         }
 
@@ -5487,6 +5552,11 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                     // tracking (#836).
                     if let Some(be) = e.downcast_ref::<BreakError>() {
                         return eval_path(catch_expr, break_catch_value(be.0), env, cb);
+                    }
+                    // Recover a typed `error(value)` payload losslessly (#844).
+                    if let Some(ev) = e.downcast_ref::<ErrorValue>() {
+                        let v = take_error_payload(ev);
+                        return eval_path(catch_expr, v, env, cb);
                     }
                     let msg = format!("{}", e);
                     // halt / halt_error are non-recoverable: jq lets them
