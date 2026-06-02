@@ -11634,3 +11634,28 @@ null
 [({a:1},2) as {a:$x} ?// $x | $x | .+0]
 null
 [1,2]
+
+# Issue #816: a reduce whose update body navigates is not a path expression
+[path(reduce 1 as $x (.; .a))?]
+{"a":1}
+[]
+
+# Issue #816: |= over such a reduce errors instead of silently mutating
+[(reduce 1 as $x (.; .a) |= 99)?]
+{"a":1}
+[]
+
+# Issue #816: an identity-equivalent update body still path-tracks (init path)
+path(reduce 1 as $x (.a; select(true)))
+{"a":{"b":2}}
+["a"]
+
+# Issue #816: empty source still forwards the INIT path (#711 preserved)
+path(reduce empty as $x (.a; .b))
+{"a":{"b":2}}
+["a"]
+
+# Issue #816: an identity update body forwards the INIT path
+path(reduce 1 as $x (.a; .))
+{"a":{"b":2}}
+["a"]

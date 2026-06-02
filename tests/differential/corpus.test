@@ -266,6 +266,14 @@ null
 reduce range(5) as $i (0; . + $i)
 null
 
+# a navigating reduce update body is not a path expression (#816)
+[path(reduce 1 as $x (.; .a))?]
+{"a":1}
+
+# an identity-equivalent update body still path-tracks the INIT path (#816)
+path(reduce 1 as $x (.a; select(true)))
+{"a":{"b":2}}
+
 reduce .[] as $x ({}; .[$x | tostring] = 1)
 [1,2,3,2,1]
 
