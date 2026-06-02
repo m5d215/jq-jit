@@ -714,6 +714,7 @@ null
 {(.k):2, a:1}
 {"k":"a"}
 {"a":1}
+
 # Issue #40: `//` must propagate errors from the LHS
 
 # .x on a non-object must error, not silently fall through to the RHS
@@ -11729,3 +11730,13 @@ implode|@html|length
 implode|@sh
 [97,0,98]
 "'a\\0b'"
+
+# Issue #851: scan represents an unmatched optional capture as null
+[scan("(a)?b")]
+"b"
+[[null]]
+
+# Issue #851: scan alternation leaves the unmatched branch as null
+[scan("(x)|(y)")]
+"y"
+[[null,"y"]]

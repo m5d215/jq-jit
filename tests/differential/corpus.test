@@ -522,6 +522,7 @@ null
 
 {(.k):2, a:1}
 {"k":"a"}
+
 # ---------- Issue #40: // propagates errors from the LHS ----------
 
 .x // 0
@@ -4114,3 +4115,11 @@ implode|@html
 
 implode|@sh
 [97,0,98]
+
+# ---------- Issue #851: scan null capture ----------
+
+[scan("(a)?b")]
+"b"
+
+[scan("(x)|(y)")]
+"y"
