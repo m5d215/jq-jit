@@ -576,6 +576,80 @@ fn expr_references_var(expr: &crate::ir::Expr, var_index: u16) -> bool {
     }
 }
 
+/// Returns true if `var_index` is referenced anywhere inside `expr` in a
+/// position where `.` has been rebound away from the value it had at `expr`'s
+/// entry. The LetBinding inliner uses this to refuse substituting a
+/// replacement that reads `.` (e.g. `.foo`, or `.` itself) into such a
+/// position — `. as $v | map($v)` must keep `$v` bound to the outer `.`, not
+/// the per-element `.` that `map`/`.[] |` rebinds (#818).
+///
+/// Sound by construction: only clearly dot-preserving constructs propagate
+/// `dot_same`; every other (or unenumerated) construct is treated as rebinding
+/// `.`, so a reference found there is reported (the inliner just declines the
+/// optimization and keeps the binding).
+fn var_in_rebound_dot_scope(expr: &crate::ir::Expr, var_index: u16) -> bool {
+    use crate::ir::{Expr, StringPart};
+    fn walk(e: &Expr, var: u16, dot_same: bool) -> bool {
+        match e {
+            Expr::LoadVar { var_index: v } => *v == var && !dot_same,
+            // Dot-preserving: every sub-expression sees the same `.`.
+            Expr::BinOp { lhs, rhs, .. } => walk(lhs, var, dot_same) || walk(rhs, var, dot_same),
+            Expr::UnaryOp { operand, .. }
+            | Expr::Negate { operand } => walk(operand, var, dot_same),
+            Expr::Format { expr, .. } => walk(expr, var, dot_same),
+            Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => {
+                walk(expr, var, dot_same) || walk(key, var, dot_same)
+            }
+            Expr::Comma { left, right } => walk(left, var, dot_same) || walk(right, var, dot_same),
+            Expr::Collect { generator } => walk(generator, var, dot_same),
+            Expr::Each { input_expr } | Expr::EachOpt { input_expr } => walk(input_expr, var, dot_same),
+            Expr::IfThenElse { cond, then_branch, else_branch } => {
+                walk(cond, var, dot_same)
+                    || walk(then_branch, var, dot_same)
+                    || walk(else_branch, var, dot_same)
+            }
+            Expr::Alternative { primary, fallback } => {
+                walk(primary, var, dot_same) || walk(fallback, var, dot_same)
+            }
+            Expr::ObjectConstruct { pairs } => {
+                pairs.iter().any(|(k, v)| walk(k, var, dot_same) || walk(v, var, dot_same))
+            }
+            Expr::StringInterpolation { parts } => parts.iter().any(|p| {
+                matches!(p, StringPart::Expr(x) if walk(x, var, dot_same))
+            }),
+            Expr::Slice { expr, from, to } => {
+                walk(expr, var, dot_same)
+                    || from.as_ref().is_some_and(|x| walk(x, var, dot_same))
+                    || to.as_ref().is_some_and(|x| walk(x, var, dot_same))
+            }
+            Expr::Range { from, to, step } => {
+                walk(from, var, dot_same)
+                    || walk(to, var, dot_same)
+                    || step.as_ref().is_some_and(|x| walk(x, var, dot_same))
+            }
+            // `limit(n; g)` runs both n and g against the entry `.`.
+            Expr::Limit { count, generator } => {
+                walk(count, var, dot_same) || walk(generator, var, dot_same)
+            }
+            // `a | b`: `a` sees the entry `.`; `b` sees it only when `a` is the
+            // identity `.` (otherwise `b`'s `.` is whatever `a` produced).
+            Expr::Pipe { left, right } => {
+                walk(left, var, dot_same)
+                    || walk(right, var, dot_same && matches!(left.as_ref(), Expr::Input))
+            }
+            // A nested binding keeps `.`; the body is skipped if it shadows our var.
+            Expr::LetBinding { var_index: vi, value, body } => {
+                walk(value, var, dot_same) || (*vi != var && walk(body, var, dot_same))
+            }
+            // Everything else rebinds `.` (reduce/foreach update, while/until,
+            // try/catch handler, path updates, …) or is not clearly
+            // dot-preserving: any reference inside is treated as rebound.
+            other => expr_references_var(other, var),
+        }
+    }
+    walk(expr, var_index, true)
+}
+
 pub(crate) fn is_single_valued_expr(e: &crate::ir::Expr) -> bool {
     use crate::ir::Expr;
     match e {
@@ -1694,7 +1768,20 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             let sb = simplify_expr(body);
             if sv.is_simple_scalar() {
                 let body_uses_var = expr_references_var(&sb, *var_index);
-                if body_uses_var || expr_is_pure_scalar(&sv) {
+                if body_uses_var {
+                    // Substituting the var's value is unsafe when the value
+                    // reads `.` and a reference sits where `.` was rebound —
+                    // `. as $v | map($v)` would otherwise become `map(.)`,
+                    // reading the per-element `.` instead of the bound one
+                    // (#818). A value that doesn't read `.` is dot-independent
+                    // and always safe to substitute.
+                    let dot_safe = !contains_input(&sv)
+                        || !var_in_rebound_dot_scope(&sb, *var_index);
+                    if dot_safe {
+                        return sb.substitute_var(*var_index, &sv);
+                    }
+                } else if expr_is_pure_scalar(&sv) {
+                    // Unused binding with a side-effect-free value: drop it.
                     return sb.substitute_var(*var_index, &sv);
                 }
             }

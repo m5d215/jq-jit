@@ -11574,3 +11574,23 @@ def recurse_down: recurse; [recurse_down]
 [recurse]
 [1,[2,[3]]]
 [[1,[2,[3]]],1,[2,[3]],2,[3],3]
+
+# Issue #818: . as $v keeps $v bound to the outer value inside .[]|$v (not the element)
+[1] | . as $v | [.[] | $v]
+null
+[[1]]
+
+# Issue #818: map($v) yields the whole bound array per element
+[10,20] | . as $v | map($v)
+null
+[[10,20],[10,20]]
+
+# Issue #818: the collected leak corrupts add, not just printing
+[1,2] | . as $v | [.[] | $v] | add
+null
+[1,2,1,2]
+
+# Issue #818: a dot-preserving body still inlines correctly (no regression)
+5 as $v | [$v, $v+1]
+null
+[5,6]
