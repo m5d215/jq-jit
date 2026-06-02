@@ -5671,10 +5671,25 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                     let base_val = crate::runtime::rt_getpath(&input, ap).unwrap_or(Value::Null);
                     env.borrow_mut().vars[ai as usize] = base_val.clone();
                     let ap_vec: Vec<Value> = match ap { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
-                    eval_path(update, base_val, env, &mut |rp| {
-                        let mut p = ap_vec.clone();
-                        if let Value::Arr(rpa) = &rp { p.extend(rpa.iter().cloned()); }
-                        next.push(Value::Arr(Rc::new(p)));
+                    eval_path(update, base_val.clone(), env, &mut |rp| {
+                        // jq only path-tracks a reduce whose UPDATE preserves the
+                        // accumulator path — an identity-equivalent body (`.`,
+                        // `select(true)`, `if true then . else . end`) yields the
+                        // base unchanged (relative path `[]`). A body that
+                        // navigates (`.a`, `.[$x]`, …) makes the reduce a value
+                        // computation, which jq rejects as a path expression
+                        // rather than tracking through it — otherwise `reduce 1
+                        // as $x (.; .a) |= 99` silently mutated `.a` (#816). The
+                        // reported result is the value at the navigated location.
+                        let nav_len = match &rp { Value::Arr(a) => a.len(), _ => 0 };
+                        if nav_len != 0 {
+                            let nav_val = crate::runtime::rt_getpath(&base_val, &rp).unwrap_or(Value::Null);
+                            bail!(
+                                "Invalid path expression with result {}",
+                                crate::value::value_to_json(&nav_val)
+                            );
+                        }
+                        next.push(Value::Arr(Rc::new(ap_vec.clone())));
                         Ok(true)
                     })?;
                 }
