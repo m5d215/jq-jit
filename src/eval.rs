@@ -6268,8 +6268,12 @@ fn halt_error_write(input: &Value) {
         Value::Null => {}
         Value::Str(s) => { let _ = stderr.write_all(s.as_str().as_bytes()); }
         _ => {
+            // jq prints a non-string payload as JSON followed by a trailing
+            // newline (a string payload is written verbatim, null writes
+            // nothing). See #845.
             let json = crate::value::value_to_json_precise(input);
             let _ = stderr.write_all(json.as_bytes());
+            let _ = stderr.write_all(b"\n");
         }
     }
 }
