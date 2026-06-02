@@ -11844,3 +11844,31 @@ tojson
 @json
 {"k":"A\udc00"}
 "{\"k\":\"A�\"}"
+
+# Issue #844: a non-finite error() payload must survive the catch channel.
+# The interpreter serialized the payload to JSON (nan -> null, +-inf -> finite
+# DBL_MAX) and parsed it back, corrupting the value. catch now recovers the
+# exact Value, including nested non-finite numbers and rethrows.
+try error(nan) catch isnan
+null
+true
+
+try error(nan) catch type
+null
+"number"
+
+try error(infinite) catch isinfinite
+null
+true
+
+try error(nan) catch (.+1)
+null
+null
+
+try error({a:[{b:nan}]}) catch (.a[0].b | isnan)
+null
+true
+
+try (try error(nan) catch error) catch isnan
+null
+true

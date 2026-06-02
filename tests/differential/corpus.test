@@ -4172,3 +4172,13 @@ tojson
 
 @json
 {"k":"A\udc00"}
+
+# Issue #844: non-finite error() payload survives the catch channel
+try error(nan) catch isnan
+null
+
+try error(infinite) catch isinfinite
+null
+
+try error({a:[{b:nan}]}) catch (.a[0].b | isnan)
+null
