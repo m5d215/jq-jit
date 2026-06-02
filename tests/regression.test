@@ -11714,3 +11714,18 @@ max
 min
 [1.0,1]
 1.0
+
+# Issue #849: @html escapes an embedded NUL to the two-char sequence \0
+implode|@html
+[97,0,98]
+"a\\0b"
+
+# Issue #849: @html NUL escape is two characters
+implode|@html|length
+[0]
+2
+
+# Issue #849: @sh escapes an embedded NUL to \0 inside the quoted word
+implode|@sh
+[97,0,98]
+"'a\\0b'"

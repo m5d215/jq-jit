@@ -4106,3 +4106,11 @@ max
 
 min
 [1.0,1]
+
+# ---------- Issue #849: @html/@sh escape embedded NUL to \0 ----------
+
+implode|@html
+[97,0,98]
+
+implode|@sh
+[97,0,98]

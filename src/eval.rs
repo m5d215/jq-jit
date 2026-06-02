@@ -4289,7 +4289,8 @@ fn eval_obj_pairs(pairs: &[(Expr, Expr)], idx: usize, cur: crate::value::ObjMap,
 
 fn format_sh_scalar(val: &Value) -> Result<String> {
     match val {
-        Value::Str(s) => Ok(format!("'{}'", s.replace('\'', "'\\''"))),
+        // jq escapes an embedded NUL to `\0` inside the quoted shell word (#849).
+        Value::Str(s) => Ok(format!("'{}'", s.replace('\'', "'\\''").replace('\0', "\\0"))),
         Value::Null => Ok("null".to_string()),
         Value::True => Ok("true".to_string()),
         Value::False => Ok("false".to_string()),
@@ -4419,6 +4420,10 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
                     '>' => r.push_str("&gt;"),
                     '\'' => r.push_str("&apos;"),
                     '"' => r.push_str("&quot;"),
+                    // jq escapes an embedded NUL to the two-character sequence
+                    // `\0` in @html (and @sh); other control bytes pass through
+                    // unchanged. See #849.
+                    '\0' => r.push_str("\\0"),
                     _ => r.push(c),
                 }
             }
