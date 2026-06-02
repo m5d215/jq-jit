@@ -1070,6 +1070,20 @@ try . catch "never"
 
 # ---------- Issue #65 parser coverage: string interpolation ----------
 
+# multi-hole interpolation iterates leftmost-fastest (#817)
+["\(1,2)\(3,4)"]
+null
+
+["\(1,2)\(3,4)\(5,6)"]
+null
+
+# chained generator subscripts follow the same order (#817)
+[.[0,1][0,1]]
+[[1,2],[3,4]]
+
+[path(.[0,1][0,1])]
+[[1,2],[3,4]]
+
 "\(.)"
 42
 
