@@ -4137,3 +4137,11 @@ IN(1; .[])
 
 IN(false; .)
 null
+
+# ---------- Issue #848: pick non-path error message ----------
+
+try pick(1) catch .
+{"a":1}
+
+try pick(.a,3) catch .
+{"a":1}

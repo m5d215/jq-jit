@@ -11765,3 +11765,13 @@ true
 IN(false; .)
 null
 false
+
+# Issue #848: pick with a non-path argument reports jq's path error, not the sentinel
+try pick(1) catch .
+{"a":1}
+"Invalid path expression with result 1"
+
+# Issue #848: pick error is catchable across argument shapes
+try pick(.a,3) catch .
+{"a":1}
+"Invalid path expression with result 3"
