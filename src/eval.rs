@@ -2426,6 +2426,14 @@ pub fn eval(
         }
 
         Expr::LetBinding { var_index, value, body } => {
+            // Register `. as $var` so a path-mode `path($var)` in the body sees
+            // the identity-path provenance (#837). Cheap push/pop; only fires
+            // for the identity binding form.
+            let _id_guard = if matches!(value.as_ref(), Expr::Input) {
+                Some(push_identity_path_var(*var_index))
+            } else {
+                None
+            };
             if matches!(value.as_ref(), Expr::Input) {
                 // Fast path: `. as $var | body`
                 let tmp_vi = *var_index;
@@ -5149,6 +5157,33 @@ thread_local! {
     static FOREACH_PATH_BIND: RefCell<Vec<(u16, Value)>> = const { RefCell::new(Vec::new()) };
 }
 
+thread_local! {
+    // Variables bound to the identity path via `. as $x`. jq tracks the empty
+    // path provenance of an identity binding, so `path($x)` is the identity
+    // path `[]` as long as the current input still equals the captured value
+    // (it becomes invalid once `.` navigates away). A literal binding such as
+    // `5 as $x` carries no path and is always rejected. Each binding site has a
+    // globally unique var index (the parser never reuses one), so a non-identity
+    // rebind of the same name gets a fresh index absent from this set and
+    // correctly shadows. See #837.
+    static IDENTITY_PATH_VARS: RefCell<Vec<u16>> = const { RefCell::new(Vec::new()) };
+}
+
+/// RAII guard registering `var_index` as identity-path-bound for its lifetime.
+struct IdentityVarGuard;
+impl Drop for IdentityVarGuard {
+    fn drop(&mut self) {
+        IDENTITY_PATH_VARS.with(|s| { s.borrow_mut().pop(); });
+    }
+}
+fn push_identity_path_var(var_index: u16) -> IdentityVarGuard {
+    IDENTITY_PATH_VARS.with(|s| s.borrow_mut().push(var_index));
+    IdentityVarGuard
+}
+fn is_identity_path_var(var_index: u16) -> bool {
+    IDENTITY_PATH_VARS.with(|s| s.borrow().contains(&var_index))
+}
+
 /// Emit one slice path component `{start, end}` appended to base path `bp`,
 /// type-checking the receiver the same way jq does. Shared by the single-bound
 /// fast path and the Cartesian-product slow path of path-context slicing (#761).
@@ -5334,9 +5369,11 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
         }
         Expr::Recurse { .. } => eval_recurse_paths(&input, &Value::Arr(Rc::new(vec![])), cb),
         Expr::LetBinding { var_index, value, body } => {
+            let identity_bind = matches!(value.as_ref(), Expr::Input);
             eval(value, input.clone(), env, &mut |val| {
                 let old = env.borrow().get_var(*var_index);
                 env.borrow_mut().set_var(*var_index, val);
+                let _id_guard = if identity_bind { Some(push_identity_path_var(*var_index)) } else { None };
                 let result = eval_path(body, input.clone(), env, cb);
                 env.borrow_mut().set_var(*var_index, old);
                 result
@@ -5513,7 +5550,13 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 return cb(p);
             }
             let v = env.borrow().get_var(*var_index);
-            if matches!(&v, Value::Null | Value::True | Value::False) && v == input {
+            // An identity-bound variable (`. as $x`) is the identity path `[]`
+            // while the current input still equals its captured value (#837).
+            // Literal `null`/`true`/`false` equal to the input are likewise
+            // identity paths (#434). Any other value is an invalid path expr.
+            if v == input && (is_identity_path_var(*var_index)
+                || matches!(&v, Value::Null | Value::True | Value::False))
+            {
                 return cb(Value::Arr(Rc::new(vec![])));
             }
             bail!("__pathexpr_result__:{}", crate::value::value_to_json(&v));
@@ -5663,6 +5706,32 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             { let mut e = env.borrow_mut(); e.ensure_var(vi); e.ensure_var(ai); }
             let mut acc_paths: Vec<Value> = Vec::new();
             eval_path(init, input.clone(), env, &mut |p| { acc_paths.push(p); Ok(true) })?;
+            // jq rejects a reduce SOURCE that navigates the tracked input in
+            // path context (`.[]`, `.a`, …) — it must be a plain value generator
+            // (range, literals, empty, input). Otherwise the reduce silently
+            // forwarded the INIT path and `… |= v` mutated the document (#838).
+            // Probe the source in path mode only when it reads `.`: a navigating
+            // source emits a path (→ reject), a non-path value generator surfaces
+            // as a `__pathexpr_result__` sentinel (→ swallow, evaluate normally),
+            // and any other error (arithmetic/type) propagates as jq's does.
+            // Sources that don't read `.` (range/literals/input/inputs) skip the
+            // probe so a stream-consuming `input` is never evaluated twice.
+            if expr_uses_outer_input(source) {
+                let mut navigated = false;
+                match eval_path(source, input.clone(), env, &mut |_p| { navigated = true; Ok(true) }) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        let msg = format!("{}", e);
+                        if !msg.starts_with("__pathexpr_result__:") { return Err(e); }
+                    }
+                }
+                if navigated {
+                    bail!(
+                        "Invalid path expression near attempt to iterate through {}",
+                        crate::value::value_to_json(&input)
+                    );
+                }
+            }
             let mut source_vals: Vec<Value> = Vec::new();
             eval(source, input.clone(), env, &mut |v| { source_vals.push(v); Ok(true) })?;
             for sv in source_vals {

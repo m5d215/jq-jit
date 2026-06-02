@@ -11674,3 +11674,28 @@ path(try error catch .b)
 del(try error catch .b)
 {"b":2}
 {}
+
+# Issue #837: identity-bound variable (. as $x) is the identity path
+. as $x | path($x)
+{"a":1}
+[]
+
+# Issue #837: identity-bound variable navigates from the empty path
+. as $x | path($x | .a)
+{"a":1}
+["a"]
+
+# Issue #838: a navigating reduce SOURCE is rejected in path context
+[(path(reduce .[] as $x (.a; .)))?]
+{"a":1}
+[]
+
+# Issue #838: |= over a navigating reduce source errors (no silent mutation)
+[(reduce .[] as $x (.a; .) |= 9)?]
+{"a":1}
+[]
+
+# Issue #838: a non-navigating reduce source still tracks the INIT path
+path(reduce range(2) as $x (.a; .))
+{"a":1}
+["a"]

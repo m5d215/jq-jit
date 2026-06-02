@@ -4081,3 +4081,17 @@ path(try error catch .b)
 
 del(try error catch .b)
 {"b":2}
+
+# ---------- Issue #837/#838: path-tracking residuals ----------
+
+. as $x | path($x)
+{"a":1}
+
+. as $x | path($x | .a)
+{"a":1}
+
+reduce .[] as $x (.a; .) |= 9
+{"a":1}
+
+path(reduce range(2) as $x (.a; .))
+{"a":1}
