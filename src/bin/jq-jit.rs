@@ -16,6 +16,38 @@ fn raw_contains_del_byte(bytes: &[u8]) -> bool {
     memchr::memchr(0x7F, bytes).is_some()
 }
 
+/// Parse a JSON document stream into `(value, input_line_number)` pairs for the
+/// `input`/`inputs` queue (#855). The reported line mirrors the main loop: the
+/// count of `\n` consumed up to the document's end, `+1` until the final
+/// newline is reached.
+fn json_inputs_with_lines(content: &str) -> Result<Vec<(Value, u64)>, String> {
+    let bytes = content.as_bytes();
+    let total_nl = bytes.iter().filter(|&&b| b == b'\n').count() as u64;
+    let mut out: Vec<(Value, u64)> = Vec::new();
+    let mut cnt: u64 = 0;
+    let mut at: usize = 0;
+    json_stream_offsets(content, |v, _start, end| {
+        while at < end {
+            if bytes[at] == b'\n' { cnt += 1; }
+            at += 1;
+        }
+        let line = if cnt < total_nl { cnt + 1 } else { cnt };
+        out.push((v, line));
+        Ok(())
+    })
+    .map_err(|e| format!("{}", e))?;
+    Ok(out)
+}
+
+/// Raw (`-R`) input lines paired with their 1-based line numbers (#855).
+fn raw_inputs_with_lines(content: &str) -> Vec<(Value, u64)> {
+    content
+        .lines()
+        .enumerate()
+        .map(|(i, l)| (Value::from_str(l), (i + 1) as u64))
+        .collect()
+}
+
 /// Returns true if `bytes` contains `\uD[8-F]X` — a JSON `\u` escape that
 /// decodes to a surrogate codepoint. Identity passthrough must defer to
 /// the slow parser for these so jq's lone-surrogate semantics apply
@@ -3457,21 +3489,18 @@ fn real_main() {
     if null_input {
         // Pre-read inputs for `input`/`inputs` builtins
         if filter.uses_inputs() {
-            let mut inputs_values = Vec::new();
+            let mut inputs_values: Vec<(Value, u64)> = Vec::new();
             if files.is_empty() {
                 // Read from stdin
                 let mut input_str = String::new();
                 io::stdin().lock().read_to_string(&mut input_str).unwrap_or(0);
                 if raw_input {
-                    for line in input_str.lines() {
-                        inputs_values.push(Value::from_str(line));
+                    inputs_values.extend(raw_inputs_with_lines(&input_str));
+                } else {
+                    match json_inputs_with_lines(&input_str) {
+                        Ok(vs) => inputs_values.extend(vs),
+                        Err(e) => { eprintln!("jq: error (at <stdin>:0): {}", e); process::exit(2); }
                     }
-                } else if let Err(e) = json_stream(&input_str, |v| {
-                    inputs_values.push(v);
-                    Ok(())
-                }) {
-                    eprintln!("jq: error (at <stdin>:0): {}", e);
-                    process::exit(2);
                 }
             } else {
                 // Read from files
@@ -3481,15 +3510,12 @@ fn real_main() {
                         Err(e) => { eprintln!("jq: error: Could not open file {}: {}", file, e); process::exit(2); }
                     };
                     if raw_input {
-                        for line in content.lines() {
-                            inputs_values.push(Value::from_str(line));
+                        inputs_values.extend(raw_inputs_with_lines(&content));
+                    } else {
+                        match json_inputs_with_lines(&content) {
+                            Ok(vs) => inputs_values.extend(vs),
+                            Err(e) => { eprintln!("jq: error (at {}:0): {}", file, e); process::exit(2); }
                         }
-                    } else if let Err(e) = json_stream(&content, |v| {
-                        inputs_values.push(v);
-                        Ok(())
-                    }) {
-                        eprintln!("jq: error (at {}:0): {}", file, e);
-                        process::exit(2);
                     }
                 }
             }
@@ -3503,24 +3529,24 @@ fn real_main() {
         // remaining stdin value (#196). Pre-load everything into the inputs
         // queue, then drain the queue while both sites pull through the same
         // `read_next_input`.
-        let mut inputs_values: Vec<Value> = Vec::new();
-        if raw_input {
+        let inputs_values: Vec<(Value, u64)> = if raw_input {
             let mut buf = String::new();
             if let Err(e) = io::stdin().lock().read_to_string(&mut buf) {
                 eprintln!("jq: error reading input: {}", e);
                 process::exit(2);
             }
-            for line in buf.lines() {
-                inputs_values.push(Value::from_str(line));
-            }
+            raw_inputs_with_lines(&buf)
         } else {
             let input_str = stdin_data.unwrap_or_default();
-            if let Err(e) = json_stream(&input_str, |v| { inputs_values.push(v); Ok(()) }) {
-                eprintln!("jq: error (at <stdin>:0): {}", e);
-                process::exit(2);
+            match json_inputs_with_lines(&input_str) {
+                Ok(vs) => vs,
+                Err(e) => { eprintln!("jq: error (at <stdin>:0): {}", e); process::exit(2); }
             }
-        }
+        };
         jq_jit::eval::set_inputs_queue(inputs_values);
+        // Drain the queue through `read_next_input` so the main-loop document
+        // and the `input`/`inputs` builtin share the cursor AND the
+        // `input_line_number` updates (#855).
         while let Some(v) = jq_jit::eval::read_next_input() {
             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
         }

@@ -57,7 +57,7 @@ pub type EnvRef = Rc<RefCell<Env>>;
 // Pre-populated by CLI before eval/JIT execution. Per-thread to keep
 // `cargo test` parallel runs honest — see `value::OBJMAP_POOL`.
 thread_local! {
-    static INPUTS_STATE: RefCell<(Vec<Value>, usize)> = const { RefCell::new((Vec::new(), 0)) };
+    static INPUTS_STATE: RefCell<(Vec<(Value, u64)>, usize)> = const { RefCell::new((Vec::new(), 0)) };
 }
 
 // Per-thread 1-indexed line number for `input_line_number`. The CLI updates
@@ -79,8 +79,11 @@ pub fn get_input_line_number() -> u64 {
     INPUT_LINE_STATE.with(|c| c.get())
 }
 
-/// Set the inputs queue for `input`/`inputs` builtins.
-pub fn set_inputs_queue(values: Vec<Value>) {
+/// Set the inputs queue for `input`/`inputs` builtins. Each entry pairs the
+/// document value with the `input_line_number` jq reports after consuming it
+/// (#855): reading a document via `input`/`inputs` advances the counter, just
+/// like the main per-document loop.
+pub fn set_inputs_queue(values: Vec<(Value, u64)>) {
     INPUTS_STATE.with_borrow_mut(|state| {
         state.0 = values;
         state.1 = 0;
@@ -95,9 +98,10 @@ pub fn clear_inputs_queue() {
     });
 }
 
-/// Read the next input value. Returns None if exhausted.
+/// Read the next input value, advancing `input_line_number` to the line on
+/// which that document ended (#855). Returns None if exhausted.
 pub fn read_next_input() -> Option<Value> {
-    INPUTS_STATE.with_borrow_mut(|state| {
+    let next = INPUTS_STATE.with_borrow_mut(|state| {
         if state.1 < state.0.len() {
             let idx = state.1;
             state.1 += 1;
@@ -105,7 +109,14 @@ pub fn read_next_input() -> Option<Value> {
         } else {
             None
         }
-    })
+    });
+    match next {
+        Some((v, line)) => {
+            set_input_line_number(line);
+            Some(v)
+        }
+        None => None,
+    }
 }
 
 /// Typed error for label/break to avoid string formatting/parsing overhead.

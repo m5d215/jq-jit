@@ -846,8 +846,34 @@ where F: FnMut(Value) -> Result<()> {
     pos = skip_ws(bytes, pos);
     while pos < bytes.len() {
         let (val, end) = parse_json_value(bytes, pos, 0)?;
+        reject_adjacent_word_token(bytes, end)?;
         cb(val)?;
         pos = skip_ws(bytes, end);
+    }
+    Ok(())
+}
+
+/// Reject two bare-word/number tokens jammed together with no separator at the
+/// top level (`nullnull`, `true123`, `123true`, `false0`). jq tokenises a
+/// contiguous run of literal/number characters as a single token and errors;
+/// jq-jit's recursive parser would otherwise stop at the first valid token and
+/// split the rest into a second document. Structural values (`{}`, `[]`,
+/// strings) are self-delimiting, so the guard only fires when a word character
+/// runs straight into another word character. See #854.
+#[inline]
+fn reject_adjacent_word_token(bytes: &[u8], end: usize) -> Result<()> {
+    if end > 0 && end < bytes.len() {
+        let prev = bytes[end - 1];
+        let next = bytes[end];
+        // The value ended in a bare-word/number character …
+        let prev_word = prev.is_ascii_alphanumeric() || prev == b'.';
+        // … and the next character could extend a literal or number token
+        // (`false-1`, `1-2`, `1.2.3`, `nulltrue` all error in jq), as opposed
+        // to a separator or a self-delimiting structural/string value.
+        let next_word = next.is_ascii_alphanumeric() || matches!(next, b'.' | b'+' | b'-');
+        if prev_word && next_word {
+            bail!("Invalid literal");
+        }
     }
     Ok(())
 }
@@ -861,6 +887,7 @@ where F: FnMut(Value, usize, usize) -> Result<()> {
     pos = skip_ws(bytes, pos);
     while pos < bytes.len() {
         let (val, end) = parse_json_value(bytes, pos, 0)?;
+        reject_adjacent_word_token(bytes, end)?;
         cb(val, pos, end)?;
         pos = skip_ws(bytes, end);
     }
