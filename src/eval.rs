@@ -5783,10 +5783,41 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             // element var is bound to the element VALUE (for use in
             // update/cond) and registered in FOREACH_PATH_BIND so a bare `$x`
             // in the extract forwards the element path — this is what makes the
-            // `nth(n; g)` desugar path-transparent. #711.
+            // `nth(n; .[])` desugar path-transparent. #711.
             let vi = *var_index;
             let ai = *acc_index;
             { let mut e = env.borrow_mut(); e.ensure_var(vi); e.ensure_var(ai); }
+
+            // Decide whether SOURCE navigates the tracked input (a path
+            // generator like `.[]`) or is a plain value generator (`range`,
+            // literals, `empty` — the `nth(n; range)` / #839 shape). A
+            // navigating source forwards the element path through `$x` (handled
+            // by the block below); a value generator instead threads the
+            // ACCUMULATOR as the path carrier. Only probe when the source reads
+            // `.` (otherwise it cannot navigate), mirroring the reduce probe so
+            // a stream-consuming `input` is not evaluated twice. #839
+            let source_navigates = if expr_uses_outer_input(source) {
+                let mut nav = false;
+                match eval_path(source, input.clone(), env, &mut |_p| { nav = true; Ok(false) }) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        let m = format!("{}", e);
+                        if !m.starts_with("__pathexpr_result__:") { return Err(e); }
+                    }
+                }
+                nav
+            } else {
+                false
+            };
+
+            if !source_navigates {
+                // Value-generator source: the accumulator carries the path.
+                // Kept out-of-line so the (cold) path-mode foreach machinery
+                // does not bloat eval_path's hot index/reduce arms. #839
+                return eval_foreach_valuegen_path(source, init, vi, ai, update, extract, &input, env, cb);
+            }
+
+            // ---- navigating source: forward the element path through `$x` ----
             eval(init, input.clone(), env, &mut |init_val| {
                 let mut acc = init_val;
                 eval_path(source, input.clone(), env, &mut |src_path| {
@@ -5957,6 +5988,137 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                     return cb(Value::Arr(Rc::new(vec![])));
                 }
                 bail!("__pathexpr_result__:{}", crate::value::value_to_json(&result_val));
+            }
+            Ok(true)
+        }
+    }
+}
+
+/// Path-context `foreach` over a value-generator source (`range`, literals,
+/// `empty`): the accumulator — not the source — carries the path. Held in a
+/// separate, never-inlined function so the cold machinery does not bloat
+/// `eval_path`'s hot index/reduce arms. #839
+#[inline(never)]
+fn eval_foreach_valuegen_path(
+    source: &Expr,
+    init: &Expr,
+    vi: u16,
+    ai: u16,
+    update: &Expr,
+    extract: &Option<Box<Expr>>,
+    input: &Value,
+    env: &EnvRef,
+    cb: &mut dyn FnMut(Value) -> GenResult,
+) -> GenResult {
+    let source_vals = {
+        let mut v = Vec::new();
+        eval(source, input.clone(), env, &mut |x| { v.push(x); Ok(true) })?;
+        v
+    };
+    // Classify INIT: a path-valued seed threads the accumulator as PATH(s) so
+    // a path-preserving body (`.`) or a navigating body (`.b`) extends it
+    // (`path(foreach range(2) as $i (.a;.;.))` → ["a"],["a"]); a rootless seed
+    // threads it as a VALUE, the `nth(n; range)` counter shape
+    // (`path(nth(1; range(5)))` → result 1).
+    let mut init_paths: Vec<Value> = Vec::new();
+    let init_res = eval_path(init, input.clone(), env, &mut |p| { init_paths.push(p); Ok(true) });
+    match init_res {
+        Ok(_) => {
+            // PATH-threaded accumulator.
+            for seed in init_paths {
+                let mut acc_paths: Vec<Value> = vec![seed];
+                for sv in &source_vals {
+                    let old_var = { let mut e = env.borrow_mut(); std::mem::replace(&mut e.vars[vi as usize], sv.clone()) };
+                    let mut next: Vec<Value> = Vec::new();
+                    let mut stop = false;
+                    for ap in &acc_paths {
+                        let base = crate::runtime::rt_getpath(input, ap).unwrap_or(Value::Null);
+                        let ap_vec: Vec<Value> = match ap { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
+                        let old_acc = { let mut e = env.borrow_mut(); std::mem::replace(&mut e.vars[ai as usize], base.clone()) };
+                        // UPDATE in path mode: each output is relative to the
+                        // accumulator value and extends its path.
+                        let r = eval_path(update, base.clone(), env, &mut |rp| {
+                            let mut np_vec = ap_vec.clone();
+                            if let Value::Arr(a) = &rp { np_vec.extend(a.iter().cloned()); }
+                            let np = Value::Arr(Rc::new(np_vec.clone()));
+                            next.push(np.clone());
+                            // EXTRACT emits per updated accumulator, with the
+                            // accumulator value bound for navigation.
+                            let nbase = crate::runtime::rt_getpath(input, &np).unwrap_or(Value::Null);
+                            let old_acc2 = { let mut e = env.borrow_mut(); std::mem::replace(&mut e.vars[ai as usize], nbase.clone()) };
+                            let ec = if let Some(ex) = extract {
+                                eval_path(ex, nbase, env, &mut |ep| {
+                                    let mut comb = np_vec.clone();
+                                    if let Value::Arr(a) = &ep { comb.extend(a.iter().cloned()); }
+                                    cb(Value::Arr(Rc::new(comb)))
+                                })
+                            } else {
+                                bail!("__pathexpr_result__:{}", crate::value::value_to_json(&nbase));
+                            };
+                            env.borrow_mut().vars[ai as usize] = old_acc2;
+                            let c = ec?;
+                            if !c { stop = true; }
+                            Ok(c)
+                        });
+                        env.borrow_mut().vars[ai as usize] = old_acc;
+                        // Keep $i bound across all accumulator branches of this
+                        // source element; restore it only after the loop (or on
+                        // error) so a multi-valued UPDATE doesn't reset it
+                        // mid-iteration.
+                        if let Err(e) = r {
+                            env.borrow_mut().vars[vi as usize] = old_var;
+                            return Err(e);
+                        }
+                        if stop { break; }
+                    }
+                    env.borrow_mut().vars[vi as usize] = old_var;
+                    if stop { return Ok(false); }
+                    acc_paths = next;
+                }
+            }
+            Ok(true)
+        }
+        Err(e) => {
+            let m = format!("{}", e);
+            if !m.starts_with("__pathexpr_result__:") { return Err(e); }
+            // VALUE-threaded accumulator (the `nth` counter): a bare `$x` in
+            // EXTRACT is the source value, not a path, so it surfaces as the
+            // sink's "result <x>" — no FOREACH_PATH_BIND is registered.
+            let init_vals = {
+                let mut v = Vec::new();
+                eval(init, input.clone(), env, &mut |x| { v.push(x); Ok(true) })?;
+                v
+            };
+            for seed in init_vals {
+                let mut acc = seed;
+                for sv in &source_vals {
+                    let (old_var, old_acc) = {
+                        let mut e = env.borrow_mut();
+                        let ov = std::mem::replace(&mut e.vars[vi as usize], sv.clone());
+                        let oa = std::mem::replace(&mut e.vars[ai as usize], acc.clone());
+                        (ov, oa)
+                    };
+                    let acc_in = acc.clone();
+                    let mut stop = false;
+                    let r = eval(update, acc_in, env, &mut |new_acc| {
+                        acc = new_acc.clone();
+                        env.borrow_mut().vars[ai as usize] = new_acc.clone();
+                        let c = if let Some(ex) = extract {
+                            eval_path(ex, new_acc.clone(), env, cb)?
+                        } else {
+                            bail!("__pathexpr_result__:{}", crate::value::value_to_json(&new_acc));
+                        };
+                        if !c { stop = true; }
+                        Ok(c)
+                    });
+                    {
+                        let mut e = env.borrow_mut();
+                        e.vars[ai as usize] = old_acc;
+                        e.vars[vi as usize] = old_var;
+                    }
+                    r?;
+                    if stop { return Ok(false); }
+                }
             }
             Ok(true)
         }
