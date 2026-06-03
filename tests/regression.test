@@ -11872,3 +11872,28 @@ true
 try (try error(nan) catch error) catch isnan
 null
 true
+
+# Issue #840: ?// alternative destructuring is path-transparent (path context)
+path(. as [$a] ?// $a | .x)
+{"x":42}
+["x"]
+
+# Issue #840: ?// path-transparency under del (fallback alt, body is a path)
+del(. as [$a] ?// $a | .x)
+{"x":1,"y":2}
+{"y":2}
+
+# Issue #840: ?// transparency through a successful object-pattern alternative
+path(. as {a:$x} ?// $x | .a.b)
+{"a":{"b":9}}
+["a","b"]
+
+# Issue #840: ?// transparency through nested 3-alternative fallback chain
+path(. as [$a] ?// {p:$a} ?// $a | .q)
+{"p":1,"q":2}
+["q"]
+
+# Issue #840: ?// path-transparency drives an assignment LHS update
+. as {a:$x} ?// $x | .a.b |= 100
+{"a":{"b":9}}
+{"a":{"b":100}}

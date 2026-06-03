@@ -4182,3 +4182,12 @@ null
 
 try error({a:[{b:nan}]}) catch (.a[0].b | isnan)
 null
+
+path(. as [$a] ?// $a | .x)
+{"x":42}
+
+del(. as [$a] ?// $a | .x)
+{"x":1,"y":2}
+
+path(. as [$a] ?// {p:$a} ?// $a | .q)
+{"p":1,"q":2}

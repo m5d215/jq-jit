@@ -384,7 +384,7 @@ fn subst_inner(
             let new_idx = alloc!(*var_index);
             Expr::LetBinding { var_index: new_idx, value, body: sb!(body) }
         }
-        Expr::TryCatch { try_expr, catch_expr } => Expr::TryCatch { try_expr: sb!(try_expr), catch_expr: sb!(catch_expr) },
+        Expr::TryCatch { try_expr, catch_expr, restore_dot } => Expr::TryCatch { try_expr: sb!(try_expr), catch_expr: sb!(catch_expr), restore_dot: *restore_dot },
         Expr::Collect { generator } => Expr::Collect { generator: sb!(generator) },
         Expr::Negate { operand } => Expr::Negate { operand: sb!(operand) },
         Expr::Alternative { primary, fallback } => Expr::Alternative { primary: sb!(primary), fallback: sb!(fallback) },
@@ -504,7 +504,7 @@ pub(crate) fn append_call_args(expr: &Expr, target: usize, extra: &[Expr]) -> Ex
         Expr::LetBinding { var_index, value, body } => Expr::LetBinding {
             var_index: *var_index, value: rb!(value), body: rb!(body),
         },
-        Expr::TryCatch { try_expr, catch_expr } => Expr::TryCatch { try_expr: rb!(try_expr), catch_expr: rb!(catch_expr) },
+        Expr::TryCatch { try_expr, catch_expr, restore_dot } => Expr::TryCatch { try_expr: rb!(try_expr), catch_expr: rb!(catch_expr), restore_dot: *restore_dot },
         Expr::Collect { generator } => Expr::Collect { generator: rb!(generator) },
         Expr::Negate { operand } => Expr::Negate { operand: rb!(operand) },
         Expr::Alternative { primary, fallback } => Expr::Alternative { primary: rb!(primary), fallback: rb!(fallback) },
@@ -653,12 +653,13 @@ fn subst_cow(expr: &Expr, pv: &[u16], args: &[Expr]) -> Option<Expr> {
                 body: Box::new(b.unwrap_or_else(|| body.as_ref().clone())),
             })
         }
-        Expr::TryCatch { try_expr, catch_expr } => {
+        Expr::TryCatch { try_expr, catch_expr, restore_dot } => {
             let t = s!(try_expr); let c = s!(catch_expr);
             if t.is_none() && c.is_none() { return None; }
             Some(Expr::TryCatch {
                 try_expr: Box::new(t.unwrap_or_else(|| try_expr.as_ref().clone())),
                 catch_expr: Box::new(c.unwrap_or_else(|| catch_expr.as_ref().clone())),
+                restore_dot: *restore_dot,
             })
         }
         Expr::Collect { generator } => s!(generator).map(|g| Expr::Collect { generator: Box::new(g) }),
@@ -939,7 +940,7 @@ fn contains_func_call(expr: &Expr, target: usize) -> bool {
         Expr::Each { input_expr } | Expr::EachOpt { input_expr } | Expr::Recurse { input_expr } => c!(input_expr),
         Expr::IfThenElse { cond, then_branch, else_branch } => c!(cond) || c!(then_branch) || c!(else_branch),
         Expr::LetBinding { value, body, .. } => c!(value) || c!(body),
-        Expr::TryCatch { try_expr, catch_expr } => c!(try_expr) || c!(catch_expr),
+        Expr::TryCatch { try_expr, catch_expr, .. } => c!(try_expr) || c!(catch_expr),
         Expr::Collect { generator } => c!(generator),
         Expr::Alternative { primary, fallback } => c!(primary) || c!(fallback),
         Expr::Reduce { source, init, update, .. } => c!(source) || c!(init) || c!(update),
@@ -1000,7 +1001,7 @@ fn expr_uses_outer_input(expr: &Expr) -> bool {
         | Expr::Alternative { primary: left, fallback: right }
         | Expr::Index { expr: left, key: right }
         | Expr::IndexOpt { expr: left, key: right }
-        | Expr::TryCatch { try_expr: left, catch_expr: right } => {
+        | Expr::TryCatch { try_expr: left, catch_expr: right, .. } => {
             expr_uses_outer_input(left) || expr_uses_outer_input(right)
         }
         // GetPath/SetPath/DelPaths/Update/Assign always read `.` to produce
@@ -1084,7 +1085,7 @@ pub(crate) fn expr_uses_var(expr: &Expr, target: u16) -> bool {
         | Expr::Update { path_expr: left, update_expr: right }
         | Expr::Assign { path_expr: left, value_expr: right }
         | Expr::SetPath { path: left, value: right }
-        | Expr::TryCatch { try_expr: left, catch_expr: right } => {
+        | Expr::TryCatch { try_expr: left, catch_expr: right, .. } => {
             expr_uses_var(left, target) || expr_uses_var(right, target)
         }
         Expr::Mutate { path_expr, value_expr, .. } => {
@@ -1162,7 +1163,7 @@ pub(crate) fn collect_func_calls(expr: &Expr, out: &mut Vec<usize>) {
         | Expr::Update { path_expr: left, update_expr: right }
         | Expr::Assign { path_expr: left, value_expr: right }
         | Expr::SetPath { path: left, value: right }
-        | Expr::TryCatch { try_expr: left, catch_expr: right } => {
+        | Expr::TryCatch { try_expr: left, catch_expr: right, .. } => {
             collect_func_calls(left, out);
             collect_func_calls(right, out);
         }
@@ -2417,7 +2418,7 @@ pub fn eval(
             })
         }
 
-        Expr::TryCatch { try_expr, catch_expr } => {
+        Expr::TryCatch { try_expr, catch_expr, .. } => {
             let cb_error = std::cell::Cell::new(false);
             let result = eval(try_expr, input.clone(), env, &mut |val| {
                 match &val {
@@ -5538,12 +5539,26 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 bail!("undefined function id {}", func_id)
             }
         }
-        Expr::TryCatch { try_expr, catch_expr } => {
+        Expr::TryCatch { try_expr, catch_expr, restore_dot } => {
             let result = eval_path(try_expr, input.clone(), env, cb);
             match result {
                 Ok(cont) => Ok(cont),
                 Err(e) => {
-                    // In path context the catch branch is itself a path
+                    let msg = format!("{}", e);
+                    // halt / halt_error are non-recoverable: jq lets them
+                    // propagate past `try ... catch` so the process exits with
+                    // the requested code (#182).
+                    if msg.starts_with("__halt__:") { return Err(e); }
+                    // The `?//` desugar (`restore_dot`) keeps `.` set to the
+                    // original input across fallbacks rather than binding the
+                    // caught destructuring error: jq never exposes that error to
+                    // the body, so a path expression in the body stays
+                    // path-transparent — `path(. as [$a] ?// $a | .x)` is
+                    // `["x"]` and `del(. as [$a] ?// $a | .x)` drops `.x` (#840).
+                    if *restore_dot {
+                        return eval_path(catch_expr, input.clone(), env, cb);
+                    }
+                    // Plain `try/catch`: the catch branch is itself a path
                     // expression, evaluated against the caught value (the error
                     // payload, or the rethrown input for a bare `error`). jq
                     // tracks `path(try error catch .b)` as `["b"]` and raises a
@@ -5558,11 +5573,6 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                         let v = take_error_payload(ev);
                         return eval_path(catch_expr, v, env, cb);
                     }
-                    let msg = format!("{}", e);
-                    // halt / halt_error are non-recoverable: jq lets them
-                    // propagate past `try ... catch` so the process exits with
-                    // the requested code (#182).
-                    if msg.starts_with("__halt__:") { return Err(e); }
                     let catch_val = if let Some(json) = msg.strip_prefix("__jqerror__:") {
                         crate::value::json_to_value(json).unwrap_or(Value::from_str(&msg))
                     } else {

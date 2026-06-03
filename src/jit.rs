@@ -221,7 +221,7 @@ fn can_scalar_collect(expr: &Expr) -> bool {
         Expr::LetBinding { value, body, .. } => {
             (is_scalar(value) || can_scalar_collect(value)) && can_scalar_collect(body)
         }
-        Expr::TryCatch { try_expr, catch_expr } => {
+        Expr::TryCatch { try_expr, catch_expr, .. } => {
             can_scalar_collect(try_expr) && can_scalar_collect(catch_expr)
         }
         Expr::Error { msg } => msg.as_ref().is_none_or(|m| is_scalar(m)),
@@ -276,7 +276,7 @@ fn is_scalar(expr: &Expr) -> bool {
         Expr::Stderr { expr } => is_scalar(expr),
         // TryCatch is scalar when both try and catch are scalar:
         // try produces one value or fails, catch produces one value on failure
-        Expr::TryCatch { try_expr, catch_expr } => is_scalar(try_expr) && is_scalar(catch_expr),
+        Expr::TryCatch { try_expr, catch_expr, .. } => is_scalar(try_expr) && is_scalar(catch_expr),
         Expr::StringInterpolation { parts } => parts.iter().all(|p| match p {
             StringPart::Literal(_) => true,
             StringPart::Expr(e) => is_scalar(e),
@@ -771,9 +771,10 @@ impl Flattener {
                 path_expr: Box::new(self.inline_func_calls(path_expr)),
                 update_expr: Box::new(self.inline_func_calls(update_expr)),
             },
-            Expr::TryCatch { try_expr, catch_expr } => Expr::TryCatch {
+            Expr::TryCatch { try_expr, catch_expr, restore_dot } => Expr::TryCatch {
                 try_expr: Box::new(self.inline_func_calls(try_expr)),
                 catch_expr: Box::new(self.inline_func_calls(catch_expr)),
+                restore_dot: *restore_dot,
             },
             Expr::Alternative { primary, fallback } => Expr::Alternative {
                 primary: Box::new(self.inline_func_calls(primary)),
@@ -1735,7 +1736,7 @@ impl Flattener {
                 self.emit(JitOp::Drop { slot: val });
                 out
             }
-            Expr::TryCatch { try_expr, catch_expr } => {
+            Expr::TryCatch { try_expr, catch_expr, .. } => {
                 // Scalar try-catch: try produces one value, or catch produces one value
                 let catch_label = self.alloc_label();
                 let done_label = self.alloc_label();
@@ -2372,6 +2373,7 @@ impl Flattener {
                             key: Box::new((**key_expr).clone()),
                         }),
                         catch_expr: Box::new(Expr::Empty),
+                        restore_dot: false,
                     };
                     return self.flatten_gen(&try_catch, input_slot);
                 }
@@ -2384,6 +2386,7 @@ impl Flattener {
                             key: Box::new((**key_expr).clone()),
                         }),
                         catch_expr: Box::new(Expr::Empty),
+                        restore_dot: false,
                     }),
                 };
                 self.flatten_gen(&inner, input_slot)
@@ -2740,7 +2743,7 @@ impl Flattener {
                 true
             }
 
-            Expr::TryCatch { try_expr, catch_expr } => {
+            Expr::TryCatch { try_expr, catch_expr, .. } => {
                 self.flatten_gen_try_catch(try_expr, catch_expr, input_slot)
             }
 
@@ -3939,7 +3942,7 @@ impl Flattener {
                 true
             }
             // TryCatch | right: compile try-catch body inline, each output piped to right
-            Expr::TryCatch { try_expr, catch_expr } => {
+            Expr::TryCatch { try_expr, catch_expr, .. } => {
                 // Pre-check: try body and right must be compilable
                 {
                     let mut test = self.test_flattener();
@@ -4822,7 +4825,7 @@ impl Flattener {
                 Self::collect_loadvar_indices(then_branch, out);
                 Self::collect_loadvar_indices(else_branch, out);
             }
-            Expr::TryCatch { try_expr, catch_expr } => {
+            Expr::TryCatch { try_expr, catch_expr, .. } => {
                 Self::collect_loadvar_indices(try_expr, out);
                 Self::collect_loadvar_indices(catch_expr, out);
             }
@@ -6283,7 +6286,7 @@ fn contains_func_call(expr: &Expr) -> bool {
         Expr::Each { input_expr } | Expr::EachOpt { input_expr } => contains_func_call(input_expr),
         Expr::IfThenElse { cond, then_branch, else_branch } => contains_func_call(cond) || contains_func_call(then_branch) || contains_func_call(else_branch),
         Expr::LetBinding { value, body, .. } => contains_func_call(value) || contains_func_call(body),
-        Expr::TryCatch { try_expr, catch_expr } => contains_func_call(try_expr) || contains_func_call(catch_expr),
+        Expr::TryCatch { try_expr, catch_expr, .. } => contains_func_call(try_expr) || contains_func_call(catch_expr),
         Expr::Collect { generator } => contains_func_call(generator),
         Expr::BinOp { lhs, rhs, .. } => contains_func_call(lhs) || contains_func_call(rhs),
         Expr::UnaryOp { operand, .. } | Expr::Negate { operand } => contains_func_call(operand),

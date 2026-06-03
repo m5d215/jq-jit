@@ -526,7 +526,7 @@ fn expr_references_var(expr: &crate::ir::Expr, var_index: u16) -> bool {
         | Expr::Update { path_expr: left, update_expr: right }
         | Expr::Assign { path_expr: left, value_expr: right }
         | Expr::SetPath { path: left, value: right }
-        | Expr::TryCatch { try_expr: left, catch_expr: right } => {
+        | Expr::TryCatch { try_expr: left, catch_expr: right, .. } => {
             expr_references_var(left, var_index) || expr_references_var(right, var_index)
         }
         Expr::IfThenElse { cond, then_branch, else_branch } => {
@@ -1163,7 +1163,7 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                             Expr::IfThenElse { cond, then_branch, else_branch } => {
                                 is_single_valued(cond) && is_single_valued(then_branch) && is_single_valued(else_branch)
                             }
-                            Expr::TryCatch { try_expr, catch_expr } => {
+                            Expr::TryCatch { try_expr, catch_expr, .. } => {
                                 is_single_valued(try_expr) && is_single_valued(catch_expr)
                             }
                             Expr::Alternative { primary, fallback } => {
@@ -1254,7 +1254,7 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                                     Expr::Pipe { left, right } => is_single_valued_idx(left) && is_single_valued_idx(right),
                                     Expr::IfThenElse { cond, then_branch, else_branch } =>
                                         is_single_valued_idx(cond) && is_single_valued_idx(then_branch) && is_single_valued_idx(else_branch),
-                                    Expr::TryCatch { try_expr, catch_expr } =>
+                                    Expr::TryCatch { try_expr, catch_expr, .. } =>
                                         is_single_valued_idx(try_expr) && is_single_valued_idx(catch_expr),
                                     Expr::Alternative { primary, fallback } =>
                                         is_single_valued_idx(primary) && is_single_valued_idx(fallback),
@@ -2078,8 +2078,8 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             }
             Expr::Assign { path_expr: Box::new(sp), value_expr: Box::new(sv) }
         }
-        Expr::TryCatch { try_expr, catch_expr } => {
-            Expr::TryCatch { try_expr: Box::new(simplify_expr(try_expr)), catch_expr: Box::new(simplify_expr(catch_expr)) }
+        Expr::TryCatch { try_expr, catch_expr, restore_dot } => {
+            Expr::TryCatch { try_expr: Box::new(simplify_expr(try_expr)), catch_expr: Box::new(simplify_expr(catch_expr)), restore_dot: *restore_dot }
         }
         // delpaths([["field"]]) → del(.field)
         Expr::Limit { count, generator } => {
@@ -2208,7 +2208,7 @@ fn contains_input(expr: &crate::ir::Expr) -> bool {
         Expr::Foreach { source, init, update, extract, .. } => contains_input(source) || contains_input(init) || contains_input(update) || extract.as_ref().map_or(false, |e| contains_input(e)),
         Expr::While { cond, update } | Expr::Until { cond, update } => contains_input(cond) || contains_input(update),
         Expr::Repeat { update } => contains_input(update),
-        Expr::TryCatch { try_expr, catch_expr } => contains_input(try_expr) || contains_input(catch_expr),
+        Expr::TryCatch { try_expr, catch_expr, .. } => contains_input(try_expr) || contains_input(catch_expr),
         // CallBuiltin implicitly operates on the current input (passed as first arg)
         Expr::CallBuiltin { .. } => true,
         Expr::Range { from, to, step } => contains_input(from) || contains_input(to) || step.as_ref().map_or(false, |s| contains_input(s)),
@@ -2263,7 +2263,7 @@ fn input_behind_short_circuit(e: &crate::ir::Expr) -> bool {
             input_behind_short_circuit(primary) || contains_input(fallback)
                 || input_behind_short_circuit(fallback)
         }
-        Expr::TryCatch { try_expr, catch_expr } => {
+        Expr::TryCatch { try_expr, catch_expr, .. } => {
             // try_expr's errors are caught; the post-substitution
             // result no longer raises. catch_expr only fires on error;
             // its evaluation order is conditional.
@@ -2659,7 +2659,7 @@ impl Filter {
                 Expr::IfThenElse { cond, then_branch, else_branch } => {
                     walk(cond) || walk(then_branch) || walk(else_branch)
                 }
-                Expr::TryCatch { try_expr, catch_expr } => walk(try_expr) || walk(catch_expr),
+                Expr::TryCatch { try_expr, catch_expr, .. } => walk(try_expr) || walk(catch_expr),
                 Expr::Reduce { source, init, update, .. } => walk(source) || walk(init) || walk(update),
                 Expr::Foreach { source, init, update, extract, .. } => {
                     walk(source) || walk(init) || walk(update) || extract.as_ref().map_or(false, |e| walk(e))
@@ -2701,7 +2701,7 @@ impl Filter {
                 | Expr::EachOpt { input_expr: operand } | Expr::Recurse { input_expr: operand } => walk!(operand),
                 Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => walk!(expr) || walk!(key),
                 Expr::IfThenElse { cond, then_branch, else_branch } => walk!(cond) || walk!(then_branch) || walk!(else_branch),
-                Expr::TryCatch { try_expr, catch_expr } => walk!(try_expr) || walk!(catch_expr),
+                Expr::TryCatch { try_expr, catch_expr, .. } => walk!(try_expr) || walk!(catch_expr),
                 Expr::Reduce { source, init, update, .. } => walk!(source) || walk!(init) || walk!(update),
                 Expr::Foreach { source, init, update, extract, .. } => walk!(source) || walk!(init) || walk!(update) || extract.as_ref().map_or(false, |e| walk!(e)),
                 Expr::Slice { expr, from, to } => walk!(expr) || from.as_ref().map_or(false, |e| walk!(e)) || to.as_ref().map_or(false, |e| walk!(e)),
@@ -2770,7 +2770,7 @@ impl Filter {
                 Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => walk(expr) || walk(key),
                 Expr::IfThenElse { cond, then_branch, else_branch } =>
                     walk(cond) || walk(then_branch) || walk(else_branch),
-                Expr::TryCatch { try_expr, catch_expr } => walk(try_expr) || walk(catch_expr),
+                Expr::TryCatch { try_expr, catch_expr, .. } => walk(try_expr) || walk(catch_expr),
                 Expr::Slice { expr, from, to } => walk(expr)
                     || from.as_ref().map_or(false, |e| walk(e))
                     || to.as_ref().map_or(false, |e| walk(e)),
@@ -2823,7 +2823,7 @@ impl Filter {
                 | Expr::EachOpt { input_expr: operand } | Expr::Recurse { input_expr: operand } => count(operand),
                 Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => count(expr) + count(key),
                 Expr::IfThenElse { cond, then_branch, else_branch } => count(cond) + count(then_branch) + count(else_branch),
-                Expr::TryCatch { try_expr, catch_expr } => count(try_expr) + count(catch_expr),
+                Expr::TryCatch { try_expr, catch_expr, .. } => count(try_expr) + count(catch_expr),
                 Expr::Reduce { source, init, update, .. } => count(source) + count(init) + count(update),
                 Expr::Foreach { source, init, update, extract, .. } => {
                     count(source) + count(init) + count(update)
