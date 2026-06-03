@@ -12017,3 +12017,33 @@ try path(try error([1,2]) catch .[0]) catch .
 [path(.a | try error catch .b)]
 {"a":{"b":9}}
 [["a","b"]]
+
+# Path error result truncation: jq truncates a value dump longer than 29 bytes to its first 26 bytes + "..."
+try (path("this is a fairly long string value here")) catch .
+null
+"Invalid path expression with result \"this is a fairly long str..."
+
+# Path error result truncation: long array dump
+try (path([1,2,3,4,5,6,7,8,9,10,11,12,13,14,15])) catch .
+null
+"Invalid path expression with result [1,2,3,4,5,6,7,8,9,10,11,1..."
+
+# Path error result truncation: long object dump
+try (path({"key":"value","another":"thing","more":"data"})) catch .
+null
+"Invalid path expression with result {\"key\":\"value\",\"another\":\"..."
+
+# Path error result truncation: dump of exactly 28 bytes is left intact (no truncation under the threshold)
+try (path([1,2,3,4,5,6,7,8,9,10,11,12])) catch .
+null
+"Invalid path expression with result [1,2,3,4,5,6,7,8,9,10,11,12]"
+
+# Path error near-attempt truncation: rootless navigate into a long string value
+try (path("this is a fairly long string value here" | .x)) catch .
+null
+"Invalid path expression near attempt to access element \"x\" of \"this is a fairly long str..."
+
+# Path error near-attempt truncation: rootless navigate into a long array value
+try (path([1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16] | .[20])) catch .
+null
+"Invalid path expression near attempt to access element 20 of [1,2,3,4,5,6,7,8,9,10,11,1..."

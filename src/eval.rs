@@ -1795,7 +1795,7 @@ fn eval_update_body(
     if let Err(e) = path_result {
         let msg = format!("{}", e);
         if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
-            bail!("Invalid path expression with result {}", json);
+            bail!("Invalid path expression with result {}", trunc_path_dump(json));
         }
         return Err(e);
     }
@@ -1865,7 +1865,7 @@ fn eval_assign_body(
         if let Err(e) = path_result {
             let msg = format!("{}", e);
             if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
-                bail!("Invalid path expression with result {}", json);
+                bail!("Invalid path expression with result {}", trunc_path_dump(json));
             }
             return Err(e);
         }
@@ -1885,7 +1885,7 @@ fn eval_assign_body(
         if let Err(e) = path_result {
             let msg = format!("{}", e);
             if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
-                bail!("Invalid path expression with result {}", json);
+                bail!("Invalid path expression with result {}", trunc_path_dump(json));
             }
             return Err(e);
         }
@@ -3171,7 +3171,7 @@ pub fn eval(
                 Err(e) => {
                     let msg = format!("{}", e);
                     if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
-                        bail!("Invalid path expression with result {}", json);
+                        bail!("Invalid path expression with result {}", trunc_path_dump(json));
                     }
                     Err(e)
                 }
@@ -5176,7 +5176,7 @@ pub fn eval_path_standalone(path_expr: &Expr, input: Value, env_ref: &Rc<RefCell
         Err(e) => {
             let msg = format!("{}", e);
             if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
-                bail!("Invalid path expression with result {}", json);
+                bail!("Invalid path expression with result {}", trunc_path_dump(json));
             }
             Err(e)
         }
@@ -5291,6 +5291,23 @@ fn emit_slice_path(
     cb(Value::Arr(Rc::new(p)))
 }
 
+/// Truncate a rendered JSON dump for path-expression error messages the way
+/// jq's `jv_dump_string_trunc` does (buffer size 30): a dump longer than 29
+/// bytes keeps its first 26 bytes followed by "...". jq does a raw byte
+/// `strncpy`; we cut at the largest char boundary at or below byte 26 so the
+/// message stays valid UTF-8 (identical to jq for ASCII, which covers the
+/// "result <X>" and "near attempt to access <K> of <V>" sinks). #870 follow-up.
+fn trunc_path_dump(s: &str) -> String {
+    if s.len() <= 29 {
+        return s.to_string();
+    }
+    let mut cut = 26;
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}...", &s[..cut])
+}
+
 fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
     match expr {
         Expr::Input => cb(Value::Arr(Rc::new(vec![]))),
@@ -5369,7 +5386,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                             Value::Str(s) => format!("element \"{}\" of", s),
                             _ => format!("element {} of", crate::value::value_to_json(&key_val)),
                         };
-                        bail!("Invalid path expression near attempt to access {} {}", key_desc, json);
+                        bail!("Invalid path expression near attempt to access {} {}", key_desc, trunc_path_dump(json));
                     }
                     Err(e)
                 }
@@ -5427,7 +5444,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                                     Value::Str(s) => format!("element \"{}\" of", s),
                                     _ => format!("element {} of", crate::value::value_to_json(&key_val)),
                                 };
-                                bail!("Invalid path expression near attempt to access {} {}", key_desc, json);
+                                bail!("Invalid path expression near attempt to access {} {}", key_desc, trunc_path_dump(json));
                             }
                             Expr::Each { .. } | Expr::EachOpt { .. } => {
                                 bail!("Invalid path expression near attempt to iterate through {}", json);
@@ -5461,7 +5478,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                                                         Value::Str(s) => format!("element \"{}\" of", s),
                                                         other => format!("element {} of", crate::value::value_to_json(other)),
                                                     };
-                                                    bail!("Invalid path expression near attempt to access {} {}", key_desc, crate::value::value_to_json(&v))
+                                                    bail!("Invalid path expression near attempt to access {} {}", key_desc, trunc_path_dump(&crate::value::value_to_json(&v)))
                                                 }
                                                 _ => Err(e),
                                             },
@@ -5946,7 +5963,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                             let nav_val = crate::runtime::rt_getpath(&base_val, &rp).unwrap_or(Value::Null);
                             bail!(
                                 "Invalid path expression with result {}",
-                                crate::value::value_to_json(&nav_val)
+                                trunc_path_dump(&crate::value::value_to_json(&nav_val))
                             );
                         }
                         next.push(Value::Arr(Rc::new(ap_vec.clone())));
@@ -6027,7 +6044,7 @@ fn eval_path_catch(
                     Value::Str(s) => format!("element \"{}\" of", s),
                     other => format!("element {} of", crate::value::value_to_json(other)),
                 };
-                bail!("Invalid path expression near attempt to access {} {}", key_desc, crate::value::value_to_json(&payload))
+                bail!("Invalid path expression near attempt to access {} {}", key_desc, trunc_path_dump(&crate::value::value_to_json(&payload)))
             }
             _ => bail!("__pathexpr_result__:{}", crate::value::value_to_json(&payload)),
         },
@@ -6844,7 +6861,9 @@ fn eval_pick(f: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> 
     .map_err(|e| {
         let msg = format!("{}", e);
         match msg.strip_prefix("__pathexpr_result__:") {
-            Some(json) => anyhow::anyhow!("Invalid path expression with result {}", json),
+            Some(json) => {
+                anyhow::anyhow!("Invalid path expression with result {}", trunc_path_dump(json))
+            }
             None => e,
         }
     })?;
@@ -7141,7 +7160,9 @@ fn eval_del(f: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> G
         .map_err(|e| {
             let msg = format!("{}", e);
             match msg.strip_prefix("__pathexpr_result__:") {
-                Some(json) => anyhow::anyhow!("Invalid path expression with result {}", json),
+                Some(json) => {
+                anyhow::anyhow!("Invalid path expression with result {}", trunc_path_dump(json))
+            }
                 None => e,
             }
         })?;
