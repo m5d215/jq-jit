@@ -1603,6 +1603,9 @@ impl Parser {
                 Some(prev) => Expr::TryCatch {
                     try_expr: Box::new(restored),
                     catch_expr: Box::new(prev),
+                    // `?//` keeps `.` = original input across fallbacks in a
+                    // path context, so the body stays path-transparent (#840).
+                    restore_dot: true,
                 },
             });
         }
@@ -2423,6 +2426,7 @@ impl Parser {
                     expr = Expr::TryCatch {
                         try_expr: Box::new(expr),
                         catch_expr: Box::new(Expr::Empty),
+                        restore_dot: false,
                     };
                 }
                 _ => break,
@@ -2596,6 +2600,7 @@ impl Parser {
                 Ok(Expr::TryCatch {
                     try_expr: Box::new(try_expr),
                     catch_expr: Box::new(catch_expr),
+                    restore_dot: false,
                 })
             }
 
@@ -4564,7 +4569,8 @@ fn remap_func_ids(expr: Expr, map: &[(usize, usize)]) -> Expr {
             then_branch: Box::new(remap_func_ids(*then_branch, map)),
             else_branch: Box::new(remap_func_ids(*else_branch, map)),
         },
-        Expr::TryCatch { try_expr, catch_expr } => Expr::TryCatch {
+        Expr::TryCatch { try_expr, catch_expr, restore_dot } => Expr::TryCatch {
+            restore_dot,
             try_expr: Box::new(remap_func_ids(*try_expr, map)),
             catch_expr: Box::new(remap_func_ids(*catch_expr, map)),
         },
