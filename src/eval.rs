@@ -5600,19 +5600,19 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                     // the navigation. Evaluating it in VALUE mode dropped the
                     // tracking (#836).
                     if let Some(be) = e.downcast_ref::<BreakError>() {
-                        return eval_path(catch_expr, break_catch_value(be.0), env, cb);
+                        return eval_path_catch(catch_expr, break_catch_value(be.0), &input, env, cb);
                     }
                     // Recover a typed `error(value)` payload losslessly (#844).
                     if let Some(ev) = e.downcast_ref::<ErrorValue>() {
                         let v = take_error_payload(ev);
-                        return eval_path(catch_expr, v, env, cb);
+                        return eval_path_catch(catch_expr, v, &input, env, cb);
                     }
                     let catch_val = if let Some(json) = msg.strip_prefix("__jqerror__:") {
                         crate::value::json_to_value(json).unwrap_or(Value::from_str(&msg))
                     } else {
                         Value::from_str(&msg)
                     };
-                    eval_path(catch_expr, catch_val, env, cb)
+                    eval_path_catch(catch_expr, catch_val, &input, env, cb)
                 }
             }
         }
@@ -5991,6 +5991,46 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             }
             Ok(true)
         }
+    }
+}
+
+/// Evaluate a `try … catch` body in path context against the caught value.
+/// jq gives the caught value a path only when it is the try's own input (a
+/// bare `error` / `error(.)` re-raising `.`); an `error(LITERAL)` payload is
+/// rootless, so a body that navigates it reports the first hop, an identity
+/// body leaves the value-shaped "result <payload>" at the sink, and a
+/// discarding body (`catch empty`) yields nothing. `path(try error("E")
+/// catch .)` errors with `result "E"` where jq-jit used to emit `[]`. The
+/// value-provenance distinction jq draws between `error(5)` and `error(.)`
+/// on an identical input is approximated here by value equality. Extends the
+/// try/catch path tracking of #836.
+fn eval_path_catch(
+    catch_expr: &Expr,
+    payload: Value,
+    input: &Value,
+    env: &EnvRef,
+    cb: &mut dyn FnMut(Value) -> GenResult,
+) -> GenResult {
+    if &payload == input {
+        // The caught value sits at the current path position (re-raised `.`),
+        // so the body tracks normally.
+        return eval_path(catch_expr, payload, env, cb);
+    }
+    let mut nav: Option<Value> = None;
+    match eval_path(catch_expr, payload.clone(), env, &mut |rp| { nav = Some(rp); Ok(false) }) {
+        Err(e) => Err(e),
+        Ok(_) => match &nav {
+            None => Ok(true),
+            Some(Value::Arr(comps)) if !comps.is_empty() => {
+                let key_desc = match &comps[0] {
+                    Value::Num(n, _) => format!("element {} of", crate::value::format_jq_number(*n)),
+                    Value::Str(s) => format!("element \"{}\" of", s),
+                    other => format!("element {} of", crate::value::value_to_json(other)),
+                };
+                bail!("Invalid path expression near attempt to access {} {}", key_desc, crate::value::value_to_json(&payload))
+            }
+            _ => bail!("__pathexpr_result__:{}", crate::value::value_to_json(&payload)),
+        },
     }
 }
 
