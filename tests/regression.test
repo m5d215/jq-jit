@@ -11897,3 +11897,38 @@ path(. as [$a] ?// {p:$a} ?// $a | .q)
 . as {a:$x} ?// $x | .a.b |= 100
 {"a":{"b":9}}
 {"a":{"b":100}}
+
+# Issue #839: a non-path value piped into a discarding filter yields no path (last(empty))
+[path(last(empty))]
+{"a":1}
+[]
+
+# Issue #839: a rootless value piped into empty is swallowed, not an error
+[path(1 | empty)]
+{"a":1}
+[]
+
+# Issue #839: select(false) discards the rootless value in path context
+[path(5 | select(. > 10))]
+{"a":1}
+[]
+
+# Issue #839: a non-path reduce result flows through a discarding downstream
+[path(reduce empty as $x (.a; .) | if false then . else empty end)]
+{"a":1}
+[]
+
+# Issue #839: a transforming downstream surfaces the deferred result at the sink
+try path(1 | .+1) catch .
+{"a":1}
+"Invalid path expression with result 2"
+
+# Issue #839: navigating a rootless value reports jq's first-hop message
+try path([1] | if length>0 then .[0] else empty end) catch .
+{"a":1}
+"Invalid path expression near attempt to access element 0 of [1]"
+
+# Issue #839: an identity downstream leaves the rootless value at the sink
+try path(1 | select(true)) catch .
+{"a":1}
+"Invalid path expression with result 1"
