@@ -5433,8 +5433,42 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                                 bail!("Invalid path expression near attempt to iterate through {}", json);
                             }
                             _ => {
-                                // Pass __pathexpr_result__ through for higher-level handlers
-                                Err(e)
+                                // jq evaluates `A | B` in path context by running B
+                                // on the VALUE A produced, even when A is a rootless
+                                // (non-path) value. A discarding B (`empty`,
+                                // `select(false)`, an `else empty` branch) yields
+                                // nothing, so no invalid-path error reaches the sink:
+                                // `path(last(empty))` = `… reduce empty … | if
+                                // length>0 then .[0] else empty end` → []. A
+                                // transforming B surfaces its own result/error. When
+                                // B navigates the rootless value, jq reports the
+                                // first hop (`near attempt to access element 0 of
+                                // [1]`); an identity B leaves the value at the sink
+                                // (`result <A>`). #839
+                                match crate::value::json_to_value(json) {
+                                    Ok(v) => {
+                                        let mut nav: Option<Value> = None;
+                                        match eval_path(right, v.clone(), env, &mut |rp| {
+                                            nav = Some(rp);
+                                            Ok(false)
+                                        }) {
+                                            Err(re) => Err(re),
+                                            Ok(_) => match &nav {
+                                                None => Ok(true),
+                                                Some(Value::Arr(comps)) if !comps.is_empty() => {
+                                                    let key_desc = match &comps[0] {
+                                                        Value::Num(n, _) => format!("element {} of", crate::value::format_jq_number(*n)),
+                                                        Value::Str(s) => format!("element \"{}\" of", s),
+                                                        other => format!("element {} of", crate::value::value_to_json(other)),
+                                                    };
+                                                    bail!("Invalid path expression near attempt to access {} {}", key_desc, crate::value::value_to_json(&v))
+                                                }
+                                                _ => Err(e),
+                                            },
+                                        }
+                                    }
+                                    Err(_) => Err(e),
+                                }
                             }
                         }
                     } else {
@@ -5801,7 +5835,32 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             let ai = *acc_index;
             { let mut e = env.borrow_mut(); e.ensure_var(vi); e.ensure_var(ai); }
             let mut acc_paths: Vec<Value> = Vec::new();
-            eval_path(init, input.clone(), env, &mut |p| { acc_paths.push(p); Ok(true) })?;
+            if let Err(e) = eval_path(init, input.clone(), env, &mut |p| { acc_paths.push(p); Ok(true) }) {
+                let msg = format!("{}", e);
+                if msg.starts_with("__pathexpr_result__:") {
+                    // A non-path INIT means the reduce isn't path-trackable: jq
+                    // treats it as a value computation whose (rootless) result
+                    // flows to the sink. Compute that value and defer it as the
+                    // sentinel so a downstream discard (`| if … else empty`,
+                    // `path(last(empty))`) swallows it and a navigation/assignment
+                    // surfaces the real result rather than the INIT value. #839
+                    let reduced = Expr::Reduce {
+                        source: source.clone(),
+                        init: init.clone(),
+                        var_index: *var_index,
+                        acc_index: *acc_index,
+                        update: update.clone(),
+                    };
+                    let mut last_val = Value::Null;
+                    let mut has = false;
+                    eval(&reduced, input, env, &mut |v| { last_val = v; has = true; Ok(true) })?;
+                    if has {
+                        bail!("__pathexpr_result__:{}", crate::value::value_to_json(&last_val));
+                    }
+                    return Ok(true);
+                }
+                return Err(e);
+            }
             // jq rejects a reduce SOURCE that navigates the tracked input in
             // path context (`.[]`, `.a`, …) — it must be a plain value generator
             // (range, literals, empty, input). Otherwise the reduce silently
