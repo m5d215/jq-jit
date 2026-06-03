@@ -12047,3 +12047,33 @@ null
 try (path([1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16] | .[20])) catch .
 null
 "Invalid path expression near attempt to access element 20 of [1,2,3,4,5,6,7,8,9,10,11,1..."
+
+# @csv/@tsv preserve a precision-edge literal's uppercase-E decnum form (DBL_MAX, #616-class)
+[1.7976931348623157e308]|@csv
+null
+"1.7976931348623157E+308"
+
+# @csv/@tsv preserve the smallest-subnormal literal's decnum form
+[5e-324]|@csv
+null
+"5E-324"
+
+# @tsv preserves a 16-significant-digit literal exponent (was lossy decimal-expanded)
+[9.999999999999999e22]|@tsv
+null
+"9.999999999999999E+22"
+
+# @csv preserves a large high-precision literal in exponent form (was decimal-expanded)
+[1.234567890123456e30]|@csv
+null
+"1.234567890123456E+30"
+
+# @csv on a COMPUTED edge value keeps jq's lowercase dtoa form (literal-vs-computed split)
+[5e-324*1]|@csv
+null
+"5e-324"
+
+# @tsv preserves the smallest normal-double literal's decnum form
+[2.2250738585072014e-308]|@tsv
+null
+"2.2250738585072014E-308"

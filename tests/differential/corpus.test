@@ -4191,3 +4191,19 @@ del(. as [$a] ?// $a | .x)
 
 path(. as [$a] ?// {p:$a} ?// $a | .q)
 {"p":1,"q":2}
+
+# ---------- @csv/@tsv preserve precision-edge literal exponents (#616-class) ----------
+[1.7976931348623157e308] | @csv
+null
+
+[5e-324] | @csv
+null
+
+[9.999999999999999e22] | @tsv
+null
+
+[1.234567890123456e30] | @csv
+null
+
+[5e-324 * 1] | @csv
+null

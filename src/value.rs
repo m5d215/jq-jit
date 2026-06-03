@@ -5698,6 +5698,19 @@ pub fn push_value_num_repr_str(buf: &mut String, n: f64, repr: Option<&Rc<str>>)
         } else {
             buf.push_str(r);
         }
+    } else if let Some(canonical) = repr
+        .filter(|r| is_valid_json_number(r) && n.is_finite() && n != 0.0)
+        .and_then(|r| normalize_jq_repr(r))
+        .filter(|c| c.as_str().parse::<f64>().ok() == Some(n))
+    {
+        // Subnormal/precision-edge literals (#616): `repr_is_exact_for_f64` is
+        // too conservative for >15-sig-digit mantissas and exponents < -323,
+        // but the canonical literal still round-trips through f64 — e.g.
+        // DBL_MAX `1.7976931348623157e308` and the smallest subnormal `5e-324`.
+        // jq's @csv/@tsv preserve the literal's uppercase-E decnum form here
+        // exactly as `tostring`/tojson do, so mirror `push_value_tojson`
+        // instead of falling through to the lossy lowercase f64 dtoa form.
+        buf.push_str(&canonical);
     } else {
         push_jq_number_str(buf, n);
     }
@@ -5713,6 +5726,13 @@ pub fn push_value_num_repr_bytes(buf: &mut Vec<u8>, n: f64, repr: Option<&Rc<str
         } else {
             buf.extend_from_slice(r.as_bytes());
         }
+    } else if let Some(canonical) = repr
+        .filter(|r| is_valid_json_number(r) && n.is_finite() && n != 0.0)
+        .and_then(|r| normalize_jq_repr(r))
+        .filter(|c| c.as_str().parse::<f64>().ok() == Some(n))
+    {
+        // Subnormal/precision-edge literals (#616) — see push_value_num_repr_str.
+        buf.extend_from_slice(canonical.as_bytes());
     } else {
         push_jq_number_bytes(buf, n);
     }
