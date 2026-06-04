@@ -61,9 +61,19 @@ pub enum Expr {
     },
 
     /// Try-catch: `try expr catch handler`
+    ///
+    /// `restore_dot` marks the `try/catch` synthesised by the `?//`
+    /// alternative-destructuring desugar (see `build_alt_destructure`). In a
+    /// path context jq keeps `.` set to the original input across `?//`
+    /// fallbacks rather than the caught destructuring error, so the body stays
+    /// path-transparent (`path(. as [$a] ?// $a | .x)` is `["x"]`). When this
+    /// flag is set, the path-mode handler runs the catch branch against the
+    /// try's input instead of the error payload. Plain `try/catch` (the flag is
+    /// `false`) keeps jq's normal behaviour of binding `.` to the error (#840).
     TryCatch {
         try_expr: Box<Expr>,
         catch_expr: Box<Expr>,
+        restore_dot: bool,
     },
 
     /// Array iteration `.[]`
@@ -983,9 +993,10 @@ impl Expr {
                 value_expr: Box::new(value_expr.substitute_var(var_index, replacement)),
                 kind: *kind,
             },
-            Expr::TryCatch { try_expr, catch_expr } => Expr::TryCatch {
+            Expr::TryCatch { try_expr, catch_expr, restore_dot } => Expr::TryCatch {
                 try_expr: Box::new(try_expr.substitute_var(var_index, replacement)),
                 catch_expr: Box::new(catch_expr.substitute_var(var_index, replacement)),
+                restore_dot: *restore_dot,
             },
             Expr::StringInterpolation { parts } => Expr::StringInterpolation {
                 parts: parts.iter().map(|p| match p {
@@ -1022,6 +1033,13 @@ impl Expr {
             },
             Expr::Error { msg } => Expr::Error {
                 msg: msg.as_ref().map(|e| Box::new(e.substitute_var(var_index, replacement))),
+            },
+            // `@fmt EXPR` formats its operand: a `$x` in the operand must be
+            // substituted, otherwise inlining `E as $x | $x | @json` leaves a
+            // dangling LoadVar that the input-free fast path reads as null (#808).
+            Expr::Format { name, expr } => Expr::Format {
+                name: name.clone(),
+                expr: Box::new(expr.substitute_var(var_index, replacement)),
             },
             _ => self.clone(),
         }

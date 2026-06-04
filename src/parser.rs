@@ -28,6 +28,14 @@ struct Scope {
     /// Next available memoize slot id. Each lexical occurrence of `memoize(...)`
     /// gets a unique slot; the Env allocates one cache map per slot.
     next_memo_slot: u32,
+    /// Monotonic binding counter shared by `def`s and filter parameters, so the
+    /// lexically innermost binding of a name can be identified when a 0-arg call
+    /// could resolve to either (#766). Higher = bound later = more local.
+    next_bind_seq: u32,
+    /// `var_index` → binding sequence, for filter-parameter vars.
+    var_bind_seq: std::collections::HashMap<u16, u32>,
+    /// `func_id` → binding sequence, for user-defined functions.
+    func_bind_seq: std::collections::HashMap<usize, u32>,
 }
 
 impl Scope {
@@ -39,7 +47,25 @@ impl Scope {
             compiled_funcs: Vec::new(),
             func_captures: std::collections::HashMap::new(),
             next_memo_slot: 0,
+            next_bind_seq: 0,
+            var_bind_seq: std::collections::HashMap::new(),
+            func_bind_seq: std::collections::HashMap::new(),
         }
+    }
+
+    /// Allocate the next shared binding sequence number (#766).
+    fn next_bind_seq(&mut self) -> u32 {
+        let s = self.next_bind_seq;
+        self.next_bind_seq += 1;
+        s
+    }
+
+    /// Whether the def `func_id` is lexically more local (bound later) than the
+    /// filter-parameter var `var_idx` of the same name. Innermost wins (#766).
+    fn func_shadows_param(&self, func_id: usize, var_idx: u16) -> bool {
+        let fs = self.func_bind_seq.get(&func_id).copied().unwrap_or(0);
+        let vs = self.var_bind_seq.get(&var_idx).copied().unwrap_or(0);
+        fs > vs
     }
 
     fn alloc_memo_slot(&mut self) -> u32 {
@@ -52,6 +78,8 @@ impl Scope {
         let idx = self.next_var;
         self.next_var += 1;
         self.vars.push((name.to_string(), idx));
+        let seq = self.next_bind_seq();
+        self.var_bind_seq.insert(idx, seq);
         idx
     }
 
@@ -64,6 +92,8 @@ impl Scope {
     fn define_func(&mut self, name: &str, nargs: usize, body: Expr, param_vars: Vec<u16>) -> usize {
         let func_id = self.compiled_funcs.len();
         self.funcs.push((name.to_string(), func_id, nargs));
+        let seq = self.next_bind_seq();
+        self.func_bind_seq.insert(func_id, seq);
         self.compiled_funcs.push(CompiledFunc {
             name: Some(name.to_string()),
             nargs,
@@ -200,6 +230,15 @@ struct Lexer {
     chars: Vec<char>,
     pos: usize,
     tokens: Vec<Token>,
+    /// Source char offset where each token in `tokens` begins. Parallel to
+    /// `tokens`; backfilled per tokenize iteration so multi-token emitters
+    /// (string interpolation) share the start of their originating token.
+    /// Converted to 1-based line numbers in `token_lines` after tokenize so
+    /// `$__loc__` can report the actual source line (#778).
+    token_starts: Vec<usize>,
+    /// 1-based source line for each token in `tokens`, computed from
+    /// `token_starts` at the end of `tokenize`.
+    token_lines: Vec<usize>,
 }
 
 impl Lexer {
@@ -208,6 +247,8 @@ impl Lexer {
             chars: input.chars().collect(),
             pos: 0,
             tokens: Vec::new(),
+            token_starts: Vec::new(),
+            token_lines: Vec::new(),
         }
     }
 
@@ -216,6 +257,7 @@ impl Lexer {
             self.skip_whitespace_and_comments();
             if self.pos >= self.chars.len() { break; }
 
+            let tok_start = self.pos;
             let ch = self.chars[self.pos];
             match ch {
                 '|' => {
@@ -412,8 +454,31 @@ impl Lexer {
                     bail!("unexpected character '{}' at position {}", ch, self.pos);
                 }
             }
+            // Attribute every token emitted this iteration (one, or several for
+            // string interpolation) to the char offset where the iteration began.
+            while self.token_starts.len() < self.tokens.len() {
+                self.token_starts.push(tok_start);
+            }
         }
         self.tokens.push(Token::Eof);
+        while self.token_starts.len() < self.tokens.len() {
+            self.token_starts.push(self.chars.len());
+        }
+        // Convert char offsets to 1-based line numbers in a single forward pass
+        // (token_starts is non-decreasing across the main token stream).
+        self.token_lines.clear();
+        self.token_lines.reserve(self.token_starts.len());
+        let mut cursor = 0usize;
+        let mut line = 1usize;
+        for &start in &self.token_starts {
+            while cursor < start {
+                if self.chars[cursor] == '\n' {
+                    line += 1;
+                }
+                cursor += 1;
+            }
+            self.token_lines.push(line);
+        }
         Ok(self.tokens.clone())
     }
 
@@ -750,9 +815,29 @@ enum StringSegment {
 /// Parser state.
 pub struct Parser {
     tokens: Vec<Token>,
+    /// 1-based source line for each token in `tokens` (parallel vector).
+    /// Used to give `$__loc__` the actual source line (#778). May be empty
+    /// for parsers built without line info, in which case lookups fall back
+    /// to line 1.
+    token_lines: Vec<usize>,
     pos: usize,
     scope: Scope,
     lib_dirs: Vec<String>,
+    /// The `compiled_funcs` id of the function body currently being parsed, or
+    /// `None` at the top level. Used to attribute a deferred unbound-variable
+    /// reference to its enclosing def. #765
+    current_func: Option<usize>,
+    /// Unbound `$var` references parked instead of erroring eagerly, as
+    /// `(enclosing_func_id, name)`. After the whole program is parsed, only
+    /// those reachable from the top-level expression (top-level refs, plus refs
+    /// inside transitively-called defs) are errors — jq never compiles the body
+    /// of an uncalled def. #765
+    deferred_unbound: Vec<(Option<usize>, String)>,
+    /// Unknown function/builtin references parked instead of erroring eagerly,
+    /// as `(enclosing_func_id, name, nargs)`. Same reachability rule as
+    /// `deferred_unbound`: jq resolves function names lazily, so an undefined
+    /// name in the body of an uncalled def is not an error. #807
+    deferred_unknown_func: Vec<(Option<usize>, String, usize)>,
 }
 
 /// Result of parsing: expression + compiled functions.
@@ -772,11 +857,16 @@ impl Parser {
     pub fn parse_with_libs(input: &str, lib_dirs: &[String]) -> Result<ParseResult> {
         let mut lexer = Lexer::new(input);
         let tokens = lexer.tokenize()?;
+        let token_lines = std::mem::take(&mut lexer.token_lines);
         let mut parser = Parser {
             tokens,
+            token_lines,
             pos: 0,
             scope: Scope::new(),
             lib_dirs: lib_dirs.to_vec(),
+            current_func: None,
+            deferred_unbound: Vec::new(),
+            deferred_unknown_func: Vec::new(),
         };
 
         // Pre-register $ENV
@@ -786,6 +876,7 @@ impl Parser {
         if !parser.at_eof() {
             bail!("unexpected token {:?} at position {}", parser.current(), parser.pos);
         }
+        parser.check_unbound_reachability(&expr)?;
         Ok(ParseResult {
             expr,
             funcs: parser.scope.compiled_funcs,
@@ -793,8 +884,89 @@ impl Parser {
         })
     }
 
+    /// Record an unbound `$name` reference (attributed to the def currently
+    /// being parsed) and return a placeholder that errors with jq's message if
+    /// it is ever evaluated. The eager error is deferred so a never-called def
+    /// with a free variable does not abort compilation; the real decision is
+    /// made by `check_unbound_reachability`. #765
+    fn defer_unbound_var(&mut self, name: &str) -> Expr {
+        self.deferred_unbound.push((self.current_func, name.to_string()));
+        Expr::Error {
+            msg: Some(Box::new(Expr::Literal(Literal::Str(format!("${} is not defined", name))))),
+        }
+    }
+
+    /// Record an unknown function/builtin reference (attributed to the def
+    /// currently being parsed) and return a placeholder that errors with jq's
+    /// message if it is ever evaluated. Deferred so a never-called def whose
+    /// body names an undefined function does not abort compilation — jq
+    /// resolves function names lazily. The real decision is made by
+    /// `check_unbound_reachability`. #807
+    fn defer_unknown_func(&mut self, name: &str, nargs: usize) -> Expr {
+        self.deferred_unknown_func
+            .push((self.current_func, name.to_string(), nargs));
+        Expr::Error {
+            msg: Some(Box::new(Expr::Literal(Literal::Str(format!(
+                "{}/{} is not defined",
+                name, nargs
+            ))))),
+        }
+    }
+
+    /// Resolve `$name`, deferring the "not defined" error for an unbound
+    /// reference (see `defer_unbound_var`). #765
+    fn load_or_defer_var(&mut self, name: &str) -> Expr {
+        match self.scope.lookup_var(name) {
+            Some(idx) => Expr::LoadVar { var_index: idx },
+            None => self.defer_unbound_var(name),
+        }
+    }
+
+    /// Turn parked unbound `$var` references and unknown function references
+    /// into errors, but only those that are actually reachable: a top-level
+    /// reference, or one inside a def that the top-level program calls
+    /// (transitively). jq never compiles the body of an uncalled def, so a
+    /// free variable (#765) or undefined function name (#807) there is not an
+    /// error.
+    fn check_unbound_reachability(&self, program: &Expr) -> Result<()> {
+        if self.deferred_unbound.is_empty() && self.deferred_unknown_func.is_empty() {
+            return Ok(());
+        }
+        let mut reachable: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut stack: Vec<usize> = Vec::new();
+        crate::eval::collect_func_calls(program, &mut stack);
+        while let Some(fid) = stack.pop() {
+            if reachable.insert(fid) {
+                if let Some(f) = self.scope.compiled_funcs.get(fid) {
+                    crate::eval::collect_func_calls(&f.body, &mut stack);
+                }
+            }
+        }
+        let is_reachable = |fid: &Option<usize>| match fid {
+            None => true, // top-level reference
+            Some(id) => reachable.contains(id),
+        };
+        for (fid, name) in &self.deferred_unbound {
+            if is_reachable(fid) {
+                bail!("${} is not defined", name);
+            }
+        }
+        for (fid, name, nargs) in &self.deferred_unknown_func {
+            if is_reachable(fid) {
+                bail!("{}/{} is not defined", name, nargs);
+            }
+        }
+        Ok(())
+    }
+
     fn current(&self) -> &Token {
         self.tokens.get(self.pos).unwrap_or(&Token::Eof)
+    }
+
+    /// 1-based source line of the token at the current cursor, for `$__loc__`
+    /// (#778). Falls back to line 1 when line info is unavailable.
+    fn current_line(&self) -> usize {
+        self.token_lines.get(self.pos).copied().unwrap_or(1)
     }
 
     fn peek(&self) -> &Token {
@@ -921,7 +1093,13 @@ impl Parser {
         let func_id = self.scope.define_func(&name, params.len(), Expr::Empty, param_vars.clone());
 
         let saved_funcs = self.scope.save_func_scope();
+        // Attribute any unbound `$var` parked while parsing this body to this
+        // def, so the reachability check can ignore it if the def is never
+        // called (#765). Nested defs save/restore around their own bodies.
+        let saved_current_func = self.current_func;
+        self.current_func = Some(func_id);
         let mut body = self.parse_pipe()?;
+        self.current_func = saved_current_func;
         self.scope.restore_func_scope(saved_funcs);
         self.expect(&Token::Semicolon)?;
 
@@ -1158,6 +1336,7 @@ impl Parser {
 
         let mut lexer = Lexer::new(&content);
         let tokens = lexer.tokenize()?;
+        let mod_token_lines = std::mem::take(&mut lexer.token_lines);
 
         // Add the module's directory to lib_dirs for resolving relative imports
         let mut mod_lib_dirs = self.lib_dirs.clone();
@@ -1175,9 +1354,13 @@ impl Parser {
         mod_scope.next_var = self.scope.next_var;
         let mut mod_parser = Parser {
             tokens,
+            token_lines: mod_token_lines,
             pos: 0,
             scope: mod_scope,
             lib_dirs: mod_lib_dirs,
+            current_func: None,
+            deferred_unbound: Vec::new(),
+            deferred_unknown_func: Vec::new(),
         };
 
         // Skip module statement
@@ -1343,30 +1526,15 @@ impl Parser {
         let body = self.parse_pipe()?;
         self.scope.vars.truncate(saved_vars);
 
-        // Build: try (bind pattern1 | body) catch try (bind pattern2 | body) catch ... bind patternN | body
-        // The last alternative runs WITHOUT a try-catch so its error propagates —
-        // per the jq spec, "if they all fail, then an error is emitted" (issue #76).
-        let tmp_idx = self.scope.alloc_var("__altdestruct_tmp__");
-        let tmp_ref = Expr::LoadVar { var_index: tmp_idx };
-
-        let mut result: Option<Expr> = None;
-        for pattern in alt_patterns.into_iter().rev() {
-            let binding = self.build_binding_with_varmap(tmp_ref.clone(), &pattern, &var_map, body.clone())?;
-            result = Some(match result {
-                None => binding,
-                Some(prev) => Expr::TryCatch {
-                    try_expr: Box::new(binding),
-                    catch_expr: Box::new(prev),
-                },
-            });
-        }
-        let result = result.expect("alt_patterns has at least two entries here");
-
-        Ok(Expr::LetBinding {
-            var_index: tmp_idx,
-            value: Box::new(value_expr),
-            body: Box::new(result),
-        })
+        // Build the `try (bind P1 | body) catch (bind P2 | body) …` chain through
+        // the shared helper, which captures the original `.` up front and
+        // restores it at the head of every alternative's body. Without that, a
+        // fallback alternative would run `body` with `.` set to the caught
+        // destructuring *error* string instead of the original input (#736).
+        // The helper clones `value_expr` into each alternative rather than
+        // sharing it through a tmp slot; only one alternative ultimately runs
+        // (first success wins), matching jq.
+        self.build_alt_destructure(&value_expr, &alt_patterns, &var_map, &body)
     }
 
     /// Allocate the shared variables for a `?//` alternative-destructuring
@@ -1400,35 +1568,58 @@ impl Parser {
         var_map: &std::collections::HashMap<String, u16>,
         body: &Expr,
     ) -> Result<Expr> {
-        // The fallback chain is `try (bind P1 | body) catch (bind P2 | body) …`.
-        // jq's `try … catch` runs the catch with `.` set to the *error*, which
-        // would clobber the input the body expects (e.g. a reduce UPDATE's
-        // accumulator). Capture the original input in `$__altdot__` up front
-        // and restore it at the head of every alternative's body, so each body
-        // sees the same `.` regardless of which alternative fires. The bind
-        // step only sets variables and leaves `.` untouched, so this is a
-        // no-op for the first (try) alternative and a correction for the rest.
+        // jq applies `?//` *per source value*: for each value of `value_expr`
+        // it tries P1, and only the values that fail P1 fall through to P2,
+        // etc. The source generator must therefore be bound ONCE, outside the
+        // try/catch — binding it per alternative (re-running it inside every
+        // `catch`) re-applies the fallback to values that already matched an
+        // earlier pattern, so `({a:1},2) as {a:$x} ?// $x | $x` leaked the
+        // whole `{a:1}` through the fallback alongside its real match (#819).
+        //
+        // Capture the original input in `$__altdot__` and the per-element
+        // source value in `$__altsrc__`. Each alternative is run as
+        // `$__altdot__ | (BIND-Pi | BODY)`, so the catch arm's `.` (set to the
+        // caught error by `try … catch`) is restored to the original input for
+        // both the pattern's computed keys and the body (#736/#803). The
+        // source binding sits outside the try/catch, evaluated against the
+        // original `.`, so reduce/foreach element sources (#712) and
+        // `.`-reading sources (#736) still see the right input.
         let dot_var = self.scope.alloc_var("__altdot__");
-        let restored_body = Expr::Pipe {
-            left: Box::new(Expr::LoadVar { var_index: dot_var }),
-            right: Box::new(body.clone()),
-        };
+        let src_var = self.scope.alloc_var("__altsrc__");
         let mut result: Option<Expr> = None;
         for pattern in alt_patterns.iter().rev() {
-            let binding = self.build_binding_with_varmap(value_expr.clone(), pattern, var_map, restored_body.clone())?;
+            let binding = self.build_binding_with_varmap(
+                Expr::LoadVar { var_index: src_var },
+                pattern,
+                var_map,
+                body.clone(),
+            )?;
+            let restored = Expr::Pipe {
+                left: Box::new(Expr::LoadVar { var_index: dot_var }),
+                right: Box::new(binding),
+            };
             result = Some(match result {
-                None => binding,
+                None => restored,
                 Some(prev) => Expr::TryCatch {
-                    try_expr: Box::new(binding),
+                    try_expr: Box::new(restored),
                     catch_expr: Box::new(prev),
+                    // `?//` keeps `.` = original input across fallbacks in a
+                    // path context, so the body stays path-transparent (#840).
+                    restore_dot: true,
                 },
             });
         }
         let chain = result.expect("alt_patterns is non-empty");
+        // `value_expr as $__altsrc__ | chain`, iterated per source value.
+        let src_binding = Expr::LetBinding {
+            var_index: src_var,
+            value: Box::new(value_expr.clone()),
+            body: Box::new(chain),
+        };
         Ok(Expr::LetBinding {
             var_index: dot_var,
             value: Box::new(Expr::Input),
-            body: Box::new(chain),
+            body: Box::new(src_binding),
         })
     }
 
@@ -2235,6 +2426,7 @@ impl Parser {
                     expr = Expr::TryCatch {
                         try_expr: Box::new(expr),
                         catch_expr: Box::new(Expr::Empty),
+                        restore_dot: false,
                     };
                 }
                 _ => break,
@@ -2408,6 +2600,7 @@ impl Parser {
                 Ok(Expr::TryCatch {
                     try_expr: Box::new(try_expr),
                     catch_expr: Box::new(catch_expr),
+                    restore_dot: false,
                 })
             }
 
@@ -2427,9 +2620,16 @@ impl Parser {
                     Token::Variable(name) => {
                         // Register label-typed bindings under a sentinel prefix so they
                         // can only be referenced via `break $name`, never as a bare $name.
+                        // The binding is lexically scoped to the body: pop it afterwards
+                        // so a sibling `break $name` following an inner `label $name`
+                        // resolves to the still-live *outer* label rather than the
+                        // already-finished inner one (which `lookup_var` would otherwise
+                        // pick as the innermost match, dropping the whole output). #776
+                        let saved_vars = self.scope.vars.len();
                         let var_idx = self.scope.alloc_var(&format!("\x00label:{}", name));
                         self.expect(&Token::Pipe)?;
                         let body = self.parse_pipe()?;
+                        self.scope.vars.truncate(saved_vars);
                         Ok(Expr::Label {
                             var_index: var_idx,
                             body: Box::new(body),
@@ -2476,6 +2676,7 @@ impl Parser {
             }
 
             Token::Variable(name) => {
+                let loc_line = self.current_line();
                 self.advance();
                 // Check for $var::name (namespace access for data imports)
                 if self.at(&Token::Colon) && matches!(self.tokens.get(self.pos + 1), Some(Token::Colon)) {
@@ -2489,14 +2690,11 @@ impl Parser {
                     }
                 }
                 if name == "__loc__" {
-                    Ok(Expr::Loc { file: "<top-level>".to_string(), line: 1 })
+                    Ok(Expr::Loc { file: "<top-level>".to_string(), line: loc_line as i64 })
                 } else if name == "ENV" {
                     Ok(Expr::Env)
                 } else {
-                    match self.scope.lookup_var(&name) {
-                        Some(idx) => Ok(Expr::LoadVar { var_index: idx }),
-                        None => bail!("${} is not defined", name),
-                    }
+                    Ok(self.load_or_defer_var(&name))
                 }
             }
 
@@ -2594,24 +2792,21 @@ impl Parser {
                 }
             }
             Token::Variable(name) => {
+                let loc_line = self.current_line();
                 self.advance();
                 if self.eat(&Token::Colon) {
                     let val = self.parse_pipe_nocomma()?;
                     // $var: value — key is the variable's value converted to string
-                    let idx = self.scope.lookup_var(&name)
-                        .ok_or_else(|| anyhow::anyhow!("${} is not defined", name))?;
-                    let key_expr = Expr::LoadVar { var_index: idx };
+                    let key_expr = self.load_or_defer_var(&name);
                     Ok((key_expr, val))
                 } else {
                     // Shorthand: {$x} = {"x": $x}
                     let val_expr = if name == "__loc__" {
-                        Expr::Loc { file: "<top-level>".to_string(), line: 1 }
+                        Expr::Loc { file: "<top-level>".to_string(), line: loc_line as i64 }
                     } else if name == "ENV" {
                         Expr::Env
                     } else {
-                        let idx = self.scope.lookup_var(&name)
-                            .ok_or_else(|| anyhow::anyhow!("${} is not defined", name))?;
-                        Expr::LoadVar { var_index: idx }
+                        self.load_or_defer_var(&name)
                     };
                     Ok((
                         Expr::Literal(Literal::Str(name)),
@@ -3002,7 +3197,7 @@ impl Parser {
             | "gmtime" | "localtime" | "mktime" | "now" | "abs"
             | "not" | "env" | "builtins" | "input" | "inputs"
             | "debug" | "stderr" | "modulemeta" | "path"
-            | "with_entries" | "recurse" | "recurse_down"
+            | "with_entries" | "recurse"
             | "has" | "in" | "contains" | "inside"
             | "getpath" | "setpath" | "delpaths"
             | "to_number" | "to_string" | "type_error"
@@ -3046,10 +3241,24 @@ impl Parser {
         }
     }
 
-    fn compile_builtin_noargs(&self, name: &str) -> Result<Expr> {
-        // User-defined 0-arg functions shadow same-named builtins.
-        if let Some(func_id) = self.scope.lookup_func(name, 0) {
-            return Ok(self.scope.make_funccall(func_id, vec![]));
+    fn compile_builtin_noargs(&mut self, name: &str) -> Result<Expr> {
+        // A bare 0-arg name can resolve to a user `def` or a filter parameter
+        // (including the implicit `x` filter introduced by a `$x` value param).
+        // Both shadow same-named builtins, and between the two the lexically
+        // innermost binding wins: a parameter shadows an enclosing `def`, while
+        // a `def` nested inside the parameter's body shadows the parameter (#766).
+        let func = self.scope.lookup_func(name, 0);
+        let fparam = self.scope.lookup_var(&format!("\x00fparam:{}", name));
+        match (func, fparam) {
+            (Some(func_id), Some(var_idx)) => {
+                if self.scope.func_shadows_param(func_id, var_idx) {
+                    return Ok(self.scope.make_funccall(func_id, vec![]));
+                }
+                return Ok(Expr::LoadVar { var_index: var_idx });
+            }
+            (Some(func_id), None) => return Ok(self.scope.make_funccall(func_id, vec![])),
+            (None, Some(var_idx)) => return Ok(Expr::LoadVar { var_index: var_idx }),
+            (None, None) => {}
         }
         match name {
             "not" => Ok(Expr::Not),
@@ -3096,11 +3305,16 @@ impl Parser {
                     }),
                 })
             }
-            "recurse" | "recurse_down" => {
+            "recurse" => {
                 // jq: `def recurse: recurse(.[]?);`
                 // `EachOpt(Input)` represents `.[]?` and lets eval/JIT take
                 // the descent fast path; `recurse(.)` (which is infinite)
                 // takes the slow custom-step path instead. See #497.
+                // Note: `recurse_down/0` (a deprecated alias removed from jq
+                // before 1.8) is intentionally NOT handled here — jq 1.8.1
+                // compile-errors on it, and it is not a documented jqx
+                // extension, so it falls through to the undefined-function
+                // path ("recurse_down/0 is not defined") (#821).
                 Ok(Expr::Recurse {
                     input_expr: Box::new(Expr::EachOpt { input_expr: Box::new(Expr::Input) }),
                 })
@@ -3268,22 +3482,20 @@ impl Parser {
                 Ok(Expr::Literal(Literal::Str("<stdin>".to_string())))
             }
             _ => {
-                // Check user-defined functions
-                if let Some(func_id) = self.scope.lookup_func(name, 0) {
-                    // Forward any lambda-lifted capture params (#714).
-                    Ok(self.scope.make_funccall(func_id, vec![]))
-                } else {
-                    // Check for filter parameter reference (bare identifier like `x` in `def f(x):`)
-                    let fparam_name = format!("\x00fparam:{}", name);
-                    if let Some(var_idx) = self.scope.lookup_var(&fparam_name) {
-                        Ok(Expr::LoadVar { var_index: var_idx })
-                    } else {
-                        // Treat as a 0-arg builtin via runtime
-                        Ok(Expr::UnaryOp {
-                            op: name_to_unary_op(name)?,
-                            operand: Box::new(Expr::Input),
-                        })
-                    }
+                // User defs and filter parameters were already resolved at the
+                // top of this function (#766), so anything reaching here is a
+                // 0-arg builtin handled via runtime — or an undefined name.
+                // jq resolves names lazily, so an undefined 0-arg name is only
+                // an error when reachable: defer it instead of erroring eagerly
+                // (#807). The deferred placeholder errors at runtime if it is
+                // reached, and `check_unbound_reachability` turns it into a
+                // compile error if its enclosing def is actually called.
+                match name_to_unary_op(name) {
+                    Ok(op) => Ok(Expr::UnaryOp {
+                        op,
+                        operand: Box::new(Expr::Input),
+                    }),
+                    Err(_) => Ok(self.defer_unknown_func(name, 0)),
                 }
             }
         }
@@ -3801,7 +4013,15 @@ impl Parser {
                         cond: Box::new(Expr::BinOp {
                             op: BinOp::Eq,
                             lhs: Box::new(Expr::Input),
-                            rhs: Box::new(Expr::LoadVar { var_index: n_var }),
+                            // Floor the index per-item rather than eagerly at the
+                            // binding: jq evaluates the index lazily, so a
+                            // non-numeric index errors only once the generator
+                            // yields. An empty generator therefore produces no
+                            // output instead of an eager floor error (#806).
+                            rhs: Box::new(Expr::UnaryOp {
+                                op: UnaryOp::Floor,
+                                operand: Box::new(Expr::LoadVar { var_index: n_var }),
+                            }),
                         }),
                         then_branch: Box::new(Expr::LoadVar { var_index: x_var }),
                         else_branch: Box::new(Expr::Empty),
@@ -3825,17 +4045,16 @@ impl Parser {
                 };
                 // jq's nth(n; g) floors the index: nth(0.5) == nth(0), and a
                 // non-numeric index raises (floor errors on non-numbers). The
-                // foreach counter is integer-valued, so binding the raw float
-                // made `counter == $n` never match for fractional n (silently
-                // empty) and let a string index fall through to empty instead
-                // of erroring (#719). Flooring at the binding fixes both and
-                // leaves integer / negative indices unchanged.
+                // foreach counter is integer-valued, so `counter == $n` never
+                // matched for fractional n (silently empty) and a string index
+                // fell through to empty instead of erroring (#719). The floor
+                // now lives in the per-item comparison above so it stays lazy:
+                // the negative-index guard sees the raw value (`"a" < 0` is
+                // false, so a string index proceeds to the deferred error) and
+                // an empty generator never forces the floor at all (#806).
                 Ok(Expr::LetBinding {
                     var_index: n_var,
-                    value: Box::new(Expr::UnaryOp {
-                        op: UnaryOp::Floor,
-                        operand: Box::new(n_expr),
-                    }),
+                    value: Box::new(n_expr),
                     body: Box::new(body),
                 })
             }
@@ -4001,47 +4220,56 @@ impl Parser {
                     }),
                 })
             }
-            // IN/2: IN(s; b) = reduce s as $x (false; . or ($x | IN(b)))
+            // IN/2: jq's `IN(src; s)` is `any(src == s; .)` — BOTH `src` and the
+            // candidate set `s` are evaluated against the original input. The old
+            // desugar fed the candidate set the reduce accumulator (the update's
+            // `.`), so `IN(1; .[])` iterated `false` and `IN(false; .)` compared
+            // against the accumulator. Bind the original input as `$dot` and pipe
+            // the candidate set from it: #846
+            //   . as $dot
+            //   | reduce src as $x (false;
+            //       . or (first(($dot | s) | if . == $x then true else empty) // false))
             ("IN", 2) => {
                 let mut args = args.into_iter();
+                let src = args.next().unwrap();
                 let s = args.next().unwrap();
-                let b = args.next().unwrap();
+                let dot_var = self.scope.alloc_var("__in2_dot__");
                 let x_var = self.scope.alloc_var("__in2_x__");
                 let acc_var = self.scope.alloc_var("__in2_acc__");
-                let check_var = self.scope.alloc_var("__in2_chk__");
-                // IN($x; b) = $x | IN(b) = $x as $chk | first(b | if . == $chk then true else empty end) // false
-                let in_check = Expr::LetBinding {
-                    var_index: check_var,
-                    value: Box::new(Expr::LoadVar { var_index: x_var }),
-                    body: Box::new(Expr::Alternative {
-                        primary: Box::new(Expr::Limit {
-                            count: Box::new(Expr::Literal(Literal::Num(1.0, None))),
-                            generator: Box::new(Expr::Pipe {
-                                left: Box::new(b),
-                                right: Box::new(Expr::IfThenElse {
-                                    cond: Box::new(Expr::BinOp {
-                                        op: BinOp::Eq,
-                                        lhs: Box::new(Expr::Input),
-                                        rhs: Box::new(Expr::LoadVar { var_index: check_var }),
-                                    }),
-                                    then_branch: Box::new(Expr::Literal(Literal::True)),
-                                    else_branch: Box::new(Expr::Empty),
+                let in_check = Expr::Alternative {
+                    primary: Box::new(Expr::Limit {
+                        count: Box::new(Expr::Literal(Literal::Num(1.0, None))),
+                        generator: Box::new(Expr::Pipe {
+                            left: Box::new(Expr::Pipe {
+                                left: Box::new(Expr::LoadVar { var_index: dot_var }),
+                                right: Box::new(s),
+                            }),
+                            right: Box::new(Expr::IfThenElse {
+                                cond: Box::new(Expr::BinOp {
+                                    op: BinOp::Eq,
+                                    lhs: Box::new(Expr::Input),
+                                    rhs: Box::new(Expr::LoadVar { var_index: x_var }),
                                 }),
+                                then_branch: Box::new(Expr::Literal(Literal::True)),
+                                else_branch: Box::new(Expr::Empty),
                             }),
                         }),
-                        fallback: Box::new(Expr::Literal(Literal::False)),
                     }),
+                    fallback: Box::new(Expr::Literal(Literal::False)),
                 };
-                // reduce s as $x (false; . or in_check)
-                Ok(Expr::Reduce {
-                    source: Box::new(s),
-                    init: Box::new(Expr::Literal(Literal::False)),
-                    var_index: x_var,
-                    acc_index: acc_var,
-                    update: Box::new(Expr::BinOp {
-                        op: BinOp::Or,
-                        lhs: Box::new(Expr::Input),
-                        rhs: Box::new(in_check),
+                Ok(Expr::LetBinding {
+                    var_index: dot_var,
+                    value: Box::new(Expr::Input),
+                    body: Box::new(Expr::Reduce {
+                        source: Box::new(src),
+                        init: Box::new(Expr::Literal(Literal::False)),
+                        var_index: x_var,
+                        acc_index: acc_var,
+                        update: Box::new(Expr::BinOp {
+                            op: BinOp::Or,
+                            lhs: Box::new(Expr::Input),
+                            rhs: Box::new(in_check),
+                        }),
                     }),
                 })
             }
@@ -4199,7 +4427,9 @@ impl Parser {
                 if let Some(func_id) = self.scope.lookup_func(name, args.len()) {
                     Ok(self.scope.make_funccall(func_id, args))
                 } else {
-                    bail!("unknown function '{}' with {} args", name, args.len())
+                    // Undefined function name. jq resolves names lazily, so this
+                    // is only an error when reachable: defer it (#807).
+                    Ok(self.defer_unknown_func(name, args.len()))
                 }
             }
         }
@@ -4339,7 +4569,8 @@ fn remap_func_ids(expr: Expr, map: &[(usize, usize)]) -> Expr {
             then_branch: Box::new(remap_func_ids(*then_branch, map)),
             else_branch: Box::new(remap_func_ids(*else_branch, map)),
         },
-        Expr::TryCatch { try_expr, catch_expr } => Expr::TryCatch {
+        Expr::TryCatch { try_expr, catch_expr, restore_dot } => Expr::TryCatch {
+            restore_dot,
             try_expr: Box::new(remap_func_ids(*try_expr, map)),
             catch_expr: Box::new(remap_func_ids(*catch_expr, map)),
         },

@@ -196,8 +196,8 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         "split" => {
             // split(re; flags) — regex split
             let pat_str = coerce_regex_pat_str(&args[1])?;
-            let (pat, _) = apply_regex_flags(&pat_str, &args[2])?;
-            rt_regex_split(&args[0], &Value::from_string(pat), &Value::Null)
+            let (pat, _, not_empty) = apply_regex_flags(&pat_str, &args[2])?;
+            rt_regex_split_ne(&args[0], &Value::from_string(pat), not_empty)
         }
         "join" => binary_arg(args, rt_join),
         "index" | "rindex" => binary_arg(args, |a, b| rt_str_index(a, b, name == "rindex")),
@@ -214,10 +214,10 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                 } else {
                     args[2].clone()
                 };
-                let (pat, _) = apply_regex_flags(&pat_str, &combined)?;
-                rt_test(&args[0], &Value::from_string(pat))
+                let (pat, _, not_empty) = apply_regex_flags(&pat_str, &combined)?;
+                rt_test(&args[0], &Value::from_string(pat), not_empty)
             } else {
-                binary_arg(args, rt_test)
+                binary_arg(args, |a, b| rt_test(a, b, false))
             }
         }
         "match" => {
@@ -229,15 +229,15 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                 } else {
                     args[2].clone()
                 };
-                let (pat, global) = apply_regex_flags(&pat_str, &combined)?;
+                let (pat, global, not_empty) = apply_regex_flags(&pat_str, &combined)?;
                 let re = Value::from_string(pat);
                 if global {
-                    rt_match_global(&args[0], &re)
+                    rt_match_global(&args[0], &re, not_empty)
                 } else {
-                    rt_match(&args[0], &re)
+                    rt_match(&args[0], &re, not_empty)
                 }
             } else {
-                binary_arg(args, rt_match)
+                binary_arg(args, |a, b| rt_match(a, b, false))
             }
         }
         "capture" => {
@@ -249,34 +249,34 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                 } else {
                     args[2].clone()
                 };
-                let (pat, global) = apply_regex_flags(&pat_str, &combined)?;
+                let (pat, global, not_empty) = apply_regex_flags(&pat_str, &combined)?;
                 let re = Value::from_string(pat);
                 if global {
-                    rt_capture_global(&args[0], &re)
+                    rt_capture_global(&args[0], &re, not_empty)
                 } else {
-                    rt_capture(&args[0], &re)
+                    rt_capture(&args[0], &re, not_empty)
                 }
             } else {
-                binary_arg(args, rt_capture)
+                binary_arg(args, |a, b| rt_capture(a, b, false))
             }
         }
         "scan" => {
             if args.len() >= 3 {
                 let pat_str = coerce_regex_pat_str(&args[1])?;
-                let (pat, _) = apply_regex_flags(&pat_str, &args[2])?;
-                rt_scan(&args[0], &Value::from_string(pat))
+                let (pat, _, not_empty) = apply_regex_flags(&pat_str, &args[2])?;
+                rt_scan(&args[0], &Value::from_string(pat), not_empty)
             } else {
-                binary_arg(args, rt_scan)
+                binary_arg(args, |a, b| rt_scan(a, b, false))
             }
         }
         "sub" | "gsub" => {
             if args.len() >= 4 {
                 // sub/gsub with flags: input, regex, replacement, flags
                 let pat_str = coerce_regex_pat_str(&args[1])?;
-                let (pat, _) = apply_regex_flags(&pat_str, &args[3])?;
-                rt_sub_gsub(&args[0], &Value::from_string(pat), &args[2], name == "gsub")
+                let (pat, _, not_empty) = apply_regex_flags(&pat_str, &args[3])?;
+                rt_sub_gsub(&args[0], &Value::from_string(pat), &args[2], name == "gsub", not_empty)
             } else if args.len() >= 3 {
-                rt_sub_gsub(&args[0], &args[1], &args[2], name == "gsub")
+                rt_sub_gsub(&args[0], &args[1], &args[2], name == "gsub", false)
             } else {
                 bail!("{} requires 3 arguments", name);
             }
@@ -285,7 +285,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             // limit needs special handling as a generator
             Ok(Value::Null)
         }),
-        "first" | "last" | "nth" | "range" | "while" | "until" | "repeat" | "recurse" | "recurse_down"
+        "first" | "last" | "nth" | "range" | "while" | "until" | "repeat" | "recurse"
         | "getpath" | "setpath" | "delpaths" => {
             // These need special handling
             match name {
@@ -370,12 +370,16 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             Value::Num(n, _) => Ok(Value::number(n.tanh())),
             _ => bail!("{} number required", errdesc(v)),
         }),
+        // Rust std's f64::asinh/acosh compute ln(2x) internally, which
+        // overflows to +inf (→ DBL_MAX) once 2x exceeds DBL_MAX (|x| ≳ 9e307).
+        // libm (a musl port, like the libm jq links) uses log1p/scaling and
+        // stays accurate for large arguments (~709.9 at 1e308) (#811).
         "asinh" => unary_op(args, |v| match v {
-            Value::Num(n, _) => Ok(Value::number(n.asinh())),
+            Value::Num(n, _) => Ok(Value::number(libm::asinh(*n))),
             _ => bail!("{} number required", errdesc(v)),
         }),
         "acosh" => unary_op(args, |v| match v {
-            Value::Num(n, _) => Ok(Value::number(n.acosh())),
+            Value::Num(n, _) => Ok(Value::number(libm::acosh(*n))),
             _ => bail!("{} number required", errdesc(v)),
         }),
         "atanh" => unary_op(args, |v| match v {
@@ -464,7 +468,11 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
         "scalb" => ternary_arg(args, |a, b| match (a, b) {
-            (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(*x * 2f64.powf(*y))),
+            // C scalb / jq truncate the exponent to an integer: x * 2^trunc(n).
+            // `2f64.powf(n)` honoured the fraction (scalb(1; 0.5) → √2 instead
+            // of 1). Use scalbn with the truncated exponent, matching the
+            // sibling scalbln/ldexp (`f64 as i32` truncates toward zero) (#812).
+            (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(libm::scalbn(*x, *y as i32))),
             _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
         // Additional libc binary wrappers (#473).
@@ -521,9 +529,14 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                 Value::Num(n, _) => {
                     let r = match name {
                         "significand" => {
-                            // significand(x) = x * 2^(-ilogb(x))
+                            // significand(x) = x * 2^(-ilogb(x)). Compute via
+                            // scalbn so the exponent is applied directly to the
+                            // mantissa field — `2f64.powi(-e)` overflows to +inf
+                            // for subnormals (e ≈ -1030 → 2^1030 = inf, x*inf →
+                            // inf), and infinities stayed inf rather than NaN.
+                            // scalbn handles subnormals/inf/0 correctly (#810).
                             let e = libm::ilogb(*n);
-                            *n * 2f64.powi(-e)
+                            libm::scalbn(*n, -e)
                         }
                         "exponent" => libm::ilogb(*n) as f64,
                         "logb" => unsafe { logb(*n) },
@@ -1392,7 +1405,11 @@ fn rt_max(v: &Value) -> Result<Value> {
         Value::Arr(a) => {
             let mut max = &a[0];
             for v in &a[1..] {
-                if compare_values(v, max) == std::cmp::Ordering::Greater {
+                // jq's `max` keeps the LAST maximal element on ties (its C fold
+                // updates on `>=`), so representation-distinct equal maxima
+                // settle on the last one (`[1.0,1]|max` → `1`, `[-0,0]|max` →
+                // `0`). `min` stays strict (keeps the first). See #852.
+                if compare_values(v, max) != std::cmp::Ordering::Less {
                     max = v;
                 }
             }
@@ -1760,8 +1777,15 @@ fn rt_implode(v: &Value) -> Result<Value> {
             for item in a.iter() {
                 match item {
                     Value::Num(n, _) => {
-                        if n.is_nan() || n.is_infinite() {
+                        // NaN is rejected ("number (null) can't be imploded"),
+                        // but jq clamps an *infinite* codepoint to U+FFFD rather
+                        // than erroring (#814).
+                        if n.is_nan() {
                             bail!("{} can't be imploded, unicode codepoint needs to be numeric", errdesc(item));
+                        }
+                        if n.is_infinite() {
+                            s.push('\u{FFFD}');
+                            continue;
                         }
                         let n_val = *n as i64;
                         // Negative, surrogate range (0xD800-0xDFFF), or > 0x10FFFF → replacement char
@@ -2141,17 +2165,17 @@ fn rt_split(v: &Value, sep: &Value) -> Result<Value> {
     }
 }
 
-fn rt_regex_split(v: &Value, re: &Value, flags: &Value) -> Result<Value> {
+fn rt_regex_split_ne(v: &Value, re: &Value, not_empty: bool) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
-            let (pat, _global) = apply_regex_flags(r.as_str(), flags)?;
-            with_regex(&pat, |regex| {
+            with_regex(r.as_str(), |regex| {
                 // jq enumerates an empty match adjacent to a non-empty
                 // one; Rust's `Regex::split` skips it. Walk
                 // `jq_match_spans` instead so the slices line up with
                 // jq's output for zero-width regexes like `a*`. See #444.
+                // The `n` flag drops the zero-width matches (#773).
                 let s_str = s.as_str();
-                let spans = jq_match_spans(regex, s_str);
+                let spans = drop_empty_spans(jq_match_spans(regex, s_str), not_empty);
                 let mut parts: Vec<Value> = Vec::with_capacity(spans.len() + 1);
                 let mut last = 0;
                 for (start, end) in spans {
@@ -2251,21 +2275,19 @@ fn rt_str_index(v: &Value, target: &Value, is_rindex: bool) -> Result<Value> {
                 Ok(Value::Null)
             }
         }
-        (Value::Arr(a), _) => {
-            if is_rindex {
-                for (i, item) in a.iter().enumerate().rev() {
-                    if values_equal(item, target) {
-                        return Ok(Value::number(i as f64));
-                    }
-                }
-                Ok(Value::Null)
-            } else {
-                for (i, item) in a.iter().enumerate() {
-                    if values_equal(item, target) {
-                        return Ok(Value::number(i as f64));
-                    }
-                }
-                Ok(Value::Null)
+        (Value::Arr(_), _) => {
+            // jq defines `index(x): indices(x)|.[0]` and
+            // `rindex(x): indices(x)|.[-1:][0]`. Delegating to `rt_indices`
+            // covers both element search (scalar needle) and contiguous
+            // subsequence search (array needle); the previous element-only
+            // comparison returned null for an array needle (#779).
+            match rt_indices(v, target)? {
+                Value::Arr(list) => Ok(if is_rindex {
+                    list.last().cloned().unwrap_or(Value::Null)
+                } else {
+                    list.first().cloned().unwrap_or(Value::Null)
+                }),
+                _ => Ok(Value::Null),
             }
         }
         // jq's def is `index(x): indices(x) | .[0]` (and `rindex(x): ... | .[-1:][0]`),
@@ -2396,9 +2418,17 @@ pub fn rt_getpath(v: &Value, path: &Value) -> Result<Value> {
                         current = o.get(k.as_str()).cloned().unwrap_or(Value::Null);
                     }
                     (Value::Arr(a), Value::Num(n, _)) => {
-                        let idx = *n as i64;
-                        let actual = if idx < 0 { (a.len() as i64 + idx) as usize } else { idx as usize };
-                        current = a.get(actual).cloned().unwrap_or(Value::Null);
+                        // A NaN index is out of range → null, matching jq and
+                        // `.[nan]`. `nan as i64` would otherwise truncate to 0
+                        // and return the first element (#813). (An infinite
+                        // index saturates to i64::MAX/MIN and already misses.)
+                        if n.is_nan() {
+                            current = Value::Null;
+                        } else {
+                            let idx = *n as i64;
+                            let actual = if idx < 0 { (a.len() as i64 + idx) as usize } else { idx as usize };
+                            current = a.get(actual).cloned().unwrap_or(Value::Null);
+                        }
                     }
                     // Slice path element `{start, end}`. Originally added in
                     // #536 for `.[N:M] |= f` (eval's Update branch fetches the
@@ -2746,7 +2776,38 @@ pub fn rt_delpaths(v: &Value, paths: &Value) -> Result<Value> {
             // `delpaths([["a"],["a","b"]]) on {"a":1,...}` errors on the
             // second path (descending into `.a` = number); jq returns the
             // object minus `.a`. See #432.
-            let mut sorted_paths: Vec<&Value> = ps.iter().collect();
+            // Expand any terminal slice component (`[..parent, {start,end}]`)
+            // into the explicit element-index paths it covers, resolved against
+            // the ORIGINAL array at `parent`. jq deletes the UNION of all
+            // sibling deletions computed against the pre-deletion array; doing
+            // the expansion up front lets the descending index delete below
+            // produce that union even for overlapping or generator-bound slices
+            // (`del(.a[(0,2):(1,4)])`) and mixed index/slice deletes, instead of
+            // draining each slice against the already-shortened array. A slice
+            // whose parent is not an array is left intact so `delete_path`
+            // raises jq's type error (non-array container) or no-ops (missing
+            // key). See #841/#842/#843.
+            let mut expanded: Vec<Value> = Vec::with_capacity(ps.len());
+            for path in ps.iter() {
+                if let Value::Arr(pa) = path {
+                    if let Some(Value::Obj(ObjInner(spec))) = pa.last() {
+                        let parent: Vec<Value> = pa[..pa.len() - 1].to_vec();
+                        let parent_val = rt_getpath(v, &Value::Arr(Rc::new(parent.clone())));
+                        if let Ok(Value::Arr(arr)) = parent_val {
+                            validate_slice_spec(spec)?;
+                            let (si, ei) = slice_indices(spec, arr.len() as i64);
+                            for idx in si..ei {
+                                let mut np = parent.clone();
+                                np.push(Value::number(idx as f64));
+                                expanded.push(Value::Arr(Rc::new(np)));
+                            }
+                            continue;
+                        }
+                    }
+                }
+                expanded.push(path.clone());
+            }
+            let mut sorted_paths: Vec<&Value> = expanded.iter().collect();
             sorted_paths.sort_by(|a, b| compare_values(a, b));
             let mut filtered: Vec<&Value> = Vec::with_capacity(sorted_paths.len());
             for path in sorted_paths {
@@ -3067,10 +3128,24 @@ fn coerce_regex_pat_str(re: &Value) -> Result<String> {
     }
 }
 
-fn apply_regex_flags(pattern: &str, flags: &Value) -> Result<(String, bool)> {
+/// Drop zero-width spans when the `n` (ignore-empty-matches) flag is set.
+/// jq maps `n` to Oniguruma's `ONIG_OPTION_FIND_NOT_EMPTY`; since
+/// `jq_match_spans` already enumerates empty matches (#444), filtering them
+/// here reproduces the flag without a different engine (#773).
+#[inline]
+fn drop_empty_spans(mut spans: Vec<(usize, usize)>, not_empty: bool) -> Vec<(usize, usize)> {
+    if not_empty {
+        spans.retain(|&(start, end)| start != end);
+    }
+    spans
+}
+
+/// Returns `(pattern_with_inline_flags, global, not_empty)`. `not_empty` is the
+/// jq `n` flag (#773).
+fn apply_regex_flags(pattern: &str, flags: &Value) -> Result<(String, bool, bool)> {
     let flags_str = match flags {
         Value::Str(s) => s.as_str(),
-        Value::Null => return Ok((pattern.to_string(), false)),
+        Value::Null => return Ok((pattern.to_string(), false, false)),
         // jq rejects non-string non-null flags with the standard errdesc
         // wording (#461).
         _ => bail!("{} is not a string", errdesc(flags)),
@@ -3080,20 +3155,34 @@ fn apply_regex_flags(pattern: &str, flags: &Value) -> Result<(String, bool)> {
     if !flags_str.chars().all(|c| matches!(c, 'g' | 'i' | 'l' | 'm' | 'n' | 'p' | 's' | 'x')) {
         bail!("{} is not a valid modifier string", flags_str);
     }
+    // jq tolerates a repeated flag (e.g. "ii", "mp" both map to dotall), but the
+    // Rust engine rejects a duplicated inline flag like `(?ii)`/`(?ss)`. Collect
+    // each inline flag at most once. #764 / #774
     let mut inline = String::new();
     let mut global = false;
+    let mut not_empty = false;
     for ch in flags_str.chars() {
-        match ch {
-            'i' | 'x' => inline.push(ch),
+        let inline_flag = match ch {
+            'i' | 'x' => Some(ch),
             // In jq's engine (Oniguruma) `m` is dotall — `.` matches newline —
             // which the underlying regex spells `s`. jq's own `s` (single-line
             // anchors) is already this engine's default, so it needs no inline
             // flag. The two were mapped PCRE-style (`s` = dotall), i.e. swapped.
             // `"a\nb" | test("a.b";"m")` must be true, `…;"s"` false. #723.
-            'm' => inline.push('s'),
-            'g' => global = true,
-            // l, n, p (and jq's `s`) have no inline equivalent here — accepted, ignored.
-            _ => {}
+            // jq's `p` enables both its `s` (single-line anchors) and `m`
+            // (dotall) modes. The single-line half is this engine's default, so
+            // `p` reduces to the same dotall as `m` — it must not be ignored. #764
+            'm' | 'p' => Some('s'),
+            'g' => { global = true; None }
+            // jq's `n` ignores zero-width matches. Oniguruma spells this as an
+            // engine option (FIND_NOT_EMPTY) with no inline equivalent here, so
+            // it is handled by filtering empty spans, not via the pattern. #773
+            'n' => { not_empty = true; None }
+            // l (and jq's `s`) have no inline equivalent here — accepted, ignored.
+            _ => None,
+        };
+        if let Some(f) = inline_flag {
+            if !inline.contains(f) { inline.push(f); }
         }
     }
     let pat = if inline.is_empty() {
@@ -3101,13 +3190,20 @@ fn apply_regex_flags(pattern: &str, flags: &Value) -> Result<(String, bool)> {
     } else {
         format!("(?{}){}", inline, pattern)
     };
-    Ok((pat, global))
+    Ok((pat, global, not_empty))
 }
 
-fn rt_test(v: &Value, re: &Value) -> Result<Value> {
+fn rt_test(v: &Value, re: &Value, not_empty: bool) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
-            let matched = with_regex(r, |regex| regex.is_match(s))?;
+            let matched = with_regex(r, |regex| {
+                if not_empty {
+                    // With `n`, a successful test requires a non-empty match.
+                    !drop_empty_spans(jq_match_spans(regex, s), true).is_empty()
+                } else {
+                    regex.is_match(s)
+                }
+            })?;
             Ok(Value::from_bool(matched))
         }
         // jq distinguishes input-side and regex-side type errors. Non-string
@@ -3119,19 +3215,37 @@ fn rt_test(v: &Value, re: &Value) -> Result<Value> {
     }
 }
 
-fn rt_match(v: &Value, re: &Value) -> Result<Value> {
+fn rt_match(v: &Value, re: &Value, not_empty: bool) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
             with_regex(r, |regex| {
                 let capture_names: Vec<Option<&str>> = regex.capture_names().skip(1).collect();
                 let num_groups = regex.captures_len();
+                // With `n`, the first match is the first non-empty span.
+                let start_at = if not_empty {
+                    match drop_empty_spans(jq_match_spans(regex, s), true).first() {
+                        Some(&(start, _)) => Some(start),
+                        None => bail!("match failed"),
+                    }
+                } else {
+                    None
+                };
                 if num_groups <= 1 {
-                    match regex.find(s) {
+                    let m = match start_at {
+                        Some(start) => regex.find_at(s, start).filter(|m| m.start() == start),
+                        None => regex.find(s),
+                    };
+                    match m {
                         Some(m) => Ok(build_match_obj(&m, None, &capture_names, s)),
                         None => bail!("match failed"),
                     }
                 } else {
-                    match regex.captures(s) {
+                    let caps = match start_at {
+                        Some(start) => regex.captures_at(s, start)
+                            .filter(|c| c.get(0).map(|m| m.start()) == Some(start)),
+                        None => regex.captures(s),
+                    };
+                    match caps {
                         Some(caps) => {
                             let m = caps.get(0).unwrap();
                             Ok(build_match_obj(&m, Some(&caps), &capture_names, s))
@@ -3187,14 +3301,14 @@ fn build_match_obj(m: &regex::Match, caps: Option<&regex::Captures>, capture_nam
     Value::object_from_map(result)
 }
 
-fn rt_match_global(v: &Value, re: &Value) -> Result<Value> {
+fn rt_match_global(v: &Value, re: &Value, not_empty: bool) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
             with_regex(r, |regex| {
                 let capture_names: Vec<Option<&str>> = regex.capture_names().skip(1).collect();
                 let num_groups = regex.captures_len();
                 let mut results = Vec::new();
-                let spans = jq_match_spans(regex, s);
+                let spans = drop_empty_spans(jq_match_spans(regex, s), not_empty);
                 if num_groups <= 1 {
                     for (start, _) in &spans {
                         if let Some(m) = regex.find_at(s, *start) {
@@ -3227,11 +3341,21 @@ fn rt_match_global(v: &Value, re: &Value) -> Result<Value> {
     }
 }
 
-fn rt_capture(v: &Value, re: &Value) -> Result<Value> {
+fn rt_capture(v: &Value, re: &Value, not_empty: bool) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
             with_regex(r, |regex| {
-                match regex.captures(s) {
+                // With `n`, capture from the first non-empty match.
+                let caps = if not_empty {
+                    match drop_empty_spans(jq_match_spans(regex, s), true).first() {
+                        Some(&(start, _)) => regex.captures_at(s, start)
+                            .filter(|c| c.get(0).map(|m| m.start()) == Some(start)),
+                        None => None,
+                    }
+                } else {
+                    regex.captures(s)
+                };
+                match caps {
                     Some(caps) => {
                         let mut result = new_objmap();
                         for name in regex.capture_names().flatten() {
@@ -3254,12 +3378,12 @@ fn rt_capture(v: &Value, re: &Value) -> Result<Value> {
     }
 }
 
-pub fn rt_capture_global(v: &Value, re: &Value) -> Result<Value> {
+pub fn rt_capture_global(v: &Value, re: &Value, not_empty: bool) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
             with_regex(r, |regex| {
                 let mut results: Vec<Value> = Vec::new();
-                for (start, _) in jq_match_spans(regex, s) {
+                for (start, _) in drop_empty_spans(jq_match_spans(regex, s), not_empty) {
                     let caps = match regex.captures_at(s, start) {
                         Some(c) if c.get(0).map(|m| m.start()) == Some(start) => c,
                         _ => continue,
@@ -3284,12 +3408,12 @@ pub fn rt_capture_global(v: &Value, re: &Value) -> Result<Value> {
     }
 }
 
-fn rt_scan(v: &Value, re: &Value) -> Result<Value> {
+fn rt_scan(v: &Value, re: &Value, not_empty: bool) -> Result<Value> {
     match (v, re) {
         (Value::Str(s), Value::Str(r)) => {
             with_regex(r, |regex| {
                 let has_captures = regex.captures_len() > 1;
-                let spans = jq_match_spans(regex, s);
+                let spans = drop_empty_spans(jq_match_spans(regex, s), not_empty);
                 let results: Vec<Value> = if has_captures {
                     spans.iter()
                         .filter_map(|(start, _)| regex.captures_at(s, *start)
@@ -3298,7 +3422,9 @@ fn rt_scan(v: &Value, re: &Value) -> Result<Value> {
                             let groups: Vec<Value> = (1..caps.len())
                                 .map(|i| match caps.get(i) {
                                     Some(m) => Value::from_str(m.as_str()),
-                                    None => Value::from_str(""),
+                                    // An unmatched optional capture is null, like
+                                    // `match`/`capture` (not the empty string). #851
+                                    None => Value::Null,
                                 })
                                 .collect();
                             Value::Arr(Rc::new(groups))
@@ -3319,11 +3445,27 @@ fn rt_scan(v: &Value, re: &Value) -> Result<Value> {
     }
 }
 
-fn rt_sub_gsub(v: &Value, re: &Value, replacement: &Value, global: bool) -> Result<Value> {
+fn rt_sub_gsub(v: &Value, re: &Value, replacement: &Value, global: bool, not_empty: bool) -> Result<Value> {
     match (v, re, replacement) {
         (Value::Str(s), Value::Str(r), Value::Str(rep)) => {
             let result = with_regex(r, |regex| {
-                if global {
+                if not_empty {
+                    // With `n`, replace only the non-empty matches. `replace`/
+                    // `replace_all` cannot skip zero-width matches, so walk the
+                    // filtered spans and splice the literal replacement (this
+                    // builtin path takes a plain string replacement). #773
+                    let spans = drop_empty_spans(jq_match_spans(regex, s), true);
+                    let mut out = String::with_capacity(s.len());
+                    let mut last = 0;
+                    for (start, end) in spans {
+                        out.push_str(&s[last..start]);
+                        out.push_str(rep.as_str());
+                        last = end;
+                        if !global { break; }
+                    }
+                    out.push_str(&s[last..]);
+                    out
+                } else if global {
                     regex.replace_all(s, rep.as_str()).to_string()
                 } else {
                     regex.replace(s, rep.as_str()).to_string()
@@ -3347,7 +3489,7 @@ pub struct SubGsubSegment {
 /// Find regex matches and return segments for capture-aware sub/gsub replacement.
 /// Returns segments alternating: literal, capture_obj, literal, capture_obj, ..., literal.
 pub fn sub_gsub_segments(input: &str, pattern: &str, flags: &Value, global: bool) -> Result<Vec<SubGsubSegment>> {
-    let (pat, flag_global) = apply_regex_flags(pattern, flags)?;
+    let (pat, flag_global, not_empty) = apply_regex_flags(pattern, flags)?;
     let is_global = global || flag_global;
     with_regex(&pat, |regex| {
         let mut segments = Vec::new();
@@ -3380,7 +3522,8 @@ pub fn sub_gsub_segments(input: &str, pattern: &str, flags: &Value, global: bool
             // zero-width regexes (`a*`, etc.). `captures_iter` /
             // `find_iter` skip those. Walk `jq_match_spans` so the
             // segment list matches jq's output. See #444.
-            let spans = jq_match_spans(regex, input);
+            // With the `n` flag, drop the zero-width matches (#773).
+            let spans = drop_empty_spans(jq_match_spans(regex, input), not_empty);
             if has_captures {
                 for (start, _end) in spans {
                     if let Some(caps) = regex.captures_at(input, start) {
@@ -3398,6 +3541,19 @@ pub fn sub_gsub_segments(input: &str, pattern: &str, flags: &Value, global: bool
                             process_match(m, None);
                         }
                     }
+                }
+            }
+        } else if not_empty {
+            // Non-global `sub` with `n`: replace the first non-empty match.
+            if let Some(&(start, _)) = drop_empty_spans(jq_match_spans(regex, input), true).first() {
+                if has_captures {
+                    if let Some(caps) = regex.captures_at(input, start) {
+                        if let Some(m) = caps.get(0).filter(|m| m.start() == start) {
+                            process_match(m, Some(&caps));
+                        }
+                    }
+                } else if let Some(m) = regex.find_at(input, start).filter(|m| m.start() == start) {
+                    process_match(m, None);
                 }
             }
         } else if has_captures {
@@ -3598,7 +3754,7 @@ fn rt_strftime(v: &Value, fmt: &Value) -> Result<Value> {
             let secs = *n as i64;
             let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
                 .ok_or_else(|| anyhow::anyhow!("strftime: epoch out of range"))?;
-            Ok(Value::from_str(&dt.format(fmt_str).to_string()))
+            Ok(Value::from_str(&dt.format(&rewrite_strftime_compat(fmt_str)).to_string()))
         }
         _ => bail!("strftime/1 requires parsed datetime inputs"),
     }
@@ -3609,6 +3765,31 @@ fn rt_strftime(v: &Value, fmt: &Value) -> Result<Value> {
 /// `[]` and `[1900]` cases store mday=0 which chrono rejects). Existing
 /// regression tests (`#113`) only exercise `%Y` for these edge cases, so
 /// the clamp doesn't shift any tested output.
+/// Rewrite `strftime` specifiers where chrono's rendering diverges from the
+/// macOS libc that jq delegates to (the project's reference, see
+/// `docs/maintenance.md`). Currently only `%x`: chrono renders it with a
+/// 2-digit year, jq's `%x` is `%m/%d/%Y` with a 4-digit year. `%%` is preserved
+/// (a literal percent, not a specifier). #763
+fn rewrite_strftime_compat(fmt: &str) -> std::borrow::Cow<'_, str> {
+    if !fmt.contains("%x") {
+        return std::borrow::Cow::Borrowed(fmt);
+    }
+    let mut out = String::with_capacity(fmt.len() + 8);
+    let mut chars = fmt.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            match chars.peek() {
+                Some('x') => { chars.next(); out.push_str("%m/%d/%Y"); }
+                Some('%') => { chars.next(); out.push_str("%%"); }
+                _ => out.push('%'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 fn format_broken(t: &BrokenTime, fmt: &str) -> String {
     use chrono::{NaiveDate, TimeZone, Utc};
     let mon = (t.mon.clamp(0, 11) + 1) as u32;
@@ -3629,7 +3810,7 @@ fn format_broken(t: &BrokenTime, fmt: &str) -> String {
     // `to_string()` turns into a process-aborting panic (#710). With UTC
     // attached, `%z` renders `+0000` and `%Z` renders `UTC`, matching jq; all
     // non-tz specifiers format identically to the naive path.
-    Utc.from_utc_datetime(&ndt).format(fmt).to_string()
+    Utc.from_utc_datetime(&ndt).format(&rewrite_strftime_compat(fmt)).to_string()
 }
 
 fn rt_strptime(v: &Value, fmt: &Value) -> Result<Value> {
@@ -3641,20 +3822,93 @@ fn rt_strptime(v: &Value, fmt: &Value) -> Result<Value> {
             }
             // Partial format (date-only, time-only, single field, …): libc's
             // strptime fills whatever fields it parses, but chrono's
-            // `parse_from_str` is all-or-nothing and previously fell straight to
-            // the zeroed `[1900,0,…]` placeholder. Parse field-by-field with
-            // `chrono::format::Parsed` instead. #724.
+            // `parse_from_str` is all-or-nothing. `parse_and_remainder` resolves
+            // the partial fields and, crucially, reports any unconsumed input so
+            // trailing garbage is rejected like jq rather than silently dropped.
+            // #724 / #772.
             let mut parsed = chrono::format::Parsed::new();
-            if chrono::format::parse(&mut parsed, s.as_str(), chrono::format::StrftimeItems::new(f.as_str())).is_ok() {
-                return Ok(broken_to_value(&parsed_to_broken(&parsed), 0.0));
+            if let Ok(rem) = chrono::format::parse_and_remainder(
+                &mut parsed, s.as_str(), chrono::format::StrftimeItems::new(f.as_str()),
+            ) {
+                if rem.is_empty() {
+                    return Ok(broken_to_value(&parsed_to_broken(&parsed), 0.0));
+                }
             }
-            // Total mismatch: keep the historical zeroed-tm surface so callers
-            // like `fromdateiso8601` (which validate in `rt_fromisodate`)
-            // observe the same shape.
-            Ok(broken_to_value(&BrokenTime { year: 1900, ..BrokenTime::default() }, 0.0))
+            // The format did not cleanly match (mismatch, trailing input,
+            // out-of-range field, or a conflicting double-set). jq's libc
+            // `strptime` is last-wins on duplicate field specifiers (e.g.
+            // `%m %B` set the month twice), which chrono rejects as a conflict;
+            // recover that one case by parsing each format item independently.
+            // A genuine mismatch / out-of-range / trailing input still fails and
+            // propagates jq's error rather than the old zeroed placeholder. #772
+            if let Some(bt) = strptime_last_wins(s.as_str(), f.as_str()) {
+                return Ok(broken_to_value(&bt, 0.0));
+            }
+            bail!(r#"date "{}" does not match format "{}""#, s, f)
         }
         _ => bail!("strptime/1 requires string inputs and arguments"),
     }
+}
+
+/// Parse `s` against `f` one format item at a time, so a field that is set by
+/// more than one specifier (jq's libc `strptime` is last-wins on `%m %B` etc.)
+/// does not abort the whole parse the way `chrono::format::parse` does on a
+/// conflict. Returns `None` if any item fails to match, an out-of-range field
+/// is seen, or input is left over (trailing garbage) — all of which jq treats
+/// as an error.
+fn strptime_last_wins(s: &str, f: &str) -> Option<BrokenTime> {
+    use chrono::format::{parse_and_remainder, Parsed, StrftimeItems};
+    // Each item parses against the remaining input with its own `Parsed`, so a
+    // later item's value can override an earlier one without a conflict error.
+    let mut cursor = s;
+    let mut per_item: Vec<Parsed> = Vec::new();
+    for item in StrftimeItems::new(f) {
+        let mut p = Parsed::new();
+        match parse_and_remainder(&mut p, cursor, std::iter::once(item)) {
+            Ok(rem) => cursor = rem,
+            Err(_) => return None,
+        }
+        per_item.push(p);
+    }
+    if !cursor.is_empty() {
+        return None;
+    }
+    // Merge in reverse so the last occurrence of each field wins: the first set
+    // of a field sticks and chrono rejects later (i.e. earlier-in-format)
+    // conflicting writes, which we ignore.
+    let mut m = Parsed::new();
+    for p in per_item.iter().rev() {
+        merge_parsed_field(&mut m, p);
+    }
+    Some(parsed_to_broken(&m))
+}
+
+/// Copy whatever fields `p` set into `m`, ignoring chrono's conflict errors
+/// (the caller merges in reverse order, so the first writer — the last format
+/// item — wins). Covers the field set that `parsed_to_broken` consults.
+fn merge_parsed_field(m: &mut chrono::format::Parsed, p: &chrono::format::Parsed) {
+    if let Some(v) = p.year() { let _ = m.set_year(v as i64); }
+    if let Some(v) = p.year_div_100() { let _ = m.set_year_div_100(v as i64); }
+    if let Some(v) = p.year_mod_100() { let _ = m.set_year_mod_100(v as i64); }
+    if let Some(v) = p.isoyear() { let _ = m.set_isoyear(v as i64); }
+    if let Some(v) = p.isoyear_div_100() { let _ = m.set_isoyear_div_100(v as i64); }
+    if let Some(v) = p.isoyear_mod_100() { let _ = m.set_isoyear_mod_100(v as i64); }
+    if let Some(v) = p.month() { let _ = m.set_month(v as i64); }
+    if let Some(v) = p.week_from_sun() { let _ = m.set_week_from_sun(v as i64); }
+    if let Some(v) = p.week_from_mon() { let _ = m.set_week_from_mon(v as i64); }
+    if let Some(v) = p.isoweek() { let _ = m.set_isoweek(v as i64); }
+    if let Some(v) = p.weekday() { let _ = m.set_weekday(v); }
+    if let Some(v) = p.ordinal() { let _ = m.set_ordinal(v as i64); }
+    if let Some(v) = p.day() { let _ = m.set_day(v as i64); }
+    match (p.hour_div_12(), p.hour_mod_12()) {
+        (Some(d), Some(mm)) => { let _ = m.set_hour((d * 12 + mm) as i64); }
+        (Some(d), None) => { let _ = m.set_ampm(d == 1); }
+        (None, Some(mm)) => { let _ = m.set_hour12(if mm == 0 { 12 } else { mm as i64 }); }
+        (None, None) => {}
+    }
+    if let Some(v) = p.minute() { let _ = m.set_minute(v as i64); }
+    if let Some(v) = p.second() { let _ = m.set_second(v as i64); }
+    if let Some(v) = p.nanosecond() { let _ = m.set_nanosecond(v as i64); }
 }
 
 /// Build a broken-down-time from a partially-parsed format, mirroring libc
@@ -3668,21 +3922,31 @@ fn parsed_to_broken(p: &chrono::format::Parsed) -> BrokenTime {
     let (year, mon0, mday, date_seen) = match full_date {
         Some(d) => (d.year(), d.month0() as i32, d.day() as i32, true),
         None => {
-            // `%y` sets only the mod-100 year; resolve the century with the
-            // POSIX pivot (00–68 → 2000s, 69–99 → 1900s) the way libc does.
+            // Resolve the year from `%Y` (`year`), `%C` (`year_div_100`), and
+            // `%y` (`year_mod_100`). `%C %y` combine to `C*100 + y2`; `%C` alone
+            // gives `C*100`; `%y` alone resolves the century with the POSIX pivot
+            // (00–68 → 2000s, 69–99 → 1900s) the way libc does. #762
             let year = p.year()
-                .or_else(|| p.year_mod_100().map(|y2| if y2 < 69 { 2000 + y2 } else { 1900 + y2 }))
+                .or_else(|| match (p.year_div_100(), p.year_mod_100()) {
+                    (Some(c), Some(y2)) => Some(c * 100 + y2),
+                    (Some(c), None) => Some(c * 100),
+                    (None, Some(y2)) => Some(if y2 < 69 { 2000 + y2 } else { 1900 + y2 }),
+                    (None, None) => None,
+                })
                 .unwrap_or(1900);
             let mon0 = p.month().map(|m| m as i32 - 1).unwrap_or(0);
             let mday = p.day().map(|d| d as i32).unwrap_or(0);
-            let seen = p.year().is_some() || p.year_mod_100().is_some()
+            let seen = p.year().is_some() || p.year_div_100().is_some() || p.year_mod_100().is_some()
                 || p.month().is_some() || p.day().is_some();
             (year, mon0, mday, seen)
         }
     };
+    // `%H`/`%I` set the 12-hour parts, `%p` the AM/PM half-day. jq fills each
+    // independently: `%p` alone (PM → 12, AM → 0) and `%I` alone (no `%p` → the
+    // literal 12-hour value) must still apply, not just the both-present case. #762
     let hour = match (p.hour_div_12(), p.hour_mod_12()) {
-        (Some(d), Some(m)) => (d * 12 + m) as i32,
-        _ => 0,
+        (None, None) => 0,
+        (d, m) => (d.unwrap_or(0) * 12 + m.unwrap_or(0)) as i32,
     };
     let min = p.minute().map(|m| m as i32).unwrap_or(0);
     let sec = p.second().map(|s| s as i32).unwrap_or(0);
@@ -3693,7 +3957,16 @@ fn parsed_to_broken(p: &chrono::format::Parsed) -> BrokenTime {
         // the normalized civil date (`mday` may be 0 = last day of the prior
         // month). `yday` is `days-before-month + mday - 1`, so a day-less parse
         // yields the `-1` jq emits for year/month-only formats.
-        (civil_wday(year, mon0, mday), days_before_month(mon0, year) + mday - 1)
+        let mut wday = civil_wday(year, mon0, mday);
+        // A day-less January (mon 0, mday 0) normalizes to Dec 31 of `year-1`,
+        // crossing the year boundary. jq's own day arithmetic miscounts that
+        // crossing by one day when `year` is a non-leap century, so e.g.
+        // `strptime("%C")` on "21" reports wday 3, not the civil 4. Reproduce
+        // the quirk for bit-exact parity (also affects `%Y`/`%y`). #762
+        if mon0 == 0 && mday == 0 && year % 100 == 0 && year % 400 != 0 {
+            wday = (wday + 6) % 7;
+        }
+        (wday, days_before_month(mon0, year) + mday - 1)
     } else {
         // No date field at all (time-only): jq leaves the tm_wday/tm_yday
         // sentinels, which surface as 6 / -1.
@@ -3824,12 +4097,13 @@ fn rt_strflocaltime_impl(input: &Value, fmt: &Value) -> Result<Value> {
             // which emits the zone abbreviation (`JST`, `UTC`, ...). Splice the
             // libc-provided abbreviation into the format string before chrono
             // formats it, so every other specifier keeps chrono's behaviour.
-            if fmt_str.contains("%Z") {
+            let fmt_x = rewrite_strftime_compat(fmt_str.as_str());
+            if fmt_x.contains("%Z") {
                 let abbrev = local_tz_abbrev(secs).unwrap_or_default();
-                let fmt_final = splice_local_zone(fmt_str.as_str(), abbrev.as_str());
+                let fmt_final = splice_local_zone(&fmt_x, abbrev.as_str());
                 Ok(Value::from_str(&dt.format(fmt_final.as_str()).to_string()))
             } else {
-                Ok(Value::from_str(&dt.format(fmt_str.as_str()).to_string()))
+                Ok(Value::from_str(&dt.format(&fmt_x).to_string()))
             }
         }
         _ => bail!("strflocaltime/1 requires parsed datetime inputs"),

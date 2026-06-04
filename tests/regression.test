@@ -1437,6 +1437,31 @@ null
 [1,2]
 [[1,1],[1,2],[2,1],[2,2]]
 
+# Issue #805: combinations on null returns a single empty combination (length == 0)
+[combinations]
+null
+[[]]
+
+# Issue #805: combinations on {} returns a single empty combination
+[combinations]
+{}
+[[]]
+
+# Issue #815: first(combinations) truncates the Cartesian product after one tuple
+first(combinations)
+[[1,2],[3,4]]
+[1,3]
+
+# Issue #815: limit(2; combinations) stops after two tuples
+[limit(2; combinations)]
+[[1,2],[3,4]]
+[[1,3],[1,4]]
+
+# Issue #815: isempty(combinations) on a non-empty product is false (no spurious extra outputs)
+[isempty(combinations)]
+[[1],[2]]
+[false]
+
 # Issue #135: modf splits number into [fractional, integer] truncated toward zero
 modf
 1.5
@@ -9809,6 +9834,26 @@ null
 2
 []
 
+# Issue #804: truncate_stream with a null depth passes events through unchanged
+[truncate_stream({a:[1,2]} | tostream)]
+null
+[[["a",0],1],[["a",1],2],[["a",1]],[["a"]]]
+
+# Issue #804: truncate_stream with a string depth drops every event (length > string is false)
+[truncate_stream({a:[1,2]} | tostream)]
+"x"
+[]
+
+# Issue #804: truncate_stream with an object depth drops every event
+[truncate_stream([[0],1])]
+{}
+[]
+
+# Issue #804: truncate_stream with a negative depth slices from the end
+[truncate_stream({a:[1,2]} | tostream)]
+-1
+[[[0],1],[[1],2],[[1]],[["a"]]]
+
 # Issue #551: (.. | scalars) |= f preserves all leaves after switching Update
 # from rt_setpath to rt_setpath_mut (Rc::make_mut). Verifies every scalar
 # in a deep binary tree still gets updated, not just the last branch.
@@ -10835,3 +10880,1200 @@ true
 .x|tostring
 {"x":1234567890123456}
 "1234567890123456"
+
+# Issue #760 eval: while(cond; empty) terminates after emitting the input once
+while(.<3; empty)
+0
+0
+
+# Issue #760 eval: while(cond; empty) piped continuation also terminates
+[while(.<3; empty) | .+1]
+0
+[1]
+
+# Issue #760 eval: until(cond; empty) with a false cond emits nothing and terminates
+[until(.>3; empty)]
+0
+[]
+
+# Issue #767 eval: while folds a multi-valued update into independent successors
+[limit(8; while(.<3; .+1, .+2))]
+0
+[0,1,2,2]
+
+# Issue #767 eval: until fans out a multi-valued update into independent successors
+[limit(8; until(.>=3; .+1, .+2))]
+0
+[3,4,3,3,4]
+
+# Issue #767 eval: piped while with a multi-valued update threads each successor through the continuation
+[while(.<3; .+1, .+10) | .]
+0
+[0,1,2]
+
+# Issue #761 eval: slice with generator bounds yields the Cartesian product (from outer, to inner)
+[.[(0,1):(3,4)]]
+[1,2,3,4,5]
+[[1,2,3],[1,2,3,4],[2,3],[2,3,4]]
+
+# Issue #761 eval: slice product nests from outer, to middle, base inner
+[.[][(0,1):(2,3)]]
+[[1,2,3],[4,5,6]]
+[[1,2],[4,5],[1,2,3],[4,5,6],[2],[5],[2,3],[5,6]]
+
+# Issue #761 eval: empty slice bound generator yields nothing
+[.[(empty):3]]
+[1,2,3,4,5]
+[]
+
+# Issue #761 path: path() of a generator-bound slice yields one path per combination
+[path(.[(0,1):(3,4)])]
+[1,2,3,4,5]
+[[{"start":0,"end":3}],[{"start":0,"end":4}],[{"start":1,"end":3}],[{"start":1,"end":4}]]
+
+# Issue #761 eval: assigning through a generator-bound slice composes over every combination
+.[(0,1):(3,4)] = [99]
+[1,2,3,4,5]
+[99,99]
+
+# Issue #761 eval: updating through a generator-bound slice composes over every combination
+.[(0,1):(2,3)] |= reverse
+[1,2,3,4,5]
+[3,2,1,4,5]
+
+# Issue #761 eval: del over a generator-bound slice removes the union of all ranges
+del(.[(0,1):(3,4)])
+[1,2,3,4,5]
+[5]
+
+# Issue #761 eval: del over a nested generator-bound slice removes the union
+del(.a[(0,2):(1,4)])
+{"a":[10,20,30,40,50,60]}
+{"a":[50,60]}
+
+# Issue #762 datetime: strptime applies %p alone (PM sets hour 12)
+strptime("%p")
+"PM"
+[1900,0,0,12,0,0,6,-1]
+
+# Issue #762 datetime: strptime applies %p alone (AM keeps hour 0)
+strptime("%p")
+"AM"
+[1900,0,0,0,0,0,6,-1]
+
+# Issue #762 datetime: strptime combines %I and %p (5 PM -> 17)
+strptime("%I:%M %p")
+"05:30 PM"
+[1900,0,0,17,30,0,6,-1]
+
+# Issue #762 datetime: strptime 12 AM with %I/%p is midnight (hour 0)
+strptime("%I:%M %p")
+"12:00 AM"
+[1900,0,0,0,0,0,6,-1]
+
+# Issue #762 datetime: strptime applies %C alone (century 21 -> year 2100, jq's boundary wday)
+strptime("%C")
+"21"
+[2100,0,0,0,0,0,3,-1]
+
+# Issue #762 datetime: strptime applies %C with a leap century (no wday correction)
+strptime("%C")
+"20"
+[2000,0,0,0,0,0,5,-1]
+
+# Issue #762 datetime: strptime combines %C and %y (century + 2-digit year)
+strptime("%C %y")
+"20 05"
+[2005,0,0,0,0,0,5,-1]
+
+# Issue #762 datetime: strptime combines %p and %C across the format
+strptime("%p %C")
+"PM 21"
+[2100,0,0,12,0,0,3,-1]
+
+# Issue #762 datetime: strptime %C with a full date resolves the calendar wday
+strptime("%C %y-%m-%d")
+"21 24-03-15"
+[2124,2,15,0,0,0,3,74]
+
+# Issue #763 datetime: strftime("%x") renders a 4-digit year (macOS libc %m/%d/%Y)
+gmtime|strftime("%x")
+1700000000
+"11/14/2023"
+
+# Issue #763 datetime: strftime %x at the epoch
+gmtime|strftime("%x")
+0
+"01/01/1970"
+
+# Issue #763 datetime: strftime %x composes with other specifiers
+gmtime|strftime("%Y-%m-%d %x %X")
+1700000000
+"2023-11-14 11/14/2023 22:13:20"
+
+# Issue #763 datetime: strftime %%x is a literal percent then x, not the %x specifier
+gmtime|strftime("100%% %x")
+1700000000
+"100% 11/14/2023"
+
+# Issue #763 datetime: strftime %D keeps its own 2-digit year (only %x was wrong)
+gmtime|strftime("%D")
+1700000000
+"11/14/23"
+
+# Issue #764 regex: the p flag enables dotall so . matches a newline
+gsub(".";"X";"p")
+"\n"
+"X"
+
+# Issue #764 regex: p flag dotall lets . span a newline
+[match("a.b";"p").string]
+"a\nb"
+["a\nb"]
+
+# Issue #764 regex: p does not turn ^ into a per-line anchor (single-line anchors)
+test("^b";"p")
+"a\nb"
+false
+
+# Issue #764 regex: p combined with m (both dotall) is tolerated, not a duplicate-flag error
+test("a.b";"mp")
+"a\nb"
+true
+
+# Issue #774 regex: a duplicated valid flag (ii) is tolerated like jq
+test("ab";"ii")
+"AB"
+true
+
+# Issue #774 regex: repeated dotall flag (mm) is tolerated
+test("a.b";"mm")
+"a\nb"
+true
+
+# Issue #765 eval: a free variable in an uncalled nested def does not error
+def g: def f: $x; "inner"; g
+null
+"inner"
+
+# Issue #765 eval: an uncalled def with a free variable is not compiled
+def f: $x; "inner"
+null
+"inner"
+
+# Issue #765 eval: a free variable reached only through an uncalled def is fine
+def f: $x; def g: f; "z"
+null
+"z"
+
+# Issue #765 eval: an unbound var in a def that is never called is ignored
+def f: .+$x; def g: 1; g
+null
+1
+
+# Issue #765 eval: a free variable in an uncalled def's object shorthand is fine
+def f: {$x}; "ok"
+null
+"ok"
+
+# Issue #765 eval: deeply nested uncalled def with a free variable is fine
+def outer: def inner: $z; inner; "ok"
+null
+"ok"
+
+# Issue #766 eval: a $x value-param's implicit filter shadows an outer def of the same name
+def x: 1; def f($x): x; f(5)
+null
+5
+
+# Issue #766 eval: a filter param shadows an outer def of the same name
+def x: 1; def f(x): x; f(2)
+null
+2
+
+# Issue #766 eval: a def nested in the body shadows the enclosing param (innermost wins)
+def f($x): def x: 9; x; f(5)
+null
+9
+
+# Issue #766 eval: an inner def shadows a filter param of the same name
+def f(g): def g: 2; g; f(1)
+null
+2
+
+# Issue #766 eval: a filter param shadows a same-named builtin
+def f(length): length; f(5)
+null
+5
+
+# Issue #766 eval: outer def and param coexist by lexical scope
+def x: 1; [x, (def f($x): x; f(5))]
+null
+[1,5]
+
+# Issue #768 regex: sub keeps every value of a multi-valued replacement generator
+[sub("a";"x","y")]
+"a"
+["x","y"]
+
+# Issue #768 regex: gsub applies the i-th replacement value to all matches in lockstep
+[gsub("a";"x","y")]
+"aa"
+["xx","yy"]
+
+# Issue #768 regex: an empty replacement generator preserves the original string (sub)
+sub("a";empty)
+"a"
+"a"
+
+# Issue #768 regex: an empty replacement generator preserves the original string (gsub)
+gsub("a";empty)
+"aa"
+"aa"
+
+# Issue #768 regex: per-match captures combine in lockstep
+[gsub("(?<c>.)";.c,"Z")]
+"ab"
+["ab","ZZ"]
+
+# Issue #768 regex: uneven generator lengths drop exhausted matches at higher indices
+[gsub("(?<c>.)";if .c=="a" then "x","y" else "z" end)]
+"ab"
+["xz","y"]
+
+# Issue #768 regex: a multi-valued sub feeds downstream folds value by value
+reduce sub("a";"x","y") as $s ("";.+$s)
+"a"
+"xy"
+
+# Issue #769 walk: a multi-valued f forks the array reconstruction (Cartesian per leaf)
+[walk(if type=="number" then .,.+1 else . end)]
+[1]
+[[1,2]]
+
+# Issue #769 walk: lockstep flatten across multiple array elements
+[walk(if type=="number" then .,.+1 else . end)]
+[1,2]
+[[1,2,2,3]]
+
+# Issue #769 walk: a multi-valued binop on a leaf forks
+[walk(if type=="number" then .+(1,2) else . end)]
+[1]
+[[2,3]]
+
+# Issue #769 walk: objects keep the first fork per key (map_values semantics)
+walk(if type=="number" then .+(1,2) else . end)
+{"a":1}
+{"a":2}
+
+# Issue #769 walk: nested array under an object forks the inner array only
+walk(if type=="number" then .,.+1 else . end)
+{"a":1,"b":[2,3]}
+{"a":1,"b":[2,3,3,4]}
+
+# Issue #769 walk: single-valued branch still folds to one output
+walk(if type=="number" then .+1 else . end)
+{"a":1,"b":[2,3]}
+{"a":2,"b":[3,4]}
+
+# Issue #770 _by: sort_by applies jq's NaN-smallest total order
+[2,nan,1]|sort_by(.)
+null
+[null,1,2]
+
+# Issue #770 _by: max_by ignores NaN (never the maximum)
+[2,nan,1]|max_by(.)
+null
+2
+
+# Issue #770 _by: min_by treats NaN as the minimum
+[2,nan,1]|min_by(.)
+null
+null
+
+# Issue #770 _by: group_by keeps each NaN key in its own group (NaN != NaN)
+[nan,1,nan]|group_by(.)
+null
+[[null],[null],[1]]
+
+# Issue #770 _by: unique_by never dedups NaN keys
+[nan,1,nan]|unique_by(.)
+null
+[null,null,1]
+
+# Issue #770 _by: a multi-valued key orders a shorter prefix first
+[[1],[]]|sort_by(.[])
+null
+[[],[1]]
+
+# Issue #770 _by: min_by over multi-valued keys honours prefix ordering
+[[1,2],[1]]|min_by(.[])
+null
+[1]
+
+# Issue #770 _by: group_by over multi-valued keys distinguishes prefix lengths
+[[1,2],[1]]|group_by(.[])
+null
+[[[1]],[[1,2]]]
+
+# Issue #771 tojson: an input-parsed NaN normalizes to null (raw fast path)
+tojson
+nan
+"null"
+
+# Issue #771 tojson: NaN inside a nested input value normalizes to null
+tojson
+[1,nan,2]
+"[1,null,2]"
+
+# Issue #771 @csv: a NaN cell renders empty, not the JSON null
+[1,nan,3]|@csv
+null
+"1,,3"
+
+# Issue #771 @tsv: a NaN cell renders empty, not the JSON null
+[1,nan,3]|@tsv
+null
+"1\t\t3"
+
+# Issue #771 @csv: a lone NaN cell produces an empty row field
+[nan]|@csv
+null
+""
+
+# Issue #772 strptime errors on a total mismatch instead of the [1900,..] placeholder
+strptime("%Y-%m-%d")
+"abc"
+
+# Issue #772 strptime errors on an out-of-range field
+strptime("%Y-%m-%d")
+"2024-13-15"
+
+# Issue #772 strptime errors on trailing input after a full match
+strptime("%Y-%m-%d")
+"2024-01-15X"
+
+# Issue #772 strptime errors on trailing input after a single field
+strptime("%Y")
+"2023x"
+
+# Issue #772 strptime keeps the last value of a double-set field (last-wins)
+"2024 03 February"|strptime("%Y %m %B")
+null
+[2024,1,0,0,0,0,3,30]
+
+# Issue #772 strptime last-wins also applies to the hour (%H then %I)
+"2024-06-15 03 09"|strptime("%Y-%m-%d %H %I")
+null
+[2024,5,15,9,0,0,6,166]
+
+# Issue #772 strptime still resolves a valid partial date (no regression)
+strptime("%Y-%m-%d")
+"2024-01-15"
+[2024,0,15,0,0,0,1,14]
+
+# Issue #775 path: path(getpath(P)) errors when an intermediate value is not indexable
+path(getpath(["a","b"]))
+{"a":1}
+
+# Issue #775 path: indexing a string with a number errors in path position too
+path(getpath([0]))
+"hello"
+
+# Issue #775 path: a valid path traverses and returns the path array
+path(getpath(["a","b"]))
+{"a":{"b":1}}
+["a","b"]
+
+# Issue #775 path: a missing key is lenient (descends into null), not an error
+path(getpath(["a","b"]))
+{"a":{}}
+["a","b"]
+
+# Issue #776 label: an outer break is not captured by a finished inner same-name label
+[label $out | ((label $out | 2), break $out)]
+null
+[2]
+
+# Issue #776 label: triply-nested same-name labels each break to their own scope
+[label $x | (1,(label $x|(2,(label $x|3),break $x,4)),break $x,5)]
+null
+[1,2,3]
+
+# Issue #776 label: an inner break targets the inner label, outer continues
+[label $x | (label $x | break $x), 99]
+null
+[99]
+
+# Issue #776 label: a same-name break inside reaches the nearest enclosing label
+[label $a | (1, (label $b | (2, break $a, 3)), 4)]
+null
+[1,2]
+
+# Issue #777 label: a self-contained break inside a def must not leak into an enclosing try/catch
+def f: label $o | break $o; try f catch "c"
+null
+
+# Issue #777 label: break in a def drops only the def's tail, sibling try branches survive
+def f: label $o | (10, break $o, 20); try (f, 99) catch "c"
+null
+10
+99
+
+# Issue #779 index with an array argument is a contiguous-subsequence search
+index([1,2])
+[0,1,2]
+1
+
+# Issue #779 rindex with an array argument returns the last subsequence start
+rindex([2,3])
+[1,2,3,2,3]
+3
+
+# Issue #779 index still works for a scalar element needle
+index(1)
+[0,1,2]
+1
+
+# Issue #779 index with a no-match array needle returns null
+index([9])
+[0,1,2]
+null
+
+# Issue #780 escaped solidus: identity output decodes \/ to /
+.
+"http:\/\/x.com"
+"http://x.com"
+
+# Issue #780 escaped solidus: field access decodes \/
+.a
+{"a":"x\/y"}
+"x/y"
+
+# Issue #780 escaped solidus: object keys decode \/
+keys
+{"a\/b":1}
+["a/b"]
+
+# Issue #780 escaped solidus: tojson decodes \/ (no leak in the serialized string)
+tojson
+"a\/b"
+"\"a/b\""
+
+# Issue #780 escaped solidus: an escaped backslash before a solidus is not collapsed
+.
+"a\\\/b"
+"a\\/b"
+
+# Issue #780 escaped solidus: to_entries decodes \/ in both key and value
+to_entries
+{"a\/b":"c\/d"}
+[{"key":"a/b","value":"c/d"}]
+
+# Issue #773 regex n flag: test ignores empty matches
+test("";"n")
+"a"
+false
+
+# Issue #773 regex n flag: gsub skips zero-width matches
+gsub("b*";"X";"n")
+"abba"
+"aXa"
+
+# Issue #773 regex n flag: match returns the first non-empty match
+match("a*";"n")
+"Xaa"
+{"offset":1,"length":2,"string":"aa","captures":[]}
+
+# Issue #773 regex n flag: scan drops empty matches
+[scan("b*";"n")]
+"abba"
+["bb"]
+
+# Issue #773 regex n flag: global match with n yields only non-empty matches
+[match("a*";"gn")]
+"Xaa baa"
+[{"offset":1,"length":2,"string":"aa","captures":[]},{"offset":5,"length":2,"string":"aa","captures":[]}]
+
+# Issue #734 cond_chain: a then-branch reading a missing field yields null, not empty
+if (.a >= .a) then .x else .a end
+{"a":0}
+null
+
+# Issue #734 cond_chain: an else-branch missing field with field-vs-field condition yields null
+if (.a >= .b) then .x else .y end
+{"a":0,"b":5}
+null
+
+# Issue #734 cond_chain: present selected field still returns its value
+if (.a >= .a) then .x else .a end
+{"a":0,"x":9}
+9
+
+# Issue #736 destructure: a ?// fallback runs the body with the original ., not the caught error
+5 as [$a] ?// $a | . + $a
+7
+12
+
+# Issue #736 destructure: value_expr reading . is evaluated against the original input in the fallback
+. as [$a] ?// $a | . + $a
+7
+14
+
+# Issue #736 destructure: nested ?// alternatives restore . for the body
+. as {$x} ?// [$x] ?// $x | {d:.,x:$x}
+[42]
+{"d":[42],"x":42}
+
+# Issue #806: limit with an off-type count and an empty generator yields nothing (no error)
+[limit("a"; empty)]
+null
+[]
+
+# Issue #806: limit with an object count and an empty generator yields nothing
+[limit({}; empty)]
+null
+[]
+
+# Issue #806: limit with a non-number count still errors on a non-empty generator
+[limit("a"; 1,2,3)?]
+null
+[]
+
+# Issue #806: nth with an off-type index and an empty generator yields nothing
+[nth("a"; empty)]
+null
+[]
+
+# Issue #806: nth still floors a fractional index over a non-empty generator
+nth(0.5; 10,20,30)
+null
+10
+
+# Issue #807: an unused def referencing an undefined function is ignored
+def e: undefined_fn; 5
+null
+5
+
+# Issue #807: an unused parameterized def with an undefined function body is ignored
+def e($p): undefined_fn; 5
+null
+5
+
+# Issue #807: an unused def referencing an undefined function with args is ignored
+def e: undefined_fn(1,2); 5
+null
+5
+
+# Issue #807: a chain of unused defs ending in an undefined function is ignored
+def e: g; def g: undefined_fn; 5
+null
+5
+
+# Issue #808: @format reads the piped value, not the env input
+. as $x | $x | @json
+{"a":1}
+"{\"a\":1}"
+
+# Issue #808: @text on a piped bound variable
+5 as $x | $x | @text
+null
+"5"
+
+# Issue #808: @base64 on a piped bound string
+"abc" as $x | $x | @base64
+null
+"YWJj"
+
+# Issue #809: a fused .field op after |= still raises the index-type error (caught by ?, collected empty)
+[.[0]|=. | (.a==1)?]
+[1,2]
+[]
+
+# Issue #809: fused .field arithmetic after map_values raises on the array element
+[(map_values(.) | .a+1)?]
+[1]
+[]
+
+# Issue #809: fused .field op after .[]|=. raises on a non-object element
+[(.[]|=. | .a==1 and true)?]
+[1,2]
+[]
+
+# Issue #810: significand normalizes subnormals without overflowing to DBL_MAX
+1e-308 | significand
+null
+1.7976931348623157
+
+# Issue #810: significand of an infinity stays infinite (printed as DBL_MAX), not null
+1e1000 | significand
+null
+1.7976931348623157e+308
+
+# Issue #811: asinh of a large argument is ~709.9, not DBL_MAX
+1e308 | asinh
+null
+709.889355822726
+
+# Issue #811: acosh of a large argument is ~709.9, not DBL_MAX
+1e308 | acosh
+null
+709.889355822726
+
+# Issue #812: scalb truncates its fractional exponent (x * 2^trunc(n))
+[1,0.5] | scalb(.[0]; .[1])
+null
+1
+
+# Issue #812: scalb with a negative fractional exponent truncates toward zero
+[3,-1.9] | scalb(.[0]; .[1])
+null
+1.5
+
+# Issue #813: limit with a NaN count errors (NaN sorts below 0, not unbounded)
+[limit(nan; 1,2,3)?]
+null
+[]
+
+# Issue #813: limit with a NaN count and an empty generator still errors
+[limit(nan; empty)?]
+null
+[]
+
+# Issue #813: getpath with a NaN index is out of range (null), not truncated to 0
+getpath([nan])
+[10,20]
+null
+
+# Issue #813: .[nan] and getpath([nan]) agree (both null)
+.[nan]
+[10,20]
+null
+
+# Issue #814: implode clamps an infinite codepoint to U+FFFD instead of erroring
+[infinite] | implode
+null
+"�"
+
+# Issue #814: implode clamps -infinite to U+FFFD, mixed with valid codepoints
+[65,infinite,66] | implode
+null
+"A�B"
+
+# Issue #814: implode still errors on a NaN codepoint
+[[nan] | implode?]
+null
+[]
+
+# Issue #821: recurse_down/0 is no longer a builtin alias, so a user def is honored
+def recurse_down: recurse; [recurse_down]
+[1,[2]]
+[[1,[2]],1,[2],2]
+
+# Issue #821: recurse/0 still descends (unaffected by removing the recurse_down alias)
+[recurse]
+[1,[2,[3]]]
+[[1,[2,[3]]],1,[2,[3]],2,[3],3]
+
+# Issue #818: . as $v keeps $v bound to the outer value inside .[]|$v (not the element)
+[1] | . as $v | [.[] | $v]
+null
+[[1]]
+
+# Issue #818: map($v) yields the whole bound array per element
+[10,20] | . as $v | map($v)
+null
+[[10,20],[10,20]]
+
+# Issue #818: the collected leak corrupts add, not just printing
+[1,2] | . as $v | [.[] | $v] | add
+null
+[1,2,1,2]
+
+# Issue #818: a dot-preserving body still inlines correctly (no regression)
+5 as $v | [$v, $v+1]
+null
+[5,6]
+
+# Issue #817: chained generator subscripts iterate leftmost-fastest (subscript outer)
+[.[0,1][0,1]]
+[[1,2],[3,4]]
+[1,3,2,4]
+
+# Issue #817: multi-hole interpolation iterates leftmost-fastest (last hole outer)
+["\(1,2)\(3,4)"]
+null
+["13","23","14","24"]
+
+# Issue #817: three-hole interpolation order
+["\(1,2)\(3,4)\(5,6)"]
+null
+["135","235","145","245","136","236","146","246"]
+
+# Issue #817: path context follows the same order
+[path(.[0,1][0,1])]
+[[1,2],[3,4]]
+[[0,0],[1,0],[0,1],[1,1]]
+
+# Issue #817: an explicit pipe is unaffected (already leftmost-outer)
+[.[0,1] | .[0,1]]
+[[1,2],[3,4]]
+[1,2,3,4]
+
+# Issue #819: ?// fallback only applies to source values that fail the first pattern
+[({a:1},2) as {a:$x} ?// $x | $x]
+null
+[1,2]
+
+# Issue #819: array-pattern ?// leak across generator values
+[([1],2,[3]) as [$a] ?// $a | $a]
+null
+[1,2,3]
+
+# Issue #819: a matched value does not leak through the fallback (downstream stays typed)
+[({a:1},2) as {a:$x} ?// $x | $x | .+0]
+null
+[1,2]
+
+# Issue #816: a reduce whose update body navigates is not a path expression
+[path(reduce 1 as $x (.; .a))?]
+{"a":1}
+[]
+
+# Issue #816: |= over such a reduce errors instead of silently mutating
+[(reduce 1 as $x (.; .a) |= 99)?]
+{"a":1}
+[]
+
+# Issue #816: an identity-equivalent update body still path-tracks (init path)
+path(reduce 1 as $x (.a; select(true)))
+{"a":{"b":2}}
+["a"]
+
+# Issue #816: empty source still forwards the INIT path (#711 preserved)
+path(reduce empty as $x (.a; .b))
+{"a":{"b":2}}
+["a"]
+
+# Issue #816: an identity update body forwards the INIT path
+path(reduce 1 as $x (.a; .))
+{"a":{"b":2}}
+["a"]
+
+# Issue #836: try/catch catch-branch is path-tracked (path)
+path(try error catch .b)
+{"b":2}
+["b"]
+
+# Issue #836: try/catch catch-branch is path-tracked (update)
+(try error catch .b) |= .+10
+{"b":2}
+{"b":12}
+
+# Issue #836: try/catch catch-branch is path-tracked (del)
+del(try error catch .b)
+{"b":2}
+{}
+
+# Issue #837: identity-bound variable (. as $x) is the identity path
+. as $x | path($x)
+{"a":1}
+[]
+
+# Issue #837: identity-bound variable navigates from the empty path
+. as $x | path($x | .a)
+{"a":1}
+["a"]
+
+# Issue #838: a navigating reduce SOURCE is rejected in path context
+[(path(reduce .[] as $x (.a; .)))?]
+{"a":1}
+[]
+
+# Issue #838: |= over a navigating reduce source errors (no silent mutation)
+[(reduce .[] as $x (.a; .) |= 9)?]
+{"a":1}
+[]
+
+# Issue #838: a non-navigating reduce source still tracks the INIT path
+path(reduce range(2) as $x (.a; .))
+{"a":1}
+["a"]
+
+# Issue #852: max keeps the LAST maximal element on ties (min keeps first)
+max
+[1.0,1]
+1
+
+# Issue #852: max keeps the last of three representation-distinct equal maxima
+max
+[1.0,1,1.00]
+1.00
+
+# Issue #852: min still keeps the first maximal element on ties
+min
+[1.0,1]
+1.0
+
+# Issue #849: @html escapes an embedded NUL to the two-char sequence \0
+implode|@html
+[97,0,98]
+"a\\0b"
+
+# Issue #849: @html NUL escape is two characters
+implode|@html|length
+[0]
+2
+
+# Issue #849: @sh escapes an embedded NUL to \0 inside the quoted word
+implode|@sh
+[97,0,98]
+"'a\\0b'"
+
+# Issue #851: scan represents an unmatched optional capture as null
+[scan("(a)?b")]
+"b"
+[[null]]
+
+# Issue #851: scan alternation leaves the unmatched branch as null
+[scan("(x)|(y)")]
+"y"
+[[null,"y"]]
+
+# Issue #847: IN/1 membership test on a matching input
+IN(1)
+1
+true
+
+# Issue #847: IN/1 with null candidate against a non-null input
+IN(null)
+5
+false
+
+# Issue #847: a piped input value found in the candidate list
+2|IN(1,2,3)
+null
+true
+
+# Issue #846: IN/2 evaluates the candidate set against the input
+IN(1; .[])
+[1,2,3]
+true
+
+# Issue #846: IN/2 with a constant source and identity candidate set
+IN(false; .)
+null
+false
+
+# Issue #848: pick with a non-path argument reports jq's path error, not the sentinel
+try pick(1) catch .
+{"a":1}
+"Invalid path expression with result 1"
+
+# Issue #848: pick error is catchable across argument shapes
+try pick(.a,3) catch .
+{"a":1}
+"Invalid path expression with result 3"
+
+# Issue #841: comma-separated array index deletes use descending order
+del(.a[1], .a[2])
+{"a":[1,2,3,4]}
+{"a":[1,4]}
+
+# Issue #841: three comma-separated index deletes
+del(.a[0], .a[1], .a[2])
+{"a":[1,2,3,4]}
+{"a":[4]}
+
+# Issue #841: comma-separated slice deletes
+del(.a[1:2], .a[3:4])
+{"a":[1,2,3,4,5]}
+{"a":[1,3,5]}
+
+# Issue #842: a slice path on a non-array container errors (here: object)
+try del(.[1:3]) catch "ERR"
+{}
+"ERR"
+
+# Issue #842: a slice path on a string errors
+try del(.[1:3]) catch "ERR"
+"abcdef"
+"ERR"
+
+# Issue #843: a slice under a missing object key is a no-op (no autovivify)
+del(.a[1:3])
+{}
+{}
+
+# Issue #843: a slice under a deleted key does not autovivify to null
+del(.a, .a[1:3])
+{"a":[0,1,2,3]}
+{}
+
+# Issue #841/#2111: generator-bound slice deletes the union of indices
+del(.a[(0,2):(1,4)])
+{"a":[10,20,30,40,50,60]}
+{"a":[50,60]}
+
+# Issue #850: the tojson/@json raw-byte fast path must normalize \u escapes the
+# way jq does instead of copying them verbatim. Printable escapes decode to
+# UTF-8, a lone low surrogate becomes U+FFFD, and a valid surrogate pair
+# combines into one codepoint, including inside nested objects. (Lone high
+# surrogate -> parse error is pinned in tests/tojson_unicode_escape.rs since it
+# has no stdout to assert here.)
+@json
+"\u0041"
+"\"A\""
+
+@json
+"\u263a"
+"\"☺\""
+
+tojson
+"\u00e9"
+"\"é\""
+
+@json
+"\udc00"
+"\"�\""
+
+tojson
+"\ud83d\ude00"
+"\"😀\""
+
+@json
+{"k":"A\udc00"}
+"{\"k\":\"A�\"}"
+
+# Issue #844: a non-finite error() payload must survive the catch channel.
+# The interpreter serialized the payload to JSON (nan -> null, +-inf -> finite
+# DBL_MAX) and parsed it back, corrupting the value. catch now recovers the
+# exact Value, including nested non-finite numbers and rethrows.
+try error(nan) catch isnan
+null
+true
+
+try error(nan) catch type
+null
+"number"
+
+try error(infinite) catch isinfinite
+null
+true
+
+try error(nan) catch (.+1)
+null
+null
+
+try error({a:[{b:nan}]}) catch (.a[0].b | isnan)
+null
+true
+
+try (try error(nan) catch error) catch isnan
+null
+true
+
+# Issue #840: ?// alternative destructuring is path-transparent (path context)
+path(. as [$a] ?// $a | .x)
+{"x":42}
+["x"]
+
+# Issue #840: ?// path-transparency under del (fallback alt, body is a path)
+del(. as [$a] ?// $a | .x)
+{"x":1,"y":2}
+{"y":2}
+
+# Issue #840: ?// transparency through a successful object-pattern alternative
+path(. as {a:$x} ?// $x | .a.b)
+{"a":{"b":9}}
+["a","b"]
+
+# Issue #840: ?// transparency through nested 3-alternative fallback chain
+path(. as [$a] ?// {p:$a} ?// $a | .q)
+{"p":1,"q":2}
+["q"]
+
+# Issue #840: ?// path-transparency drives an assignment LHS update
+. as {a:$x} ?// $x | .a.b |= 100
+{"a":{"b":9}}
+{"a":{"b":100}}
+
+# Issue #839: a non-path value piped into a discarding filter yields no path (last(empty))
+[path(last(empty))]
+{"a":1}
+[]
+
+# Issue #839: a rootless value piped into empty is swallowed, not an error
+[path(1 | empty)]
+{"a":1}
+[]
+
+# Issue #839: select(false) discards the rootless value in path context
+[path(5 | select(. > 10))]
+{"a":1}
+[]
+
+# Issue #839: a non-path reduce result flows through a discarding downstream
+[path(reduce empty as $x (.a; .) | if false then . else empty end)]
+{"a":1}
+[]
+
+# Issue #839: a transforming downstream surfaces the deferred result at the sink
+try path(1 | .+1) catch .
+{"a":1}
+"Invalid path expression with result 2"
+
+# Issue #839: navigating a rootless value reports jq's first-hop message
+try path([1] | if length>0 then .[0] else empty end) catch .
+{"a":1}
+"Invalid path expression near attempt to access element 0 of [1]"
+
+# Issue #839: an identity downstream leaves the rootless value at the sink
+try path(1 | select(true)) catch .
+{"a":1}
+"Invalid path expression with result 1"
+
+# Issue #839: foreach over a value-generator threads the accumulator path (identity body)
+[path(foreach range(2) as $i (.a; .; .))]
+{"a":1}
+[["a"],["a"]]
+
+# Issue #839: a navigating foreach extract extends the accumulator path
+[path(foreach range(2) as $i (.a; .; .b))]
+{"a":{"b":9}}
+[["a","b"],["a","b"]]
+
+# Issue #839: a value-valued foreach extract surfaces jq's path error at the sink
+try path(foreach range(2) as $i (.a; .; $i)) catch .
+{"a":1}
+"Invalid path expression with result 0"
+
+# Issue #839: nth over a value generator reports the counter result, not the last source value
+try path(nth(1; range(5))) catch .
+{"a":1}
+"Invalid path expression with result 1"
+
+# Issue #839: a comma-list value source also threads the accumulator path
+[path(foreach (1,2) as $i (.a; .; .))]
+{"a":{"b":1}}
+[["a"],["a"]]
+
+# Issue #839: a discarding foreach extract drops iterations in path context
+[path(foreach range(3) as $i (.a; .; select($i!=1)))]
+{"a":1}
+[["a"],["a"]]
+
+# Issue #839: an empty value source yields no foreach paths
+[path(foreach empty as $i (.a; .; .))]
+{"a":1}
+[]
+
+# Issue #839: a foreach-derived path drives an assignment LHS
+(foreach range(2) as $i (.a; .; .)) |= 99
+{"a":1}
+{"a":99}
+
+# Issue #839: a foreach-derived path drives del
+del(foreach range(1) as $i (.a; .; .))
+{"a":1,"b":2}
+{"b":2}
+
+# Path tracking: a rootless error() payload bound by catch is not the identity path
+try path(try error("E") catch .) catch .
+{"a":1}
+"Invalid path expression with result \"E\""
+
+# Path tracking: a rootless catch payload errors even under an outer navigation
+try path(.a | try error("E") catch .) catch .
+{"a":1}
+"Invalid path expression with result \"E\""
+
+# Path tracking: a bare error re-raises . so catch . is the identity path
+[path(try error catch .)]
+5
+[[]]
+
+# Path tracking: error(.) re-raises the tracked input, so catch . stays trackable
+[path(try error(.) catch .)]
+5
+[[]]
+
+# Path tracking: navigating a rootless catch payload reports jq's first hop
+try path(try error([1,2]) catch .[0]) catch .
+5
+"Invalid path expression near attempt to access element 0 of [1,2]"
+
+# Path tracking: a discarding catch body yields no path for a rootless payload
+[path(try error("E") catch empty)]
+5
+[]
+
+# Path tracking: a catch value flows through an assignment LHS update
+.a |= (try error("X") catch .)
+{"a":1}
+{"a":"X"}
+
+# Path tracking: a bare error under navigation keeps the catch body trackable
+[path(.a | try error catch .b)]
+{"a":{"b":9}}
+[["a","b"]]
+
+# Path error result truncation: jq truncates a value dump longer than 29 bytes to its first 26 bytes + "..."
+try (path("this is a fairly long string value here")) catch .
+null
+"Invalid path expression with result \"this is a fairly long str..."
+
+# Path error result truncation: long array dump
+try (path([1,2,3,4,5,6,7,8,9,10,11,12,13,14,15])) catch .
+null
+"Invalid path expression with result [1,2,3,4,5,6,7,8,9,10,11,1..."
+
+# Path error result truncation: long object dump
+try (path({"key":"value","another":"thing","more":"data"})) catch .
+null
+"Invalid path expression with result {\"key\":\"value\",\"another\":\"..."
+
+# Path error result truncation: dump of exactly 28 bytes is left intact (no truncation under the threshold)
+try (path([1,2,3,4,5,6,7,8,9,10,11,12])) catch .
+null
+"Invalid path expression with result [1,2,3,4,5,6,7,8,9,10,11,12]"
+
+# Path error near-attempt truncation: rootless navigate into a long string value
+try (path("this is a fairly long string value here" | .x)) catch .
+null
+"Invalid path expression near attempt to access element \"x\" of \"this is a fairly long str..."
+
+# Path error near-attempt truncation: rootless navigate into a long array value
+try (path([1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16] | .[20])) catch .
+null
+"Invalid path expression near attempt to access element 20 of [1,2,3,4,5,6,7,8,9,10,11,1..."
+
+# @csv/@tsv preserve a precision-edge literal's uppercase-E decnum form (DBL_MAX, #616-class)
+[1.7976931348623157e308]|@csv
+null
+"1.7976931348623157E+308"
+
+# @csv/@tsv preserve the smallest-subnormal literal's decnum form
+[5e-324]|@csv
+null
+"5E-324"
+
+# @tsv preserves a 16-significant-digit literal exponent (was lossy decimal-expanded)
+[9.999999999999999e22]|@tsv
+null
+"9.999999999999999E+22"
+
+# @csv preserves a large high-precision literal in exponent form (was decimal-expanded)
+[1.234567890123456e30]|@csv
+null
+"1.234567890123456E+30"
+
+# @csv on a COMPUTED edge value keeps jq's lowercase dtoa form (literal-vs-computed split)
+[5e-324*1]|@csv
+null
+"5e-324"
+
+# @tsv preserves the smallest normal-double literal's decnum form
+[2.2250738585072014e-308]|@tsv
+null
+"2.2250738585072014E-308"

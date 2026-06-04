@@ -57,7 +57,7 @@ pub type EnvRef = Rc<RefCell<Env>>;
 // Pre-populated by CLI before eval/JIT execution. Per-thread to keep
 // `cargo test` parallel runs honest — see `value::OBJMAP_POOL`.
 thread_local! {
-    static INPUTS_STATE: RefCell<(Vec<Value>, usize)> = const { RefCell::new((Vec::new(), 0)) };
+    static INPUTS_STATE: RefCell<(Vec<(Value, u64)>, usize)> = const { RefCell::new((Vec::new(), 0)) };
 }
 
 // Per-thread 1-indexed line number for `input_line_number`. The CLI updates
@@ -79,8 +79,11 @@ pub fn get_input_line_number() -> u64 {
     INPUT_LINE_STATE.with(|c| c.get())
 }
 
-/// Set the inputs queue for `input`/`inputs` builtins.
-pub fn set_inputs_queue(values: Vec<Value>) {
+/// Set the inputs queue for `input`/`inputs` builtins. Each entry pairs the
+/// document value with the `input_line_number` jq reports after consuming it
+/// (#855): reading a document via `input`/`inputs` advances the counter, just
+/// like the main per-document loop.
+pub fn set_inputs_queue(values: Vec<(Value, u64)>) {
     INPUTS_STATE.with_borrow_mut(|state| {
         state.0 = values;
         state.1 = 0;
@@ -95,9 +98,10 @@ pub fn clear_inputs_queue() {
     });
 }
 
-/// Read the next input value. Returns None if exhausted.
+/// Read the next input value, advancing `input_line_number` to the line on
+/// which that document ended (#855). Returns None if exhausted.
 pub fn read_next_input() -> Option<Value> {
-    INPUTS_STATE.with_borrow_mut(|state| {
+    let next = INPUTS_STATE.with_borrow_mut(|state| {
         if state.1 < state.0.len() {
             let idx = state.1;
             state.1 += 1;
@@ -105,7 +109,14 @@ pub fn read_next_input() -> Option<Value> {
         } else {
             None
         }
-    })
+    });
+    match next {
+        Some((v, line)) => {
+            set_input_line_number(line);
+            Some(v)
+        }
+        None => None,
+    }
 }
 
 /// Typed error for label/break to avoid string formatting/parsing overhead.
@@ -117,6 +128,62 @@ impl std::fmt::Display for BreakError {
     }
 }
 impl std::error::Error for BreakError {}
+
+thread_local! {
+    /// Lossless payload slot for the most recently raised `error(value)`
+    /// (#844). `Value` holds `Rc`s, so it cannot live inside an
+    /// `anyhow::Error` (which requires `Send + Sync`); instead `error`
+    /// stashes the value here and bails with the `Send + Sync` [`ErrorValue`]
+    /// marker. The matching `catch` takes the value straight back. This
+    /// mirrors jit.rs's `JIT_ERROR_VALUE` channel. The slot is safe as a
+    /// single cell because error propagation is synchronous LIFO unwinding:
+    /// only one `error(value)` is ever in flight, and the catching `try`
+    /// takes it immediately. A stale value left by an uncaught error is
+    /// overwritten by the next `error` and is never read by the string path
+    /// (which only fires when the `ErrorValue` downcast fails).
+    static ERROR_PAYLOAD: std::cell::RefCell<Option<Value>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Typed marker error carrying an `error(value)` payload losslessly (#844).
+///
+/// The string channel (`__jqerror__:<JSON>`) serializes the payload with
+/// `value_to_json_precise`, which is lossy for non-finite numbers anywhere
+/// in the value: `nan` becomes `null` and `±infinite` saturates to the
+/// nearest finite f64. Round-tripping that JSON back in a `catch` branch
+/// therefore corrupts the caught value. The exact `Value` rides in
+/// [`ERROR_PAYLOAD`] instead; `Display` still emits the `__jqerror__:<JSON>`
+/// form so uncaught errors print exactly as before.
+#[derive(Debug)]
+struct ErrorValue {
+    display: String,
+}
+impl ErrorValue {
+    /// Stash `value` in the thread-local payload slot and build the marker
+    /// error whose `Display` reproduces the legacy `__jqerror__:<JSON>` text.
+    fn raise(value: Value) -> anyhow::Error {
+        let display = format!("__jqerror__:{}", crate::value::value_to_json_precise(&value));
+        ERROR_PAYLOAD.with(|slot| *slot.borrow_mut() = Some(value));
+        ErrorValue { display }.into()
+    }
+}
+impl std::fmt::Display for ErrorValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.display)
+    }
+}
+impl std::error::Error for ErrorValue {}
+
+/// Take the payload stashed by the most recent `error(value)`. Falls back to
+/// re-parsing the marker's `display` JSON if the slot is somehow empty.
+fn take_error_payload(ev: &ErrorValue) -> Value {
+    if let Some(v) = ERROR_PAYLOAD.with(|slot| slot.borrow_mut().take()) {
+        return v;
+    }
+    match ev.display.strip_prefix("__jqerror__:") {
+        Some(json) => crate::value::json_to_value(json).unwrap_or_else(|_| Value::from_str(&ev.display)),
+        None => Value::from_str(&ev.display),
+    }
+}
 
 /// The value a `try ... catch` / `?` receives when it catches a `break`
 /// signal. jq surfaces the break as `{"__jq": <label id>}`; matching the
@@ -317,7 +384,7 @@ fn subst_inner(
             let new_idx = alloc!(*var_index);
             Expr::LetBinding { var_index: new_idx, value, body: sb!(body) }
         }
-        Expr::TryCatch { try_expr, catch_expr } => Expr::TryCatch { try_expr: sb!(try_expr), catch_expr: sb!(catch_expr) },
+        Expr::TryCatch { try_expr, catch_expr, restore_dot } => Expr::TryCatch { try_expr: sb!(try_expr), catch_expr: sb!(catch_expr), restore_dot: *restore_dot },
         Expr::Collect { generator } => Expr::Collect { generator: sb!(generator) },
         Expr::Negate { operand } => Expr::Negate { operand: sb!(operand) },
         Expr::Alternative { primary, fallback } => Expr::Alternative { primary: sb!(primary), fallback: sb!(fallback) },
@@ -437,7 +504,7 @@ pub(crate) fn append_call_args(expr: &Expr, target: usize, extra: &[Expr]) -> Ex
         Expr::LetBinding { var_index, value, body } => Expr::LetBinding {
             var_index: *var_index, value: rb!(value), body: rb!(body),
         },
-        Expr::TryCatch { try_expr, catch_expr } => Expr::TryCatch { try_expr: rb!(try_expr), catch_expr: rb!(catch_expr) },
+        Expr::TryCatch { try_expr, catch_expr, restore_dot } => Expr::TryCatch { try_expr: rb!(try_expr), catch_expr: rb!(catch_expr), restore_dot: *restore_dot },
         Expr::Collect { generator } => Expr::Collect { generator: rb!(generator) },
         Expr::Negate { operand } => Expr::Negate { operand: rb!(operand) },
         Expr::Alternative { primary, fallback } => Expr::Alternative { primary: rb!(primary), fallback: rb!(fallback) },
@@ -586,12 +653,13 @@ fn subst_cow(expr: &Expr, pv: &[u16], args: &[Expr]) -> Option<Expr> {
                 body: Box::new(b.unwrap_or_else(|| body.as_ref().clone())),
             })
         }
-        Expr::TryCatch { try_expr, catch_expr } => {
+        Expr::TryCatch { try_expr, catch_expr, restore_dot } => {
             let t = s!(try_expr); let c = s!(catch_expr);
             if t.is_none() && c.is_none() { return None; }
             Some(Expr::TryCatch {
                 try_expr: Box::new(t.unwrap_or_else(|| try_expr.as_ref().clone())),
                 catch_expr: Box::new(c.unwrap_or_else(|| catch_expr.as_ref().clone())),
+                restore_dot: *restore_dot,
             })
         }
         Expr::Collect { generator } => s!(generator).map(|g| Expr::Collect { generator: Box::new(g) }),
@@ -872,7 +940,7 @@ fn contains_func_call(expr: &Expr, target: usize) -> bool {
         Expr::Each { input_expr } | Expr::EachOpt { input_expr } | Expr::Recurse { input_expr } => c!(input_expr),
         Expr::IfThenElse { cond, then_branch, else_branch } => c!(cond) || c!(then_branch) || c!(else_branch),
         Expr::LetBinding { value, body, .. } => c!(value) || c!(body),
-        Expr::TryCatch { try_expr, catch_expr } => c!(try_expr) || c!(catch_expr),
+        Expr::TryCatch { try_expr, catch_expr, .. } => c!(try_expr) || c!(catch_expr),
         Expr::Collect { generator } => c!(generator),
         Expr::Alternative { primary, fallback } => c!(primary) || c!(fallback),
         Expr::Reduce { source, init, update, .. } => c!(source) || c!(init) || c!(update),
@@ -933,7 +1001,7 @@ fn expr_uses_outer_input(expr: &Expr) -> bool {
         | Expr::Alternative { primary: left, fallback: right }
         | Expr::Index { expr: left, key: right }
         | Expr::IndexOpt { expr: left, key: right }
-        | Expr::TryCatch { try_expr: left, catch_expr: right } => {
+        | Expr::TryCatch { try_expr: left, catch_expr: right, .. } => {
             expr_uses_outer_input(left) || expr_uses_outer_input(right)
         }
         // GetPath/SetPath/DelPaths/Update/Assign always read `.` to produce
@@ -1017,7 +1085,7 @@ pub(crate) fn expr_uses_var(expr: &Expr, target: u16) -> bool {
         | Expr::Update { path_expr: left, update_expr: right }
         | Expr::Assign { path_expr: left, value_expr: right }
         | Expr::SetPath { path: left, value: right }
-        | Expr::TryCatch { try_expr: left, catch_expr: right } => {
+        | Expr::TryCatch { try_expr: left, catch_expr: right, .. } => {
             expr_uses_var(left, target) || expr_uses_var(right, target)
         }
         Expr::Mutate { path_expr, value_expr, .. } => {
@@ -1071,6 +1139,111 @@ pub(crate) fn expr_uses_var(expr: &Expr, target: u16) -> bool {
         Expr::Memoize { key, body, .. } => {
             key.as_ref().is_some_and(|k| expr_uses_var(k, target))
                 || expr_uses_var(body, target)
+        }
+    }
+}
+
+/// Push the `func_id` of every `FuncCall` that appears anywhere in `expr` onto
+/// `out` (one level deep — the caller follows callees transitively). Exhaustive
+/// over `Expr` so a call buried in any sub-expression is found, which is what
+/// makes the #765 reachability check sound. Mirrors `expr_uses_var`'s structure.
+pub(crate) fn collect_func_calls(expr: &Expr, out: &mut Vec<usize>) {
+    match expr {
+        Expr::Input | Expr::Empty | Expr::Not | Expr::Env | Expr::Builtins
+        | Expr::ReadInput | Expr::ReadInputs | Expr::ModuleMeta | Expr::GenLabel
+        | Expr::Literal(_) | Expr::Loc { .. } | Expr::LoadVar { .. } => {}
+        Expr::Pipe { left, right } | Expr::Comma { left, right }
+        | Expr::BinOp { lhs: left, rhs: right, .. }
+        | Expr::Alternative { primary: left, fallback: right }
+        | Expr::While { cond: left, update: right }
+        | Expr::Until { cond: left, update: right }
+        | Expr::Limit { count: left, generator: right }
+        | Expr::Index { expr: left, key: right }
+        | Expr::IndexOpt { expr: left, key: right }
+        | Expr::Update { path_expr: left, update_expr: right }
+        | Expr::Assign { path_expr: left, value_expr: right }
+        | Expr::SetPath { path: left, value: right }
+        | Expr::TryCatch { try_expr: left, catch_expr: right, .. } => {
+            collect_func_calls(left, out);
+            collect_func_calls(right, out);
+        }
+        Expr::Mutate { path_expr, value_expr, .. } => {
+            collect_func_calls(path_expr, out);
+            collect_func_calls(value_expr, out);
+        }
+        Expr::IfThenElse { cond, then_branch, else_branch } => {
+            collect_func_calls(cond, out);
+            collect_func_calls(then_branch, out);
+            collect_func_calls(else_branch, out);
+        }
+        Expr::LetBinding { value, body, .. } => {
+            collect_func_calls(value, out);
+            collect_func_calls(body, out);
+        }
+        Expr::Each { input_expr } | Expr::EachOpt { input_expr }
+        | Expr::Recurse { input_expr } | Expr::Repeat { update: input_expr }
+        | Expr::Negate { operand: input_expr } | Expr::UnaryOp { operand: input_expr, .. }
+        | Expr::Collect { generator: input_expr }
+        | Expr::PathExpr { expr: input_expr } | Expr::GetPath { path: input_expr }
+        | Expr::DelPaths { paths: input_expr } | Expr::Debug { expr: input_expr }
+        | Expr::Stderr { expr: input_expr } | Expr::Format { expr: input_expr, .. } => {
+            collect_func_calls(input_expr, out);
+        }
+        Expr::Reduce { source, init, update, .. }
+        | Expr::Foreach { source, init, update, .. } => {
+            collect_func_calls(source, out);
+            collect_func_calls(init, out);
+            collect_func_calls(update, out);
+        }
+        Expr::Range { from, to, step } => {
+            collect_func_calls(from, out);
+            collect_func_calls(to, out);
+            if let Some(s) = step { collect_func_calls(s, out); }
+        }
+        Expr::FuncCall { func_id, args } => {
+            out.push(*func_id);
+            for a in args { collect_func_calls(a, out); }
+        }
+        Expr::CallBuiltin { args, .. } => { for a in args { collect_func_calls(a, out); } }
+        Expr::ObjectConstruct { pairs } => {
+            for (k, v) in pairs { collect_func_calls(k, out); collect_func_calls(v, out); }
+        }
+        Expr::StringInterpolation { parts } => {
+            for p in parts { if let StringPart::Expr(e) = p { collect_func_calls(e, out); } }
+        }
+        Expr::AllShort { generator, predicate } | Expr::AnyShort { generator, predicate } => {
+            collect_func_calls(generator, out);
+            collect_func_calls(predicate, out);
+        }
+        Expr::Label { body, .. } | Expr::Break { value: body, .. } => collect_func_calls(body, out),
+        Expr::Error { msg } => { if let Some(m) = msg { collect_func_calls(m, out); } }
+        Expr::ClosureOp { input_expr, key_expr, .. } => {
+            collect_func_calls(input_expr, out);
+            collect_func_calls(key_expr, out);
+        }
+        Expr::Slice { expr, from, to } => {
+            collect_func_calls(expr, out);
+            if let Some(f) = from { collect_func_calls(f, out); }
+            if let Some(t) = to { collect_func_calls(t, out); }
+        }
+        Expr::RegexTest { input_expr, re, flags } | Expr::RegexMatch { input_expr, re, flags }
+        | Expr::RegexCapture { input_expr, re, flags } | Expr::RegexScan { input_expr, re, flags } => {
+            collect_func_calls(input_expr, out);
+            collect_func_calls(re, out);
+            collect_func_calls(flags, out);
+        }
+        Expr::RegexSub { input_expr, re, tostr, flags } | Expr::RegexGsub { input_expr, re, tostr, flags } => {
+            collect_func_calls(input_expr, out);
+            collect_func_calls(re, out);
+            collect_func_calls(tostr, out);
+            collect_func_calls(flags, out);
+        }
+        Expr::AlternativeDestructure { alternatives } => {
+            for a in alternatives { collect_func_calls(a, out); }
+        }
+        Expr::Memoize { key, body, .. } => {
+            if let Some(k) = key { collect_func_calls(k, out); }
+            collect_func_calls(body, out);
         }
     }
 }
@@ -1622,7 +1795,7 @@ fn eval_update_body(
     if let Err(e) = path_result {
         let msg = format!("{}", e);
         if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
-            bail!("Invalid path expression with result {}", json);
+            bail!("Invalid path expression with result {}", trunc_path_dump(json));
         }
         return Err(e);
     }
@@ -1692,7 +1865,7 @@ fn eval_assign_body(
         if let Err(e) = path_result {
             let msg = format!("{}", e);
             if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
-                bail!("Invalid path expression with result {}", json);
+                bail!("Invalid path expression with result {}", trunc_path_dump(json));
             }
             return Err(e);
         }
@@ -1712,7 +1885,7 @@ fn eval_assign_body(
         if let Err(e) = path_result {
             let msg = format!("{}", e);
             if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
-                bail!("Invalid path expression with result {}", json);
+                bail!("Invalid path expression with result {}", trunc_path_dump(json));
             }
             return Err(e);
         }
@@ -1726,6 +1899,91 @@ fn eval_assign_body(
         }
         cb(result)
     })
+}
+
+/// `while(cond; update)` with full generator semantics.
+///
+/// jq desugars it to `def _while: if cond then ., (update | _while) else empty
+/// end; _while;`. The update is therefore a *generator*: each value it yields is
+/// an independent successor that re-enters the loop. The common case (update
+/// yields exactly one value) stays a tight tail-iteration; an empty update
+/// terminates the chain (#760), and a multi-valued update fans out (#767).
+fn eval_while_gen(
+    cond: &Expr, update: &Expr, always_true: bool, mut current: Value,
+    env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult,
+) -> GenResult {
+    loop {
+        if !always_true {
+            let is_true = if let Ok(v) = eval_one(cond, &current, env) {
+                v.is_truthy()
+            } else {
+                let mut t = false;
+                eval(cond, current.clone(), env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
+                t
+            };
+            if !is_true { return Ok(true); }
+        }
+        if !cb(current.clone())? { return Ok(false); }
+        // Advance through `update`, honouring its generator semantics.
+        if let Ok(next) = eval_one(update, &current, env) {
+            current = next; // single value → tail-iterate (hot path)
+            continue;
+        }
+        let mut succ: Vec<Value> = Vec::new();
+        eval(update, current.clone(), env, &mut |v| { succ.push(v); Ok(true) })?;
+        match succ.len() {
+            0 => return Ok(true),                  // empty update → no successor (#760)
+            1 => current = succ.pop().unwrap(),    // single value → tail-iterate
+            _ => {                                 // multi-valued → fan out (#767)
+                for u in succ {
+                    if !eval_while_gen(cond, update, always_true, u, env, cb)? {
+                        return Ok(false);
+                    }
+                }
+                return Ok(true);
+            }
+        }
+    }
+}
+
+/// `until(cond; update)` with full generator semantics.
+///
+/// jq desugars it to `def _until: if cond then . else (update | _until) end;
+/// _until;`. As with `while`, the update is a generator: an empty update yields
+/// no successor (so the loop terminates emitting nothing) and a multi-valued
+/// update fans out, each value re-entering the loop.
+fn eval_until_gen(
+    cond: &Expr, update: &Expr, mut current: Value,
+    env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult,
+) -> GenResult {
+    loop {
+        let is_true = if let Ok(v) = eval_one(cond, &current, env) {
+            v.is_truthy()
+        } else {
+            let mut t = false;
+            eval(cond, current.clone(), env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
+            t
+        };
+        if is_true { return cb(current); }
+        if let Ok(next) = eval_one(update, &current, env) {
+            current = next; // single value → tail-iterate (hot path)
+            continue;
+        }
+        let mut succ: Vec<Value> = Vec::new();
+        eval(update, current.clone(), env, &mut |v| { succ.push(v); Ok(true) })?;
+        match succ.len() {
+            0 => return Ok(true),                  // empty update → no successor
+            1 => current = succ.pop().unwrap(),    // single value → tail-iterate
+            _ => {                                 // multi-valued → fan out
+                for u in succ {
+                    if !eval_until_gen(cond, update, u, env, cb)? {
+                        return Ok(false);
+                    }
+                }
+                return Ok(true);
+            }
+        }
+    }
 }
 
 pub fn eval(
@@ -1824,8 +2082,12 @@ pub fn eval(
             if let Ok(v) = eval_one(expr, &input, env) {
                 return cb(v);
             }
-            eval(base_expr, input.clone(), env, &mut |base| {
-                eval(key_expr, input.clone(), env, &mut |key| {
+            // jq iterates the subscript generator in the OUTER loop and the
+            // base generator in the inner loop, so the leftmost generator
+            // varies fastest: `.[0,1][0,1]` yields .[0][0], .[1][0], .[0][1],
+            // .[1][1]. Nesting base outer reversed that order (#817).
+            eval(key_expr, input.clone(), env, &mut |key| {
+                eval(base_expr, input.clone(), env, &mut |base| {
                     match eval_index(&base, &key, false) {
                         Ok(v) => cb(v),
                         Err(msg) => bail!("{}", msg),
@@ -1835,8 +2097,9 @@ pub fn eval(
         }
 
         Expr::IndexOpt { expr: base_expr, key: key_expr } => {
-            eval(base_expr, input.clone(), env, &mut |base| {
-                eval(key_expr, input.clone(), env, &mut |key| {
+            // Subscript generator outer, base inner — see Expr::Index (#817).
+            eval(key_expr, input.clone(), env, &mut |key| {
+                eval(base_expr, input.clone(), env, &mut |base| {
                     match eval_index(&base, &key, true) {
                         Ok(v) => cb(v),
                         Err(_) => Ok(true),
@@ -1945,9 +2208,25 @@ pub fn eval(
                         } else if let Ok(next) = eval_one(update, &current, env) {
                             current = next;
                         } else {
-                            let mut next = Value::Null;
-                            eval(update, current, env, &mut |v| { next = v; Ok(true) })?;
-                            current = next;
+                            // `update` is a generator here: 0, 1, or many successors.
+                            let mut succ: Vec<Value> = Vec::new();
+                            eval(update, current.clone(), env, &mut |v| { succ.push(v); Ok(true) })?;
+                            match succ.len() {
+                                0 => break,                        // empty update terminates (#760)
+                                1 => current = succ.pop().unwrap(),
+                                _ => {
+                                    // Multi-valued update (#767): each successor spawns an
+                                    // independent continuation of `while(cond; update)`, whose
+                                    // values flow through the piped `right`. Delegate to the
+                                    // generator helper so the linear fast path stays untouched.
+                                    for u in succ {
+                                        let go = eval_while_gen(cond, update, always_true, u, env,
+                                            &mut |wv| eval(right, wv, env, cb))?;
+                                        if !go { return Ok(false); }
+                                    }
+                                    break;
+                                }
+                            }
                         }
                     }
                     Ok(true)
@@ -2139,7 +2418,7 @@ pub fn eval(
             })
         }
 
-        Expr::TryCatch { try_expr, catch_expr } => {
+        Expr::TryCatch { try_expr, catch_expr, .. } => {
             let cb_error = std::cell::Cell::new(false);
             let result = eval(try_expr, input.clone(), env, &mut |val| {
                 match &val {
@@ -2166,6 +2445,12 @@ pub fn eval(
                     // excluded above by `cb_error`. See #715.
                     if let Some(be) = e.downcast_ref::<BreakError>() {
                         return eval(catch_expr, break_catch_value(be.0), env, cb);
+                    }
+                    // A typed `error(value)` payload is recovered losslessly,
+                    // dodging the lossy JSON round-trip (#844).
+                    if let Some(ev) = e.downcast_ref::<ErrorValue>() {
+                        let v = take_error_payload(ev);
+                        return eval(catch_expr, v, env, cb);
                     }
                     let msg = format!("{}", e);
                     // halt / halt_error are non-recoverable: jq lets them
@@ -2215,6 +2500,14 @@ pub fn eval(
         }
 
         Expr::LetBinding { var_index, value, body } => {
+            // Register `. as $var` so a path-mode `path($var)` in the body sees
+            // the identity-path provenance (#837). Cheap push/pop; only fires
+            // for the identity binding form.
+            let _id_guard = if matches!(value.as_ref(), Expr::Input) {
+                Some(push_identity_path_var(*var_index))
+            } else {
+                None
+            };
             if matches!(value.as_ref(), Expr::Input) {
                 // Fast path: `. as $var | body`
                 let tmp_vi = *var_index;
@@ -2878,7 +3171,7 @@ pub fn eval(
                 Err(e) => {
                     let msg = format!("{}", e);
                     if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
-                        bail!("Invalid path expression with result {}", json);
+                        bail!("Invalid path expression with result {}", trunc_path_dump(json));
                     }
                     Err(e)
                 }
@@ -3102,7 +3395,7 @@ pub fn eval(
         }
 
         Expr::StringInterpolation { parts } => {
-            eval_interp_parts(parts, 0, String::new(), input, env, cb)
+            eval_interp_parts(parts, parts.len() as isize - 1, String::new(), input, env, cb)
         }
 
         Expr::Limit { count, generator } => {
@@ -3121,7 +3414,10 @@ pub fn eval(
                         // dropping the ceil item (#719). The JIT path already
                         // does this float compare (jit.rs emit_yield); this
                         // aligns the eval/interpreter path with it and with jq.
-                        if n < 0.0 {
+                        // jq orders NaN below every number, so `count < 0` is
+                        // true for NaN and it takes the negative-count error
+                        // path rather than acting as an unbounded count (#813).
+                        if n < 0.0 || n.is_nan() {
                             bail!("__jqerror__:\"limit doesn't support negative count\"");
                         }
                         if n == 0.0 { return Ok(true); } // 0.0 and -0.0 → empty
@@ -3152,16 +3448,28 @@ pub fn eval(
                         bail!("__jqerror__:\"limit doesn't support negative count\"");
                     }
                     // String / array / object surface jq's `$n - 1`
-                    // arithmetic error from the limit reduce.
+                    // arithmetic error from the limit reduce. jq computes that
+                    // update lazily — only once the generator yields its first
+                    // item — so an empty generator produces no error at all
+                    // (#806). Defer the error until `generator` yields.
                     other => {
                         let msg = format!(
                             "{} and number (1) cannot be subtracted",
                             crate::runtime::errdesc_pub(other),
                         );
-                        bail!(
+                        let err = format!(
                             "__jqerror__:{}",
                             crate::value::value_to_json_precise(&Value::from_string(msg)),
                         );
+                        let mut yielded = false;
+                        eval(generator, input.clone(), env, &mut |_val| {
+                            yielded = true;
+                            Ok(false)
+                        })?;
+                        if yielded {
+                            bail!("{}", err);
+                        }
+                        Ok(true)
                     }
                 }
             })
@@ -3169,50 +3477,11 @@ pub fn eval(
 
         Expr::While { cond, update } => {
             let always_true = matches!(cond.as_ref(), Expr::Literal(Literal::True));
-            let mut current = input;
-            loop {
-                if !always_true {
-                    let is_true = if let Ok(v) = eval_one(cond, &current, env) {
-                        v.is_truthy()
-                    } else {
-                        let mut t = false;
-                        eval(cond, current.clone(), env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
-                        t
-                    };
-                    if !is_true { break; }
-                }
-                if !cb(current.clone())? { return Ok(false); }
-                if let Ok(next) = eval_one(update, &current, env) {
-                    current = next;
-                } else {
-                    let mut next = Value::Null;
-                    eval(update, current, env, &mut |v| { next = v; Ok(true) })?;
-                    current = next;
-                }
-            }
-            Ok(true)
+            eval_while_gen(cond, update, always_true, input, env, cb)
         }
 
         Expr::Until { cond, update } => {
-            let mut current = input;
-            loop {
-                let is_true = if let Ok(v) = eval_one(cond, &current, env) {
-                    v.is_truthy()
-                } else {
-                    let mut t = false;
-                    eval(cond, current.clone(), env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
-                    t
-                };
-                if is_true { break; }
-                if let Ok(next) = eval_one(update, &current, env) {
-                    current = next;
-                } else {
-                    let mut next = Value::Null;
-                    eval(update, current, env, &mut |v| { next = v; Ok(true) })?;
-                    current = next;
-                }
-            }
-            cb(current)
+            eval_until_gen(cond, update, input, env, cb)
         }
 
         Expr::Repeat { update } => {
@@ -3336,12 +3605,15 @@ pub fn eval(
         }
 
         Expr::Error { msg } => {
+            // Carry the payload as a typed `ErrorValue` so a downstream
+            // `catch` recovers the exact value, including non-finite numbers
+            // that the JSON channel would corrupt (#844).
             if let Some(msg_expr) = msg {
                 eval(msg_expr, input, env, &mut |val| {
-                    bail!("__jqerror__:{}", crate::value::value_to_json_precise(&val))
+                    Err(ErrorValue::raise(val))
                 })
             } else {
-                bail!("__jqerror__:{}", crate::value::value_to_json_precise(&input))
+                Err(ErrorValue::raise(input))
             }
         }
 
@@ -3461,38 +3733,61 @@ pub fn eval(
                             crate::runtime::errdesc_pub(&rv),
                         ))?;
                         let segments = crate::runtime::sub_gsub_segments(input_str, re_str, &fv, is_global)?;
-                        let mut result = String::new();
+                        // jq treats the replacement as a generator and applies the
+                        // i-th value of every match in lockstep — NOT a Cartesian
+                        // product (#768). So the number of outputs is the largest
+                        // number of values any single match yields; a match whose
+                        // generator runs out at index i contributes nothing (drops
+                        // the match) for that output. When *every* match yields
+                        // nothing (or there are no matches at all), jq emits the
+                        // original string unchanged.
+                        let mut reps: Vec<Vec<Value>> = Vec::new();
                         for seg in &segments {
-                            result.push_str(&seg.literal);
                             if let Some(ref cap_obj) = seg.captures {
-                                let mut replacement = Value::Null;
-                                eval(tostr, cap_obj.clone(), env, &mut |tv| {
-                                    replacement = tv;
-                                    Ok(true)
-                                })?;
-                                // jq's sub/gsub concatenates the replacement
-                                // into the running string via `+`. String
-                                // works as expected; null is the additive
-                                // identity (drops the match); other types
-                                // surface jq's standard addition error
-                                // referencing the partial result built so
-                                // far (#545). The previous `.to_string()`
-                                // catch-all silently coerced non-strings.
-                                match &replacement {
-                                    Value::Str(s) => result.push_str(s),
-                                    Value::Null => {},
-                                    other => {
-                                        let partial = Value::from_string(result);
-                                        bail!(
-                                            "{} and {} cannot be added",
-                                            crate::runtime::errdesc_pub(&partial),
-                                            crate::runtime::errdesc_pub(other),
-                                        );
+                                let mut vals = Vec::new();
+                                eval(tostr, cap_obj.clone(), env, &mut |tv| { vals.push(tv); Ok(true) })?;
+                                reps.push(vals);
+                            }
+                        }
+                        let n = reps.iter().map(|v| v.len()).max().unwrap_or(0);
+                        if n == 0 {
+                            // No matches, or every replacement generator was empty:
+                            // the original string is preserved as a single output.
+                            return cb(s.clone());
+                        }
+                        for i in 0..n {
+                            let mut result = String::new();
+                            let mut cap_idx = 0;
+                            for seg in &segments {
+                                result.push_str(&seg.literal);
+                                if seg.captures.is_some() {
+                                    let rep = reps[cap_idx].get(i);
+                                    cap_idx += 1;
+                                    // jq concatenates the replacement via `+`: a
+                                    // string appends, null is the additive identity
+                                    // (drops the match), other types surface jq's
+                                    // standard addition error referencing the partial
+                                    // result built so far (#545). A missing value at
+                                    // this index likewise drops the match.
+                                    match rep {
+                                        Some(Value::Str(rs)) => result.push_str(rs),
+                                        Some(Value::Null) | None => {},
+                                        Some(other) => {
+                                            let partial = Value::from_string(result);
+                                            bail!(
+                                                "{} and {} cannot be added",
+                                                crate::runtime::errdesc_pub(&partial),
+                                                crate::runtime::errdesc_pub(other),
+                                            );
+                                        }
                                     }
                                 }
                             }
+                            if !cb(Value::from_string(result))? {
+                                return Ok(false);
+                            }
                         }
-                        cb(Value::from_string(result))
+                        Ok(true)
                     })
                 })
             })
@@ -3510,17 +3805,51 @@ pub fn eval(
         }
 
         Expr::Slice { expr: base_expr, from, to } => {
-            eval(base_expr, input.clone(), env, &mut |base| {
-                let from_val = if let Some(f) = from {
-                    let mut v = Value::Null;
-                    eval(f, input.clone(), env, &mut |fv| { v = fv; Ok(true) })?; v
-                } else { Value::Null };
-                let to_val = if let Some(t) = to {
-                    let mut v = Value::Null;
-                    eval(t, input.clone(), env, &mut |tv| { v = tv; Ok(true) })?; v
-                } else { Value::Null };
-                cb(eval_slice(&base, &from_val, &to_val)?)
-            })
+            // jq yields the Cartesian product of the bound generators, nested
+            // from (outer) → to (middle) → base (inner). A missing bound is a
+            // single Null (slice-from-start / slice-to-end); an *empty* bound
+            // generator contributes no values, so the whole slice yields nothing. #761
+            //
+            // Fast path: both bounds resolve to a single value (the common
+            // `.[a:b]` shape) — no product, no intermediate Vec.
+            let from_one = match from { None => Some(Value::Null), Some(f) => eval_one(f, &input, env).ok() };
+            let to_one = match to { None => Some(Value::Null), Some(t) => eval_one(t, &input, env).ok() };
+            if let (Some(fv), Some(tv)) = (&from_one, &to_one) {
+                return eval(base_expr, input.clone(), env, &mut |base| {
+                    cb(eval_slice(&base, fv, tv)?)
+                });
+            }
+            // Slow path: at least one bound is a generator (or empty).
+            let from_vals: Vec<Value> = match (&from_one, from) {
+                (Some(v), _) => vec![v.clone()],
+                (None, Some(f)) => {
+                    let mut vs = Vec::new();
+                    eval(f, input.clone(), env, &mut |v| { vs.push(v); Ok(true) })?;
+                    vs
+                }
+                (None, None) => vec![Value::Null],
+            };
+            if from_vals.is_empty() { return Ok(true); }
+            let to_vals: Vec<Value> = match (&to_one, to) {
+                (Some(v), _) => vec![v.clone()],
+                (None, Some(t)) => {
+                    let mut vs = Vec::new();
+                    eval(t, input.clone(), env, &mut |v| { vs.push(v); Ok(true) })?;
+                    vs
+                }
+                (None, None) => vec![Value::Null],
+            };
+            if to_vals.is_empty() { return Ok(true); }
+            for fv in &from_vals {
+                for tv in &to_vals {
+                    if !eval(base_expr, input.clone(), env, &mut |base| {
+                        cb(eval_slice(&base, fv, tv)?)
+                    })? {
+                        return Ok(false);
+                    }
+                }
+            }
+            Ok(true)
         }
 
         Expr::Loc { file, line } => {
@@ -4037,7 +4366,8 @@ fn eval_obj_pairs(pairs: &[(Expr, Expr)], idx: usize, cur: crate::value::ObjMap,
 
 fn format_sh_scalar(val: &Value) -> Result<String> {
     match val {
-        Value::Str(s) => Ok(format!("'{}'", s.replace('\'', "'\\''"))),
+        // jq escapes an embedded NUL to `\0` inside the quoted shell word (#849).
+        Value::Str(s) => Ok(format!("'{}'", s.replace('\'', "'\\''").replace('\0', "\\0"))),
         Value::Null => Ok("null".to_string()),
         Value::True => Ok("true".to_string()),
         Value::False => Ok("false".to_string()),
@@ -4167,6 +4497,10 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
                     '>' => r.push_str("&gt;"),
                     '\'' => r.push_str("&apos;"),
                     '"' => r.push_str("&quot;"),
+                    // jq escapes an embedded NUL to the two-character sequence
+                    // `\0` in @html (and @sh); other control bytes pass through
+                    // unchanged. See #849.
+                    '\0' => r.push_str("\\0"),
                     _ => r.push(c),
                 }
             }
@@ -4499,13 +4833,11 @@ fn sort_indexed_by_key(indexed: &mut [(usize, &Value)]) {
             });
         }
         Value::Num(..) => {
-            indexed.sort_by(|(_, ka), (_, kb)| {
-                if let (Value::Num(a, _), Value::Num(b, _)) = (ka, kb) {
-                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-                } else {
-                    crate::runtime::compare_values(ka, kb)
-                }
-            });
+            // `partial_cmp` returns None for NaN and would collapse to Equal,
+            // leaving NaN keys misordered (and dropped by group_by/unique_by).
+            // jq's total order (#115) places NaN below every number, which
+            // `compare_values` implements. #770
+            indexed.sort_by(|(_, ka), (_, kb)| crate::runtime::compare_values(ka, kb));
         }
         _ => {
             indexed.sort_by(|(_, ka), (_, kb)| crate::runtime::compare_values(ka, kb));
@@ -4702,18 +5034,24 @@ fn eval_closure_op(op: ClosureOpKind, container: &Value, key_expr: &Expr, _input
         _ => bail!("Cannot iterate over {}", crate::runtime::errdesc_pub(container)),
     };
 
-    // Fast path: f64 key extraction — avoids eval overhead and Vec<Value> allocations
+    // Fast path: f64 key extraction — avoids eval overhead and Vec<Value> allocations.
+    // A NaN key disqualifies this path: its raw IEEE comparator neither orders
+    // NaN (jq sorts it smallest) nor keeps NaN keys distinct under group_by /
+    // unique_by (NaN is never equal to itself). Such inputs fall through to the
+    // Value-based paths, which route ordering through `compare_values` and
+    // grouping through `values_equal`. #770
     if !a.is_empty() {
-        if let Some(first_key) = try_eval_key_f64(key_expr, &a[0]) {
+        if let Some(first_key) = try_eval_key_f64(key_expr, &a[0]).filter(|k| !k.is_nan()) {
             let mut f64_keys: Vec<f64> = Vec::with_capacity(a.len());
             f64_keys.push(first_key);
             let mut all_f64 = true;
             for item in &a[1..] {
-                if let Some(k) = try_eval_key_f64(key_expr, item) {
-                    f64_keys.push(k);
-                } else {
-                    all_f64 = false;
-                    break;
+                match try_eval_key_f64(key_expr, item) {
+                    Some(k) if !k.is_nan() => f64_keys.push(k),
+                    _ => {
+                        all_f64 = false;
+                        break;
+                    }
                 }
             }
             if all_f64 {
@@ -4739,54 +5077,65 @@ fn eval_closure_op(op: ClosureOpKind, container: &Value, key_expr: &Expr, _input
         }
     }
 
-    let mut keyed: Vec<(Vec<Value>, Value)> = Vec::new();
+    // Multi-valued key path: jq collects every output of the key expression
+    // into an array and orders those arrays with its standard value comparison —
+    // lexicographically, with a shorter prefix sorting before a longer one
+    // (`[] < [1] < [1,2]`). The previous hand-rolled comparator zipped to the
+    // shorter length and treated a prefix as equal, and never applied jq's NaN
+    // ordering. Wrapping the collected keys in `Value::Arr` lets `compare_values`
+    // (ordering) and `values_equal` (grouping) handle both correctly. #770
+    let mut keyed: Vec<(Value, Value)> = Vec::new();
     for item in a.iter() {
         let mut keys = Vec::new();
         eval(key_expr, item.clone(), env, &mut |k| { keys.push(k); Ok(true) })?;
-        keyed.push((keys, item.clone()));
+        keyed.push((Value::Arr(Rc::new(keys)), item.clone()));
     }
     match op {
         ClosureOpKind::SortBy => {
-            keyed.sort_by(|(ka, _), (kb, _)| { ka.iter().zip(kb.iter()).map(|(a, b)| crate::runtime::compare_values(a, b)).find(|o| *o != std::cmp::Ordering::Equal).unwrap_or(std::cmp::Ordering::Equal) });
+            keyed.sort_by(|(ka, _), (kb, _)| crate::runtime::compare_values(ka, kb));
             cb(Value::Arr(Rc::new(keyed.into_iter().map(|(_, v)| v).collect())))
         }
         ClosureOpKind::GroupBy => {
-            keyed.sort_by(|(ka, _), (kb, _)| { ka.iter().zip(kb.iter()).map(|(a, b)| crate::runtime::compare_values(a, b)).find(|o| *o != std::cmp::Ordering::Equal).unwrap_or(std::cmp::Ordering::Equal) });
-            let mut groups: Vec<Value> = Vec::new(); let mut cg: Vec<Value> = Vec::new(); let mut ck: Option<Vec<Value>> = None;
-            for (keys, val) in keyed {
-                if let Some(ref pk) = ck { if keys.len()==pk.len()&&keys.iter().zip(pk.iter()).all(|(a,b)| crate::runtime::values_equal(a,b)) { cg.push(val); } else { groups.push(Value::Arr(Rc::new(std::mem::take(&mut cg)))); cg.push(val); ck=Some(keys); } } else { cg.push(val); ck=Some(keys); }
+            keyed.sort_by(|(ka, _), (kb, _)| crate::runtime::compare_values(ka, kb));
+            let mut groups: Vec<Value> = Vec::new(); let mut cg: Vec<Value> = Vec::new(); let mut ck: Option<Value> = None;
+            for (key, val) in keyed {
+                if let Some(ref pk) = ck {
+                    if crate::runtime::values_equal(&key, pk) { cg.push(val); }
+                    else { groups.push(Value::Arr(Rc::new(std::mem::take(&mut cg)))); cg.push(val); ck = Some(key); }
+                } else { cg.push(val); ck = Some(key); }
             }
             if !cg.is_empty() { groups.push(Value::Arr(Rc::new(cg))); }
             cb(Value::Arr(Rc::new(groups)))
         }
         ClosureOpKind::UniqueBy => {
             // jq: unique_by(f) = group_by(f) | map(.[0]) — sorted by key, deduped.
-            keyed.sort_by(|(ka, _), (kb, _)| { ka.iter().zip(kb.iter()).map(|(a, b)| crate::runtime::compare_values(a, b)).find(|o| *o != std::cmp::Ordering::Equal).unwrap_or(std::cmp::Ordering::Equal) });
+            keyed.sort_by(|(ka, _), (kb, _)| crate::runtime::compare_values(ka, kb));
             let mut result: Vec<Value> = Vec::new();
-            let mut prev: Option<Vec<Value>> = None;
-            for (keys, val) in keyed {
-                let is_dup = match &prev {
-                    Some(pk) => pk.len() == keys.len() && pk.iter().zip(keys.iter()).all(|(a, b)| crate::runtime::values_equal(a, b)),
-                    None => false,
-                };
+            let mut prev: Option<Value> = None;
+            for (key, val) in keyed {
+                let is_dup = prev.as_ref().is_some_and(|pk| crate::runtime::values_equal(pk, &key));
                 if !is_dup {
                     result.push(val);
-                    prev = Some(keys);
+                    prev = Some(key);
                 }
             }
             cb(Value::Arr(Rc::new(result)))
         }
         ClosureOpKind::MinBy => {
             if keyed.is_empty() { cb(Value::Null) } else {
-                let mut mi = 0; for i in 1..keyed.len() { if keyed[i].0.iter().zip(keyed[mi].0.iter()).map(|(a,b)| crate::runtime::compare_values(a,b)).find(|o|*o!=std::cmp::Ordering::Equal).unwrap_or(std::cmp::Ordering::Equal) == std::cmp::Ordering::Less { mi=i; } }
+                let mut mi = 0;
+                for i in 1..keyed.len() {
+                    if crate::runtime::compare_values(&keyed[i].0, &keyed[mi].0) == std::cmp::Ordering::Less { mi = i; }
+                }
                 cb(keyed[mi].1.clone())
             }
         }
         ClosureOpKind::MaxBy => {
             if keyed.is_empty() { cb(Value::Null) } else {
-                let mut mi = 0; for i in 1..keyed.len() {
-                    let cmp = keyed[i].0.iter().zip(keyed[mi].0.iter()).map(|(a,b)| crate::runtime::compare_values(a,b)).find(|o|*o!=std::cmp::Ordering::Equal).unwrap_or(std::cmp::Ordering::Equal);
-                    if cmp == std::cmp::Ordering::Greater || cmp == std::cmp::Ordering::Equal { mi=i; }
+                let mut mi = 0;
+                for i in 1..keyed.len() {
+                    let cmp = crate::runtime::compare_values(&keyed[i].0, &keyed[mi].0);
+                    if cmp == std::cmp::Ordering::Greater || cmp == std::cmp::Ordering::Equal { mi = i; }
                 }
                 cb(keyed[mi].1.clone())
             }
@@ -4827,7 +5176,7 @@ pub fn eval_path_standalone(path_expr: &Expr, input: Value, env_ref: &Rc<RefCell
         Err(e) => {
             let msg = format!("{}", e);
             if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
-                bail!("Invalid path expression with result {}", json);
+                bail!("Invalid path expression with result {}", trunc_path_dump(json));
             }
             Err(e)
         }
@@ -4845,10 +5194,15 @@ pub fn eval_closure_op_standalone(op: ClosureOpKind, container: &Value, key_expr
     Ok(result)
 }
 
-fn eval_interp_parts(parts: &[StringPart], idx: usize, cur: String, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
-    if idx >= parts.len() { return cb(Value::from_str(&cur)); }
-    match &parts[idx] {
-        StringPart::Literal(s) => { let mut n = cur; n.push_str(s); eval_interp_parts(parts, idx+1, n, input, env, cb) }
+// Build the interpolated string by recursing from the LAST part to the first,
+// prepending each piece to the `suffix` accumulated from the parts to its
+// right. This makes the rightmost generator hole the outermost loop, so the
+// leftmost hole varies fastest — matching jq: `"\(1,2)\(3,4)"` yields
+// "13","23","14","24". Iterating left-to-right reversed that order (#817).
+fn eval_interp_parts(parts: &[StringPart], idx: isize, suffix: String, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
+    if idx < 0 { return cb(Value::from_str(&suffix)); }
+    match &parts[idx as usize] {
+        StringPart::Literal(s) => { let mut n = s.clone(); n.push_str(&suffix); eval_interp_parts(parts, idx-1, n, input, env, cb) }
         StringPart::Expr(e) => {
             eval(e, input.clone(), env, &mut |val| {
                 // String interpolation runs `tostring` semantics on the
@@ -4858,8 +5212,8 @@ fn eval_interp_parts(parts: &[StringPart], idx: usize, cur: String, input: Value
                 // `value_to_json_tojson` to keep the literal form when the
                 // f64 round-trips it exactly. See #560.
                 let s = match &val { Value::Str(s) => s.to_string(), _ => crate::value::value_to_json_tojson(&val) };
-                let mut n = cur.clone(); n.push_str(&s);
-                eval_interp_parts(parts, idx+1, n, input.clone(), env, cb)
+                let mut n = s; n.push_str(&suffix);
+                eval_interp_parts(parts, idx-1, n, input.clone(), env, cb)
             })
         }
     }
@@ -4885,56 +5239,140 @@ thread_local! {
     static FOREACH_PATH_BIND: RefCell<Vec<(u16, Value)>> = const { RefCell::new(Vec::new()) };
 }
 
+thread_local! {
+    // Variables bound to the identity path via `. as $x`. jq tracks the empty
+    // path provenance of an identity binding, so `path($x)` is the identity
+    // path `[]` as long as the current input still equals the captured value
+    // (it becomes invalid once `.` navigates away). A literal binding such as
+    // `5 as $x` carries no path and is always rejected. Each binding site has a
+    // globally unique var index (the parser never reuses one), so a non-identity
+    // rebind of the same name gets a fresh index absent from this set and
+    // correctly shadows. See #837.
+    static IDENTITY_PATH_VARS: RefCell<Vec<u16>> = const { RefCell::new(Vec::new()) };
+}
+
+/// RAII guard registering `var_index` as identity-path-bound for its lifetime.
+struct IdentityVarGuard;
+impl Drop for IdentityVarGuard {
+    fn drop(&mut self) {
+        IDENTITY_PATH_VARS.with(|s| { s.borrow_mut().pop(); });
+    }
+}
+fn push_identity_path_var(var_index: u16) -> IdentityVarGuard {
+    IDENTITY_PATH_VARS.with(|s| s.borrow_mut().push(var_index));
+    IdentityVarGuard
+}
+fn is_identity_path_var(var_index: u16) -> bool {
+    IDENTITY_PATH_VARS.with(|s| s.borrow().contains(&var_index))
+}
+
+/// Emit one slice path component `{start, end}` appended to base path `bp`,
+/// type-checking the receiver the same way jq does. Shared by the single-bound
+/// fast path and the Cartesian-product slow path of path-context slicing (#761).
+fn emit_slice_path(
+    input: &Value, bp: &Value, from_val: &Value, to_val: &Value,
+    cb: &mut dyn FnMut(Value) -> GenResult,
+) -> GenResult {
+    // Type-check the receiver: jq errors on path slicing of non-array/string/null.
+    let base = crate::runtime::rt_getpath(input, bp).unwrap_or(Value::Null);
+    match &base {
+        Value::Arr(_) | Value::Str(_) | Value::Null => {}
+        other => bail!("Cannot index {} with object", other.type_name()),
+    }
+    // jq preserves the literal slice expressions in path output without
+    // clamping to the receiver's actual length. Omitted bounds → null.
+    let mut p = match bp { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
+    p.push(Value::object_from_map({
+        let mut m = crate::value::new_objmap();
+        m.insert("start".into(), from_val.clone());
+        m.insert("end".into(), to_val.clone());
+        m
+    }));
+    cb(Value::Arr(Rc::new(p)))
+}
+
+/// Truncate a rendered JSON dump for path-expression error messages the way
+/// jq's `jv_dump_string_trunc` does (buffer size 30): a dump longer than 29
+/// bytes keeps its first 26 bytes followed by "...". jq does a raw byte
+/// `strncpy`; we cut at the largest char boundary at or below byte 26 so the
+/// message stays valid UTF-8 (identical to jq for ASCII, which covers the
+/// "result <X>" and "near attempt to access <K> of <V>" sinks). #870 follow-up.
+fn trunc_path_dump(s: &str) -> String {
+    if s.len() <= 29 {
+        return s.to_string();
+    }
+    let mut cut = 26;
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}...", &s[..cut])
+}
+
 fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
     match expr {
         Expr::Input => cb(Value::Arr(Rc::new(vec![]))),
         Expr::Index { expr: be, key: ke } => {
             let cb_called = std::cell::Cell::new(false);
             let input_for_check = input.clone();
+            // Collect the base paths first (preserving the path-validity error
+            // recovery below), then iterate subscript-outer / base-inner so the
+            // leftmost generator varies fastest, matching jq's order for
+            // `path(.[0,1][0,1])` (#817). Validating per (key, base) is
+            // equivalent to the old (base, key) loop — only the iteration
+            // order differs.
+            let mut base_paths: Vec<Value> = Vec::new();
             let result = eval_path(be, input.clone(), env, &mut |bp| {
                 cb_called.set(true);
+                base_paths.push(bp);
+                Ok(true)
+            })
+            .and_then(|_| {
                 eval(ke, input.clone(), env, &mut |key| {
-                    // jq errors `path(.field)` when the base value at the
-                    // current path can't accept the key type (issue #46).
-                    // Only objects (with string keys), arrays (with number
-                    // keys), and null (a no-op) are valid bases.
-                    let base_val = crate::runtime::rt_getpath(&input_for_check, &bp).unwrap_or(Value::Null);
-                    match (&base_val, &key) {
-                        (Value::Obj(_), Value::Str(_)) => {}
-                        (Value::Arr(_), Value::Num(_, _)) => {}
-                        // jq accepts `path(.[arr])` on an array — the array
-                        // key becomes a single path component. Updates via
-                        // this path still fail in rt_setpath with `Cannot
-                        // update field at array index of array`. See #467.
-                        (Value::Arr(_), Value::Arr(_)) => {}
-                        // jq treats `.[OBJ]` on array/string as a slice when
-                        // OBJ has both `start` and `end` keys with Num/Null
-                        // values. Otherwise it errors with `Array/string
-                        // slice indices must be integers`. See #596.
-                        (Value::Arr(_) | Value::Str(_), Value::Obj(_)) => {
-                            if !is_valid_slice_object(&key) {
-                                bail!("Array/string slice indices must be integers");
+                    for bp in &base_paths {
+                        // jq errors `path(.field)` when the base value at the
+                        // current path can't accept the key type (issue #46).
+                        // Only objects (with string keys), arrays (with number
+                        // keys), and null (a no-op) are valid bases.
+                        let base_val = crate::runtime::rt_getpath(&input_for_check, bp).unwrap_or(Value::Null);
+                        match (&base_val, &key) {
+                            (Value::Obj(_), Value::Str(_)) => {}
+                            (Value::Arr(_), Value::Num(_, _)) => {}
+                            // jq accepts `path(.[arr])` on an array — the array
+                            // key becomes a single path component. Updates via
+                            // this path still fail in rt_setpath with `Cannot
+                            // update field at array index of array`. See #467.
+                            (Value::Arr(_), Value::Arr(_)) => {}
+                            // jq treats `.[OBJ]` on array/string as a slice when
+                            // OBJ has both `start` and `end` keys with Num/Null
+                            // values. Otherwise it errors with `Array/string
+                            // slice indices must be integers`. See #596.
+                            (Value::Arr(_) | Value::Str(_), Value::Obj(_)) => {
+                                if !is_valid_slice_object(&key) {
+                                    bail!("Array/string slice indices must be integers");
+                                }
+                            }
+                            // null accepts string/number/object keys (the slicing
+                            // form), but jq errors on bool/null/array keys with
+                            // `Cannot index null with <type>` (#594).
+                            (Value::Null, Value::Str(_) | Value::Num(_, _) | Value::Obj(_)) => {}
+                            _ => {
+                                // jq's wording: string keys keep the quoted
+                                // value (`string "x"`), other key types use
+                                // the bare type name (`number`, `boolean`,
+                                // `null`). Aligns with the read-side fix from
+                                // #440. See #500.
+                                let key_desc = match &key {
+                                    Value::Str(s) => format!("string \"{}\"", s),
+                                    other => other.type_name().to_string(),
+                                };
+                                bail!("Cannot index {} with {}", base_val.type_name(), key_desc);
                             }
                         }
-                        // null accepts string/number/object keys (the slicing
-                        // form), but jq errors on bool/null/array keys with
-                        // `Cannot index null with <type>` (#594).
-                        (Value::Null, Value::Str(_) | Value::Num(_, _) | Value::Obj(_)) => {}
-                        _ => {
-                            // jq's wording: string keys keep the quoted
-                            // value (`string "x"`), other key types use
-                            // the bare type name (`number`, `boolean`,
-                            // `null`). Aligns with the read-side fix from
-                            // #440. See #500.
-                            let key_desc = match &key {
-                                Value::Str(s) => format!("string \"{}\"", s),
-                                other => other.type_name().to_string(),
-                            };
-                            bail!("Cannot index {} with {}", base_val.type_name(), key_desc);
-                        }
+                        let mut p = match bp { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
+                        p.push(key.clone());
+                        if !cb(Value::Arr(Rc::new(p)))? { return Ok(false); }
                     }
-                    let mut p = match &bp { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
-                    p.push(key); cb(Value::Arr(Rc::new(p)))
+                    Ok(true)
                 })
             });
             match result {
@@ -4948,7 +5386,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                             Value::Str(s) => format!("element \"{}\" of", s),
                             _ => format!("element {} of", crate::value::value_to_json(&key_val)),
                         };
-                        bail!("Invalid path expression near attempt to access {} {}", key_desc, json);
+                        bail!("Invalid path expression near attempt to access {} {}", key_desc, trunc_path_dump(json));
                     }
                     Err(e)
                 }
@@ -5006,14 +5444,48 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                                     Value::Str(s) => format!("element \"{}\" of", s),
                                     _ => format!("element {} of", crate::value::value_to_json(&key_val)),
                                 };
-                                bail!("Invalid path expression near attempt to access {} {}", key_desc, json);
+                                bail!("Invalid path expression near attempt to access {} {}", key_desc, trunc_path_dump(json));
                             }
                             Expr::Each { .. } | Expr::EachOpt { .. } => {
                                 bail!("Invalid path expression near attempt to iterate through {}", json);
                             }
                             _ => {
-                                // Pass __pathexpr_result__ through for higher-level handlers
-                                Err(e)
+                                // jq evaluates `A | B` in path context by running B
+                                // on the VALUE A produced, even when A is a rootless
+                                // (non-path) value. A discarding B (`empty`,
+                                // `select(false)`, an `else empty` branch) yields
+                                // nothing, so no invalid-path error reaches the sink:
+                                // `path(last(empty))` = `… reduce empty … | if
+                                // length>0 then .[0] else empty end` → []. A
+                                // transforming B surfaces its own result/error. When
+                                // B navigates the rootless value, jq reports the
+                                // first hop (`near attempt to access element 0 of
+                                // [1]`); an identity B leaves the value at the sink
+                                // (`result <A>`). #839
+                                match crate::value::json_to_value(json) {
+                                    Ok(v) => {
+                                        let mut nav: Option<Value> = None;
+                                        match eval_path(right, v.clone(), env, &mut |rp| {
+                                            nav = Some(rp);
+                                            Ok(false)
+                                        }) {
+                                            Err(re) => Err(re),
+                                            Ok(_) => match &nav {
+                                                None => Ok(true),
+                                                Some(Value::Arr(comps)) if !comps.is_empty() => {
+                                                    let key_desc = match &comps[0] {
+                                                        Value::Num(n, _) => format!("element {} of", crate::value::format_jq_number(*n)),
+                                                        Value::Str(s) => format!("element \"{}\" of", s),
+                                                        other => format!("element {} of", crate::value::value_to_json(other)),
+                                                    };
+                                                    bail!("Invalid path expression near attempt to access {} {}", key_desc, trunc_path_dump(&crate::value::value_to_json(&v)))
+                                                }
+                                                _ => Err(e),
+                                            },
+                                        }
+                                    }
+                                    Err(_) => Err(e),
+                                }
                             }
                         }
                     } else {
@@ -5030,9 +5502,11 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
         }
         Expr::Recurse { .. } => eval_recurse_paths(&input, &Value::Arr(Rc::new(vec![])), cb),
         Expr::LetBinding { var_index, value, body } => {
+            let identity_bind = matches!(value.as_ref(), Expr::Input);
             eval(value, input.clone(), env, &mut |val| {
                 let old = env.borrow().get_var(*var_index);
                 env.borrow_mut().set_var(*var_index, val);
+                let _id_guard = if identity_bind { Some(push_identity_path_var(*var_index)) } else { None };
                 let result = eval_path(body, input.clone(), env, cb);
                 env.borrow_mut().set_var(*var_index, old);
                 result
@@ -5048,40 +5522,65 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             })
         }
         Expr::Slice { expr: base_expr, from, to } => {
-            eval_path(base_expr, input.clone(), env, &mut |bp| {
-                // Type-check the receiver: jq errors on path slicing of non-array/string/null.
-                let base = crate::runtime::rt_getpath(&input, &bp).unwrap_or(Value::Null);
-                match &base {
-                    Value::Arr(_) | Value::Str(_) | Value::Null => {}
-                    other => bail!("Cannot index {} with object", other.type_name()),
+            // Slice bounds are generators: produce the Cartesian product of
+            // path components, nested from (outer) → to (middle) → base (inner),
+            // mirroring the value-context handler. #761
+            let from_one = match from { None => Some(Value::Null), Some(f) => eval_one(f, &input, env).ok() };
+            let to_one = match to { None => Some(Value::Null), Some(t) => eval_one(t, &input, env).ok() };
+            if let (Some(fv), Some(tv)) = (&from_one, &to_one) {
+                return eval_path(base_expr, input.clone(), env, &mut |bp| {
+                    emit_slice_path(&input, &bp, fv, tv, cb)
+                });
+            }
+            let from_vals: Vec<Value> = match (&from_one, from) {
+                (Some(v), _) => vec![v.clone()],
+                (None, Some(f)) => {
+                    let mut vs = Vec::new();
+                    eval(f, input.clone(), env, &mut |v| { vs.push(v); Ok(true) })?;
+                    vs
                 }
-                let from_val = if let Some(f) = from {
-                    let mut v = Value::Null;
-                    eval(f, input.clone(), env, &mut |fv| { v = fv; Ok(true) })?; v
-                } else { Value::Null };
-                let to_val = if let Some(t) = to {
-                    let mut v = Value::Null;
-                    eval(t, input.clone(), env, &mut |tv| { v = tv; Ok(true) })?; v
-                } else { Value::Null };
-                // jq preserves the literal slice expressions in path output without
-                // clamping to the receiver's actual length. Omitted bounds → null.
-                let mut p = match &bp { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
-                p.push(Value::object_from_map({
-                    let mut m = crate::value::new_objmap();
-                    m.insert("start".into(), from_val);
-                    m.insert("end".into(), to_val);
-                    m
-                }));
-                cb(Value::Arr(Rc::new(p)))
-            })
+                (None, None) => vec![Value::Null],
+            };
+            if from_vals.is_empty() { return Ok(true); }
+            let to_vals: Vec<Value> = match (&to_one, to) {
+                (Some(v), _) => vec![v.clone()],
+                (None, Some(t)) => {
+                    let mut vs = Vec::new();
+                    eval(t, input.clone(), env, &mut |v| { vs.push(v); Ok(true) })?;
+                    vs
+                }
+                (None, None) => vec![Value::Null],
+            };
+            if to_vals.is_empty() { return Ok(true); }
+            for fv in &from_vals {
+                for tv in &to_vals {
+                    if !eval_path(base_expr, input.clone(), env, &mut |bp| {
+                        emit_slice_path(&input, &bp, fv, tv, cb)
+                    })? {
+                        return Ok(false);
+                    }
+                }
+            }
+            Ok(true)
         }
         Expr::CallBuiltin { name, args } if name == "getpath" && args.len() == 1 => {
-            // In path context, getpath(p) = the path p itself
-            eval(&args[0], input, env, cb)
+            // In path context, getpath(p) yields the path p — but jq still
+            // traverses the input along p and raises a type error if an
+            // intermediate value cannot be indexed. `rt_getpath` performs that
+            // exact check (lenient on missing keys, strict on type mismatch), so
+            // validate before emitting the path. #775
+            eval(&args[0], input.clone(), env, &mut |pv| {
+                crate::runtime::rt_getpath(&input, &pv)?;
+                cb(pv)
+            })
         }
         Expr::GetPath { path } => {
-            // In path context, getpath(p) = the path p itself
-            eval(path, input, env, cb)
+            // In path context, getpath(p) = the path p itself, validated against
+            // the input the same way as the CallBuiltin form above. #775
+            eval(path, input.clone(), env, &mut |pv| {
+                crate::runtime::rt_getpath(&input, &pv)?;
+                cb(pv)
+            })
         }
         Expr::FuncCall { func_id, .. } => {
             let func = env.borrow().funcs.get(*func_id).cloned();
@@ -5091,27 +5590,46 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 bail!("undefined function id {}", func_id)
             }
         }
-        Expr::TryCatch { try_expr, catch_expr } => {
+        Expr::TryCatch { try_expr, catch_expr, restore_dot } => {
             let result = eval_path(try_expr, input.clone(), env, cb);
             match result {
                 Ok(cont) => Ok(cont),
                 Err(e) => {
-                    // A caught `break` surfaces as `{"__jq": id}`, mirroring the
-                    // value-mode handler (#715).
-                    if let Some(be) = e.downcast_ref::<BreakError>() {
-                        return eval(catch_expr, break_catch_value(be.0), env, cb);
-                    }
                     let msg = format!("{}", e);
                     // halt / halt_error are non-recoverable: jq lets them
                     // propagate past `try ... catch` so the process exits with
                     // the requested code (#182).
                     if msg.starts_with("__halt__:") { return Err(e); }
+                    // The `?//` desugar (`restore_dot`) keeps `.` set to the
+                    // original input across fallbacks rather than binding the
+                    // caught destructuring error: jq never exposes that error to
+                    // the body, so a path expression in the body stays
+                    // path-transparent — `path(. as [$a] ?// $a | .x)` is
+                    // `["x"]` and `del(. as [$a] ?// $a | .x)` drops `.x` (#840).
+                    if *restore_dot {
+                        return eval_path(catch_expr, input.clone(), env, cb);
+                    }
+                    // Plain `try/catch`: the catch branch is itself a path
+                    // expression, evaluated against the caught value (the error
+                    // payload, or the rethrown input for a bare `error`). jq
+                    // tracks `path(try error catch .b)` as `["b"]` and raises a
+                    // path-mode type error when the caught value can't accept
+                    // the navigation. Evaluating it in VALUE mode dropped the
+                    // tracking (#836).
+                    if let Some(be) = e.downcast_ref::<BreakError>() {
+                        return eval_path_catch(catch_expr, break_catch_value(be.0), &input, env, cb);
+                    }
+                    // Recover a typed `error(value)` payload losslessly (#844).
+                    if let Some(ev) = e.downcast_ref::<ErrorValue>() {
+                        let v = take_error_payload(ev);
+                        return eval_path_catch(catch_expr, v, &input, env, cb);
+                    }
                     let catch_val = if let Some(json) = msg.strip_prefix("__jqerror__:") {
                         crate::value::json_to_value(json).unwrap_or(Value::from_str(&msg))
                     } else {
                         Value::from_str(&msg)
                     };
-                    eval(catch_expr, catch_val, env, cb)
+                    eval_path_catch(catch_expr, catch_val, &input, env, cb)
                 }
             }
         }
@@ -5179,7 +5697,13 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 return cb(p);
             }
             let v = env.borrow().get_var(*var_index);
-            if matches!(&v, Value::Null | Value::True | Value::False) && v == input {
+            // An identity-bound variable (`. as $x`) is the identity path `[]`
+            // while the current input still equals its captured value (#837).
+            // Literal `null`/`true`/`false` equal to the input are likewise
+            // identity paths (#434). Any other value is an invalid path expr.
+            if v == input && (is_identity_path_var(*var_index)
+                || matches!(&v, Value::Null | Value::True | Value::False))
+            {
                 return cb(Value::Arr(Rc::new(vec![])));
             }
             bail!("__pathexpr_result__:{}", crate::value::value_to_json(&v));
@@ -5222,18 +5746,31 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                     Value::Null | Value::True | Value::False => {
                         bail!("__jqerror__:\"limit doesn't support negative count\"");
                     }
+                    // A string/array/object count surfaces jq's `$n - 1`
+                    // arithmetic error lazily — only when the generator yields
+                    // its first path — so an empty generator produces nothing
+                    // rather than erroring (#806).
                     other => {
                         let msg = format!(
                             "{} and number (1) cannot be subtracted",
                             crate::runtime::errdesc_pub(other),
                         );
-                        bail!(
+                        let err = format!(
                             "__jqerror__:{}",
                             crate::value::value_to_json_precise(&Value::from_string(msg)),
                         );
+                        let mut yielded = false;
+                        eval_path(generator, input.clone(), env, &mut |_p| {
+                            yielded = true;
+                            Ok(false)
+                        })?;
+                        if yielded {
+                            bail!("{}", err);
+                        }
+                        return Ok(true);
                     }
                 };
-                if n < 0.0 {
+                if n < 0.0 || n.is_nan() {
                     bail!("__jqerror__:\"limit doesn't support negative count\"");
                 }
                 if n == 0.0 { return Ok(true); }
@@ -5263,10 +5800,41 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             // element var is bound to the element VALUE (for use in
             // update/cond) and registered in FOREACH_PATH_BIND so a bare `$x`
             // in the extract forwards the element path — this is what makes the
-            // `nth(n; g)` desugar path-transparent. #711.
+            // `nth(n; .[])` desugar path-transparent. #711.
             let vi = *var_index;
             let ai = *acc_index;
             { let mut e = env.borrow_mut(); e.ensure_var(vi); e.ensure_var(ai); }
+
+            // Decide whether SOURCE navigates the tracked input (a path
+            // generator like `.[]`) or is a plain value generator (`range`,
+            // literals, `empty` — the `nth(n; range)` / #839 shape). A
+            // navigating source forwards the element path through `$x` (handled
+            // by the block below); a value generator instead threads the
+            // ACCUMULATOR as the path carrier. Only probe when the source reads
+            // `.` (otherwise it cannot navigate), mirroring the reduce probe so
+            // a stream-consuming `input` is not evaluated twice. #839
+            let source_navigates = if expr_uses_outer_input(source) {
+                let mut nav = false;
+                match eval_path(source, input.clone(), env, &mut |_p| { nav = true; Ok(false) }) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        let m = format!("{}", e);
+                        if !m.starts_with("__pathexpr_result__:") { return Err(e); }
+                    }
+                }
+                nav
+            } else {
+                false
+            };
+
+            if !source_navigates {
+                // Value-generator source: the accumulator carries the path.
+                // Kept out-of-line so the (cold) path-mode foreach machinery
+                // does not bloat eval_path's hot index/reduce arms. #839
+                return eval_foreach_valuegen_path(source, init, vi, ai, update, extract, &input, env, cb);
+            }
+
+            // ---- navigating source: forward the element path through `$x` ----
             eval(init, input.clone(), env, &mut |init_val| {
                 let mut acc = init_val;
                 eval_path(source, input.clone(), env, &mut |src_path| {
@@ -5315,7 +5883,58 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             let ai = *acc_index;
             { let mut e = env.borrow_mut(); e.ensure_var(vi); e.ensure_var(ai); }
             let mut acc_paths: Vec<Value> = Vec::new();
-            eval_path(init, input.clone(), env, &mut |p| { acc_paths.push(p); Ok(true) })?;
+            if let Err(e) = eval_path(init, input.clone(), env, &mut |p| { acc_paths.push(p); Ok(true) }) {
+                let msg = format!("{}", e);
+                if msg.starts_with("__pathexpr_result__:") {
+                    // A non-path INIT means the reduce isn't path-trackable: jq
+                    // treats it as a value computation whose (rootless) result
+                    // flows to the sink. Compute that value and defer it as the
+                    // sentinel so a downstream discard (`| if … else empty`,
+                    // `path(last(empty))`) swallows it and a navigation/assignment
+                    // surfaces the real result rather than the INIT value. #839
+                    let reduced = Expr::Reduce {
+                        source: source.clone(),
+                        init: init.clone(),
+                        var_index: *var_index,
+                        acc_index: *acc_index,
+                        update: update.clone(),
+                    };
+                    let mut last_val = Value::Null;
+                    let mut has = false;
+                    eval(&reduced, input, env, &mut |v| { last_val = v; has = true; Ok(true) })?;
+                    if has {
+                        bail!("__pathexpr_result__:{}", crate::value::value_to_json(&last_val));
+                    }
+                    return Ok(true);
+                }
+                return Err(e);
+            }
+            // jq rejects a reduce SOURCE that navigates the tracked input in
+            // path context (`.[]`, `.a`, …) — it must be a plain value generator
+            // (range, literals, empty, input). Otherwise the reduce silently
+            // forwarded the INIT path and `… |= v` mutated the document (#838).
+            // Probe the source in path mode only when it reads `.`: a navigating
+            // source emits a path (→ reject), a non-path value generator surfaces
+            // as a `__pathexpr_result__` sentinel (→ swallow, evaluate normally),
+            // and any other error (arithmetic/type) propagates as jq's does.
+            // Sources that don't read `.` (range/literals/input/inputs) skip the
+            // probe so a stream-consuming `input` is never evaluated twice.
+            if expr_uses_outer_input(source) {
+                let mut navigated = false;
+                match eval_path(source, input.clone(), env, &mut |_p| { navigated = true; Ok(true) }) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        let msg = format!("{}", e);
+                        if !msg.starts_with("__pathexpr_result__:") { return Err(e); }
+                    }
+                }
+                if navigated {
+                    bail!(
+                        "Invalid path expression near attempt to iterate through {}",
+                        crate::value::value_to_json(&input)
+                    );
+                }
+            }
             let mut source_vals: Vec<Value> = Vec::new();
             eval(source, input.clone(), env, &mut |v| { source_vals.push(v); Ok(true) })?;
             for sv in source_vals {
@@ -5329,10 +5948,25 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                     let base_val = crate::runtime::rt_getpath(&input, ap).unwrap_or(Value::Null);
                     env.borrow_mut().vars[ai as usize] = base_val.clone();
                     let ap_vec: Vec<Value> = match ap { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
-                    eval_path(update, base_val, env, &mut |rp| {
-                        let mut p = ap_vec.clone();
-                        if let Value::Arr(rpa) = &rp { p.extend(rpa.iter().cloned()); }
-                        next.push(Value::Arr(Rc::new(p)));
+                    eval_path(update, base_val.clone(), env, &mut |rp| {
+                        // jq only path-tracks a reduce whose UPDATE preserves the
+                        // accumulator path — an identity-equivalent body (`.`,
+                        // `select(true)`, `if true then . else . end`) yields the
+                        // base unchanged (relative path `[]`). A body that
+                        // navigates (`.a`, `.[$x]`, …) makes the reduce a value
+                        // computation, which jq rejects as a path expression
+                        // rather than tracking through it — otherwise `reduce 1
+                        // as $x (.; .a) |= 99` silently mutated `.a` (#816). The
+                        // reported result is the value at the navigated location.
+                        let nav_len = match &rp { Value::Arr(a) => a.len(), _ => 0 };
+                        if nav_len != 0 {
+                            let nav_val = crate::runtime::rt_getpath(&base_val, &rp).unwrap_or(Value::Null);
+                            bail!(
+                                "Invalid path expression with result {}",
+                                trunc_path_dump(&crate::value::value_to_json(&nav_val))
+                            );
+                        }
+                        next.push(Value::Arr(Rc::new(ap_vec.clone())));
                         Ok(true)
                     })?;
                 }
@@ -5371,6 +6005,177 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                     return cb(Value::Arr(Rc::new(vec![])));
                 }
                 bail!("__pathexpr_result__:{}", crate::value::value_to_json(&result_val));
+            }
+            Ok(true)
+        }
+    }
+}
+
+/// Evaluate a `try … catch` body in path context against the caught value.
+/// jq gives the caught value a path only when it is the try's own input (a
+/// bare `error` / `error(.)` re-raising `.`); an `error(LITERAL)` payload is
+/// rootless, so a body that navigates it reports the first hop, an identity
+/// body leaves the value-shaped "result <payload>" at the sink, and a
+/// discarding body (`catch empty`) yields nothing. `path(try error("E")
+/// catch .)` errors with `result "E"` where jq-jit used to emit `[]`. The
+/// value-provenance distinction jq draws between `error(5)` and `error(.)`
+/// on an identical input is approximated here by value equality. Extends the
+/// try/catch path tracking of #836.
+fn eval_path_catch(
+    catch_expr: &Expr,
+    payload: Value,
+    input: &Value,
+    env: &EnvRef,
+    cb: &mut dyn FnMut(Value) -> GenResult,
+) -> GenResult {
+    if &payload == input {
+        // The caught value sits at the current path position (re-raised `.`),
+        // so the body tracks normally.
+        return eval_path(catch_expr, payload, env, cb);
+    }
+    let mut nav: Option<Value> = None;
+    match eval_path(catch_expr, payload.clone(), env, &mut |rp| { nav = Some(rp); Ok(false) }) {
+        Err(e) => Err(e),
+        Ok(_) => match &nav {
+            None => Ok(true),
+            Some(Value::Arr(comps)) if !comps.is_empty() => {
+                let key_desc = match &comps[0] {
+                    Value::Num(n, _) => format!("element {} of", crate::value::format_jq_number(*n)),
+                    Value::Str(s) => format!("element \"{}\" of", s),
+                    other => format!("element {} of", crate::value::value_to_json(other)),
+                };
+                bail!("Invalid path expression near attempt to access {} {}", key_desc, trunc_path_dump(&crate::value::value_to_json(&payload)))
+            }
+            _ => bail!("__pathexpr_result__:{}", crate::value::value_to_json(&payload)),
+        },
+    }
+}
+
+/// Path-context `foreach` over a value-generator source (`range`, literals,
+/// `empty`): the accumulator — not the source — carries the path. Held in a
+/// separate, never-inlined function so the cold machinery does not bloat
+/// `eval_path`'s hot index/reduce arms. #839
+#[inline(never)]
+fn eval_foreach_valuegen_path(
+    source: &Expr,
+    init: &Expr,
+    vi: u16,
+    ai: u16,
+    update: &Expr,
+    extract: &Option<Box<Expr>>,
+    input: &Value,
+    env: &EnvRef,
+    cb: &mut dyn FnMut(Value) -> GenResult,
+) -> GenResult {
+    let source_vals = {
+        let mut v = Vec::new();
+        eval(source, input.clone(), env, &mut |x| { v.push(x); Ok(true) })?;
+        v
+    };
+    // Classify INIT: a path-valued seed threads the accumulator as PATH(s) so
+    // a path-preserving body (`.`) or a navigating body (`.b`) extends it
+    // (`path(foreach range(2) as $i (.a;.;.))` → ["a"],["a"]); a rootless seed
+    // threads it as a VALUE, the `nth(n; range)` counter shape
+    // (`path(nth(1; range(5)))` → result 1).
+    let mut init_paths: Vec<Value> = Vec::new();
+    let init_res = eval_path(init, input.clone(), env, &mut |p| { init_paths.push(p); Ok(true) });
+    match init_res {
+        Ok(_) => {
+            // PATH-threaded accumulator.
+            for seed in init_paths {
+                let mut acc_paths: Vec<Value> = vec![seed];
+                for sv in &source_vals {
+                    let old_var = { let mut e = env.borrow_mut(); std::mem::replace(&mut e.vars[vi as usize], sv.clone()) };
+                    let mut next: Vec<Value> = Vec::new();
+                    let mut stop = false;
+                    for ap in &acc_paths {
+                        let base = crate::runtime::rt_getpath(input, ap).unwrap_or(Value::Null);
+                        let ap_vec: Vec<Value> = match ap { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
+                        let old_acc = { let mut e = env.borrow_mut(); std::mem::replace(&mut e.vars[ai as usize], base.clone()) };
+                        // UPDATE in path mode: each output is relative to the
+                        // accumulator value and extends its path.
+                        let r = eval_path(update, base.clone(), env, &mut |rp| {
+                            let mut np_vec = ap_vec.clone();
+                            if let Value::Arr(a) = &rp { np_vec.extend(a.iter().cloned()); }
+                            let np = Value::Arr(Rc::new(np_vec.clone()));
+                            next.push(np.clone());
+                            // EXTRACT emits per updated accumulator, with the
+                            // accumulator value bound for navigation.
+                            let nbase = crate::runtime::rt_getpath(input, &np).unwrap_or(Value::Null);
+                            let old_acc2 = { let mut e = env.borrow_mut(); std::mem::replace(&mut e.vars[ai as usize], nbase.clone()) };
+                            let ec = if let Some(ex) = extract {
+                                eval_path(ex, nbase, env, &mut |ep| {
+                                    let mut comb = np_vec.clone();
+                                    if let Value::Arr(a) = &ep { comb.extend(a.iter().cloned()); }
+                                    cb(Value::Arr(Rc::new(comb)))
+                                })
+                            } else {
+                                bail!("__pathexpr_result__:{}", crate::value::value_to_json(&nbase));
+                            };
+                            env.borrow_mut().vars[ai as usize] = old_acc2;
+                            let c = ec?;
+                            if !c { stop = true; }
+                            Ok(c)
+                        });
+                        env.borrow_mut().vars[ai as usize] = old_acc;
+                        // Keep $i bound across all accumulator branches of this
+                        // source element; restore it only after the loop (or on
+                        // error) so a multi-valued UPDATE doesn't reset it
+                        // mid-iteration.
+                        if let Err(e) = r {
+                            env.borrow_mut().vars[vi as usize] = old_var;
+                            return Err(e);
+                        }
+                        if stop { break; }
+                    }
+                    env.borrow_mut().vars[vi as usize] = old_var;
+                    if stop { return Ok(false); }
+                    acc_paths = next;
+                }
+            }
+            Ok(true)
+        }
+        Err(e) => {
+            let m = format!("{}", e);
+            if !m.starts_with("__pathexpr_result__:") { return Err(e); }
+            // VALUE-threaded accumulator (the `nth` counter): a bare `$x` in
+            // EXTRACT is the source value, not a path, so it surfaces as the
+            // sink's "result <x>" — no FOREACH_PATH_BIND is registered.
+            let init_vals = {
+                let mut v = Vec::new();
+                eval(init, input.clone(), env, &mut |x| { v.push(x); Ok(true) })?;
+                v
+            };
+            for seed in init_vals {
+                let mut acc = seed;
+                for sv in &source_vals {
+                    let (old_var, old_acc) = {
+                        let mut e = env.borrow_mut();
+                        let ov = std::mem::replace(&mut e.vars[vi as usize], sv.clone());
+                        let oa = std::mem::replace(&mut e.vars[ai as usize], acc.clone());
+                        (ov, oa)
+                    };
+                    let acc_in = acc.clone();
+                    let mut stop = false;
+                    let r = eval(update, acc_in, env, &mut |new_acc| {
+                        acc = new_acc.clone();
+                        env.borrow_mut().vars[ai as usize] = new_acc.clone();
+                        let c = if let Some(ex) = extract {
+                            eval_path(ex, new_acc.clone(), env, cb)?
+                        } else {
+                            bail!("__pathexpr_result__:{}", crate::value::value_to_json(&new_acc));
+                        };
+                        if !c { stop = true; }
+                        Ok(c)
+                    });
+                    {
+                        let mut e = env.borrow_mut();
+                        e.vars[ai as usize] = old_acc;
+                        e.vars[vi as usize] = old_var;
+                    }
+                    r?;
+                    if stop { return Ok(false); }
+                }
             }
             Ok(true)
         }
@@ -5549,9 +6354,28 @@ fn eval_call_builtin(name: &str, args: &[Expr], input: Value, env: &EnvRef, cb: 
 /// Yield each Cartesian-product combination of an array of arrays, in
 /// lexicographic order. Empty input array yields a single empty
 /// combination (matching jq).
+/// jq's `length` of a value is 0 for: null, an empty array/object/string, and
+/// the number 0. (Booleans have no length and error.) Used so `combinations`
+/// can mirror jq's `if length == 0 then [] else ...` short-circuit (#805).
+fn input_length_is_zero(v: &Value) -> bool {
+    match v {
+        Value::Null => true,
+        Value::Arr(a) => a.is_empty(),
+        Value::Obj(o) => o.is_empty(),
+        Value::Str(s) => s.as_str().is_empty(),
+        Value::Num(n, _) => *n == 0.0,
+        Value::True | Value::False | Value::Error(_) => false,
+    }
+}
+
 fn eval_combinations(input: &Value, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
     let arrays = match input {
         Value::Arr(a) => a.clone(),
+        // jq's `combinations` is `if length == 0 then [] else .[0][] as $x | ... end`,
+        // so any length-0 input (null, {}, "", 0) yields a single empty combination
+        // before the `.[0]` indexing in the else branch runs (#805). A non-array
+        // input with a non-zero length falls through to the array-indexing error.
+        _ if input_length_is_zero(input) => return cb(Value::Arr(Rc::new(vec![]))),
         _ => bail!("combinations requires array of arrays input"),
     };
     let mut current: Vec<Value> = Vec::with_capacity(arrays.len());
@@ -5562,8 +6386,9 @@ fn eval_combinations(input: &Value, cb: &mut dyn FnMut(Value) -> GenResult) -> G
         cb: &mut dyn FnMut(Value) -> GenResult,
     ) -> GenResult {
         if idx == arrays.len() {
-            cb(Value::Arr(Rc::new(current.clone())))?;
-            return Ok(true);
+            // Propagate the callback's continue/stop signal so an outer
+            // first/limit/isempty can truncate the Cartesian product (#815).
+            return cb(Value::Arr(Rc::new(current.clone())));
         }
         let inner = match &arrays[idx] {
             Value::Arr(a) => a.clone(),
@@ -5571,8 +6396,11 @@ fn eval_combinations(input: &Value, cb: &mut dyn FnMut(Value) -> GenResult) -> G
         };
         for v in inner.iter() {
             current.push(v.clone());
-            rec(arrays, idx + 1, current, cb)?;
+            let cont = rec(arrays, idx + 1, current, cb)?;
             current.pop();
+            if !cont {
+                return Ok(false);
+            }
         }
         Ok(true)
     }
@@ -5741,11 +6569,14 @@ fn eval_truncate_stream(
     env: &EnvRef,
     cb: &mut dyn FnMut(Value) -> GenResult,
 ) -> GenResult {
-    let depth = match &input {
-        Value::Num(n, _) if n.is_finite() && *n >= 0.0 => *n as usize,
-        Value::Num(_, _) => bail!("truncate_stream: depth must be a non-negative integer"),
-        _ => bail!("truncate_stream: depth must be a number"),
-    };
+    // jq's `truncate_stream` is `. as $n | null | stream | ... if (.[0]|length) > $n
+    // then setpath([0]; .[0][$n:]) else empty end`, so the depth `$n` (taken from
+    // `.`) is used both in a value comparison and as a slice bound. A non-number
+    // depth is therefore handled leniently rather than rejected: `null` passes the
+    // events through unchanged, while a string/array/object depth makes the
+    // `length > $n` comparison false and drops every event. We mirror those
+    // semantics instead of hard-requiring a numeric depth (#804).
+    let depth = input.clone();
     eval(f, input.clone(), env, &mut |event| {
         let arr = match &event {
             Value::Arr(a) => a.clone(),
@@ -5758,10 +6589,40 @@ fn eval_truncate_stream(
             Value::Arr(p) => p.clone(),
             _ => bail!("truncate_stream: stream event missing path"),
         };
-        if path_arr.len() <= depth {
+        let path_len = path_arr.len();
+        // `(.[0]|length) > $n` in jq's type ordering (null < bool < number < ...).
+        // A number is always greater than null/bool and always less than
+        // string/array/object, so only a Num depth participates numerically.
+        let keep = match &depth {
+            Value::Null | Value::True | Value::False => true,
+            Value::Num(n, _) => (path_len as f64) > *n,
+            _ => false,
+        };
+        if !keep {
             return Ok(true);
         }
-        let new_path: Vec<Value> = path_arr.iter().skip(depth).cloned().collect();
+        // `.[0][$n:]` slice bound. null means "from the start"; a number is
+        // floored and clamped like any jq array slice; anything else is an
+        // error ("must be integers"), matching jq when a bool depth survives
+        // the comparison above.
+        let start: usize = match &depth {
+            Value::Null => 0,
+            Value::Num(n, _) => {
+                let mut i = n.floor();
+                if i < 0.0 {
+                    i += path_len as f64;
+                }
+                if i < 0.0 {
+                    0
+                } else if i > path_len as f64 {
+                    path_len
+                } else {
+                    i as usize
+                }
+            }
+            _ => bail!("Array/string slice indices must be integers"),
+        };
+        let new_path: Vec<Value> = path_arr.iter().skip(start).cloned().collect();
         let mut new_event: Vec<Value> = Vec::with_capacity(arr.len());
         new_event.push(Value::Arr(Rc::new(new_path)));
         for v in arr.iter().skip(1) { new_event.push(v.clone()); }
@@ -5781,8 +6642,12 @@ fn halt_error_write(input: &Value) {
         Value::Null => {}
         Value::Str(s) => { let _ = stderr.write_all(s.as_str().as_bytes()); }
         _ => {
+            // jq prints a non-string payload as JSON followed by a trailing
+            // newline (a string payload is written verbatim, null writes
+            // nothing). See #845.
             let json = crate::value::value_to_json_precise(input);
             let _ = stderr.write_all(json.as_bytes());
+            let _ = stderr.write_all(b"\n");
         }
     }
 }
@@ -5984,11 +6849,23 @@ fn eval_skip(exp: &Expr, nval: &Value, input: Value, env: &EnvRef, cb: &mut dyn 
 
 // pick(f): For each path generated by f, set that path in the output
 fn eval_pick(f: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
-    // Collect all paths generated by f (as path arrays)
+    // Collect all paths generated by f (as path arrays). A non-path argument
+    // bails with the internal `__pathexpr_result__:<json>` sentinel; rewrite it
+    // to jq's user-facing message (catchable via try/catch), like the other
+    // path-eval entry points. #848
     let mut paths: Vec<Value> = Vec::new();
     eval_path(f, input.clone(), env, &mut |path| {
         paths.push(path);
         Ok(true)
+    })
+    .map_err(|e| {
+        let msg = format!("{}", e);
+        match msg.strip_prefix("__pathexpr_result__:") {
+            Some(json) => {
+                anyhow::anyhow!("Invalid path expression with result {}", trunc_path_dump(json))
+            }
+            None => e,
+        }
     })?;
     // Build result by setting each path
     let mut result = Value::Null;
@@ -6061,8 +6938,16 @@ fn eval_walk(f: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> 
     // Optimization: walk(if type == "T" then F else . end)
     // For values whose type != T, f is identity, so skip eval entirely.
     // Only call eval(F, ...) on matching-type leaf values.
+    // The in-place fast path folds the then-branch to a single value, so it is
+    // only valid when that branch yields exactly one output. A multi-valued
+    // branch (`.,.+1`, `.+(1,2)`, …) must backtrack: each leaf forks the
+    // surrounding reconstruction, which the generic `walk_value_cb` handles
+    // correctly (arrays collect every fork via `map`, objects keep the first
+    // via `map_values`, and the trailing `f` forks at every level). #769
     if let Some((type_name, then_body)) = detect_walk_type_guard(f) {
-        return walk_type_guarded(type_name, then_body, f, input, env, cb);
+        if then_body.is_single_output() {
+            return walk_type_guarded(type_name, then_body, f, input, env, cb);
+        }
     }
     walk_value_cb(f, input, env, cb)
 }
@@ -6232,11 +7117,17 @@ fn eval_del(f: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> G
                 }
                 DelOp::Slice { base, from, to } => {
                     if matches!(base, Expr::Input) {
-                        let from_idx = eval_slice_idx_val(from, len, 0, false, &input, env)?;
-                        let to_idx = eval_slice_idx_val(to, len, len, true, &input, env)?;
-                        for i in from_idx..to_idx {
-                            if i >= 0 && i < len {
-                                indices_to_del.insert(i);
+                        // Generator bounds: delete the union over the Cartesian
+                        // product of (from, to) endpoints. #761
+                        let from_idxs = eval_slice_idx_vals(from, len, 0, false, &input, env)?;
+                        let to_idxs = eval_slice_idx_vals(to, len, len, true, &input, env)?;
+                        for &fi in &from_idxs {
+                            for &ti in &to_idxs {
+                                for i in fi..ti {
+                                    if i >= 0 && i < len {
+                                        indices_to_del.insert(i);
+                                    }
+                                }
                             }
                         }
                     } else {
@@ -6258,11 +7149,24 @@ fn eval_del(f: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> G
         }
     }
 
-    // Fallback: apply operations sequentially
-    let mut result = input.clone();
-    for op in &del_ops {
-        result = apply_del_op(op, result, env)?;
-    }
+    // Fallback (nested paths, slices, non-array input): collect every path
+    // `f` generates and delete them in one `delpaths` pass. jq defines
+    // `del(f)` as `delpaths([path(f)])`, which sorts the paths descending and
+    // type-checks each container. Applying the comma-separated ops sequentially
+    // instead shifted later array indices (#841), skipped the slice container
+    // type check (#842), and autovivified a missing parent to null (#843).
+    let mut paths: Vec<Value> = Vec::new();
+    eval_path(f, input.clone(), env, &mut |p| { paths.push(p); Ok(true) })
+        .map_err(|e| {
+            let msg = format!("{}", e);
+            match msg.strip_prefix("__pathexpr_result__:") {
+                Some(json) => {
+                anyhow::anyhow!("Invalid path expression with result {}", trunc_path_dump(json))
+            }
+                None => e,
+            }
+        })?;
+    let result = crate::runtime::rt_delpaths(&input, &Value::Arr(Rc::new(paths)))?;
     cb(result)
 }
 
@@ -6290,72 +7194,32 @@ fn collect_del_ops<'a>(f: &'a Expr, ops: &mut Vec<DelOp<'a>>) {
     }
 }
 
-fn apply_del_op(op: &DelOp, current: Value, env: &EnvRef) -> Result<Value> {
-    match op {
-        DelOp::Path(expr) => {
-            let mut paths: Vec<Value> = Vec::new();
-            eval_path(expr, current.clone(), env, &mut |path| {
-                paths.push(path);
-                Ok(true)
-            })?;
-            let path_arr = Value::Arr(Rc::new(paths));
-            crate::runtime::rt_delpaths(&current, &path_arr)
-        }
-        DelOp::Slice { base, from, to } => {
-            let mut container = Value::Null;
-            eval(base, current.clone(), env, &mut |v| { container = v; Ok(true) })?;
-            let new_val = match &container {
-                Value::Arr(a) => {
-                    let len = a.len() as i64;
-                    let from_idx = eval_slice_idx_val(from, len, 0, false, &current, env)?;
-                    let to_idx = eval_slice_idx_val(to, len, len, true, &current, env)?;
-                    let mut result = Vec::new();
-                    for i in 0..from_idx.min(len) { result.push(a[i as usize].clone()); }
-                    for i in to_idx.max(0)..len { result.push(a[i as usize].clone()); }
-                    Value::Arr(Rc::new(result))
-                }
-                _ => container,
-            };
-            if matches!(base, Expr::Input) {
-                Ok(new_val)
-            } else {
-                let mut base_paths: Vec<Value> = Vec::new();
-                let _ = eval_path(base, current.clone(), env, &mut |p| {
-                    base_paths.push(p);
-                    Ok(false)
-                });
-                if let Some(bp) = base_paths.first() {
-                    crate::runtime::rt_setpath(&current, bp, &new_val)
-                } else {
-                    Ok(new_val)
-                }
-            }
-        }
-    }
-}
-
-fn eval_slice_idx_val(expr: &Option<&Expr>, len: i64, default: i64, is_end: bool, input: &Value, env: &EnvRef) -> Result<i64> {
-    if let Some(e) = expr {
-        let mut fval: Option<f64> = None;
-        eval(e, input.clone(), env, &mut |v| {
-            if let Value::Num(n, _) = &v { fval = Some(*n); }
-            Ok(true)
-        })?;
-        match fval {
+/// Resolve a `del(.[a:b])` slice bound to its normalized array indices.
+///
+/// The bound is a *generator* (#761): every value it yields is an independent
+/// endpoint, so the result is a list of indices (the caller takes the Cartesian
+/// product of the two bounds). An absent bound contributes the single default;
+/// an empty generator contributes nothing (so the slice deletes nothing).
+fn eval_slice_idx_vals(expr: &Option<&Expr>, len: i64, default: i64, is_end: bool, input: &Value, env: &EnvRef) -> Result<Vec<i64>> {
+    let Some(e) = expr else { return Ok(vec![default]); };
+    let mut out = Vec::new();
+    eval(e, input.clone(), env, &mut |v| {
+        let i = match &v {
             // jq normalizes a negative bound (`n + len`) before converting it to
             // an integer; the start floors and the end ceils. Truncating `n as
             // i64` before adding `len` mis-placed fractional bounds for
             // `del(.[a:b])` (e.g. `del(.[1.5:3.5])` deleted [1,3) not [1,4)). #722.
-            Some(n) if !n.is_nan() => {
-                let norm = if n < 0.0 { n + len as f64 } else { n };
+            Value::Num(n, _) if !n.is_nan() => {
+                let norm = if *n < 0.0 { n + len as f64 } else { *n };
                 let i = if is_end { norm.ceil() as i64 } else { norm.floor() as i64 };
-                Ok(i.clamp(0, len))
+                i.clamp(0, len)
             }
-            _ => Ok(default),
-        }
-    } else {
-        Ok(default)
-    }
+            _ => default,
+        };
+        out.push(i);
+        Ok(true)
+    })?;
+    Ok(out)
 }
 
 // bsearch(target): binary search on sorted array

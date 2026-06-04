@@ -526,7 +526,7 @@ fn expr_references_var(expr: &crate::ir::Expr, var_index: u16) -> bool {
         | Expr::Update { path_expr: left, update_expr: right }
         | Expr::Assign { path_expr: left, value_expr: right }
         | Expr::SetPath { path: left, value: right }
-        | Expr::TryCatch { try_expr: left, catch_expr: right } => {
+        | Expr::TryCatch { try_expr: left, catch_expr: right, .. } => {
             expr_references_var(left, var_index) || expr_references_var(right, var_index)
         }
         Expr::IfThenElse { cond, then_branch, else_branch } => {
@@ -574,6 +574,80 @@ fn expr_references_var(expr: &crate::ir::Expr, var_index: u16) -> bool {
         // Conservative for variants we don't enumerate: assume they may use the var.
         _ => true,
     }
+}
+
+/// Returns true if `var_index` is referenced anywhere inside `expr` in a
+/// position where `.` has been rebound away from the value it had at `expr`'s
+/// entry. The LetBinding inliner uses this to refuse substituting a
+/// replacement that reads `.` (e.g. `.foo`, or `.` itself) into such a
+/// position — `. as $v | map($v)` must keep `$v` bound to the outer `.`, not
+/// the per-element `.` that `map`/`.[] |` rebinds (#818).
+///
+/// Sound by construction: only clearly dot-preserving constructs propagate
+/// `dot_same`; every other (or unenumerated) construct is treated as rebinding
+/// `.`, so a reference found there is reported (the inliner just declines the
+/// optimization and keeps the binding).
+fn var_in_rebound_dot_scope(expr: &crate::ir::Expr, var_index: u16) -> bool {
+    use crate::ir::{Expr, StringPart};
+    fn walk(e: &Expr, var: u16, dot_same: bool) -> bool {
+        match e {
+            Expr::LoadVar { var_index: v } => *v == var && !dot_same,
+            // Dot-preserving: every sub-expression sees the same `.`.
+            Expr::BinOp { lhs, rhs, .. } => walk(lhs, var, dot_same) || walk(rhs, var, dot_same),
+            Expr::UnaryOp { operand, .. }
+            | Expr::Negate { operand } => walk(operand, var, dot_same),
+            Expr::Format { expr, .. } => walk(expr, var, dot_same),
+            Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => {
+                walk(expr, var, dot_same) || walk(key, var, dot_same)
+            }
+            Expr::Comma { left, right } => walk(left, var, dot_same) || walk(right, var, dot_same),
+            Expr::Collect { generator } => walk(generator, var, dot_same),
+            Expr::Each { input_expr } | Expr::EachOpt { input_expr } => walk(input_expr, var, dot_same),
+            Expr::IfThenElse { cond, then_branch, else_branch } => {
+                walk(cond, var, dot_same)
+                    || walk(then_branch, var, dot_same)
+                    || walk(else_branch, var, dot_same)
+            }
+            Expr::Alternative { primary, fallback } => {
+                walk(primary, var, dot_same) || walk(fallback, var, dot_same)
+            }
+            Expr::ObjectConstruct { pairs } => {
+                pairs.iter().any(|(k, v)| walk(k, var, dot_same) || walk(v, var, dot_same))
+            }
+            Expr::StringInterpolation { parts } => parts.iter().any(|p| {
+                matches!(p, StringPart::Expr(x) if walk(x, var, dot_same))
+            }),
+            Expr::Slice { expr, from, to } => {
+                walk(expr, var, dot_same)
+                    || from.as_ref().is_some_and(|x| walk(x, var, dot_same))
+                    || to.as_ref().is_some_and(|x| walk(x, var, dot_same))
+            }
+            Expr::Range { from, to, step } => {
+                walk(from, var, dot_same)
+                    || walk(to, var, dot_same)
+                    || step.as_ref().is_some_and(|x| walk(x, var, dot_same))
+            }
+            // `limit(n; g)` runs both n and g against the entry `.`.
+            Expr::Limit { count, generator } => {
+                walk(count, var, dot_same) || walk(generator, var, dot_same)
+            }
+            // `a | b`: `a` sees the entry `.`; `b` sees it only when `a` is the
+            // identity `.` (otherwise `b`'s `.` is whatever `a` produced).
+            Expr::Pipe { left, right } => {
+                walk(left, var, dot_same)
+                    || walk(right, var, dot_same && matches!(left.as_ref(), Expr::Input))
+            }
+            // A nested binding keeps `.`; the body is skipped if it shadows our var.
+            Expr::LetBinding { var_index: vi, value, body } => {
+                walk(value, var, dot_same) || (*vi != var && walk(body, var, dot_same))
+            }
+            // Everything else rebinds `.` (reduce/foreach update, while/until,
+            // try/catch handler, path updates, …) or is not clearly
+            // dot-preserving: any reference inside is treated as rebound.
+            other => expr_references_var(other, var),
+        }
+    }
+    walk(expr, var_index, true)
 }
 
 pub(crate) fn is_single_valued_expr(e: &crate::ir::Expr) -> bool {
@@ -1089,7 +1163,7 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                             Expr::IfThenElse { cond, then_branch, else_branch } => {
                                 is_single_valued(cond) && is_single_valued(then_branch) && is_single_valued(else_branch)
                             }
-                            Expr::TryCatch { try_expr, catch_expr } => {
+                            Expr::TryCatch { try_expr, catch_expr, .. } => {
                                 is_single_valued(try_expr) && is_single_valued(catch_expr)
                             }
                             Expr::Alternative { primary, fallback } => {
@@ -1180,7 +1254,7 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                                     Expr::Pipe { left, right } => is_single_valued_idx(left) && is_single_valued_idx(right),
                                     Expr::IfThenElse { cond, then_branch, else_branch } =>
                                         is_single_valued_idx(cond) && is_single_valued_idx(then_branch) && is_single_valued_idx(else_branch),
-                                    Expr::TryCatch { try_expr, catch_expr } =>
+                                    Expr::TryCatch { try_expr, catch_expr, .. } =>
                                         is_single_valued_idx(try_expr) && is_single_valued_idx(catch_expr),
                                     Expr::Alternative { primary, fallback } =>
                                         is_single_valued_idx(primary) && is_single_valued_idx(fallback),
@@ -1694,7 +1768,20 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             let sb = simplify_expr(body);
             if sv.is_simple_scalar() {
                 let body_uses_var = expr_references_var(&sb, *var_index);
-                if body_uses_var || expr_is_pure_scalar(&sv) {
+                if body_uses_var {
+                    // Substituting the var's value is unsafe when the value
+                    // reads `.` and a reference sits where `.` was rebound —
+                    // `. as $v | map($v)` would otherwise become `map(.)`,
+                    // reading the per-element `.` instead of the bound one
+                    // (#818). A value that doesn't read `.` is dot-independent
+                    // and always safe to substitute.
+                    let dot_safe = !contains_input(&sv)
+                        || !var_in_rebound_dot_scope(&sb, *var_index);
+                    if dot_safe {
+                        return sb.substitute_var(*var_index, &sv);
+                    }
+                } else if expr_is_pure_scalar(&sv) {
+                    // Unused binding with a side-effect-free value: drop it.
                     return sb.substitute_var(*var_index, &sv);
                 }
             }
@@ -1991,8 +2078,8 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             }
             Expr::Assign { path_expr: Box::new(sp), value_expr: Box::new(sv) }
         }
-        Expr::TryCatch { try_expr, catch_expr } => {
-            Expr::TryCatch { try_expr: Box::new(simplify_expr(try_expr)), catch_expr: Box::new(simplify_expr(catch_expr)) }
+        Expr::TryCatch { try_expr, catch_expr, restore_dot } => {
+            Expr::TryCatch { try_expr: Box::new(simplify_expr(try_expr)), catch_expr: Box::new(simplify_expr(catch_expr)), restore_dot: *restore_dot }
         }
         // delpaths([["field"]]) → del(.field)
         Expr::Limit { count, generator } => {
@@ -2121,7 +2208,7 @@ fn contains_input(expr: &crate::ir::Expr) -> bool {
         Expr::Foreach { source, init, update, extract, .. } => contains_input(source) || contains_input(init) || contains_input(update) || extract.as_ref().map_or(false, |e| contains_input(e)),
         Expr::While { cond, update } | Expr::Until { cond, update } => contains_input(cond) || contains_input(update),
         Expr::Repeat { update } => contains_input(update),
-        Expr::TryCatch { try_expr, catch_expr } => contains_input(try_expr) || contains_input(catch_expr),
+        Expr::TryCatch { try_expr, catch_expr, .. } => contains_input(try_expr) || contains_input(catch_expr),
         // CallBuiltin implicitly operates on the current input (passed as first arg)
         Expr::CallBuiltin { .. } => true,
         Expr::Range { from, to, step } => contains_input(from) || contains_input(to) || step.as_ref().map_or(false, |s| contains_input(s)),
@@ -2176,7 +2263,7 @@ fn input_behind_short_circuit(e: &crate::ir::Expr) -> bool {
             input_behind_short_circuit(primary) || contains_input(fallback)
                 || input_behind_short_circuit(fallback)
         }
-        Expr::TryCatch { try_expr, catch_expr } => {
+        Expr::TryCatch { try_expr, catch_expr, .. } => {
             // try_expr's errors are caught; the post-substitution
             // result no longer raises. catch_expr only fires on error;
             // its evaluation order is conditional.
@@ -2572,7 +2659,7 @@ impl Filter {
                 Expr::IfThenElse { cond, then_branch, else_branch } => {
                     walk(cond) || walk(then_branch) || walk(else_branch)
                 }
-                Expr::TryCatch { try_expr, catch_expr } => walk(try_expr) || walk(catch_expr),
+                Expr::TryCatch { try_expr, catch_expr, .. } => walk(try_expr) || walk(catch_expr),
                 Expr::Reduce { source, init, update, .. } => walk(source) || walk(init) || walk(update),
                 Expr::Foreach { source, init, update, extract, .. } => {
                     walk(source) || walk(init) || walk(update) || extract.as_ref().map_or(false, |e| walk(e))
@@ -2598,39 +2685,64 @@ impl Filter {
     /// Returns true if the filter uses `input` or `inputs` anywhere.
     pub fn uses_inputs(&self) -> bool {
         use crate::ir::Expr;
-        fn walk(e: &Expr) -> bool {
+        // `funcs` lets us follow a `FuncCall` into its body: `def f: input; f`
+        // hides the stream read behind the call, and without descending we'd
+        // report no-inputs and skip seeding the queue (#853). `visited` guards
+        // against recursive/mutually-recursive defs.
+        fn walk(e: &Expr, funcs: &[crate::ir::CompiledFunc], visited: &mut Vec<usize>) -> bool {
+            macro_rules! walk { ($x:expr) => { walk($x, funcs, visited) }; }
             match e {
                 Expr::ReadInput | Expr::ReadInputs => true,
                 Expr::Pipe { left, right } | Expr::Comma { left, right }
                 | Expr::BinOp { lhs: left, rhs: right, .. }
-                | Expr::Alternative { primary: left, fallback: right } => walk(left) || walk(right),
+                | Expr::Alternative { primary: left, fallback: right } => walk!(left) || walk!(right),
                 Expr::UnaryOp { operand, .. } | Expr::Negate { operand }
                 | Expr::Collect { generator: operand } | Expr::Each { input_expr: operand }
-                | Expr::EachOpt { input_expr: operand } | Expr::Recurse { input_expr: operand } => walk(operand),
-                Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => walk(expr) || walk(key),
-                Expr::IfThenElse { cond, then_branch, else_branch } => walk(cond) || walk(then_branch) || walk(else_branch),
-                Expr::TryCatch { try_expr, catch_expr } => walk(try_expr) || walk(catch_expr),
-                Expr::Reduce { source, init, update, .. } => walk(source) || walk(init) || walk(update),
-                Expr::Foreach { source, init, update, extract, .. } => walk(source) || walk(init) || walk(update) || extract.as_ref().map_or(false, |e| walk(e)),
-                Expr::Slice { expr, from, to } => walk(expr) || from.as_ref().map_or(false, |e| walk(e)) || to.as_ref().map_or(false, |e| walk(e)),
-                Expr::ObjectConstruct { pairs } => pairs.iter().any(|(k, v)| walk(k) || walk(v)),
-                Expr::LetBinding { value, body, .. } => walk(value) || walk(body),
-                Expr::Label { body, .. } => walk(body),
-                Expr::CallBuiltin { args, .. } => args.iter().any(|a| walk(a)),
-                Expr::Update { path_expr, update_expr } | Expr::Assign { path_expr, value_expr: update_expr } => walk(path_expr) || walk(update_expr),
-                Expr::Mutate { path_expr, value_expr, .. } => walk(path_expr) || walk(value_expr),
-                Expr::ClosureOp { input_expr, key_expr, .. } => walk(input_expr) || walk(key_expr),
-                Expr::Format { expr: e, .. } => walk(e),
-                Expr::Limit { count, generator } => walk(count) || walk(generator),
-                Expr::While { cond, update, .. } | Expr::Until { cond, update } => walk(cond) || walk(update),
-                Expr::Repeat { update, .. } => walk(update),
+                | Expr::EachOpt { input_expr: operand } | Expr::Recurse { input_expr: operand } => walk!(operand),
+                Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => walk!(expr) || walk!(key),
+                Expr::IfThenElse { cond, then_branch, else_branch } => walk!(cond) || walk!(then_branch) || walk!(else_branch),
+                Expr::TryCatch { try_expr, catch_expr, .. } => walk!(try_expr) || walk!(catch_expr),
+                Expr::Reduce { source, init, update, .. } => walk!(source) || walk!(init) || walk!(update),
+                Expr::Foreach { source, init, update, extract, .. } => walk!(source) || walk!(init) || walk!(update) || extract.as_ref().map_or(false, |e| walk!(e)),
+                Expr::Slice { expr, from, to } => walk!(expr) || from.as_ref().map_or(false, |e| walk!(e)) || to.as_ref().map_or(false, |e| walk!(e)),
+                Expr::ObjectConstruct { pairs } => pairs.iter().any(|(k, v)| walk!(k) || walk!(v)),
+                Expr::LetBinding { value, body, .. } => walk!(value) || walk!(body),
+                Expr::Label { body, .. } => walk!(body),
+                Expr::CallBuiltin { args, .. } => args.iter().any(|a| walk!(a)),
+                Expr::Update { path_expr, update_expr } | Expr::Assign { path_expr, value_expr: update_expr } => walk!(path_expr) || walk!(update_expr),
+                Expr::Mutate { path_expr, value_expr, .. } => walk!(path_expr) || walk!(value_expr),
+                Expr::ClosureOp { input_expr, key_expr, .. } => walk!(input_expr) || walk!(key_expr),
+                // Path-expression forms wrap a sub-expression that may pull from
+                // the input stream (`getpath([input])`, `setpath([input];9)`,
+                // `delpaths([[input]])`, `path(input|.a)`). Omitting these made
+                // `uses_inputs()` report false, so the binary never seeded the
+                // input queue and `input` raised a bogus `break` (#853).
+                Expr::GetPath { path } => walk!(path),
+                Expr::SetPath { path, value } => walk!(path) || walk!(value),
+                Expr::DelPaths { paths } => walk!(paths),
+                Expr::PathExpr { expr: e } | Expr::Debug { expr: e } => walk!(e),
+                Expr::StringInterpolation { parts } => parts.iter().any(|p| {
+                    matches!(p, crate::ir::StringPart::Expr(e) if walk!(e))
+                }),
+                Expr::Format { expr: e, .. } => walk!(e),
+                Expr::Limit { count, generator } => walk!(count) || walk!(generator),
+                Expr::While { cond, update, .. } | Expr::Until { cond, update } => walk!(cond) || walk!(update),
+                Expr::Repeat { update, .. } => walk!(update),
                 Expr::Range { from, to, step } => {
-                    walk(from) || walk(to) || step.as_ref().map_or(false, |s| walk(s))
+                    walk!(from) || walk!(to) || step.as_ref().map_or(false, |s| walk!(s))
+                }
+                // A user-defined call hides the stream read in its body; descend
+                // into it (guarding recursion via `visited`) plus its arguments.
+                Expr::FuncCall { func_id, args } => {
+                    if args.iter().any(|a| walk!(a)) { return true; }
+                    if visited.contains(func_id) { return false; }
+                    visited.push(*func_id);
+                    funcs.get(*func_id).map_or(false, |f| walk(&f.body, funcs, visited))
                 }
                 _ => false,
             }
         }
-        walk(&self.parsed.0)
+        walk(&self.parsed.0, &self.parsed.1, &mut Vec::new())
     }
 
     /// Returns true if the AST contains any runtime loop construct (Reduce,
@@ -2658,7 +2770,7 @@ impl Filter {
                 Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => walk(expr) || walk(key),
                 Expr::IfThenElse { cond, then_branch, else_branch } =>
                     walk(cond) || walk(then_branch) || walk(else_branch),
-                Expr::TryCatch { try_expr, catch_expr } => walk(try_expr) || walk(catch_expr),
+                Expr::TryCatch { try_expr, catch_expr, .. } => walk(try_expr) || walk(catch_expr),
                 Expr::Slice { expr, from, to } => walk(expr)
                     || from.as_ref().map_or(false, |e| walk(e))
                     || to.as_ref().map_or(false, |e| walk(e)),
@@ -2711,7 +2823,7 @@ impl Filter {
                 | Expr::EachOpt { input_expr: operand } | Expr::Recurse { input_expr: operand } => count(operand),
                 Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => count(expr) + count(key),
                 Expr::IfThenElse { cond, then_branch, else_branch } => count(cond) + count(then_branch) + count(else_branch),
-                Expr::TryCatch { try_expr, catch_expr } => count(try_expr) + count(catch_expr),
+                Expr::TryCatch { try_expr, catch_expr, .. } => count(try_expr) + count(catch_expr),
                 Expr::Reduce { source, init, update, .. } => count(source) + count(init) + count(update),
                 Expr::Foreach { source, init, update, extract, .. } => {
                     count(source) + count(init) + count(update)
@@ -2834,14 +2946,31 @@ impl Filter {
     /// (evaluated once with null input). Returns None if expression depends on input.
     /// The result is a list of JSON output lines (one per output value).
     pub fn detect_input_free_output(&self) -> Option<Vec<Vec<u8>>> {
-        let expr = self.detect_expr()?;
+        // Use the ORIGINAL parsed expr, not the simplified one. The simplifier
+        // can rewrite a binding (e.g. the `. as $x` / `LIT as $x` that `IN(x)`
+        // desugars to) into a shape whose input-dependence `contains_input`
+        // no longer sees, so evaluating the simplified form against `null` lost
+        // the binding and `IN(1)` returned `false`. The original expr is the
+        // authoritative one the generic path evaluates. See #847.
+        let expr = &self.parsed.0;
         if contains_input(expr) { return None; }
         // Already handled by literal_output?
         let mut buf = Vec::new();
         if push_const_json(expr, &mut buf) {
             return Some(vec![buf]);
         }
-        // Evaluate with null input using eval
+        // This fast path evaluates `self.simplified` against a `null` input
+        // with an env that carries no user functions. That is only faithful
+        // when the program defines none: a `FuncCall` would otherwise hit an
+        // empty func table and raise "undefined function", which an enclosing
+        // `try`/`catch` silently turns into bogus output (#777 — e.g.
+        // `def f: label $o|break $o; try f catch "c"` wrongly yielded "c").
+        // Const-foldable input-free exprs are already returned above via
+        // `push_const_json`; anything left that references user defs must run
+        // on the authoritative input-carrying path instead, so bail.
+        if !self.parsed.1.is_empty() {
+            return None;
+        }
         let mut outputs = Vec::new();
         let env: crate::eval::EnvRef = std::rc::Rc::new(std::cell::RefCell::new(crate::eval::Env::new(vec![])));
         let result = crate::eval::eval(expr, crate::value::Value::Null, &env, &mut |v| {

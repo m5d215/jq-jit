@@ -846,8 +846,34 @@ where F: FnMut(Value) -> Result<()> {
     pos = skip_ws(bytes, pos);
     while pos < bytes.len() {
         let (val, end) = parse_json_value(bytes, pos, 0)?;
+        reject_adjacent_word_token(bytes, end)?;
         cb(val)?;
         pos = skip_ws(bytes, end);
+    }
+    Ok(())
+}
+
+/// Reject two bare-word/number tokens jammed together with no separator at the
+/// top level (`nullnull`, `true123`, `123true`, `false0`). jq tokenises a
+/// contiguous run of literal/number characters as a single token and errors;
+/// jq-jit's recursive parser would otherwise stop at the first valid token and
+/// split the rest into a second document. Structural values (`{}`, `[]`,
+/// strings) are self-delimiting, so the guard only fires when a word character
+/// runs straight into another word character. See #854.
+#[inline]
+fn reject_adjacent_word_token(bytes: &[u8], end: usize) -> Result<()> {
+    if end > 0 && end < bytes.len() {
+        let prev = bytes[end - 1];
+        let next = bytes[end];
+        // The value ended in a bare-word/number character …
+        let prev_word = prev.is_ascii_alphanumeric() || prev == b'.';
+        // … and the next character could extend a literal or number token
+        // (`false-1`, `1-2`, `1.2.3`, `nulltrue` all error in jq), as opposed
+        // to a separator or a self-delimiting structural/string value.
+        let next_word = next.is_ascii_alphanumeric() || matches!(next, b'.' | b'+' | b'-');
+        if prev_word && next_word {
+            bail!("Invalid literal");
+        }
     }
     Ok(())
 }
@@ -861,6 +887,7 @@ where F: FnMut(Value, usize, usize) -> Result<()> {
     pos = skip_ws(bytes, pos);
     while pos < bytes.len() {
         let (val, end) = parse_json_value(bytes, pos, 0)?;
+        reject_adjacent_word_token(bytes, end)?;
         cb(val, pos, end)?;
         pos = skip_ws(bytes, end);
     }
@@ -1390,7 +1417,7 @@ pub fn json_object_keys_to_buf_reuse(b: &[u8], pos: usize, buf: &mut Vec<u8>, ke
     buf.push(b'[');
     for (idx, (ks, ke)) in keys.iter().enumerate() {
         if idx > 0 { buf.push(b','); }
-        buf.extend_from_slice(&b[*ks..*ke]);
+        push_key_canon_solidus(buf, &b[*ks..*ke]);
     }
     buf.extend_from_slice(b"]\n");
     true
@@ -1498,8 +1525,22 @@ pub fn json_object_keys_join_to_buf(b: &[u8], pos: usize, sep: &[u8], sorted: bo
             }
         }
         // Key content is between quotes: b[ks+1..ke-1]
-        // Already valid JSON string content (escapes preserved)
-        buf.extend_from_slice(&b[ks+1..ke-1]);
+        // Escapes preserved, except `\/` is decoded to `/` (#780).
+        let content = &b[ks+1..ke-1];
+        if raw_contains_escaped_solidus(content) {
+            let mut j = 0;
+            while j < content.len() {
+                let run = j;
+                while j < content.len() && content[j] != b'\\' { j += 1; }
+                if j > run { buf.extend_from_slice(&content[run..j]); }
+                if j >= content.len() { break; }
+                if j + 1 < content.len() && content[j+1] == b'/' { buf.push(b'/'); j += 2; }
+                else if j + 1 < content.len() { buf.push(b'\\'); buf.push(content[j+1]); j += 2; }
+                else { buf.push(b'\\'); j += 1; }
+            }
+        } else {
+            buf.extend_from_slice(content);
+        }
     }
     buf.extend_from_slice(b"\"\n");
     true
@@ -1545,7 +1586,7 @@ pub fn json_object_keys_unsorted_to_buf(b: &[u8], pos: usize, buf: &mut Vec<u8>)
             buf.push(b'[');
             for (idx, (ks, ke, _, _)) in pairs.iter().enumerate() {
                 if idx > 0 { buf.push(b','); }
-                buf.extend_from_slice(&b[*ks..*ke]);
+                push_key_canon_solidus(buf, &b[*ks..*ke]);
             }
             buf.extend_from_slice(b"]\n");
             return true;
@@ -1555,7 +1596,7 @@ pub fn json_object_keys_unsorted_to_buf(b: &[u8], pos: usize, buf: &mut Vec<u8>)
 
         if !first { buf.push(b','); }
         first = false;
-        buf.extend_from_slice(&b[key_start..key_end]);
+        push_key_canon_solidus(buf, &b[key_start..key_end]);
         i = key_end;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
         if i >= b.len() || b[i] != b':' { return false; }
@@ -3280,7 +3321,7 @@ pub fn json_to_entries_raw(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {
             for (idx, (ks, ke, vs, ve)) in pairs.iter().enumerate() {
                 if idx > 0 { buf.push(b','); }
                 buf.extend_from_slice(b"{\"key\":");
-                buf.extend_from_slice(&b[*ks..*ke]);
+                push_key_canon_solidus(buf, &b[*ks..*ke]);
                 buf.extend_from_slice(b",\"value\":");
                 if !append_canonical_value(buf, &b[*vs..*ve]) { buf.truncate(buf_start); return false; }
                 buf.push(b'}');
@@ -3301,7 +3342,7 @@ pub fn json_to_entries_raw(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {
         if !first { buf.push(b','); }
         first = false;
         buf.extend_from_slice(b"{\"key\":");
-        buf.extend_from_slice(&b[key_start..key_end]);
+        push_key_canon_solidus(buf, &b[key_start..key_end]);
         buf.extend_from_slice(b",\"value\":");
         if !append_canonical_value(buf, &b[vs..i]) { buf.truncate(buf_start); return false; }
         buf.push(b'}');
@@ -3930,6 +3971,91 @@ fn walk_json_nums_inner(buf: &mut Vec<u8>, b: &[u8], pos: &mut usize, op: u8, op
     }
 }
 
+/// Returns true if `b` contains an escaped solidus (`\/`) inside a string —
+/// the only escape jq canonicalises that the raw-byte passthrough paths would
+/// otherwise leak verbatim (#780). Escape-aware so `\\/` (escaped backslash
+/// followed by a literal `/`) is not a false positive. Callers gate the
+/// (slightly slower) normalising copy on this so backslash-free input — the
+/// overwhelmingly common case — keeps its single `extend_from_slice`.
+#[inline]
+pub fn raw_contains_escaped_solidus(b: &[u8]) -> bool {
+    // Fast SIMD pre-filter: if the two-byte sequence `\/` never appears there
+    // is no escaped solidus. This rejects the common case — including
+    // backslash-heavy data (escaped quotes, `\\` paths) — in a single pass
+    // without the per-backslash branching of the escape-aware walk below.
+    if memchr::memmem::find(b, b"\\/").is_none() {
+        return false;
+    }
+    // A `\/` substring exists, but it could be a literal `/` following an
+    // escaped backslash (`\\/`). Confirm with an escape-aware walk so that
+    // case is not a false positive.
+    let mut i = 0;
+    while i + 1 < b.len() {
+        match memchr::memchr(b'\\', &b[i..]) {
+            Some(off) => {
+                let p = i + off;
+                if p + 1 >= b.len() { return false; }
+                if b[p + 1] == b'/' { return true; }
+                // Skip the whole escape pair so `\\` does not let the second
+                // backslash pair with a following `/`.
+                i = p + 2;
+            }
+            None => return false,
+        }
+    }
+    false
+}
+
+/// Append the raw JSON value bytes `b` to `buf` verbatim, except that `\/`
+/// inside any string is decoded to `/` (jq canonical form, #780). Object keys
+/// are strings too, so this also fixes keys. Used by identity-passthrough
+/// echo sites; gate with [`raw_contains_escaped_solidus`] so the fast path
+/// (plain `extend_from_slice`) is preserved when no escaped solidus is present.
+pub fn push_raw_canon_solidus(buf: &mut Vec<u8>, b: &[u8]) {
+    let mut i = 0;
+    let len = b.len();
+    while i < len {
+        if b[i] == b'"' {
+            buf.push(b'"');
+            i += 1;
+            loop {
+                let run_start = i;
+                while i < len && b[i] != b'"' && b[i] != b'\\' { i += 1; }
+                if i > run_start { buf.extend_from_slice(&b[run_start..i]); }
+                if i >= len { return; }
+                if b[i] == b'"' { buf.push(b'"'); i += 1; break; }
+                if i + 1 < len && b[i + 1] == b'/' {
+                    buf.push(b'/');
+                    i += 2;
+                } else if i + 1 < len {
+                    buf.push(b'\\');
+                    buf.push(b[i + 1]);
+                    i += 2;
+                } else {
+                    buf.push(b'\\');
+                    i += 1;
+                }
+            }
+        } else {
+            let run_start = i;
+            while i < len && b[i] != b'"' { i += 1; }
+            buf.extend_from_slice(&b[run_start..i]);
+        }
+    }
+}
+
+/// Append a JSON string token `key` (including its surrounding quotes),
+/// decoding `\/` to `/` (#780). Fast-paths the common no-escaped-solidus key
+/// with a single `extend_from_slice`.
+#[inline]
+pub fn push_key_canon_solidus(buf: &mut Vec<u8>, key: &[u8]) {
+    if raw_contains_escaped_solidus(key) {
+        push_raw_canon_solidus(buf, key);
+    } else {
+        buf.extend_from_slice(key);
+    }
+}
+
 /// Compact a JSON value by stripping whitespace outside strings.
 /// Copies to `buf` directly, avoiding Value construction.
 pub fn push_json_compact_raw(buf: &mut Vec<u8>, b: &[u8]) {
@@ -3939,17 +4065,31 @@ pub fn push_json_compact_raw(buf: &mut Vec<u8>, b: &[u8]) {
         match b[i] {
             b' ' | b'\t' | b'\n' | b'\r' => { i += 1; }
             b'"' => {
-                // Copy entire string including quotes
-                let str_start = i;
+                // Copy the string, decoding `\/` to `/` (jq never escapes the
+                // solidus, #780). Other escapes are copied verbatim. Runs of
+                // ordinary bytes are bulk-copied so the common (no-`\/`) string
+                // stays close to a single `extend_from_slice`.
+                buf.push(b'"');
                 i += 1;
-                while i < len {
-                    match b[i] {
-                        b'"' => { i += 1; break; }
-                        b'\\' => { i += 2; }
-                        _ => { i += 1; }
+                loop {
+                    let run_start = i;
+                    while i < len && b[i] != b'"' && b[i] != b'\\' { i += 1; }
+                    if i > run_start { buf.extend_from_slice(&b[run_start..i]); }
+                    if i >= len { break; }
+                    if b[i] == b'"' { buf.push(b'"'); i += 1; break; }
+                    // b[i] == b'\\'
+                    if i + 1 < len && b[i + 1] == b'/' {
+                        buf.push(b'/');
+                        i += 2;
+                    } else if i + 1 < len {
+                        buf.push(b'\\');
+                        buf.push(b[i + 1]);
+                        i += 2;
+                    } else {
+                        buf.push(b'\\');
+                        i += 1;
                     }
                 }
-                buf.extend_from_slice(&b[str_start..i]);
             }
             c => { buf.push(c); i += 1; }
         }
@@ -3993,13 +4133,20 @@ pub fn push_tojson_raw(buf: &mut Vec<u8>, b: &[u8]) {
                         continue;
                     }
                     // backslash escape sequence
-                    buf.extend_from_slice(b"\\\\");
                     i += 1;
-                    if i < len {
-                        if b[i] == b'"' { buf.extend_from_slice(b"\\\""); }
-                        else if b[i] == b'\\' { buf.extend_from_slice(b"\\\\"); }
-                        else { buf.push(b[i]); }
+                    if i < len && b[i] == b'/' {
+                        // `\/` decodes to `/`; jq never escapes the solidus, so
+                        // emit a bare `/` (no outer escaping needed either). #780
+                        buf.push(b'/');
                         i += 1;
+                    } else {
+                        buf.extend_from_slice(b"\\\\");
+                        if i < len {
+                            if b[i] == b'"' { buf.extend_from_slice(b"\\\""); }
+                            else if b[i] == b'\\' { buf.extend_from_slice(b"\\\\"); }
+                            else { buf.push(b[i]); }
+                            i += 1;
+                        }
                     }
                 }
             }
@@ -4023,6 +4170,20 @@ pub fn push_tojson_raw(buf: &mut Vec<u8>, b: &[u8]) {
                     buf.extend_from_slice(canonical.as_bytes());
                 } else {
                     buf.extend_from_slice(num_bytes);
+                }
+            }
+            b'a'..=b'z' | b'A'..=b'Z' => {
+                // Bare literal tokens (true/false/null/nan). An input-parsed
+                // NaN reaches this raw fast path without normalization; jq
+                // renders NaN as `null` in JSON, so the literal `nan` token
+                // would otherwise leak as invalid JSON. #771
+                let start = i;
+                while i < len && b[i].is_ascii_alphabetic() { i += 1; }
+                let tok = &b[start..i];
+                if tok.eq_ignore_ascii_case(b"nan") {
+                    buf.extend_from_slice(b"null");
+                } else {
+                    buf.extend_from_slice(tok);
                 }
             }
             c => { buf.push(c); i += 1; }
@@ -4100,16 +4261,28 @@ pub fn push_json_pretty_raw_at(buf: &mut Vec<u8>, b: &[u8], indent_n: usize, use
                 i += 1;
             }
             b'"' => {
-                let str_start = i;
+                // Copy the string, decoding `\/` to `/` (#780); other escapes
+                // verbatim. Ordinary runs are bulk-copied.
+                buf.push(b'"');
                 i += 1;
-                while i < len {
-                    match b[i] {
-                        b'"' => { i += 1; break; }
-                        b'\\' => { i += 2; }
-                        _ => { i += 1; }
+                loop {
+                    let run_start = i;
+                    while i < len && b[i] != b'"' && b[i] != b'\\' { i += 1; }
+                    if i > run_start { buf.extend_from_slice(&b[run_start..i]); }
+                    if i >= len { break; }
+                    if b[i] == b'"' { buf.push(b'"'); i += 1; break; }
+                    if i + 1 < len && b[i + 1] == b'/' {
+                        buf.push(b'/');
+                        i += 2;
+                    } else if i + 1 < len {
+                        buf.push(b'\\');
+                        buf.push(b[i + 1]);
+                        i += 2;
+                    } else {
+                        buf.push(b'\\');
+                        i += 1;
                     }
                 }
-                buf.extend_from_slice(&b[str_start..i]);
             }
             _ => {
                 // Numbers, true, false, null — copy until structural char or whitespace
@@ -5517,12 +5690,27 @@ pub fn format_jq_number(n: f64) -> String {
 /// through f64. Falls back to f64 dtoa otherwise. Used by @csv / @tsv
 /// formatters where jq preserves the literal shape (#475).
 pub fn push_value_num_repr_str(buf: &mut String, n: f64, repr: Option<&Rc<str>>) {
+    // jq renders a NaN cell as empty in CSV/TSV (not the JSON `null`). #771
+    if n.is_nan() { return; }
     if let Some(r) = repr.filter(|r| is_valid_json_number(r) && repr_is_exact_for_f64(r, n)) {
         if let Some(canonical) = normalize_jq_repr(r) {
             buf.push_str(&canonical);
         } else {
             buf.push_str(r);
         }
+    } else if let Some(canonical) = repr
+        .filter(|r| is_valid_json_number(r) && n.is_finite() && n != 0.0)
+        .and_then(|r| normalize_jq_repr(r))
+        .filter(|c| c.as_str().parse::<f64>().ok() == Some(n))
+    {
+        // Subnormal/precision-edge literals (#616): `repr_is_exact_for_f64` is
+        // too conservative for >15-sig-digit mantissas and exponents < -323,
+        // but the canonical literal still round-trips through f64 — e.g.
+        // DBL_MAX `1.7976931348623157e308` and the smallest subnormal `5e-324`.
+        // jq's @csv/@tsv preserve the literal's uppercase-E decnum form here
+        // exactly as `tostring`/tojson do, so mirror `push_value_tojson`
+        // instead of falling through to the lossy lowercase f64 dtoa form.
+        buf.push_str(&canonical);
     } else {
         push_jq_number_str(buf, n);
     }
@@ -5530,12 +5718,21 @@ pub fn push_value_num_repr_str(buf: &mut String, n: f64, repr: Option<&Rc<str>>)
 
 /// Same as [`push_value_num_repr_str`] but writes UTF-8 bytes to a `Vec<u8>`.
 pub fn push_value_num_repr_bytes(buf: &mut Vec<u8>, n: f64, repr: Option<&Rc<str>>) {
+    // jq renders a NaN cell as empty in CSV/TSV (not the JSON `null`). #771
+    if n.is_nan() { return; }
     if let Some(r) = repr.filter(|r| is_valid_json_number(r) && repr_is_exact_for_f64(r, n)) {
         if let Some(canonical) = normalize_jq_repr(r) {
             buf.extend_from_slice(canonical.as_bytes());
         } else {
             buf.extend_from_slice(r.as_bytes());
         }
+    } else if let Some(canonical) = repr
+        .filter(|r| is_valid_json_number(r) && n.is_finite() && n != 0.0)
+        .and_then(|r| normalize_jq_repr(r))
+        .filter(|c| c.as_str().parse::<f64>().ok() == Some(n))
+    {
+        // Subnormal/precision-edge literals (#616) — see push_value_num_repr_str.
+        buf.extend_from_slice(canonical.as_bytes());
     } else {
         push_jq_number_bytes(buf, n);
     }
@@ -5750,16 +5947,27 @@ pub fn append_canonical_value(buf: &mut Vec<u8>, val: &[u8]) -> bool {
             true
         }
         Some(b'"') => {
-            buf.extend_from_slice(val);
+            // Decode `\/` to `/` (jq never escapes the solidus, #780); other
+            // escapes copy verbatim. Fast-path the no-escaped-solidus string.
+            if raw_contains_escaped_solidus(val) {
+                push_raw_canon_solidus(buf, val);
+            } else {
+                buf.extend_from_slice(val);
+            }
             true
         }
         Some(b'{') | Some(b'[') => {
-            // Composite: only a value that actually holds a non-canonical number
-            // pays the scan and defers; everything else stays a copy.
+            // Composite: a value that holds a non-canonical number must defer
+            // to the generic path; an escaped solidus inside a nested string is
+            // normalised by the byte-copy here (#780); everything else copies.
             if raw_contains_non_canonical_number(val) {
                 return false;
             }
-            buf.extend_from_slice(val);
+            if raw_contains_escaped_solidus(val) {
+                push_raw_canon_solidus(buf, val);
+            } else {
+                buf.extend_from_slice(val);
+            }
             true
         }
         // `true`/`false`/`null` carry no numbers; the special-float literals

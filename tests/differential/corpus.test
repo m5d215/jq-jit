@@ -38,6 +38,19 @@ null
 [limit(1; 1,2,3)]
 null
 
+# limit/nth tolerate an off-type count when the generator is empty (#806)
+[limit("a"; empty)]
+null
+
+[limit({}; empty)]
+null
+
+[nth("a"; empty)]
+null
+
+[nth({}; empty)]
+null
+
 # ---------- PR #27 bug 4: foreach emits per update yield ----------
 
 [foreach range(3) as $i (0; . + $i; .)]
@@ -135,6 +148,13 @@ null
 
 .[] |= . + 1
 [1,2,3]
+
+# a fused .field op after a _modify still raises the index-type error (#809)
+[.[0]|=. | (.a==1)?]
+[1,2]
+
+[(map_values(.) | .a+1)?]
+[1]
 
 # ---------- Issue #31: JIT→eval delegation must seed $vars buried deep in update ----------
 
@@ -245,6 +265,14 @@ null
 
 reduce range(5) as $i (0; . + $i)
 null
+
+# a navigating reduce update body is not a path expression (#816)
+[path(reduce 1 as $x (.; .a))?]
+{"a":1}
+
+# an identity-equivalent update body still path-tracks the INIT path (#816)
+path(reduce 1 as $x (.a; select(true)))
+{"a":{"b":2}}
 
 reduce .[] as $x ({}; .[$x | tostring] = 1)
 [1,2,3,2,1]
@@ -856,7 +884,21 @@ fromjson
 . as $orig | . as [$a, $b] | [$orig, $a, $b]
 [5, 6]
 
+# `. as $v` stays bound to the outer value inside a rebound-`.` body (#818)
+. as $v | [.[] | $v]
+[1,2]
+
+. as $v | map($v)
+[10,20]
+
 # ---------- Issue #65 parser coverage: alternative destructuring ?// ----------
+
+# ?// applies the fallback per source value, not across the whole generator (#819)
+[({a:1},2) as {a:$x} ?// $x | $x]
+null
+
+[([1],2,[3]) as [$a] ?// $a | $a]
+null
 
 . as [$a] ?// $a | $a
 "hello"
@@ -898,6 +940,13 @@ def id: .; id | id | id
 
 def twice(f): f | f; twice(. + 1)
 0
+
+# an unused def referencing an undefined function is ignored (#807)
+def e: undefined_fn; 5
+null
+
+def e($p): undefined_fn(1,2); 5
+null
 
 # ---------- Issue #65 parser coverage: mutual recursion ----------
 
@@ -1036,6 +1085,20 @@ try . catch "never"
 
 # ---------- Issue #65 parser coverage: string interpolation ----------
 
+# multi-hole interpolation iterates leftmost-fastest (#817)
+["\(1,2)\(3,4)"]
+null
+
+["\(1,2)\(3,4)\(5,6)"]
+null
+
+# chained generator subscripts follow the same order (#817)
+[.[0,1][0,1]]
+[[1,2],[3,4]]
+
+[path(.[0,1][0,1])]
+[[1,2],[3,4]]
+
 "\(.)"
 42
 
@@ -1091,6 +1154,13 @@ null
 
 @text
 42
+
+# @format reads the piped value, not the env input (#808)
+. as $x | $x | @json
+{"a":1}
+
+"abc" as $x | $x | @base64
+null
 
 # ---------- Issue #65 parser coverage: format with interpolation ----------
 
@@ -1181,6 +1251,33 @@ null
 
 [truncate_stream({a:[1,2]} | tostream)]
 2
+
+# truncate_stream tolerates a non-number depth (#804)
+[truncate_stream({a:[1,2]} | tostream)]
+null
+
+[truncate_stream({a:[1,2]} | tostream)]
+"x"
+
+[truncate_stream({a:[1,2]} | tostream)]
+-1
+
+# combinations on a length-0 input yields a single empty combination (#805)
+[combinations]
+null
+
+[combinations]
+{}
+
+# combinations honors early termination (#815)
+first(combinations)
+[[1,2],[3,4]]
+
+[limit(2; combinations)]
+[[1,2],[3,4]]
+
+[isempty(combinations)]
+[[1],[2]]
 
 # ---------- Issue #65 parser coverage: path / leaf ----------
 
@@ -1672,6 +1769,14 @@ null
 
 # ---------- Issue #65 parser coverage: numeric conversions + math ----------
 
+# scalb truncates its fractional exponent (#812). NOTE: significand's
+# subnormal/infinity results are intentionally NOT in the corpus — Windows
+# jq (MSVC libm) diverges from jq-jit's libm there, so they live in
+# tests/regression.test (jq-jit basis) only.
+[1,0.5] | scalb(.[0]; .[1])
+
+[3,-1.9] | scalb(.[0]; .[1])
+
 sqrt
 16
 
@@ -1767,6 +1872,11 @@ null
 
 [range(65; 70)] | implode
 null
+
+# NOTE: implode of an *infinite* codepoint (#814) is NOT in the corpus —
+# jq casts the codepoint with `(int)`, and `(int)inf` is implementation-
+# defined, so the system jq may differ across platforms. Covered in
+# tests/regression.test (jq-jit basis) instead.
 
 # ---------- Issue #65 parser coverage: nested try chains ----------
 
@@ -3007,6 +3117,14 @@ null
 getpath(["a", 0])
 null
 
+# a NaN index is out of range (null), not truncated to 0 (#813)
+getpath([nan])
+[10,20]
+
+# limit with a NaN count errors (caught by ? → empty) (#813)
+[limit(nan; 1,2,3)?]
+null
+
 getpath(["a", "b", "c"])
 null
 
@@ -3679,4 +3797,413 @@ nth(0.5; 10,20,30)
 null
 
 nth(2.9; 10,20,30,40)
+null
+
+# ---------- Issue #760/#767: while/until update is a generator ----------
+
+while(.<3; empty)
+0
+
+[while(.<3; empty) | .+1]
+0
+
+[until(.>3; empty)]
+0
+
+[limit(8; while(.<3; .+1, .+2))]
+0
+
+[limit(8; until(.>=3; .+1, .+2))]
+0
+
+# ---------- Issue #761: slice with generator-valued bounds ----------
+
+[.[(0,1):(3,4)]]
+[1,2,3,4,5]
+
+[.[][(0,1):(2,3)]]
+[[1,2,3],[4,5,6]]
+
+[path(.[(0,1):(3,4)])]
+[1,2,3,4,5]
+
+.[(0,1):(3,4)] = [99]
+[1,2,3,4,5]
+
+del(.[(0,1):(3,4)])
+[1,2,3,4,5]
+
+# ---------- Issue #762: strptime %C century specifier ----------
+# jq delegates strptime to libc, so any partial parse (mday = 0) has a
+# platform-divergent wday/yday: glibc → 8/367, BSD → 6/-1, MSVC leaves yday
+# at the 367 sentinel even when the year is set. Only a FULL date (year +
+# month + day all resolved) yields a calendar wday/yday stable on all three,
+# so that is the only shape probed here.
+
+strptime("%C %y-%m-%d")
+"21 24-03-15"
+
+# ---------- Issue #764/#774: regex p flag and duplicated flags ----------
+
+gsub(".";"X";"p")
+"\n"
+
+[match("a.b";"p").string]
+"a\nb"
+
+test("ab";"ii")
+"AB"
+
+test("a.b";"mp")
+"a\nb"
+
+# ---------- Issue #765: free var in an uncalled def is not eagerly rejected ----------
+
+def g: def f: $x; "inner"; g
+null
+
+def f: $x; def g: f; "z"
+null
+
+def f: .+$x; def g: 1; g
+null
+
+def f: {$x}; "ok"
+null
+
+# ---------- Issue #766: param shadows enclosing def of the same name ----------
+
+def x: 1; def f($x): x; f(5)
+null
+
+def x: 1; def f(x): x; f(2)
+null
+
+def f($x): def x: 9; x; f(5)
+null
+
+def f(g): def g: 2; g; f(1)
+null
+
+def x: 1; [x, (def f($x): x; f(5))]
+null
+
+[sub("a";"x","y")]
+"a"
+
+[gsub("a";"x","y")]
+"aa"
+
+sub("a";empty)
+"a"
+
+[gsub("(?<c>.)";.c,"Z")]
+"ab"
+
+[gsub("(?<c>.)";if .c=="a" then "x","y" else "z" end)]
+"ab"
+
+[walk(if type=="number" then .,.+1 else . end)]
+[1]
+
+[walk(if type=="number" then .,.+1 else . end)]
+[1,2]
+
+walk(if type=="number" then .+(1,2) else . end)
+{"a":1}
+
+walk(if type=="number" then .,.+1 else . end)
+{"a":1,"b":[2,3]}
+
+[2,nan,1]|sort_by(.)
+null
+
+[nan,1,nan]|group_by(.)
+null
+
+[nan,1,nan]|unique_by(.)
+null
+
+[[1],[]]|sort_by(.[])
+null
+
+[[1,2],[1],[]]|sort_by(.[])
+null
+
+[[1,2],[1]]|min_by(.[])
+null
+
+tojson
+nan
+
+tojson
+[nan,1,2.5]
+
+[1,nan,3]|@csv
+null
+
+[1,nan,3]|@tsv
+null
+
+["a",nan,1]|@csv
+null
+
+path(getpath(["a","b"]))
+{"a":1}
+
+path(getpath([0]))
+"hello"
+
+path(getpath(["a","b"]))
+{"a":{"b":1}}
+
+path(getpath(["a","b"]))
+{"a":{}}
+
+[label $out | ((label $out | 2), break $out)]
+null
+
+[label $x | (1,(label $x|(2,(label $x|3),break $x,4)),break $x,5)]
+null
+
+[label $x | (label $x | break $x), 99]
+null
+
+def f: label $o | break $o; try f catch "c"
+null
+
+def f: label $o | (10, break $o, 20); try (f, 99) catch "c"
+null
+
+index([1,2])
+[0,1,2]
+
+rindex([2,3])
+[1,2,3,2,3]
+
+index([1,2])
+[1,2,1,2]
+
+rindex([1,2])
+[1,2,1,2]
+
+index({"a":1})
+[{"a":1},2,{"a":1}]
+
+.
+"http:\/\/x.com"
+
+.a
+{"a":"x\/y"}
+
+keys
+{"a\/b":1}
+
+tojson
+"a\/b"
+
+@json
+"a\/b"
+
+{a:.a}
+{"a":"p\/q"}
+
+to_entries
+{"a\/b":"c\/d"}
+
+[.a,.b]
+{"a":"x\/y","b":"m\/n"}
+
+.
+"a\\\/b"
+
+test("";"n")
+"a"
+
+gsub("b*";"X";"n")
+"abba"
+
+match("a*";"n")
+"Xaa"
+
+[scan("a*";"n")]
+"Xaa baa"
+
+[match("";"gn")]
+"abc"
+
+split("a*";"n")
+"XaaYaZ"
+
+[splits(" *";"n")]
+"a b  c"
+
+sub("a*";"X";"n")
+"Xaa"
+
+capture("(?<x>a+)";"gn")
+"aXaa"
+
+if (.a >= .a) then .x else .a end
+{"a":0}
+
+if (.a >= .b) then .x else .y end
+{"a":0,"b":5}
+
+if (.a >= .a) then .a else .x end
+{"a":0}
+
+if (.a >= .b) then .a else .x end
+{"a":1,"b":5}
+
+5 as [$a] ?// $a | . + $a
+7
+
+. as [$a] ?// $a | . + $a
+7
+
+. as [$a] ?// $a | . + $a
+[3]
+
+(1,2,3) as [$a] ?// $a | . + $a
+10
+
+reduce .[] as [$a] ?// $a (0; . + $a)
+[1,[2],3]
+
+# ---------- Issue #836: try/catch catch-branch path tracking ----------
+
+path(try error catch .b)
+{"b":2}
+
+(try error catch .b) |= .+10
+{"b":2}
+
+del(try error catch .b)
+{"b":2}
+
+# ---------- Issue #837/#838: path-tracking residuals ----------
+
+. as $x | path($x)
+{"a":1}
+
+. as $x | path($x | .a)
+{"a":1}
+
+reduce .[] as $x (.a; .) |= 9
+{"a":1}
+
+path(reduce range(2) as $x (.a; .))
+{"a":1}
+
+# ---------- Issue #852: max keeps the last element on ties ----------
+
+max
+[1.0,1]
+
+max
+[1.0,1,1.00]
+
+min
+[1.0,1]
+
+# ---------- Issue #849: @html/@sh escape embedded NUL to \0 ----------
+
+implode|@html
+[97,0,98]
+
+implode|@sh
+[97,0,98]
+
+# ---------- Issue #851: scan null capture ----------
+
+[scan("(a)?b")]
+"b"
+
+[scan("(x)|(y)")]
+"y"
+
+# ---------- Issue #846/#847: IN/1 and IN/2 ----------
+
+IN(1)
+1
+
+IN(null)
+5
+
+IN(1; .[])
+[1,2,3]
+
+IN(false; .)
+null
+
+# ---------- Issue #848: pick non-path error message ----------
+
+try pick(1) catch .
+{"a":1}
+
+try pick(.a,3) catch .
+{"a":1}
+
+# ---------- Issue #841/#842/#843: del comma-paths, slice guards ----------
+
+del(.a[1], .a[2])
+{"a":[1,2,3,4]}
+
+del(.a[1:2], .a[3:4])
+{"a":[1,2,3,4,5]}
+
+del(.[1:3])
+{}
+
+del(.a, .a[1:3])
+{"a":[0,1,2,3]}
+
+# Issue #850: tojson/@json normalizes \u escapes (printable decode,
+# lone low surrogate -> U+FFFD, valid pair -> codepoint)
+@json
+"\u0041"
+
+@json
+"\udc00"
+
+tojson
+"\ud83d\ude00"
+
+@json
+{"k":"A\udc00"}
+
+# Issue #844: non-finite error() payload survives the catch channel
+try error(nan) catch isnan
+null
+
+try error(infinite) catch isinfinite
+null
+
+try error({a:[{b:nan}]}) catch (.a[0].b | isnan)
+null
+
+path(. as [$a] ?// $a | .x)
+{"x":42}
+
+del(. as [$a] ?// $a | .x)
+{"x":1,"y":2}
+
+path(. as [$a] ?// {p:$a} ?// $a | .q)
+{"p":1,"q":2}
+
+# ---------- @csv/@tsv preserve precision-edge literal exponents (#616-class) ----------
+[1.7976931348623157e308] | @csv
+null
+
+[5e-324] | @csv
+null
+
+[9.999999999999999e22] | @tsv
+null
+
+[1.234567890123456e30] | @csv
+null
+
+[5e-324 * 1] | @csv
 null

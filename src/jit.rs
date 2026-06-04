@@ -221,7 +221,7 @@ fn can_scalar_collect(expr: &Expr) -> bool {
         Expr::LetBinding { value, body, .. } => {
             (is_scalar(value) || can_scalar_collect(value)) && can_scalar_collect(body)
         }
-        Expr::TryCatch { try_expr, catch_expr } => {
+        Expr::TryCatch { try_expr, catch_expr, .. } => {
             can_scalar_collect(try_expr) && can_scalar_collect(catch_expr)
         }
         Expr::Error { msg } => msg.as_ref().is_none_or(|m| is_scalar(m)),
@@ -276,7 +276,7 @@ fn is_scalar(expr: &Expr) -> bool {
         Expr::Stderr { expr } => is_scalar(expr),
         // TryCatch is scalar when both try and catch are scalar:
         // try produces one value or fails, catch produces one value on failure
-        Expr::TryCatch { try_expr, catch_expr } => is_scalar(try_expr) && is_scalar(catch_expr),
+        Expr::TryCatch { try_expr, catch_expr, .. } => is_scalar(try_expr) && is_scalar(catch_expr),
         Expr::StringInterpolation { parts } => parts.iter().all(|p| match p {
             StringPart::Literal(_) => true,
             StringPart::Expr(e) => is_scalar(e),
@@ -444,6 +444,7 @@ enum JitOp {
     // Range loop
     ToF64Var { dst_var: u32, src: SlotId },
     F64Less { dst_var: u32, a_var: u32, b_var: u32 },
+    F64Equal { dst_var: u32, a_var: u32, b_var: u32 },
     F64Add { dst_var: u32, a_var: u32, b_var: u32 },
     F64Sub { dst_var: u32, a_var: u32, b_var: u32 },
     F64Mul { dst_var: u32, a_var: u32, b_var: u32 },
@@ -770,9 +771,10 @@ impl Flattener {
                 path_expr: Box::new(self.inline_func_calls(path_expr)),
                 update_expr: Box::new(self.inline_func_calls(update_expr)),
             },
-            Expr::TryCatch { try_expr, catch_expr } => Expr::TryCatch {
+            Expr::TryCatch { try_expr, catch_expr, restore_dot } => Expr::TryCatch {
                 try_expr: Box::new(self.inline_func_calls(try_expr)),
                 catch_expr: Box::new(self.inline_func_calls(catch_expr)),
+                restore_dot: *restore_dot,
             },
             Expr::Alternative { primary, fallback } => Expr::Alternative {
                 primary: Box::new(self.inline_func_calls(primary)),
@@ -951,7 +953,14 @@ impl Flattener {
             JitOp::Index { .. } | JitOp::IndexField { .. } |
             JitOp::BinOp { .. } | JitOp::AddMove { .. } | JitOp::UnaryOp { .. } |
             JitOp::Negate { .. } | JitOp::CallBuiltin { .. } |
-            JitOp::MutateInplace { .. } | JitOp::ThrowError { .. }
+            JitOp::MutateInplace { .. } | JitOp::ThrowError { .. } |
+            // The fused field-op runtimes index `.field` on the base and return
+            // GEN_ERROR for a non-object base ("Cannot index <type> with string").
+            // Without a CheckError that error is set but never propagated, so the
+            // null in dst leaks out — e.g. `.[0]|=. | .a==1` returned null instead
+            // of erroring once the surrounding _modify pushed it onto the JIT
+            // path (#809).
+            JitOp::FieldBinopConst { .. } | JitOp::FieldBinopField { .. }
         );
         self.ops.push(op);
         if is_fallible {
@@ -1727,7 +1736,7 @@ impl Flattener {
                 self.emit(JitOp::Drop { slot: val });
                 out
             }
-            Expr::TryCatch { try_expr, catch_expr } => {
+            Expr::TryCatch { try_expr, catch_expr, .. } => {
                 // Scalar try-catch: try produces one value, or catch produces one value
                 let catch_label = self.alloc_label();
                 let done_label = self.alloc_label();
@@ -2364,6 +2373,7 @@ impl Flattener {
                             key: Box::new((**key_expr).clone()),
                         }),
                         catch_expr: Box::new(Expr::Empty),
+                        restore_dot: false,
                     };
                     return self.flatten_gen(&try_catch, input_slot);
                 }
@@ -2376,6 +2386,7 @@ impl Flattener {
                             key: Box::new((**key_expr).clone()),
                         }),
                         catch_expr: Box::new(Expr::Empty),
+                        restore_dot: false,
                     }),
                 };
                 self.flatten_gen(&inner, input_slot)
@@ -2732,7 +2743,7 @@ impl Flattener {
                 true
             }
 
-            Expr::TryCatch { try_expr, catch_expr } => {
+            Expr::TryCatch { try_expr, catch_expr, .. } => {
                 self.flatten_gen_try_catch(try_expr, catch_expr, input_slot)
             }
 
@@ -3268,11 +3279,15 @@ impl Flattener {
                 self.emit(JitOp::F64Less { dst_var: cmp, a_var: zero_var, b_var: limit_var });
                 self.emit(JitOp::BranchOnVar { var: cmp, nonzero_label: start_label, zero_label });
                 self.emit(JitOp::Label { id: zero_label });
-                // limit <= 0: check if negative (error) or zero (skip)
-                let neg_cmp = self.alloc_var();
-                self.emit(JitOp::F64Less { dst_var: neg_cmp, a_var: limit_var, b_var: zero_var });
+                // Reached when `0 < limit` is false — i.e. limit is <= 0 or NaN.
+                // Skip (empty) only for an exact zero; a negative OR NaN count
+                // is an error (jq orders NaN below 0). NaN fails every F64Less
+                // comparison, so distinguish it from 0 with an equality test:
+                // `limit == 0` is true only for an exact zero (#813).
+                let eq_zero = self.alloc_var();
+                self.emit(JitOp::F64Equal { dst_var: eq_zero, a_var: limit_var, b_var: zero_var });
                 let error_label = self.alloc_label();
-                self.emit(JitOp::BranchOnVar { var: neg_cmp, nonzero_label: error_label, zero_label: done_label });
+                self.emit(JitOp::BranchOnVar { var: eq_zero, nonzero_label: done_label, zero_label: error_label });
                 self.emit(JitOp::Label { id: error_label });
                 // Negative limit: throw error
                 let err_msg = self.alloc_slot();
@@ -3927,7 +3942,7 @@ impl Flattener {
                 true
             }
             // TryCatch | right: compile try-catch body inline, each output piped to right
-            Expr::TryCatch { try_expr, catch_expr } => {
+            Expr::TryCatch { try_expr, catch_expr, .. } => {
                 // Pre-check: try body and right must be compilable
                 {
                     let mut test = self.test_flattener();
@@ -4810,7 +4825,7 @@ impl Flattener {
                 Self::collect_loadvar_indices(then_branch, out);
                 Self::collect_loadvar_indices(else_branch, out);
             }
-            Expr::TryCatch { try_expr, catch_expr } => {
+            Expr::TryCatch { try_expr, catch_expr, .. } => {
                 Self::collect_loadvar_indices(try_expr, out);
                 Self::collect_loadvar_indices(catch_expr, out);
             }
@@ -6271,7 +6286,7 @@ fn contains_func_call(expr: &Expr) -> bool {
         Expr::Each { input_expr } | Expr::EachOpt { input_expr } => contains_func_call(input_expr),
         Expr::IfThenElse { cond, then_branch, else_branch } => contains_func_call(cond) || contains_func_call(then_branch) || contains_func_call(else_branch),
         Expr::LetBinding { value, body, .. } => contains_func_call(value) || contains_func_call(body),
-        Expr::TryCatch { try_expr, catch_expr } => contains_func_call(try_expr) || contains_func_call(catch_expr),
+        Expr::TryCatch { try_expr, catch_expr, .. } => contains_func_call(try_expr) || contains_func_call(catch_expr),
         Expr::Collect { generator } => contains_func_call(generator),
         Expr::BinOp { lhs, rhs, .. } => contains_func_call(lhs) || contains_func_call(rhs),
         Expr::UnaryOp { operand, .. } | Expr::Negate { operand } => contains_func_call(operand),
@@ -7140,7 +7155,8 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 }
                 let mut m = &a[0];
                 for v in &a[1..] {
-                    if crate::runtime::compare_values(v, m) == std::cmp::Ordering::Greater { m = v; }
+                    // jq's `max` keeps the LAST maximal element on ties (#852).
+                    if crate::runtime::compare_values(v, m) != std::cmp::Ordering::Less { m = v; }
                 }
                 std::ptr::write(dst, m.clone());
                 return 0;
@@ -10017,6 +10033,17 @@ impl JitCompiler {
                         let a_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), a_bits);
                         let b_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), b_bits);
                         let cmp = b.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::LessThan, a_f, b_f);
+                        let result = b.ins().uextend(ptr_ty, cmp);
+                        b.def_var(vars[*dst_var as usize], result);
+                    }
+                    JitOp::F64Equal { dst_var, a_var, b_var: bv } => {
+                        let a_bits = b.use_var(vars[*a_var as usize]);
+                        let b_bits = b.use_var(vars[*bv as usize]);
+                        let a_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), a_bits);
+                        let b_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), b_bits);
+                        // Ordered equality: NaN == anything is false, so a NaN
+                        // operand yields 0 here (used to flag a NaN limit count).
+                        let cmp = b.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::Equal, a_f, b_f);
                         let result = b.ins().uextend(ptr_ty, cmp);
                         b.def_var(vars[*dst_var as usize], result);
                     }
