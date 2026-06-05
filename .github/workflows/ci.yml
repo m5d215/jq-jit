@@ -19,6 +19,29 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # Cache the cargo registry and the release build tree so warm runs skip
+      # recompiling the heavy third-party deps (cranelift, serde, proptest),
+      # which dominate the job now that test execution is parallelized. The
+      # key busts on the toolchain version and Cargo.lock; restore-keys lets a
+      # changed lockfile still warm-start from the previous build tree.
+      # actions/cache is GitHub-first-party (same trust boundary as the
+      # checkout / upload-artifact actions already in use).
+      - name: Capture toolchain version
+        id: rust
+        shell: bash
+        run: echo "ver=$(rustc --version | tr ' ' '-')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache cargo registry and build tree
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ steps.rust.outputs.ver }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ steps.rust.outputs.ver }}-
+
       - name: Install jq 1.8.1 (for differential tests)
         shell: bash
         run: |
