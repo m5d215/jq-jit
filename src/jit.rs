@@ -3956,6 +3956,18 @@ impl Flattener {
                     let t_in = test.alloc_slot();
                     if !test.flatten_gen(catch_expr, t_in) { return false; }
                 }
+                // Pre-check: `right` must be compilable too. Both branches below
+                // pipe into it via `flatten_gen(right, …)` whose return value is
+                // ignored, so a `right` that bails mid-compile (e.g. a non-scalar
+                // `reduce` with a `?`-bearing update body, which has no flatten_gen
+                // arm) would leave partial ops yet still report success — silently
+                // dropping the reduce and swallowing its error (#877). The sibling
+                // `Collect | right` arm guards `right` the same way.
+                {
+                    let mut test = self.test_flattener();
+                    let t_in = test.alloc_slot();
+                    if !test.flatten_gen(right, t_in) { return false; }
+                }
 
                 let catch_label = self.alloc_label();
                 let done_label = self.alloc_label();
