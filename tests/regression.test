@@ -12119,3 +12119,17 @@ false
 .a | length | tostring
 {"a":[1,2]}
 "2"
+
+# #877: array construct via (try…catch…)|(.[0], reduce …) must propagate the
+# reduce source's error, not silently drop the reduce. The reduce's `?`-bearing
+# update body made is_scalar(reduce) false (TryCatch with an empty catch), and
+# the TryCatch|right pipe arm ignored the failed flatten_gen(right) — shipping a
+# JIT program with the reduce dropped, leaking [null] instead of erroring.
+[(try (.) catch (values)) | (.[0]),reduce (.a) as $x (0; . + ($x | tonumber? // 0))]
+[]
+
+# #877: same filter on null takes the no-error path and must still produce both
+# elements (guards the fix from over-bailing when `right` is compilable).
+[(try (.) catch (values)) | (.[0]),reduce (.a) as $x (0; . + ($x | tonumber? // 0))]
+null
+[null,0]
