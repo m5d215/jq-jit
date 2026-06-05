@@ -76,64 +76,67 @@ fn differential_against_jq_1_8() {
     let mut fail = 0usize;
     let mut failures: Vec<String> = Vec::new();
 
-    for case in &cases {
+    // Each case spawns its own jq and jq-jit subprocesses with no shared
+    // in-process state, so fan out across cores; verdicts are folded back in
+    // input order to keep the failure report deterministic.
+    let verdicts = common::parallel::par_map(&cases, |case| -> Result<(), String> {
         let jq_out = run_filter(&jq, &case.filter, &case.input, TIMEOUT);
         let jit_out = run_filter(jq_jit, &case.filter, &case.input, TIMEOUT);
 
         let (Some(a), Some(b)) = (jq_out, jit_out) else {
-            fail += 1;
-            failures.push(format!(
+            return Err(format!(
                 "  line {}: spawn failure\n    filter: {}\n    input:  {}",
                 case.line, case.filter, case.input
             ));
-            continue;
         };
 
         if a.is_error && b.is_error {
-            pass += 1;
-            continue;
+            return Ok(());
         }
         if a.is_error != b.is_error {
-            fail += 1;
-            failures.push(format!(
+            return Err(format!(
                 "  line {}: error mismatch (jq error={}, jit error={})\n    filter: {}\n    input:  {}\n    jq:  {}\n    jit: {}",
                 case.line, a.is_error, b.is_error, case.filter, case.input,
                 a.stdout.trim(), b.stdout.trim()
             ));
-            continue;
         }
 
         let a_norm = match normalize(&a.stdout) {
             Ok(s) => s,
             Err(e) => {
-                fail += 1;
-                failures.push(format!(
+                return Err(format!(
                     "  line {}: jq output not JSON-parsable ({})\n    filter: {}\n    input:  {}\n    jq:  {}",
                     case.line, e, case.filter, case.input, a.stdout.trim()
                 ));
-                continue;
             }
         };
         let b_norm = match normalize(&b.stdout) {
             Ok(s) => s,
             Err(e) => {
-                fail += 1;
-                failures.push(format!(
+                return Err(format!(
                     "  line {}: jit output not JSON-parsable ({})\n    filter: {}\n    input:  {}\n    jit: {}",
                     case.line, e, case.filter, case.input, b.stdout.trim()
                 ));
-                continue;
             }
         };
 
         if a_norm == b_norm {
-            pass += 1;
+            Ok(())
         } else {
-            fail += 1;
-            failures.push(format!(
+            Err(format!(
                 "  line {}: value mismatch\n    filter: {}\n    input:  {}\n    jq:  {}\n    jit: {}",
                 case.line, case.filter, case.input, a_norm, b_norm
-            ));
+            ))
+        }
+    });
+
+    for verdict in verdicts {
+        match verdict {
+            Ok(()) => pass += 1,
+            Err(msg) => {
+                fail += 1;
+                failures.push(msg);
+            }
         }
     }
 

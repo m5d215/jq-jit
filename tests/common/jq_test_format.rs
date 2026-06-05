@@ -306,8 +306,11 @@ pub fn run_jq_test_suite(label: &str, test_file_path: &str) {
     let mut skip = 0usize;
     let mut failures: Vec<TestResult> = Vec::new();
 
-    for case in &cases {
-        let result = run_test(case);
+    // Each case spawns its own jq-jit subprocess and shares no in-process
+    // state, so the suite fans out across cores; results come back in input
+    // order to keep the report deterministic.
+    let results = super::parallel::par_map(&cases, |case| run_test(case));
+    for (case, result) in cases.iter().zip(results) {
         match &result.status {
             TestStatus::Pass => pass += 1,
             TestStatus::Fail => {

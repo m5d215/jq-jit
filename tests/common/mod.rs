@@ -16,6 +16,8 @@
 //! - `jq_test_format` — parser + runner for the 3-line group format
 //!   (`filter / input / expected_output`) shared by `tests/official/jq.test`
 //!   and `tests/regression.test`.
+//! - `parallel` — `par_map`, a dep-free order-preserving parallel map used to
+//!   fan the spawn-bound differential harnesses across CPU cores.
 //!
 //! `#[allow(dead_code)]` is applied because each integration test imports
 //! only the subset of helpers it needs; unused ones look dead from the
@@ -27,3 +29,4 @@ pub mod diff_harness;
 pub mod filter_strategy;
 pub mod jq_test_format;
 pub mod json_normalize;
+pub mod parallel;
