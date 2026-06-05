@@ -5,16 +5,32 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Daily full-matrix run: catches platform-specific regressions within a day
+  # of merge (PR/push only gate on ubuntu) and gives the proptest suites a
+  # fresh-seed fuzzing cadence. Owner is notified on failure.
+  schedule:
+    - cron: "17 15 * * *" # 00:17 JST
+  # Manual full-matrix run on demand.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+  # CI only: drop LTO and maximise codegen parallelism to cut the test-binary
+  # compile (~34% locally). Correctness is unaffected — LTO/codegen-units are
+  # pure optimizations. The shipped binary keeps `lto = "thin"`: release.yml
+  # has no such override, so the tag build still tests the production config.
+  CARGO_PROFILE_RELEASE_LTO: "false"
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "256"
 
 jobs:
   build-and-test:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-2025]
+        # PR / push: ubuntu only (fast feedback). schedule / manual: full
+        # 3-OS matrix. Release coverage on all three lives in release.yml,
+        # which gates the tag build on `cargo test --release`.
+        os: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && fromJSON('["ubuntu-latest", "macos-latest", "windows-2025"]') || fromJSON('["ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
