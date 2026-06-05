@@ -155,6 +155,17 @@ fn normalize(output: &str) -> String {
 ///   in #415.
 const KNOWN_DIVERGENCES: &[usize] = &[2230, 2235, 2240, 2366, 2371];
 
+/// Per-case verdict, produced in parallel and folded sequentially so the
+/// counters and reporting stay identical to the original serial loop.
+enum Outcome {
+    /// Agreed (jit == interp). `Some(line)` if the case is on the allowlist
+    /// yet agreed anyway — counts as a pass *and* flags a stale entry.
+    Pass(Option<usize>),
+    KnownDiverged,
+    SpawnFail(String),
+    Fail(String),
+}
+
 #[test]
 fn jit_vs_interpreter_self_diff() {
     let jq_jit = env!("CARGO_BIN_EXE_jq-jit");
@@ -178,52 +189,66 @@ fn jit_vs_interpreter_self_diff() {
     let mut unexpected_pass: Vec<usize> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
 
-    for case in &cases {
+    // Each case spawns two isolated jq-jit subprocesses (JIT vs forced
+    // interpreter); no shared in-process state, so fan out across cores and
+    // fold the verdicts back in input order.
+    let outcomes = common::parallel::par_map(&cases, |case| {
         let known = KNOWN_DIVERGENCES.contains(&case.line);
         let jit = run_once(jq_jit, &case.filter, &case.input, false);
         let interp = run_once(jq_jit, &case.filter, &case.input, true);
 
         let (Some(jit), Some(interp)) = (jit, interp) else {
-            spawn_fail += 1;
-            failures.push(format!(
+            return Outcome::SpawnFail(format!(
                 "  line {}: spawn failure\n    filter: {}\n    input:  {}",
                 case.line, case.filter, case.input
             ));
-            continue;
         };
 
         if jit.is_error && interp.is_error {
-            if known { unexpected_pass.push(case.line); }
-            pass += 1;
-            continue;
+            return Outcome::Pass(known.then_some(case.line));
         }
         if jit.is_error != interp.is_error {
             if known {
-                known_diverged += 1;
-                continue;
+                return Outcome::KnownDiverged;
             }
-            fail += 1;
-            failures.push(format!(
+            return Outcome::Fail(format!(
                 "  line {}: error-class mismatch (jit error={}, interp error={})\n    filter: {}\n    input:  {}\n    jit:    {}\n    interp: {}",
                 case.line, jit.is_error, interp.is_error, case.filter, case.input,
                 jit.stdout.trim(), interp.stdout.trim()
             ));
-            continue;
         }
 
         let jit_norm = normalize(&jit.stdout);
         let interp_norm = normalize(&interp.stdout);
         if jit_norm == interp_norm {
-            if known { unexpected_pass.push(case.line); }
-            pass += 1;
+            Outcome::Pass(known.then_some(case.line))
         } else if known {
-            known_diverged += 1;
+            Outcome::KnownDiverged
         } else {
-            fail += 1;
-            failures.push(format!(
+            Outcome::Fail(format!(
                 "  line {}: value mismatch\n    filter: {}\n    input:  {}\n    jit:    {}\n    interp: {}",
                 case.line, case.filter, case.input, jit_norm, interp_norm
-            ));
+            ))
+        }
+    });
+
+    for outcome in outcomes {
+        match outcome {
+            Outcome::Pass(maybe_line) => {
+                pass += 1;
+                if let Some(line) = maybe_line {
+                    unexpected_pass.push(line);
+                }
+            }
+            Outcome::KnownDiverged => known_diverged += 1,
+            Outcome::SpawnFail(msg) => {
+                spawn_fail += 1;
+                failures.push(msg);
+            }
+            Outcome::Fail(msg) => {
+                fail += 1;
+                failures.push(msg);
+            }
         }
     }
 

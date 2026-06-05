@@ -208,6 +208,17 @@ fn normalize(output: &str) -> String {
 /// with `selfdiff_jit_interp.rs::KNOWN_DIVERGENCES`.
 const KNOWN_DIVERGENCES: &[usize] = &[2230, 2235, 2240, 2366, 2371];
 
+/// Per-case verdict, produced in parallel and folded sequentially so the
+/// counters and reporting stay identical to the original serial loop.
+enum Outcome {
+    /// Agreed across all configs. `Some(line)` if the case is on the allowlist
+    /// yet agreed anyway — counts as a pass *and* flags a stale entry.
+    Pass(Option<usize>),
+    KnownDiverged,
+    SpawnFail(String),
+    Fail(String),
+}
+
 #[test]
 fn layer_pinned_self_diff() {
     let jq_jit = env!("CARGO_BIN_EXE_jq-jit");
@@ -231,7 +242,10 @@ fn layer_pinned_self_diff() {
     let mut unexpected_pass: Vec<usize> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
 
-    for case in &cases {
+    // Each case spawns four isolated jq-jit subprocesses (one per layer
+    // config); no shared in-process state, so fan out across cores and fold
+    // the verdicts back in input order.
+    let outcomes = common::parallel::par_map(&cases, |case| {
         let known = KNOWN_DIVERGENCES.contains(&case.line);
 
         // Run all four configs. Baseline is the oracle every other config
@@ -245,12 +259,10 @@ fn layer_pinned_self_diff() {
             }
         }
         if spawn_failed {
-            spawn_fail += 1;
-            failures.push(format!(
+            return Outcome::SpawnFail(format!(
                 "  line {}: spawn failure\n    filter: {}\n    input:  {}",
                 case.line, case.filter, case.input
             ));
-            continue;
         }
 
         // Per-config normalized output (stdout) and error class. The
@@ -270,16 +282,12 @@ fn layer_pinned_self_diff() {
         }
 
         if disagreeing.is_empty() {
-            if known { unexpected_pass.push(case.line); }
-            pass += 1;
-            continue;
+            return Outcome::Pass(known.then_some(case.line));
         }
         if known {
-            known_diverged += 1;
-            continue;
+            return Outcome::KnownDiverged;
         }
 
-        fail += 1;
         let mut buf = String::new();
         buf.push_str(&format!(
             "  line {}: layer divergence\n    filter: {}\n    input:  {}\n",
@@ -309,7 +317,27 @@ fn layer_pinned_self_diff() {
             configs_off.join(", "),
         ));
         buf.push_str("       multiple configs differ ⇒ inspect baseline output for the canonical answer)\n");
-        failures.push(buf);
+        Outcome::Fail(buf)
+    });
+
+    for outcome in outcomes {
+        match outcome {
+            Outcome::Pass(maybe_line) => {
+                pass += 1;
+                if let Some(line) = maybe_line {
+                    unexpected_pass.push(line);
+                }
+            }
+            Outcome::KnownDiverged => known_diverged += 1,
+            Outcome::SpawnFail(msg) => {
+                spawn_fail += 1;
+                failures.push(msg);
+            }
+            Outcome::Fail(msg) => {
+                fail += 1;
+                failures.push(msg);
+            }
+        }
     }
 
     eprintln!();

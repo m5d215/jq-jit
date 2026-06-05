@@ -25,6 +25,8 @@
 //! reviewers can see the hot/cold distribution without opening a CI
 //! artifact.
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
@@ -150,13 +152,17 @@ fn fast_paths_have_nonzero_corpus_coverage() {
     // "generic" fallbacks, reported separately
     let mut generic_counts: BTreeMap<String, usize> = BTreeMap::new();
 
-    for case in &cases {
-        if let Some(name) = trace_one(jq_jit, &case.filter, &case.input) {
-            if name == "jit" || name == "eval" {
-                *generic_counts.entry(name).or_insert(0) += 1;
-            } else {
-                *counts.entry(name).or_insert(0) += 1;
-            }
+    // Each case spawns its own traced jq-jit subprocess (no shared in-process
+    // state), so collect the matched names across cores, then fold into the
+    // count maps sequentially.
+    let traced = common::parallel::par_map(&cases, |case| {
+        trace_one(jq_jit, &case.filter, &case.input)
+    });
+    for name in traced.into_iter().flatten() {
+        if name == "jit" || name == "eval" {
+            *generic_counts.entry(name).or_insert(0) += 1;
+        } else {
+            *counts.entry(name).or_insert(0) += 1;
         }
     }
 
