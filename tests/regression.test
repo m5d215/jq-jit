@@ -12077,3 +12077,45 @@ null
 [2.2250738585072014e-308]|@tsv
 null
 "2.2250738585072014E-308"
+
+# #873: .field | tostring | length must error on non-object input
+# (fast path used to conflate "object missing field" with "not an object").
+# boolean
+.a | tostring | length
+false
+
+# #873: number input
+.a | tostring | length
+5
+
+# #873: string input
+.a | tostring | length
+"x"
+
+# #873: object missing the field stays null -> "null" -> length 4
+.a | tostring | length
+{}
+4
+
+# #873: present field is unaffected
+.a | tostring | length
+{"a":12}
+2
+
+# #873 sibling: .field | length | tostring must error on non-object input
+.a | length | tostring
+false
+
+# #873 sibling: number input
+.a | length | tostring
+5
+
+# #873 sibling: object missing the field stays 0 -> "0"
+.a | length | tostring
+{}
+"0"
+
+# #873 sibling: present array field is unaffected
+.a | length | tostring
+{"a":[1,2]}
+"2"

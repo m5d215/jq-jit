@@ -12094,8 +12094,22 @@ fn real_main() {
                                 }
                             }
                         } else {
-                            // null field: tostring = "null", length = 4
-                            compact_buf.extend_from_slice(b"4\n");
+                            // None means either an object missing the field
+                            // (→ null, tostring "null", length 4) or a
+                            // non-object input, which jq rejects with an
+                            // indexing error. Distinguish by the leading
+                            // non-whitespace byte: only `{` is the object case.
+                            let mut p = 0;
+                            while p < raw.len() && matches!(raw[p], b' ' | b'\t' | b'\n' | b'\r') { p += 1; }
+                            if p < raw.len() && raw[p] == b'{' {
+                                // object missing the field: tostring = "null", length = 4
+                                compact_buf.extend_from_slice(b"4\n");
+                            } else {
+                                // non-object input: defer to the slow path so jq's
+                                // "Cannot index <type> with string" error is raised
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -12157,8 +12171,21 @@ fn real_main() {
                                 }
                             }
                         } else {
-                            // null field: length = 0, tostring = "0"
-                            compact_buf.extend_from_slice(b"\"0\"\n");
+                            // None means either an object missing the field
+                            // (→ null, length 0, tostring "0") or a non-object
+                            // input, which jq rejects with an indexing error.
+                            // Distinguish by the leading non-whitespace byte.
+                            let mut p = 0;
+                            while p < raw.len() && matches!(raw[p], b' ' | b'\t' | b'\n' | b'\r') { p += 1; }
+                            if p < raw.len() && raw[p] == b'{' {
+                                // object missing the field: length = 0, tostring = "0"
+                                compact_buf.extend_from_slice(b"\"0\"\n");
+                            } else {
+                                // non-object input: defer to the slow path so jq's
+                                // "Cannot index <type> with string" error is raised
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            }
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -20803,7 +20830,17 @@ fn real_main() {
                             }
                         }
                     } else {
-                        compact_buf.extend_from_slice(b"4\n");
+                        // None: object missing the field (→ "null", length 4)
+                        // vs non-object input (jq raises an indexing error).
+                        // Distinguish by the leading non-whitespace byte.
+                        let mut p = 0;
+                        while p < raw.len() && matches!(raw[p], b' ' | b'\t' | b'\n' | b'\r') { p += 1; }
+                        if p < raw.len() && raw[p] == b'{' {
+                            compact_buf.extend_from_slice(b"4\n");
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
@@ -20861,7 +20898,17 @@ fn real_main() {
                             }
                         }
                     } else {
-                        compact_buf.extend_from_slice(b"\"0\"\n");
+                        // None: object missing the field (→ length 0, "0")
+                        // vs non-object input (jq raises an indexing error).
+                        // Distinguish by the leading non-whitespace byte.
+                        let mut p = 0;
+                        while p < raw.len() && matches!(raw[p], b' ' | b'\t' | b'\n' | b'\r') { p += 1; }
+                        if p < raw.len() && raw[p] == b'{' {
+                            compact_buf.extend_from_slice(b"\"0\"\n");
+                        } else {
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        }
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
