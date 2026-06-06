@@ -2787,8 +2787,39 @@ pub fn rt_delpaths(v: &Value, paths: &Value) -> Result<Value> {
             // whose parent is not an array is left intact so `delete_path`
             // raises jq's type error (non-array container) or no-ops (missing
             // key). See #841/#842/#843.
-            let mut expanded: Vec<Value> = Vec::with_capacity(ps.len());
-            for path in ps.iter() {
+            // Resolve negative array indices to their absolute positions
+            // BEFORE sorting/dedup/delete. jq's `delpaths_sorted` normalizes
+            // each path against the ORIGINAL document so e.g. `[[-1],[2]]` on
+            // `[1,2,3]` collapses to a single deletion (both name index 2), and
+            // the descending-delete safety property holds. Without this, the raw
+            // `[-1]` sorts before `[2]` and the wrong elements are removed. Each
+            // negative component is resolved against the array at its (already
+            // normalized) parent path; non-array parents leave it untouched so
+            // `delete_path` still raises jq's type error / no-ops. See #884.
+            let normalized: Vec<Value> = ps
+                .iter()
+                .map(|path| match path {
+                    Value::Arr(pa) => {
+                        let mut np: Vec<Value> = Vec::with_capacity(pa.len());
+                        for comp in pa.iter() {
+                            let parent =
+                                rt_getpath(v, &Value::Arr(Rc::new(np.clone()))).unwrap_or(Value::Null);
+                            let nc = match (&parent, comp) {
+                                (Value::Arr(arr), Value::Num(n, _)) if *n < 0.0 => {
+                                    let idx = *n as i64 + arr.len() as i64;
+                                    if idx >= 0 { Value::number(idx as f64) } else { comp.clone() }
+                                }
+                                _ => comp.clone(),
+                            };
+                            np.push(nc);
+                        }
+                        Value::Arr(Rc::new(np))
+                    }
+                    other => other.clone(),
+                })
+                .collect();
+            let mut expanded: Vec<Value> = Vec::with_capacity(normalized.len());
+            for path in normalized.iter() {
                 if let Value::Arr(pa) = path {
                     if let Some(Value::Obj(ObjInner(spec))) = pa.last() {
                         let parent: Vec<Value> = pa[..pa.len() - 1].to_vec();

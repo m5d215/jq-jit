@@ -12282,3 +12282,28 @@ INDEX(.a,.b)
 INDEX(.[]; .id)
 [{"id":1},{"id":1,"x":9},{"id":2}]
 {"1":{"id":1,"x":9},"2":{"id":2}}
+
+# #884: delpaths normalizes a negative index against a positive twin before dedup.
+delpaths([[-1],[2]])
+[1,2,3]
+[1,2]
+
+# #884: delpaths deletes both elements when given two negative indices.
+delpaths([[-1],[-2]])
+[1,2]
+[]
+
+# #884: scattered negative indices delete the correct (descending) positions.
+delpaths([[-3],[-1],[-5]])
+[1,2,3,4,5,6]
+[1,3,5]
+
+# #884: negative indices nested under an object key are resolved against that array.
+delpaths([["a",-1],["a",-2]])
+{"a":[1,2,3,4]}
+{"a":[1,2]}
+
+# #884: an out-of-range negative index is a no-op (matches jq).
+delpaths([[-10]])
+[1,2]
+[1,2]
