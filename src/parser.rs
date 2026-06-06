@@ -1913,6 +1913,25 @@ impl Parser {
                 self.advance();
                 let key_expr = self.parse_pipe()?;
                 self.expect(&Token::RParen)?;
+                // jq rejects a constant non-string literal key at compile time
+                // ("Cannot use number (0) as object key"); jq-jit otherwise
+                // deferred to runtime and treated `(0)` as the index `.[0]`,
+                // returning a value for array input. Only literal constants are
+                // rejected — runtime expressions like `(.x)` / `(0|tostring)`
+                // and a negated `(-0)` (a Negate node, not a literal) defer as
+                // before. See #888.
+                if let Expr::Literal(lit) = &key_expr {
+                    let bad = match lit {
+                        Literal::Num(n, _) => Some(("number", crate::value::format_jq_number(*n))),
+                        Literal::Null => Some(("null", "null".to_string())),
+                        Literal::True => Some(("boolean", "true".to_string())),
+                        Literal::False => Some(("boolean", "false".to_string())),
+                        Literal::Str(_) => None,
+                    };
+                    if let Some((ty, val)) = bad {
+                        bail!("Cannot use {} ({}) as object key", ty, val);
+                    }
+                }
                 self.expect(&Token::Colon)?;
                 let pat = self.parse_pattern()?;
                 Ok((key_expr, pat))
