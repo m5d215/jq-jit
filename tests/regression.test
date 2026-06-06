@@ -12397,3 +12397,28 @@ bsearch(2)
 . as {(0|tostring):$v} | $v
 {"0":7}
 7
+
+# #902: empty/not/error are builtins, not keywords; a user def may shadow them.
+def empty: 1; empty
+null
+1
+
+# #902: user def shadows the error builtin (0-arg rethrow form).
+def error: 1; error
+null
+1
+
+# #902: error/1 user def shadows the builtin error/1.
+def error(x): [x,x]; error("hi")
+null
+["hi","hi"]
+
+# #902: builtin name accepted as a parameter name and used as a value.
+def f(not): not+1; f(10)
+null
+11
+
+# #902: literal keywords true/false/null are accepted as def names (dead def; body literal wins).
+def true: 1; [true]
+null
+[true]
