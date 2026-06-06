@@ -12422,3 +12422,18 @@ null
 def true: 1; [true]
 null
 [true]
+
+# #903: nan-vs-nan compares Equal, so a stable sort preserves input order of equal-NaN keys.
+[[nan,1],[nan,2],[nan,3]]|sort
+null
+[[null,1],[null,2],[null,3]]
+
+# #903: sort_by stability with a NaN tie-breaking key keeps input order.
+[{"a":1,"b":nan,"i":0},{"a":1,"b":nan,"i":1}]|sort_by(.a,.b)|map(.i)
+null
+[0,1]
+
+# #903: group_by over equal-NaN keys yields singleton groups in input order.
+[{"k":nan,"i":0},{"k":nan,"i":1},{"k":nan,"i":2}]|group_by(.k)|map(map(.i))
+null
+[[0],[1],[2]]

@@ -1137,7 +1137,11 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
 pub fn cmp_num_jq(x: f64, y: f64) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match (x.is_nan(), y.is_nan()) {
-        (true, true) => Ordering::Less,
+        // jq's total order treats NaN as the smallest value AND nan-vs-nan as
+        // EQUAL. Returning Less here would make the comparator non-antisymmetric,
+        // so a stable sort reverses any run of >=2 elements that share a NaN key
+        // (sort/sort_by/group_by/unique_by). #903
+        (true, true) => Ordering::Equal,
         (true, false) => Ordering::Less,
         (false, true) => Ordering::Greater,
         (false, false) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
