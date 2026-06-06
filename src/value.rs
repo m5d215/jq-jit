@@ -3979,17 +3979,18 @@ fn walk_json_nums_inner(buf: &mut Vec<u8>, b: &[u8], pos: &mut usize, op: u8, op
 /// overwhelmingly common case — keeps its single `extend_from_slice`.
 #[inline]
 pub fn raw_contains_escaped_solidus(b: &[u8]) -> bool {
-    // Fast SIMD pre-filter: if the two-byte sequence `\/` never appears there
-    // is no escaped solidus. This rejects the common case — including
-    // backslash-heavy data (escaped quotes, `\\` paths) — in a single pass
-    // without the per-backslash branching of the escape-aware walk below.
-    if memchr::memmem::find(b, b"\\/").is_none() {
+    // Cheapest pre-filter first: no backslash at all means no escape of any
+    // kind, so no escaped solidus. A single-byte `memchr` has lower per-call
+    // setup than memmem's two-byte searcher, which matters because this gates
+    // every raw string output — one call per record on the NDJSON
+    // field-access hot paths, where the value almost never contains `\`.
+    let Some(first) = memchr::memchr(b'\\', b) else {
         return false;
-    }
-    // A `\/` substring exists, but it could be a literal `/` following an
-    // escaped backslash (`\\/`). Confirm with an escape-aware walk so that
-    // case is not a false positive.
-    let mut i = 0;
+    };
+    // A backslash exists; it may be the `\/` we canonicalise, or a literal `/`
+    // following an escaped backslash (`\\/`). Walk escape-aware from the first
+    // backslash so that case is not a false positive.
+    let mut i = first;
     while i + 1 < b.len() {
         match memchr::memchr(b'\\', &b[i..]) {
             Some(off) => {
