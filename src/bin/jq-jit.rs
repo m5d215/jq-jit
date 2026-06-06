@@ -3417,8 +3417,11 @@ fn real_main() {
             }
             // RFC 7464 JSON Text Sequences: every output value is preceded
             // by an RS (0x1e) byte. The trailing LF is already produced by
-            // each emitter below.
-            if seq {
+            // each emitter below. jq omits the RS for a RAW STRING output
+            // (`-r`/`-j` applied to a string), since that bypasses the JSON
+            // dumper; numbers/bools/arrays/objects (JSON-encoded even under
+            // `-r`) and default JSON output keep the RS. See #890.
+            if seq && !(raw_output && matches!(result, Value::Str(_))) {
                 if use_compact_buf || use_pretty_buf {
                     cbuf.push(0x1e);
                 } else {
