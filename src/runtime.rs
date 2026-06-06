@@ -2202,10 +2202,16 @@ fn rt_join(v: &Value, sep: &Value) -> Result<Value> {
     // jq treats `null` as the additive identity for strings (`"a" + null == "a"`),
     // and `join` is internally a reduce over `acc + sep + item`, so a `null`
     // separator collapses to the empty string. See #430.
-    let sep_bytes: &[u8] = match sep {
-        Value::Str(s) => s.as_bytes(),
-        Value::Null => b"",
-        _ => bail!("join requires array and string"),
+    //
+    // The separator's type only matters when it is actually inserted (between
+    // two or more elements). jq's reduce never touches `$sep` for a 0- or
+    // 1-element input, so `join` returns a value there regardless of `$sep`'s
+    // type. Defer the type check: `None` means "not a string/null", which is
+    // only an error once the separator is reached (i > 0 below). #905
+    let sep_bytes: Option<&[u8]> = match sep {
+        Value::Str(s) => Some(s.as_bytes()),
+        Value::Null => Some(b""),
+        _ => None,
     };
     // jq's `join` desugars to a reduce that iterates the input. Both arrays
     // and objects are accepted (#533); for objects we walk the values in
@@ -2217,10 +2223,21 @@ fn rt_join(v: &Value, sep: &Value) -> Result<Value> {
         // wording adopted across other iteration sites (#481/#505/#517).
         _ => bail!("Cannot iterate over {}", errdesc(v)),
     };
-    let cap = items.len() * (8 + sep_bytes.len());
+    let cap = items.len() * (8 + sep_bytes.map_or(0, |s| s.len()));
     let mut buf: Vec<u8> = Vec::with_capacity(cap);
     for (i, item) in items.iter().enumerate() {
-        if i > 0 { buf.extend_from_slice(sep_bytes); }
+        if i > 0 {
+            match sep_bytes {
+                Some(sb) => buf.extend_from_slice(sb),
+                // Separator is now actually used but is neither a string nor
+                // null: jq raises its addition error (`acc + $sep`), where `acc`
+                // is the partial string built so far. #905
+                None => {
+                    let partial = Value::from_string(unsafe { String::from_utf8_unchecked(buf) });
+                    bail!("{} and {} cannot be added", errdesc(&partial), errdesc(sep));
+                }
+            }
+        }
         match item {
             Value::Str(sv) => buf.extend_from_slice(sv.as_bytes()),
             Value::Null => {},
