@@ -3501,6 +3501,35 @@ impl Parser {
         }
     }
 
+    /// Desugar `INDEX(stream; f)` to jq's real definition
+    /// `reduce stream as $x ({}; .[$x|f|tostring] = $x)`. The assignment LHS is
+    /// a path expression whose key (`$x|f|tostring`) may be a generator; each
+    /// produced key is then set to `$x` (last-write-wins across the fan-out).
+    /// The earlier `. + {($x|f|tostring): $x}` object-merge collapsed a
+    /// multi-output index expression to only its last key. See #883.
+    fn index_reduce(stream: Expr, f: Expr, x_var: u16, acc_var: u16) -> Expr {
+        let key = Expr::Pipe {
+            left: Box::new(Expr::LoadVar { var_index: x_var }),
+            right: Box::new(Expr::Pipe {
+                left: Box::new(f),
+                right: Box::new(Expr::UnaryOp { op: UnaryOp::ToString, operand: Box::new(Expr::Input) }),
+            }),
+        };
+        Expr::Reduce {
+            source: Box::new(stream),
+            init: Box::new(Expr::ObjectConstruct { pairs: vec![] }),
+            var_index: x_var,
+            acc_index: acc_var,
+            update: Box::new(Expr::Assign {
+                path_expr: Box::new(Expr::Index {
+                    expr: Box::new(Expr::Input),
+                    key: Box::new(key),
+                }),
+                value_expr: Box::new(Expr::LoadVar { var_index: x_var }),
+            }),
+        }
+    }
+
     fn compile_funcall(&mut self, name: &str, args: Vec<Expr>) -> Result<Expr> {
         // User-defined functions shadow builtins (matches jq semantics).
         if let Some(func_id) = self.scope.lookup_func(name, args.len()) {
@@ -4282,58 +4311,16 @@ impl Parser {
                 let stream = Expr::Each { input_expr: Box::new(Expr::Input) };
                 let x_var = self.scope.alloc_var("__idx_x__");
                 let acc_var = self.scope.alloc_var("__idx_acc__");
-                Ok(Expr::Reduce {
-                    source: Box::new(stream),
-                    init: Box::new(Expr::ObjectConstruct { pairs: vec![] }),
-                    var_index: x_var,
-                    acc_index: acc_var,
-                    update: Box::new(Expr::BinOp {
-                        op: BinOp::Add,
-                        lhs: Box::new(Expr::Input),
-                        rhs: Box::new(Expr::ObjectConstruct {
-                            pairs: vec![(
-                                Expr::Pipe {
-                                    left: Box::new(Expr::LoadVar { var_index: x_var }),
-                                    right: Box::new(Expr::Pipe {
-                                        left: Box::new(f),
-                                        right: Box::new(Expr::UnaryOp { op: UnaryOp::ToString, operand: Box::new(Expr::Input) }),
-                                    }),
-                                },
-                                Expr::LoadVar { var_index: x_var },
-                            )],
-                        }),
-                    }),
-                })
+                Ok(Self::index_reduce(stream, f, x_var, acc_var))
             }
-            // INDEX/2: INDEX(stream; f) = reduce stream as $x ({}; . + {($x|f|tostring): $x})
+            // INDEX/2: INDEX(stream; f) = reduce stream as $x ({}; .[$x|f|tostring] = $x)
             ("INDEX", 2) => {
                 let mut args = args.into_iter();
                 let stream = args.next().unwrap();
                 let f = args.next().unwrap();
                 let x_var = self.scope.alloc_var("__idx_x__");
                 let acc_var = self.scope.alloc_var("__idx_acc__");
-                Ok(Expr::Reduce {
-                    source: Box::new(stream),
-                    init: Box::new(Expr::ObjectConstruct { pairs: vec![] }),
-                    var_index: x_var,
-                    acc_index: acc_var,
-                    update: Box::new(Expr::BinOp {
-                        op: BinOp::Add,
-                        lhs: Box::new(Expr::Input),
-                        rhs: Box::new(Expr::ObjectConstruct {
-                            pairs: vec![(
-                                Expr::Pipe {
-                                    left: Box::new(Expr::LoadVar { var_index: x_var }),
-                                    right: Box::new(Expr::Pipe {
-                                        left: Box::new(f),
-                                        right: Box::new(Expr::UnaryOp { op: UnaryOp::ToString, operand: Box::new(Expr::Input) }),
-                                    }),
-                                },
-                                Expr::LoadVar { var_index: x_var },
-                            )],
-                        }),
-                    }),
-                })
+                Ok(Self::index_reduce(stream, f, x_var, acc_var))
             }
             // JOIN/2: JOIN($idx; f) = [.[] | [., $idx[f|tostring]]]
             ("JOIN", 2) => {

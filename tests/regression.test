@@ -12257,3 +12257,28 @@ path(until(type=="array"; .a))
 (until(.a|not; .a)) = 9
 {"a":{"a":{}}}
 {"a":{"a":9}}
+
+# #883: INDEX with a generator index-expression sets one key per emitted value (not just the last).
+INDEX(.[]; .[])
+[["a","b"]]
+{"a":["a","b"],"b":["a","b"]}
+
+# #883: INDEX/1 with a multi-output index expression keeps every key.
+INDEX(.[])
+[[1,2,3]]
+{"1":[1,2,3],"2":[1,2,3],"3":[1,2,3]}
+
+# #883: multi-row multi-output INDEX preserves last-write-wins overwrite ordering.
+INDEX(.[]; .[])
+[["a","b"],["b","c"]]
+{"a":["a","b"],"b":["b","c"],"c":["b","c"]}
+
+# #883: a comma index-expression (INDEX(.a,.b)) fans out to both keys.
+INDEX(.a,.b)
+[{"a":1,"b":2}]
+{"1":{"a":1,"b":2},"2":{"a":1,"b":2}}
+
+# #883: ordinary single-key INDEX still de-duplicates by last-write-wins.
+INDEX(.[]; .id)
+[{"id":1},{"id":1,"x":9},{"id":2}]
+{"1":{"id":1,"x":9},"2":{"id":2}}
