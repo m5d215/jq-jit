@@ -1065,10 +1065,31 @@ impl Parser {
         Ok(result)
     }
 
+    /// jq treats the builtin names `empty`/`not`/`error` and the literal
+    /// keywords `true`/`false`/`null` as ordinary identifiers in function-name
+    /// and parameter-name position, so a user `def` may carry one of these
+    /// names. Our lexer emits dedicated tokens for them; map those back to the
+    /// identifier string here (#902). Returns None for genuine keywords
+    /// (`if`/`reduce`/`as`/…) that jq also rejects in this position.
+    fn def_name_token(t: &Token) -> Option<&'static str> {
+        match t {
+            Token::Empty => Some("empty"),
+            Token::Not => Some("not"),
+            Token::Error => Some("error"),
+            Token::True => Some("true"),
+            Token::False => Some("false"),
+            Token::Null => Some("null"),
+            _ => None,
+        }
+    }
+
     fn parse_funcdef(&mut self) -> Result<()> {
         self.expect(&Token::Def)?;
         let name = match self.advance() {
             Token::Ident(s) => s,
+            ref t if Self::def_name_token(t).is_some() => {
+                Self::def_name_token(t).unwrap().to_string()
+            }
             t => bail!("expected function name, got {:?}", t),
         };
 
@@ -1081,6 +1102,9 @@ impl Parser {
                     Token::Variable(p) => params.push((p, true)),
                     Token::RParen => break,
                     Token::Semicolon => continue,
+                    ref t if Self::def_name_token(t).is_some() => {
+                        params.push((Self::def_name_token(t).unwrap().to_string(), false))
+                    }
                     t => bail!("expected parameter name, got {:?}", t),
                 }
             }
@@ -2701,9 +2725,14 @@ impl Parser {
                 }
             }
 
+            // `empty`, `error`, and `not` are ordinary builtins in jq, not
+            // reserved words, so a user `def` (or a same-named parameter) may
+            // shadow them. Route through the shadow-aware resolvers — they look
+            // up a user func / filter param first and fall back to the builtin
+            // Expr only when nothing shadows it (#902).
             Token::Empty => {
                 self.advance();
-                Ok(Expr::Empty)
+                self.compile_builtin_noargs("empty")
             }
 
             Token::Error => {
@@ -2711,15 +2740,15 @@ impl Parser {
                 if self.eat(&Token::LParen) {
                     let msg = self.parse_pipe()?;
                     self.expect(&Token::RParen)?;
-                    Ok(Expr::Error { msg: Some(Box::new(msg)) })
+                    self.compile_funcall("error", vec![msg])
                 } else {
-                    Ok(Expr::Error { msg: None })
+                    self.compile_builtin_noargs("error")
                 }
             }
 
             Token::Not => {
                 self.advance();
-                Ok(Expr::Not)
+                self.compile_builtin_noargs("not")
             }
 
             Token::Variable(name) => {
@@ -3310,6 +3339,10 @@ impl Parser {
         match name {
             "not" => Ok(Expr::Not),
             "empty" => Ok(Expr::Empty),
+            // `error`/0 (rethrow current input as an error). Reached only via the
+            // `Token::Error` primary arm, which routes here so a user `def error`
+            // or an `error` parameter can shadow the builtin (#902).
+            "error" => Ok(Expr::Error { msg: None }),
             "env" => Ok(Expr::Env),
             "builtins" => Ok(Expr::Builtins),
             "input" => Ok(Expr::ReadInput),
