@@ -6350,16 +6350,60 @@ pub fn value_to_json_pretty_color(v: &Value, depth: usize, step: usize, use_tab:
     out
 }
 
-// ANSI color constants (matches jq defaults: JQ_COLORS="0;90:0;39:0;39:0;39:0;32:1;39:1;39:1;34")
 const COLOR_RESET: &str = "\x1b[0m";
-const COLOR_NULL: &str = "\x1b[0;90m";     // bright black (gray)
-const COLOR_FALSE: &str = "\x1b[0;39m";    // default
-const COLOR_TRUE: &str = "\x1b[0;39m";     // default
-const COLOR_NUMBER: &str = "\x1b[0;39m";   // default
-const COLOR_STRING: &str = "\x1b[0;32m";   // green
-const COLOR_ARRAY: &str = "\x1b[1;39m";    // bold default
-const COLOR_OBJECT: &str = "\x1b[1;39m";   // bold default
-const COLOR_KEY: &str = "\x1b[1;34m";      // bold blue
+
+/// The 8 SGR colour sequences jq uses for `-C` output, in jq's slot order:
+/// null, false, true, numbers, strings, arrays, objects, object-keys.
+/// Built once from `$JQ_COLORS`, falling back to jq's defaults. See #891.
+pub struct Palette {
+    null: String,
+    fal: String,
+    tru: String,
+    num: String,
+    string: String,
+    arr: String,
+    obj: String,
+    key: String,
+}
+
+/// jq's default palette (`JQ_COLORS="0;90:0;39:0;39:0;39:0;32:1;39:1;39:1;34"`).
+const DEFAULT_COLOR_CODES: [&str; 8] =
+    ["0;90", "0;39", "0;39", "0;39", "0;32", "1;39", "1;39", "1;34"];
+
+fn build_palette() -> Palette {
+    let mut codes: [String; 8] =
+        std::array::from_fn(|i| format!("\x1b[{}m", DEFAULT_COLOR_CODES[i]));
+    if let Ok(env) = std::env::var("JQ_COLORS") {
+        if !env.is_empty() {
+            // jq splits on ':' but a trailing ':' does NOT add an empty final
+            // field; interior empty fields ARE honoured (rendered as `\x1b[m`).
+            let mut fields: Vec<&str> = env.split(':').collect();
+            if env.ends_with(':') {
+                fields.pop();
+            }
+            // jq rejects the WHOLE variable (keeping all defaults) if any of the
+            // first 8 fields contains anything other than digits/semicolons.
+            // An empty field is valid and maps to `\x1b[m`.
+            let valid = fields
+                .iter()
+                .take(8)
+                .all(|f| f.bytes().all(|b| b.is_ascii_digit() || b == b';'));
+            if valid {
+                for (i, f) in fields.iter().take(8).enumerate() {
+                    codes[i] = format!("\x1b[{}m", f);
+                }
+            }
+        }
+    }
+    let [null, fal, tru, num, string, arr, obj, key] = codes;
+    Palette { null, fal, tru, num, string, arr, obj, key }
+}
+
+/// The process-wide colour palette, initialised once from `$JQ_COLORS`.
+pub fn palette() -> &'static Palette {
+    static PALETTE: std::sync::OnceLock<Palette> = std::sync::OnceLock::new();
+    PALETTE.get_or_init(build_palette)
+}
 
 // Pre-computed indent buffers (avoid per-call allocation from repeat())
 const SPACES_256: &str = "                                                                                                                                                                                                                                                                ";
@@ -6434,12 +6478,13 @@ fn write_pretty_to_string_impl<const COLOR: bool>(out: &mut String, v: &Value, d
     macro_rules! c {
         ($code:expr) => { if COLOR { out.push_str($code); } };
     }
+    let p = palette();
     match v {
-        Value::Null => { c!(COLOR_NULL); out.push_str("null"); c!(COLOR_RESET); }
-        Value::False => { c!(COLOR_FALSE); out.push_str("false"); c!(COLOR_RESET); }
-        Value::True => { c!(COLOR_TRUE); out.push_str("true"); c!(COLOR_RESET); }
+        Value::Null => { c!(p.null.as_str()); out.push_str("null"); c!(COLOR_RESET); }
+        Value::False => { c!(p.fal.as_str()); out.push_str("false"); c!(COLOR_RESET); }
+        Value::True => { c!(p.tru.as_str()); out.push_str("true"); c!(COLOR_RESET); }
         Value::Num(n, NumRepr(repr)) => {
-            c!(COLOR_NUMBER);
+            c!(p.num.as_str());
             if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r)) {
                 if let Some(canonical) = normalize_jq_repr(r) {
                     out.push_str(&canonical);
@@ -6451,50 +6496,50 @@ fn write_pretty_to_string_impl<const COLOR: bool>(out: &mut String, v: &Value, d
             }
             c!(COLOR_RESET);
         }
-        Value::Str(s) => { c!(COLOR_STRING); push_json_string(out, s); c!(COLOR_RESET); }
+        Value::Str(s) => { c!(p.string.as_str()); push_json_string(out, s); c!(COLOR_RESET); }
         Value::Error(e) => push_json_string(out, e),
-        Value::Arr(a) if a.is_empty() => { c!(COLOR_ARRAY); out.push_str("[]"); c!(COLOR_RESET); }
-        Value::Obj(ObjInner(o)) if o.is_empty() => { c!(COLOR_OBJECT); out.push_str("{}"); c!(COLOR_RESET); }
+        Value::Arr(a) if a.is_empty() => { c!(p.arr.as_str()); out.push_str("[]"); c!(COLOR_RESET); }
+        Value::Obj(ObjInner(o)) if o.is_empty() => { c!(p.obj.as_str()); out.push_str("{}"); c!(COLOR_RESET); }
         Value::Arr(a) => {
             let inner_depth = depth + step;
             // Emit `\033[0m` before each newline so terminals that paint
             // the rest of the line (powerline, less -R) do not extend the
             // structural-character color. Matches jq -C byte-for-byte.
-            c!(COLOR_ARRAY); out.push('['); c!(COLOR_RESET); out.push('\n');
+            c!(p.arr.as_str()); out.push('['); c!(COLOR_RESET); out.push('\n');
             for (i, item) in a.iter().enumerate() {
-                if i > 0 { c!(COLOR_ARRAY); out.push(','); c!(COLOR_RESET); out.push('\n'); }
+                if i > 0 { c!(p.arr.as_str()); out.push(','); c!(COLOR_RESET); out.push('\n'); }
                 push_indent(out, inner_depth, use_tab);
                 write_pretty_to_string_impl::<COLOR>(out, item, inner_depth, step, use_tab, sort_keys);
             }
             out.push('\n');
             push_indent(out, depth, use_tab);
-            c!(COLOR_ARRAY); out.push(']'); c!(COLOR_RESET);
+            c!(p.arr.as_str()); out.push(']'); c!(COLOR_RESET);
         }
         Value::Obj(ObjInner(o)) => {
             let inner_depth = depth + step;
-            c!(COLOR_OBJECT); out.push('{'); c!(COLOR_RESET); out.push('\n');
+            c!(p.obj.as_str()); out.push('{'); c!(COLOR_RESET); out.push('\n');
             if sort_keys {
                 let mut entries: Vec<_> = o.iter().collect();
                 entries.sort_by(|a, b| a.0.cmp(&b.0));
                 for (i, (k, val)) in entries.iter().enumerate() {
-                    if i > 0 { c!(COLOR_OBJECT); out.push(','); c!(COLOR_RESET); out.push('\n'); }
+                    if i > 0 { c!(p.obj.as_str()); out.push(','); c!(COLOR_RESET); out.push('\n'); }
                     push_indent(out, inner_depth, use_tab);
-                    c!(COLOR_KEY); push_json_string(out, k); c!(COLOR_RESET);
-                    c!(COLOR_OBJECT); out.push(':'); c!(COLOR_RESET); out.push(' ');
+                    c!(p.key.as_str()); push_json_string(out, k); c!(COLOR_RESET);
+                    c!(p.obj.as_str()); out.push(':'); c!(COLOR_RESET); out.push(' ');
                     write_pretty_to_string_impl::<COLOR>(out, val, inner_depth, step, use_tab, sort_keys);
                 }
             } else {
                 for (i, (k, val)) in o.iter().enumerate() {
-                    if i > 0 { c!(COLOR_OBJECT); out.push(','); c!(COLOR_RESET); out.push('\n'); }
+                    if i > 0 { c!(p.obj.as_str()); out.push(','); c!(COLOR_RESET); out.push('\n'); }
                     push_indent(out, inner_depth, use_tab);
-                    c!(COLOR_KEY); push_json_string(out, k); c!(COLOR_RESET);
-                    c!(COLOR_OBJECT); out.push(':'); c!(COLOR_RESET); out.push(' ');
+                    c!(p.key.as_str()); push_json_string(out, k); c!(COLOR_RESET);
+                    c!(p.obj.as_str()); out.push(':'); c!(COLOR_RESET); out.push(' ');
                     write_pretty_to_string_impl::<COLOR>(out, val, inner_depth, step, use_tab, sort_keys);
                 }
             }
             out.push('\n');
             push_indent(out, depth, use_tab);
-            c!(COLOR_OBJECT); out.push('}'); c!(COLOR_RESET);
+            c!(p.obj.as_str()); out.push('}'); c!(COLOR_RESET);
         }
     }
 }
@@ -6678,12 +6723,13 @@ fn push_compact_value_color(buf: &mut Vec<u8>, v: &Value) {
     macro_rules! c {
         ($code:expr) => { buf.extend_from_slice($code.as_bytes()); };
     }
+    let p = palette();
     match v {
-        Value::Null => { c!(COLOR_NULL); buf.extend_from_slice(b"null"); c!(COLOR_RESET); }
-        Value::False => { c!(COLOR_FALSE); buf.extend_from_slice(b"false"); c!(COLOR_RESET); }
-        Value::True => { c!(COLOR_TRUE); buf.extend_from_slice(b"true"); c!(COLOR_RESET); }
+        Value::Null => { c!(p.null.as_str()); buf.extend_from_slice(b"null"); c!(COLOR_RESET); }
+        Value::False => { c!(p.fal.as_str()); buf.extend_from_slice(b"false"); c!(COLOR_RESET); }
+        Value::True => { c!(p.tru.as_str()); buf.extend_from_slice(b"true"); c!(COLOR_RESET); }
         Value::Num(n, NumRepr(repr)) => {
-            c!(COLOR_NUMBER);
+            c!(p.num.as_str());
             if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r)) {
                 buf.extend_from_slice(canonical_repr_bytes(r).as_bytes());
             } else {
@@ -6691,25 +6737,29 @@ fn push_compact_value_color(buf: &mut Vec<u8>, v: &Value) {
             }
             c!(COLOR_RESET);
         }
-        Value::Str(s) => { c!(COLOR_STRING); push_json_string_to_vec(buf, s.as_str()); c!(COLOR_RESET); }
+        Value::Str(s) => { c!(p.string.as_str()); push_json_string_to_vec(buf, s.as_str()); c!(COLOR_RESET); }
+        // Each structural character is wrapped `COLOR <char> RESET`, and an
+        // empty container is one colored span (`COLOR [] RESET`), matching jq
+        // -Cc byte-for-byte (the pretty path already did; #891).
+        Value::Arr(a) if a.is_empty() => { c!(p.arr.as_str()); buf.extend_from_slice(b"[]"); c!(COLOR_RESET); }
+        Value::Obj(ObjInner(o)) if o.is_empty() => { c!(p.obj.as_str()); buf.extend_from_slice(b"{}"); c!(COLOR_RESET); }
         Value::Arr(a) => {
-            c!(COLOR_ARRAY); buf.push(b'[');
+            c!(p.arr.as_str()); buf.push(b'['); c!(COLOR_RESET);
             for (i, item) in a.iter().enumerate() {
-                if i > 0 { buf.push(b','); }
-                c!(COLOR_RESET);
+                if i > 0 { c!(p.arr.as_str()); buf.push(b','); c!(COLOR_RESET); }
                 push_compact_value_color(buf, item);
             }
-            c!(COLOR_ARRAY); buf.push(b']'); c!(COLOR_RESET);
+            c!(p.arr.as_str()); buf.push(b']'); c!(COLOR_RESET);
         }
         Value::Obj(ObjInner(o)) => {
-            c!(COLOR_OBJECT); buf.push(b'{');
+            c!(p.obj.as_str()); buf.push(b'{'); c!(COLOR_RESET);
             for (i, (k, val)) in o.iter().enumerate() {
-                if i > 0 { buf.push(b','); }
-                c!(COLOR_KEY); push_json_string_to_vec(buf, k.as_str()); c!(COLOR_RESET);
-                c!(COLOR_OBJECT); buf.push(b':'); c!(COLOR_RESET);
+                if i > 0 { c!(p.obj.as_str()); buf.push(b','); c!(COLOR_RESET); }
+                c!(p.key.as_str()); push_json_string_to_vec(buf, k.as_str()); c!(COLOR_RESET);
+                c!(p.obj.as_str()); buf.push(b':'); c!(COLOR_RESET);
                 push_compact_value_color(buf, val);
             }
-            c!(COLOR_OBJECT); buf.push(b'}'); c!(COLOR_RESET);
+            c!(p.obj.as_str()); buf.push(b'}'); c!(COLOR_RESET);
         }
         Value::Error(e) => push_json_string_to_vec(buf, e.as_str()),
     }
@@ -6733,12 +6783,13 @@ fn push_pretty_value_impl<const COLOR: bool>(buf: &mut Vec<u8>, v: &Value, depth
     macro_rules! c {
         ($code:expr) => { if COLOR { buf.extend_from_slice($code.as_bytes()); } };
     }
+    let p = palette();
     match v {
-        Value::Null => { c!(COLOR_NULL); buf.extend_from_slice(b"null"); c!(COLOR_RESET); }
-        Value::False => { c!(COLOR_FALSE); buf.extend_from_slice(b"false"); c!(COLOR_RESET); }
-        Value::True => { c!(COLOR_TRUE); buf.extend_from_slice(b"true"); c!(COLOR_RESET); }
+        Value::Null => { c!(p.null.as_str()); buf.extend_from_slice(b"null"); c!(COLOR_RESET); }
+        Value::False => { c!(p.fal.as_str()); buf.extend_from_slice(b"false"); c!(COLOR_RESET); }
+        Value::True => { c!(p.tru.as_str()); buf.extend_from_slice(b"true"); c!(COLOR_RESET); }
         Value::Num(n, NumRepr(repr)) => {
-            c!(COLOR_NUMBER);
+            c!(p.num.as_str());
             if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r)) {
                 buf.extend_from_slice(canonical_repr_bytes(r).as_bytes());
             } else {
@@ -6746,38 +6797,38 @@ fn push_pretty_value_impl<const COLOR: bool>(buf: &mut Vec<u8>, v: &Value, depth
             }
             c!(COLOR_RESET);
         }
-        Value::Str(s) => { c!(COLOR_STRING); push_json_string_to_vec(buf, s.as_str()); c!(COLOR_RESET); }
+        Value::Str(s) => { c!(p.string.as_str()); push_json_string_to_vec(buf, s.as_str()); c!(COLOR_RESET); }
         Value::Error(e) => push_json_string_to_vec(buf, e.as_str()),
-        Value::Arr(a) if a.is_empty() => { c!(COLOR_ARRAY); buf.extend_from_slice(b"[]"); c!(COLOR_RESET); }
-        Value::Obj(ObjInner(o)) if o.is_empty() => { c!(COLOR_OBJECT); buf.extend_from_slice(b"{}"); c!(COLOR_RESET); }
+        Value::Arr(a) if a.is_empty() => { c!(p.arr.as_str()); buf.extend_from_slice(b"[]"); c!(COLOR_RESET); }
+        Value::Obj(ObjInner(o)) if o.is_empty() => { c!(p.obj.as_str()); buf.extend_from_slice(b"{}"); c!(COLOR_RESET); }
         Value::Arr(a) => {
             let inner = depth + step;
             // Reset color before every newline so terminals that paint
             // the rest of the line don't extend the structural-character
             // color. Matches jq -C byte-for-byte.
-            c!(COLOR_ARRAY); buf.push(b'['); c!(COLOR_RESET); buf.push(b'\n');
+            c!(p.arr.as_str()); buf.push(b'['); c!(COLOR_RESET); buf.push(b'\n');
             for (i, item) in a.iter().enumerate() {
-                if i > 0 { c!(COLOR_ARRAY); buf.push(b','); c!(COLOR_RESET); buf.push(b'\n'); }
+                if i > 0 { c!(p.arr.as_str()); buf.push(b','); c!(COLOR_RESET); buf.push(b'\n'); }
                 push_indent_bytes(buf, inner, use_tab);
                 push_pretty_value_impl::<COLOR>(buf, item, inner, step, use_tab);
             }
             buf.push(b'\n');
             push_indent_bytes(buf, depth, use_tab);
-            c!(COLOR_ARRAY); buf.push(b']'); c!(COLOR_RESET);
+            c!(p.arr.as_str()); buf.push(b']'); c!(COLOR_RESET);
         }
         Value::Obj(ObjInner(o)) => {
             let inner = depth + step;
-            c!(COLOR_OBJECT); buf.push(b'{'); c!(COLOR_RESET); buf.push(b'\n');
+            c!(p.obj.as_str()); buf.push(b'{'); c!(COLOR_RESET); buf.push(b'\n');
             for (i, (k, val)) in o.iter().enumerate() {
-                if i > 0 { c!(COLOR_OBJECT); buf.push(b','); c!(COLOR_RESET); buf.push(b'\n'); }
+                if i > 0 { c!(p.obj.as_str()); buf.push(b','); c!(COLOR_RESET); buf.push(b'\n'); }
                 push_indent_bytes(buf, inner, use_tab);
-                c!(COLOR_KEY); push_json_string_to_vec(buf, k.as_str()); c!(COLOR_RESET);
-                c!(COLOR_OBJECT); buf.push(b':'); c!(COLOR_RESET); buf.push(b' ');
+                c!(p.key.as_str()); push_json_string_to_vec(buf, k.as_str()); c!(COLOR_RESET);
+                c!(p.obj.as_str()); buf.push(b':'); c!(COLOR_RESET); buf.push(b' ');
                 push_pretty_value_impl::<COLOR>(buf, val, inner, step, use_tab);
             }
             buf.push(b'\n');
             push_indent_bytes(buf, depth, use_tab);
-            c!(COLOR_OBJECT); buf.push(b'}'); c!(COLOR_RESET);
+            c!(p.obj.as_str()); buf.push(b'}'); c!(COLOR_RESET);
         }
     }
 }
