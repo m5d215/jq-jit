@@ -7445,8 +7445,19 @@ fn eval_del(f: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> G
                             if let Value::Arr(pa) = p {
                                 if pa.len() == 1 {
                                     if let Value::Num(n, _) = &pa[0] {
-                                        let mut idx = *n as i64;
-                                        if idx < 0 { idx += len; }
+                                        // Decide the negative-index offset from the
+                                        // ORIGINAL float, not the truncated int:
+                                        // `*n as i64` truncates toward zero, so a
+                                        // fractional index in (-1, 0) (e.g. -0.9)
+                                        // would become 0 and wrongly delete element
+                                        // 0. jq treats such indices as out of range
+                                        // (no-op). Mirror rt_delpaths (#884): add len
+                                        // when `*n < 0.0`, then range-check. #904
+                                        let idx = if *n < 0.0 {
+                                            *n as i64 + len
+                                        } else {
+                                            *n as i64
+                                        };
                                         if idx >= 0 && idx < len {
                                             indices_to_del.insert(idx);
                                         }

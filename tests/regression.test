@@ -12437,3 +12437,18 @@ null
 [{"k":nan,"i":0},{"k":nan,"i":1},{"k":nan,"i":2}]|group_by(.k)|map(map(.i))
 null
 [[0],[1],[2]]
+
+# #904: del with a fractional negative array index in (-1,0) is out of range (no-op), not element 0.
+del(.[-0.9])
+[0,1,2,3,4]
+[0,1,2,3,4]
+
+# #904: multi-target del where one index is fractional-negative deletes only the in-range target.
+del(.[-0.5],.[1])
+[10,20,30,40]
+[10,30,40]
+
+# #904: a fractional negative index <= -1 still normalizes (e.g. -1.5 -> last element).
+del(.[-1.5])
+[1,2,3]
+[1,2]
