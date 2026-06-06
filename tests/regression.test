@@ -12467,3 +12467,23 @@ join({})
 join(1)
 ["a"]
 "a"
+
+# #906: while with a generator condition forks per output; (true,false) recurses on the truthy branch.
+[limit(6; while((true,false); .+1))]
+0
+[0,1,2,3,4,5]
+
+# #906: until with a generator condition: each truthy output emits, each falsy recurses (no hang).
+[limit(6; until((true,false); .+1))]
+0
+[0,1,2,3,4,5]
+
+# #906: a multi-truthy until condition emits the current value once per truthy output.
+[limit(4; until((true,true); .+1))]
+0
+[0,0]
+
+# #906: first() over a generator-condition while terminates lazily.
+[first(while((true,false); .+1))]
+0
+[0]
