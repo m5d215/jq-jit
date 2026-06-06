@@ -12133,3 +12133,82 @@ false
 [(try (.) catch (values)) | (.[0]),reduce (.a) as $x (0; . + ($x | tonumber? // 0))]
 null
 [null,0]
+
+# #880: a variable bound by single-element array destructuring keeps its path
+# provenance — `path(. as [$a] | $a)` is the spine the binding navigated.
+path(. as [$a] | $a)
+[7]
+[0]
+
+# #880: nested single-spine array destructuring extends the path.
+path(. as [[$a]] | $a)
+[[5]]
+[0,0]
+
+# #880: single-key object destructuring forwards the field path.
+path(. as {x:$a} | $a)
+{"x":1}
+["x"]
+
+# #880: nested object destructuring forwards the deep field path.
+path(. as {x:{y:$a}} | $a)
+{"x":{"y":2}}
+["x","y"]
+
+# #880: an array pattern nested under an object pattern (single spine).
+path(. as {a:[$x]} | $x)
+{"a":[5]}
+["a",0]
+
+# #880: a destructured variable used twice forwards the same path each time.
+[path(. as [$a] | $a, $a)]
+[7]
+[[0],[0]]
+
+# #880: the tracked path drives a `=` assignment whose LHS is the bound var.
+(. as [$a] | $a) = 99
+[7]
+[99]
+
+# #880: the tracked path drives `del` of the bound var.
+del(. as [$a] | $a)
+[7]
+[]
+
+# #880: the tracked path drives a parenthesised `|=` update of the bound var.
+(. as [$a] | $a) |= .+100
+[7]
+[107]
+
+# #880: jq tracks only a single binding spine — sibling destructuring bindings
+# lose tracking, so a path of the second var is an invalid path expression.
+try path(. as [$a,$b] | $b) catch .
+[7,8]
+"Invalid path expression with result 8"
+
+# #880: a sibling object-pattern binding is likewise untracked.
+try path(. as {x:$a,y:$b} | $b) catch .
+{"x":1,"y":2}
+"Invalid path expression with result 2"
+
+# #880: a single inner spine under a sibling outer level is still untracked.
+try path(. as [[$a],[$b]] | $a) catch .
+[[7],[8]]
+"Invalid path expression with result 7"
+
+# #880: a 2-arg `foreach` over a navigating source yields the UPDATE path, so a
+# bare `$x` body forwards each element's spine.
+[path(foreach .[] as $x (null; $x))]
+[1,2,3]
+[[0],[1],[2]]
+
+# #880: a navigating 2-arg foreach whose update extends `$x` forwards the deeper
+# path.
+[path(foreach .[] as $x (null; $x.k))]
+[{"k":1},{"k":2}]
+[[0,"k"],[1,"k"]]
+
+# #880: a non-path 2-arg foreach update surfaces jq's result error at the sink.
+try path(foreach .[] as $x (null; $x+1)) catch .
+[1,2]
+"Invalid path expression with result 2"

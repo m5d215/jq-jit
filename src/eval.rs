@@ -5266,6 +5266,32 @@ fn is_identity_path_var(var_index: u16) -> bool {
     IDENTITY_PATH_VARS.with(|s| s.borrow().contains(&var_index))
 }
 
+thread_local! {
+    // Variables that are valid *navigation sources* for path-tracked
+    // destructuring: their value carries a path provenance AND they branch into
+    // at most one navigated sub-binding (a single spine). A child binding
+    // `$tmp[k] as $a` only inherits a path when `$tmp` is registered here. jq
+    // tracks a single path register through destructuring, so two or more
+    // sibling navigations off the same source corrupt it — we mirror that by
+    // refusing to register a source that is referenced more than once. See #880.
+    static NAV_PATH_SOURCES: RefCell<Vec<u16>> = const { RefCell::new(Vec::new()) };
+}
+
+/// RAII guard registering `var_index` as a single-spine navigation source.
+struct NavSourceGuard;
+impl Drop for NavSourceGuard {
+    fn drop(&mut self) {
+        NAV_PATH_SOURCES.with(|s| { s.borrow_mut().pop(); });
+    }
+}
+fn push_nav_path_source(var_index: u16) -> NavSourceGuard {
+    NAV_PATH_SOURCES.with(|s| s.borrow_mut().push(var_index));
+    NavSourceGuard
+}
+fn is_nav_path_source(var_index: u16) -> bool {
+    NAV_PATH_SOURCES.with(|s| s.borrow().contains(&var_index))
+}
+
 /// Emit one slice path component `{start, end}` appended to base path `bp`,
 /// type-checking the receiver the same way jq does. Shared by the single-bound
 /// fast path and the Cartesian-product slow path of path-context slicing (#761).
@@ -5502,11 +5528,22 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
         }
         Expr::Recurse { .. } => eval_recurse_paths(&input, &Value::Arr(Rc::new(vec![])), cb),
         Expr::LetBinding { var_index, value, body } => {
-            let identity_bind = matches!(value.as_ref(), Expr::Input);
+            // Identity (`. as $x`, #837) and tracked-navigation destructuring
+            // sub-bindings (`$src[k] as $a`, #880) both forward a path and are
+            // cold relative to the common value-mode binding. Handle them in
+            // never-inlined helpers so this hot arm stays compact — an inline
+            // cold path here regressed a path-heavy bench (#839 / #880 note).
+            if matches!(value.as_ref(), Expr::Input) {
+                return eval_path_letbinding_identity(*var_index, body, input, env, cb);
+            }
+            if nav_source_var(value).is_some_and(is_nav_path_source) {
+                if let Some(r) = eval_path_navbind(*var_index, value, body, &input, env, cb) {
+                    return r;
+                }
+            }
             eval(value, input.clone(), env, &mut |val| {
                 let old = env.borrow().get_var(*var_index);
                 env.borrow_mut().set_var(*var_index, val);
-                let _id_guard = if identity_bind { Some(push_identity_path_var(*var_index)) } else { None };
                 let result = eval_path(body, input.clone(), env, cb);
                 env.borrow_mut().set_var(*var_index, old);
                 result
@@ -5835,6 +5872,12 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             }
 
             // ---- navigating source: forward the element path through `$x` ----
+            if extract.is_none() {
+                // 2-arg `foreach .[] as $x (init; update)` yields UPDATE each
+                // step, so UPDATE's path is the output (a bare `$x`/`$x.k`
+                // forwards the element spine). Cold path kept out-of-line. #880
+                return eval_foreach_nav_noextract_path(source, init, vi, ai, update, &input, env, cb);
+            }
             eval(init, input.clone(), env, &mut |init_val| {
                 let mut acc = init_val;
                 eval_path(source, input.clone(), env, &mut |src_path| {
@@ -5850,16 +5893,11 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                     let update_result = eval(update, acc_val, env, &mut |new_acc| {
                         acc = new_acc.clone();
                         env.borrow_mut().vars[ai as usize] = new_acc.clone();
-                        let cont = if let Some(extract_expr) = extract {
-                            FOREACH_PATH_BIND.with(|s| s.borrow_mut().push((vi, src_path.clone())));
-                            let r = eval_path(extract_expr, new_acc.clone(), env, cb);
-                            FOREACH_PATH_BIND.with(|s| { s.borrow_mut().pop(); });
-                            r?
-                        } else {
-                            // No extract: foreach yields the accumulator value,
-                            // which is not a path.
-                            bail!("__pathexpr_result__:{}", crate::value::value_to_json(&new_acc));
-                        };
+                        let extract_expr = extract.as_ref().unwrap();
+                        FOREACH_PATH_BIND.with(|s| s.borrow_mut().push((vi, src_path.clone())));
+                        let r = eval_path(extract_expr, new_acc.clone(), env, cb);
+                        FOREACH_PATH_BIND.with(|s| { s.borrow_mut().pop(); });
+                        let cont = r?;
                         if !cont { stopped = true; }
                         Ok(cont)
                     });
@@ -6049,6 +6087,233 @@ fn eval_path_catch(
             _ => bail!("__pathexpr_result__:{}", crate::value::value_to_json(&payload)),
         },
     }
+}
+
+/// The root variable of a pure navigation chain (`$v`, `$v[k]`, `$v.k`, the
+/// `$v | .[k]` desugar of a computed object-pattern key). Returns `None` for any
+/// expression that does not bottom out in a single `LoadVar`. Used to decide
+/// whether a destructuring sub-binding navigates a path-tracked source. #880
+fn nav_source_var(expr: &Expr) -> Option<u16> {
+    match expr {
+        Expr::LoadVar { var_index } => Some(*var_index),
+        Expr::Index { expr, .. } | Expr::IndexOpt { expr, .. } | Expr::Slice { expr, .. } => {
+            nav_source_var(expr)
+        }
+        Expr::Pipe { left, .. } => nav_source_var(left),
+        _ => None,
+    }
+}
+
+/// Whether `target` is referenced two or more times in `expr` (early-exit
+/// counter). A single-spine destructuring source is referenced exactly once
+/// (in its sole navigated child); two or more references mean sibling
+/// navigations, which jq cannot path-track. Mirrors `expr_uses_var`'s shape but
+/// counts. #880
+fn var_referenced_twice(expr: &Expr, target: u16) -> bool {
+    fn go(expr: &Expr, target: u16, count: &mut u8) {
+        if *count >= 2 { return; }
+        match expr {
+            Expr::LoadVar { var_index } => { if *var_index == target { *count += 1; } }
+            Expr::Pipe { left, right } | Expr::Comma { left, right }
+            | Expr::BinOp { lhs: left, rhs: right, .. }
+            | Expr::Alternative { primary: left, fallback: right }
+            | Expr::While { cond: left, update: right }
+            | Expr::Until { cond: left, update: right }
+            | Expr::Limit { count: left, generator: right }
+            | Expr::Index { expr: left, key: right }
+            | Expr::IndexOpt { expr: left, key: right }
+            | Expr::Update { path_expr: left, update_expr: right }
+            | Expr::Assign { path_expr: left, value_expr: right }
+            | Expr::SetPath { path: left, value: right }
+            | Expr::TryCatch { try_expr: left, catch_expr: right, .. } => {
+                go(left, target, count); go(right, target, count);
+            }
+            Expr::Mutate { path_expr, value_expr, .. } => {
+                go(path_expr, target, count); go(value_expr, target, count);
+            }
+            Expr::IfThenElse { cond, then_branch, else_branch } => {
+                go(cond, target, count); go(then_branch, target, count); go(else_branch, target, count);
+            }
+            Expr::LetBinding { value, body, .. } => {
+                go(value, target, count); go(body, target, count);
+            }
+            Expr::Each { input_expr } | Expr::EachOpt { input_expr }
+            | Expr::Recurse { input_expr } | Expr::Repeat { update: input_expr }
+            | Expr::Negate { operand: input_expr } | Expr::UnaryOp { operand: input_expr, .. }
+            | Expr::Collect { generator: input_expr }
+            | Expr::PathExpr { expr: input_expr } | Expr::GetPath { path: input_expr }
+            | Expr::DelPaths { paths: input_expr } | Expr::Debug { expr: input_expr }
+            | Expr::Stderr { expr: input_expr } | Expr::Format { expr: input_expr, .. } => {
+                go(input_expr, target, count);
+            }
+            Expr::Reduce { source, init, update, .. }
+            | Expr::Foreach { source, init, update, .. } => {
+                go(source, target, count); go(init, target, count); go(update, target, count);
+            }
+            Expr::Range { from, to, step } => {
+                go(from, target, count); go(to, target, count);
+                if let Some(s) = step { go(s, target, count); }
+            }
+            Expr::FuncCall { args, .. } | Expr::CallBuiltin { args, .. } => {
+                for a in args { go(a, target, count); }
+            }
+            Expr::ObjectConstruct { pairs } => {
+                for (k, v) in pairs { go(k, target, count); go(v, target, count); }
+            }
+            Expr::StringInterpolation { parts } => {
+                for p in parts { if let StringPart::Expr(e) = p { go(e, target, count); } }
+            }
+            Expr::AllShort { generator, predicate } | Expr::AnyShort { generator, predicate } => {
+                go(generator, target, count); go(predicate, target, count);
+            }
+            Expr::Label { body, .. } | Expr::Break { value: body, .. } => go(body, target, count),
+            Expr::Error { msg } => { if let Some(m) = msg { go(m, target, count); } }
+            Expr::ClosureOp { input_expr, key_expr, .. } => {
+                go(input_expr, target, count); go(key_expr, target, count);
+            }
+            Expr::Slice { expr, from, to } => {
+                go(expr, target, count);
+                if let Some(f) = from { go(f, target, count); }
+                if let Some(t) = to { go(t, target, count); }
+            }
+            Expr::RegexTest { input_expr, re, flags } | Expr::RegexMatch { input_expr, re, flags }
+            | Expr::RegexCapture { input_expr, re, flags } | Expr::RegexScan { input_expr, re, flags } => {
+                go(input_expr, target, count); go(re, target, count); go(flags, target, count);
+            }
+            Expr::RegexSub { input_expr, re, tostr, flags } | Expr::RegexGsub { input_expr, re, tostr, flags } => {
+                go(input_expr, target, count); go(re, target, count); go(tostr, target, count); go(flags, target, count);
+            }
+            Expr::AlternativeDestructure { alternatives } => {
+                for a in alternatives { go(a, target, count); }
+            }
+            Expr::Memoize { key, body, .. } => {
+                if let Some(k) = key { go(k, target, count); }
+                go(body, target, count);
+            }
+            _ => {}
+        }
+    }
+    let mut count = 0u8;
+    go(expr, target, &mut count);
+    count >= 2
+}
+
+/// Path-mode `. as $x` binding: registers the identity-path provenance (#837)
+/// and — when `$x` is referenced just once, a single navigation spine — also
+/// registers it as a navigation source so a destructuring child `$x[k] as $a`
+/// can inherit a path (#880). Out-of-line so eval_path's hot arms stay compact.
+#[inline(never)]
+fn eval_path_letbinding_identity(
+    var_index: u16,
+    body: &Expr,
+    input: Value,
+    env: &EnvRef,
+    cb: &mut dyn FnMut(Value) -> GenResult,
+) -> GenResult {
+    let nav_source = !var_referenced_twice(body, var_index);
+    let old = env.borrow().get_var(var_index);
+    env.borrow_mut().set_var(var_index, input.clone());
+    let _id_guard = push_identity_path_var(var_index);
+    let _nav_guard = if nav_source { Some(push_nav_path_source(var_index)) } else { None };
+    let result = eval_path(body, input, env, cb);
+    drop(_nav_guard);
+    env.borrow_mut().set_var(var_index, old);
+    result
+}
+
+/// Path-mode binding of a destructuring sub-variable to a navigated sub-value
+/// (`$src[k] as $new`, the desugar of `. as [$new]` / `. as {k:$new}`). The
+/// navigation is evaluated in PATH mode so `$new` inherits the spine path; that
+/// path is registered in `FOREACH_PATH_BIND` (consulted by `LoadVar`) for the
+/// body. Returns `None` when the navigation is not a path (rootless source) so
+/// the caller falls back to the ordinary value-mode binding. Kept `#[inline(never)]`
+/// to keep eval_path's hot arms compact (see #839 perf note on #880). #880
+#[inline(never)]
+fn eval_path_navbind(
+    var_index: u16,
+    value: &Expr,
+    body: &Expr,
+    input: &Value,
+    env: &EnvRef,
+    cb: &mut dyn FnMut(Value) -> GenResult,
+) -> Option<GenResult> {
+    let mut paths: Vec<Value> = Vec::new();
+    match eval_path(value, input.clone(), env, &mut |p| { paths.push(p); Ok(true) }) {
+        Ok(_) => {}
+        Err(e) => {
+            // A rootless source (non-path navigation) bails with the sentinel —
+            // not a real error; let the caller bind it the ordinary way.
+            if format!("{}", e).starts_with("__pathexpr_result__:") {
+                return None;
+            }
+            return Some(Err(e));
+        }
+    }
+    // The newly bound var is itself a navigation source only if it branches into
+    // a single sub-spine in the remaining body (the same single-spine rule that
+    // gates the identity source). #880
+    let new_is_source = !var_referenced_twice(body, var_index);
+    for p in paths {
+        let val = crate::runtime::rt_getpath(input, &p).unwrap_or(Value::Null);
+        let old = env.borrow().get_var(var_index);
+        env.borrow_mut().set_var(var_index, val);
+        FOREACH_PATH_BIND.with(|s| s.borrow_mut().push((var_index, p)));
+        let _nav_guard = if new_is_source { Some(push_nav_path_source(var_index)) } else { None };
+        let result = eval_path(body, input.clone(), env, cb);
+        drop(_nav_guard);
+        FOREACH_PATH_BIND.with(|s| { s.borrow_mut().pop(); });
+        env.borrow_mut().set_var(var_index, old);
+        match result {
+            Ok(true) => {}
+            other => return Some(other),
+        }
+    }
+    Some(Ok(true))
+}
+
+/// Path-context 2-arg `foreach` over a *navigating* source (`foreach .[] as $x
+/// (init; update)`). The form yields UPDATE each step, so UPDATE — evaluated in
+/// PATH mode with `$x` carrying the element spine — is the output path, and its
+/// value threads to the next element. Kept `#[inline(never)]` so eval_path's hot
+/// arms stay compact (#880 perf note). #880
+#[inline(never)]
+fn eval_foreach_nav_noextract_path(
+    source: &Expr,
+    init: &Expr,
+    vi: u16,
+    ai: u16,
+    update: &Expr,
+    input: &Value,
+    env: &EnvRef,
+    cb: &mut dyn FnMut(Value) -> GenResult,
+) -> GenResult {
+    eval(init, input.clone(), env, &mut |init_val| {
+        let mut acc = init_val;
+        eval_path(source, input.clone(), env, &mut |src_path| {
+            let elem_val = crate::runtime::rt_getpath(input, &src_path).unwrap_or(Value::Null);
+            let acc_val = std::mem::replace(&mut acc, Value::Null);
+            let (old_var, old_acc) = {
+                let mut e = env.borrow_mut();
+                let ov = std::mem::replace(&mut e.vars[vi as usize], elem_val);
+                let oa = std::mem::replace(&mut e.vars[ai as usize], acc_val.clone());
+                (ov, oa)
+            };
+            FOREACH_PATH_BIND.with(|s| s.borrow_mut().push((vi, src_path.clone())));
+            let r = eval_path(update, acc_val, env, &mut |upd_path| {
+                // The update result threads as the next accumulator value.
+                acc = crate::runtime::rt_getpath(input, &upd_path).unwrap_or(Value::Null);
+                env.borrow_mut().vars[ai as usize] = acc.clone();
+                cb(upd_path)
+            });
+            FOREACH_PATH_BIND.with(|s| { s.borrow_mut().pop(); });
+            {
+                let mut e = env.borrow_mut();
+                e.vars[ai as usize] = old_acc;
+                e.vars[vi as usize] = old_var;
+            }
+            r
+        })
+    })
 }
 
 /// Path-context `foreach` over a value-generator source (`range`, literals,
