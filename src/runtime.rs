@@ -630,7 +630,10 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                     let mut lo: i64 = 0;
                     let mut hi: i64 = a.len() as i64 - 1;
                     while lo <= hi {
-                        let mid = (lo + hi) / 2;
+                        // jq's `bsearch` rounds the midpoint UP (see eval.rs
+                        // `rt_bsearch` / #887), converging on a higher index for
+                        // runs of equal elements.
+                        let mid = (lo + hi + 1) / 2;
                         let cmp = compare_values(&a[mid as usize], target);
                         match cmp {
                             std::cmp::Ordering::Equal => return Ok(Value::number(mid as f64)),

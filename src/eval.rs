@@ -7577,7 +7577,12 @@ fn rt_bsearch(input: &Value, target: &Value) -> Result<Value> {
             let mut lo: i64 = 0;
             let mut hi: i64 = a.len() as i64 - 1;
             while lo <= hi {
-                let mid = (lo + hi) / 2;
+                // jq's `bsearch` (builtin.jq) rounds the midpoint UP —
+                // `((.[0]+.[1]+1)/2)|floor` — so for a run of equal elements it
+                // converges on a higher index than a floor-midpoint search. The
+                // returned index is an observable, deterministic value, so the
+                // midpoint must match jq's exactly. See #887.
+                let mid = (lo + hi + 1) / 2;
                 let cmp = crate::runtime::compare_values(&a[mid as usize], target);
                 match cmp {
                     std::cmp::Ordering::Equal => return Ok(Value::number(mid as f64)),
