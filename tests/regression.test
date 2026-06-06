@@ -12212,3 +12212,48 @@ try path(. as [[$a],[$b]] | $a) catch .
 try path(foreach .[] as $x (null; $x+1)) catch .
 [1,2]
 "Invalid path expression with result 2"
+
+# #882: while/until with a constant-true cond and an empty update emit the input (not null).
+while(true; empty)
+5
+5
+
+# #882: until with a constant-true cond and an empty update echoes the input.
+until(true; empty)
+{"a":1}
+{"a":1}
+
+# #882: a statically-truthy (non-literal) cond with an empty update still passes input through.
+while(1==1; empty)
+[1,2]
+[1,2]
+
+# #882: a zero-output update (range(0)) under a true cond passes input through once.
+while(true; range(0))
+"x"
+"x"
+
+# #882: first() over while(true; empty) yields the input, not null.
+first(while(true; empty), 88)
+7
+7
+
+# #882: until as a path expression — identity-surviving loop yields the input path [].
+path(until(true; .a))
+{"a":1}
+[]
+
+# #882: until navigating via .a until the value is an array tracks the path.
+path(until(type=="array"; .a))
+{"a":{"a":[1]}}
+["a","a"]
+
+# #882: while as a path expression tracks every emitted value's path.
+[path(while(.a|type=="object"; .a))]
+{"a":{"a":{}}}
+[[],["a"]]
+
+# #882: assignment through an until path navigates and updates the surviving leaf.
+(until(.a|not; .a)) = 9
+{"a":{"a":{}}}
+{"a":{"a":9}}

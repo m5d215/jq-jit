@@ -5558,6 +5558,20 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 }
             })
         }
+        // `until(cond; update)` / `while(cond; update)` in path context. jq
+        // desugars them to recursive if/pipe forms that all preserve paths:
+        //   _until: if cond then . else (update | _until) end
+        //   _while: if cond then ., (update | _while) else empty end
+        // so a loop that survives by identity yields the path of the input
+        // (e.g. `path(until(true; .a))` = []) rather than an "Invalid path
+        // expression" error. Mirror the value-mode desugar, tracking the path
+        // through `update` exactly as the Pipe arm composes sub-paths. #882.
+        Expr::Until { cond, update } => {
+            eval_path_until(cond, update, input.clone(), Vec::new(), env, cb)
+        }
+        Expr::While { cond, update } => {
+            eval_path_while(cond, update, input.clone(), Vec::new(), env, cb)
+        }
         Expr::Slice { expr: base_expr, from, to } => {
             // Slice bounds are generators: produce the Cartesian product of
             // path components, nested from (outer) → to (middle) → base (inner),
@@ -6445,6 +6459,57 @@ fn eval_foreach_valuegen_path(
             Ok(true)
         }
     }
+}
+
+/// Path-context evaluation of `until(cond; update)`. Faithful to jq's
+/// `def _until: if cond then . else (update | _until) end;`: when `cond` is
+/// truthy on the current value the current path is emitted; otherwise the path
+/// is extended through `update` (a path expression) and the loop recurses.
+/// `cur_val` is the value at `prefix`; `prefix` is the absolute path from the
+/// document root. See #882.
+fn eval_path_until(
+    cond: &Expr, update: &Expr, cur_val: Value, prefix: Vec<Value>,
+    env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult,
+) -> GenResult {
+    stacker::maybe_grow(128 * 1024, 32 * 1024 * 1024, || {
+        eval(cond, cur_val.clone(), env, &mut |cv| {
+            if cv.is_truthy() {
+                cb(Value::Arr(Rc::new(prefix.clone())))
+            } else {
+                eval_path(update, cur_val.clone(), env, &mut |up| {
+                    let sub = crate::runtime::rt_getpath(&cur_val, &up).unwrap_or(Value::Null);
+                    let mut next = prefix.clone();
+                    if let Value::Arr(a) = &up { next.extend(a.iter().cloned()); }
+                    eval_path_until(cond, update, sub, next, env, cb)
+                })
+            }
+        })
+    })
+}
+
+/// Path-context evaluation of `while(cond; update)`. Faithful to jq's
+/// `def _while: if cond then ., (update | _while) else empty end;`: when `cond`
+/// is truthy the current path is emitted AND the loop continues through
+/// `update`; otherwise the branch terminates. See #882.
+fn eval_path_while(
+    cond: &Expr, update: &Expr, cur_val: Value, prefix: Vec<Value>,
+    env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult,
+) -> GenResult {
+    stacker::maybe_grow(128 * 1024, 32 * 1024 * 1024, || {
+        eval(cond, cur_val.clone(), env, &mut |cv| {
+            if cv.is_truthy() {
+                if !cb(Value::Arr(Rc::new(prefix.clone())))? { return Ok(false); }
+                eval_path(update, cur_val.clone(), env, &mut |up| {
+                    let sub = crate::runtime::rt_getpath(&cur_val, &up).unwrap_or(Value::Null);
+                    let mut next = prefix.clone();
+                    if let Value::Arr(a) = &up { next.extend(a.iter().cloned()); }
+                    eval_path_while(cond, update, sub, next, env, cb)
+                })
+            } else {
+                Ok(true)
+            }
+        })
+    })
 }
 
 fn eval_recurse_paths(val: &Value, prefix: &Value, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
