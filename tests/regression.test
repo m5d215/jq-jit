@@ -12307,3 +12307,33 @@ delpaths([["a",-1],["a",-2]])
 delpaths([[-10]])
 [1,2]
 [1,2]
+
+# #885: fromstream tolerates a length-0 stream event (no-op) instead of erroring.
+[fromstream([])]
+null
+[]
+
+# #885: fromstream tolerates a length-1 event with a non-array first element (no-op).
+[fromstream([5])]
+null
+[]
+
+# #885: a lone top-level close event flushes the (null) accumulator and emits null.
+[fromstream([["a"]])]
+null
+[null]
+
+# #885: a bare close after a built value re-flushes the reset accumulator.
+[fromstream([[0],1],[[0]],[["a"]])]
+null
+[[1],null]
+
+# #885: truncate_stream skips a degenerate empty event interspersed between valid events.
+[1|truncate_stream([[1,0],5],[],[[1,0]])]
+null
+[[[0],5],[[0]]]
+
+# #885: fromstream(tostream) round-trips empty containers unchanged.
+fromstream(tostream)
+{"x":[1,{"y":2}],"z":null,"e":[],"o":{}}
+{"x":[1,{"y":2}],"z":null,"e":[],"o":{}}
