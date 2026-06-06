@@ -5833,6 +5833,35 @@ pub fn canonical_repr_bytes(repr: &str) -> std::borrow::Cow<'_, str> {
 /// Without this check, identity passthrough would emit invalid JSON.
 #[inline]
 pub fn raw_contains_non_canonical_number(bytes: &[u8]) -> bool {
+    matches!(raw_composite_canon_class(bytes), CompositeCanon::NonCanonicalNumber)
+}
+
+/// Classification of a raw composite value for `append_canonical_value`'s
+/// `{`/`[` branch. A composite may need canonicalisation for two independent
+/// reasons — a non-canonical number anywhere inside (defer to the generic
+/// path) or an escaped solidus inside a nested string (#780, normalise on
+/// copy). Detecting both in a single pass avoids a second full scan of the
+/// composite per record, which regressed the object/array construction hot
+/// paths after #800 added a standalone solidus scan.
+pub enum CompositeCanon {
+    /// Carries a number whose lexeme differs from jq's output form (or a
+    /// special-float / surrogate that must round-trip through the parser).
+    NonCanonicalNumber,
+    /// No non-canonical number, but a nested string holds an escaped solidus
+    /// (`\/`) that must be decoded to `/`.
+    EscapedSolidus,
+    /// Copies verbatim.
+    Clean,
+}
+
+/// Single-pass classifier backing both [`raw_contains_non_canonical_number`]
+/// and the composite branch of [`append_canonical_value`]. A
+/// `NonCanonicalNumber` short-circuits as soon as it is found (the generic
+/// path it defers to also handles any solidus). An escaped solidus is tracked
+/// but never short-circuits, because a non-canonical number later in the
+/// bytes still has to win — both signals are only resolved at the end.
+#[inline]
+pub fn raw_composite_canon_class(bytes: &[u8]) -> CompositeCanon {
     // 256-bit byte LUT: true when this byte is one of the "interesting"
     // chars we need to slow-scan. Lets us memchr-equivalent skip ahead
     // through the bulk of structural bytes / digits / whitespace / etc.,
@@ -5844,12 +5873,13 @@ pub fn raw_contains_non_canonical_number(bytes: &[u8]) -> bool {
         while k < chars.len() { t[chars[k] as usize] = true; k += 1; }
         t
     };
+    let mut saw_solidus = false;
     let mut i = 0;
     while i < bytes.len() {
         // Skip ahead to the next interesting byte. The hot loop is just
         // a tight LUT lookup the optimiser can vectorise.
         while i < bytes.len() && !LUT[bytes[i] as usize] { i += 1; }
-        if i >= bytes.len() { return false; }
+        if i >= bytes.len() { break; }
         match bytes[i] {
             b'"' => {
                 // Skip string contents — a stray `e` inside a string isn't
@@ -5873,8 +5903,15 @@ pub fn raw_contains_non_canonical_number(bytes: &[u8]) -> bool {
                                     b'8' | b'9' | b'A' | b'B' | b'C' | b'D' | b'E' | b'F'
                                          | b'a' | b'b' | b'c' | b'd' | b'e' | b'f')
                             {
-                                return true;
+                                return CompositeCanon::NonCanonicalNumber;
                             }
+                            // `\/` is the one escape jq canonicalises (#780).
+                            // Note it but keep scanning — a later non-canonical
+                            // number must still take priority. `\\/` is not a
+                            // false positive: skipping the whole escape pair
+                            // (`i += 2`) lands past the `\\`, so its trailing
+                            // `/` is a fresh literal, not paired with a `\`.
+                            if bytes[i + 1] == b'/' { saw_solidus = true; }
                             // backslash: skip the escape sequence
                             i = i.saturating_add(2);
                         }
@@ -5882,23 +5919,23 @@ pub fn raw_contains_non_canonical_number(bytes: &[u8]) -> bool {
                     }
                 }
             }
-            b'+' => return true,
+            b'+' => return CompositeCanon::NonCanonicalNumber,
             // Special-float literals accepted by parse_json_value:
             // `nan` / `inf` / `infinity` (case-insensitive), with optional
             // `+`/`-` prefix. jq normalises these to `null` (NaN) or
             // `±1.7976931348623157e+308` (Infinity) — the raw input bytes
             // would otherwise leak through as invalid JSON
             // (issues #513, #515).
-            b'n' | b'N' if bytes.get(i..i+3).is_some_and(|s| s.eq_ignore_ascii_case(b"nan")) => return true,
+            b'n' | b'N' if bytes.get(i..i+3).is_some_and(|s| s.eq_ignore_ascii_case(b"nan")) => return CompositeCanon::NonCanonicalNumber,
             b'i' | b'I' if bytes.get(i..i+8).is_some_and(|s| s.eq_ignore_ascii_case(b"infinity"))
-                || bytes.get(i..i+3).is_some_and(|s| s.eq_ignore_ascii_case(b"inf")) => return true,
+                || bytes.get(i..i+3).is_some_and(|s| s.eq_ignore_ascii_case(b"inf")) => return CompositeCanon::NonCanonicalNumber,
             b'e' | b'E' => {
                 // Only flag when this `e`/`E` is part of a number — the
                 // immediately preceding byte is a digit or `.`.
                 if i > 0 {
                     let prev = bytes[i - 1];
                     if prev.is_ascii_digit() || prev == b'.' {
-                        return true;
+                        return CompositeCanon::NonCanonicalNumber;
                     }
                 }
                 i += 1;
@@ -5911,14 +5948,14 @@ pub fn raw_contains_non_canonical_number(bytes: &[u8]) -> bool {
                 if bytes.get(i + 1..i + 7) == Some(&[b'0'; 6][..])
                     && i > 0 && bytes[i - 1].is_ascii_digit()
                 {
-                    return true;
+                    return CompositeCanon::NonCanonicalNumber;
                 }
                 i += 1;
             }
             _ => i += 1,
         }
     }
-    false
+    if saw_solidus { CompositeCanon::EscapedSolidus } else { CompositeCanon::Clean }
 }
 
 /// Append a single JSON value's raw bytes `val` to `buf`, canonicalising number
@@ -5958,16 +5995,15 @@ pub fn append_canonical_value(buf: &mut Vec<u8>, val: &[u8]) -> bool {
             true
         }
         Some(b'{') | Some(b'[') => {
-            // Composite: a value that holds a non-canonical number must defer
-            // to the generic path; an escaped solidus inside a nested string is
-            // normalised by the byte-copy here (#780); everything else copies.
-            if raw_contains_non_canonical_number(val) {
-                return false;
-            }
-            if raw_contains_escaped_solidus(val) {
-                push_raw_canon_solidus(buf, val);
-            } else {
-                buf.extend_from_slice(val);
+            // Composite: classify in a single pass. A non-canonical number
+            // defers to the generic path; an escaped solidus inside a nested
+            // string is normalised on copy (#780); a clean composite copies
+            // verbatim. Folding both checks into one walk avoids a second full
+            // scan of the composite per record on the construction hot paths.
+            match raw_composite_canon_class(val) {
+                CompositeCanon::NonCanonicalNumber => return false,
+                CompositeCanon::EscapedSolidus => push_raw_canon_solidus(buf, val),
+                CompositeCanon::Clean => buf.extend_from_slice(val),
             }
             true
         }
