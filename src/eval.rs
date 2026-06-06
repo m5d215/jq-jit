@@ -6788,65 +6788,76 @@ fn eval_tostream(input: &Value, cb: &mut dyn FnMut(Value) -> GenResult) -> GenRe
 /// trees. Mirrors jq's `def fromstream(f): foreach f as $i ...` —
 /// emit a tree once a top-level close marker (path length == 1) or a
 /// root-leaf event (path length == 0) lands. See #89.
+/// `length` of a stream event's leading `.[0]` element, used purely to
+/// decide close-depth, exactly as jq's `fromstream`/`truncate_stream`
+/// builtins do (`$i[0] | length`). jq tolerates any first-element type:
+/// a missing/`null` first element has length 0, a number its magnitude,
+/// a string its codepoint count, an array/object its size; only a boolean
+/// has no length. This leniency is why a degenerate event like `[]` or
+/// `[5]` is a no-op in jq rather than an error. See #885.
+fn stream_first_length(v: &Value) -> Result<i64> {
+    Ok(match v {
+        Value::Null => 0,
+        Value::Num(n, _) => n.abs() as i64,
+        Value::Str(s) => s.chars().count() as i64,
+        Value::Arr(a) => a.len() as i64,
+        Value::Obj(ObjInner(o)) => o.len() as i64,
+        Value::True | Value::False => bail!("boolean ({}) has no length", crate::value::value_to_json(v)),
+        Value::Error(_) => bail!("error has no length"),
+    })
+}
+
 fn eval_fromstream(
     f: &Expr,
     input: Value,
     env: &EnvRef,
     cb: &mut dyn FnMut(Value) -> GenResult,
 ) -> GenResult {
-    let mut acc: Value = Value::Null;
-    let mut have_acc = false;
+    // Mirror jq's builtin exactly:
+    //   { x: null, e: false } as $init
+    //   | foreach f as $i ($init;
+    //       (if .e then $init else . end)
+    //       | if $i|length == 2
+    //         then setpath(["e"]; $i[0]|length==0) | setpath(["x"]+$i[0]; $i[1])
+    //         else setpath(["e"]; $i[0]|length==1) end;
+    //       if .e then .x else empty end)
+    // The close-depth is `$i[0]|length`, so a length-1 close event flushes the
+    // accumulator (emitting it, possibly `null`) even with no preceding value
+    // event, and degenerate events (`[]`, `[5]`) are no-ops rather than errors.
+    let mut x: Value = Value::Null;
+    let mut e = false;
     let result = eval(f, input.clone(), env, &mut |event| {
         let arr = match &event {
             Value::Arr(a) => a.clone(),
             _ => bail!("fromstream: expected stream event, got {}", event.type_name()),
         };
-        let path_arr = match arr.first() {
-            Some(Value::Arr(p)) => p.clone(),
-            _ => bail!("fromstream: stream event missing path"),
-        };
-        match arr.len() {
-            2 => {
-                // Leaf event [path, value].
-                let leaf_value = arr[1].clone();
-                if path_arr.is_empty() {
-                    // Root leaf: emit immediately, no further accumulation.
-                    return cb(leaf_value);
-                }
-                if !have_acc {
-                    acc = init_container_for_first_segment(&path_arr[0])?;
-                    have_acc = true;
-                }
-                acc = setpath_in_place(acc.clone(), &path_arr, leaf_value)?;
-            }
-            1 => {
-                // Close event [path]. When the close path is depth 1 it's
-                // the top-level close — emit and reset.
-                if path_arr.len() == 1 && have_acc {
-                    let val = std::mem::replace(&mut acc, Value::Null);
-                    have_acc = false;
-                    if !cb(val)? { return Ok(false); }
-                }
-                // Deeper close events just bound the inner traversal; the
-                // accumulator already has every leaf set, so nothing else
-                // to do here.
-            }
-            _ => bail!("fromstream: stream event must be [path, value] or [path]"),
+        // `if .e then $init else . end`: reset after a flush.
+        if e {
+            x = Value::Null;
+            e = false;
+        }
+        let first = arr.first().cloned().unwrap_or(Value::Null);
+        if arr.len() == 2 {
+            e = stream_first_length(&first)? == 0;
+            // setpath(["x"] + $i[0]; $i[1]) — $i[0] is the leaf path.
+            let path_arr = match &first {
+                Value::Arr(p) => p.clone(),
+                other => bail!(
+                    "fromstream: leaf path must be an array, not {}",
+                    other.type_name()
+                ),
+            };
+            x = setpath_in_place(x.clone(), &path_arr, arr[1].clone())?;
+        } else {
+            e = stream_first_length(&first)? == 1;
+        }
+        if e {
+            if !cb(x.clone())? { return Ok(false); }
         }
         Ok(true)
     });
     result?;
     Ok(true)
-}
-
-/// Pick the empty-container shape jq uses when the first path segment
-/// is a number (array) versus a string (object).
-fn init_container_for_first_segment(seg: &Value) -> Result<Value> {
-    match seg {
-        Value::Num(_, _) => Ok(Value::Arr(Rc::new(Vec::new()))),
-        Value::Str(_) => Ok(Value::object_from_map(crate::value::new_objmap())),
-        _ => bail!("fromstream: path segments must be strings or numbers"),
-    }
 }
 
 /// `setpath` over a `Vec<Value>` path, autovivifying intermediate
@@ -6912,14 +6923,12 @@ fn eval_truncate_stream(
             Value::Arr(a) => a.clone(),
             _ => bail!("truncate_stream: expected stream event, got {}", event.type_name()),
         };
-        if arr.is_empty() {
-            bail!("truncate_stream: stream event missing path");
-        }
-        let path_arr = match &arr[0] {
-            Value::Arr(p) => p.clone(),
-            _ => bail!("truncate_stream: stream event missing path"),
-        };
-        let path_len = path_arr.len();
+        // jq reads `.[0]|length` leniently: a missing/non-array first element
+        // just yields a length (0 for an absent/`null` `.[0]`), so a degenerate
+        // event like `[]` interspersed between valid events is skipped by the
+        // `(.[0]|length) > $n` test rather than raising an error. See #885.
+        let first = arr.first().cloned().unwrap_or(Value::Null);
+        let path_len = stream_first_length(&first)? as usize;
         // `(.[0]|length) > $n` in jq's type ordering (null < bool < number < ...).
         // A number is always greater than null/bool and always less than
         // string/array/object, so only a Num depth participates numerically.
@@ -6931,6 +6940,15 @@ fn eval_truncate_stream(
         if !keep {
             return Ok(true);
         }
+        // Past the keep test the event has a real (array) path; degenerate
+        // first elements only survive a negative depth, where jq's `.[0][$n:]`
+        // slice of a non-array yields it unchanged.
+        let path_arr = match &first {
+            Value::Arr(p) => p.clone(),
+            _ => {
+                return cb(event.clone());
+            }
+        };
         // `.[0][$n:]` slice bound. null means "from the start"; a number is
         // floored and clamped like any jq array slice; anything else is an
         // error ("must be integers"), matching jq when a bool depth survives
