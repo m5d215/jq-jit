@@ -2206,7 +2206,15 @@ fn contains_input(expr: &crate::ir::Expr) -> bool {
         Expr::LetBinding { value, body, .. } => contains_input(value) || contains_input(body),
         Expr::Reduce { source, init, update, .. } => contains_input(source) || contains_input(init) || contains_input(update),
         Expr::Foreach { source, init, update, extract, .. } => contains_input(source) || contains_input(init) || contains_input(update) || extract.as_ref().map_or(false, |e| contains_input(e)),
-        Expr::While { cond, update } | Expr::Until { cond, update } => contains_input(cond) || contains_input(update),
+        // `while(cond; update)` / `until(cond; update)` always emit the current
+        // value (the input) — jq desugars them to `if cond then ., (update|_loop)
+        // …` (while) and `if cond then . else …` (until), both of which yield `.`.
+        // So they are input-dependent regardless of whether cond/update mention
+        // `.`. Classifying e.g. `while(true; empty)` by its sub-exprs marked it
+        // input-free, so the fast path evaluated it against `null` and emitted
+        // `null` instead of echoing the input. Same family as `recurse` (#713)
+        // and the assignment forms (#716) below.
+        Expr::While { .. } | Expr::Until { .. } => true,
         Expr::Repeat { update } => contains_input(update),
         Expr::TryCatch { try_expr, catch_expr, .. } => contains_input(try_expr) || contains_input(catch_expr),
         // CallBuiltin implicitly operates on the current input (passed as first arg)
