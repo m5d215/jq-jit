@@ -40,9 +40,20 @@ fn json_inputs_with_lines(content: &str) -> Result<Vec<(Value, u64)>, String> {
 }
 
 /// Raw (`-R`) input lines paired with their 1-based line numbers (#855).
+/// Split raw (`-R`) input into lines the way jq does: on `\n` ONLY, keeping any
+/// trailing `\r` as line content (so a CRLF file yields `"a\r"`). Rust's
+/// `str::lines()` / `BufRead::lines()` additionally strip a trailing `\r`, which
+/// diverges from jq. A trailing newline does not produce an empty final line,
+/// and empty input yields no lines at all. See #889.
+fn split_raw_lines(content: &str) -> impl Iterator<Item = &str> {
+    let body = content.strip_suffix('\n').unwrap_or(content);
+    // `"".split('\n')` would yield one empty line; empty input must yield none.
+    let n = if content.is_empty() { 0 } else { usize::MAX };
+    body.split('\n').take(n)
+}
+
 fn raw_inputs_with_lines(content: &str) -> Vec<(Value, u64)> {
-    content
-        .lines()
+    split_raw_lines(content)
         .enumerate()
         .map(|(i, l)| (Value::from_str(l), (i + 1) as u64))
         .collect()
@@ -3588,9 +3599,21 @@ fn real_main() {
                 }
                 process_input(&Value::from_str(&buf), None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
             } else {
-                for line in stdin.lock().lines() {
-                    match line {
-                        Ok(l) => {
+                // Stream line-by-line, splitting on '\n' only and keeping any
+                // trailing '\r' (jq compat, #889). `BufRead::lines()` would strip
+                // the CR; `read_until` preserves it and keeps the path streaming
+                // (so e.g. `tail -f | jq -R` still works incrementally).
+                let mut reader = stdin.lock();
+                let mut buf: Vec<u8> = Vec::new();
+                loop {
+                    buf.clear();
+                    match reader.read_until(b'\n', &mut buf) {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            if buf.last() == Some(&b'\n') {
+                                buf.pop();
+                            }
+                            let l = String::from_utf8_lossy(&buf);
                             process_input(&Value::from_str(&l), None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
                         Err(e) => {
@@ -12609,7 +12632,7 @@ fn real_main() {
                 io::stdin().lock().read_to_string(&mut s).unwrap_or(0);
                 if slurp {
                     if raw_input {
-                        for line in s.lines() {
+                        for line in split_raw_lines(&s) {
                             slurp_values.push(Value::from_str(line));
                         }
                     } else {
@@ -12619,7 +12642,7 @@ fn real_main() {
                         }
                     }
                 } else if raw_input {
-                    for line in s.lines() {
+                    for line in split_raw_lines(&s) {
                         let val = Value::from_str(line);
                         process_input(&val, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                     }
@@ -12668,7 +12691,7 @@ fn real_main() {
                 // Slurp: collect all JSON values into an array, process once
                 let mut values = Vec::new();
                 let r = if raw_input {
-                    for line in content.lines() {
+                    for line in split_raw_lines(content) {
                         values.push(Value::from_str(line));
                     }
                     Ok(())
