@@ -1914,14 +1914,38 @@ fn eval_while_gen(
 ) -> GenResult {
     loop {
         if !always_true {
-            let is_true = if let Ok(v) = eval_one(cond, &current, env) {
-                v.is_truthy()
-            } else {
-                let mut t = false;
-                eval(cond, current.clone(), env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
-                t
-            };
-            if !is_true { return Ok(true); }
+            // jq desugars `while` to `if cond then ., (update|_while) else empty
+            // end`. A generator `cond` forks the `if` per output: each truthy
+            // output emits the current value and recurses through `update`, each
+            // falsy output contributes nothing. eval_one only succeeds for a
+            // single-output cond (the hot path); a multi-valued (or erroring)
+            // cond falls to the fork below. Folding it to the last output —
+            // as the previous code did — dropped the multiplicity and could
+            // even stop the loop on a trailing falsy value. #906
+            match eval_one(cond, &current, env) {
+                Ok(v) => {
+                    if !v.is_truthy() { return Ok(true); }
+                    // single truthy → emit + advance via the tail path below
+                }
+                Err(_) => {
+                    let mut conds: Vec<bool> = Vec::new();
+                    eval(cond, current.clone(), env, &mut |v| { conds.push(v.is_truthy()); Ok(true) })?;
+                    for is_true in conds {
+                        if !is_true { continue; }
+                        if !cb(current.clone())? { return Ok(false); }
+                        let mut succ: Vec<Value> = Vec::new();
+                        eval(update, current.clone(), env, &mut |v| { succ.push(v); Ok(true) })?;
+                        for u in succ {
+                            if !stacker::maybe_grow(128 * 1024, 32 * 1024 * 1024,
+                                || eval_while_gen(cond, update, always_true, u, env, cb))?
+                            {
+                                return Ok(false);
+                            }
+                        }
+                    }
+                    return Ok(true);
+                }
+            }
         }
         if !cb(current.clone())? { return Ok(false); }
         // Advance through `update`, honouring its generator semantics.
@@ -1936,7 +1960,9 @@ fn eval_while_gen(
             1 => current = succ.pop().unwrap(),    // single value → tail-iterate
             _ => {                                 // multi-valued → fan out (#767)
                 for u in succ {
-                    if !eval_while_gen(cond, update, always_true, u, env, cb)? {
+                    if !stacker::maybe_grow(128 * 1024, 32 * 1024 * 1024,
+                        || eval_while_gen(cond, update, always_true, u, env, cb))?
+                    {
                         return Ok(false);
                     }
                 }
@@ -1957,14 +1983,39 @@ fn eval_until_gen(
     env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult,
 ) -> GenResult {
     loop {
-        let is_true = if let Ok(v) = eval_one(cond, &current, env) {
-            v.is_truthy()
-        } else {
-            let mut t = false;
-            eval(cond, current.clone(), env, &mut |v| { t = v.is_truthy(); Ok(true) })?;
-            t
-        };
-        if is_true { return cb(current); }
+        // jq desugars `until` to `if cond then . else (update|_until) end`. A
+        // generator `cond` forks the `if` per output: each truthy output emits
+        // the current value, each falsy output recurses through `update`.
+        // eval_one only succeeds for a single-output cond (the hot path); a
+        // multi-valued (or erroring) cond falls to the fork below. Folding it to
+        // the last output — as the previous code did — dropped the multiplicity
+        // and, on a trailing falsy value, looped forever emitting nothing. #906
+        match eval_one(cond, &current, env) {
+            Ok(v) => {
+                if v.is_truthy() { return cb(current); }
+                // single falsy → advance via the tail path below
+            }
+            Err(_) => {
+                let mut conds: Vec<bool> = Vec::new();
+                eval(cond, current.clone(), env, &mut |v| { conds.push(v.is_truthy()); Ok(true) })?;
+                for is_true in conds {
+                    if is_true {
+                        if !cb(current.clone())? { return Ok(false); }
+                    } else {
+                        let mut succ: Vec<Value> = Vec::new();
+                        eval(update, current.clone(), env, &mut |v| { succ.push(v); Ok(true) })?;
+                        for u in succ {
+                            if !stacker::maybe_grow(128 * 1024, 32 * 1024 * 1024,
+                                || eval_until_gen(cond, update, u, env, cb))?
+                            {
+                                return Ok(false);
+                            }
+                        }
+                    }
+                }
+                return Ok(true);
+            }
+        }
         if let Ok(next) = eval_one(update, &current, env) {
             current = next; // single value → tail-iterate (hot path)
             continue;
@@ -1976,7 +2027,9 @@ fn eval_until_gen(
             1 => current = succ.pop().unwrap(),    // single value → tail-iterate
             _ => {                                 // multi-valued → fan out
                 for u in succ {
-                    if !eval_until_gen(cond, update, u, env, cb)? {
+                    if !stacker::maybe_grow(128 * 1024, 32 * 1024 * 1024,
+                        || eval_until_gen(cond, update, u, env, cb))?
+                    {
                         return Ok(false);
                     }
                 }
