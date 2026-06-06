@@ -822,6 +822,11 @@ pub struct Parser {
     token_lines: Vec<usize>,
     pos: usize,
     scope: Scope,
+    /// `var_index` of the reserved top-level `$ENV` binding. A `$ENV` reference
+    /// resolves to the built-in environment (`Expr::Env`) only while this is the
+    /// innermost binding of the name; a user `. as $ENV` (or `{$ENV}` pattern)
+    /// allocates a deeper binding that shadows it, matching jq. See #886.
+    env_var_idx: u16,
     lib_dirs: Vec<String>,
     /// The `compiled_funcs` id of the function body currently being parsed, or
     /// `None` at the top level. Used to attribute a deferred unbound-variable
@@ -863,6 +868,7 @@ impl Parser {
             token_lines,
             pos: 0,
             scope: Scope::new(),
+            env_var_idx: 0,
             lib_dirs: lib_dirs.to_vec(),
             current_func: None,
             deferred_unbound: Vec::new(),
@@ -870,7 +876,7 @@ impl Parser {
         };
 
         // Pre-register $ENV
-        let _env_idx = parser.scope.alloc_var("ENV");
+        parser.env_var_idx = parser.scope.alloc_var("ENV");
 
         let expr = parser.parse_program()?;
         if !parser.at_eof() {
@@ -919,6 +925,17 @@ impl Parser {
         match self.scope.lookup_var(name) {
             Some(idx) => Expr::LoadVar { var_index: idx },
             None => self.defer_unbound_var(name),
+        }
+    }
+
+    /// Resolve a `$ENV` reference: the built-in environment object unless a
+    /// user binding (`. as $ENV`, `{$ENV}` pattern, etc.) shadows the reserved
+    /// top-level binding, in which case the lexically innermost binding wins.
+    /// jq lets `$ENV` be shadowed like any other variable. See #886.
+    fn resolve_env_ref(&self) -> Expr {
+        match self.scope.lookup_var("ENV") {
+            Some(idx) if idx != self.env_var_idx => Expr::LoadVar { var_index: idx },
+            _ => Expr::Env,
         }
     }
 
@@ -1357,6 +1374,7 @@ impl Parser {
             token_lines: mod_token_lines,
             pos: 0,
             scope: mod_scope,
+            env_var_idx: self.env_var_idx,
             lib_dirs: mod_lib_dirs,
             current_func: None,
             deferred_unbound: Vec::new(),
@@ -1831,6 +1849,12 @@ impl Parser {
     fn parse_pattern(&mut self) -> Result<Pattern> {
         match self.current().clone() {
             Token::Variable(name) => {
+                // jq rejects the reserved `$__loc__` as a binding target with a
+                // compile-time syntax error (it is a loc literal, not a BINDING).
+                // `$ENV` is allowed and shadows the built-in. See #886.
+                if name == "__loc__" {
+                    bail!("syntax error, unexpected $__loc__, expecting BINDING or '[' or '{{'");
+                }
                 self.advance();
                 Ok(Pattern::Var(name))
             }
@@ -1863,6 +1887,10 @@ impl Parser {
     fn parse_obj_pattern_pair(&mut self) -> Result<(Expr, Pattern)> {
         match self.current().clone() {
             Token::Variable(name) => {
+                // jq rejects `$__loc__` as a binding target (see parse_pattern).
+                if name == "__loc__" {
+                    bail!("syntax error, unexpected $__loc__, expecting BINDING or '[' or '{{'");
+                }
                 self.advance();
                 if self.eat(&Token::Colon) {
                     // $var: pattern — key is variable name, bind $var AND destructure
@@ -2692,7 +2720,7 @@ impl Parser {
                 if name == "__loc__" {
                     Ok(Expr::Loc { file: "<top-level>".to_string(), line: loc_line as i64 })
                 } else if name == "ENV" {
-                    Ok(Expr::Env)
+                    Ok(self.resolve_env_ref())
                 } else {
                     Ok(self.load_or_defer_var(&name))
                 }
@@ -2804,7 +2832,7 @@ impl Parser {
                     let val_expr = if name == "__loc__" {
                         Expr::Loc { file: "<top-level>".to_string(), line: loc_line as i64 }
                     } else if name == "ENV" {
-                        Expr::Env
+                        self.resolve_env_ref()
                     } else {
                         self.load_or_defer_var(&name)
                     };

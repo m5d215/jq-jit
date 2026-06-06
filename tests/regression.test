@@ -12337,3 +12337,23 @@ null
 fromstream(tostream)
 {"x":[1,{"y":2}],"z":null,"e":[],"o":{}}
 {"x":[1,{"y":2}],"z":null,"e":[],"o":{}}
+
+# #886: a destructuring binding named $ENV shadows the built-in environment variable.
+. as [$ENV] | $ENV
+["z"]
+"z"
+
+# #886: object-pattern shorthand {$ENV} binds $ENV from the key, shadowing the built-in.
+. as {$ENV} | $ENV
+{"ENV":"x"}
+"x"
+
+# #886: $ENV shadowing also works through a reduce destructuring binding.
+reduce .[] as [$ENV] (null; $ENV)
+[["q"]]
+"q"
+
+# #886: a plain `. as $ENV` binding shadows the built-in too.
+"hi" as $ENV | $ENV
+null
+"hi"
