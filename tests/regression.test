@@ -12452,3 +12452,18 @@ del(.[-0.5],.[1])
 del(.[-1.5])
 [1,2,3]
 [1,2]
+
+# #905: join defers separator type-check; a 0-element array returns "" for any sep.
+join([])
+[]
+""
+
+# #905: a 1-element array returns the element regardless of separator type (sep never inserted).
+join({})
+[42]
+"42"
+
+# #905: a non-string separator is fine when never inserted (single element).
+join(1)
+["a"]
+"a"
