@@ -1,12 +1,8 @@
 # jq-jit
 
-A JIT-compiling implementation of [jq](https://jqlang.github.io/jq/) using [Cranelift](https://cranelift.dev/).
+A drop-in [jq](https://jqlang.github.io/jq/) that runs **up to ~100x faster** — a JIT-compiling implementation in Rust using [Cranelift](https://cranelift.dev/), passing 100% of the official jq test suite (509/509).
 
-Passes 100% of the official jq test suite (509/509) while running **up to ~100x faster than jq** on NDJSON workloads.
-
-**The author cannot read or write Rust. The entire architecture and essentially all of the code were written by [Claude](https://claude.ai/) (Anthropic) via [Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — the libjq-bytecode backend, the choice of Cranelift, every optimization. The author made no code or design decisions; aside from a couple of small community fixes, every line is Claude's.
-
-The human's role was twofold: setting the goal, and — once the tool first reached a working state — keeping a bug-hunting loop running with high-level directives ("go find bugs and fix them," "keep going"). Claude did the work on both ends: discovering the bugs (building its own test infrastructure, using Project Euler problems as a detector) and fixing them. The human never read the implementation and never pointed to a specific bug. How far that goes is the experiment: a real-world, performance-critical tool maintained for months by someone who never sees the code. See [`docs/development-story.md`](docs/development-story.md) for the full account, including the (small) number of messages the human actually sent.
+> **The author can't read or write Rust** — essentially every line was written by an AI. See [How this was built](#how-this-was-built).
 
 ## Features
 
@@ -41,6 +37,12 @@ reimplementation of jq, and jq-jit stays 15–167x ahead of it across these
 filters. For per-version results across the full filter suite, see
 [`docs/benchmark-history.md`](docs/benchmark-history.md). Run
 `bash bench/comprehensive.sh` to reproduce on your own hardware.
+
+## How this was built
+
+**The author cannot read or write Rust. The entire architecture and essentially all of the code were written by [Claude](https://claude.ai/) (Anthropic) via [Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — the libjq-bytecode backend, the choice of Cranelift, every optimization. The author made no code or design decisions; aside from a couple of small community fixes, every line is Claude's.
+
+The human's role was twofold: setting the goal, and — once the tool first reached a working state — keeping a bug-hunting loop running with high-level directives ("go find bugs and fix them," "keep going"). Claude did the work on both ends: discovering the bugs (building its own test infrastructure, using Project Euler problems as a detector) and fixing them. The human never read the implementation and never pointed to a specific bug. How far that goes is the experiment: a real-world, performance-critical tool maintained for months by someone who never sees the code. See [`docs/development-story.md`](docs/development-story.md) for the full account, including the (small) number of messages the human actually sent.
 
 ## Installation
 
