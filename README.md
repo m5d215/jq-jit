@@ -2,15 +2,17 @@
 
 A JIT-compiling implementation of [jq](https://jqlang.github.io/jq/) using [Cranelift](https://cranelift.dev/).
 
-Passes 100% of the official jq test suite (509/509) while being **8x-180x faster** than jq for NDJSON workloads.
+Passes 100% of the official jq test suite (509/509) while running **up to ~100x faster than jq** on NDJSON workloads.
 
-**This entire project — architecture, implementation, debugging, optimization — was autonomously developed by [Claude](https://claude.ai/) (Anthropic) via [Claude Code](https://docs.anthropic.com/en/docs/claude-code). No human-written code.** The goal was to see how far an AI can go building a real-world, performance-critical tool from scratch.
+**The author cannot read or write Rust. The entire architecture and essentially all of the code were written by [Claude](https://claude.ai/) (Anthropic) via [Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — the libjq-bytecode backend, the choice of Cranelift, every optimization. The author made no code or design decisions; aside from a couple of small community fixes, every line is Claude's.
+
+The human's role was twofold: setting the goal, and — once the tool first reached a working state — keeping a bug-hunting loop running with high-level directives ("go find bugs and fix them," "keep going"). Claude did the work on both ends: discovering the bugs (building its own test infrastructure, using Project Euler problems as a detector) and fixing them. The human never read the implementation and never pointed to a specific bug. How far that goes is the experiment: a real-world, performance-critical tool maintained for months by someone who never sees the code. See [`docs/development-story.md`](docs/development-story.md) for the full account, including the (small) number of messages the human actually sent.
 
 ## Features
 
 - **Full jq language compatibility** — drop-in replacement for `jq` (509/509 official tests)
 - **JIT compilation** via Cranelift for hot execution paths
-- **Raw byte fast paths** — 100+ filter patterns bypass JSON parsing entirely for maximum throughput
+- **Raw byte fast paths** — 70+ filter shapes operate directly on raw bytes, skipping JSON parsing entirely; 180+ shapes in total route to specialized fast paths
 - **Streaming JSON parser** for memory-efficient NDJSON processing
 - **Memory-mapped file I/O** — mmap-based file reading with no upfront allocation
 - **Optimized value representation** with compact strings, mimalloc, and inline Cranelift codegen
@@ -20,22 +22,25 @@ Passes 100% of the official jq test suite (509/509) while being **8x-180x faster
 
 On a 2M-line NDJSON file (typical ETL/data pipeline workload):
 
-| Filter | jq-jit | jq | Speedup |
-|--------|--------|----|---------|
-| `empty` | 0.01s | 0.85s | **85x** |
-| `.name` (field access) | 0.05s | 4.83s | **97x** |
-| `select(.x > N)` | 0.04s | 3.51s | **88x** |
-| `.x + .y` (arithmetic) | 0.06s | 5.73s | **96x** |
-| `type` | 0.01s | 1.26s | **126x** |
-| `to_entries` | 0.11s | 8.03s | **73x** |
-| `keys` | 0.12s | 4.69s | **39x** |
-| `.name \| gsub("_"; "-")` | 0.31s | 28.5s | **92x** |
-| `walk(if type == "number" then . + 1 else . end)` | 0.40s | 10.2s | **26x** |
+| Filter | jq-jit | jq | jaq | Speedup vs jq |
+|--------|-------:|---:|----:|--------------:|
+| `empty` | 0.02s | 1.38s | 0.91s | **64x** |
+| `.name` (field access) | 0.12s | 2.08s | 1.76s | **18x** |
+| `select(.x > 1500000)` | 0.09s | 2.24s | 1.81s | **25x** |
+| `.x + .y` (arithmetic) | 0.09s | 2.21s | 2.18s | **24x** |
+| `type` | 0.02s | 1.83s | 4.06s | **75x** |
+| `to_entries` | 0.15s | 7.81s | 6.74s | **51x** |
+| `keys` | 0.11s | 2.50s | 1.85s | **23x** |
+| `.name \| gsub("_"; "-")` | 0.18s | 16.75s | 11.84s | **96x** |
+| `walk(if type == "number" then . + 1 else . end)` | 0.15s | 16.38s | 13.27s | **109x** |
 
-Numbers above are indicative (representative run, single machine). For
-per-version results across the full filter suite, see
+Measured on an Apple M4 Max (macOS 26.4.1, arm64), jq 1.7.1 and
+[jaq](https://github.com/01mf02/jaq) 3.0.0, best of 3 runs over 2M NDJSON
+objects. Speedups are machine-dependent — `jaq` is itself a fast Rust
+reimplementation of jq, and jq-jit stays 15–167x ahead of it across these
+filters. For per-version results across the full filter suite, see
 [`docs/benchmark-history.md`](docs/benchmark-history.md). Run
-`bash bench/run.sh` to benchmark on your own hardware.
+`bash bench/comprehensive.sh` to reproduce on your own hardware.
 
 ## Installation
 
@@ -287,11 +292,23 @@ the key explicitly with the 2-arg form: `memoize(. + $x; [., $x])`.
 
 ## Testing
 
-Run the official jq test suite (509/509 passing):
+The official jq suite is the floor, not the ceiling — most bugs that mattered
+were ones it never exercised. jq-jit is checked by several independent layers,
+all run by a single `cargo test --release -- --test-threads=1`:
 
-```bash
-cargo test --release -- --test-threads=1
-```
+| Layer | Cases | What it checks |
+|-------|------:|----------------|
+| Official jq test suite | 509 | Verbatim upstream `jq.test` — 100% pass |
+| Regression corpus | 2,400+ | Issue-driven cases pinned from real bugs found during development |
+| Differential vs jq | 1,200+ | Output compared against a reference `jq` build, case by case |
+| Fast-path contracts | 400+ | Each raw-byte / in-place fast path must match its slow-path semantics |
+| Self-differential | — | JIT output must equal the interpreter's on the same program |
+| Metamorphic · fuzz · invariant enforcement | — | Generated programs, fuzzed inputs across multiple axes, and internal architectural contracts |
+
+Thousands of corpus cases plus hundreds of contract and unit tests. See
+[`docs/development-story.md`](docs/development-story.md) for how this test
+infrastructure was built — and why passing 509/509 turned out to be the
+beginning, not the end.
 
 ## Benchmarks
 
