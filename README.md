@@ -1,12 +1,12 @@
 # jq-jit
 
-A drop-in [jq](https://jqlang.github.io/jq/) that runs **up to ~100x faster** — a JIT-compiling implementation in Rust using [Cranelift](https://cranelift.dev/), passing 100% of the official jq test suite (509/509).
+A JIT-compiling [jq](https://jqlang.github.io/jq/) in Rust using [Cranelift](https://cranelift.dev/) — **up to ~100x faster**, passing 100% of the official jq test suite (509/509).
 
 > **The author can't read or write Rust** — essentially every line was written by an AI. See [How this was built](#how-this-was-built).
 
 ## Features
 
-- **Full jq language compatibility** — drop-in replacement for `jq` (509/509 official tests)
+- **Targets full jq language compatibility** — passes the official jq test suite in full (509/509); any remaining divergence from jq is treated as a bug
 - **JIT compilation** via Cranelift for hot execution paths
 - **Raw byte fast paths** — 70+ filter shapes operate directly on raw bytes, skipping JSON parsing entirely; 180+ shapes in total route to specialized fast paths
 - **Streaming JSON parser** for memory-efficient NDJSON processing
