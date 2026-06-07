@@ -6,7 +6,7 @@ JIT compilation implementation of jq.
 
 ```bash
 cargo build --release            # Build (must have zero warnings)
-cargo test --release             # Test (official 509 + regression)
+cargo test --release             # Test (full suite: official 509, regression, differential, fuzz, self-diff, contracts)
 ./bench/comprehensive.sh         # Benchmark (vs past results, see docs/benchmark-history.md)
 ```
 
@@ -28,7 +28,7 @@ Follow this workflow for bug fixes:
 1. **Create branch**: Branch from main with `fix/<brief-description>`
 2. **Fix + add tests**: Add regression test cases to `tests/regression.test`
 3. **Verify build**: Zero warnings with `cargo build --release`, all tests pass with `cargo test --release`
-4. **Verify performance**: Run `./bench/comprehensive.sh` and compare against the latest results in `docs/benchmark-history.md` to ensure no regression
+4. **Verify performance (only when touching hot paths or optimizations)**: Run `./bench/comprehensive.sh` and compare against `docs/benchmark-history.md`. Routine fixes can skip this — the benchmark history is refreshed per release, not per fix
 5. **Commit**: Use Conventional Commits format (in English)
 6. **Push + create PR**: Link the issue with `Closes #N`
 7. **Wait for Actions**: Confirm all CI checks pass before merging

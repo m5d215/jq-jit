@@ -8,8 +8,7 @@
 #   JQ_JIT=path/to/binary bench/comprehensive.sh  # benchmark a different build, or set
 #                                                 # JQ_JIT=$(which jq) for a sanity comparison
 #
-# bench/run.sh — quick daily checks (142 NDJSON patterns).
-# This script — broader coverage (~92 patterns + jaq-derived filters).
+# Broad coverage: ~92 patterns + jaq-derived filters.
 set -e
 
 JQ_JIT="${JQ_JIT:-target/release/jq-jit}"
