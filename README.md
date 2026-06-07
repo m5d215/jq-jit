@@ -296,7 +296,7 @@ the key explicitly with the 2-arg form: `memoize(. + $x; [., $x])`.
 
 The official jq suite is the floor, not the ceiling — most bugs that mattered
 were ones it never exercised. jq-jit is checked by several independent layers,
-all run by a single `cargo test --release -- --test-threads=1`:
+all run by a single `cargo test --release`:
 
 | Layer | Cases | What it checks |
 |-------|------:|----------------|
