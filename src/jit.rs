@@ -7046,11 +7046,23 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 let mut ok = true;
                 for item in a.iter() {
                     if let Value::Num(n, _) = item {
-                        let cp = *n as u32;
-                        if let Some(c) = char::from_u32(cp) {
-                            s.push(c);
-                        } else {
+                        // NaN can't be imploded — fall back to rt_implode for the
+                        // error. `*n as u32` saturates negatives to 0 (NUL), so
+                        // mirror rt_implode's i64 clamp: negative / surrogate /
+                        // > 0x10FFFF (and ±inf, which saturate past the range) →
+                        // U+FFFD, not U+0000. #932 (cf. #814).
+                        if n.is_nan() {
+                            ok = false;
+                            break;
+                        }
+                        let n_val = *n as i64;
+                        if n_val < 0 || (0xD800..=0xDFFF).contains(&n_val) || n_val > 0x10FFFF {
                             s.push('\u{FFFD}');
+                        } else {
+                            match char::from_u32(n_val as u32) {
+                                Some(c) => s.push(c),
+                                None => s.push('\u{FFFD}'),
+                            }
                         }
                     } else {
                         ok = false;
