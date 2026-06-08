@@ -12547,3 +12547,28 @@ null
 [[97,0,98]|implode]|@tsv|explode
 null
 [97,92,48,98]
+
+# #923: todate must not prepend a '+' to expanded years (>= 10000).
+todate
+253402300800
+"10000-01-01T00:00:00Z"
+
+# #923: strftime %Y emits bare digits for a 5-digit year (no ISO expanded-year '+').
+strftime("%Y")
+[10000,0,1,0,0,0,0,0]
+"10000"
+
+# #923: strftime %Y for a 6-digit year, still no '+'.
+strftime("%Y")
+[100000,0,1,0,0,0,0,0]
+"100000"
+
+# #923: strftime %G (ISO year) also drops the expanded-year '+'.
+strftime("%G")
+[12345,0,1,0,0,0,0,0]
+"12345"
+
+# #923: a %z timezone offset keeps its '+' even next to an expanded year.
+strftime("%Y%z")
+[10000,0,1,0,0,0,0,0]
+"10000+0000"
