@@ -2636,7 +2636,15 @@ pub fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
                     validate_slice_spec(slice_spec)?;
                     let len = a.len() as i64;
                     let (si, ei) = slice_indices(slice_spec, len);
-                    let new_val = rt_setpath(&Value::Null, &rest, val)?;
+                    // Apply the rest of the path to the CURRENT slice sub-array,
+                    // not to null. A slice-then-component path (`.[1:3][0]=9`,
+                    // `setpath([{1:3},{0:1}];…)`) must edit the existing slice
+                    // contents; recursing on null built the replacement from
+                    // scratch and dropped elements (#920). For a terminal slice
+                    // (rest empty) this is unchanged — rt_setpath(x; []; val) is
+                    // val (#609).
+                    let current_slice = Value::Arr(Rc::new(a[si..ei].to_vec()));
+                    let new_val = rt_setpath(&current_slice, &rest, val)?;
                     let replacement = match &new_val {
                         Value::Arr(r) => r.as_ref().clone(),
                         _ => bail!("A slice of an array can only be assigned another array"),
@@ -2757,7 +2765,12 @@ pub fn rt_setpath_mut(v: &mut Value, path: &[Value], val: Value) -> Result<()> {
                     validate_slice_spec(slice_spec)?;
                     let len = a.len() as i64;
                     let (si, ei) = slice_indices(slice_spec, len);
-                    let mut new_val = Value::Null;
+                    // Seed the recursion with the CURRENT slice sub-array, not
+                    // null, so a slice-then-component assignment (`.[1:3][0]=9`)
+                    // edits the existing slice rather than building the
+                    // replacement from scratch and dropping elements. Terminal
+                    // slices (empty rest) are unchanged. #920 (cf. #609)
+                    let mut new_val = Value::Arr(Rc::new(a[si..ei].to_vec()));
                     rt_setpath_mut(&mut new_val, rest, val)?;
                     let replacement = match new_val {
                         Value::Arr(r) => Rc::try_unwrap(r).unwrap_or_else(|rc| (*rc).clone()),
@@ -2986,6 +2999,27 @@ fn delete_path(v: &Value, path: &Value) -> Result<Value> {
                     } else {
                         Ok(v.clone())
                     }
+                }
+                // A slice followed by a further path component
+                // (`del(.[1:4][0])`): apply the rest delete to the current
+                // slice sub-array, then splice the result back. Without this
+                // arm the trailing component fell through to the array error
+                // ("Cannot delete object element of array"). #920
+                (Value::Arr(a), Value::Obj(ObjInner(spec))) => {
+                    validate_slice_spec(spec)?;
+                    let len = a.len() as i64;
+                    let (si, ei) = slice_indices(spec, len);
+                    let slice_val = Value::Arr(Rc::new(a[si..ei].to_vec()));
+                    let new_slice = delete_path(&slice_val, &rest)?;
+                    // Deleting through an array slice always yields an array.
+                    let replacement = match &new_slice {
+                        Value::Arr(r) => r.as_ref().clone(),
+                        _ => Vec::new(),
+                    };
+                    let mut result = a[..si].to_vec();
+                    result.extend(replacement);
+                    result.extend_from_slice(&a[ei..]);
+                    Ok(Value::Arr(Rc::new(result)))
                 }
                 (Value::Obj(_), key) => bail!("Cannot delete {} field of object", index_err_desc(key)),
                 (Value::Arr(_), key) => bail!("Cannot delete {} element of array", index_err_desc(key)),

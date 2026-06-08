@@ -12627,3 +12627,38 @@ null
 [range(2000)|"aaa"] | map(sub("a";"X")) | unique
 null
 ["Xaa"]
+
+# #920: assignment through a slice then a further index edits the slice (was dropping an element).
+.[1:3][0]=9
+[1,2,3,4,5]
+[1,9,3,4,5]
+
+# #920: slice-then-slice assignment.
+.[0:3][1:2]=[9]
+[1,2,3,4,5]
+[1,9,3,4,5]
+
+# #920: |= update through a slice then index.
+.[1:4][0]|=.+10
+[1,2,3,4,5]
+[1,12,3,4,5]
+
+# #920: del through a slice then index (was "Cannot delete object element of array").
+del(.[1:4][0])
+[1,2,3,4,5]
+[1,3,4,5]
+
+# #920: delpaths through a slice then index.
+delpaths([[{"start":1,"end":4},0]])
+[1,2,3,4,5]
+[1,3,4,5]
+
+# #920: setpath through two slices.
+setpath([{"start":1,"end":3},{"start":0,"end":1}];[9])
+[1,2,3,4,5]
+[1,9,3,4,5]
+
+# #920: single-slice assignment unchanged (regression guard, #609).
+.[1:3]=[9]
+[1,2,3,4,5]
+[1,9,4,5]
