@@ -6095,6 +6095,23 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             }
             Ok(true)
         }
+        // `any`/`all` carry the path of the deciding element. The 1-/2-arg
+        // forms parse to AnyShort/AllShort; the 0-arg `any`/`all` to
+        // `UnaryOp::{Any,All}` over an operand (≡ `any(operand[]; .)`). #927
+        Expr::AnyShort { generator, predicate } => {
+            eval_any_all_path(generator, predicate, true, input, env, cb)
+        }
+        Expr::AllShort { generator, predicate } => {
+            eval_any_all_path(generator, predicate, false, input, env, cb)
+        }
+        Expr::UnaryOp { op: crate::ir::UnaryOp::Any, operand } => {
+            let gen = Expr::Each { input_expr: operand.clone() };
+            eval_any_all_path(&gen, &Expr::Input, true, input, env, cb)
+        }
+        Expr::UnaryOp { op: crate::ir::UnaryOp::All, operand } => {
+            let gen = Expr::Each { input_expr: operand.clone() };
+            eval_any_all_path(&gen, &Expr::Input, false, input, env, cb)
+        }
         _ => {
             // Non-path-safe expression: evaluate, then accept the value as
             // the empty path `[]` if it is one of `null`/`true`/`false` and
@@ -6122,6 +6139,117 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             Ok(true)
         }
     }
+}
+
+/// Path-mode `any`/`all`. jq's `any(g; c)` / `all(g; c)` carry the path of the
+/// *deciding* element: `path(any)` yields the path of the first element whose
+/// condition is truthy (`all`: first falsy). The result *value* is always the
+/// boolean `true` (any) / `false` (all); jq's `or`/`and` only keep that
+/// boolean's path provenance when the condition output is *exactly* that
+/// boolean reached by navigation (`.` on a `true` element). A truthy-but-
+/// non-boolean (`.` on `5`), a computed boolean (`.>0`), or a value-generator
+/// source (`range`) all produce a rootless boolean, so jq reports "Invalid
+/// path expression with result <bool>". A fall-through (`any` finds nothing /
+/// `all` no counterexample) yields the init boolean (`false` / `true`),
+/// likewise rootless unless it equals the input. #927
+fn eval_any_all_path(
+    generator: &Expr,
+    predicate: &Expr,
+    is_any: bool,
+    input: Value,
+    env: &EnvRef,
+    cb: &mut dyn FnMut(Value) -> GenResult,
+) -> GenResult {
+    let decide = |v: &Value| -> bool { if is_any { v.is_truthy() } else { !v.is_truthy() } };
+    let decision_bool = if is_any { Value::True } else { Value::False };
+    let fallthrough_bool = if is_any { Value::False } else { Value::True };
+
+    // A rootless boolean B is an identity path only when it equals the input
+    // (mirrors the `_ =>` arm's null/true/false rule); otherwise it is the
+    // classic "Invalid path expression with result B".
+    let emit_bool = |b: Value, cb: &mut dyn FnMut(Value) -> GenResult| -> GenResult {
+        if b == input {
+            cb(Value::Arr(Rc::new(vec![])))
+        } else {
+            bail!("__pathexpr_result__:{}", crate::value::value_to_json(&b));
+        }
+    };
+
+    // Does the generator navigate the tracked input (path-trackable), or is it
+    // a plain value generator (`range`, literals)? Probe in path mode only when
+    // it reads `.`, mirroring the reduce/foreach source probes.
+    let gen_navigates = if expr_uses_outer_input(generator) {
+        let mut nav = false;
+        match eval_path(generator, input.clone(), env, &mut |_p| { nav = true; Ok(false) }) {
+            Ok(_) => {}
+            Err(e) => { if !format!("{}", e).starts_with("__pathexpr_result__:") { return Err(e); } }
+        }
+        nav
+    } else {
+        false
+    };
+
+    if gen_navigates {
+        let mut emit: Option<Vec<Value>> = None;
+        let mut rootless = false;
+        let gen_result = eval_path(generator, input.clone(), env, &mut |gp| {
+            let elem = crate::runtime::rt_getpath(&input, &gp).unwrap_or(Value::Null);
+            // Decide via the predicate's *value*; remember which output decided.
+            let mut decided: Option<(usize, Value)> = None;
+            let mut j = 0usize;
+            eval(predicate, elem.clone(), env, &mut |v| {
+                if decide(&v) { decided = Some((j, v)); Ok(false) } else { j += 1; Ok(true) }
+            })?;
+            let Some((target, dv)) = decided else { return Ok(true); };
+            // A deciding output that is not exactly the boolean is rootless.
+            if dv != decision_bool {
+                rootless = true;
+                return Ok(false);
+            }
+            // Emit (generator ++ predicate) path of the deciding output. The
+            // predicate path-eval surfaces a rootless value as a sentinel.
+            let gp_vec: Vec<Value> = match &gp { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
+            let mut cur = 0usize;
+            let pr = eval_path(predicate, elem.clone(), env, &mut |sp| {
+                if cur == target {
+                    let mut full = gp_vec.clone();
+                    if let Value::Arr(a) = &sp { full.extend(a.iter().cloned()); }
+                    emit = Some(full);
+                    Ok(false)
+                } else {
+                    cur += 1;
+                    Ok(true)
+                }
+            });
+            if let Err(e) = pr {
+                if format!("{}", e).starts_with("__pathexpr_result__:") { rootless = true; }
+                else { return Err(e); }
+            }
+            Ok(false)
+        });
+        gen_result?;
+        if rootless {
+            return emit_bool(decision_bool, cb);
+        }
+        if let Some(p) = emit {
+            return cb(Value::Arr(Rc::new(p)));
+        }
+        return emit_bool(fallthrough_bool, cb);
+    }
+
+    // Value-generator source: the deciding element has no input path, so the
+    // boolean result is rootless.
+    let mut decided = false;
+    let gr = eval(generator, input.clone(), env, &mut |gv| {
+        let mut d = false;
+        eval(predicate, gv, env, &mut |v| {
+            if decide(&v) { d = true; Ok(false) } else { Ok(true) }
+        })?;
+        if d { decided = true; Ok(false) } else { Ok(true) }
+    });
+    gr?;
+    let result_bool = if decided { decision_bool } else { fallthrough_bool };
+    emit_bool(result_bool, cb)
 }
 
 /// Evaluate a `try … catch` body in path context against the caught value.

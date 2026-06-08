@@ -12662,3 +12662,73 @@ setpath([{"start":1,"end":3},{"start":0,"end":1}];[9])
 .[1:3]=[9]
 [1,2,3,4,5]
 [1,9,4,5]
+
+# #927: path(any)/path(all) carry the deciding element's path
+path(any)
+[false,true,false]
+[1]
+
+# #927: path(all) yields the first counterexample's path
+path(all)
+[true,false,true]
+[1]
+
+# #927: 0-arg any on an object yields the deciding key's path
+[path(any)]
+{"x":false,"y":true}
+[["y"]]
+
+# #927: 2-arg path(any(g; c)) threads the generator path
+path(any(.[]; .))
+[false,true]
+[1]
+
+# #927: path(all(.a,.b; .)) — comma generator, first falsy
+path(all(.a,.b; .))
+{"a":false,"b":true}
+["a"]
+
+# #927: 1-arg path(any(c)) over .[]
+path(any(.))
+[false,true,false]
+[1]
+
+# #927: assignment through (any) updates the deciding element
+(any) |= "X"
+[false,true,false]
+[false,"X",false]
+
+# #927: assignment through (all) updates the first counterexample
+(all) |= "X"
+[true,false,true]
+[true,"X",true]
+
+# #927: getpath(path(any)) round-trips to the deciding value
+getpath(path(any))
+[false,true,false]
+true
+
+# #927: deciding value not a bare boolean (truthy 5) is rootless
+try path(any(.[]; .)) catch .
+[false,5]
+"Invalid path expression with result true"
+
+# #927: computed boolean (.>0) is rootless even though any succeeds
+try path(any(.[]; .>0)) catch .
+[0,5]
+"Invalid path expression with result true"
+
+# #927: any falls through (none truthy) -> rootless false
+try path(any) catch .
+[false,false]
+"Invalid path expression with result false"
+
+# #927: all falls through (no counterexample) -> rootless true
+try path(all) catch .
+[true,true]
+"Invalid path expression with result true"
+
+# #927: predicate navigates into the element; path includes the hop
+path(any(.[]; .x))
+[{"x":false},{"x":true}]
+[1,"x"]
