@@ -53,9 +53,15 @@ fn split_raw_lines(content: &str) -> impl Iterator<Item = &str> {
 }
 
 fn raw_inputs_with_lines(content: &str) -> Vec<(Value, u64)> {
+    // jq reports `input_line_number` as the count of `\n` consumed when the
+    // value is emitted. A terminated line N gets N; an unterminated final line
+    // adds no newline, so it keeps the prior count. Cap at the total `\n` count
+    // so the last line of input without a trailing newline doesn't bump the
+    // counter (`a\nb\nc` -> 1,2,2; `a\nb\nc\n` -> 1,2,3). #925
+    let total_nl = content.bytes().filter(|&b| b == b'\n').count() as u64;
     split_raw_lines(content)
         .enumerate()
-        .map(|(i, l)| (Value::from_str(l), (i + 1) as u64))
+        .map(|(i, l)| (Value::from_str(l), ((i as u64) + 1).min(total_nl)))
         .collect()
 }
 
@@ -3630,6 +3636,9 @@ fn real_main() {
                     eprintln!("jq: error reading input: {}", e);
                     process::exit(2);
                 }
+                // Slurp consumes the whole stream, so `input_line_number` is the
+                // total `\n` count consumed (#925).
+                jq_jit::eval::set_input_line_number(buf.bytes().filter(|&b| b == b'\n').count() as u64);
                 process_input(&Value::from_str(&buf), None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
             } else {
                 // Stream line-by-line, splitting on '\n' only and keeping any
@@ -3638,14 +3647,22 @@ fn real_main() {
                 // (so e.g. `tail -f | jq -R` still works incrementally).
                 let mut reader = stdin.lock();
                 let mut buf: Vec<u8> = Vec::new();
+                // Count of `\n` consumed so far. A terminated line bumps it
+                // (line N -> N); an unterminated final line keeps the prior
+                // count, so `a\nb\nc` reports 1,2,2 and `a\nb\nc\n` reports
+                // 1,2,3, matching jq's `input_line_number` (#925).
+                let mut nl_consumed: u64 = 0;
                 loop {
                     buf.clear();
                     match reader.read_until(b'\n', &mut buf) {
                         Ok(0) => break,
                         Ok(_) => {
-                            if buf.last() == Some(&b'\n') {
+                            let terminated = buf.last() == Some(&b'\n');
+                            if terminated {
                                 buf.pop();
+                                nl_consumed += 1;
                             }
+                            jq_jit::eval::set_input_line_number(nl_consumed);
                             let l = String::from_utf8_lossy(&buf);
                             process_input(&Value::from_str(&l), None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         }
@@ -3670,6 +3687,9 @@ fn real_main() {
                     eprintln!("jq: error (at <stdin>:0): {}", e);
                     process::exit(2);
                 }
+                // Slurp consumes the whole stream: `input_line_number` is the
+                // total `\n` count consumed (#925).
+                jq_jit::eval::set_input_line_number(input_str.bytes().filter(|&b| b == b'\n').count() as u64);
                 let arr = Value::Arr(std::rc::Rc::new(values));
                 process_input(&arr, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
             } else {
