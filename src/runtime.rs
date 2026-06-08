@@ -1051,6 +1051,14 @@ pub fn jq_mod_f64<A: std::borrow::Borrow<f64>, B: std::borrow::Borrow<f64>>(a: A
     Some(r as f64)
 }
 
+/// Integer modulo with jq's `i64::MIN % -1 => 0` overflow guard. The bare
+/// `xi % yi` panics (SIGABRT) on that one input; callers on the arithmetic
+/// fast paths must route through here. Divisor-zero must be checked by callers.
+#[inline]
+pub fn jq_mod_i64(xi: i64, yi: i64) -> i64 {
+    if xi == i64::MIN && yi == -1 { 0 } else { xi % yi }
+}
+
 pub fn rt_mod(a: &Value, b: &Value) -> Result<Value> {
     match (a, b) {
         (Value::Num(x, _), Value::Num(y, _)) => {

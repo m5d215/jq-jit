@@ -12487,3 +12487,18 @@ join(1)
 [first(while((true,false); .+1))]
 0
 [0]
+
+# #918: i64::MIN % -1 must not overflow/panic on the arithmetic fast path (jq returns 0).
+. % -1
+-9223372036854775808
+0
+
+# #918: i64::MIN % -1 via a bound variable also stays on the safe path.
+. as $x | $x % -1
+-9223372036854775808
+0
+
+# #918: i64::MIN % -1 inside reduce (binop fast path on a runtime value).
+reduce range(1) as $i (.; . % -1)
+-9223372036854775808
+0
