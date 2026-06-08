@@ -273,8 +273,13 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             if args.len() >= 4 {
                 // sub/gsub with flags: input, regex, replacement, flags
                 let pat_str = coerce_regex_pat_str(&args[1])?;
-                let (pat, _, not_empty) = apply_regex_flags(&pat_str, &args[3])?;
-                rt_sub_gsub(&args[0], &Value::from_string(pat), &args[2], name == "gsub", not_empty)
+                // The `"g"` flag controls replacement count, not the pattern, so
+                // it must be honored here — `sub(re; repl; "g")` replaces all
+                // matches. Discarding it (binding to `_`) silently dropped the
+                // global flag on this dispatch (the JIT scalar path). #931
+                let (pat, flag_global, not_empty) = apply_regex_flags(&pat_str, &args[3])?;
+                let global = name == "gsub" || flag_global;
+                rt_sub_gsub(&args[0], &Value::from_string(pat), &args[2], global, not_empty)
             } else if args.len() >= 3 {
                 rt_sub_gsub(&args[0], &args[1], &args[2], name == "gsub", false)
             } else {

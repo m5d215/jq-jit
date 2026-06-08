@@ -12612,3 +12612,18 @@ try gmtime catch .
 nan|gmtime
 null
 [1970,0,1,0,0,null,4,0]
+
+# #931: sub(re;repl;"g") must replace all matches on the JIT scalar path (>= ~1000 iters), not just the first.
+[range(2000)|"aaa"] | map(sub("a";"X";"g")) | unique
+null
+["XXX"]
+
+# #931: the "ig" flags both survive on the JIT path (case-insensitive + global).
+[range(2000)|"AaA"] | map(sub("A";"x";"ig")) | unique
+null
+["xxx"]
+
+# #931: sub without "g" still replaces only the first match (no over-correction).
+[range(2000)|"aaa"] | map(sub("a";"X")) | unique
+null
+["Xaa"]
