@@ -4462,10 +4462,16 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
                 match v {
                     Value::Str(s) => {
                         buf.push('"');
-                        if s.contains('"') {
+                        // jq doubles `"` and escapes an embedded NUL to the
+                        // two-char `\0` (the #849 NUL fix missed @csv/@tsv).
+                        // Single pass over the cell bytes. #929
+                        if s.as_bytes().iter().any(|&b| b == b'"' || b == 0) {
                             for c in s.chars() {
-                                if c == '"' { buf.push('"'); }
-                                buf.push(c);
+                                match c {
+                                    '"' => { buf.push('"'); buf.push('"'); }
+                                    '\0' => buf.push_str("\\0"),
+                                    _ => buf.push(c),
+                                }
                             }
                         } else {
                             buf.push_str(s);
@@ -4502,6 +4508,8 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
                                 '\t' => buf.push_str("\\t"),
                                 '\n' => buf.push_str("\\n"),
                                 '\r' => buf.push_str("\\r"),
+                                // jq escapes an embedded NUL to `\0` (#849/#929).
+                                '\0' => buf.push_str("\\0"),
                                 _ => buf.push(c),
                             }
                         }

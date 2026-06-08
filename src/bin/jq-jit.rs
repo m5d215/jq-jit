@@ -115,6 +115,36 @@ fn raw_contains_unicode_escape(bytes: &[u8]) -> bool {
     false
 }
 
+/// CSV-escape already-decoded cell bytes into `buf` for the raw `-r @csv`
+/// fast path: double `"` and escape an embedded NUL to the two-char `\0`,
+/// matching jq and the value formatter (`eval::eval_format`). #929
+fn push_csv_decoded_cell(buf: &mut Vec<u8>, bytes: &[u8]) {
+    for &b in bytes {
+        match b {
+            b'"' => { buf.push(b'"'); buf.push(b'"'); }
+            0 => buf.extend_from_slice(b"\\0"),
+            _ => buf.push(b),
+        }
+    }
+}
+
+/// TSV-escape already-decoded cell bytes into `buf` for the raw `-r @tsv`
+/// fast path: `\\`, tab, newline, CR, and NUL are escaped, matching jq and
+/// the value formatter. The previous raw path emitted these bytes verbatim,
+/// so `\t`/`\n`/`\r`/`\\`/NUL all leaked unescaped. #929
+fn push_tsv_decoded_cell(buf: &mut Vec<u8>, bytes: &[u8]) {
+    for &b in bytes {
+        match b {
+            b'\\' => buf.extend_from_slice(b"\\\\"),
+            b'\t' => buf.extend_from_slice(b"\\t"),
+            b'\n' => buf.extend_from_slice(b"\\n"),
+            b'\r' => buf.extend_from_slice(b"\\r"),
+            0 => buf.extend_from_slice(b"\\0"),
+            _ => buf.push(b),
+        }
+    }
+}
+
 
 fn jqjit_trace_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -3774,13 +3804,9 @@ fn real_main() {
                                     if is_csv {
                                         compact_buf.push(b'"');
                                         if inner.contains(&b'\\') {
-                                            // Has JSON escapes — decode first
-                                            let decoded = json_unescape_bytes(inner);
-                                            // CSV-escape: double any quotes
-                                            for &b in &decoded {
-                                                if b == b'"' { compact_buf.push(b'"'); }
-                                                compact_buf.push(b);
-                                            }
+                                            // Has JSON escapes — decode, then CSV-escape
+                                            // (double `"`, NUL -> `\0`).
+                                            push_csv_decoded_cell(&mut compact_buf, &json_unescape_bytes(inner));
                                         } else if inner.contains(&b'"') {
                                             for &b in inner.iter() {
                                                 if b == b'"' { compact_buf.push(b'"'); }
@@ -3791,9 +3817,9 @@ fn real_main() {
                                         }
                                         compact_buf.push(b'"');
                                     } else {
-                                        // TSV: output raw
+                                        // TSV: decode, then TSV-escape (\\ tab nl cr NUL).
                                         if inner.contains(&b'\\') {
-                                            compact_buf.extend_from_slice(&json_unescape_bytes(inner));
+                                            push_tsv_decoded_cell(&mut compact_buf, &json_unescape_bytes(inner));
                                         } else {
                                             compact_buf.extend_from_slice(inner);
                                         }
@@ -12827,11 +12853,7 @@ fn real_main() {
                                 if is_csv {
                                     compact_buf.push(b'"');
                                     if inner.contains(&b'\\') {
-                                        let decoded = json_unescape_bytes(inner);
-                                        for &b in &decoded {
-                                            if b == b'"' { compact_buf.push(b'"'); }
-                                            compact_buf.push(b);
-                                        }
+                                        push_csv_decoded_cell(&mut compact_buf, &json_unescape_bytes(inner));
                                     } else if inner.contains(&b'"') {
                                         for &b in inner.iter() {
                                             if b == b'"' { compact_buf.push(b'"'); }
@@ -12843,7 +12865,7 @@ fn real_main() {
                                     compact_buf.push(b'"');
                                 } else {
                                     if inner.contains(&b'\\') {
-                                        compact_buf.extend_from_slice(&json_unescape_bytes(inner));
+                                        push_tsv_decoded_cell(&mut compact_buf, &json_unescape_bytes(inner));
                                     } else {
                                         compact_buf.extend_from_slice(inner);
                                     }
