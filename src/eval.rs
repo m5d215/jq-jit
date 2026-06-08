@@ -1270,7 +1270,7 @@ fn get_num_leaf(expr: &Expr, input: &Value, vars: &[Value]) -> Option<f64> {
                 BinOp::Sub => ln - rn,
                 BinOp::Mul => ln * rn,
                 BinOp::Div => { if rn == 0.0 { return None; } ln / rn }
-                BinOp::Mod => { if !ln.is_finite() || !rn.is_finite() { return None; } let yi = rn as i64; if yi == 0 { return None; } (ln as i64 % yi) as f64 }
+                BinOp::Mod => { if !ln.is_finite() || !rn.is_finite() { return None; } let yi = rn as i64; if yi == 0 { return None; } crate::runtime::jq_mod_i64(ln as i64, yi) as f64 }
                 _ => return None,
             })
         }
@@ -1366,7 +1366,7 @@ fn get_num_leaf_override(expr: &Expr, vars: &[Value], override_vi: u16, override
                 BinOp::Sub => ln - rn,
                 BinOp::Mul => ln * rn,
                 BinOp::Div => { if rn == 0.0 { return None; } ln / rn }
-                BinOp::Mod => { if !ln.is_finite() || !rn.is_finite() { return None; } let yi = rn as i64; if yi == 0 { return None; } (ln as i64 % yi) as f64 }
+                BinOp::Mod => { if !ln.is_finite() || !rn.is_finite() { return None; } let yi = rn as i64; if yi == 0 { return None; } crate::runtime::jq_mod_i64(ln as i64, yi) as f64 }
                 _ => return None,
             })
         }
@@ -1451,7 +1451,7 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
                                         if !ln.is_finite() || !rn.is_finite() { drop(e); return Err(()); }
                                         let yi = rn as i64;
                                         if yi == 0 { drop(e); return Err(()); }
-                                        Value::number((ln as i64 % yi) as f64)
+                                        Value::number(crate::runtime::jq_mod_i64(ln as i64, yi) as f64)
                                     }
                                     BinOp::Eq => if ln == rn { Value::True } else { Value::False },
                                     BinOp::Ne => if ln != rn { Value::True } else { Value::False },
@@ -1480,7 +1480,7 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
                                 if !ln.is_finite() || !rn.is_finite() { return eval_binop(*op, &l, &r).map_err(|_| ()); }
                                 let yi = *rn as i64;
                                 if yi == 0 { return eval_binop(*op, &l, &r).map_err(|_| ()); }
-                                Value::number((*ln as i64 % yi) as f64)
+                                Value::number(crate::runtime::jq_mod_i64(*ln as i64, yi) as f64)
                             }
                             BinOp::Eq => if ln == rn { Value::True } else { Value::False },
                             BinOp::Ne => if ln != rn { Value::True } else { Value::False },
@@ -4110,7 +4110,7 @@ pub fn eval_binop(op: BinOp, lhs: &Value, rhs: &Value) -> Result<Value> {
                 if !ln.is_finite() || !rn.is_finite() { return crate::runtime::rt_mod(lhs, rhs); }
                 let yi = *rn as i64;
                 if yi == 0 { return crate::runtime::rt_mod(lhs, rhs); }
-                Value::number((*ln as i64 % yi) as f64)
+                Value::number(crate::runtime::jq_mod_i64(*ln as i64, yi) as f64)
             }
             BinOp::Eq => if ln == rn { Value::True } else { Value::False },
             BinOp::Ne => if ln != rn { Value::True } else { Value::False },
@@ -4156,7 +4156,7 @@ fn eval_binop_owned(op: BinOp, lhs: Value, rhs: &Value) -> Result<Value> {
                 if !ln.is_finite() || !rn.is_finite() { return crate::runtime::rt_mod(&lhs, rhs); }
                 let yi = *rn as i64;
                 if yi == 0 { return crate::runtime::rt_mod(&lhs, rhs); }
-                Value::number((*ln as i64 % yi) as f64)
+                Value::number(crate::runtime::jq_mod_i64(*ln as i64, yi) as f64)
             }
             BinOp::Eq => if ln == rn { Value::True } else { Value::False },
             BinOp::Ne => if ln != rn { Value::True } else { Value::False },
