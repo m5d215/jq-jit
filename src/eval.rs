@@ -5338,6 +5338,36 @@ thread_local! {
 }
 
 thread_local! {
+    // Depth>0 means the `eval_path` INPUT is a rootless `foreach` accumulator:
+    // a navigating source (`.[]`) owns the path register, so the accumulator
+    // carries no provenance. In that state the bare identity `.` surfaces the
+    // `__pathexpr_result__` sentinel (→ "Invalid path expression with result
+    // <acc>") and a navigation off it (`.a`) becomes "near attempt to access …"
+    // via the existing Index/Each recovery, while a `$x` reference still
+    // forwards its source path (`LoadVar` never touches the identity arm). Only
+    // the EXTRACT (3-arg) / UPDATE (2-arg) evaluation of a navigating-source
+    // foreach raises the depth, so ordinary path expressions are unaffected.
+    // #915
+    static FOREACH_ROOTLESS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// RAII guard that marks the current `eval_path` input as a rootless `foreach`
+/// accumulator for its lifetime (see [`FOREACH_ROOTLESS`]). Restores the prior
+/// depth on drop, so early returns / error propagation can't leak the state.
+struct RootlessAccGuard;
+impl RootlessAccGuard {
+    fn enter() -> Self {
+        FOREACH_ROOTLESS.with(|c| c.set(c.get() + 1));
+        RootlessAccGuard
+    }
+}
+impl Drop for RootlessAccGuard {
+    fn drop(&mut self) {
+        FOREACH_ROOTLESS.with(|c| c.set(c.get().saturating_sub(1)));
+    }
+}
+
+thread_local! {
     // Variables bound to the identity path via `. as $x`. jq tracks the empty
     // path provenance of an identity binding, so `path($x)` is the identity
     // path `[]` as long as the current input still equals the captured value
@@ -5473,7 +5503,17 @@ fn source_nav_error(source: &Expr, input: &Value, env: &EnvRef) -> anyhow::Error
 
 fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
     match expr {
-        Expr::Input => cb(Value::Arr(Rc::new(vec![]))),
+        Expr::Input => {
+            // A rootless `foreach` accumulator has no path: the identity `.`
+            // surfaces as the sink's "Invalid path expression with result
+            // <acc>" rather than the root path `[]`. Navigation off it (`.a`)
+            // bails the same sentinel from the base, which the enclosing
+            // Index/Each arm rewrites into "near attempt to access …". #915
+            if FOREACH_ROOTLESS.with(|c| c.get()) > 0 {
+                bail!("__pathexpr_result__:{}", crate::value::value_to_json(&input));
+            }
+            cb(Value::Arr(Rc::new(vec![])))
+        }
         Expr::Index { expr: be, key: ke } => {
             let cb_called = std::cell::Cell::new(false);
             let input_for_check = input.clone();
@@ -6079,7 +6119,14 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                         env.borrow_mut().vars[ai as usize] = new_acc.clone();
                         let extract_expr = extract.as_ref().unwrap();
                         FOREACH_PATH_BIND.with(|s| s.borrow_mut().push((vi, src_path.clone())));
-                        let r = eval_path(extract_expr, new_acc.clone(), env, cb);
+                        // The navigating source owns the path register, so the
+                        // accumulator EXTRACT runs against is rootless: a bare
+                        // `.`/`.k` surfaces "result <acc>"/"near attempt …", a
+                        // `$x` still forwards the element path. #915
+                        let r = {
+                            let _rootless = RootlessAccGuard::enter();
+                            eval_path(extract_expr, new_acc.clone(), env, cb)
+                        };
                         FOREACH_PATH_BIND.with(|s| { s.borrow_mut().pop(); });
                         let cont = r?;
                         if !cont { stopped = true; }
@@ -6613,12 +6660,19 @@ fn eval_foreach_nav_noextract_path(
                 (ov, oa)
             };
             FOREACH_PATH_BIND.with(|s| s.borrow_mut().push((vi, src_path.clone())));
-            let r = eval_path(update, acc_val, env, &mut |upd_path| {
-                // The update result threads as the next accumulator value.
-                acc = crate::runtime::rt_getpath(input, &upd_path).unwrap_or(Value::Null);
-                env.borrow_mut().vars[ai as usize] = acc.clone();
-                cb(upd_path)
-            });
+            // A 2-arg `foreach .[] as $x (init; update)` yields UPDATE each
+            // step; with a navigating source the accumulator is rootless, so an
+            // accumulator-anchored UPDATE (`.`, `.k`) is an invalid path
+            // expression while a `$x`-anchored one forwards the element path. #915
+            let r = {
+                let _rootless = RootlessAccGuard::enter();
+                eval_path(update, acc_val, env, &mut |upd_path| {
+                    // The update result threads as the next accumulator value.
+                    acc = crate::runtime::rt_getpath(input, &upd_path).unwrap_or(Value::Null);
+                    env.borrow_mut().vars[ai as usize] = acc.clone();
+                    cb(upd_path)
+                })
+            };
             FOREACH_PATH_BIND.with(|s| { s.borrow_mut().pop(); });
             {
                 let mut e = env.borrow_mut();
