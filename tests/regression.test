@@ -12757,3 +12757,23 @@ try ([path(recurse(.a; true))]) catch .
 [path(recurse)]
 {"a":{"b":9},"c":7}
 [[],["a"],["a","b"],["c"]]
+
+# #916: recurse(f) is lazy/depth-first; an outer break fires after the earlier subtree
+[label $o | recurse(if . < 3 then (.+1, (if .==1 then break $o else empty end)) else empty end)]
+0
+[0,1,2,3]
+
+# #916: same for the 2-arg recurse(f; cond) form
+[label $o | recurse(if .==1 then (.+1, break $o) else .+1 end; . < 4)]
+0
+[0,1,2,3]
+
+# #916: a label inside f is re-entered per level; each break targets its own instance
+[label $a | recurse(if . < 5 then (label $b | (.+1, break $b)) else empty end)]
+0
+[0,1,2,3,4,5]
+
+# #916: recurse(f) ordering unchanged when no break is involved (regression guard)
+[recurse(if . < 3 then .+1 else empty end)]
+0
+[0,1,2,3]

@@ -3163,14 +3163,24 @@ pub fn eval(
         }
 
         Expr::Label { var_index, body } => {
-            let label_id = {
+            // Allocate a fresh runtime label id and bind it to the label var,
+            // saving the slot's prior value. The save/restore matters when the
+            // same lexical `label $x` is dynamically re-entered — e.g. a
+            // `recurse(f)` whose `f` contains `label $x | … break $x`, which
+            // nests because the recursion is lazy/depth-first. Without the
+            // restore, a `break $x` evaluated after an inner instance exited
+            // read the inner (stale) id and unwound to the wrong label. #916
+            let (label_id, old) = {
                 let mut e = env.borrow_mut();
                 let id = e.next_label;
                 e.next_label = id + 1;
+                let old = e.get_var(*var_index);
                 e.set_var(*var_index, Value::number(id as f64));
-                id
+                (id, old)
             };
-            match eval(body, input, env, cb) {
+            let result = eval(body, input, env, cb);
+            env.borrow_mut().set_var(*var_index, old);
+            match result {
                 Err(e) => {
                     if let Some(be) = e.downcast_ref::<BreakError>() {
                         if be.0 == label_id { return Ok(true); }
@@ -4297,24 +4307,19 @@ fn eval_recurse_expr(step: &Expr, val: &Value, env: &EnvRef, cb: &mut dyn FnMut(
     if matches!(step, Expr::EachOpt { input_expr } if matches!(**input_expr, Expr::Input)) {
         eval_recurse_default(val, cb)
     } else {
-        // Custom step: use explicit stack to avoid stack overflow.
-        // Errors raised by `step` must propagate (#195) — jq emits the
-        // already-yielded values AND the type-error to stderr (exit 5).
-        // The previous `let _ = eval(...)` silently dropped them.
-        let mut work = vec![val.clone()];
-        while let Some(current) = work.pop() {
-            if !cb(current.clone())? { return Ok(false); }
-            let mut next_vals = Vec::new();
-            eval(step, current, env, &mut |next| {
-                next_vals.push(next);
-                Ok(true)
-            })?;
-            // Push in reverse so first output is processed first
-            for v in next_vals.into_iter().rev() {
-                work.push(v);
-            }
-        }
-        Ok(true)
+        // Custom step `recurse(f)` = `def r: ., (f | r); r`. The recursion is
+        // lazy and depth-first: emit the current value, then for EACH value
+        // `f` produces (in order) immediately recurse into it before pulling
+        // the next one. Buffering all of `f`'s outputs first (the old
+        // explicit-stack approach) evaluated `f` breadth-first, so a
+        // `break $label` / error raised by a *later* generator alternative
+        // inside `f` fired before an *earlier* alternative's subtree ran —
+        // truncating output (#916). Errors raised by `step` still propagate
+        // (#195). `stacker::maybe_grow` guards deep recursion.
+        if !cb(val.clone())? { return Ok(false); }
+        eval(step, val.clone(), env, &mut |next| {
+            stacker::maybe_grow(64 * 1024, 1024 * 1024, || eval_recurse_expr(step, &next, env, cb))
+        })
     }
 }
 
