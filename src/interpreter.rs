@@ -2734,6 +2734,12 @@ impl Filter {
                 }),
                 Expr::Format { expr: e, .. } => walk!(e),
                 Expr::Limit { count, generator } => walk!(count) || walk!(generator),
+                // `any(inputs; cond)` / `all(inputs; cond)` (and an
+                // input-consuming predicate like `any(.[]; . == input)`) read
+                // the stream. Omitting these made `uses_inputs()` report false,
+                // so the binary never seeded the input queue under `-n` and the
+                // generator yielded nothing (any -> false, all -> true). #928
+                Expr::AnyShort { generator, predicate } | Expr::AllShort { generator, predicate } => walk!(generator) || walk!(predicate),
                 Expr::While { cond, update, .. } | Expr::Until { cond, update } => walk!(cond) || walk!(update),
                 Expr::Repeat { update, .. } => walk!(update),
                 Expr::Range { from, to, step } => {

@@ -2112,6 +2112,21 @@ impl Flattener {
                 out
             }
             Expr::AllShort { generator, predicate } => {
+                // Bail when the generator isn't JIT-compilable (e.g. `inputs`):
+                // flatten_gen_with_each_output would silently emit no loop body,
+                // collapsing all/2 to its vacuous `true`. Fall back to the
+                // interpreter, which drives the input stream. See #928 (cf. the
+                // reduce-source bailout, #683).
+                {
+                    let mut test = self.test_flattener();
+                    let t_in = test.alloc_slot();
+                    if !test.flatten_gen(generator, t_in) {
+                        self.has_unresolved_recursion = true;
+                        let out = self.alloc_slot();
+                        self.emit(JitOp::Null { dst: out });
+                        return out;
+                    }
+                }
                 // all(pred): iterate generator, short-circuit to false on first falsey predicate
                 let result_var = self.alloc_var();
                 // result = 1 (true)
@@ -2145,6 +2160,21 @@ impl Flattener {
                 out
             }
             Expr::AnyShort { generator, predicate } => {
+                // Bail when the generator isn't JIT-compilable (e.g. `inputs`):
+                // flatten_gen_with_each_output would silently emit no loop body,
+                // collapsing any/2 to its vacuous `false`. Fall back to the
+                // interpreter, which drives the input stream. See #928 (cf. the
+                // reduce-source bailout, #683).
+                {
+                    let mut test = self.test_flattener();
+                    let t_in = test.alloc_slot();
+                    if !test.flatten_gen(generator, t_in) {
+                        self.has_unresolved_recursion = true;
+                        let out = self.alloc_slot();
+                        self.emit(JitOp::Null { dst: out });
+                        return out;
+                    }
+                }
                 // any(pred): iterate generator, short-circuit to true on first truthy predicate
                 let result_var = self.alloc_var();
                 self.emit(JitOp::InitVar { var: result_var }); // result = 0 (false)
