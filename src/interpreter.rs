@@ -2740,6 +2740,20 @@ impl Filter {
                 // so the binary never seeded the input queue under `-n` and the
                 // generator yielded nothing (any -> false, all -> true). #928
                 Expr::AnyShort { generator, predicate } | Expr::AllShort { generator, predicate } => walk!(generator) || walk!(predicate),
+                // Regex builtins evaluate their sub-expressions against the
+                // input, and `sub`/`gsub` evaluate the replacement (`tostr`)
+                // as a generator that can pull from the stream
+                // (`gsub(re; input)`). Omitting these made `uses_inputs()`
+                // report false, so the binary never seeded the input queue:
+                // `input` raised a bogus `break` and the main loop replayed
+                // each remaining document as a separate top-level input,
+                // producing the wrong output shape (#930).
+                Expr::RegexTest { input_expr, re, flags }
+                | Expr::RegexMatch { input_expr, re, flags }
+                | Expr::RegexCapture { input_expr, re, flags }
+                | Expr::RegexScan { input_expr, re, flags } => walk!(input_expr) || walk!(re) || walk!(flags),
+                Expr::RegexSub { input_expr, re, tostr, flags }
+                | Expr::RegexGsub { input_expr, re, tostr, flags } => walk!(input_expr) || walk!(re) || walk!(tostr) || walk!(flags),
                 Expr::While { cond, update, .. } | Expr::Until { cond, update } => walk!(cond) || walk!(update),
                 Expr::Repeat { update, .. } => walk!(update),
                 Expr::Range { from, to, step } => {
