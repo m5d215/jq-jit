@@ -12532,3 +12532,18 @@ null
 [-infinite]|implode|explode
 null
 [65533]
+
+# #929: @csv escapes an embedded NUL to the two-char \0 (codepoints shown via explode).
+[[0]|implode]|@csv|explode
+null
+[34,92,48,34]
+
+# #929: @csv escapes a mid-string NUL (a\0b inside the quoted cell).
+[[97,0,98]|implode]|@csv|explode
+null
+[34,97,92,48,98,34]
+
+# #929: @tsv escapes an embedded NUL to \0 (a\0b).
+[[97,0,98]|implode]|@tsv|explode
+null
+[97,92,48,98]

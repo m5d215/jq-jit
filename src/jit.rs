@@ -8274,10 +8274,17 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                         match v {
                             Value::Str(s) => {
                                 buf.push(b'"');
-                                if s.as_bytes().contains(&b'"') {
+                                // jq doubles `"` and escapes an embedded NUL to
+                                // the two-char `\0` (the #849 NUL fix missed
+                                // @csv/@tsv). One SIMD pass (memchr2) over the
+                                // cell for both bytes, keeping the hot path fast. #929
+                                if memchr::memchr2(b'"', 0, s.as_bytes()).is_some() {
                                     for &b in s.as_bytes() {
-                                        if b == b'"' { buf.push(b'"'); }
-                                        buf.push(b);
+                                        match b {
+                                            b'"' => { buf.push(b'"'); buf.push(b'"'); }
+                                            0 => buf.extend_from_slice(b"\\0"),
+                                            _ => buf.push(b),
+                                        }
                                     }
                                 } else {
                                     buf.extend_from_slice(s.as_bytes());
@@ -8316,6 +8323,8 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                                         b'\t' => buf.extend_from_slice(b"\\t"),
                                         b'\n' => buf.extend_from_slice(b"\\n"),
                                         b'\r' => buf.extend_from_slice(b"\\r"),
+                                        // jq escapes an embedded NUL to `\0` (#849/#929).
+                                        0 => buf.extend_from_slice(b"\\0"),
                                         _ => buf.push(b),
                                     }
                                 }
