@@ -12592,3 +12592,23 @@ todate
 todate
 -1.5
 "1969-12-31T23:59:59Z"
+
+# #922: gmtime of a large finite epoch computes the real broken-down time (was all-zeros).
+gmtime
+10000000000000
+[318857,4,20,17,46,40,0,139]
+
+# #922: gmtime still correct near the top of the representable range.
+gmtime
+67000000000000000
+[2123147449,11,15,23,6,40,6,348]
+
+# #922: gmtime of an infinite epoch errors instead of returning garbage.
+try gmtime catch .
+1e400
+"error converting number of seconds since epoch to datetime"
+
+# #922: gmtime of NaN keeps jq's quirk (epoch 0 with a null seconds field), not an error.
+nan|gmtime
+null
+[1970,0,1,0,0,null,4,0]
