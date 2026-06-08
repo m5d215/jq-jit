@@ -12502,3 +12502,18 @@ join(1)
 reduce range(1) as $i (.; . % -1)
 -9223372036854775808
 0
+
+# #921: del with a NaN array index errors instead of silently deleting index 0 (top-level fast path).
+try del(.[nan]) catch .
+[10,20,30]
+"Cannot delete array element at NaN index"
+
+# #921: del with a NaN array index through a nested path also errors.
+try del(.a[nan]) catch .
+{"a":[1,2,3]}
+"Cannot delete array element at NaN index"
+
+# #921: delpaths with a NaN array index errors (mixed with a valid path).
+try delpaths([[0],[nan]]) catch .
+[10,20,30]
+"Cannot delete array element at NaN index"
