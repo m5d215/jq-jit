@@ -3664,9 +3664,23 @@ struct BrokenTime {
     yday: i32,
 }
 
+/// Reject epochs that cannot be converted to a broken-down time: `inf`
+/// (jq errors) and finite values outside the `i64` second range (which
+/// `trunc as i64` would silently saturate). `NaN` is intentionally allowed
+/// through — `trunc(NaN) as i64` is 0, so it yields the 1970 epoch with a
+/// `null` seconds field, matching jq's `nan | gmtime`. #922
+fn epoch_secs_in_range(n: f64) -> Result<()> {
+    if n.is_infinite() || n < (i64::MIN as f64) || n > (i64::MAX as f64) {
+        bail!("error converting number of seconds since epoch to datetime");
+    }
+    Ok(())
+}
+
 fn rt_gmtime(v: &Value) -> Result<Value> {
     match v {
         Value::Num(n, _) => {
+            let n = *n;
+            epoch_secs_in_range(n)?;
             // jq derives the broken-down second from `trunc(n)` (toward zero)
             // but the fractional remainder from `n - floor(n)` (always in
             // [0,1)). For negative non-integer epochs these disagree, e.g.
@@ -3675,7 +3689,9 @@ fn rt_gmtime(v: &Value) -> Result<Value> {
             // here. `(-1.5) | .[5]` stays `59.5`. See #436/#924.
             let secs = n.trunc() as i64;
             let frac = n - n.floor();
-            Ok(broken_to_value(&epoch_to_utc_broken(secs), frac))
+            let t = epoch_to_utc_broken(secs)
+                .ok_or_else(|| anyhow::anyhow!("error converting number of seconds since epoch to datetime"))?;
+            Ok(broken_to_value(&t, frac))
         }
         _ => bail!("gmtime() requires numeric inputs"),
     }
@@ -3684,27 +3700,91 @@ fn rt_gmtime(v: &Value) -> Result<Value> {
 fn rt_localtime(v: &Value) -> Result<Value> {
     match v {
         Value::Num(n, _) => {
+            let n = *n;
+            epoch_secs_in_range(n)?;
             // See rt_gmtime: tm_sec from trunc, fraction from `n - floor(n)`. #924
             let secs = n.trunc() as i64;
             let frac = n - n.floor();
-            Ok(broken_to_value(&epoch_to_local_broken(secs), frac))
+            let t = epoch_to_local_broken(secs)
+                .ok_or_else(|| anyhow::anyhow!("error converting number of seconds since epoch to datetime"))?;
+            Ok(broken_to_value(&t, frac))
         }
         _ => bail!("localtime() requires numeric inputs"),
     }
 }
 
-fn epoch_to_utc_broken(secs: i64) -> BrokenTime {
+fn epoch_to_utc_broken(secs: i64) -> Option<BrokenTime> {
     use chrono::DateTime;
-    DateTime::from_timestamp(secs, 0)
-        .map(|d| ndt_to_broken(&d.naive_utc()))
-        .unwrap_or_default()
+    if let Some(d) = DateTime::from_timestamp(secs, 0) {
+        return Some(ndt_to_broken(&d.naive_utc()));
+    }
+    // Beyond chrono's representable range: compute directly. jq's libc gmtime
+    // handles years well past chrono's ~262143 ceiling (e.g. epoch 1e13 ->
+    // year 318857), so all-zeros was silent garbage. See #922.
+    civil_broken_from_epoch(secs)
 }
 
-fn epoch_to_local_broken(secs: i64) -> BrokenTime {
+fn epoch_to_local_broken(secs: i64) -> Option<BrokenTime> {
     use chrono::DateTime;
-    DateTime::from_timestamp(secs, 0)
-        .map(|d| ndt_to_broken(&d.with_timezone(&chrono::Local).naive_local()))
-        .unwrap_or_default()
+    if let Some(d) = DateTime::from_timestamp(secs, 0) {
+        return Some(ndt_to_broken(&d.with_timezone(&chrono::Local).naive_local()));
+    }
+    // Out of chrono's range: the local UTC offset for such astronomical years
+    // is undefined, so fall back to the UTC civil computation (correct under
+    // TZ=UTC, the only tested regime for these extremes). #922
+    civil_broken_from_epoch(secs)
+}
+
+/// Days since the Unix epoch (1970-01-01) to a civil `(year, month[1..=12],
+/// day)` and back, via Howard Hinnant's branch-free algorithms. Valid for the
+/// whole `i64` day range — used to extend `gmtime` past chrono's year ceiling.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = z - era * 146097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = if m <= 2 { y + 1 } else { y };
+    (year, m as u32, d as u32)
+}
+
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mi = m as i64;
+    let doy = (153 * (if mi > 2 { mi - 3 } else { mi + 9 }) + 2) / 5 + d as i64 - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146097 + doe - 719468
+}
+
+/// Full-range UTC broken-down time from a Unix epoch second, for epochs beyond
+/// chrono's range. Returns `None` when the year no longer fits the `i32`
+/// broken-time field — roughly where jq's libc gmtime (C `int` tm_year)
+/// overflows and errors. #922
+fn civil_broken_from_epoch(secs: i64) -> Option<BrokenTime> {
+    let days = secs.div_euclid(86400);
+    let tod = secs.rem_euclid(86400);
+    let (year, mon1, mday) = civil_from_days(days);
+    let year = i32::try_from(year).ok()?;
+    let jan1 = days_from_civil(year as i64, 1, 1);
+    let yday = (days - jan1) as i32;
+    // 1970-01-01 (day 0) was a Thursday: num_days_from_sunday = 4.
+    let wday = (days.rem_euclid(7) + 4).rem_euclid(7) as i32;
+    Some(BrokenTime {
+        year,
+        mon: (mon1 - 1) as i32,
+        mday: mday as i32,
+        hour: (tod / 3600) as i32,
+        min: ((tod % 3600) / 60) as i32,
+        sec: (tod % 60) as i32,
+        wday,
+        yday,
+    })
 }
 
 fn ndt_to_broken(dt: &chrono::NaiveDateTime) -> BrokenTime {
