@@ -12822,3 +12822,18 @@ try ([path(foreach .k[] as $x (.a; .; .))]) catch .
 input_filename
 1
 "<stdin>"
+
+# #915: 2-arg foreach over a value-generator source with a path-valued accumulator yields the UPDATE path
+[path(foreach (1,2) as $x (.;.))]
+{"a":1}
+[[],[]]
+
+# #915: 2-arg foreach value-generator, navigating UPDATE extends the accumulator path
+[path(foreach range(1) as $x (.;.a))]
+{"a":1}
+[["a"]]
+
+# #915: 2-arg foreach value-generator, path-valued INIT threads across steps
+[path(foreach range(2) as $i (.a; .))]
+{"a":1}
+[["a"],["a"]]
