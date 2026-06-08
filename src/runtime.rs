@@ -3806,6 +3806,40 @@ fn rt_mktime(v: &Value) -> Result<Value> {
     }
 }
 
+/// chrono renders an "expanded" year (>= 10000, i.e. 5+ digits) for `%Y` /
+/// `%G` / `%F` / composites with a leading `+` (ISO-8601 expanded-year form,
+/// e.g. `+10000`). jq delegates to libc `strftime`, which prints the bare
+/// digits. Strip a `+` that immediately precedes a run of 5 or more ASCII
+/// digits — unambiguously chrono's expanded year, since a `%z` timezone offset
+/// has at most 4 digits after its sign (`+0000`, `+09:00`). Negative years
+/// (`-`) are left intact. #923
+fn strip_expanded_year_sign(s: String) -> String {
+    let bytes = s.as_bytes();
+    let has_expanded = |start: usize| -> bool {
+        let mut j = start;
+        while j < bytes.len() && bytes[j].is_ascii_digit() { j += 1; }
+        j - start >= 5
+    };
+    // Common case (year < 10000): no strippable `+`, return as-is.
+    let mut needs = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'+' && has_expanded(i + 1) { needs = true; break; }
+    }
+    if !needs { return s; }
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'+' && has_expanded(i + 1) {
+            i += 1; // drop the '+', keep the digits that follow
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    // Only standalone ASCII '+' bytes were removed, so UTF-8 stays valid.
+    String::from_utf8(out).expect("removing ASCII '+' preserves UTF-8")
+}
+
 fn rt_strftime(v: &Value, fmt: &Value) -> Result<Value> {
     let fmt_str = match fmt {
         Value::Str(f) => f.as_ref(),
@@ -3825,7 +3859,7 @@ fn rt_strftime(v: &Value, fmt: &Value) -> Result<Value> {
             let secs = *n as i64;
             let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
                 .ok_or_else(|| anyhow::anyhow!("strftime: epoch out of range"))?;
-            Ok(Value::from_str(&dt.format(&rewrite_strftime_compat(fmt_str)).to_string()))
+            Ok(Value::from_str(&strip_expanded_year_sign(dt.format(&rewrite_strftime_compat(fmt_str)).to_string())))
         }
         _ => bail!("strftime/1 requires parsed datetime inputs"),
     }
@@ -3881,7 +3915,7 @@ fn format_broken(t: &BrokenTime, fmt: &str) -> String {
     // `to_string()` turns into a process-aborting panic (#710). With UTC
     // attached, `%z` renders `+0000` and `%Z` renders `UTC`, matching jq; all
     // non-tz specifiers format identically to the naive path.
-    Utc.from_utc_datetime(&ndt).format(&rewrite_strftime_compat(fmt)).to_string()
+    strip_expanded_year_sign(Utc.from_utc_datetime(&ndt).format(&rewrite_strftime_compat(fmt)).to_string())
 }
 
 fn rt_strptime(v: &Value, fmt: &Value) -> Result<Value> {
@@ -4172,9 +4206,9 @@ fn rt_strflocaltime_impl(input: &Value, fmt: &Value) -> Result<Value> {
             if fmt_x.contains("%Z") {
                 let abbrev = local_tz_abbrev(secs).unwrap_or_default();
                 let fmt_final = splice_local_zone(&fmt_x, abbrev.as_str());
-                Ok(Value::from_str(&dt.format(fmt_final.as_str()).to_string()))
+                Ok(Value::from_str(&strip_expanded_year_sign(dt.format(fmt_final.as_str()).to_string())))
             } else {
-                Ok(Value::from_str(&dt.format(&fmt_x).to_string()))
+                Ok(Value::from_str(&strip_expanded_year_sign(dt.format(&fmt_x).to_string())))
             }
         }
         _ => bail!("strflocaltime/1 requires parsed datetime inputs"),
@@ -4230,7 +4264,7 @@ fn rt_toisodate(v: &Value) -> Result<Value> {
     let secs = epoch.floor() as i64;
     let dt = DateTime::from_timestamp(secs, 0)
         .ok_or_else(|| anyhow::anyhow!("toisodate: invalid epoch: {}", epoch))?;
-    let formatted = dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let formatted = strip_expanded_year_sign(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string());
     Ok(Value::from_str(&formatted))
 }
 
