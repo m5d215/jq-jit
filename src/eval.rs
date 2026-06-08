@@ -6689,7 +6689,16 @@ fn eval_foreach_valuegen_path(
                                     cb(Value::Arr(Rc::new(comb)))
                                 })
                             } else {
-                                bail!("__pathexpr_result__:{}", crate::value::value_to_json(&nbase));
+                                // 2-arg `foreach gen as $x (init; update)` over a
+                                // value-generator source yields UPDATE each step,
+                                // so with a PATH-threaded accumulator the output is
+                                // the UPDATE path (`path(foreach (1,2) as $x (.;.))`
+                                // → `[],[]`; `path(foreach range(1) as $x (.;.a))`
+                                // → `["a"]`). The old code bailed as if the
+                                // accumulator were rootless, which only holds for
+                                // the value-threaded (rootless-INIT) branch below.
+                                // #915
+                                cb(np.clone())
                             };
                             env.borrow_mut().vars[ai as usize] = old_acc2;
                             let c = ec?;
