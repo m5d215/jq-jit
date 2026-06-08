@@ -5587,7 +5587,21 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             if !cont { return Ok(false); }
             eval_path(right, input, env, cb)
         }
-        Expr::Recurse { .. } => eval_recurse_paths(&input, &Value::Arr(Rc::new(vec![])), cb),
+        Expr::Recurse { input_expr } => {
+            // The 0-arg `recurse` / `..` desugar to `recurse(.[]?)` —
+            // `EachOpt { Input }` — whose path closure is the full descent.
+            // A custom step `recurse(f)` must instead follow `f` in path
+            // mode at every level: jq navigates via `f` (not the default
+            // descent) and propagates a per-step type error when `f` cannot
+            // apply to a leaf (`1 | .a`). Ignoring the step both produced the
+            // wrong paths and masked that error (#917).
+            if matches!(input_expr.as_ref(), Expr::EachOpt { input_expr: ie } if matches!(ie.as_ref(), Expr::Input)) {
+                eval_recurse_paths(&input, &Value::Arr(Rc::new(vec![])), cb)
+            } else {
+                let mut path: Vec<Value> = Vec::new();
+                eval_recurse_step_paths(input_expr, &input, &mut path, env, cb)
+            }
+        }
         Expr::LetBinding { var_index, value, body } => {
             // Identity (`. as $x`, #837) and tracked-navigation destructuring
             // sub-bindings (`$src[k] as $a`, #880) both forward a path and are
@@ -6730,6 +6744,33 @@ fn eval_recurse_paths_inner(val: &Value, path: &mut Vec<Value>, cb: &mut dyn FnM
         _ => {}
     }
     Ok(true)
+}
+
+/// Path-mode `recurse(f)`: yield the current path, then follow the step `f`
+/// in path mode at each level (`def r: ., (f | r)`). Paths are relative to the
+/// value passed in (Pipe concatenates any prefix). A step that cannot apply to
+/// a leaf surfaces jq's per-step type error rather than stopping silently
+/// (`path(recurse(.a))` on `{"a":{"a":1}}` → "Cannot index number"). The
+/// recursion is lazy: a `cb` stop request (`limit`/`first`) halts the descent,
+/// and `stacker::maybe_grow` guards deep navigation. #917
+fn eval_recurse_step_paths(
+    step: &Expr,
+    val: &Value,
+    path: &mut Vec<Value>,
+    env: &EnvRef,
+    cb: &mut dyn FnMut(Value) -> GenResult,
+) -> GenResult {
+    if !cb(Value::Arr(Rc::new(path.clone())))? { return Ok(false); }
+    eval_path(step, val.clone(), env, &mut |sp| {
+        let child = crate::runtime::rt_getpath(val, &sp).unwrap_or(Value::Null);
+        let saved = path.len();
+        if let Value::Arr(a) = &sp { path.extend(a.iter().cloned()); }
+        let r = stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+            eval_recurse_step_paths(step, &child, path, env, cb)
+        });
+        path.truncate(saved);
+        r
+    })
 }
 
 fn eval_call_builtin(name: &str, args: &[Expr], input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {

@@ -12732,3 +12732,28 @@ try path(all) catch .
 path(any(.[]; .x))
 [{"x":false},{"x":true}]
 [1,"x"]
+
+# #917: path(recurse(f)) propagates the per-step leaf type error
+try ([path(recurse(.a))]) catch .
+{"a":{"a":1}}
+"Cannot index number with string \"a\""
+
+# #917: 2-arg recurse(f; cond) likewise propagates the leaf error
+try ([path(recurse(.a; true))]) catch .
+{"a":{"a":1}}
+"Cannot index number with string \"a\""
+
+# #917: path(recurse(f)) follows the step f, not the default descent
+[limit(5; path(recurse(.a)))]
+{"a":{"b":9}}
+[[],["a"],["a","a"],["a","a","a"],["a","a","a","a"]]
+
+# #917: guarded custom step terminates with the navigated paths
+[path(recurse(.a | objects))]
+{"a":{"a":1}}
+[[],["a"]]
+
+# #917: plain recurse / .. still uses the full descent (regression guard)
+[path(recurse)]
+{"a":{"b":9},"c":7}
+[[],["a"],["a","b"],["c"]]
