@@ -12837,3 +12837,23 @@ input_filename
 [path(foreach range(2) as $i (.a; .))]
 {"a":1}
 [["a"],["a"]]
+
+# #915: navigating-source foreach accumulator is rootless; identity output -> result sentinel
+try (path(foreach .[] as $x (.; .; .))) catch .
+{"a":{"b":2},"c":3}
+"Invalid path expression with result {\"a\":{\"b\":2},\"c\":3}"
+
+# #915: navigating-source 2-arg foreach, accumulator-anchored navigation errors
+try (path(foreach .[] as $x (.; .a))) catch .
+{"a":{"b":2},"c":3}
+"Invalid path expression near attempt to access element \"a\" of {\"a\":{\"b\":2},\"c\":3}"
+
+# #915: navigating-source foreach rootless accumulator no longer silently corrupts |= assignment
+try ((foreach .[] as $x (0; .+$x; .)) |= 99) catch .
+[1,2]
+"Invalid path expression with result 1"
+
+# #915: navigating-source foreach still forwards the element path through a bare $x (#711)
+[path(foreach .[] as $x (0; .; $x))]
+{"a":{"b":2},"c":3}
+[["a"],["c"]]
