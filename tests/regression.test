@@ -12572,3 +12572,23 @@ strftime("%G")
 strftime("%Y%z")
 [10000,0,1,0,0,0,0,0]
 "10000+0000"
+
+# #924: gmtime of a negative fractional epoch puts frac = epoch - floor(epoch) in .[5].
+gmtime|.[5]
+-0.3
+0.7
+
+# #924: gmtime negative fractional, tm_sec from trunc but frac from floor.
+gmtime|.[5]
+-2.25
+58.75
+
+# #924: todate of a negative fractional epoch truncates toward zero (epoch 0, not -1).
+todate
+-0.5
+"1970-01-01T00:00:00Z"
+
+# #924: todate of -1.5 lands on 23:59:59 (trunc -> epoch -1), matching jq.
+todate
+-1.5
+"1969-12-31T23:59:59Z"
