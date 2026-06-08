@@ -7947,6 +7947,10 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             std::ptr::write(dst, Value::number(crate::eval::get_input_line_number() as f64));
             return 0;
         }
+        if name == "input_filename" {
+            std::ptr::write(dst, crate::eval::get_input_filename());
+            return 0;
+        }
         if name == "__env__" {
             // Cache env object — environment is constant during execution.
             thread_local! {
