@@ -3667,11 +3667,14 @@ struct BrokenTime {
 fn rt_gmtime(v: &Value) -> Result<Value> {
     match v {
         Value::Num(n, _) => {
-            // jq preserves fractional seconds in tm_sec: trunc toward zero
-            // for the conversion, then add |n - trunc| (always non-negative)
-            // back. `(-1.5) | gmtime | .[5]` is `59.5`, not `58.5`. See #436.
+            // jq derives the broken-down second from `trunc(n)` (toward zero)
+            // but the fractional remainder from `n - floor(n)` (always in
+            // [0,1)). For negative non-integer epochs these disagree, e.g.
+            // `-0.3 | gmtime | .[5]` is `0.7` (tm_sec 0 from trunc, frac 0.7
+            // from floor), not `0.3`. Using `|n - trunc|` gave `1 - frac`
+            // here. `(-1.5) | .[5]` stays `59.5`. See #436/#924.
             let secs = n.trunc() as i64;
-            let frac = (n - n.trunc()).abs();
+            let frac = n - n.floor();
             Ok(broken_to_value(&epoch_to_utc_broken(secs), frac))
         }
         _ => bail!("gmtime() requires numeric inputs"),
@@ -3681,8 +3684,9 @@ fn rt_gmtime(v: &Value) -> Result<Value> {
 fn rt_localtime(v: &Value) -> Result<Value> {
     match v {
         Value::Num(n, _) => {
+            // See rt_gmtime: tm_sec from trunc, fraction from `n - floor(n)`. #924
             let secs = n.trunc() as i64;
-            let frac = (n - n.trunc()).abs();
+            let frac = n - n.floor();
             Ok(broken_to_value(&epoch_to_local_broken(secs), frac))
         }
         _ => bail!("localtime() requires numeric inputs"),
@@ -4257,11 +4261,13 @@ fn rt_toisodate(v: &Value) -> Result<Value> {
         _ => unreachable!(),
     };
 
-    // jq's `def todate: strftime("%Y-%m-%dT%H:%M:%SZ")` floors the epoch to
-    // whole seconds before formatting (the broken-down-time `tm` produced by
-    // gmtime has no subsecond field), so any fractional input must be
-    // dropped to keep `todate | fromdateiso8601` round-tripping. See #613.
-    let secs = epoch.floor() as i64;
+    // jq's `def todate: strftime("%Y-%m-%dT%H:%M:%SZ")` drops the subsecond
+    // part (the `tm` from gmtime has no fraction), keeping the round-trip
+    // `todate | fromdateiso8601` stable (#613). The truncation must be toward
+    // zero, matching gmtime's `trunc(n)` calendar second: `todate(-0.5)` is
+    // `1970-01-01T00:00:00Z` (trunc -> epoch 0), not `…23:59:59Z` (floor ->
+    // epoch -1). For non-negative epochs trunc == floor. See #924.
+    let secs = epoch.trunc() as i64;
     let dt = DateTime::from_timestamp(secs, 0)
         .ok_or_else(|| anyhow::anyhow!("toisodate: invalid epoch: {}", epoch))?;
     let formatted = strip_expanded_year_sign(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string());
