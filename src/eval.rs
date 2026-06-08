@@ -5400,6 +5400,45 @@ fn trunc_path_dump(s: &str) -> String {
     format!("{}...", &s[..cut])
 }
 
+/// jq's error for a `reduce`/`foreach` SOURCE that navigates the tracked input
+/// while the accumulator path is already non-empty (INIT navigated). It names
+/// the source's leftmost navigation hop: an iteration (`.[]`) reports "iterate
+/// through <input>"; a field/index access (`.a`, `.k[]`) reports "access
+/// element <key> of <input>". The reported container is always the root input.
+/// #915
+fn source_nav_error(source: &Expr, input: &Value, env: &EnvRef) -> anyhow::Error {
+    enum Hop { Iterate, Access(Value) }
+    fn leftmost(e: &Expr, input: &Value, env: &EnvRef) -> Option<Hop> {
+        match e {
+            Expr::Each { input_expr } | Expr::EachOpt { input_expr } => {
+                leftmost(input_expr, input, env).or(Some(Hop::Iterate))
+            }
+            Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => {
+                if let Some(h) = leftmost(expr, input, env) { return Some(h); }
+                let mut kv = Value::Null;
+                let _ = eval(key, input.clone(), env, &mut |k| { kv = k; Ok(false) });
+                Some(Hop::Access(kv))
+            }
+            Expr::Pipe { left, right } => {
+                leftmost(left, input, env).or_else(|| leftmost(right, input, env))
+            }
+            _ => None,
+        }
+    }
+    let tail = match leftmost(source, input, env) {
+        Some(Hop::Access(k)) => {
+            let kd = match &k {
+                Value::Str(s) => format!("\"{}\"", s),
+                Value::Num(n, _) => crate::value::format_jq_number(*n),
+                other => crate::value::value_to_json(other),
+            };
+            format!("attempt to access element {} of {}", kd, crate::value::value_to_json(input))
+        }
+        _ => format!("attempt to iterate through {}", crate::value::value_to_json(input)),
+    };
+    anyhow::anyhow!("Invalid path expression near {}", tail)
+}
+
 fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
     match expr {
         Expr::Input => cb(Value::Arr(Rc::new(vec![]))),
@@ -5966,6 +6005,25 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             }
 
             // ---- navigating source: forward the element path through `$x` ----
+            // When INIT itself navigates the input (a non-empty accumulator
+            // path) AND the source also navigates, jq cannot reconcile the two
+            // and reports the source's first hop — `del(foreach .k[] as $x
+            // (.a; .; .))` errors instead of deleting the whole document (the
+            // old code forwarded the INIT path and corrupted/deleted). Mirrors
+            // the reduce rule. #915
+            if expr_uses_outer_input(init) {
+                let mut init_navigated = false;
+                match eval_path(init, input.clone(), env, &mut |p| {
+                    if matches!(&p, Value::Arr(a) if !a.is_empty()) { init_navigated = true; }
+                    Ok(true)
+                }) {
+                    Ok(_) => {}
+                    Err(e) => { if !format!("{}", e).starts_with("__pathexpr_result__:") { return Err(e); } }
+                }
+                if init_navigated {
+                    return Err(source_nav_error(source, &input, env));
+                }
+            }
             if extract.is_none() {
                 // 2-arg `foreach .[] as $x (init; update)` yields UPDATE each
                 // step, so UPDATE's path is the output (a bare `$x`/`$x.k`
@@ -6041,19 +6099,24 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 }
                 return Err(e);
             }
-            // jq rejects a reduce SOURCE that navigates the tracked input in
-            // path context (`.[]`, `.a`, …) — it must be a plain value generator
-            // (range, literals, empty, input). Otherwise the reduce silently
-            // forwarded the INIT path and `… |= v` mutated the document (#838).
-            // Probe the source in path mode only when it reads `.`: a navigating
-            // source emits a path (→ reject), a non-path value generator surfaces
-            // as a `__pathexpr_result__` sentinel (→ swallow, evaluate normally),
-            // and any other error (arithmetic/type) propagates as jq's does.
-            // Sources that don't read `.` (range/literals/input/inputs) skip the
-            // probe so a stream-consuming `input` is never evaluated twice.
-            if expr_uses_outer_input(source) {
+            // A reduce SOURCE that navigates the tracked input is rejected only
+            // when the accumulator path is already non-empty (INIT navigated):
+            // jq cannot reconcile the source navigation with the seeded path, so
+            // it reports the source's first hop (`reduce .[] as $x (.a; .)` ->
+            // "iterate through …"). When INIT is identity (path []), the source
+            // is a pure iteration generator and contributes no provenance — the
+            // UPDATE/body is what jq path-tracks, so `path(reduce .[] as $x
+            // (.; .))` is `[]`, not an error. The previous code rejected *all*
+            // navigating sources, inverting the rule (#915, regressed the #838
+            // guard direction). Probe in path mode only when the source reads
+            // `.`: a value generator surfaces as a `__pathexpr_result__`
+            // sentinel (→ swallow), other errors propagate, and a source that
+            // doesn't read `.` is never probed (so a stream `input` is not
+            // evaluated twice).
+            let init_navigated = acc_paths.iter().any(|p| matches!(p, Value::Arr(a) if !a.is_empty()));
+            if init_navigated && expr_uses_outer_input(source) {
                 let mut navigated = false;
-                match eval_path(source, input.clone(), env, &mut |_p| { navigated = true; Ok(true) }) {
+                match eval_path(source, input.clone(), env, &mut |_p| { navigated = true; Ok(false) }) {
                     Ok(_) => {}
                     Err(e) => {
                         let msg = format!("{}", e);
@@ -6061,10 +6124,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                     }
                 }
                 if navigated {
-                    bail!(
-                        "Invalid path expression near attempt to iterate through {}",
-                        crate::value::value_to_json(&input)
-                    );
+                    return Err(source_nav_error(source, &input, env));
                 }
             }
             let mut source_vals: Vec<Value> = Vec::new();

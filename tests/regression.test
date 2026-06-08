@@ -12777,3 +12777,43 @@ try ([path(recurse(.a; true))]) catch .
 [recurse(if . < 3 then .+1 else empty end)]
 0
 [0,1,2,3]
+
+# #915: reduce with identity INIT treats a navigating source as pure iteration
+path(reduce .[] as $x (.; .))
+{"a":1}
+[]
+
+# #915: same for a single-nav source .a (no provenance from the source)
+path(reduce .a as $x (.; .))
+{"a":1}
+[]
+
+# #915: navigating source + INIT that navigated -> source-navigation error
+try (path(reduce .[] as $x (.a; .))) catch .
+{"a":1}
+"Invalid path expression near attempt to iterate through {\"a\":1}"
+
+# #915: source's first hop is reported (.k[] -> access element "k")
+try (path(reduce .k[] as $x (.a; .))) catch .
+{"a":1,"k":[1,2]}
+"Invalid path expression near attempt to access element \"k\" of {\"a\":1,\"k\":[1,2]}"
+
+# #915: empty source forwards the INIT path unchanged (regression guard, #711)
+path(reduce empty as $x (.[0]; .))
+[[7]]
+[0]
+
+# #915: foreach with a navigated INIT + navigating source errors on the source
+try ([path(foreach .[] as $x (.a; .; .))]) catch .
+{"a":1}
+"Invalid path expression near attempt to iterate through {\"a\":1}"
+
+# #915: foreach del no longer deletes the whole document; reports the source hop
+try ([path(foreach .k[] as $x (.a; .; .))]) catch .
+{"a":1,"k":[1,2]}
+"Invalid path expression near attempt to access element \"k\" of {\"a\":1,\"k\":[1,2]}"
+
+# #915: $x-extract foreach over a navigating source still yields element paths (#711)
+[path(foreach .[] as $x (0; .; $x))]
+[10,20]
+[[0],[1]]
