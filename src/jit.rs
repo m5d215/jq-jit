@@ -107,8 +107,14 @@ fn try_const_eval(expr: &Expr) -> Option<Value> {
             Literal::Str(s) => Value::from_str(s),
         }),
         Expr::Negate { operand } => {
-            if let Value::Num(n, _) = try_const_eval(operand)? {
-                Some(Value::number(-n))
+            if let Value::Num(n, crate::value::NumRepr(repr)) = try_const_eval(operand)? {
+                // Mirror the runtime Negate path (eval.rs): normalize -0 to 0
+                // and carry the sign-flipped repr (negate_repr drops the sign
+                // for zero-valued reprs). Without this, `jq-jit -n '-0'`
+                // const-folds to -0.0 / "-0" while piped `null` renders "0",
+                // and `-1.0` loses its decimal. jq normalizes in both modes. #919
+                let neg = if n == 0.0 { 0.0 } else { -n };
+                Some(Value::number_opt(neg, crate::value::Value::negate_repr(repr)))
             } else { None }
         }
         Expr::Collect { generator } => {
@@ -1096,6 +1102,17 @@ impl Flattener {
                 out
             }
             Expr::Negate { operand } => {
+                // Constant fold a negated literal so its (sign-flipped) repr is
+                // preserved — `-1.0` stays "-1.0", `-0`/`-0.0` normalize to
+                // "0"/"0.0" — matching the runtime/piped path. The JitOp::Negate
+                // fast path below carries no repr, so without this `-n` rendered
+                // negated literals without their decimals. #919
+                if let Some(val) = try_const_eval(expr) {
+                    let ptr = self.hoist_value(val);
+                    let out = self.alloc_slot();
+                    self.emit(JitOp::LoadConst { dst: out, const_ptr: ptr });
+                    return out;
+                }
                 let val = self.flatten_scalar(operand, input_slot);
                 let out = self.alloc_slot();
                 self.emit(JitOp::Negate { dst: out, src: val });
@@ -9702,7 +9719,12 @@ impl JitCompiler {
                         let s2 = slot_addr(&mut b, *src);
                         let d2 = slot_addr(&mut b, *dst);
                         let f_val = b.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), s2, 8);
-                        let neg = b.ins().fneg(f_val);
+                        // `0.0 - x`, not `fneg(x)`: this normalizes -0 to +0
+                        // (0.0 - ±0.0 == +0.0) while negating everything else
+                        // identically, matching the runtime eval and const-fold
+                        // paths so `-0` renders "0" rather than "-0". #919
+                        let zero_f = b.ins().f64const(0.0);
+                        let neg = b.ins().fsub(zero_f, f_val);
                         let tag_word = b.ins().iconst(ptr_ty, 3);
                         b.ins().store(cranelift_codegen::ir::MemFlags::new(), tag_word, d2, 0);
                         b.ins().store(cranelift_codegen::ir::MemFlags::new(), neg, d2, 8);
