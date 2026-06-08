@@ -2917,6 +2917,10 @@ fn delete_path(v: &Value, path: &Value) -> Result<Value> {
                     Ok(Value::object_from_map(new_obj))
                 }
                 (Value::Arr(a), Value::Num(n, _)) => {
+                    // A NaN array index casts to 0 and would silently delete
+                    // element 0; reject it, mirroring the set path's guard.
+                    // (Upstream jq hangs here — see #921 — so we do not match it.)
+                    if n.is_nan() { bail!("Cannot delete array element at NaN index"); }
                     let ni = *n as i64;
                     let idx = if ni < 0 { a.len() as i64 + ni } else { ni };
                     if idx >= 0 && (idx as usize) < a.len() {
@@ -2961,6 +2965,10 @@ fn delete_path(v: &Value, path: &Value) -> Result<Value> {
                     }
                 }
                 (Value::Arr(a), Value::Num(n, _)) => {
+                    // A NaN array index casts to 0 and would silently delete
+                    // element 0; reject it, mirroring the set path's guard.
+                    // (Upstream jq hangs here — see #921 — so we do not match it.)
+                    if n.is_nan() { bail!("Cannot delete array element at NaN index"); }
                     let ni = *n as i64;
                     let idx = if ni < 0 { a.len() as i64 + ni } else { ni };
                     if idx >= 0 && (idx as usize) < a.len() {

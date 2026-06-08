@@ -7498,6 +7498,13 @@ fn eval_del(f: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> G
                             if let Value::Arr(pa) = p {
                                 if pa.len() == 1 {
                                     if let Value::Num(n, _) = &pa[0] {
+                                        // A NaN index casts to 0 and would silently
+                                        // delete element 0; reject it, mirroring the
+                                        // set path and rt_delpaths. (Upstream jq hangs
+                                        // here — see #921 — so we do not match it.)
+                                        if n.is_nan() {
+                                            bail!("Cannot delete array element at NaN index");
+                                        }
                                         // Decide the negative-index offset from the
                                         // ORIGINAL float, not the truncated int:
                                         // `*n as i64` truncates toward zero, so a
