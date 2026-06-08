@@ -57,8 +57,14 @@ pub type EnvRef = Rc<RefCell<Env>>;
 // Pre-populated by CLI before eval/JIT execution. Per-thread to keep
 // `cargo test` parallel runs honest — see `value::OBJMAP_POOL`.
 thread_local! {
-    static INPUTS_STATE: RefCell<(Vec<(Value, u64)>, usize)> = const { RefCell::new((Vec::new(), 0)) };
+    static INPUTS_STATE: RefCell<(Vec<InputEntry>, usize)> = const { RefCell::new((Vec::new(), 0)) };
 }
+
+/// A queued document for `input`/`inputs`: the value, the `input_line_number`
+/// jq reports after consuming it (#855), and the source filename for
+/// `input_filename` (#926; `None` => stdin-less null, but the CLI always
+/// supplies "<stdin>" or a file path so this is `Some` in practice).
+pub type InputEntry = (Value, u64, Option<std::rc::Rc<str>>);
 
 // Per-thread 1-indexed line number for `input_line_number`. The CLI updates
 // it before executing the filter on each input; jq defines it as the count
@@ -67,6 +73,16 @@ thread_local! {
 // line sees the same number.
 thread_local! {
     static INPUT_LINE_STATE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+// Per-thread filename reported by `input_filename` (#926). `None` means no
+// input source has been consumed yet — jq returns `null` in that case (e.g.
+// `-n` mode before the first `input`). The CLI sets it to the file path for a
+// named file argument, or "<stdin>" for the stdin stream, as each source is
+// read. `read_next_input` advances it alongside the line counter so a filter
+// that pulls across a file boundary via `input` sees the right source.
+thread_local! {
+    static INPUT_FILENAME_STATE: RefCell<Option<std::rc::Rc<str>>> = const { RefCell::new(None) };
 }
 
 /// Set the line number reported by `input_line_number` for the current input.
@@ -79,11 +95,26 @@ pub fn get_input_line_number() -> u64 {
     INPUT_LINE_STATE.with(|c| c.get())
 }
 
+/// Set the filename reported by `input_filename` for the current input source
+/// (`None` => jq's `null`, before any input is consumed). See #926.
+pub fn set_input_filename(name: Option<std::rc::Rc<str>>) {
+    INPUT_FILENAME_STATE.with_borrow_mut(|c| *c = name);
+}
+
+/// Read the current `input_filename` value as a jq `Value` (`null` until an
+/// input source has been consumed, otherwise the source path string).
+pub fn get_input_filename() -> Value {
+    INPUT_FILENAME_STATE.with_borrow(|c| match c {
+        Some(name) => Value::from_str(name),
+        None => Value::Null,
+    })
+}
+
 /// Set the inputs queue for `input`/`inputs` builtins. Each entry pairs the
 /// document value with the `input_line_number` jq reports after consuming it
 /// (#855): reading a document via `input`/`inputs` advances the counter, just
 /// like the main per-document loop.
-pub fn set_inputs_queue(values: Vec<(Value, u64)>) {
+pub fn set_inputs_queue(values: Vec<InputEntry>) {
     INPUTS_STATE.with_borrow_mut(|state| {
         state.0 = values;
         state.1 = 0;
@@ -111,8 +142,9 @@ pub fn read_next_input() -> Option<Value> {
         }
     });
     match next {
-        Some((v, line)) => {
+        Some((v, line, filename)) => {
             set_input_line_number(line);
+            set_input_filename(filename);
             Some(v)
         }
         None => None,
@@ -6843,6 +6875,9 @@ fn eval_call_builtin(name: &str, args: &[Expr], input: Value, env: &EnvRef, cb: 
     match (name, args.len()) {
         ("input_line_number", 0) => {
             return cb(Value::number(get_input_line_number() as f64));
+        }
+        ("input_filename", 0) => {
+            return cb(get_input_filename());
         }
         ("toboolean", 0) => {
             return cb(rt_toboolean(&input)?);

@@ -12817,3 +12817,8 @@ try ([path(foreach .k[] as $x (.a; .; .))]) catch .
 [path(foreach .[] as $x (0; .; $x))]
 [10,20]
 [[0],[1]]
+
+# #926: input_filename reports "<stdin>" for the stdin stream (file-arg/-n cases in tests/input_filename.rs)
+input_filename
+1
+"<stdin>"

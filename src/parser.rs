@@ -3553,13 +3553,12 @@ impl Parser {
                 Ok(Expr::CallBuiltin { name: "tostream".to_string(), args: vec![] })
             }
             "input_filename" => {
-                // jq emits "<stdin>" for the default stdin input source
-                // (and the file path when one is specified). jq-jit reads
-                // exclusively from stdin and does not plumb file paths
-                // through the pipeline, so always return "<stdin>" — this
-                // matches jq for the common stdin pipeline; in `-n` mode
-                // jq would return null, which is a known divergence.
-                Ok(Expr::Literal(Literal::Str("<stdin>".to_string())))
+                // Resolved at eval/JIT time from the current input's filename
+                // state (set by the CLI as each input source is consumed): the
+                // file path for a named file argument, "<stdin>" for the stdin
+                // stream, and null before any input has been read (e.g. `-n`
+                // mode before the first `input`). See #926.
+                Ok(Expr::CallBuiltin { name: "input_filename".to_string(), args: vec![] })
             }
             _ => {
                 // User defs and filter parameters were already resolved at the

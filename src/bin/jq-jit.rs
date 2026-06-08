@@ -39,6 +39,19 @@ fn json_inputs_with_lines(content: &str) -> Result<Vec<(Value, u64)>, String> {
     Ok(out)
 }
 
+/// Tag `(value, line)` queue entries with their source filename, producing the
+/// `(value, line, filename)` entries `input`/`inputs` need so `input_filename`
+/// reports the right source as a filter pulls across the stream (#926).
+fn tag_filename(
+    entries: Vec<(jq_jit::value::Value, u64)>,
+    filename: &std::rc::Rc<str>,
+) -> Vec<jq_jit::eval::InputEntry> {
+    entries
+        .into_iter()
+        .map(|(v, line)| (v, line, Some(std::rc::Rc::clone(filename))))
+        .collect()
+}
+
 /// Raw (`-R`) input lines paired with their 1-based line numbers (#855).
 /// Split raw (`-R`) input into lines the way jq does: on `\n` ONLY, keeping any
 /// trailing `\r` as line content (so a CRLF file yields `"a\r"`). Rust's
@@ -3563,31 +3576,34 @@ fn real_main() {
     if null_input {
         // Pre-read inputs for `input`/`inputs` builtins
         if filter.uses_inputs() {
-            let mut inputs_values: Vec<(Value, u64)> = Vec::new();
+            let mut inputs_values: Vec<jq_jit::eval::InputEntry> = Vec::new();
             if files.is_empty() {
                 // Read from stdin
+                let stdin_name: std::rc::Rc<str> = std::rc::Rc::from("<stdin>");
                 let mut input_str = String::new();
                 io::stdin().lock().read_to_string(&mut input_str).unwrap_or(0);
                 if raw_input {
-                    inputs_values.extend(raw_inputs_with_lines(&input_str));
+                    inputs_values.extend(tag_filename(raw_inputs_with_lines(&input_str), &stdin_name));
                 } else {
                     match json_inputs_with_lines(&input_str) {
-                        Ok(vs) => inputs_values.extend(vs),
+                        Ok(vs) => inputs_values.extend(tag_filename(vs, &stdin_name)),
                         Err(e) => { eprintln!("jq: error (at <stdin>:0): {}", e); process::exit(2); }
                     }
                 }
             } else {
-                // Read from files
+                // Read from files — each document carries its own source path so
+                // `input_filename` reflects the file the value came from (#926).
                 for file in &files {
+                    let fname: std::rc::Rc<str> = std::rc::Rc::from(file.as_str());
                     let content = match std::fs::read_to_string(file) {
                         Ok(c) => c,
                         Err(e) => { eprintln!("jq: error: Could not open file {}: {}", file, e); process::exit(2); }
                     };
                     if raw_input {
-                        inputs_values.extend(raw_inputs_with_lines(&content));
+                        inputs_values.extend(tag_filename(raw_inputs_with_lines(&content), &fname));
                     } else {
                         match json_inputs_with_lines(&content) {
-                            Ok(vs) => inputs_values.extend(vs),
+                            Ok(vs) => inputs_values.extend(tag_filename(vs, &fname)),
                             Err(e) => { eprintln!("jq: error (at {}:0): {}", file, e); process::exit(2); }
                         }
                     }
@@ -3603,17 +3619,18 @@ fn real_main() {
         // remaining stdin value (#196). Pre-load everything into the inputs
         // queue, then drain the queue while both sites pull through the same
         // `read_next_input`.
-        let inputs_values: Vec<(Value, u64)> = if raw_input {
+        let stdin_name: std::rc::Rc<str> = std::rc::Rc::from("<stdin>");
+        let inputs_values: Vec<jq_jit::eval::InputEntry> = if raw_input {
             let mut buf = String::new();
             if let Err(e) = io::stdin().lock().read_to_string(&mut buf) {
                 eprintln!("jq: error reading input: {}", e);
                 process::exit(2);
             }
-            raw_inputs_with_lines(&buf)
+            tag_filename(raw_inputs_with_lines(&buf), &stdin_name)
         } else {
             let input_str = stdin_data.unwrap_or_default();
             match json_inputs_with_lines(&input_str) {
-                Ok(vs) => vs,
+                Ok(vs) => tag_filename(vs, &stdin_name),
                 Err(e) => { eprintln!("jq: error (at <stdin>:0): {}", e); process::exit(2); }
             }
         };
@@ -3627,6 +3644,8 @@ fn real_main() {
         jq_jit::eval::clear_inputs_queue();
     } else if files.is_empty() {
         // Read from stdin
+        // `input_filename` reports "<stdin>" for the stdin stream (#926).
+        jq_jit::eval::set_input_filename(Some(std::rc::Rc::from("<stdin>")));
         let stdin = io::stdin();
         if raw_input {
             if slurp {
@@ -12675,6 +12694,14 @@ fn real_main() {
         // Process files
         let mut slurp_values: Vec<Value> = Vec::new();
         for file in &files {
+            // `input_filename` reports the source path of the current input;
+            // "-" reads stdin and reports "<stdin>" (#926). For `--slurp`, all
+            // files fold into one document and jq reports the LAST source —
+            // setting it per file leaves the last value in place for the single
+            // post-loop `process_input`.
+            jq_jit::eval::set_input_filename(Some(std::rc::Rc::from(
+                if file == "-" { "<stdin>" } else { file.as_str() },
+            )));
             // Handle "-" as stdin
             if file == "-" {
                 let mut s = String::new();
