@@ -12517,3 +12517,18 @@ try del(.a[nan]) catch .
 try delpaths([[0],[nan]]) catch .
 [10,20,30]
 "Cannot delete array element at NaN index"
+
+# #932: implode of a negative codepoint clamps to U+FFFD on the JIT fast path (was U+0000).
+[-1]|implode|explode
+null
+[65533]
+
+# #932: implode of an out-of-range negative magnitude also clamps to U+FFFD.
+[-1e300]|implode|explode
+null
+[65533]
+
+# #932: implode of -infinite clamps to U+FFFD on the JIT fast path.
+[-infinite]|implode|explode
+null
+[65533]
