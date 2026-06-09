@@ -4239,3 +4239,7 @@ null
 # #961: @urid hard-errors on a malformed percent escape
 try @urid catch .
 "%GG"
+
+# #953: $x-anchored navigation in a navigating-source foreach is document-rooted
+[path(foreach .[] as $x (0; .; $x.b))]
+{"a":{"b":2},"c":{"b":9}}
