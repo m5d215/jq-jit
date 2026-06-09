@@ -1463,6 +1463,14 @@ fn resolved_would_error(
             }
             true
         }
+        // `.field | length`: jq's `length` is defined for null (0), strings
+        // (codepoints), arrays/objects (count), and numbers (abs), but raises
+        // `<type> has no length` for booleans. The inline emitter falls through
+        // to a `null` literal for booleans, masking that error — bail so the
+        // generic path raises it. Surfaced by the metamorphic harness as
+        // `{a: (.b | length)}` on `{"b":false}` emitting `{"a":null}` while
+        // `.b | length` (and every non-object-construct path) errors.
+        ResolvedRemap::FieldLength(idx) => matches!(bytes_of(*idx).first(), Some(b't') | Some(b'f')),
         ResolvedRemap::FieldStringCase(idx, _) => str_domain(*idx),
         ResolvedRemap::FieldStrBuiltin(idx, _, _) => str_domain(*idx),
         ResolvedRemap::FieldSplitJoin(idx, _, _) => str_domain(*idx),
