@@ -13282,3 +13282,53 @@ del(.[{"start":1,"end":nan}])
 .[(nan):3] = [9]
 [1,2,3,4]
 [9,4]
+
+# #1020: strftime unknown specifier renders literally instead of panicking
+strftime("%N")
+[1970,0,1,0,0,0,4,0]
+"N"
+
+# #1020: strftime trailing % renders a literal percent
+strftime("%")
+[1970,0,1,0,0,0,4,0]
+"%"
+
+# #1020: bare %E locale-modifier prefix renders literally
+0|gmtime|strftime("%E")
+null
+"E"
+
+# #1020: %E locale modifier strips to the unmodified specifier
+strftime("%EY")
+[2001,2,4,5,6,7,0,90]
+"2001"
+
+# #1020: %O locale modifier strips to the unmodified specifier
+strftime("%OS")
+[2001,2,4,5,6,7,0,90]
+"07"
+
+# #1020: pad flag on a non-numeric specifier drops the flag, no panic
+strftime("%-A")
+[2001,2,4,5,6,7,0,90]
+"Sunday"
+
+# #1020: unknown specifier embedded in text keeps surrounding text
+strftime("a%Nb")
+[1970,0,1,0,0,0,4,0]
+"aNb"
+
+# #1020: %% stays a literal percent before an unknown character
+strftime("%%N")
+[1970,0,1,0,0,0,4,0]
+"%N"
+
+# #1020: pad flag on a numeric specifier still applies
+strftime("%-d %0d %_d")
+[2001,2,4,5,6,7,0,90]
+"4 04  4"
+
+# #1020: epoch-input strftime path sanitizes unknown specifiers too
+strftime("%N %")
+0
+"N %"

@@ -4012,27 +4012,119 @@ fn rt_strftime(v: &Value, fmt: &Value) -> Result<Value> {
 /// the clamp doesn't shift any tested output.
 /// Rewrite `strftime` specifiers where chrono's rendering diverges from the
 /// macOS libc that jq delegates to (the project's reference, see
-/// `docs/maintenance.md`). Currently only `%x`: chrono renders it with a
-/// 2-digit year, jq's `%x` is `%m/%d/%Y` with a 4-digit year. `%%` is preserved
-/// (a literal percent, not a specifier). #763
+/// `docs/maintenance.md`):
+///
+/// - `%x`: chrono renders a 2-digit year, jq's `%x` is `%m/%d/%Y`. #763
+/// - Unknown / incomplete specifiers (`%N`, trailing `%`, `%#z`, `%4Y`, …):
+///   chrono's `Display` impl returns `Err`, which `to_string()` turns into a
+///   process-aborting panic. libc emits the conversion character literally
+///   (dropping the `%` and any consumed flags), so rewrite them to escaped
+///   literal text before chrono sees them. #710 #1020
+/// - `%E<c>` / `%O<c>` locale modifiers: chrono rejects them; in the C locale
+///   libc treats them as the unmodified specifier, so strip the modifier.
+/// - A `-`/`_`/`0` pad flag on a non-numeric specifier (`%-A`): chrono
+///   rejects it; libc ignores the flag, so drop it.
+///
+/// `%%` (a literal percent) is preserved. Fractional-second forms chrono
+/// accepts (`%.f`, `%.3f`, `%3f`, …) pass through unchanged — their rendering
+/// diverges from libc but does not panic, and is out of scope here.
 fn rewrite_strftime_compat(fmt: &str) -> std::borrow::Cow<'_, str> {
-    if !fmt.contains("%x") {
-        return std::borrow::Cow::Borrowed(fmt);
-    }
+    // Specifiers chrono's strftime formats without error for a DateTime<Tz>.
+    // `%x` is recognized but expanded per the divergence above.
+    const KNOWN: &[u8] = b"YCyqmbBhdeaAwuUWGgVjDxFvHkIlPpMSfRTXrzZc+stn";
+    // Subset chrono parses as Numeric items, where a pad flag is accepted.
+    const NUMERIC: &[u8] = b"YCyqmdewuUWGgVjHkIlMSs";
+
+    let chars: Vec<char> = fmt.chars().collect();
     let mut out = String::with_capacity(fmt.len() + 8);
-    let mut chars = fmt.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            match chars.peek() {
-                Some('x') => { chars.next(); out.push_str("%m/%d/%Y"); }
-                Some('%') => { chars.next(); out.push_str("%%"); }
-                _ => out.push('%'),
-            }
-        } else {
-            out.push(c);
+    let mut changed = false;
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '%' {
+            out.push(chars[i]);
+            i += 1;
+            continue;
         }
+        let mut j = i + 1;
+        // `%%`: literal percent, untouched.
+        if j < chars.len() && chars[j] == '%' {
+            out.push_str("%%");
+            i = j + 1;
+            continue;
+        }
+        // Fractional-second forms chrono accepts: %.f %.3f %.6f %.9f %3f %6f %9f.
+        let frac_len = match chars.get(j) {
+            Some('.') => match (chars.get(j + 1), chars.get(j + 2)) {
+                (Some('f'), _) => Some(2),
+                (Some('3' | '6' | '9'), Some('f')) => Some(3),
+                _ => None,
+            },
+            Some('3' | '6' | '9') if chars.get(j + 1) == Some(&'f') => Some(2),
+            _ => None,
+        };
+        if let Some(n) = frac_len {
+            out.push('%');
+            out.extend(&chars[j..j + n]);
+            i = j + n;
+            continue;
+        }
+        // Optional pad flag, then an optional E/O locale modifier.
+        let pad = match chars.get(j) {
+            Some(&p @ ('-' | '_' | '0')) => { j += 1; Some(p) }
+            _ => None,
+        };
+        if matches!(chars.get(j), Some('E' | 'O')) {
+            j += 1;
+            changed = true;
+        }
+        let Some(&conv) = chars.get(j) else {
+            // Incomplete specifier at end of input (`%`, `%-`, `%E`): libc
+            // emits the consumed flag characters literally.
+            for &c in &chars[i + 1..j] {
+                out.push(c);
+            }
+            if j == i + 1 {
+                out.push_str("%%");
+            }
+            changed = true;
+            i = j;
+            continue;
+        };
+        if conv == '%' {
+            // `%E%` / `%-%`: libc renders a literal percent and does not
+            // start a new specifier.
+            out.push_str("%%");
+            changed = true;
+            i = j + 1;
+            continue;
+        }
+        if conv == 'x' {
+            out.push_str("%m/%d/%Y");
+            changed = true;
+            i = j + 1;
+            continue;
+        }
+        if conv.is_ascii() && KNOWN.contains(&(conv as u8)) {
+            out.push('%');
+            match pad {
+                Some(p) if NUMERIC.contains(&(conv as u8)) => out.push(p),
+                Some(_) => changed = true, // pad on a fixed item: drop it
+                None => {}
+            }
+            out.push(conv);
+        } else {
+            // Unknown conversion: emit it literally, dropping the `%` and
+            // any consumed flags (libc behavior).
+            out.push(conv);
+            changed = true;
+        }
+        i = j + 1;
     }
-    std::borrow::Cow::Owned(out)
+    if changed {
+        std::borrow::Cow::Owned(out)
+    } else {
+        std::borrow::Cow::Borrowed(fmt)
+    }
 }
 
 fn format_broken(t: &BrokenTime, fmt: &str) -> String {
