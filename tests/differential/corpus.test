@@ -4215,3 +4215,11 @@ try (reduce .[] as $x (.; .sum += $x)) catch .
 # #963: trim family under |= must not scramble leading/trailing stripping
 [(.a|=ltrim), (.a|=rtrim), (.a|=trim)]
 {"a":" hi "}
+
+# #956: truncate_stream evaluates its stream argument on null, not the depth
+0|truncate_stream([[0],.])
+7
+
+# #956: truncate_stream null/empty-event handling vs the depth
+[(-1|truncate_stream(.)), (0|truncate_stream(.))]
+99

@@ -12897,3 +12897,33 @@ reduce .[] as $x (.; try (.sum += $x) catch "ERR")
 . |= ltrim
 " hi"
 "hi"
+
+# #956: truncate_stream runs its stream arg on null (not the depth), so `.` reads null
+0|truncate_stream([[0],.])
+7
+[[0],null]
+
+# #956: tostream as the stream arg runs on null, not the negative depth
+-1|truncate_stream(tostream)
+{"a":1}
+[[],null]
+
+# #956: a stream arg reading `.` sees null, not the depth number
+0|truncate_stream([[.k // 0],.])
+{"k":1}
+[[0],null]
+
+# #956: `truncate_stream(.)` yields a null event; depth 0 drops it (was a type error)
+[0|truncate_stream(.)]
+99
+[]
+
+# #956: a negative depth keeps the null event as setpath([0];null) == [null]
+[-1|truncate_stream(.)]
+99
+[[null]]
+
+# #956: an empty-array event with a negative depth extends to [null] (setpath slot)
+[-1|truncate_stream([])]
+99
+[[null]]
