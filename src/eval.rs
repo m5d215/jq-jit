@@ -7310,11 +7310,23 @@ fn eval_truncate_stream(
     // events through unchanged, while a string/array/object depth makes the
     // `length > $n` comparison false and drops every event. We mirror those
     // semantics instead of hard-requiring a numeric depth (#804).
-    let depth = input.clone();
-    eval(f, input.clone(), env, &mut |event| {
+    // jq's def is `. as $n | null | stream | …`: the depth is captured in `$n`
+    // but the stream argument runs with `.` == null, NOT the depth. Passing the
+    // depth as the stream's input made any `stream` that reads `.` see the
+    // number (value drift, spurious type errors, over-strict errors) — #956.
+    let depth = input;
+    eval(f, Value::Null, env, &mut |event| {
+        // jq's body indexes/sets the event with `.[0]` and `setpath([0]; …)`.
+        // A null event behaves exactly like an empty array (`.[0]` is null,
+        // length 0; `setpath([0]; …)` extends it to a one-element array), so
+        // route it through the same array path. Any other scalar/object event
+        // is a `Cannot index <type> with number` error, matching jq — now
+        // reachable because the stream runs on null (e.g. `truncate_stream(.)`
+        // yields a null event, `truncate_stream(5)` a number event). #956
         let arr = match &event {
             Value::Arr(a) => a.clone(),
-            _ => bail!("truncate_stream: expected stream event, got {}", event.type_name()),
+            Value::Null => Rc::new(Vec::new()),
+            other => bail!("Cannot index {} with number", other.type_name()),
         };
         // jq reads `.[0]|length` leniently: a missing/non-array first element
         // just yields a length (0 for an absent/`null` `.[0]`), so a degenerate
@@ -7333,39 +7345,45 @@ fn eval_truncate_stream(
         if !keep {
             return Ok(true);
         }
-        // Past the keep test the event has a real (array) path; degenerate
-        // first elements only survive a negative depth, where jq's `.[0][$n:]`
-        // slice of a non-array yields it unchanged.
-        let path_arr = match &first {
-            Value::Arr(p) => p.clone(),
-            _ => {
-                return cb(event.clone());
+        // jq's kept branch is `setpath([0]; .[0][$n:])`: slice `.[0]` (== `first`)
+        // by `$n` and write it back to element 0. A null `.[0]` (null/empty
+        // event, or an event whose 0th element is already null) slices to null
+        // — and, like jq's `null[$n:]`, ignores the slice-index type, so a bool
+        // depth that survived the keep test does NOT error here. An array `.[0]`
+        // validates and clamps `$n` like any jq slice. Any other `.[0]` (an
+        // exotic hand-built event) keeps the lenient passthrough.
+        let sliced = match &first {
+            Value::Null => Value::Null,
+            Value::Arr(path_arr) => {
+                // `.[0][$n:]` slice bound. null means "from the start"; a number
+                // is floored and clamped like any jq array slice; anything else
+                // errors ("must be integers"), matching jq when a bool depth
+                // survives the comparison above.
+                let start: usize = match &depth {
+                    Value::Null => 0,
+                    Value::Num(n, _) => {
+                        let mut i = n.floor();
+                        if i < 0.0 {
+                            i += path_len as f64;
+                        }
+                        if i < 0.0 {
+                            0
+                        } else if i > path_len as f64 {
+                            path_len
+                        } else {
+                            i as usize
+                        }
+                    }
+                    _ => bail!("Array/string slice indices must be integers"),
+                };
+                Value::Arr(Rc::new(path_arr.iter().skip(start).cloned().collect()))
             }
+            _ => return cb(event.clone()),
         };
-        // `.[0][$n:]` slice bound. null means "from the start"; a number is
-        // floored and clamped like any jq array slice; anything else is an
-        // error ("must be integers"), matching jq when a bool depth survives
-        // the comparison above.
-        let start: usize = match &depth {
-            Value::Null => 0,
-            Value::Num(n, _) => {
-                let mut i = n.floor();
-                if i < 0.0 {
-                    i += path_len as f64;
-                }
-                if i < 0.0 {
-                    0
-                } else if i > path_len as f64 {
-                    path_len
-                } else {
-                    i as usize
-                }
-            }
-            _ => bail!("Array/string slice indices must be integers"),
-        };
-        let new_path: Vec<Value> = path_arr.iter().skip(start).cloned().collect();
-        let mut new_event: Vec<Value> = Vec::with_capacity(arr.len());
-        new_event.push(Value::Arr(Rc::new(new_path)));
+        // setpath([0]; sliced): replace element 0, extending a null/empty event
+        // into the one-element array `[sliced]` (jq's setpath creates the slot).
+        let mut new_event: Vec<Value> = Vec::with_capacity(arr.len().max(1));
+        new_event.push(sliced);
         for v in arr.iter().skip(1) { new_event.push(v.clone()); }
         cb(Value::Arr(Rc::new(new_event)))
     })
