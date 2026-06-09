@@ -13087,3 +13087,23 @@ try @base64d catch .
 try @base64d catch .
 "a%"
 "string (\"a%\") is not valid base64 data"
+
+# #975: a constant object key with a quote is JSON-escaped in -c output
+{"\"":1}
+null
+{"\"":1}
+
+# #975: a constant object key with a backslash is escaped (not leaked literally)
+{"a\\b":1}
+null
+{"a\\b":1}
+
+# #975: a constant object key with a tab is escaped to \t
+{"a	b":1}
+null
+{"a\tb":1}
+
+# #975: a constant object key with a DEL byte is escaped to \u007f
+{"ab":1}
+null
+{"a\u007fb":1}

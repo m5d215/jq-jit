@@ -395,19 +395,7 @@ fn const_expr_to_json(expr: &crate::ir::Expr) -> Option<Vec<u8>> {
     match expr {
         Expr::Literal(Literal::Str(s)) => {
             let mut v = Vec::with_capacity(s.len() + 2);
-            v.push(b'"');
-            for &b in s.as_bytes() {
-                match b {
-                    b'"' => v.extend_from_slice(b"\\\""),
-                    b'\\' => v.extend_from_slice(b"\\\\"),
-                    b'\n' => v.extend_from_slice(b"\\n"),
-                    b'\r' => v.extend_from_slice(b"\\r"),
-                    b'\t' => v.extend_from_slice(b"\\t"),
-                    b if b < 0x20 => { v.extend_from_slice(format!("\\u{:04x}", b).as_bytes()); }
-                    _ => v.push(b),
-                }
-            }
-            v.push(b'"');
+            push_const_json_string(&mut v, s);
             Some(v)
         }
         Expr::Literal(Literal::Num(n, repr)) => {
@@ -445,9 +433,7 @@ fn const_expr_to_json(expr: &crate::ir::Expr) -> Option<Vec<u8>> {
             buf.push(b'{');
             for (i, (key, v)) in normalized.iter().enumerate() {
                 if i > 0 { buf.push(b','); }
-                buf.push(b'"');
-                buf.extend_from_slice(key.as_bytes());
-                buf.push(b'"');
+                push_const_json_string(&mut buf, key);
                 buf.push(b':');
                 buf.extend(const_expr_to_json(v)?);
             }
@@ -2375,6 +2361,34 @@ fn expr_is_single_output(e: &crate::ir::Expr) -> bool {
 }
 
 /// Serialize a constant expression to JSON bytes. Returns false if expression is not fully constant.
+/// Emit `s` as a JSON string (quotes included) with jq's escaping: `"`, `\`,
+/// the named control escapes (`\b \t \n \f \r`), `\u00xx` for the rest of
+/// U+0000–U+001F, and `\u007f` for DEL. Mirrors the canonical
+/// `push_json_string` serializer. Used for both string-literal *values* and
+/// object *keys* on the constant fast path so the const path escapes
+/// identically to the generic path — keys previously leaked verbatim (#975).
+fn push_const_json_string(buf: &mut Vec<u8>, s: &str) {
+    buf.push(b'"');
+    for &b in s.as_bytes() {
+        match b {
+            b'"' => buf.extend_from_slice(b"\\\""),
+            b'\\' => buf.extend_from_slice(b"\\\\"),
+            b'\n' => buf.extend_from_slice(b"\\n"),
+            b'\r' => buf.extend_from_slice(b"\\r"),
+            b'\t' => buf.extend_from_slice(b"\\t"),
+            0x08 => buf.extend_from_slice(b"\\b"),
+            0x0c => buf.extend_from_slice(b"\\f"),
+            c if c < 0x20 => {
+                let hex = format!("\\u{:04x}", c);
+                buf.extend_from_slice(hex.as_bytes());
+            }
+            0x7f => buf.extend_from_slice(b"\\u007f"),
+            _ => buf.push(b),
+        }
+    }
+    buf.push(b'"');
+}
+
 fn push_const_json(expr: &crate::ir::Expr, buf: &mut Vec<u8>) -> bool {
     use crate::ir::{Expr, Literal};
     match expr {
@@ -2394,24 +2408,7 @@ fn push_const_json(expr: &crate::ir::Expr, buf: &mut Vec<u8>) -> bool {
             true
         }
         Expr::Literal(Literal::Str(s)) => {
-            buf.push(b'"');
-            for &b in s.as_bytes() {
-                match b {
-                    b'"' => buf.extend_from_slice(b"\\\""),
-                    b'\\' => buf.extend_from_slice(b"\\\\"),
-                    b'\n' => buf.extend_from_slice(b"\\n"),
-                    b'\r' => buf.extend_from_slice(b"\\r"),
-                    b'\t' => buf.extend_from_slice(b"\\t"),
-                    0x08 => buf.extend_from_slice(b"\\b"),
-                    0x0c => buf.extend_from_slice(b"\\f"),
-                    c if c < 0x20 => {
-                        let hex = format!("\\u{:04x}", c);
-                        buf.extend_from_slice(hex.as_bytes());
-                    },
-                    _ => buf.push(b),
-                }
-            }
-            buf.push(b'"');
+            push_const_json_string(buf, s);
             true
         }
         Expr::ObjectConstruct { pairs } => {
@@ -2439,9 +2436,7 @@ fn push_const_json(expr: &crate::ir::Expr, buf: &mut Vec<u8>) -> bool {
             buf.push(b'{');
             for (i, (k, val)) in normalized.iter().enumerate() {
                 if i > 0 { buf.push(b','); }
-                buf.push(b'"');
-                buf.extend_from_slice(k.as_bytes());
-                buf.push(b'"');
+                push_const_json_string(buf, k);
                 buf.push(b':');
                 if !push_const_json(val, buf) { return false; }
             }
