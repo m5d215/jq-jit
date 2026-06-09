@@ -1884,22 +1884,42 @@ impl Parser {
             }
             Token::LBracket => {
                 self.advance();
+                // jq's grammar requires at least one sub-pattern and forbids a
+                // trailing comma: `. as []` and `. as [$a,]` are syntax errors
+                // (unlike object/array *construction*, which allows neither an
+                // empty list error nor — for construction — a trailing comma).
+                // The old `while` loop accepted both. #999
+                if self.at(&Token::RBracket) {
+                    bail!("syntax error, unexpected ']', expecting BINDING or '[' or '{{'");
+                }
                 let mut pats = Vec::new();
-                while !self.at(&Token::RBracket) && !self.at_eof() {
+                loop {
                     pats.push(self.parse_pattern()?);
                     if !self.eat(&Token::Comma) { break; }
+                    if self.at(&Token::RBracket) {
+                        bail!("syntax error, unexpected ']', expecting BINDING or '[' or '{{'");
+                    }
                 }
                 self.expect(&Token::RBracket)?;
                 Ok(Pattern::Array(pats))
             }
             Token::LBrace => {
                 self.advance();
+                // jq requires at least one key pattern and forbids a trailing
+                // comma: `. as {}` and `. as {a:$x,}` / `. as {$a,}` are syntax
+                // errors. #999
+                if self.at(&Token::RBrace) {
+                    bail!("syntax error, unexpected '}}'");
+                }
                 let mut pats = Vec::new();
-                while !self.at(&Token::RBrace) && !self.at_eof() {
+                loop {
                     // {key: $var} or {$var} (shorthand)
                     let (key, pat) = self.parse_obj_pattern_pair()?;
                     pats.push((key, pat));
                     if !self.eat(&Token::Comma) { break; }
+                    if self.at(&Token::RBrace) {
+                        bail!("syntax error, unexpected '}}'");
+                    }
                 }
                 self.expect(&Token::RBrace)?;
                 Ok(Pattern::Object(pats))
