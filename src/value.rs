@@ -911,11 +911,17 @@ where F: FnMut(usize, usize) -> Result<()> {
             cb(pos, end)?;
             return json_stream_ndjson(bytes, end + 1, cb);
         }
+        // The default main-loop document reader (`jq .`) is this raw streamer,
+        // not `json_stream` — so it needs the same adjacent-token guard #854
+        // added there. Without it `nullnull` / `true1` / `truefalse` split into
+        // separate documents instead of erroring like jq. #1000
+        reject_adjacent_word_token(bytes, end)?;
         cb(pos, end)?;
         pos = ws_after;
     }
     while pos < bytes.len() {
         let end = skip_json_value(bytes, pos)?;
+        reject_adjacent_word_token(bytes, end)?;
         cb(pos, end)?;
         pos = skip_ws(bytes, end);
     }
