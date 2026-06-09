@@ -272,12 +272,12 @@ pub struct Env {
     pub lib_dirs: Vec<String>,
     /// Closure bindings: (param_var_index, arg_expression).
     /// Used to avoid deep-cloning function bodies via substitute_params.
-    closures: Vec<(u16, Expr)>,
+    closures: Vec<(VarIdx, Expr)>,
     /// Cache for is_recursive check per func_id.
     recursive_cache: Vec<(usize, bool)>,
     /// Cache for substituted function bodies: (func_id, arg_var_indices) → substituted body.
     /// Only used when all args are LoadVar (the common case).
-    subst_cache: Vec<((usize, Vec<u16>), Rc<Expr>)>,
+    subst_cache: Vec<((usize, Vec<VarIdx>), Rc<Expr>)>,
     /// Pointer-based substitution cache: func_id → (args_ptr, substituted_body).
     /// For non-LoadVar args from stable (cached) call sites.
     subst_ptr_cache: Vec<(usize, usize, Rc<Expr>)>,
@@ -335,8 +335,8 @@ impl Env {
         // lifetime per #671 design).
     }
     #[inline(always)]
-    fn get_var(&self, idx: u16) -> Value {
-        let i = idx as usize;
+    fn get_var(&self, idx: VarIdx) -> Value {
+        let i = idx.idx();
         if i < self.vars.len() {
             // SAFETY: bounds checked above
             unsafe { self.vars.get_unchecked(i) }.clone()
@@ -345,8 +345,8 @@ impl Env {
         }
     }
     #[inline(always)]
-    fn set_var(&mut self, idx: u16, val: Value) {
-        let idx = idx as usize;
+    fn set_var(&mut self, idx: VarIdx, val: Value) {
+        let idx = idx.idx();
         if idx >= self.vars.len() { self.vars.resize(idx + 1, Value::Null); }
         // SAFETY: bounds ensured above
         unsafe { *self.vars.get_unchecked_mut(idx) = val; }
@@ -354,11 +354,11 @@ impl Env {
     /// Public setter used by the JIT runtime when it delegates complex paths
     /// back to eval — the JIT has its own var storage, so we copy the live
     /// bindings into the eval Env before dispatch.
-    pub fn seed_var(&mut self, idx: u16, val: Value) {
+    pub fn seed_var(&mut self, idx: VarIdx, val: Value) {
         self.set_var(idx, val);
     }
-    fn ensure_var(&mut self, idx: u16) {
-        let idx = idx as usize;
+    fn ensure_var(&mut self, idx: VarIdx) {
+        let idx = idx.idx();
         if idx >= self.vars.len() { self.vars.resize(idx + 1, Value::Null); }
     }
 }
@@ -367,25 +367,25 @@ impl Env {
 /// This implements jq's closure semantics: each time a param is referenced,
 /// the arg filter is re-evaluated with the current input.
 /// Uses COW: unchanged subtrees are not cloned.
-pub fn substitute_params(expr: &Expr, param_vars: &[u16], args: &[Expr]) -> Expr {
+pub fn substitute_params(expr: &Expr, param_vars: &[VarIdx], args: &[Expr]) -> Expr {
     subst_cow(expr, param_vars, args).unwrap_or_else(|| expr.clone())
 }
 
 /// Substitute params AND rename all local variable bindings (LetBinding, Reduce,
 /// Foreach, Label) to fresh indices from `next_var`. This prevents recursive calls
 /// from clobbering each other's local variables in the callback-based eval model.
-pub fn substitute_and_rename(expr: &Expr, param_vars: &[u16], args: &[Expr], next_var: &mut u16) -> Expr {
+pub fn substitute_and_rename(expr: &Expr, param_vars: &[VarIdx], args: &[Expr], next_var: &mut u16) -> Expr {
     subst_inner(expr, param_vars, args, true, next_var, &mut HashMap::new())
 }
 
 fn subst_inner(
-    expr: &Expr, pv: &[u16], args: &[Expr],
-    rename: bool, nv: &mut u16, rn: &mut HashMap<u16, u16>,
+    expr: &Expr, pv: &[VarIdx], args: &[Expr],
+    rename: bool, nv: &mut u16, rn: &mut HashMap<VarIdx, VarIdx>,
 ) -> Expr {
     macro_rules! s { ($e:expr) => { subst_inner($e, pv, args, rename, nv, rn) } }
     macro_rules! sb { ($e:expr) => { Box::new(s!($e)) } }
     macro_rules! alloc {
-        ($old:expr) => { if rename { let n = *nv; *nv += 1; rn.insert($old, n); n } else { $old } }
+        ($old:expr) => { if rename { let n = VarIdx(*nv); *nv += 1; rn.insert($old, n); n } else { $old } }
     }
     match expr {
         Expr::LoadVar { var_index } => {
@@ -610,7 +610,7 @@ pub(crate) fn append_call_args(expr: &Expr, target: usize, extra: &[Expr]) -> Ex
 
 /// COW substitution: returns None if no param vars were found (no changes needed).
 /// Avoids deep-cloning unchanged subtrees.
-fn subst_cow(expr: &Expr, pv: &[u16], args: &[Expr]) -> Option<Expr> {
+fn subst_cow(expr: &Expr, pv: &[VarIdx], args: &[Expr]) -> Option<Expr> {
     // Helpers: s returns Option, sb returns Option<Box>
     macro_rules! s { ($e:expr) => { subst_cow($e, pv, args) } }
     match expr {
@@ -1100,7 +1100,7 @@ fn expr_uses_outer_input(expr: &Expr) -> bool {
 }
 
 /// Check if an expression references a specific variable (for reduce optimization).
-pub(crate) fn expr_uses_var(expr: &Expr, target: u16) -> bool {
+pub(crate) fn expr_uses_var(expr: &Expr, target: VarIdx) -> bool {
     match expr {
         Expr::LoadVar { var_index } => *var_index == target,
         Expr::Input | Expr::Empty | Expr::Not | Expr::Env | Expr::Builtins
@@ -1286,7 +1286,7 @@ pub(crate) fn collect_func_calls(expr: &Expr, out: &mut Vec<usize>) {
 fn get_num_leaf(expr: &Expr, input: &Value, vars: &[Value]) -> Option<f64> {
     match expr {
         Expr::LoadVar { var_index } => {
-            if let Some(Value::Num(n, _)) = vars.get(*var_index as usize) {
+            if let Some(Value::Num(n, _)) = vars.get(var_index.idx()) {
                 Some(*n)
             } else { None }
         }
@@ -1350,7 +1350,7 @@ fn eval_bool_compound(expr: &Expr, input: &Value, vars: &[Value]) -> Option<bool
 /// Evaluate a boolean expression entirely via f64 arithmetic, with one variable
 /// override (avoids env borrow/store). Returns Some(true/false) or None if not applicable.
 #[inline(always)]
-fn eval_bool_numeric(expr: &Expr, vars: &[Value], override_vi: u16, override_val: f64) -> Option<bool> {
+fn eval_bool_numeric(expr: &Expr, vars: &[Value], override_vi: VarIdx, override_val: f64) -> Option<bool> {
     match expr {
         Expr::BinOp { op, lhs, rhs } => {
             let ln = get_num_leaf_override(lhs, vars, override_vi, override_val)?;
@@ -1380,12 +1380,12 @@ fn eval_bool_numeric(expr: &Expr, vars: &[Value], override_vi: u16, override_val
 
 /// Like get_num_leaf but with a variable override for one var_index.
 #[inline(always)]
-fn get_num_leaf_override(expr: &Expr, vars: &[Value], override_vi: u16, override_val: f64) -> Option<f64> {
+fn get_num_leaf_override(expr: &Expr, vars: &[Value], override_vi: VarIdx, override_val: f64) -> Option<f64> {
     match expr {
         Expr::LoadVar { var_index } => {
             if *var_index == override_vi {
                 Some(override_val)
-            } else if let Some(Value::Num(n, _)) = vars.get(*var_index as usize) {
+            } else if let Some(Value::Num(n, _)) = vars.get(var_index.idx()) {
                 Some(*n)
             } else { None }
         }
@@ -1600,7 +1600,7 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
             }
         }
         Expr::LetBinding { var_index, value, body } => {
-            let vi = *var_index as usize;
+            let vi = var_index.idx();
             // Fast path: `. as $var` avoids eval_one dispatch for Input
             let val = if matches!(value.as_ref(), Expr::Input) {
                 input.clone()
@@ -2340,7 +2340,7 @@ pub fn eval(
                             let mut elems = Vec::new();
                             let gen_result = eval(gen, Value::Null, env, &mut |elem| { elems.push(elem); Ok(true) });
                             // Take array back from env (refcount should be 1 after gen drops its refs)
-                            let arr_val = std::mem::replace(&mut env.borrow_mut().vars[v_idx as usize], old);
+                            let arr_val = std::mem::replace(&mut env.borrow_mut().vars[v_idx.idx()], old);
                             gen_result?;
                             current = match arr_val {
                                 Value::Arr(rc) => {
@@ -2431,7 +2431,7 @@ pub fn eval(
                                     }
                                 }
                                 if let Some((vi, body)) = let_bind {
-                                    let old = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], elem);
+                                    let old = std::mem::replace(&mut env.borrow_mut().vars[vi.idx()], elem);
                                     // jq's `all` is vacuously true when the
                                     // predicate yields no values for an
                                     // element, and false on the first falsy
@@ -2447,7 +2447,7 @@ pub fn eval(
                                             !found_falsy
                                         }
                                     };
-                                    env.borrow_mut().vars[vi as usize] = old;
+                                    env.borrow_mut().vars[vi.idx()] = old;
                                     if is_true { Ok(true) } else { all_true = false; Ok(false) }
                                 } else {
                                     // Compound bool fast path: dummy-probe at line ~1609 may
@@ -2498,7 +2498,7 @@ pub fn eval(
                                         }
                                         drop(e);
                                     }
-                                    let old = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], elem);
+                                    let old = std::mem::replace(&mut env.borrow_mut().vars[vi.idx()], elem);
                                     // jq's `any` is vacuously false when the
                                     // predicate yields no values for an
                                     // element, and true on the first truthy
@@ -2514,7 +2514,7 @@ pub fn eval(
                                             found_truthy
                                         }
                                     };
-                                    env.borrow_mut().vars[vi as usize] = old;
+                                    env.borrow_mut().vars[vi.idx()] = old;
                                     if is_true { any_true = true; Ok(false) } else { Ok(true) }
                                 } else {
                                     let pred_result = eval_one(predicate, &elem, env);
@@ -2669,7 +2669,7 @@ pub fn eval(
                 let tmp_vi = *var_index;
                 if !expr_uses_outer_input(body) {
                     // Detect destructuring: body is chain of LetBinding { vi, Index(LoadVar(tmp), i) }
-                    let mut bindings: Vec<(u16, usize)> = Vec::new();
+                    let mut bindings: Vec<(VarIdx, usize)> = Vec::new();
                     let mut inner = body.as_ref();
                     while let Expr::LetBinding { var_index: vi, value: val, body: b } = inner {
                         if let Expr::Index { expr: base, key } = val.as_ref() {
@@ -2691,27 +2691,27 @@ pub fn eval(
                         // Teardown: restore all vars (1 borrow_mut).
                         let n_bind = bindings.len();
                         // Use stack storage for common 2-element case to avoid Vec allocation
-                        let mut olds_buf: [(u16, Value); 3] = [(0, Value::Null), (0, Value::Null), (0, Value::Null)];
-                        let mut olds_vec: Vec<(u16, Value)> = Vec::new();
+                        let mut olds_buf: [(VarIdx, Value); 3] = [(VarIdx(0), Value::Null), (VarIdx(0), Value::Null), (VarIdx(0), Value::Null)];
+                        let mut olds_vec: Vec<(VarIdx, Value)> = Vec::new();
                         let use_buf = n_bind <= 2;
                         let destructured = {
                             let mut e = env.borrow_mut();
-                            let old_tmp = std::mem::replace(&mut e.vars[tmp_vi as usize], input);
+                            let old_tmp = std::mem::replace(&mut e.vars[tmp_vi.idx()], input);
                             if use_buf { olds_buf[0] = (tmp_vi, old_tmp); }
                             else { olds_vec.push((tmp_vi, old_tmp)); }
-                            let rc_opt = match &e.vars[tmp_vi as usize] {
+                            let rc_opt = match &e.vars[tmp_vi.idx()] {
                                 Value::Arr(rc) => Some(rc.clone()),
                                 _ => None,
                             };
                             if let Some(rc) = rc_opt {
                                 for (i, &(vi, idx)) in bindings.iter().enumerate() {
                                     let elem = rc.get(idx).cloned().unwrap_or(Value::Null);
-                                    let old = std::mem::replace(&mut e.vars[vi as usize], elem);
+                                    let old = std::mem::replace(&mut e.vars[vi.idx()], elem);
                                     if use_buf { olds_buf[i + 1] = (vi, old); }
                                     else { olds_vec.push((vi, old)); }
                                 }
                                 drop(rc);
-                                e.vars[tmp_vi as usize] = Value::Null;
+                                e.vars[tmp_vi.idx()] = Value::Null;
                                 true
                             } else {
                                 false
@@ -2728,45 +2728,45 @@ pub fn eval(
                             if use_buf {
                                 if destructured {
                                     for i in (1..=n_bind).rev() {
-                                        let (vi, old) = std::mem::replace(&mut olds_buf[i], (0, Value::Null));
-                                        e.vars[vi as usize] = old;
+                                        let (vi, old) = std::mem::replace(&mut olds_buf[i], (VarIdx(0), Value::Null));
+                                        e.vars[vi.idx()] = old;
                                     }
                                 }
-                                e.vars[tmp_vi as usize] = std::mem::replace(&mut olds_buf[0], (0, Value::Null)).1;
+                                e.vars[tmp_vi.idx()] = std::mem::replace(&mut olds_buf[0], (VarIdx(0), Value::Null)).1;
                             } else {
                                 if destructured {
                                     while olds_vec.len() > 1 {
                                         let (vi, old) = olds_vec.pop().unwrap();
-                                        e.vars[vi as usize] = old;
+                                        e.vars[vi.idx()] = old;
                                     }
                                 }
-                                e.vars[tmp_vi as usize] = olds_vec.pop().unwrap().1;
+                                e.vars[tmp_vi.idx()] = olds_vec.pop().unwrap().1;
                             }
                         }
                         result
                     } else {
                         // No destructuring, normal path
-                        let old = std::mem::replace(&mut env.borrow_mut().vars[tmp_vi as usize], input);
+                        let old = std::mem::replace(&mut env.borrow_mut().vars[tmp_vi.idx()], input);
                         let result = eval(body, Value::Null, env, cb);
-                        env.borrow_mut().vars[tmp_vi as usize] = old;
+                        env.borrow_mut().vars[tmp_vi.idx()] = old;
                         result
                     }
                 } else {
-                    let old = std::mem::replace(&mut env.borrow_mut().vars[tmp_vi as usize], input.clone());
+                    let old = std::mem::replace(&mut env.borrow_mut().vars[tmp_vi.idx()], input.clone());
                     let result = eval(body, input, env, cb);
-                    env.borrow_mut().vars[tmp_vi as usize] = old;
+                    env.borrow_mut().vars[tmp_vi.idx()] = old;
                     result
                 }
             } else if let Ok(val) = eval_one(value, &input, env) {
                 // Scalar fast path: avoid closure + input clone
-                let vi = *var_index as usize;
+                let vi = var_index.idx();
                 let old = std::mem::replace(&mut env.borrow_mut().vars[vi], val);
                 let result = eval(body, input, env, cb);
                 env.borrow_mut().vars[vi] = old;
                 result
             } else {
                 eval(value, input.clone(), env, &mut |val| {
-                    let vi = *var_index as usize;
+                    let vi = var_index.idx();
                     let old = std::mem::replace(&mut env.borrow_mut().vars[vi], val);
                     let result = eval(body, input.clone(), env, cb);
                     env.borrow_mut().vars[vi] = old;
@@ -2875,15 +2875,15 @@ pub fn eval(
                             let acc_val = std::mem::replace(&mut acc, Value::Null);
                             let (old_var, old_acc) = {
                                 let mut e = env.borrow_mut();
-                                let ov = std::mem::replace(&mut e.vars[vi as usize], sv);
-                                let oa = std::mem::replace(&mut e.vars[ai as usize], acc_val.clone());
+                                let ov = std::mem::replace(&mut e.vars[vi.idx()], sv);
+                                let oa = std::mem::replace(&mut e.vars[ai.idx()], acc_val.clone());
                                 (ov, oa)
                             };
                             let r = eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) });
                             {
                                 let mut e = env.borrow_mut();
-                                e.vars[ai as usize] = old_acc;
-                                e.vars[vi as usize] = old_var;
+                                e.vars[ai.idx()] = old_acc;
+                                e.vars[vi.idx()] = old_var;
                             }
                             r?;
                             Ok(true)
@@ -2915,7 +2915,7 @@ pub fn eval(
             let fused = if !acc_used_in_update {
                 if let Expr::LetBinding { var_index: tmp_vi, value, body } = update {
                     if matches!(value.as_ref(), Expr::Input) && !expr_uses_outer_input(body) {
-                        let mut bindings: Vec<(u16, usize)> = Vec::new();
+                        let mut bindings: Vec<(VarIdx, usize)> = Vec::new();
                         let mut inner = body.as_ref();
                         while let Expr::LetBinding { var_index: bvi, value: bval, body: bb } = inner {
                             if let Expr::Index { expr: base, key } = bval.as_ref() {
@@ -2944,19 +2944,19 @@ pub fn eval(
                     // Setup: store $var, destructure acc, null tmp (1 borrow_mut)
                     let (old_var, old_tmp, destructured) = {
                         let mut e = env.borrow_mut();
-                        let old_var = std::mem::replace(&mut e.vars[vi as usize], val);
-                        let old_tmp = std::mem::replace(&mut e.vars[tmp_vi as usize], acc_val);
-                        let rc_opt = match &e.vars[tmp_vi as usize] {
+                        let old_var = std::mem::replace(&mut e.vars[vi.idx()], val);
+                        let old_tmp = std::mem::replace(&mut e.vars[tmp_vi.idx()], acc_val);
+                        let rc_opt = match &e.vars[tmp_vi.idx()] {
                             Value::Arr(rc) => Some(rc.clone()),
                             _ => None,
                         };
                         if let Some(rc) = rc_opt {
                             for &(bvi, idx) in bindings {
                                 let elem = rc.get(idx).cloned().unwrap_or(Value::Null);
-                                e.vars[bvi as usize] = elem;
+                                e.vars[bvi.idx()] = elem;
                             }
                             drop(rc);
-                            e.vars[tmp_vi as usize] = Value::Null;
+                            e.vars[tmp_vi.idx()] = Value::Null;
                             (old_var, old_tmp, true)
                         } else {
                             (old_var, old_tmp, false)
@@ -2966,14 +2966,14 @@ pub fn eval(
                         eval(inner_body, Value::Null, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
                     } else {
                         // Not an array; restore tmp and run update normally
-                        env.borrow_mut().vars[tmp_vi as usize] = old_tmp;
+                        env.borrow_mut().vars[tmp_vi.idx()] = old_tmp;
                         let acc_val_for_update = env.borrow().get_var(tmp_vi);
                         eval(update, acc_val_for_update, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
                     }
                     // Teardown: restore $var (1 borrow_mut)
                     // Note: destructured bindings' old values were whatever was in env before;
                     // since we're in a reduce loop and these are scratch vars, we just restore $var.
-                    env.borrow_mut().vars[vi as usize] = old_var;
+                    env.borrow_mut().vars[vi.idx()] = old_var;
                     Ok(true)
                 })?;
                 cb(acc)
@@ -2982,7 +2982,7 @@ pub fn eval(
                 // Also detect `+= rhs` which is: LetBinding { var, value: rhs, body: Update { path: ., update: . + LoadVar(var) } }
                 let add_inplace = if let Expr::BinOp { op: BinOp::Add, lhs, rhs } = update {
                     if matches!(lhs.as_ref(), Expr::Input) && !expr_uses_outer_input(rhs) {
-                        Some((rhs.as_ref(), None::<u16>))
+                        Some((rhs.as_ref(), None::<VarIdx>))
                     } else { None }
                 } else if let Expr::LetBinding { var_index: rhs_var, value: rhs_value, body } = update {
                     // `. += rhs` pattern
@@ -3001,7 +3001,7 @@ pub fn eval(
                 } else { None };
                 if let Some((add_rhs, _temp_var)) = add_inplace {
                     eval(source, source_input, env, &mut |val| {
-                        let old_var = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], val);
+                        let old_var = std::mem::replace(&mut env.borrow_mut().vars[vi.idx()], val);
                         let rhs_val = {
                             let mut r = Value::Null;
                             eval(add_rhs, Value::Null, env, &mut |v| { r = v; Ok(true) })?;
@@ -3026,16 +3026,16 @@ pub fn eval(
                                 *acc_ref = crate::runtime::rt_add(&acc_val, &rhs_val)?;
                             }
                         }
-                        env.borrow_mut().vars[vi as usize] = old_var;
+                        env.borrow_mut().vars[vi.idx()] = old_var;
                         Ok(true)
                     })?;
                     cb(acc)
                 } else {
                     eval(source, source_input, env, &mut |val| {
                         let acc_val = std::mem::replace(&mut acc, Value::Null);
-                        let old_var = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], val);
+                        let old_var = std::mem::replace(&mut env.borrow_mut().vars[vi.idx()], val);
                         eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
-                        env.borrow_mut().vars[vi as usize] = old_var;
+                        env.borrow_mut().vars[vi.idx()] = old_var;
                         Ok(true)
                     })?;
                     cb(acc)
@@ -3045,15 +3045,15 @@ pub fn eval(
                     let acc_val = std::mem::replace(&mut acc, Value::Null);
                     let (old_var, old_acc) = {
                         let mut e = env.borrow_mut();
-                        let ov = std::mem::replace(&mut e.vars[vi as usize], val);
-                        let oa = std::mem::replace(&mut e.vars[ai as usize], acc_val.clone());
+                        let ov = std::mem::replace(&mut e.vars[vi.idx()], val);
+                        let oa = std::mem::replace(&mut e.vars[ai.idx()], acc_val.clone());
                         (ov, oa)
                     };
                     eval(update, acc_val, env, &mut |new_acc| { acc = new_acc; Ok(true) })?;
                     {
                         let mut e = env.borrow_mut();
-                        e.vars[ai as usize] = old_acc;
-                        e.vars[vi as usize] = old_var;
+                        e.vars[ai.idx()] = old_acc;
+                        e.vars[vi.idx()] = old_var;
                     }
                     Ok(true)
                 })?;
@@ -3088,7 +3088,7 @@ pub fn eval(
                                         if cond_needs_var {
                                             // Slow path: cond_body references $item
                                             let old_var = std::mem::replace(
-                                                &mut env.borrow_mut().vars[vi as usize], val.clone());
+                                                &mut env.borrow_mut().vars[vi.idx()], val.clone());
                                             let is_true = match eval_one(cond_body, &val, env) {
                                                 Ok(v) => v.is_truthy(),
                                                 Err(()) => {
@@ -3102,12 +3102,12 @@ pub fn eval(
                                             let cont = if is_true {
                                                 cb(val)?
                                             } else if else_is_break {
-                                                env.borrow_mut().vars[vi as usize] = old_var;
+                                                env.borrow_mut().vars[vi.idx()] = old_var;
                                                 return eval(else_branch, Value::Null, env, cb);
                                             } else {
                                                 true
                                             };
-                                            env.borrow_mut().vars[vi as usize] = old_var;
+                                            env.borrow_mut().vars[vi.idx()] = old_var;
                                             Ok(cont)
                                         } else {
                                             // Fast path: evaluate cond before touching env
@@ -3131,9 +3131,9 @@ pub fn eval(
                                             } else if else_is_break {
                                                 // Store val in env only for break path
                                                 let old_var = std::mem::replace(
-                                                    &mut env.borrow_mut().vars[vi as usize], val);
+                                                    &mut env.borrow_mut().vars[vi.idx()], val);
                                                 let r = eval(else_branch, Value::Null, env, cb);
-                                                env.borrow_mut().vars[vi as usize] = old_var;
+                                                env.borrow_mut().vars[vi.idx()] = old_var;
                                                 r
                                             } else {
                                                 Ok(true)
@@ -3145,13 +3145,13 @@ pub fn eval(
                         }
                     }
                     return eval(source, input, env, &mut |val| {
-                        let old_var = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], val);
+                        let old_var = std::mem::replace(&mut env.borrow_mut().vars[vi.idx()], val);
                         let cont = match eval_one_filter(extract_expr, &Value::Null, env) {
                             Ok(Some(v)) => cb(v)?,
                             Ok(None) => true,
                             Err(()) => eval(extract_expr, Value::Null, env, cb)?,
                         };
-                        env.borrow_mut().vars[vi as usize] = old_var;
+                        env.borrow_mut().vars[vi.idx()] = old_var;
                         Ok(cont)
                     });
                 }
@@ -3164,9 +3164,9 @@ pub fn eval(
                     let acc_val = std::mem::replace(&mut acc, Value::Null);
                     let (old_var, old_acc) = {
                         let mut e = env.borrow_mut();
-                        let ov = std::mem::replace(&mut e.vars[vi as usize], val);
+                        let ov = std::mem::replace(&mut e.vars[vi.idx()], val);
                         let oa = if acc_used {
-                            std::mem::replace(&mut e.vars[ai as usize], acc_val.clone())
+                            std::mem::replace(&mut e.vars[ai.idx()], acc_val.clone())
                         } else {
                             Value::Null
                         };
@@ -3178,7 +3178,7 @@ pub fn eval(
                     let update_result = eval(update, acc_val, env, &mut |new_acc| {
                         acc = new_acc.clone();
                         if acc_used {
-                            env.borrow_mut().vars[ai as usize] = new_acc.clone();
+                            env.borrow_mut().vars[ai.idx()] = new_acc.clone();
                         }
                         let cont = if let Some(extract_expr) = extract {
                             match eval_one_filter(extract_expr, &new_acc, env) {
@@ -3195,9 +3195,9 @@ pub fn eval(
                     {
                         let mut e = env.borrow_mut();
                         if acc_used {
-                            e.vars[ai as usize] = old_acc;
+                            e.vars[ai.idx()] = old_acc;
                         }
-                        e.vars[vi as usize] = old_var;
+                        e.vars[vi.idx()] = old_var;
                     }
                     update_result?;
                     Ok(!stopped)
@@ -3443,7 +3443,7 @@ pub fn eval(
                             }
                         } else {
                             // Multi-arg: check all LoadVar
-                            let all_loadvar: Option<Vec<u16>> = args.iter().map(|a| {
+                            let all_loadvar: Option<Vec<VarIdx>> = args.iter().map(|a| {
                                 if let Expr::LoadVar { var_index } = a { Some(*var_index) } else { None }
                             }).collect();
                             if let Some(ref vis) = all_loadvar {
@@ -3545,7 +3545,7 @@ pub fn eval(
                                 return eval(&body_rc, input, env, cb);
                             }
                         }
-                        let all_loadvar: Option<Vec<u16>> = args.iter().map(|a| {
+                        let all_loadvar: Option<Vec<VarIdx>> = args.iter().map(|a| {
                             if let Expr::LoadVar { var_index } = a { Some(*var_index) } else { None }
                         }).collect();
                         if let Some(var_indices) = all_loadvar {
@@ -3677,7 +3677,7 @@ pub fn eval(
                         }
                         drop(e);
                     }
-                    let old = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], elem);
+                    let old = std::mem::replace(&mut env.borrow_mut().vars[vi.idx()], elem);
                     // jq's `all` returns true vacuously when the predicate
                     // emits no values for an element, and false on the first
                     // falsy value (other values are short-circuited away).
@@ -3692,7 +3692,7 @@ pub fn eval(
                             !found_falsy
                         }
                     };
-                    env.borrow_mut().vars[vi as usize] = old;
+                    env.borrow_mut().vars[vi.idx()] = old;
                     if is_true { Ok(true) } else { all_true = false; Ok(false) }
                 } else {
                     let pred_result = eval_one(predicate, &elem, env);
@@ -3733,7 +3733,7 @@ pub fn eval(
                         }
                         drop(e);
                     }
-                    let old = std::mem::replace(&mut env.borrow_mut().vars[vi as usize], elem);
+                    let old = std::mem::replace(&mut env.borrow_mut().vars[vi.idx()], elem);
                     // jq's `any` returns false vacuously when the predicate
                     // emits no values, and true on the first truthy value
                     // (other values are short-circuited away).
@@ -3748,7 +3748,7 @@ pub fn eval(
                             found_truthy
                         }
                     };
-                    env.borrow_mut().vars[vi as usize] = old;
+                    env.borrow_mut().vars[vi.idx()] = old;
                     if is_true { any_true = true; Ok(false) } else { Ok(true) }
                 } else {
                     let pred_result = eval_one(predicate, &elem, env);
@@ -5434,7 +5434,7 @@ thread_local! {
     // forwards the element's source path instead of being rejected as a value.
     // Outside a path-mode `foreach`, the stack is empty and variables behave
     // as ordinary (non-path) values. See #711.
-    static FOREACH_PATH_BIND: RefCell<Vec<(u16, Value)>> = const { RefCell::new(Vec::new()) };
+    static FOREACH_PATH_BIND: RefCell<Vec<(VarIdx, Value)>> = const { RefCell::new(Vec::new()) };
 }
 
 thread_local! {
@@ -5500,7 +5500,7 @@ thread_local! {
     // globally unique var index (the parser never reuses one), so a non-identity
     // rebind of the same name gets a fresh index absent from this set and
     // correctly shadows. See #837.
-    static IDENTITY_PATH_VARS: RefCell<Vec<u16>> = const { RefCell::new(Vec::new()) };
+    static IDENTITY_PATH_VARS: RefCell<Vec<VarIdx>> = const { RefCell::new(Vec::new()) };
 }
 
 /// RAII guard registering `var_index` as identity-path-bound for its lifetime.
@@ -5510,11 +5510,11 @@ impl Drop for IdentityVarGuard {
         IDENTITY_PATH_VARS.with(|s| { s.borrow_mut().pop(); });
     }
 }
-fn push_identity_path_var(var_index: u16) -> IdentityVarGuard {
+fn push_identity_path_var(var_index: VarIdx) -> IdentityVarGuard {
     IDENTITY_PATH_VARS.with(|s| s.borrow_mut().push(var_index));
     IdentityVarGuard
 }
-fn is_identity_path_var(var_index: u16) -> bool {
+fn is_identity_path_var(var_index: VarIdx) -> bool {
     IDENTITY_PATH_VARS.with(|s| s.borrow().contains(&var_index))
 }
 
@@ -5526,7 +5526,7 @@ thread_local! {
     // tracks a single path register through destructuring, so two or more
     // sibling navigations off the same source corrupt it — we mirror that by
     // refusing to register a source that is referenced more than once. See #880.
-    static NAV_PATH_SOURCES: RefCell<Vec<u16>> = const { RefCell::new(Vec::new()) };
+    static NAV_PATH_SOURCES: RefCell<Vec<VarIdx>> = const { RefCell::new(Vec::new()) };
 }
 
 /// RAII guard registering `var_index` as a single-spine navigation source.
@@ -5536,11 +5536,11 @@ impl Drop for NavSourceGuard {
         NAV_PATH_SOURCES.with(|s| { s.borrow_mut().pop(); });
     }
 }
-fn push_nav_path_source(var_index: u16) -> NavSourceGuard {
+fn push_nav_path_source(var_index: VarIdx) -> NavSourceGuard {
     NAV_PATH_SOURCES.with(|s| s.borrow_mut().push(var_index));
     NavSourceGuard
 }
-fn is_nav_path_source(var_index: u16) -> bool {
+fn is_nav_path_source(var_index: VarIdx) -> bool {
     NAV_PATH_SOURCES.with(|s| s.borrow().contains(&var_index))
 }
 
@@ -6313,14 +6313,14 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                     let acc_val = std::mem::replace(&mut acc, Value::Null);
                     let (old_var, old_acc) = {
                         let mut e = env.borrow_mut();
-                        let ov = std::mem::replace(&mut e.vars[vi as usize], elem_val);
-                        let oa = std::mem::replace(&mut e.vars[ai as usize], acc_val.clone());
+                        let ov = std::mem::replace(&mut e.vars[vi.idx()], elem_val);
+                        let oa = std::mem::replace(&mut e.vars[ai.idx()], acc_val.clone());
                         (ov, oa)
                     };
                     let mut stopped = false;
                     let update_result = eval(update, acc_val, env, &mut |new_acc| {
                         acc = new_acc.clone();
-                        env.borrow_mut().vars[ai as usize] = new_acc.clone();
+                        env.borrow_mut().vars[ai.idx()] = new_acc.clone();
                         let extract_expr = extract.as_ref().unwrap();
                         FOREACH_PATH_BIND.with(|s| s.borrow_mut().push((vi, src_path.clone())));
                         // The navigating source owns the path register, so the
@@ -6338,8 +6338,8 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                     });
                     {
                         let mut e = env.borrow_mut();
-                        e.vars[ai as usize] = old_acc;
-                        e.vars[vi as usize] = old_var;
+                        e.vars[ai.idx()] = old_acc;
+                        e.vars[vi.idx()] = old_var;
                     }
                     update_result?;
                     Ok(!stopped)
@@ -6415,13 +6415,13 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             for sv in source_vals {
                 let (old_var, old_acc) = {
                     let mut e = env.borrow_mut();
-                    let ov = std::mem::replace(&mut e.vars[vi as usize], sv);
-                    (ov, e.vars[ai as usize].clone())
+                    let ov = std::mem::replace(&mut e.vars[vi.idx()], sv);
+                    (ov, e.vars[ai.idx()].clone())
                 };
                 let mut next: Vec<Value> = Vec::new();
                 for ap in &acc_paths {
                     let base_val = crate::runtime::rt_getpath(&input, ap).unwrap_or(Value::Null);
-                    env.borrow_mut().vars[ai as usize] = base_val.clone();
+                    env.borrow_mut().vars[ai.idx()] = base_val.clone();
                     let ap_vec: Vec<Value> = match ap { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
                     eval_path(update, base_val.clone(), env, &mut |rp| {
                         // jq only path-tracks a reduce whose UPDATE preserves the
@@ -6447,8 +6447,8 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 }
                 {
                     let mut e = env.borrow_mut();
-                    e.vars[ai as usize] = old_acc;
-                    e.vars[vi as usize] = old_var;
+                    e.vars[ai.idx()] = old_acc;
+                    e.vars[vi.idx()] = old_var;
                 }
                 acc_paths = next;
             }
@@ -6705,7 +6705,7 @@ fn eval_path_catch(
 /// `$v | .[k]` desugar of a computed object-pattern key). Returns `None` for any
 /// expression that does not bottom out in a single `LoadVar`. Used to decide
 /// whether a destructuring sub-binding navigates a path-tracked source. #880
-fn nav_source_var(expr: &Expr) -> Option<u16> {
+fn nav_source_var(expr: &Expr) -> Option<VarIdx> {
     match expr {
         Expr::LoadVar { var_index } => Some(*var_index),
         Expr::Index { expr, .. } | Expr::IndexOpt { expr, .. } | Expr::Slice { expr, .. } => {
@@ -6721,8 +6721,8 @@ fn nav_source_var(expr: &Expr) -> Option<u16> {
 /// (in its sole navigated child); two or more references mean sibling
 /// navigations, which jq cannot path-track. Mirrors `expr_uses_var`'s shape but
 /// counts. #880
-fn var_referenced_twice(expr: &Expr, target: u16) -> bool {
-    fn go(expr: &Expr, target: u16, count: &mut u8) {
+fn var_referenced_twice(expr: &Expr, target: VarIdx) -> bool {
+    fn go(expr: &Expr, target: VarIdx, count: &mut u8) {
         if *count >= 2 { return; }
         match expr {
             Expr::LoadVar { var_index } => { if *var_index == target { *count += 1; } }
@@ -6816,7 +6816,7 @@ fn var_referenced_twice(expr: &Expr, target: u16) -> bool {
 /// can inherit a path (#880). Out-of-line so eval_path's hot arms stay compact.
 #[inline(never)]
 fn eval_path_letbinding_identity(
-    var_index: u16,
+    var_index: VarIdx,
     body: &Expr,
     input: Value,
     env: &EnvRef,
@@ -6842,7 +6842,7 @@ fn eval_path_letbinding_identity(
 /// to keep eval_path's hot arms compact (see #839 perf note on #880). #880
 #[inline(never)]
 fn eval_path_navbind(
-    var_index: u16,
+    var_index: VarIdx,
     value: &Expr,
     body: &Expr,
     input: &Value,
@@ -6892,8 +6892,8 @@ fn eval_path_navbind(
 fn eval_foreach_nav_noextract_path(
     source: &Expr,
     init: &Expr,
-    vi: u16,
-    ai: u16,
+    vi: VarIdx,
+    ai: VarIdx,
     update: &Expr,
     input: &Value,
     env: &EnvRef,
@@ -6906,8 +6906,8 @@ fn eval_foreach_nav_noextract_path(
             let acc_val = std::mem::replace(&mut acc, Value::Null);
             let (old_var, old_acc) = {
                 let mut e = env.borrow_mut();
-                let ov = std::mem::replace(&mut e.vars[vi as usize], elem_val);
-                let oa = std::mem::replace(&mut e.vars[ai as usize], acc_val.clone());
+                let ov = std::mem::replace(&mut e.vars[vi.idx()], elem_val);
+                let oa = std::mem::replace(&mut e.vars[ai.idx()], acc_val.clone());
                 (ov, oa)
             };
             FOREACH_PATH_BIND.with(|s| s.borrow_mut().push((vi, src_path.clone())));
@@ -6920,15 +6920,15 @@ fn eval_foreach_nav_noextract_path(
                 eval_path(update, acc_val, env, &mut |upd_path| {
                     // The update result threads as the next accumulator value.
                     acc = crate::runtime::rt_getpath(input, &upd_path).unwrap_or(Value::Null);
-                    env.borrow_mut().vars[ai as usize] = acc.clone();
+                    env.borrow_mut().vars[ai.idx()] = acc.clone();
                     cb(upd_path)
                 })
             };
             FOREACH_PATH_BIND.with(|s| { s.borrow_mut().pop(); });
             {
                 let mut e = env.borrow_mut();
-                e.vars[ai as usize] = old_acc;
-                e.vars[vi as usize] = old_var;
+                e.vars[ai.idx()] = old_acc;
+                e.vars[vi.idx()] = old_var;
             }
             r
         })
@@ -6943,8 +6943,8 @@ fn eval_foreach_nav_noextract_path(
 fn eval_foreach_valuegen_path(
     source: &Expr,
     init: &Expr,
-    vi: u16,
-    ai: u16,
+    vi: VarIdx,
+    ai: VarIdx,
     update: &Expr,
     extract: &Option<Box<Expr>>,
     input: &Value,
@@ -6969,13 +6969,13 @@ fn eval_foreach_valuegen_path(
             for seed in init_paths {
                 let mut acc_paths: Vec<Value> = vec![seed];
                 for sv in &source_vals {
-                    let old_var = { let mut e = env.borrow_mut(); std::mem::replace(&mut e.vars[vi as usize], sv.clone()) };
+                    let old_var = { let mut e = env.borrow_mut(); std::mem::replace(&mut e.vars[vi.idx()], sv.clone()) };
                     let mut next: Vec<Value> = Vec::new();
                     let mut stop = false;
                     for ap in &acc_paths {
                         let base = crate::runtime::rt_getpath(input, ap).unwrap_or(Value::Null);
                         let ap_vec: Vec<Value> = match ap { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
-                        let old_acc = { let mut e = env.borrow_mut(); std::mem::replace(&mut e.vars[ai as usize], base.clone()) };
+                        let old_acc = { let mut e = env.borrow_mut(); std::mem::replace(&mut e.vars[ai.idx()], base.clone()) };
                         // UPDATE in path mode: each output is relative to the
                         // accumulator value and extends its path.
                         let r = eval_path(update, base.clone(), env, &mut |rp| {
@@ -6986,7 +6986,7 @@ fn eval_foreach_valuegen_path(
                             // EXTRACT emits per updated accumulator, with the
                             // accumulator value bound for navigation.
                             let nbase = crate::runtime::rt_getpath(input, &np).unwrap_or(Value::Null);
-                            let old_acc2 = { let mut e = env.borrow_mut(); std::mem::replace(&mut e.vars[ai as usize], nbase.clone()) };
+                            let old_acc2 = { let mut e = env.borrow_mut(); std::mem::replace(&mut e.vars[ai.idx()], nbase.clone()) };
                             let ec = if let Some(ex) = extract {
                                 eval_path(ex, nbase, env, &mut |ep| {
                                     let mut comb = np_vec.clone();
@@ -7005,23 +7005,23 @@ fn eval_foreach_valuegen_path(
                                 // #915
                                 cb(np.clone())
                             };
-                            env.borrow_mut().vars[ai as usize] = old_acc2;
+                            env.borrow_mut().vars[ai.idx()] = old_acc2;
                             let c = ec?;
                             if !c { stop = true; }
                             Ok(c)
                         });
-                        env.borrow_mut().vars[ai as usize] = old_acc;
+                        env.borrow_mut().vars[ai.idx()] = old_acc;
                         // Keep $i bound across all accumulator branches of this
                         // source element; restore it only after the loop (or on
                         // error) so a multi-valued UPDATE doesn't reset it
                         // mid-iteration.
                         if let Err(e) = r {
-                            env.borrow_mut().vars[vi as usize] = old_var;
+                            env.borrow_mut().vars[vi.idx()] = old_var;
                             return Err(e);
                         }
                         if stop { break; }
                     }
-                    env.borrow_mut().vars[vi as usize] = old_var;
+                    env.borrow_mut().vars[vi.idx()] = old_var;
                     if stop { return Ok(false); }
                     acc_paths = next;
                 }
@@ -7044,15 +7044,15 @@ fn eval_foreach_valuegen_path(
                 for sv in &source_vals {
                     let (old_var, old_acc) = {
                         let mut e = env.borrow_mut();
-                        let ov = std::mem::replace(&mut e.vars[vi as usize], sv.clone());
-                        let oa = std::mem::replace(&mut e.vars[ai as usize], acc.clone());
+                        let ov = std::mem::replace(&mut e.vars[vi.idx()], sv.clone());
+                        let oa = std::mem::replace(&mut e.vars[ai.idx()], acc.clone());
                         (ov, oa)
                     };
                     let acc_in = acc.clone();
                     let mut stop = false;
                     let r = eval(update, acc_in, env, &mut |new_acc| {
                         acc = new_acc.clone();
-                        env.borrow_mut().vars[ai as usize] = new_acc.clone();
+                        env.borrow_mut().vars[ai.idx()] = new_acc.clone();
                         let c = if let Some(ex) = extract {
                             eval_path(ex, new_acc.clone(), env, cb)?
                         } else {
@@ -7063,8 +7063,8 @@ fn eval_foreach_valuegen_path(
                     });
                     {
                         let mut e = env.borrow_mut();
-                        e.vars[ai as usize] = old_acc;
-                        e.vars[vi as usize] = old_var;
+                        e.vars[ai.idx()] = old_acc;
+                        e.vars[vi.idx()] = old_var;
                     }
                     r?;
                     if stop { return Ok(false); }

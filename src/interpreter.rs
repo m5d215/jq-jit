@@ -494,7 +494,7 @@ fn expr_is_pure_scalar(e: &crate::ir::Expr) -> bool {
 /// True if `expr` contains a `LoadVar` reference to `var_index`. Used by the
 /// LetBinding inliner to decide whether substitution would actually use the
 /// bound value or only need to keep it for its side effect.
-fn expr_references_var(expr: &crate::ir::Expr, var_index: u16) -> bool {
+fn expr_references_var(expr: &crate::ir::Expr, var_index: crate::ir::VarIdx) -> bool {
     use crate::ir::Expr;
     match expr {
         Expr::LoadVar { var_index: idx } => *idx == var_index,
@@ -573,9 +573,9 @@ fn expr_references_var(expr: &crate::ir::Expr, var_index: u16) -> bool {
 /// `dot_same`; every other (or unenumerated) construct is treated as rebinding
 /// `.`, so a reference found there is reported (the inliner just declines the
 /// optimization and keeps the binding).
-fn var_in_rebound_dot_scope(expr: &crate::ir::Expr, var_index: u16) -> bool {
+fn var_in_rebound_dot_scope(expr: &crate::ir::Expr, var_index: crate::ir::VarIdx) -> bool {
     use crate::ir::{Expr, StringPart};
-    fn walk(e: &Expr, var: u16, dot_same: bool) -> bool {
+    fn walk(e: &Expr, var: crate::ir::VarIdx, dot_same: bool) -> bool {
         match e {
             Expr::LoadVar { var_index: v } => *v == var && !dot_same,
             // Dot-preserving: every sub-expression sees the same `.`.

@@ -3,6 +3,31 @@
 //! Every IR node is a generator: it takes an input Value and produces zero or more
 //! output Values. This unified model eliminates the generator-in-scalar-context problem.
 
+/// Index of a variable slot in the evaluation environment.
+///
+/// Variable slots, function ids, and label ids are all small integers; this
+/// newtype keeps the variable-slot domain from being mixed with the others
+/// (#1033). The raw slot number stays public so counter arithmetic at
+/// allocation sites stays local (`VarIdx(v.0 + 1)`); cross-layer plumbing
+/// must carry `VarIdx`, dropping to the raw `u16` only at the JIT/FFI
+/// boundary where indices become machine-code immediates.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct VarIdx(pub u16);
+
+impl VarIdx {
+    /// Slot position for direct slice/`Vec` indexing.
+    #[inline(always)]
+    pub const fn idx(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl std::fmt::Display for VarIdx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// A filter expression in the IR.
 #[derive(Debug, Clone)]
 pub enum Expr {
@@ -88,22 +113,22 @@ pub enum Expr {
 
     /// Variable binding: `expr as $var | body`
     LetBinding {
-        var_index: u16,
+        var_index: VarIdx,
         value: Box<Expr>,
         body: Box<Expr>,
     },
 
     /// Variable reference: `$var`
     LoadVar {
-        var_index: u16,
+        var_index: VarIdx,
     },
 
     /// Reduce: `reduce source as $var (init; update)`
     Reduce {
         source: Box<Expr>,
         init: Box<Expr>,
-        var_index: u16,
-        acc_index: u16,
+        var_index: VarIdx,
+        acc_index: VarIdx,
         update: Box<Expr>,
     },
 
@@ -111,8 +136,8 @@ pub enum Expr {
     Foreach {
         source: Box<Expr>,
         init: Box<Expr>,
-        var_index: u16,
-        acc_index: u16,
+        var_index: VarIdx,
+        acc_index: VarIdx,
         update: Box<Expr>,
         extract: Option<Box<Expr>>,
     },
@@ -152,13 +177,13 @@ pub enum Expr {
 
     /// Label-break: `label $name | body`
     Label {
-        var_index: u16,
+        var_index: VarIdx,
         body: Box<Expr>,
     },
 
     /// Break out of label
     Break {
-        var_index: u16,
+        var_index: VarIdx,
         value: Box<Expr>,
     },
 
@@ -549,7 +574,7 @@ pub struct CompiledFunc {
     pub name: Option<String>,
     pub nargs: usize,
     pub body: Expr,
-    pub param_vars: Vec<u16>,
+    pub param_vars: Vec<VarIdx>,
 }
 
 // ============================================================================
@@ -907,7 +932,7 @@ impl Expr {
     }
 
     /// Substitute all LoadVar references with the given var_index with the replacement expression.
-    pub fn substitute_var(&self, var_index: u16, replacement: &Expr) -> Expr {
+    pub fn substitute_var(&self, var_index: VarIdx, replacement: &Expr) -> Expr {
         match self {
             Expr::LoadVar { var_index: idx } if *idx == var_index => replacement.clone(),
             Expr::LoadVar { .. } | Expr::Literal(_) | Expr::Input | Expr::Empty
