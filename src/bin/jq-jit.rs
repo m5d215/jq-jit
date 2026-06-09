@@ -2346,9 +2346,49 @@ fn real_main() {
         }
     }
 
+    // `--args` / `--jsonargs` are *mode* flags, not terminal separators (#957):
+    // after one, jq keeps parsing option flags and only collects non-flag tokens
+    // as positional arguments. `args_mode` is None until one is seen, then
+    // Some(false) for `--args` (string positionals) / Some(true) for `--jsonargs`
+    // (JSON positionals). A bare `--` ends option parsing entirely.
+    let mut args_mode: Option<bool> = None;
+    let mut end_of_options = false;
+
+    // Push one operand (a non-option token, or any token after `--`). The first
+    // such token always fills the filter slot — even in args mode, jq treats
+    // `jq -n --args a b` as filter `a` with positional `b`. Once the filter is
+    // set, a `--args`/`--jsonargs` mode routes operands to positional string /
+    // JSON args; otherwise they are input files.
+    macro_rules! push_operand {
+        ($s:expr) => {{
+            let s: &str = $s;
+            if filter_str.is_none() {
+                filter_str = Some(s.to_string());
+            } else {
+                match args_mode {
+                    Some(true) => match json_to_value(s) {
+                        Ok(val) => positional_args.push(val),
+                        Err(e) => {
+                            eprintln!("jq: Invalid JSON text passed to --jsonargs: {}", e);
+                            process::exit(2);
+                        }
+                    },
+                    Some(false) => positional_args.push(Value::from_str(s)),
+                    None => files.push(s.to_string()),
+                }
+            }
+        }};
+    }
+
     let mut i = 0;
     while i < expanded_args.len() {
         let arg = &expanded_args[i];
+        // Past a `--`, every remaining token is an operand — no option parsing.
+        if end_of_options {
+            push_operand!(arg.as_str());
+            i += 1;
+            continue;
+        }
         match arg.as_str() {
             "-c" | "--compact-output" => { compact = true; tab = false; }
             "-r" | "--raw-output" => raw_output = true,
@@ -2471,30 +2511,12 @@ fn real_main() {
                     lib_dirs.push(expanded_args[i].clone());
                 }
             }
-            "--args" => {
-                // Remaining arguments are positional string args
-                i += 1;
-                while i < expanded_args.len() {
-                    positional_args.push(Value::from_str(&expanded_args[i]));
-                    i += 1;
-                }
-                break;
-            }
-            "--jsonargs" => {
-                // Remaining arguments are positional JSON args
-                i += 1;
-                while i < expanded_args.len() {
-                    match json_to_value(&expanded_args[i]) {
-                        Ok(val) => positional_args.push(val),
-                        Err(e) => {
-                            eprintln!("jq: Invalid JSON text passed to --jsonargs: {}", e);
-                            process::exit(2);
-                        }
-                    }
-                    i += 1;
-                }
-                break;
-            }
+            // Mode flags: subsequent non-option tokens are collected as
+            // positional string / JSON args, while option flags keep parsing.
+            "--args" => { args_mode = Some(false); }
+            "--jsonargs" => { args_mode = Some(true); }
+            // End of options: every remaining token is an operand.
+            "--" => { end_of_options = true; }
             "--slurpfile" => {
                 if i + 2 < expanded_args.len() {
                     let name = expanded_args[i + 1].clone();
@@ -2547,16 +2569,15 @@ fn real_main() {
                 eprintln!("jq: Unknown option: {}", s);
                 process::exit(2);
             }
-            s if s.starts_with('-') && s != "-" && filter_str.is_some() => {
+            // An unknown `-`-prefixed flag errors once the filter is set or a
+            // `--args`/`--jsonargs` mode is active (jq still rejects stray flags
+            // in args mode rather than collecting them as positionals). #957
+            s if s.starts_with('-') && s != "-" && (filter_str.is_some() || args_mode.is_some()) => {
                 eprintln!("jq: Unknown option: {}", s);
                 process::exit(2);
             }
             _ => {
-                if filter_str.is_none() {
-                    filter_str = Some(arg.clone());
-                } else {
-                    files.push(arg.clone());
-                }
+                push_operand!(arg.as_str());
             }
         }
         i += 1;
