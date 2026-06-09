@@ -13107,3 +13107,18 @@ null
 {"ab":1}
 null
 {"a\u007fb":1}
+
+# #984: IN/2 short-circuits its source generator at the first match (no drain)
+IN(2, error("x"); 2)
+null
+true
+
+# #984: IN/2 stops consuming src once a match is found (select idiom)
+[.[] | select(.x | IN(1, error; 1))]
+[{"x":1},{"x":9}]
+[{"x":1},{"x":9}]
+
+# #984: IN/2 still returns false when no source value matches
+IN(1, 2, 3; 9)
+null
+false
