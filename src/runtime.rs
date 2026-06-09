@@ -1896,9 +1896,11 @@ fn rt_from_entries(v: &Value) -> Result<Value> {
             for entry in a.iter() {
                 match entry {
                     Value::Obj(ObjInner(o)) => {
-                        // jq resolves the key via `.key // .key_ // .Key // .name // .Name`
+                        // jq 1.8.1 resolves the key via `.key // .Key // .name // .Name`
                         // — `//` skips null/false — and errors when the resolved key is
-                        // not a string. Matches jq 1.8.1 wording.
+                        // not a string. (`key_`, `.k`, `.K`, `.N` are NOT aliases in
+                        // 1.8.1; `key_` previously here made jq-jit accept entries jq
+                        // rejects and pick the wrong key — #976.)
                         let pick_truthy = |name: &str| -> Option<&Value> {
                             match o.get(name) {
                                 Some(v) if !matches!(v, Value::Null | Value::False) => Some(v),
@@ -1906,7 +1908,6 @@ fn rt_from_entries(v: &Value) -> Result<Value> {
                             }
                         };
                         let key = pick_truthy("key")
-                            .or_else(|| pick_truthy("key_"))
                             .or_else(|| pick_truthy("Key"))
                             .or_else(|| pick_truthy("name"))
                             .or_else(|| pick_truthy("Name"))
