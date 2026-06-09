@@ -5922,12 +5922,35 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 cb(pv)
             })
         }
-        Expr::FuncCall { func_id, .. } => {
+        Expr::FuncCall { func_id, args } => {
             let func = env.borrow().funcs.get(*func_id).cloned();
-            if let Some(f) = func {
+            let f = match func {
+                Some(f) => f,
+                None => bail!("undefined function id {}", func_id),
+            };
+            // A path forwarded through a filter parameter (`def f(g): g; path(f(.a))`)
+            // must keep its provenance: jq treats the closure argument as
+            // path-transparent. Mirror the value-mode call by substituting the
+            // argument expressions into the body before collecting paths, so a
+            // parameter reference resolves to the path of the forwarded filter
+            // rather than evaluating to a value (which bailed "Invalid path
+            // expression with result null"). See #982.
+            if f.param_vars.is_empty() || args.is_empty() {
                 eval_path(&f.body, input, env, cb)
+            } else if contains_func_call(&f.body, *func_id) {
+                // Recursive body: rename its local bindings to fresh slots so
+                // concurrently-active frames don't share var indices (matching
+                // the value-mode recursive call path).
+                let nv_before = env.borrow().next_var;
+                let mut nv = nv_before;
+                let body = substitute_and_rename(&f.body, &f.param_vars, args, &mut nv);
+                env.borrow_mut().next_var = nv;
+                let result = eval_path(&body, input, env, cb);
+                env.borrow_mut().next_var = nv_before;
+                result
             } else {
-                bail!("undefined function id {}", func_id)
+                let body = substitute_params(&f.body, &f.param_vars, args);
+                eval_path(&body, input, env, cb)
             }
         }
         Expr::TryCatch { try_expr, catch_expr, restore_dot } => {

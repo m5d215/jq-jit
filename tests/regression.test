@@ -13152,3 +13152,33 @@ null
 "ab" | [capture(("(?<x>a)","(?<y>b)"); ("","g"))]
 null
 [{"x":"a"},{"y":"b"},{"x":"a"},{"y":"b"}]
+
+# #982: a path forwarded through a user-def filter arg keeps provenance under path()
+def f(g): g; path(f(.a))
+{"a":1}
+["a"]
+
+# #982: assignment through a filter-arg-forwarded path
+def f(g): g; f(.a) = 99
+{"a":1}
+{"a":99}
+
+# #982: del() through a filter-arg-forwarded path
+def f(g): g; del(f(.a))
+{"a":1,"b":2}
+{"b":2}
+
+# #982: del through a helper def that forwards a path (SQL-style idiom)
+def k(c): select(c); [del(.[] | k(.>1))]
+[1,2,3]
+[[1]]
+
+# #982: path composes across the body and the closure arg
+def f(g): .a | g; path(f(.b))
+{"a":{"b":1}}
+["a","b"]
+
+# #982: multiple filter params forward the selected path
+def f(a;b): b; path(f(.x;.y))
+{"x":1,"y":2}
+["y"]
