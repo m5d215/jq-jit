@@ -82,3 +82,50 @@ fn bare_double_dash_is_end_of_options_without_args_mode() {
     assert!(ok);
     assert_eq!(out, "2");
 }
+
+// Issue #958: jq accepts ANY --arg/--argjson name into $ARGS.named (including
+// non-identifiers); only a valid identifier is also reachable as a bare $name.
+// jq-jit previously rejected every non-identifier name with a fatal error.
+
+#[test]
+fn arg_accepts_non_identifier_name_into_args_named() {
+    let (out, ok) = run(&["-cn", "$ARGS.named", "--arg", "1bad", "hello"]);
+    assert!(ok, "non-identifier --arg name must be accepted");
+    assert_eq!(out, r#"{"1bad":"hello"}"#);
+}
+
+#[test]
+fn arg_non_identifier_name_reachable_via_args_named_index() {
+    let (out, ok) = run(&["-cn", r#"$ARGS.named["a-b"]"#, "--arg", "a-b", "1"]);
+    assert!(ok);
+    assert_eq!(out, r#""1""#);
+}
+
+#[test]
+fn argjson_accepts_dotted_name() {
+    let (out, ok) = run(&["-cn", r#"$ARGS.named["c.d"]"#, "--argjson", "c.d", "5"]);
+    assert!(ok);
+    assert_eq!(out, "5");
+}
+
+#[test]
+fn arg_accepts_empty_name() {
+    let (out, ok) = run(&["-cn", "$ARGS.named", "--arg", "", "x"]);
+    assert!(ok);
+    assert_eq!(out, r#"{"":"x"}"#);
+}
+
+#[test]
+fn arg_name_with_special_chars_is_json_escaped() {
+    // A name containing a quote must produce a valid $ARGS.named object.
+    let (out, ok) = run(&["-cn", "$ARGS.named", "--arg", "a\"b", "x"]);
+    assert!(ok);
+    assert_eq!(out, r#"{"a\"b":"x"}"#);
+}
+
+#[test]
+fn valid_identifier_name_still_bound_as_bare_variable() {
+    let (out, ok) = run(&["-cn", "$a", "--arg", "a", "7"]);
+    assert!(ok);
+    assert_eq!(out, r#""7""#);
+}
