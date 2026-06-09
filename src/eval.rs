@@ -5374,22 +5374,46 @@ thread_local! {
     // foreach raises the depth, so ordinary path expressions are unaffected.
     // #915
     static FOREACH_ROOTLESS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+
+    // Document root for the active rootless navigating-source `foreach`
+    // extract/update, pushed in lockstep with `FOREACH_ROOTLESS`. A
+    // `$x`-anchored navigation (`$x.k`, `$x[i]`) forwards the element's source
+    // path, which is *document*-relative — so its key must be validated against
+    // the document the element lives in, not the rootless accumulator. Resolving
+    // it against the accumulator lenient-nulled a non-indexable element and let
+    // an invalid navigation slip through. #953
+    static FOREACH_DOC_ROOT: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
 }
 
 /// RAII guard that marks the current `eval_path` input as a rootless `foreach`
-/// accumulator for its lifetime (see [`FOREACH_ROOTLESS`]). Restores the prior
-/// depth on drop, so early returns / error propagation can't leak the state.
+/// accumulator for its lifetime (see [`FOREACH_ROOTLESS`]) and records the
+/// document root for `$x`-anchored key validation (see [`FOREACH_DOC_ROOT`]).
+/// Restores the prior state on drop, so early returns / error propagation can't
+/// leak it.
 struct RootlessAccGuard;
 impl RootlessAccGuard {
-    fn enter() -> Self {
+    fn enter(doc_root: Value) -> Self {
         FOREACH_ROOTLESS.with(|c| c.set(c.get() + 1));
+        FOREACH_DOC_ROOT.with(|s| s.borrow_mut().push(doc_root));
         RootlessAccGuard
     }
 }
 impl Drop for RootlessAccGuard {
     fn drop(&mut self) {
         FOREACH_ROOTLESS.with(|c| c.set(c.get().saturating_sub(1)));
+        FOREACH_DOC_ROOT.with(|s| { s.borrow_mut().pop(); });
     }
+}
+
+/// The document root of the innermost active rootless navigating-source
+/// `foreach` extract/update, or `None` when not inside one. Used to validate a
+/// `$x`-anchored navigation's key against the document rather than the rootless
+/// accumulator (#953).
+fn rootless_doc_root() -> Option<Value> {
+    if FOREACH_ROOTLESS.with(|c| c.get()) == 0 {
+        return None;
+    }
+    FOREACH_DOC_ROOT.with(|s| s.borrow().last().cloned())
 }
 
 thread_local! {
@@ -5595,7 +5619,18 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                         // current path can't accept the key type (issue #46).
                         // Only objects (with string keys), arrays (with number
                         // keys), and null (a no-op) are valid bases.
-                        let base_val = crate::runtime::rt_getpath(&input_for_check, bp).unwrap_or(Value::Null);
+                        //
+                        // In a rootless navigating-source `foreach` extract/
+                        // update, any base path reaching here is `$x`-anchored:
+                        // a `.`-anchored navigation bails the rootless sentinel
+                        // via the `Input` arm before producing a path. That path
+                        // is document-relative, so validate the key against the
+                        // document the element lives in — resolving it against
+                        // the rootless accumulator lenient-nulled a non-indexable
+                        // element and accepted an invalid navigation (#953).
+                        let base_val = rootless_doc_root()
+                            .map(|doc| crate::runtime::rt_getpath(&doc, bp).unwrap_or(Value::Null))
+                            .unwrap_or_else(|| crate::runtime::rt_getpath(&input_for_check, bp).unwrap_or(Value::Null));
                         match (&base_val, &key) {
                             (Value::Obj(_), Value::Str(_)) => {}
                             (Value::Arr(_), Value::Num(_, _)) => {}
@@ -6183,7 +6218,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                         // `.`/`.k` surfaces "result <acc>"/"near attempt …", a
                         // `$x` still forwards the element path. #915
                         let r = {
-                            let _rootless = RootlessAccGuard::enter();
+                            let _rootless = RootlessAccGuard::enter(input.clone());
                             eval_path(extract_expr, new_acc.clone(), env, cb)
                         };
                         FOREACH_PATH_BIND.with(|s| { s.borrow_mut().pop(); });
@@ -6751,7 +6786,7 @@ fn eval_foreach_nav_noextract_path(
             // accumulator-anchored UPDATE (`.`, `.k`) is an invalid path
             // expression while a `$x`-anchored one forwards the element path. #915
             let r = {
-                let _rootless = RootlessAccGuard::enter();
+                let _rootless = RootlessAccGuard::enter(input.clone());
                 eval_path(update, acc_val, env, &mut |upd_path| {
                     // The update result threads as the next accumulator value.
                     acc = crate::runtime::rt_getpath(input, &upd_path).unwrap_or(Value::Null);
