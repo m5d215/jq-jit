@@ -284,6 +284,11 @@ fn is_valid_var_name(name: &str) -> bool {
     bytes.all(|b| b == b'_' || b.is_ascii_alphanumeric())
 }
 
+/// jq's error when a string with an embedded NUL is dumped under
+/// `--raw-output0` (NUL is the record separator there). See #980.
+const RAW_OUTPUT0_NUL_ERR: &str =
+    "Cannot dump a string containing NUL with --raw-output0 option";
+
 fn print_jq_error(msg: &str) {
     let line = jq_jit::eval::get_input_line_number();
     if let Some(jq_msg) = msg.strip_prefix("__jqerror__:") {
@@ -3552,6 +3557,11 @@ fn real_main() {
                     let _ = write_value_compact_ext(out, result, sort_keys);
                 } else {
                     let formatted = format_value(result);
+                    if raw_output0 && formatted.as_bytes().contains(&0) {
+                        print_jq_error(RAW_OUTPUT0_NUL_ERR);
+                        *had_error = true;
+                        return Ok(true);
+                    }
                     let _ = write!(out, "{}", formatted);
                 }
             } else if compact && !raw_output {
@@ -3560,6 +3570,16 @@ fn real_main() {
                 let _ = write_value_pretty_line_color(out, result, indent_n, tab, sort_keys, color_output);
             } else {
                 let formatted = format_value(result);
+                // --raw-output0 reserves NUL as the record separator, so jq
+                // refuses to dump a (raw) string whose content contains an
+                // embedded NUL and errors instead (#980). Non-string outputs
+                // are JSON-encoded even under -r (NUL escaped to U+0000), so
+                // this only fires for genuine raw-string NUL content.
+                if raw_output0 && formatted.as_bytes().contains(&0) {
+                    print_jq_error(RAW_OUTPUT0_NUL_ERR);
+                    *had_error = true;
+                    return Ok(true);
+                }
                 let _ = out.write_all(formatted.as_bytes());
                 // --raw-output0 (#210): use NUL as record separator so the
                 // stream is xargs -0 -friendly. -r alone keeps the newline.
