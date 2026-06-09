@@ -5501,6 +5501,40 @@ fn source_nav_error(source: &Expr, input: &Value, env: &EnvRef) -> anyhow::Error
     anyhow::anyhow!("Invalid path expression near {}", tail)
 }
 
+/// Lower the path-transparent `*str` trim builtins to their jq slice
+/// definitions so the existing slice-path machinery produces jq's paths:
+///   `ltrimstr($x)` → `if startswith($x) then .[($x|length):] else . end`
+///   `rtrimstr($x)` → `if endswith($x)   then .[:-($x|length)] else . end`
+///   `trimstr($x)`  → `ltrimstr($x) | rtrimstr($x)`
+/// A no-match yields the identity path `[]`; a match yields the slice path
+/// (`[{start,end}]`), which `|=`/`=` reject with "Cannot update string slices"
+/// and `del` removes — exactly as jq does (#962). The startswith/endswith
+/// condition raises jq's "… requires string inputs" on a non-string input or
+/// argument. `$x` (`arg`) is evaluated against the same input as the builtin,
+/// matching `def`-bound semantics; it is referenced twice, so a generator
+/// argument (vanishingly rare in a path expression) is re-evaluated.
+fn lower_trimstr_path(name: &str, arg: &Expr) -> Expr {
+    let len_of_arg = || Expr::UnaryOp { op: crate::ir::UnaryOp::Length, operand: Box::new(arg.clone()) };
+    match name {
+        "ltrimstr" => Expr::IfThenElse {
+            cond: Box::new(Expr::CallBuiltin { name: "startswith".to_string(), args: vec![arg.clone()] }),
+            then_branch: Box::new(Expr::Slice { expr: Box::new(Expr::Input), from: Some(Box::new(len_of_arg())), to: None }),
+            else_branch: Box::new(Expr::Input),
+        },
+        "rtrimstr" => Expr::IfThenElse {
+            cond: Box::new(Expr::CallBuiltin { name: "endswith".to_string(), args: vec![arg.clone()] }),
+            then_branch: Box::new(Expr::Slice { expr: Box::new(Expr::Input), from: None, to: Some(Box::new(Expr::Negate { operand: Box::new(len_of_arg()) })) }),
+            else_branch: Box::new(Expr::Input),
+        },
+        // `trimstr` is `ltrimstr | rtrimstr`: a left match then a right match
+        // compose into a two-component slice path, exactly as jq emits.
+        _ => Expr::Pipe {
+            left: Box::new(lower_trimstr_path("ltrimstr", arg)),
+            right: Box::new(lower_trimstr_path("rtrimstr", arg)),
+        },
+    }
+}
+
 fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
     match expr {
         Expr::Input => {
@@ -6269,6 +6303,33 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
         Expr::UnaryOp { op: crate::ir::UnaryOp::All, operand } => {
             let gen = Expr::Each { input_expr: operand.clone() };
             eval_any_all_path(&gen, &Expr::Input, false, input, env, cb)
+        }
+        // The `*str` trim builtins are jq-defined slice expressions, so they are
+        // path-transparent: lower to that definition and reuse the slice-path
+        // machinery (no-match → identity `[]`, match → slice path). #962
+        Expr::CallBuiltin { name, args }
+            if args.len() == 1 && matches!(name.as_str(), "ltrimstr" | "rtrimstr" | "trimstr") =>
+        {
+            let lowered = lower_trimstr_path(name, &args[0]);
+            eval_path(&lowered, input, env, cb)
+        }
+        // The whitespace trim builtins (`trim`/`ltrim`/`rtrim`) are value-
+        // producing C builtins: jq keeps the path only when the result is the
+        // input unchanged (identity path `[]`); any actual trim has no path and
+        // surfaces "Invalid path expression with result <trimmed>". #962
+        Expr::UnaryOp { op, operand }
+            if matches!(op, crate::ir::UnaryOp::Trim | crate::ir::UnaryOp::Ltrim | crate::ir::UnaryOp::Rtrim) =>
+        {
+            let root = input.clone();
+            eval_path(operand, input, env, &mut |base_path| {
+                let base_val = crate::runtime::rt_getpath(&root, &base_path).unwrap_or(Value::Null);
+                let trimmed = eval_unaryop(*op, &base_val)?;
+                if trimmed == base_val {
+                    cb(base_path)
+                } else {
+                    bail!("__pathexpr_result__:{}", crate::value::value_to_json(&trimmed))
+                }
+            })
         }
         _ => {
             // Non-path-safe expression: evaluate, then accept the value as
