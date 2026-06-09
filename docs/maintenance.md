@@ -329,6 +329,18 @@ self.emit(JitOp::TypeCmpBranch {
 
 `else_label` 側は `flatten_scalar` で cond/update をセマンティックに評価する generic path に逃がす。cross-type 比較（`"hello" > 5` = true）を honour するのはそこだけ。新しい f64 fused path を書く時は必ずこの guard を付ける。タグ値は `src/value.rs` の `TAG_*` 定数。
 
+### regex の `$` / `^` アンカーは end-of-text のみ（既知の非互換・再起票しない / #820）
+
+jq（Oniguruma）の `$` は Perl 流で「文字列末尾 **または** 末尾改行 1 個の直前」にマッチする（内部改行の前には当たらない）。`^` も対称に始端のみ。jq-jit は Rust `regex` クレートを使っており、その `$` は **end-of-text のみ**、`(?m)$` は **全改行の前**（広すぎ）で、どちらも jq に一致しない。正攻法の lookahead 書き換え `$`→`(?=\n?\z)` は `regex` クレートが lookaround 非対応のため表現できず、消費型 `\n?\z` はゼロ幅でなくなりオフセット/`sub`/`gsub` を壊すので不可。
+
+```
+"a\n" | test("a$")        jq=true        jit=false
+"hello\n" | sub("o$";"0") jq="hell0\n"   jit="hello\n"
+"a\nb\n" | gsub("$";"X")  jq="a\nbX\nX"  jit="a\nb\nX"
+```
+
+単一根因（`$` 既定セマンティクス）が全 regex ビルトイン（`test`/`match`/`sub`/`gsub`/`scan`/`splits`/`capture`）に波及する。クリーンな修正は lookaround 対応エンジン（例 `fancy-regex`）への載せ替えだが、`regex` クレートの **線形時間保証（ReDoS 耐性）を全 regex 経路で手放す** all-or-nothing な設計判断になり、エンジン構文拒否を追う #727 と一体で検討すべき。意図的トレードオフとして **据え置き（#820 を wontfix で close 済）**。bug sweep の regex レンズでこの `$`/`^` 差異を見つけても **再起票しない**。差異の実害は haystack に末尾改行があるケースに限られ、`^…$` 全体マッチの最頻用法では出ない。
+
 ---
 
 ## 4. 典型的なデバッグの流れ
