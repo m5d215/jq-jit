@@ -5724,7 +5724,14 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             }
         }
         Expr::Pipe { left, right } => {
+            // Track whether LEFT produced a path: if so, a `__pathexpr_result__`
+            // sentinel below came from RIGHT applied to a real `mid` value, so
+            // its json IS the offending value already — reporting it directly
+            // avoids re-running RIGHT on it (which double-applies a non-path
+            // transform: `path(.a | . + 2)` reported 9 instead of 7). #1005
+            let left_pathed = std::cell::Cell::new(false);
             let result = eval_path(left, input.clone(), env, &mut |lp| {
+                left_pathed.set(true);
                 let mid = crate::runtime::rt_getpath(&input, &lp).unwrap_or(Value::Null);
                 eval_path(right, mid.clone(), env, &mut |rp| {
                     let mut p = match &lp { Value::Arr(a)=>a.as_ref().clone(), _=>vec![] };
@@ -5736,6 +5743,11 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 Err(e) => {
                     let msg = format!("{}", e);
                     if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
+                        if left_pathed.get() {
+                            // Sentinel originates from RIGHT on a navigated value;
+                            // json is the already-computed result. Don't re-eval.
+                            bail!("Invalid path expression with result {}", trunc_path_dump(json));
+                        }
                         match right.as_ref() {
                             Expr::Index { key, .. } | Expr::IndexOpt { key, .. } => {
                                 let mut key_val = Value::Null;
