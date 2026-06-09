@@ -7080,6 +7080,11 @@ fn eval_call_builtin(name: &str, args: &[Expr], input: Value, env: &EnvRef, cb: 
         ("halt_error", 1) => {
             return eval(&args[0], input.clone(), env, &mut |code_val| {
                 let code = match &code_val {
+                    // jq clamps any negative halt_error code to 0 (still emitting
+                    // the stderr payload); without this, `n as i32` -> the OS
+                    // truncates to `n & 0xff`, so halt_error(-1) wrongly exits 255
+                    // instead of 0 (#979).
+                    Value::Num(n, _) if *n < 0.0 => 0,
                     Value::Num(n, _) => *n as i32,
                     _ => bail!(
                         "{} halt_error/1: number required",
