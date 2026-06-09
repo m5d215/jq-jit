@@ -1832,11 +1832,7 @@ fn eval_update_body(
         let mut paths = Vec::new();
         let path_result = eval_path(path_expr, input.clone(), env, &mut |p| { paths.push(p); Ok(true) });
         if let Err(e) = path_result {
-            let msg = format!("{}", e);
-            if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
-                bail!("Invalid path expression with result {}", trunc_path_dump(json));
-            }
-            return Err(e);
+            return Err(invalid_path_expr_err(e));
         }
         let mut result = input;
         let mut del_paths = Vec::new();
@@ -1894,11 +1890,7 @@ fn eval_update_body(
         Ok(true)
     });
     if let Err(e) = path_result {
-        let msg = format!("{}", e);
-        if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
-            bail!("Invalid path expression with result {}", trunc_path_dump(json));
-        }
-        return Err(e);
+        return Err(invalid_path_expr_err(e));
     }
     if !del_paths.is_empty() {
         let dp = Value::Arr(Rc::new(del_paths));
@@ -1929,11 +1921,7 @@ fn eval_assign_body(
             let mut paths = Vec::new();
             let path_result = eval_path(path_expr, input.clone(), env, &mut |p| { paths.push(p); Ok(true) });
             if let Err(e) = path_result {
-                let msg = format!("{}", e);
-                if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
-                    bail!("Invalid path expression with result {}", trunc_path_dump(json));
-                }
-                return Err(e);
+                return Err(invalid_path_expr_err(e));
             }
             let mut result = input;
             for path in &paths {
@@ -1955,11 +1943,7 @@ fn eval_assign_body(
             Ok(true)
         });
         if let Err(e) = path_result {
-            let msg = format!("{}", e);
-            if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
-                bail!("Invalid path expression with result {}", trunc_path_dump(json));
-            }
-            return Err(e);
+            return Err(invalid_path_expr_err(e));
         }
         return cb(result);
     }
@@ -1968,11 +1952,7 @@ fn eval_assign_body(
             let mut paths = Vec::new();
             let path_result = eval_path(path_expr, input.clone(), env, &mut |p| { paths.push(p); Ok(true) });
             if let Err(e) = path_result {
-                let msg = format!("{}", e);
-                if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
-                    bail!("Invalid path expression with result {}", trunc_path_dump(json));
-                }
-                return Err(e);
+                return Err(invalid_path_expr_err(e));
             }
             let mut result = input.clone();
             for path in &paths {
@@ -1994,11 +1974,7 @@ fn eval_assign_body(
             Ok(true)
         });
         if let Err(e) = path_result {
-            let msg = format!("{}", e);
-            if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
-                bail!("Invalid path expression with result {}", trunc_path_dump(json));
-            }
-            return Err(e);
+            return Err(invalid_path_expr_err(e));
         }
         cb(result)
     })
@@ -3334,13 +3310,7 @@ pub fn eval(
         Expr::PathExpr { expr: path_expr } => {
             let result = eval_path(path_expr, input, env, cb);
             match result {
-                Err(e) => {
-                    let msg = format!("{}", e);
-                    if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
-                        bail!("Invalid path expression with result {}", trunc_path_dump(json));
-                    }
-                    Err(e)
-                }
+                Err(e) => Err(invalid_path_expr_err(e)),
                 other => other,
             }
         }
@@ -5370,13 +5340,7 @@ pub fn eval_path_standalone(path_expr: &Expr, input: Value, env_ref: &Rc<RefCell
         Ok(true)
     });
     match result {
-        Err(e) => {
-            let msg = format!("{}", e);
-            if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
-                bail!("Invalid path expression with result {}", trunc_path_dump(json));
-            }
-            Err(e)
-        }
+        Err(e) => Err(invalid_path_expr_err(e)),
         Ok(_) => Ok(Value::Arr(Rc::new(results))),
     }
 }
@@ -5440,7 +5404,7 @@ thread_local! {
     // Depth>0 means the `eval_path` INPUT is a rootless `foreach` accumulator:
     // a navigating source (`.[]`) owns the path register, so the accumulator
     // carries no provenance. In that state the bare identity `.` surfaces the
-    // `__pathexpr_result__` sentinel (→ "Invalid path expression with result
+    // PathResultSignal (→ "Invalid path expression with result
     // <acc>") and a navigation off it (`.a`) becomes "near attempt to access …"
     // via the existing Index/Each recovery, while a `$x` reference still
     // forwards its source path (`LoadVar` never touches the identity arm). Only
@@ -5574,6 +5538,19 @@ fn emit_slice_path(
 /// `strncpy`; we cut at the largest char boundary at or below byte 26 so the
 /// message stays valid UTF-8 (identical to jq for ASCII, which covers the
 /// "result <X>" and "near attempt to access <K> of <V>" sinks). #870 follow-up.
+/// Rewrite a [`PathResultSignal`](crate::signal::PathResultSignal) into the
+/// user-facing "Invalid path expression with result ..." error; any other
+/// error passes through unchanged.
+fn invalid_path_expr_err(e: anyhow::Error) -> anyhow::Error {
+    match crate::signal::take_path_result(&e) {
+        Some(v) => anyhow::anyhow!(
+            "Invalid path expression with result {}",
+            trunc_path_dump(&crate::value::value_to_json(&v))
+        ),
+        None => e,
+    }
+}
+
 fn trunc_path_dump(s: &str) -> String {
     if s.len() <= 29 {
         return s.to_string();
@@ -5664,10 +5641,10 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             // A rootless `foreach` accumulator has no path: the identity `.`
             // surfaces as the sink's "Invalid path expression with result
             // <acc>" rather than the root path `[]`. Navigation off it (`.a`)
-            // bails the same sentinel from the base, which the enclosing
+            // raises the same signal from the base, which the enclosing
             // Index/Each arm rewrites into "near attempt to access …". #915
             if FOREACH_ROOTLESS.with(|c| c.get()) > 0 {
-                bail!("__pathexpr_result__:{}", crate::value::value_to_json(&input));
+                return Err(crate::signal::PathResultSignal::raise(&input));
             }
             cb(Value::Arr(Rc::new(vec![])))
         }
@@ -5748,8 +5725,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             });
             match result {
                 Err(e) if !cb_called.get() => {
-                    let msg = format!("{}", e);
-                    if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
+                    if let Some(pv) = crate::signal::take_path_result(&e) {
                         let mut key_val = Value::Null;
                         let _ = eval(ke, input, env, &mut |k| { key_val = k; Ok(true) });
                         let key_desc = match &key_val {
@@ -5757,7 +5733,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                             Value::Str(s) => format!("element \"{}\" of", s),
                             _ => format!("element {} of", crate::value::value_to_json(&key_val)),
                         };
-                        bail!("Invalid path expression near attempt to access {} {}", key_desc, trunc_path_dump(json));
+                        bail!("Invalid path expression near attempt to access {} {}", key_desc, trunc_path_dump(&crate::value::value_to_json(&pv)));
                     }
                     Err(e)
                 }
@@ -5784,9 +5760,8 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             });
             match result {
                 Err(e) if !cb_called.get() => {
-                    let msg = format!("{}", e);
-                    if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
-                        bail!("Invalid path expression near attempt to iterate through {}", json);
+                    if let Some(pv) = crate::signal::take_path_result(&e) {
+                        bail!("Invalid path expression near attempt to iterate through {}", crate::value::value_to_json(&pv));
                     }
                     Err(e)
                 }
@@ -5794,9 +5769,9 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             }
         }
         Expr::Pipe { left, right } => {
-            // Track whether LEFT produced a path: if so, a `__pathexpr_result__`
-            // sentinel below came from RIGHT applied to a real `mid` value, so
-            // its json IS the offending value already — reporting it directly
+            // Track whether LEFT produced a path: if so, a PathResultSignal
+            // below came from RIGHT applied to a real `mid` value, so its
+            // payload IS the offending value already — reporting it directly
             // avoids re-running RIGHT on it (which double-applies a non-path
             // transform: `path(.a | . + 2)` reported 9 instead of 7). #1005
             let left_pathed = std::cell::Cell::new(false);
@@ -5811,12 +5786,11 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             });
             match result {
                 Err(e) => {
-                    let msg = format!("{}", e);
-                    if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
+                    if let Some(pv) = crate::signal::take_path_result(&e) {
                         if left_pathed.get() {
-                            // Sentinel originates from RIGHT on a navigated value;
-                            // json is the already-computed result. Don't re-eval.
-                            bail!("Invalid path expression with result {}", trunc_path_dump(json));
+                            // The signal originates from RIGHT on a navigated value;
+                            // its payload is the already-computed result. Don't re-eval.
+                            bail!("Invalid path expression with result {}", trunc_path_dump(&crate::value::value_to_json(&pv)));
                         }
                         match right.as_ref() {
                             Expr::Index { key, .. } | Expr::IndexOpt { key, .. } => {
@@ -5827,10 +5801,10 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                                     Value::Str(s) => format!("element \"{}\" of", s),
                                     _ => format!("element {} of", crate::value::value_to_json(&key_val)),
                                 };
-                                bail!("Invalid path expression near attempt to access {} {}", key_desc, trunc_path_dump(json));
+                                bail!("Invalid path expression near attempt to access {} {}", key_desc, trunc_path_dump(&crate::value::value_to_json(&pv)));
                             }
                             Expr::Each { .. } | Expr::EachOpt { .. } => {
-                                bail!("Invalid path expression near attempt to iterate through {}", json);
+                                bail!("Invalid path expression near attempt to iterate through {}", crate::value::value_to_json(&pv));
                             }
                             _ => {
                                 // jq evaluates `A | B` in path context by running B
@@ -5845,8 +5819,9 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                                 // first hop (`near attempt to access element 0 of
                                 // [1]`); an identity B leaves the value at the sink
                                 // (`result <A>`). #839
-                                match crate::value::json_to_value(json) {
-                                    Ok(v) => {
+                                {
+                                    let v = pv;
+                                    {
                                         let mut nav: Option<Value> = None;
                                         match eval_path(right, v.clone(), env, &mut |rp| {
                                             nav = Some(rp);
@@ -5867,7 +5842,6 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                                             },
                                         }
                                     }
-                                    Err(_) => Err(e),
                                 }
                             }
                         }
@@ -6151,7 +6125,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             {
                 return cb(Value::Arr(Rc::new(vec![])));
             }
-            bail!("__pathexpr_result__:{}", crate::value::value_to_json(&v));
+            return Err(crate::signal::PathResultSignal::raise(&v));
         }
         Expr::Label { var_index, body } => {
             // Forward the body's paths; a matching `break` ends the label
@@ -6263,8 +6237,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 match eval_path(source, input.clone(), env, &mut |_p| { nav = true; Ok(false) }) {
                     Ok(_) => {}
                     Err(e) => {
-                        let m = format!("{}", e);
-                        if !m.starts_with("__pathexpr_result__:") { return Err(e); }
+                        if !crate::signal::is_path_result(&e) { return Err(e); }
                     }
                 }
                 nav
@@ -6293,7 +6266,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                     Ok(true)
                 }) {
                     Ok(_) => {}
-                    Err(e) => { if !format!("{}", e).starts_with("__pathexpr_result__:") { return Err(e); } }
+                    Err(e) => { if !crate::signal::is_path_result(&e) { return Err(e); } }
                 }
                 if init_navigated {
                     return Err(source_nav_error(source, &input, env));
@@ -6356,8 +6329,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             { let mut e = env.borrow_mut(); e.ensure_var(vi); e.ensure_var(ai); }
             let mut acc_paths: Vec<Value> = Vec::new();
             if let Err(e) = eval_path(init, input.clone(), env, &mut |p| { acc_paths.push(p); Ok(true) }) {
-                let msg = format!("{}", e);
-                if msg.starts_with("__pathexpr_result__:") {
+                if crate::signal::is_path_result(&e) {
                     // A non-path INIT means the reduce isn't path-trackable: jq
                     // treats it as a value computation whose (rootless) result
                     // flows to the sink. Compute that value and defer it as the
@@ -6375,7 +6347,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                     let mut has = false;
                     eval(&reduced, input, env, &mut |v| { last_val = v; has = true; Ok(true) })?;
                     if has {
-                        bail!("__pathexpr_result__:{}", crate::value::value_to_json(&last_val));
+                        return Err(crate::signal::PathResultSignal::raise(&last_val));
                     }
                     return Ok(true);
                 }
@@ -6391,7 +6363,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             // (.; .))` is `[]`, not an error. The previous code rejected *all*
             // navigating sources, inverting the rule (#915, regressed the #838
             // guard direction). Probe in path mode only when the source reads
-            // `.`: a value generator surfaces as a `__pathexpr_result__`
+            // `.`: a value generator surfaces as a PathResultSignal
             // sentinel (→ swallow), other errors propagate, and a source that
             // doesn't read `.` is never probed (so a stream `input` is not
             // evaluated twice).
@@ -6401,8 +6373,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 match eval_path(source, input.clone(), env, &mut |_p| { navigated = true; Ok(false) }) {
                     Ok(_) => {}
                     Err(e) => {
-                        let msg = format!("{}", e);
-                        if !msg.starts_with("__pathexpr_result__:") { return Err(e); }
+                        if !crate::signal::is_path_result(&e) { return Err(e); }
                     }
                 }
                 if navigated {
@@ -6496,7 +6467,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 if trimmed == base_val {
                     cb(base_path)
                 } else {
-                    bail!("__pathexpr_result__:{}", crate::value::value_to_json(&trimmed))
+                    Err(crate::signal::PathResultSignal::raise(&trimmed))
                 }
             })
         }
@@ -6542,7 +6513,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 if is_id_value && result_val == input_for_check {
                     return cb(Value::Arr(Rc::new(vec![])));
                 }
-                bail!("__pathexpr_result__:{}", crate::value::value_to_json(&result_val));
+                return Err(crate::signal::PathResultSignal::raise(&result_val));
             }
             Ok(true)
         }
@@ -6579,7 +6550,7 @@ fn eval_any_all_path(
         if b == input {
             cb(Value::Arr(Rc::new(vec![])))
         } else {
-            bail!("__pathexpr_result__:{}", crate::value::value_to_json(&b));
+            return Err(crate::signal::PathResultSignal::raise(&b));
         }
     };
 
@@ -6590,7 +6561,7 @@ fn eval_any_all_path(
         let mut nav = false;
         match eval_path(generator, input.clone(), env, &mut |_p| { nav = true; Ok(false) }) {
             Ok(_) => {}
-            Err(e) => { if !format!("{}", e).starts_with("__pathexpr_result__:") { return Err(e); } }
+            Err(e) => { if !crate::signal::is_path_result(&e) { return Err(e); } }
         }
         nav
     } else {
@@ -6630,7 +6601,7 @@ fn eval_any_all_path(
                 }
             });
             if let Err(e) = pr {
-                if format!("{}", e).starts_with("__pathexpr_result__:") { rootless = true; }
+                if crate::signal::is_path_result(&e) { rootless = true; }
                 else { return Err(e); }
             }
             Ok(false)
@@ -6695,7 +6666,7 @@ fn eval_path_catch(
                 };
                 bail!("Invalid path expression near attempt to access {} {}", key_desc, trunc_path_dump(&crate::value::value_to_json(&payload)))
             }
-            _ => bail!("__pathexpr_result__:{}", crate::value::value_to_json(&payload)),
+            _ => Err(crate::signal::PathResultSignal::raise(&payload)),
         },
     }
 }
@@ -6854,7 +6825,7 @@ fn eval_path_navbind(
         Err(e) => {
             // A rootless source (non-path navigation) bails with the sentinel —
             // not a real error; let the caller bind it the ordinary way.
-            if format!("{}", e).starts_with("__pathexpr_result__:") {
+            if crate::signal::is_path_result(&e) {
                 return None;
             }
             return Some(Err(e));
@@ -7028,8 +6999,7 @@ fn eval_foreach_valuegen_path(
             Ok(true)
         }
         Err(e) => {
-            let m = format!("{}", e);
-            if !m.starts_with("__pathexpr_result__:") { return Err(e); }
+            if !crate::signal::is_path_result(&e) { return Err(e); }
             // VALUE-threaded accumulator (the `nth` counter): a bare `$x` in
             // EXTRACT is the source value, not a path, so it surfaces as the
             // sink's "result <x>" — no FOREACH_PATH_BIND is registered.
@@ -7055,7 +7025,7 @@ fn eval_foreach_valuegen_path(
                         let c = if let Some(ex) = extract {
                             eval_path(ex, new_acc.clone(), env, cb)?
                         } else {
-                            bail!("__pathexpr_result__:{}", crate::value::value_to_json(&new_acc));
+                            return Err(crate::signal::PathResultSignal::raise(&new_acc));
                         };
                         if !c { stop = true; }
                         Ok(c)
@@ -7901,7 +7871,7 @@ fn eval_skip(exp: &Expr, nval: &Value, input: Value, env: &EnvRef, cb: &mut dyn 
 // pick(f): For each path generated by f, set that path in the output
 fn eval_pick(f: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
     // Collect all paths generated by f (as path arrays). A non-path argument
-    // bails with the internal `__pathexpr_result__:<json>` sentinel; rewrite it
+    // bails with the internal PathResultSignal; rewrite it
     // to jq's user-facing message (catchable via try/catch), like the other
     // path-eval entry points. #848
     let mut paths: Vec<Value> = Vec::new();
@@ -7909,15 +7879,7 @@ fn eval_pick(f: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> 
         paths.push(path);
         Ok(true)
     })
-    .map_err(|e| {
-        let msg = format!("{}", e);
-        match msg.strip_prefix("__pathexpr_result__:") {
-            Some(json) => {
-                anyhow::anyhow!("Invalid path expression with result {}", trunc_path_dump(json))
-            }
-            None => e,
-        }
-    })?;
+    .map_err(invalid_path_expr_err)?;
     // Build result by setting each path
     let mut result = Value::Null;
     for path in &paths {
@@ -8226,15 +8188,7 @@ fn eval_del(f: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> G
     // type check (#842), and autovivified a missing parent to null (#843).
     let mut paths: Vec<Value> = Vec::new();
     eval_path(f, input.clone(), env, &mut |p| { paths.push(p); Ok(true) })
-        .map_err(|e| {
-            let msg = format!("{}", e);
-            match msg.strip_prefix("__pathexpr_result__:") {
-                Some(json) => {
-                anyhow::anyhow!("Invalid path expression with result {}", trunc_path_dump(json))
-            }
-                None => e,
-            }
-        })?;
+        .map_err(invalid_path_expr_err)?;
     let result = crate::runtime::rt_delpaths(&input, &Value::Arr(Rc::new(paths)))?;
     cb(result)
 }
