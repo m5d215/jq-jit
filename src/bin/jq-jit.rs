@@ -3614,12 +3614,16 @@ fn real_main() {
         }
         if let Err(e) = result {
             let msg = format!("{}", e);
-            if let Some(code_str) = msg.strip_prefix("__halt__:") {
-                // halt / halt_error: drain any buffered output, release
-                // our hold on stdout, then terminate with the requested
-                // exit status. Stderr (halt_error's message) was already
-                // written directly in eval.rs before the sentinel bailed.
-                let code: i32 = code_str.parse().unwrap_or(0);
+            // halt / halt_error: drain any buffered output, release our
+            // hold on stdout, then terminate with the requested exit
+            // status. Stderr (halt_error's message) was already written
+            // directly in eval.rs at raise time. The string form is the
+            // fallback for halts that crossed the JIT FFI boundary, where
+            // only the Display text survives (see src/signal.rs).
+            let halt_code = e.downcast_ref::<jq_jit::signal::HaltSignal>()
+                .map(|h| h.code)
+                .or_else(|| msg.strip_prefix("__halt__:").map(|c| c.parse().unwrap_or(0)));
+            if let Some(code) = halt_code {
                 if !cbuf.is_empty() {
                     let _ = out.write_all(cbuf);
                     cbuf.clear();

@@ -4,6 +4,7 @@ pub mod ir;
 pub mod runtime;
 pub mod parser;
 pub mod eval;
+pub mod signal;
 pub mod module;
 pub mod jit;
 pub mod fast_path;
