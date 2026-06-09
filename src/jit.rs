@@ -541,7 +541,7 @@ struct Flattener {
     /// Closure ops: key expressions for sort_by/group_by/etc.
     closure_ops: Vec<Expr>,
     /// Track which functions are currently being expanded (cycle detection)
-    expanding_funcs: HashSet<usize>,
+    expanding_funcs: HashSet<crate::ir::FuncId>,
     /// Pre-allocated Value constants for fused ops (hoisted out of per-call code).
     #[allow(clippy::vec_box)]
     value_constants: Vec<Box<Value>>,
@@ -620,12 +620,12 @@ impl Flattener {
     fn inline_func_calls(&mut self, expr: &Expr) -> Expr {
         match expr {
             Expr::FuncCall { func_id, args } => {
-                if *func_id >= self.funcs.len() { return expr.clone(); }
+                if func_id.idx() >= self.funcs.len() { return expr.clone(); }
                 if self.expanding_funcs.contains(func_id) {
                     self.has_unresolved_recursion = true;
                     return expr.clone();
                 }
-                let func = self.funcs[*func_id].clone();
+                let func = self.funcs[func_id.idx()].clone();
                 let body = if !func.param_vars.is_empty() && !args.is_empty() {
                     crate::eval::substitute_params(&func.body, &func.param_vars, args)
                 } else {
@@ -2211,9 +2211,9 @@ impl Flattener {
                 self.emit(JitOp::Label { id: end_lbl });
                 out
             }
-            Expr::FuncCall { func_id, args } if *func_id < self.funcs.len() && !self.expanding_funcs.contains(func_id) => {
+            Expr::FuncCall { func_id, args } if func_id.idx() < self.funcs.len() && !self.expanding_funcs.contains(func_id) => {
                 self.expanding_funcs.insert(*func_id);
-                let func = &self.funcs[*func_id].clone();
+                let func = &self.funcs[func_id.idx()].clone();
                 let body = if !func.param_vars.is_empty() && !args.is_empty() {
                     crate::eval::substitute_params(&func.body, &func.param_vars, args)
                 } else {
@@ -3386,11 +3386,11 @@ impl Flattener {
             }
 
             Expr::FuncCall { func_id, args } => {
-                if *func_id >= self.funcs.len() { return false; }
+                if func_id.idx() >= self.funcs.len() { return false; }
                 // Detect recursive function calls — not JIT-compilable
                 if self.expanding_funcs.contains(func_id) { return false; }
                 self.expanding_funcs.insert(*func_id);
-                let func = &self.funcs[*func_id].clone();
+                let func = &self.funcs[func_id.idx()].clone();
                 let body = if !func.param_vars.is_empty() && !args.is_empty() {
                     crate::eval::substitute_params(&func.body, &func.param_vars, args)
                 } else {

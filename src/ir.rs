@@ -28,6 +28,28 @@ impl std::fmt::Display for VarIdx {
     }
 }
 
+/// Id of a compiled function (slot in the `CompiledFunc` table).
+///
+/// Companion of [`VarIdx`] (#1033): keeps the function-id domain from being
+/// mixed with variable slots or other integer domains. The raw id stays
+/// public so table-slot minting stays local (`FuncId(table.len())`).
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FuncId(pub usize);
+
+impl FuncId {
+    /// Table position for direct slice/`Vec` indexing.
+    #[inline(always)]
+    pub const fn idx(self) -> usize {
+        self.0
+    }
+}
+
+impl std::fmt::Display for FuncId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// A filter expression in the IR.
 #[derive(Debug, Clone)]
 pub enum Expr {
@@ -238,7 +260,7 @@ pub enum Expr {
 
     /// User-defined function call
     FuncCall {
-        func_id: usize,
+        func_id: FuncId,
         args: Vec<Expr>,
     },
 

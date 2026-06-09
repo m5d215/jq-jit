@@ -2692,7 +2692,7 @@ impl Filter {
         // hides the stream read behind the call, and without descending we'd
         // report no-inputs and skip seeding the queue (#853). `visited` guards
         // against recursive/mutually-recursive defs.
-        fn walk(e: &Expr, funcs: &[crate::ir::CompiledFunc], visited: &mut Vec<usize>) -> bool {
+        fn walk(e: &Expr, funcs: &[crate::ir::CompiledFunc], visited: &mut Vec<crate::ir::FuncId>) -> bool {
             macro_rules! walk { ($x:expr) => { walk($x, funcs, visited) }; }
             match e {
                 Expr::ReadInput | Expr::ReadInputs => true,
@@ -2760,7 +2760,7 @@ impl Filter {
                     if args.iter().any(|a| walk!(a)) { return true; }
                     if visited.contains(func_id) { return false; }
                     visited.push(*func_id);
-                    funcs.get(*func_id).map_or(false, |f| walk(&f.body, funcs, visited))
+                    funcs.get(func_id.idx()).map_or(false, |f| walk(&f.body, funcs, visited))
                 }
                 _ => false,
             }
