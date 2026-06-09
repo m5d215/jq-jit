@@ -39,3 +39,83 @@ impl fmt::Display for HaltSignal {
 }
 
 impl std::error::Error for HaltSignal {}
+
+thread_local! {
+    /// Payload slot for the most recent [`PathResultSignal`]. `Value` holds
+    /// `Rc`s, so it cannot live inside an `anyhow::Error` (`Send + Sync`);
+    /// the value rides here and the marker error carries a serial number to
+    /// detect when a nested raise overwrote the slot before the outer signal
+    /// was consumed (the consumer then falls back to the display JSON, which
+    /// is exactly what the legacy string channel always did).
+    static PATH_RESULT: std::cell::RefCell<(u64, Option<crate::value::Value>)> =
+        const { std::cell::RefCell::new((0, None)) };
+}
+
+/// Path-mode value smuggling: a value-producing (non-path) expression under
+/// `path()` / assignment tracking surfaces its *result* through the error
+/// channel, and the enclosing path machinery either swallows it, rewrites it
+/// into the user-facing "Invalid path expression …" error, or re-raises it.
+/// Strictly eval-internal: every consumer converts it before the value
+/// crosses a public entry point (`eval_*_standalone`), so unlike
+/// [`HaltSignal`] it never rides the JIT string channel in normal operation.
+#[derive(Debug)]
+pub struct PathResultSignal {
+    serial: u64,
+    display: String,
+}
+
+impl PathResultSignal {
+    /// Stash `value` in the payload slot and build the marker error. The
+    /// Display keeps the legacy `__pathexpr_result__:<JSON>` sentinel form
+    /// (serialized with the same lossy `value_to_json` as before) so any
+    /// uncaught signal prints exactly as it used to.
+    pub(crate) fn raise(value: &crate::value::Value) -> anyhow::Error {
+        let display = format!(
+            "__pathexpr_result__:{}",
+            crate::value::value_to_json(value)
+        );
+        let serial = PATH_RESULT.with(|s| {
+            let mut s = s.borrow_mut();
+            s.0 += 1;
+            s.1 = Some(value.clone());
+            s.0
+        });
+        PathResultSignal { serial, display }.into()
+    }
+}
+
+impl fmt::Display for PathResultSignal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.display)
+    }
+}
+
+impl std::error::Error for PathResultSignal {}
+
+/// Whether `e` is a path-result signal (without consuming its payload).
+pub(crate) fn is_path_result(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<PathResultSignal>().is_some()
+}
+
+/// Recover the smuggled value from a path-result signal; `None` if `e` is a
+/// different error. Takes the payload slot when the serial still matches;
+/// a slot overwritten by a nested raise falls back to re-parsing the display
+/// JSON (lossy for non-finite numbers — the legacy channel's behavior).
+pub(crate) fn take_path_result(e: &anyhow::Error) -> Option<crate::value::Value> {
+    let sig = e.downcast_ref::<PathResultSignal>()?;
+    let slot = PATH_RESULT.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.0 == sig.serial { s.1.take() } else { None }
+    });
+    if let Some(v) = slot {
+        return Some(v);
+    }
+    let json = sig
+        .display
+        .strip_prefix("__pathexpr_result__:")
+        .unwrap_or(&sig.display);
+    Some(
+        crate::value::json_to_value(json)
+            .unwrap_or_else(|_| crate::value::Value::from_str(json)),
+    )
+}
