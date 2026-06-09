@@ -12927,3 +12927,58 @@ reduce .[] as $x (.; try (.sum += $x) catch "ERR")
 [-1|truncate_stream([])]
 99
 [[null]]
+
+# #962: ltrimstr no-match yields the identity path []
+path(ltrimstr("q"))
+"abc"
+[]
+
+# #962: ltrimstr match yields a slice path (jq-defined slice builtin)
+path(ltrimstr("a"))
+"abc"
+[{"start":1,"end":null}]
+
+# #962: rtrimstr match yields a trailing slice path
+path(rtrimstr("c"))
+"abc"
+[{"start":null,"end":-1}]
+
+# #962: trimstr match composes two slice components (ltrimstr | rtrimstr)
+path(trimstr("a"))
+"abca"
+[{"start":1,"end":null},{"start":null,"end":-1}]
+
+# #962: ltrimstr no-match under |= updates the whole value (identity path)
+ltrimstr("x") |= "Z"
+"abc"
+"Z"
+
+# #962: trim no-op under |= updates (whitespace-free input keeps identity path)
+trim |= "Z"
+"abc"
+"Z"
+
+# #962: trim that actually strips has no path -> invalid path expression
+try (trim|="Z") catch .
+" hi "
+"Invalid path expression with result \"hi\""
+
+# #962: del over a no-match *str trim removes nothing-indexable -> null
+del(ltrimstr("q"))
+"abc"
+null
+
+# #962: |= over a matched *str slice rejects like any string slice
+try (ltrimstr("a")|="Z") catch .
+"abc"
+"Cannot update string slices"
+
+# #962: trim is path-transparent through object navigation under |=
+.x |= trim
+{"x":" hi "}
+{"x":"hi"}
+
+# #962: trim no-op navigates to a valid path
+path(.x | trim)
+{"x":"hi"}
+["x"]

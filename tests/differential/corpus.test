@@ -4223,3 +4223,11 @@ try (reduce .[] as $x (.; .sum += $x)) catch .
 # #956: truncate_stream null/empty-event handling vs the depth
 [(-1|truncate_stream(.)), (0|truncate_stream(.))]
 99
+
+# #962: *str / whitespace trim builtins are path-transparent
+[path(ltrimstr("q")), path(ltrimstr("a")), path(rtrimstr("c")), path(trimstr("a"))]
+"abca"
+
+# #962: trim no-op under |= vs object navigation
+(.x |= trim)
+{"x":" hi "}
