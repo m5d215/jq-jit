@@ -4977,6 +4977,21 @@ fn real_main() {
                                 }
                                 compact_buf.push(b'\n');
                             }
+                        } else {
+                            // Field not located by the object scanner: either a
+                            // non-object input (jq raises `Cannot index <type>
+                            // with string`) or an object missing the field
+                            // (`.field` = null, `null|length` = 0). The raw path
+                            // silently dropping these masked the type error on
+                            // non-objects (#998). Defer to the JIT, which raises
+                            // the error or applies the length-0 comparison.
+                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                            if compact_buf.len() >= 1 << 17 {
+                                let _ = out.write_all(&compact_buf);
+                                compact_buf.clear();
+                            }
+                            return Ok(());
                         }
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -13995,6 +14010,18 @@ fn real_main() {
                             }
                             compact_buf.push(b'\n');
                         }
+                    } else {
+                        // Non-object input (jq raises `Cannot index <type> with
+                        // string`) or object missing the field (`null|length`=0).
+                        // Defer to the JIT instead of silently dropping, which
+                        // masked the type error on non-objects (#998).
+                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                        if compact_buf.len() >= 1 << 17 {
+                            let _ = out.write_all(&compact_buf);
+                            compact_buf.clear();
+                        }
+                        return Ok(());
                     }
                     if compact_buf.len() >= 1 << 17 {
                         let _ = out.write_all(&compact_buf);
