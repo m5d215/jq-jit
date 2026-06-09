@@ -7347,13 +7347,18 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()));
             return 0;
         }
-        // Fast path: ltrimstr/rtrimstr/trim (op 40/41/42) — null-arg form trims whitespace
+        // Fast path: trim/ltrim/rtrim (op 40/41/42 — see `unaryop_from_i32`)
+        // strip whitespace. The opcodes are Trim=40, Ltrim=41, Rtrim=42, so the
+        // map must be trim→`trim`, ltrim→`trim_start`, rtrim→`trim_end`. It was
+        // previously scrambled (40→trim_start, 41→trim_end, 42→trim), which only
+        // surfaced on the JIT `|=`/_modify apply route — standalone trim uses a
+        // different path — degenerating `ltrim`/`trim` to `rtrim` there (#963).
         if op >= 40 && op <= 42 {
             if let Value::Str(s) = &*input {
                 let r = match op {
-                    40 => s.trim_start(),
-                    41 => s.trim_end(),
-                    42 => s.trim(),
+                    40 => s.trim(),
+                    41 => s.trim_start(),
+                    42 => s.trim_end(),
                     _ => unreachable!(),
                 };
                 std::ptr::write(dst, Value::from_str(r));
