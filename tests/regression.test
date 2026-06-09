@@ -13252,3 +13252,33 @@ try ((recurse(.a)) = 9) catch "caught"
 try ((while(true; .a)) |= 9) catch "caught"
 {"a":{}}
 "caught"
+
+# #1018: NaN slice end-bound clamps to array length on assign (setpath)
+.[1:(nan)] = [9]
+[1,2,3,4]
+[1,9]
+
+# #1018: NaN slice end-bound clamps to length on update (|=)
+.[1:(nan)] |= reverse
+[1,2,3,4]
+[1,4,3,2]
+
+# #1018: object-form getpath with NaN end-bound returns the tail
+getpath([{"start":1,"end":(nan)}])
+[1,2,3,4]
+[2,3,4]
+
+# #1018: object-form del with NaN end-bound deletes through the tail
+del(.[{"start":1,"end":nan}])
+[0,1,2,3,4]
+[0]
+
+# #1018: non-literal NaN source (sqrt of negative) clamps end-bound on assign
+.[1:((-1)|sqrt)] = [9]
+[1,2,3,4]
+[1,9]
+
+# #1018: NaN start-bound still clamps to 0 (regression guard)
+.[(nan):3] = [9]
+[1,2,3,4]
+[9,4]
