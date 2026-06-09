@@ -4231,3 +4231,11 @@ try (reduce .[] as $x (.; .sum += $x)) catch .
 # #962: trim no-op under |= vs object navigation
 (.x |= trim)
 {"x":" hi "}
+
+# #961: @urid validates malformed escapes / raw non-ASCII (error via try/catch)
+[("%C3%A9","%41","caf%C3%A9","é") | try @urid catch "ERR:\(.)"]
+null
+
+# #961: @urid hard-errors on a malformed percent escape
+try @urid catch .
+"%GG"

@@ -4616,23 +4616,48 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
             Ok(r)
         }
         "urid" => {
+            // jq validates `@urid` input (#961): a `%` must be followed by two
+            // hex digits, and a maximal run of consecutive `%XX` escapes must
+            // decode to valid UTF-8 — a malformed escape (`%`, `%4`, `%GG`) or
+            // an ill-formed escaped byte sequence (`%80`, `%C3`, `%C0%80`) is a
+            // hard `"string (X) is not a valid uri encoding"` error. A *raw*
+            // (non-escaped) input byte ≥ 0x80 is instead replaced per-byte with
+            // U+FFFD (so `"é"` → two U+FFFD), and raw ASCII passes through.
             let bytes = s.as_bytes();
-            let mut decoded = Vec::new();
+            let uri_err = || anyhow::anyhow!(
+                "string ({}) is not a valid uri encoding",
+                crate::value::value_to_json(&Value::from_str(&s))
+            );
+            // Validate + flush the pending escaped-byte run as UTF-8.
+            let flush = |esc: &mut Vec<u8>, out: &mut String| -> Result<()> {
+                if !esc.is_empty() {
+                    match std::str::from_utf8(esc) {
+                        Ok(decoded) => out.push_str(decoded),
+                        Err(_) => return Err(uri_err()),
+                    }
+                    esc.clear();
+                }
+                Ok(())
+            };
+            let mut out = String::with_capacity(s.len());
+            let mut esc: Vec<u8> = Vec::new();
             let mut i = 0;
             while i < bytes.len() {
-                if bytes[i] == b'%' && i + 2 < bytes.len() {
-                    let hi = hex_val(bytes[i+1]);
-                    let lo = hex_val(bytes[i+2]);
-                    if let (Some(h), Some(l)) = (hi, lo) {
-                        decoded.push(h * 16 + l);
-                        i += 3;
-                        continue;
+                if bytes[i] == b'%' {
+                    match (bytes.get(i + 1).copied().and_then(hex_val),
+                           bytes.get(i + 2).copied().and_then(hex_val)) {
+                        (Some(h), Some(l)) => { esc.push(h * 16 + l); i += 3; }
+                        _ => return Err(uri_err()),
                     }
+                } else {
+                    flush(&mut esc, &mut out)?;
+                    let b = bytes[i];
+                    if b < 0x80 { out.push(b as char); } else { out.push('\u{FFFD}'); }
+                    i += 1;
                 }
-                decoded.push(bytes[i]);
-                i += 1;
             }
-            Ok(String::from_utf8_lossy(&decoded).into_owned())
+            flush(&mut esc, &mut out)?;
+            Ok(out)
         }
         "sh" => format_sh(val),
         "base64" => {
