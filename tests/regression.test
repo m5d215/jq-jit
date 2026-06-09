@@ -12982,3 +12982,38 @@ try (ltrimstr("a")|="Z") catch .
 path(.x | trim)
 {"x":"hi"}
 ["x"]
+
+# #961: @urid passes valid percent-escapes through
+@urid
+"%C3%A9"
+"é"
+
+# #961: @urid errors on a non-hex percent escape
+try @urid catch .
+"%GG"
+"string (\"%GG\") is not a valid uri encoding"
+
+# #961: @urid errors on a truncated percent escape
+try @urid catch .
+"%4"
+"string (\"%4\") is not a valid uri encoding"
+
+# #961: @urid errors when an escape decodes to invalid UTF-8
+try @urid catch .
+"%80"
+"string (\"%80\") is not a valid uri encoding"
+
+# #961: @urid errors on an overlong escaped sequence
+try @urid catch .
+"%C0%80"
+"string (\"%C0%80\") is not a valid uri encoding"
+
+# #961: @urid replaces a raw non-ASCII input byte per-byte with U+FFFD
+@urid
+"é"
+"��"
+
+# #961: @urid raw ASCII passes through, escaped non-ASCII decodes
+@urid
+"caf%C3%A9"
+"café"
