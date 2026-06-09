@@ -738,10 +738,6 @@ impl Value {
         }
     }
 
-    pub fn tag(&self) -> u64 {
-        unsafe { *(self as *const Value as *const u64) }
-    }
-
     pub fn type_name(&self) -> &'static str {
         match self {
             Value::Null => "null",
