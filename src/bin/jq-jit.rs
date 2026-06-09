@@ -2521,6 +2521,12 @@ fn real_main() {
                     lib_dirs.push(expanded_args[i].clone());
                 }
             }
+            // GNU-style attached short option `-L<path>` (no space), which jq
+            // accepts alongside the separated `-L <path>`. Everything after the
+            // `-L` in the same token is the path. #1001
+            s if s.starts_with("-L") => {
+                lib_dirs.push(s[2..].to_string());
+            }
             // Mode flags: subsequent non-option tokens are collected as
             // positional string / JSON args, while option flags keep parsing.
             "--args" => { args_mode = Some(false); }
