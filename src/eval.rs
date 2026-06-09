@@ -4241,7 +4241,7 @@ pub fn eval_unaryop(op: UnaryOp, val: &Value) -> Result<Value> {
         UnaryOp::Exp => "exp", UnaryOp::Exp2 => "exp2", UnaryOp::Exp10 => "exp10",
         UnaryOp::Log => "log", UnaryOp::Log2 => "log2", UnaryOp::Log10 => "log10",
         UnaryOp::Cbrt => "cbrt", UnaryOp::Significand => "significand",
-        UnaryOp::Exponent => "exponent", UnaryOp::Logb => "logb",
+        UnaryOp::Logb => "logb",
         UnaryOp::NearbyInt => "nearbyint", UnaryOp::Trunc => "trunc",
         UnaryOp::Rint => "rint", UnaryOp::J0 => "j0", UnaryOp::J1 => "j1",
         UnaryOp::Keys => "keys", UnaryOp::KeysUnsorted => "keys_unsorted",
