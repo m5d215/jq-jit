@@ -2549,11 +2549,19 @@ fn slice_indices(slice_spec: &crate::value::ObjMap, len: i64) -> (usize, usize) 
     // rounding the raw float first mis-placed fractional negatives like `-0.5`
     // (`(-0.5).ceil() == 0` discards the negativity, so `len` was never added).
     // This path drives slice-assign and `del(.[a:b])`. #722.
+    // A NaN bound (from the literal `nan`, or any non-integer source like
+    // `(-1)|sqrt`) follows jq's default-endpoint semantics: a NaN start opens to
+    // 0 and a NaN end opens to `len`. Guard before the `as i64` cast, which
+    // would otherwise floor NaN to 0 and collapse the end-bound to a zero-width
+    // range — silently corrupting `=`/`|=`/`+=` and object-form `del`. This
+    // mirrors the syntactic `.[a:b]` read path's `slice_index_*` helpers. #1018.
     let start = match slice_spec.get("start") {
+        Some(Value::Num(n, _)) if n.is_nan() => 0,
         Some(Value::Num(n, _)) => (if *n < 0.0 { n + lenf } else { *n }).floor() as i64,
         _ => 0,
     };
     let end = match slice_spec.get("end") {
+        Some(Value::Num(n, _)) if n.is_nan() => len,
         Some(Value::Num(n, _)) => (if *n < 0.0 { n + lenf } else { *n }).ceil() as i64,
         Some(Value::Null) | None => len,
         _ => 0,
