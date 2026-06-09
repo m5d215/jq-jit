@@ -4211,3 +4211,7 @@ null
 # #964: reduce in-place update-assign must not mask index type errors
 try (reduce .[] as $x (.; .sum += $x)) catch .
 [1,2,3]
+
+# #963: trim family under |= must not scramble leading/trailing stripping
+[(.a|=ltrim), (.a|=rtrim), (.a|=trim)]
+{"a":" hi "}

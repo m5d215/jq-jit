@@ -12877,3 +12877,23 @@ try (reduce .[] as $x ({"ok":0,"bad":[1]}; .ok += $x | .bad.k += $x)) catch .
 reduce .[] as $x (.; try (.sum += $x) catch "ERR")
 [1,2,3]
 "ERR"
+
+# #963: ltrim under |= strips leading whitespace (was degenerating to rtrim)
+.a |= ltrim
+{"a":" hi "}
+{"a":"hi "}
+
+# #963: rtrim under |= strips trailing whitespace only
+.a |= rtrim
+{"a":" hi "}
+{"a":" hi"}
+
+# #963: trim under |= strips both ends (leading ASCII space was kept)
+.a |= trim
+{"a":" hi "}
+{"a":"hi"}
+
+# #963: ltrim on root under |= strips leading ASCII whitespace
+. |= ltrim
+" hi"
+"hi"
