@@ -14,7 +14,7 @@ struct Scope {
     /// Variable name → var_index mapping.
     vars: Vec<(String, VarIdx)>,
     /// Function name → (func_id, nargs) mapping.
-    funcs: Vec<(String, usize, usize)>,
+    funcs: Vec<(String, FuncId, usize)>,
     /// Next available var_index.
     next_var: u16,
     /// Compiled function bodies.
@@ -24,7 +24,7 @@ struct Scope {
     /// captured slot becomes a hidden trailing parameter, and every call site
     /// forwards `LoadVar{captured_slot}`. Parse-time only — `eval` just sees
     /// the extra args/param_vars. See #714.
-    func_captures: std::collections::HashMap<usize, Vec<VarIdx>>,
+    func_captures: std::collections::HashMap<FuncId, Vec<VarIdx>>,
     /// Next available memoize slot id. Each lexical occurrence of `memoize(...)`
     /// gets a unique slot; the Env allocates one cache map per slot.
     next_memo_slot: u32,
@@ -35,7 +35,7 @@ struct Scope {
     /// `var_index` → binding sequence, for filter-parameter vars.
     var_bind_seq: std::collections::HashMap<VarIdx, u32>,
     /// `func_id` → binding sequence, for user-defined functions.
-    func_bind_seq: std::collections::HashMap<usize, u32>,
+    func_bind_seq: std::collections::HashMap<FuncId, u32>,
 }
 
 impl Scope {
@@ -62,7 +62,7 @@ impl Scope {
 
     /// Whether the def `func_id` is lexically more local (bound later) than the
     /// filter-parameter var `var_idx` of the same name. Innermost wins (#766).
-    fn func_shadows_param(&self, func_id: usize, var_idx: VarIdx) -> bool {
+    fn func_shadows_param(&self, func_id: FuncId, var_idx: VarIdx) -> bool {
         let fs = self.func_bind_seq.get(&func_id).copied().unwrap_or(0);
         let vs = self.var_bind_seq.get(&var_idx).copied().unwrap_or(0);
         fs > vs
@@ -89,8 +89,8 @@ impl Scope {
             .map(|(_, idx)| *idx)
     }
 
-    fn define_func(&mut self, name: &str, nargs: usize, body: Expr, param_vars: Vec<VarIdx>) -> usize {
-        let func_id = self.compiled_funcs.len();
+    fn define_func(&mut self, name: &str, nargs: usize, body: Expr, param_vars: Vec<VarIdx>) -> FuncId {
+        let func_id = FuncId(self.compiled_funcs.len());
         self.funcs.push((name.to_string(), func_id, nargs));
         let seq = self.next_bind_seq();
         self.func_bind_seq.insert(func_id, seq);
@@ -107,8 +107,8 @@ impl Scope {
     /// in the name-lookup table. Used by module loading for nested defs that
     /// must keep a slot for runtime FuncCall dispatch but should not be
     /// callable by name from outside their parent.
-    fn define_anon_func(&mut self, nargs: usize, body: Expr, param_vars: Vec<VarIdx>) -> usize {
-        let func_id = self.compiled_funcs.len();
+    fn define_anon_func(&mut self, nargs: usize, body: Expr, param_vars: Vec<VarIdx>) -> FuncId {
+        let func_id = FuncId(self.compiled_funcs.len());
         self.compiled_funcs.push(CompiledFunc {
             name: None,
             nargs,
@@ -118,21 +118,21 @@ impl Scope {
         func_id
     }
 
-    fn update_func_body(&mut self, func_id: usize, body: Expr, param_vars: Vec<VarIdx>) {
-        if let Some(f) = self.compiled_funcs.get_mut(func_id) {
+    fn update_func_body(&mut self, func_id: FuncId, body: Expr, param_vars: Vec<VarIdx>) {
+        if let Some(f) = self.compiled_funcs.get_mut(func_id.idx()) {
             f.body = body;
             f.param_vars = param_vars;
         }
     }
 
-    fn lookup_func(&self, name: &str, nargs: usize) -> Option<usize> {
+    fn lookup_func(&self, name: &str, nargs: usize) -> Option<FuncId> {
         self.funcs.iter().rev()
             .find(|(n, _, na)| n == name && *na == nargs)
             .map(|(_, id, _)| *id)
     }
 
     /// Record the captured outer filter-param slots for a lambda-lifted func.
-    fn set_func_captures(&mut self, func_id: usize, captures: Vec<VarIdx>) {
+    fn set_func_captures(&mut self, func_id: FuncId, captures: Vec<VarIdx>) {
         if !captures.is_empty() {
             self.func_captures.insert(func_id, captures);
         }
@@ -140,7 +140,7 @@ impl Scope {
 
     /// Trailing capture args (`LoadVar{slot}` per captured slot) a call to
     /// `func_id` must forward, in declared order. Empty for ordinary funcs.
-    fn func_capture_args(&self, func_id: usize) -> Vec<Expr> {
+    fn func_capture_args(&self, func_id: FuncId) -> Vec<Expr> {
         self.func_captures.get(&func_id)
             .map(|caps| caps.iter().map(|&v| Expr::LoadVar { var_index: v }).collect())
             .unwrap_or_default()
@@ -149,7 +149,7 @@ impl Scope {
     /// Build a `FuncCall`, appending any lambda-lifted capture args after the
     /// caller-supplied `args` (#714). Use at every call-emission site so
     /// captures are forwarded uniformly.
-    fn make_funccall(&self, func_id: usize, mut args: Vec<Expr>) -> Expr {
+    fn make_funccall(&self, func_id: FuncId, mut args: Vec<Expr>) -> Expr {
         args.extend(self.func_capture_args(func_id));
         Expr::FuncCall { func_id, args }
     }
@@ -836,18 +836,18 @@ pub struct Parser {
     /// The `compiled_funcs` id of the function body currently being parsed, or
     /// `None` at the top level. Used to attribute a deferred unbound-variable
     /// reference to its enclosing def. #765
-    current_func: Option<usize>,
+    current_func: Option<FuncId>,
     /// Unbound `$var` references parked instead of erroring eagerly, as
     /// `(enclosing_func_id, name)`. After the whole program is parsed, only
     /// those reachable from the top-level expression (top-level refs, plus refs
     /// inside transitively-called defs) are errors — jq never compiles the body
     /// of an uncalled def. #765
-    deferred_unbound: Vec<(Option<usize>, String)>,
+    deferred_unbound: Vec<(Option<FuncId>, String)>,
     /// Unknown function/builtin references parked instead of erroring eagerly,
     /// as `(enclosing_func_id, name, nargs)`. Same reachability rule as
     /// `deferred_unbound`: jq resolves function names lazily, so an undefined
     /// name in the body of an uncalled def is not an error. #807
-    deferred_unknown_func: Vec<(Option<usize>, String, usize)>,
+    deferred_unknown_func: Vec<(Option<FuncId>, String, usize)>,
 }
 
 /// Result of parsing: expression + compiled functions.
@@ -955,17 +955,17 @@ impl Parser {
         if self.deferred_unbound.is_empty() && self.deferred_unknown_func.is_empty() {
             return Ok(());
         }
-        let mut reachable: std::collections::HashSet<usize> = std::collections::HashSet::new();
-        let mut stack: Vec<usize> = Vec::new();
+        let mut reachable: std::collections::HashSet<FuncId> = std::collections::HashSet::new();
+        let mut stack: Vec<FuncId> = Vec::new();
         crate::eval::collect_func_calls(program, &mut stack);
         while let Some(fid) = stack.pop() {
             if reachable.insert(fid) {
-                if let Some(f) = self.scope.compiled_funcs.get(fid) {
+                if let Some(f) = self.scope.compiled_funcs.get(fid.idx()) {
                     crate::eval::collect_func_calls(&f.body, &mut stack);
                 }
             }
         }
-        let is_reachable = |fid: &Option<usize>| match fid {
+        let is_reachable = |fid: &Option<FuncId>| match fid {
             None => true, // top-level reference
             Some(id) => reachable.contains(id),
         };
@@ -1498,8 +1498,9 @@ impl Parser {
         // (#638). Without this, a nested recursive `def g` inside a module's
         // exported `def f` triggered "undefined function id" at the recursive
         // self-call site.
-        let mut func_id_map: Vec<(usize, usize)> = Vec::new(); // (old, new)
+        let mut func_id_map: Vec<(FuncId, FuncId)> = Vec::new(); // (old, new)
         for (mod_func_id, mod_func) in mod_parser.scope.compiled_funcs.iter().enumerate() {
+            let mod_func_id = FuncId(mod_func_id);
             let top_level_name = mod_parser.scope.funcs.iter()
                 .find(|(_, fid, _)| *fid == mod_func_id)
                 .map(|(name, _, _)| name.clone());
@@ -1514,7 +1515,7 @@ impl Parser {
 
         // Second pass: remap func_ids in bodies and install them
         for (mod_func_id, new_func_id) in &func_id_map {
-            let func = mod_parser.scope.compiled_funcs[*mod_func_id].clone();
+            let func = mod_parser.scope.compiled_funcs[mod_func_id.idx()].clone();
             let mut body = remap_func_ids(func.body, &func_id_map);
             // Wrap function body with data import bindings (in reverse order)
             for (var_idx, value_expr) in data_bindings.iter().rev() {
@@ -4648,7 +4649,7 @@ fn wrap_mutate(body: Expr) -> Result<Expr> {
 }
 
 /// Remap FuncCall func_ids in an expression tree using a mapping table.
-fn remap_func_ids(expr: Expr, map: &[(usize, usize)]) -> Expr {
+fn remap_func_ids(expr: Expr, map: &[(FuncId, FuncId)]) -> Expr {
     match expr {
         Expr::FuncCall { func_id, args } => {
             let new_id = map.iter().find(|(old, _)| *old == func_id).map(|(_, new)| *new).unwrap_or(func_id);

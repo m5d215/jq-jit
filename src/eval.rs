@@ -274,13 +274,13 @@ pub struct Env {
     /// Used to avoid deep-cloning function bodies via substitute_params.
     closures: Vec<(VarIdx, Expr)>,
     /// Cache for is_recursive check per func_id.
-    recursive_cache: Vec<(usize, bool)>,
+    recursive_cache: Vec<(FuncId, bool)>,
     /// Cache for substituted function bodies: (func_id, arg_var_indices) → substituted body.
     /// Only used when all args are LoadVar (the common case).
-    subst_cache: Vec<((usize, Vec<VarIdx>), Rc<Expr>)>,
+    subst_cache: Vec<((FuncId, Vec<VarIdx>), Rc<Expr>)>,
     /// Pointer-based substitution cache: func_id → (args_ptr, substituted_body).
     /// For non-LoadVar args from stable (cached) call sites.
-    subst_ptr_cache: Vec<(usize, usize, Rc<Expr>)>,
+    subst_ptr_cache: Vec<(FuncId, usize, Rc<Expr>)>,
     /// One cache map per lexical `memoize(...)` occurrence in the program,
     /// plus the per-slot entry cap. `None` for programs that don't use
     /// `memoize(...)` so the Env stays small. Lifetime is the whole program
@@ -511,7 +511,7 @@ fn subst_inner(
 /// def's hidden capture parameters through the def's own recursive self-calls,
 /// which were emitted (as zero-arg calls) before the captures were known.
 /// Exhaustive (no catch-all) so a new `Expr` variant forces review. See #714.
-pub(crate) fn append_call_args(expr: &Expr, target: usize, extra: &[Expr]) -> Expr {
+pub(crate) fn append_call_args(expr: &Expr, target: FuncId, extra: &[Expr]) -> Expr {
     macro_rules! r { ($e:expr) => { append_call_args($e, target, extra) } }
     macro_rules! rb { ($e:expr) => { Box::new(r!($e)) } }
     match expr {
@@ -961,7 +961,7 @@ fn subst_cow(expr: &Expr, pv: &[VarIdx], args: &[Expr]) -> Option<Expr> {
 }
 
 /// Check if an expression contains a FuncCall to the given func_id (direct recursion check).
-fn contains_func_call(expr: &Expr, target: usize) -> bool {
+fn contains_func_call(expr: &Expr, target: FuncId) -> bool {
     macro_rules! c { ($e:expr) => { contains_func_call($e, target) } }
     match expr {
         Expr::FuncCall { func_id, args } => *func_id == target || args.iter().any(|a| c!(a)),
@@ -1179,7 +1179,7 @@ pub(crate) fn expr_uses_var(expr: &Expr, target: VarIdx) -> bool {
 /// `out` (one level deep — the caller follows callees transitively). Exhaustive
 /// over `Expr` so a call buried in any sub-expression is found, which is what
 /// makes the #765 reachability check sound. Mirrors `expr_uses_var`'s structure.
-pub(crate) fn collect_func_calls(expr: &Expr, out: &mut Vec<usize>) {
+pub(crate) fn collect_func_calls(expr: &Expr, out: &mut Vec<FuncId>) {
     match expr {
         Expr::Input | Expr::Empty | Expr::Not | Expr::Env | Expr::Builtins
         | Expr::ReadInput | Expr::ReadInputs | Expr::ModuleMeta | Expr::GenLabel
@@ -1592,7 +1592,7 @@ fn eval_one(expr: &Expr, input: &Value, env: &EnvRef) -> std::result::Result<Val
         }
         Expr::FuncCall { func_id, args } => {
             if !args.is_empty() { return Err(()); }
-            let func = env.borrow().funcs.get(*func_id).cloned();
+            let func = env.borrow().funcs.get(func_id.idx()).cloned();
             if let Some(f) = func {
                 eval_one(&f.body, input, env)
             } else {
@@ -1654,7 +1654,7 @@ struct LinearRecursiveGen<'a> {
 /// Pattern: `if cond then pre, (transform | self), post else else_branch end`
 /// where cond, pre, transform, post, else_branch are all scalar (no generators).
 /// Handles both left-associated and right-associated Comma nesting.
-fn detect_linear_recursive_gen(body: &Expr, func_id: usize) -> Option<LinearRecursiveGen<'_>> {
+fn detect_linear_recursive_gen(body: &Expr, func_id: FuncId) -> Option<LinearRecursiveGen<'_>> {
     let (cond, then_branch, else_branch) = match body {
         Expr::IfThenElse { cond, then_branch, else_branch } => (cond.as_ref(), then_branch.as_ref(), else_branch.as_ref()),
         _ => return None,
@@ -1687,7 +1687,7 @@ fn detect_linear_recursive_gen(body: &Expr, func_id: usize) -> Option<LinearRecu
 }
 
 /// Extract the transform expression from Pipe { transform, FuncCall(func_id, []) }.
-fn extract_recursive_pipe(expr: &Expr, func_id: usize) -> Option<&Expr> {
+fn extract_recursive_pipe(expr: &Expr, func_id: FuncId) -> Option<&Expr> {
     if let Expr::Pipe { left, right } = expr {
         if let Expr::FuncCall { func_id: fid, args } = right.as_ref() {
             if *fid == func_id && args.is_empty() {
@@ -3399,7 +3399,7 @@ pub fn eval(
         Expr::FuncCall { func_id, args } => {
             // Consolidated function call: single env borrow for func lookup + recursive check + cache hit
             enum FuncAction {
-                Direct(Rc<CompiledFunc>, usize),
+                Direct(Rc<CompiledFunc>, FuncId),
                 Recursive(Rc<CompiledFunc>),
                 CacheHit(Rc<Expr>),
                 CacheMiss(Rc<CompiledFunc>),
@@ -3415,7 +3415,7 @@ pub fn eval(
             let arg_recursive = args.iter().any(|a| contains_func_call(a, *func_id));
             let action = {
                 let e = env.borrow();
-                let func = match e.funcs.get(*func_id) {
+                let func = match e.funcs.get(func_id.idx()) {
                     Some(f) => f.clone(),
                     None => bail!("undefined function id {}", func_id),
                 };
@@ -6006,7 +6006,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             })
         }
         Expr::FuncCall { func_id, args } => {
-            let func = env.borrow().funcs.get(*func_id).cloned();
+            let func = env.borrow().funcs.get(func_id.idx()).cloned();
             let f = match func {
                 Some(f) => f,
                 None => bail!("undefined function id {}", func_id),
