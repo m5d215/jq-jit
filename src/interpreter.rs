@@ -1214,7 +1214,6 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                         if let Expr::Literal(Literal::Num(n, _)) = key.as_ref() {
                             if n.is_nan() || !n.is_finite() { /* skip NaN/Inf indices */ }
                             else {
-                            let idx = *n as i64;
                             fn collect_comma_for_idx(e: &Expr, out: &mut Vec<Expr>) {
                                 match e {
                                     Expr::Comma { left, right } => {
@@ -1275,12 +1274,8 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                             // negative index (issue #42). Falling through for
                             // the out-of-range cases lets the runtime emit the
                             // correct null result.
-                            let effective: Option<usize> = if idx >= 0 {
-                                if (idx as usize) < elems.len() { Some(idx as usize) } else { None }
-                            } else {
-                                let v = elems.len() as i64 + idx;
-                                if v >= 0 && (v as usize) < elems.len() { Some(v as usize) } else { None }
-                            };
+                            let effective: Option<usize> =
+                                crate::value::resolve_array_index(*n, elems.len());
                             if all_single {
                                 if let Some(i) = effective {
                                     // jq evaluates every element when building

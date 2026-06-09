@@ -6876,6 +6876,26 @@ fn push_pretty_value_impl<const COLOR: bool>(buf: &mut Vec<u8>, v: &Value, depth
     }
 }
 
+/// Resolve a jq numeric array index for read access against `len`.
+///
+/// Encodes the shared `.[$n]` / `getpath` read rule in one place (#1033): a
+/// NaN index never resolves (`.[nan]` is null, #813), an infinite index
+/// saturates out of range, a fractional index truncates toward zero *before*
+/// the negative-wrap decision, and a negative index counts from the end.
+/// Returns the in-bounds slot, or `None` for any miss; the caller picks the
+/// miss policy (null / false / error). Write paths (setpath/delpaths) have
+/// different rules — out-of-range negatives error, missing slots extend the
+/// array — and must not use this resolver.
+#[inline]
+pub fn resolve_array_index(n: f64, len: usize) -> Option<usize> {
+    if n.is_nan() {
+        return None;
+    }
+    let idx = n as i64;
+    let actual = if idx < 0 { len as i64 + idx } else { idx };
+    usize::try_from(actual).ok().filter(|&i| i < len)
+}
+
 #[inline]
 fn push_pretty_value(buf: &mut Vec<u8>, v: &Value, depth: usize, step: usize, use_tab: bool, color: bool) {
     if color {

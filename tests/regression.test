@@ -13332,3 +13332,18 @@ strftime("%-d %0d %_d")
 strftime("%N %")
 0
 "N %"
+
+# #1033: JIT inline getpath misses on NaN index like the runtime path (#813 gap)
+[10,20] | getpath([nan])
+null
+null
+
+# #1033: NaN index read stays null through the shared resolver
+.[nan]
+[10,20]
+null
+
+# #1033: fractional negative index truncates toward zero before the wrap decision
+.[-0.9]
+[10,20]
+10
