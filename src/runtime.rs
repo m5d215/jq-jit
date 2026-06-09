@@ -538,7 +538,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                 }
             }
         },
-        "significand" | "exponent" | "logb" | "nearbyint" | "trunc" | "rint" | "j0" | "j1" => {
+        "significand" | "logb" | "nearbyint" | "trunc" | "rint" | "j0" | "j1" => {
             unary_op(args, |v| match v {
                 Value::Num(n, _) => {
                     let r = match name {
@@ -552,7 +552,6 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                             let e = libm::ilogb(*n);
                             libm::scalbn(*n, -e)
                         }
-                        "exponent" => libm::ilogb(*n) as f64,
                         "logb" => unsafe { logb(*n) },
                         "nearbyint" => libm::rint(*n),
                         "trunc" => n.trunc(),

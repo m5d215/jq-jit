@@ -488,7 +488,6 @@ pub enum UnaryOp {
     Log10,
     Cbrt,
     Significand,
-    Exponent,
     Logb,
     NearbyInt,
     Trunc,

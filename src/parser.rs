@@ -3263,7 +3263,7 @@ impl Parser {
             | "sinh" | "cosh" | "tanh" | "asinh" | "acosh" | "atanh"
             | "exp" | "exp2" | "exp10" | "log" | "log2" | "log10"
             | "expm1" | "log1p" | "erf" | "erfc"
-            | "cbrt" | "significand" | "exponent" | "logb"
+            | "cbrt" | "significand" | "logb"
             | "nearbyint" | "trunc" | "rint" | "j0" | "j1" | "y0" | "y1"
             | "gamma" | "tgamma" | "lgamma" | "lgamma_r" | "frexp"
             | "have_literal_numbers"
@@ -4841,7 +4841,6 @@ fn name_to_unary_op(name: &str) -> Result<UnaryOp> {
         "log10" => Ok(UnaryOp::Log10),
         "cbrt" => Ok(UnaryOp::Cbrt),
         "significand" => Ok(UnaryOp::Significand),
-        "exponent" => Ok(UnaryOp::Exponent),
         "logb" => Ok(UnaryOp::Logb),
         "nearbyint" => Ok(UnaryOp::NearbyInt),
         "trunc" => Ok(UnaryOp::Trunc),
