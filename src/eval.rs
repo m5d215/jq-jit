@@ -7122,6 +7122,31 @@ fn eval_call_builtin(name: &str, args: &[Expr], input: Value, env: &EnvRef, cb: 
         ("input_filename", 0) => {
             return cb(get_input_filename());
         }
+        ("get_search_list", 0) => {
+            // jq reports the *effective* search list: the `-L` dirs (canonical-
+            // ised via realpath when they resolve, else kept as given) when any
+            // are present, otherwise the compile-time defaults. The static
+            // builtin ignored `-L` entirely. #1003
+            let dirs = env.borrow().lib_dirs.clone();
+            let list: Vec<Value> = if dirs.is_empty() {
+                vec![
+                    Value::from_str("~/.jq"),
+                    Value::from_str("$ORIGIN/../lib/jq"),
+                    Value::from_str("$ORIGIN/../lib"),
+                ]
+            } else {
+                dirs.iter()
+                    .map(|d| {
+                        let canon = std::fs::canonicalize(d)
+                            .ok()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| d.clone());
+                        Value::from_str(&canon)
+                    })
+                    .collect()
+            };
+            return cb(Value::Arr(Rc::new(list)));
+        }
         ("toboolean", 0) => {
             return cb(rt_toboolean(&input)?);
         }
