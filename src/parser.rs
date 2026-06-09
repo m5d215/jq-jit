@@ -12,7 +12,7 @@ use crate::ir::*;
 /// Variable scope for tracking user-defined variables and functions.
 struct Scope {
     /// Variable name → var_index mapping.
-    vars: Vec<(String, u16)>,
+    vars: Vec<(String, VarIdx)>,
     /// Function name → (func_id, nargs) mapping.
     funcs: Vec<(String, usize, usize)>,
     /// Next available var_index.
@@ -24,7 +24,7 @@ struct Scope {
     /// captured slot becomes a hidden trailing parameter, and every call site
     /// forwards `LoadVar{captured_slot}`. Parse-time only — `eval` just sees
     /// the extra args/param_vars. See #714.
-    func_captures: std::collections::HashMap<usize, Vec<u16>>,
+    func_captures: std::collections::HashMap<usize, Vec<VarIdx>>,
     /// Next available memoize slot id. Each lexical occurrence of `memoize(...)`
     /// gets a unique slot; the Env allocates one cache map per slot.
     next_memo_slot: u32,
@@ -33,7 +33,7 @@ struct Scope {
     /// could resolve to either (#766). Higher = bound later = more local.
     next_bind_seq: u32,
     /// `var_index` → binding sequence, for filter-parameter vars.
-    var_bind_seq: std::collections::HashMap<u16, u32>,
+    var_bind_seq: std::collections::HashMap<VarIdx, u32>,
     /// `func_id` → binding sequence, for user-defined functions.
     func_bind_seq: std::collections::HashMap<usize, u32>,
 }
@@ -62,7 +62,7 @@ impl Scope {
 
     /// Whether the def `func_id` is lexically more local (bound later) than the
     /// filter-parameter var `var_idx` of the same name. Innermost wins (#766).
-    fn func_shadows_param(&self, func_id: usize, var_idx: u16) -> bool {
+    fn func_shadows_param(&self, func_id: usize, var_idx: VarIdx) -> bool {
         let fs = self.func_bind_seq.get(&func_id).copied().unwrap_or(0);
         let vs = self.var_bind_seq.get(&var_idx).copied().unwrap_or(0);
         fs > vs
@@ -74,8 +74,8 @@ impl Scope {
         id
     }
 
-    fn alloc_var(&mut self, name: &str) -> u16 {
-        let idx = self.next_var;
+    fn alloc_var(&mut self, name: &str) -> VarIdx {
+        let idx = VarIdx(self.next_var);
         self.next_var += 1;
         self.vars.push((name.to_string(), idx));
         let seq = self.next_bind_seq();
@@ -83,13 +83,13 @@ impl Scope {
         idx
     }
 
-    fn lookup_var(&self, name: &str) -> Option<u16> {
+    fn lookup_var(&self, name: &str) -> Option<VarIdx> {
         self.vars.iter().rev()
             .find(|(n, _)| n == name)
             .map(|(_, idx)| *idx)
     }
 
-    fn define_func(&mut self, name: &str, nargs: usize, body: Expr, param_vars: Vec<u16>) -> usize {
+    fn define_func(&mut self, name: &str, nargs: usize, body: Expr, param_vars: Vec<VarIdx>) -> usize {
         let func_id = self.compiled_funcs.len();
         self.funcs.push((name.to_string(), func_id, nargs));
         let seq = self.next_bind_seq();
@@ -107,7 +107,7 @@ impl Scope {
     /// in the name-lookup table. Used by module loading for nested defs that
     /// must keep a slot for runtime FuncCall dispatch but should not be
     /// callable by name from outside their parent.
-    fn define_anon_func(&mut self, nargs: usize, body: Expr, param_vars: Vec<u16>) -> usize {
+    fn define_anon_func(&mut self, nargs: usize, body: Expr, param_vars: Vec<VarIdx>) -> usize {
         let func_id = self.compiled_funcs.len();
         self.compiled_funcs.push(CompiledFunc {
             name: None,
@@ -118,7 +118,7 @@ impl Scope {
         func_id
     }
 
-    fn update_func_body(&mut self, func_id: usize, body: Expr, param_vars: Vec<u16>) {
+    fn update_func_body(&mut self, func_id: usize, body: Expr, param_vars: Vec<VarIdx>) {
         if let Some(f) = self.compiled_funcs.get_mut(func_id) {
             f.body = body;
             f.param_vars = param_vars;
@@ -132,7 +132,7 @@ impl Scope {
     }
 
     /// Record the captured outer filter-param slots for a lambda-lifted func.
-    fn set_func_captures(&mut self, func_id: usize, captures: Vec<u16>) {
+    fn set_func_captures(&mut self, func_id: usize, captures: Vec<VarIdx>) {
         if !captures.is_empty() {
             self.func_captures.insert(func_id, captures);
         }
@@ -826,7 +826,7 @@ pub struct Parser {
     /// resolves to the built-in environment (`Expr::Env`) only while this is the
     /// innermost binding of the name; a user `. as $ENV` (or `{$ENV}` pattern)
     /// allocates a deeper binding that shadows it, matching jq. See #886.
-    env_var_idx: u16,
+    env_var_idx: VarIdx,
     lib_dirs: Vec<String>,
     /// Source file these tokens came from, reported by `$__loc__.file`. The
     /// top-level program parser uses `"<top-level>"`; a module parser uses the
@@ -873,7 +873,7 @@ impl Parser {
             token_lines,
             pos: 0,
             scope: Scope::new(),
-            env_var_idx: 0,
+            env_var_idx: VarIdx(0),
             lib_dirs: lib_dirs.to_vec(),
             source_file: "<top-level>".to_string(),
             current_func: None,
@@ -1043,7 +1043,7 @@ impl Parser {
         }
 
         // Collect all top-level imports/includes and defs
-        let mut import_bindings: Vec<(u16, Expr)> = Vec::new();
+        let mut import_bindings: Vec<(VarIdx, Expr)> = Vec::new();
         loop {
             if self.at(&Token::Def) {
                 self.parse_funcdef()?;
@@ -1124,7 +1124,7 @@ impl Parser {
         // Allocate variables for parameters
         // Filter params use a special prefix to avoid collision with $vars of the same name
         let mut param_vars = Vec::new();
-        let mut value_param_bindings: Vec<(u16, u16)> = Vec::new(); // (filter_var, value_var)
+        let mut value_param_bindings: Vec<(VarIdx, VarIdx)> = Vec::new(); // (filter_var, value_var)
         for (p, is_value) in &params {
             let fparam_name = format!("\x00fparam:{}", p);
             let filter_idx = self.scope.alloc_var(&fparam_name);
@@ -1174,7 +1174,7 @@ impl Parser {
         // Value params and let-bindings already work via the env, so only
         // `\x00fparam:`-prefixed (filter) params from the enclosing scope need
         // this.
-        let mut captured: Vec<u16> = Vec::new();
+        let mut captured: Vec<VarIdx> = Vec::new();
         for (vname, vidx) in self.scope.vars[..saved_vars].iter() {
             if vname.starts_with('\x00')
                 && vname.starts_with("\x00fparam:")
@@ -1187,7 +1187,7 @@ impl Parser {
         }
         let mut param_vars = param_vars;
         if !captured.is_empty() {
-            let hidden: Vec<u16> = captured.iter()
+            let hidden: Vec<VarIdx> = captured.iter()
                 .map(|c| self.scope.alloc_var(&format!("\x00fparam:cap:{}", c)))
                 .collect();
             let hidden_loadvars: Vec<Expr> = hidden.iter()
@@ -1209,7 +1209,7 @@ impl Parser {
 
     /// Parse `import "path" as alias;` or `import "path" as $var;`
     /// Returns Some((var_index, value_expr)) for data imports, None for code imports.
-    fn parse_import(&mut self) -> Result<Option<(u16, Expr)>> {
+    fn parse_import(&mut self) -> Result<Option<(VarIdx, Expr)>> {
         self.advance(); // import
 
         // Get module path
@@ -1469,7 +1469,7 @@ impl Parser {
         }
 
         // Parse imports and defs in the module, collecting data import bindings
-        let mut data_bindings: Vec<(u16, Expr)> = Vec::new();
+        let mut data_bindings: Vec<(VarIdx, Expr)> = Vec::new();
         loop {
             if mod_parser.at(&Token::Def) {
                 mod_parser.parse_funcdef()?;
@@ -1612,7 +1612,7 @@ impl Parser {
         // they don't leak into outer lookups (#499).
         let saved_vars = self.scope.vars.len();
         // Allocate once for shared variables
-        let mut var_map: std::collections::HashMap<String, u16> = std::collections::HashMap::new();
+        let mut var_map: std::collections::HashMap<String, VarIdx> = std::collections::HashMap::new();
         for name in &unique_vars {
             let idx = self.scope.alloc_var(name);
             var_map.insert(name.clone(), idx);
@@ -1637,7 +1637,7 @@ impl Parser {
     /// chain. All alternatives bind the same set of names, so each unique name
     /// gets one slot (jq requires the alternatives to agree on variables). The
     /// caller is responsible for snapshotting/truncating `scope.vars`.
-    fn alloc_alt_destructure_vars(&mut self, alt_patterns: &[Pattern]) -> std::collections::HashMap<String, u16> {
+    fn alloc_alt_destructure_vars(&mut self, alt_patterns: &[Pattern]) -> std::collections::HashMap<String, VarIdx> {
         let mut var_names: Vec<String> = Vec::new();
         for pat in alt_patterns {
             self.collect_pattern_var_names(pat, &mut var_names);
@@ -1661,7 +1661,7 @@ impl Parser {
         &mut self,
         value_expr: &Expr,
         alt_patterns: &[Pattern],
-        var_map: &std::collections::HashMap<String, u16>,
+        var_map: &std::collections::HashMap<String, VarIdx>,
         body: &Expr,
     ) -> Result<Expr> {
         // jq applies `?//` *per source value*: for each value of `value_expr`
@@ -1735,7 +1735,7 @@ impl Parser {
         }
     }
 
-    fn build_binding_with_varmap(&mut self, value_expr: Expr, pattern: &Pattern, var_map: &std::collections::HashMap<String, u16>, body: Expr) -> Result<Expr> {
+    fn build_binding_with_varmap(&mut self, value_expr: Expr, pattern: &Pattern, var_map: &std::collections::HashMap<String, VarIdx>, body: Expr) -> Result<Expr> {
         match pattern {
             Pattern::Var(name) => {
                 let var_idx = var_map[name];
@@ -1777,7 +1777,7 @@ impl Parser {
         }
     }
 
-    fn build_array_destructure_varmap(&mut self, value: Expr, pats: &[Pattern], var_map: &std::collections::HashMap<String, u16>, body: Expr) -> Result<Expr> {
+    fn build_array_destructure_varmap(&mut self, value: Expr, pats: &[Pattern], var_map: &std::collections::HashMap<String, VarIdx>, body: Expr) -> Result<Expr> {
         let mut result = body;
         for (i, pat) in pats.iter().enumerate().rev() {
             let elem_expr = Expr::Index {
@@ -1789,7 +1789,7 @@ impl Parser {
         Ok(result)
     }
 
-    fn build_object_destructure_varmap(&mut self, value: Expr, pats: &[(Expr, Pattern)], var_map: &std::collections::HashMap<String, u16>, body: Expr) -> Result<Expr> {
+    fn build_object_destructure_varmap(&mut self, value: Expr, pats: &[(Expr, Pattern)], var_map: &std::collections::HashMap<String, VarIdx>, body: Expr) -> Result<Expr> {
         let mut result = body;
         for (key, pat) in pats.iter().rev() {
             let field_expr = obj_pat_field_expr(value.clone(), key.clone());
@@ -1798,7 +1798,7 @@ impl Parser {
         Ok(result)
     }
 
-    fn build_pattern_binding_varmap(&mut self, pat: &Pattern, value: Expr, var_map: &std::collections::HashMap<String, u16>, body: Expr) -> Result<Expr> {
+    fn build_pattern_binding_varmap(&mut self, pat: &Pattern, value: Expr, var_map: &std::collections::HashMap<String, VarIdx>, body: Expr) -> Result<Expr> {
         match pat {
             Pattern::Var(name) => {
                 let var_idx = var_map[name];
@@ -1840,7 +1840,7 @@ impl Parser {
         }
     }
 
-    fn build_binding(&mut self, value_expr: Expr, pattern: Pattern, allocs: Vec<u16>, body: Expr) -> Result<Expr> {
+    fn build_binding(&mut self, value_expr: Expr, pattern: Pattern, allocs: Vec<VarIdx>, body: Expr) -> Result<Expr> {
         match pattern {
             Pattern::Var(_name) => {
                 let var_idx = allocs[0];
@@ -1882,16 +1882,16 @@ impl Parser {
     }
 
     /// Pre-allocate all variables from a pattern before parsing the body.
-    fn alloc_pattern_vars(&mut self, pattern: &Pattern) -> Vec<u16> {
+    fn alloc_pattern_vars(&mut self, pattern: &Pattern) -> Vec<VarIdx> {
         // For repeated names within a single pattern, share the same slot —
         // necessary so object-pattern first-wins (#206) and array-pattern
         // last-wins land on the right binding without false aliasing across
         // separate names.
-        let mut seen: std::collections::HashMap<String, u16> = std::collections::HashMap::new();
+        let mut seen: std::collections::HashMap<String, VarIdx> = std::collections::HashMap::new();
         self.alloc_pattern_vars_inner(pattern, &mut seen)
     }
 
-    fn alloc_pattern_vars_inner(&mut self, pattern: &Pattern, seen: &mut std::collections::HashMap<String, u16>) -> Vec<u16> {
+    fn alloc_pattern_vars_inner(&mut self, pattern: &Pattern, seen: &mut std::collections::HashMap<String, VarIdx>) -> Vec<VarIdx> {
         match pattern {
             Pattern::Var(name) => {
                 let idx = if let Some(&existing) = seen.get(name) {
@@ -2045,7 +2045,7 @@ impl Parser {
         }
     }
 
-    fn build_array_destructure(&mut self, value: Expr, pats: &[Pattern], allocs: &[u16], body: Expr) -> Result<Expr> {
+    fn build_array_destructure(&mut self, value: Expr, pats: &[Pattern], allocs: &[VarIdx], body: Expr) -> Result<Expr> {
         let mut result = body;
         let mut alloc_idx = allocs.len();
         for (i, pat) in pats.iter().enumerate().rev() {
@@ -2060,7 +2060,7 @@ impl Parser {
         Ok(result)
     }
 
-    fn build_object_destructure(&mut self, value: Expr, pats: &[(Expr, Pattern)], allocs: &[u16], body: Expr) -> Result<Expr> {
+    fn build_object_destructure(&mut self, value: Expr, pats: &[(Expr, Pattern)], allocs: &[VarIdx], body: Expr) -> Result<Expr> {
         // jq's object-pattern destructure is first-wins for repeated variable
         // names in the same pattern (#206). With slot dedup in
         // `alloc_pattern_vars`, all references to `$a` map to one idx — so a
@@ -2074,7 +2074,7 @@ impl Parser {
             acc += self.count_pattern_vars(pat);
         }
         let mut keep: Vec<bool> = vec![false; pats.len()];
-        let mut bound: std::collections::HashSet<u16> = std::collections::HashSet::new();
+        let mut bound: std::collections::HashSet<VarIdx> = std::collections::HashSet::new();
         for (i, (_, pat)) in pats.iter().enumerate() {
             let count = self.count_pattern_vars(pat);
             let pair_allocs = &allocs[pair_offsets[i]..pair_offsets[i]+count];
@@ -2101,7 +2101,7 @@ impl Parser {
     }
 
     /// Recursively build bindings for a pattern. Handles nested arrays and objects.
-    fn build_pattern_binding(&mut self, pat: &Pattern, value: Expr, allocs: &[u16], body: Expr) -> Result<Expr> {
+    fn build_pattern_binding(&mut self, pat: &Pattern, value: Expr, allocs: &[VarIdx], body: Expr) -> Result<Expr> {
         match pat {
             Pattern::Var(_) => {
                 Ok(Expr::LetBinding {
@@ -3660,7 +3660,7 @@ impl Parser {
     /// produced key is then set to `$x` (last-write-wins across the fan-out).
     /// The earlier `. + {($x|f|tostring): $x}` object-merge collapsed a
     /// multi-output index expression to only its last key. See #883.
-    fn index_reduce(stream: Expr, f: Expr, x_var: u16, acc_var: u16) -> Expr {
+    fn index_reduce(stream: Expr, f: Expr, x_var: VarIdx, acc_var: VarIdx) -> Expr {
         let key = Expr::Pipe {
             left: Box::new(Expr::LoadVar { var_index: x_var }),
             right: Box::new(Expr::Pipe {

@@ -402,12 +402,12 @@ enum JitOp {
     InitVar { var: u32 },
 
     // jq variables
-    GetVar { dst: SlotId, var_index: u16 },
-    SetVar { var_index: u16, src: SlotId },
+    GetVar { dst: SlotId, var_index: VarIdx },
+    SetVar { var_index: VarIdx, src: SlotId },
     /// Take var value (move out, leave Null) — avoids clone, gives refcount = 1.
-    TakeVar { dst: SlotId, var_index: u16 },
+    TakeVar { dst: SlotId, var_index: VarIdx },
     /// Move src into var (drop old, leave src as Null) — avoids clone for accumulator stores.
-    MoveToVar { var_index: u16, src: SlotId },
+    MoveToVar { var_index: VarIdx, src: SlotId },
 
     /// In-place path extract: swap container[key] with Null, return old element.
     /// Container is modified in-place via Rc::make_mut (no clone if refcount == 1).
@@ -531,7 +531,7 @@ struct Flattener {
     /// After each fallible op, CheckError is emitted to branch to catch_label on error.
     try_catch_target: Option<(LabelId, SlotId)>,
     /// Label targets for break: var_index → done_label
-    label_targets: HashMap<u16, LabelId>,
+    label_targets: HashMap<VarIdx, LabelId>,
     /// Available compiled functions for FuncCall
     funcs: Vec<CompiledFunc>,
     /// Limit state: when inside a `limit(n; gen)`, emit_yield increments counter and breaks.
@@ -1456,7 +1456,7 @@ impl Flattener {
                     // Pre-load external variables as f64 vars
                     let acc = self.alloc_var();
                     self.emit(JitOp::ToF64Var { dst_var: acc, src: input_slot });
-                    let mut var_map: Vec<(u16, u32)> = Vec::new();
+                    let mut var_map: Vec<(VarIdx, u32)> = Vec::new();
                     for &vi in &ext_vars {
                         let slot = self.alloc_slot();
                         self.emit(JitOp::GetVar { dst: slot, var_index: vi });
@@ -2883,8 +2883,8 @@ impl Flattener {
                     // Both generators: rewrite as nested LetBinding
                     // jq evaluates rhs as outer, lhs as inner:
                     // (rhs_gen) as $__r | (lhs_gen) as $__l | $__l op $__r
-                    let lhs_var: u16 = 10100;
-                    let rhs_var: u16 = 10101;
+                    let lhs_var = VarIdx(10100);
+                    let rhs_var = VarIdx(10101);
                     let rewritten = Expr::LetBinding {
                         var_index: rhs_var,
                         value: Box::new((**rhs).clone()),
@@ -2934,7 +2934,7 @@ impl Flattener {
                     let t_in = test.alloc_slot();
                     if !test.flatten_gen(ext, t_in) { return false; }
                 }
-                let init_var: u16 = 10500;
+                let init_var = VarIdx(10500);
                 let rewritten = Expr::LetBinding {
                     var_index: init_var,
                     value: Box::new((**init).clone()),
@@ -3292,7 +3292,7 @@ impl Flattener {
 
             Expr::Limit { count, generator } if !is_scalar(count) => {
                 // Generator count: rewrite as count as $n | limit($n; body)
-                let count_var: u16 = 10300;
+                let count_var = VarIdx(10300);
                 let rewritten = Expr::LetBinding {
                     var_index: count_var,
                     value: Box::new((**count).clone()),
@@ -3546,7 +3546,7 @@ impl Flattener {
             // e.g., join(",","/") → (",","/") as $__arg | join($__arg)
             Expr::CallBuiltin { name, args } if !args.is_empty() && args.iter().any(|a| !is_scalar(a)) => {
                 // Each generator arg gets bound to a temp var
-                let base_var: u16 = 10200;
+                let base_var = VarIdx(10200);
                 let mut var_args = Vec::new();
                 let mut all_compilable = true;
                 for (i, arg) in args.iter().enumerate() {
@@ -3559,7 +3559,7 @@ impl Flattener {
                             break;
                         }
                     }
-                    var_args.push((base_var + i as u16, arg));
+                    var_args.push((VarIdx(base_var.0 + i as u16), arg));
                 }
                 if !all_compilable { return false; }
 
@@ -4164,12 +4164,12 @@ impl Flattener {
         // evaluation past any subsequent generator's bind, swallowing the error if
         // that generator yields zero outputs.
         // Use high var indices to avoid conflicts (starting at 10000).
-        let base_var: u16 = 10000;
+        let base_var = VarIdx(10000);
         let mut scalar_pairs = Vec::with_capacity(pairs.len());
         let mut bindings = Vec::with_capacity(pairs.len());
 
         for (i, (k, v)) in pairs.iter().enumerate() {
-            let var_idx = base_var + i as u16;
+            let var_idx = VarIdx(base_var.0 + i as u16);
             bindings.push((var_idx, v.clone()));
             scalar_pairs.push((k.clone(), Expr::LoadVar { var_index: var_idx }));
         }
@@ -4500,7 +4500,7 @@ impl Flattener {
     }
 
     /// Emit reduce loop inline. Returns false if the source generator can't be compiled.
-    fn flatten_gen_with_reduce(&mut self, source: &Expr, var_index: u16, acc_index: u16, update: &Expr, input_slot: SlotId) -> bool {
+    fn flatten_gen_with_reduce(&mut self, source: &Expr, var_index: VarIdx, acc_index: VarIdx, update: &Expr, input_slot: SlotId) -> bool {
         // Detect in-place update pattern: path |= f or path += f (wrapped in LetBinding)
         let inplace_info = detect_inplace_update(update);
 
@@ -4645,12 +4645,12 @@ impl Flattener {
 
     /// Check if an expression is a pure f64 function of acc (Input) and vars.
     /// Single-var convenience wrapper.
-    fn is_pure_f64_expr(expr: &Expr, var_index: u16) -> bool {
+    fn is_pure_f64_expr(expr: &Expr, var_index: VarIdx) -> bool {
         Self::is_pure_f64_expr_multi(expr, &[var_index])
     }
 
     /// Check with multiple allowed variable indices (for LetBinding support).
-    fn is_pure_f64_expr_multi(expr: &Expr, allowed: &[u16]) -> bool {
+    fn is_pure_f64_expr_multi(expr: &Expr, allowed: &[VarIdx]) -> bool {
         match expr {
             Expr::Input => true,
             Expr::LoadVar { var_index } if allowed.contains(var_index) => true,
@@ -4696,11 +4696,11 @@ impl Flattener {
     /// Compile a pure f64 expression into Cranelift f64 variables.
     /// acc_var = accumulator (Input). var_map maps IR var indices to f64 vars.
     /// Returns the f64 variable holding the result.
-    fn compile_f64_expr(&mut self, expr: &Expr, _unused: u16, acc_var: u32, x_var: u32) -> u32 {
+    fn compile_f64_expr(&mut self, expr: &Expr, _unused: VarIdx, acc_var: u32, x_var: u32) -> u32 {
         self.compile_f64_expr_multi(expr, acc_var, &[(_unused, x_var)])
     }
 
-    fn compile_f64_expr_multi(&mut self, expr: &Expr, acc_var: u32, var_map: &[(u16, u32)]) -> u32 {
+    fn compile_f64_expr_multi(&mut self, expr: &Expr, acc_var: u32, var_map: &[(VarIdx, u32)]) -> u32 {
         match expr {
             Expr::Input => acc_var,
             Expr::LoadVar { var_index } => {
@@ -4860,7 +4860,7 @@ impl Flattener {
     /// from the JIT env (see `new_delegated_env` / `reset_delegated_env`). A missing
     /// variant here silently loses any `$var` buried inside and degrades the
     /// delegated call to `null`.
-    fn collect_loadvar_indices(expr: &Expr, out: &mut Vec<u16>) {
+    fn collect_loadvar_indices(expr: &Expr, out: &mut Vec<VarIdx>) {
         use crate::ir::StringPart;
         match expr {
             Expr::LoadVar { var_index } => {
@@ -5047,7 +5047,7 @@ impl Flattener {
     }
 
     /// Iterate source for foreach: update acc and yield extract for each element.
-    fn flatten_gen_with_foreach(&mut self, source: &Expr, var_index: u16, acc_index: u16,
+    fn flatten_gen_with_foreach(&mut self, source: &Expr, var_index: VarIdx, acc_index: VarIdx,
                                 update: &Expr, extract: Option<&Expr>, input_slot: SlotId) -> bool {
         // The update+extract step for each source element
         let emit_step = |s: &mut Flattener, elem: SlotId| {
@@ -5217,7 +5217,7 @@ impl Flattener {
 
     /// Handle LetBinding with generator value.
     /// For each output of value, set $var and run body with original input.
-    fn flatten_gen_let_binding(&mut self, var_index: u16, value: &Expr, body: &Expr, input_slot: SlotId) -> bool {
+    fn flatten_gen_let_binding(&mut self, var_index: VarIdx, value: &Expr, body: &Expr, input_slot: SlotId) -> bool {
         // Pre-check: can we compile the body?
         {
             let mut test = self.test_flattener();
@@ -5484,7 +5484,7 @@ impl Flattener {
 
     /// Emit optimized in-place reduce update with LetBinding wrapping.
     /// Handles `path |= f` and `path += f` (which is LetBinding { body: Update }).
-    fn emit_reduce_update_with_lets(&mut self, acc_index: u16, info: &InplaceUpdateInfo) {
+    fn emit_reduce_update_with_lets(&mut self, acc_index: VarIdx, info: &InplaceUpdateInfo) {
         // TakeVar: move acc out (refcount = 1)
         let acc = self.alloc_slot();
         self.emit(JitOp::TakeVar { dst: acc, var_index: acc_index });
@@ -5601,7 +5601,7 @@ impl Flattener {
     }
 
     /// Emit in-place assign for reduce: .[path] = val with TakeVar for zero-copy.
-    fn emit_reduce_assign(&mut self, acc_index: u16, info: &InplaceAssignInfo) {
+    fn emit_reduce_assign(&mut self, acc_index: VarIdx, info: &InplaceAssignInfo) {
         // TakeVar: move acc out (refcount = 1)
         let acc = self.alloc_slot();
         self.emit(JitOp::TakeVar { dst: acc, var_index: acc_index });
@@ -5839,7 +5839,7 @@ fn extract_simple_path(expr: &Expr) -> Option<Vec<PathComponent>> {
 struct InplaceUpdateInfo<'a> {
     /// LetBindings wrapping the Update (from += desugaring).
     /// Each entry is (var_index, value_expr).
-    let_bindings: Vec<(u16, &'a Expr)>,
+    let_bindings: Vec<(VarIdx, &'a Expr)>,
     /// Path components for the update target.
     path_components: Vec<PathComponent>,
     /// The update expression (applied to the old value at the path).
@@ -5861,7 +5861,7 @@ struct InplaceUpdateInfo<'a> {
 /// Info for in-place reduce assign optimization (.[path] = val).
 struct InplaceAssignInfo<'a> {
     /// LetBindings wrapping the Assign.
-    let_bindings: Vec<(u16, &'a Expr)>,
+    let_bindings: Vec<(VarIdx, &'a Expr)>,
     /// Path components for the assign target.
     path_components: Vec<PathComponent>,
     /// The value expression to assign.
@@ -6168,7 +6168,7 @@ enum NestedInplaceAction<'a> {
         /// restore on the way out. Comes from `(value) as $x | inner_reduce`
         /// sequences that surround the inner reduce at this layer.
         /// Each value_expr must be `is_scalar`.
-        let_bindings: Vec<(u16, &'a Expr)>,
+        let_bindings: Vec<(VarIdx, &'a Expr)>,
         /// Skip the entire layer (loop body + everything below) when cond
         /// fires. `(cond, skip_on_truthy)` matches the leaf semantics:
         /// skip_on_truthy=true skips on truthy cond (e.g.
@@ -6178,7 +6178,7 @@ enum NestedInplaceAction<'a> {
         /// Generator for this inner reduce.
         source: &'a Expr,
         /// Iteration variable of this inner reduce.
-        var_index: u16,
+        var_index: VarIdx,
         /// What the inner reduce body does on each iteration. Recursive so
         /// the fusion can span any nesting depth.
         action: Box<NestedInplaceAction<'a>>,
@@ -6195,7 +6195,7 @@ enum NestedInplaceAction<'a> {
     /// fusion it was ~1.9× slower than the unmarked `{s: .., m: ..}`
     /// object-construct shape on the same input.
     Sequence {
-        let_bindings: Vec<(u16, &'a Expr)>,
+        let_bindings: Vec<(VarIdx, &'a Expr)>,
         actions: Vec<NestedInplaceAction<'a>>,
     },
 }
@@ -6237,7 +6237,7 @@ fn detect_inplace_action(expr: &Expr) -> Option<NestedInplaceAction<'_>> {
 /// `Sequence([a_action, b_action, c_action])`.
 fn detect_inplace_sequence<'a>(
     expr: &'a Expr,
-    mut let_bindings: Vec<(u16, &'a Expr)>,
+    mut let_bindings: Vec<(VarIdx, &'a Expr)>,
 ) -> Option<NestedInplaceAction<'a>> {
     if let Expr::LetBinding { var_index, value, body } = expr {
         if !is_scalar(value) { return None; }
@@ -6276,7 +6276,7 @@ fn detect_inplace_sequence<'a>(
 /// once on this layer.
 fn detect_inner_reduce_chain<'a>(
     expr: &'a Expr,
-    mut let_bindings: Vec<(u16, &'a Expr)>,
+    mut let_bindings: Vec<(VarIdx, &'a Expr)>,
 ) -> Option<NestedInplaceAction<'a>> {
     // Peel one LetBinding (value must be scalar to be safely evaluated
     // against acc; non-scalar values would yield multiple bindings, a
@@ -9984,22 +9984,22 @@ impl JitCompiler {
                     }
                     JitOp::GetVar { dst, var_index } => {
                         let d = slot_addr(&mut b, *dst);
-                        let vi = b.ins().iconst(types::I32, *var_index as i64);
+                        let vi = b.ins().iconst(types::I32, var_index.0 as i64);
                         b.ins().call(rt["get_var"], &[d, env_ptr, vi]);
                     }
                     JitOp::SetVar { var_index, src } => {
                         let s = slot_addr(&mut b, *src);
-                        let vi = b.ins().iconst(types::I32, *var_index as i64);
+                        let vi = b.ins().iconst(types::I32, var_index.0 as i64);
                         b.ins().call(rt["set_var"], &[env_ptr, vi, s]);
                     }
                     JitOp::TakeVar { dst, var_index } => {
                         let d = slot_addr(&mut b, *dst);
-                        let vi = b.ins().iconst(types::I32, *var_index as i64);
+                        let vi = b.ins().iconst(types::I32, var_index.0 as i64);
                         b.ins().call(rt["take_var"], &[d, env_ptr, vi]);
                     }
                     JitOp::MoveToVar { var_index, src } => {
                         let s = slot_addr(&mut b, *src);
-                        let vi = b.ins().iconst(types::I32, *var_index as i64);
+                        let vi = b.ins().iconst(types::I32, var_index.0 as i64);
                         b.ins().call(rt["move_to_var"], &[env_ptr, vi, s]);
                     }
                     JitOp::PathExtract { element, container, key } => {
@@ -10629,7 +10629,7 @@ thread_local! {
 /// `Env::new` directly — they guarantee the JIT-set let-bindings are seeded so
 /// new closure ops can't silently regress.
 fn seed_eval_env_from_jit(env: &Rc<RefCell<crate::eval::Env>>, exprs: &[&Expr]) {
-    let mut indices: Vec<u16> = Vec::new();
+    let mut indices: Vec<VarIdx> = Vec::new();
     for e in exprs {
         Flattener::collect_loadvar_indices(e, &mut indices);
     }
@@ -10639,7 +10639,7 @@ fn seed_eval_env_from_jit(env: &Rc<RefCell<crate::eval::Env>>, exprs: &[&Expr]) 
         let jit_env = match jit_env_opt.as_ref() { Some(e) => e, None => return };
         let mut env_mut = env.borrow_mut();
         for idx in indices {
-            let i = idx as usize;
+            let i = idx.idx();
             if i < jit_env.vars.len() {
                 env_mut.seed_var(idx, jit_env.vars[i].clone());
             }
