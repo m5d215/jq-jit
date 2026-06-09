@@ -2478,11 +2478,12 @@ fn real_main() {
             }
             "--arg" => {
                 if i + 2 < expanded_args.len() {
+                    // jq accepts ANY name (e.g. `1bad`, `a-b`, `c.d`, empty) and
+                    // stores it in $ARGS.named; a non-identifier simply cannot be
+                    // referenced as a bare `$name`. The bare binding below is
+                    // gated on `is_valid_var_name`, so no validation is needed
+                    // here — rejecting was an over-strict compat gap (#958).
                     let name = expanded_args[i + 1].clone();
-                    if !is_valid_var_name(&name) {
-                        eprintln!("jq: error: arg name `{}` is not a valid identifier", name);
-                        process::exit(2);
-                    }
                     let val = Value::from_str(&expanded_args[i + 2]);
                     arg_vars.push((name, val));
                     i += 2;
@@ -2491,10 +2492,6 @@ fn real_main() {
             "--argjson" => {
                 if i + 2 < expanded_args.len() {
                     let name = expanded_args[i + 1].clone();
-                    if !is_valid_var_name(&name) {
-                        eprintln!("jq: error: arg name `{}` is not a valid identifier", name);
-                        process::exit(2);
-                    }
                     match json_to_value(&expanded_args[i + 2]) {
                         Ok(val) => argjson_vars.push((name, val)),
                         Err(e) => {
@@ -2612,13 +2609,18 @@ fn real_main() {
     // Prepend --arg / --argjson / $ARGS bindings to the filter expression
     let filter_str = {
         let mut prefix = String::new();
+        // Only identifier names can be bound as a bare `$name` (a non-identifier
+        // would be a syntax error in the prefix). Non-identifier names still
+        // reach the filter through $ARGS.named below, matching jq. #958
         for (name, val) in &arg_vars {
+            if !is_valid_var_name(name) { continue; }
             prefix.push_str(&value_to_json_precise(val));
             prefix.push_str(" as $");
             prefix.push_str(name);
             prefix.push_str(" | ");
         }
         for (name, val) in &argjson_vars {
+            if !is_valid_var_name(name) { continue; }
             prefix.push_str(&value_to_json_precise(val));
             prefix.push_str(" as $");
             prefix.push_str(name);
@@ -2633,20 +2635,22 @@ fn real_main() {
             }
             args_json.push_str("],\"named\":{");
             let mut first = true;
+            // JSON-encode the name as a string key so arbitrary arg names jq
+            // accepts (`1bad`, `a-b`, and names containing `"`/`\`) produce a
+            // valid $ARGS.named object rather than corrupting the embedded
+            // JSON. #958
             for (name, val) in &arg_vars {
                 if !first { args_json.push(','); }
                 first = false;
-                args_json.push('"');
-                args_json.push_str(name);
-                args_json.push_str("\":");
+                args_json.push_str(&value_to_json_precise(&Value::from_str(name)));
+                args_json.push(':');
                 args_json.push_str(&value_to_json_precise(val));
             }
             for (name, val) in &argjson_vars {
                 if !first { args_json.push(','); }
                 first = false;
-                args_json.push('"');
-                args_json.push_str(name);
-                args_json.push_str("\":");
+                args_json.push_str(&value_to_json_precise(&Value::from_str(name)));
+                args_json.push(':');
                 args_json.push_str(&value_to_json_precise(val));
             }
             args_json.push_str("}}");
