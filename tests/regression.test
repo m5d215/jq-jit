@@ -13217,3 +13217,13 @@ try path(.a | [.]) catch .
 try path(.a | {x:.}) catch .
 {"a":1}
 "Invalid path expression with result {\"x\":1}"
+
+# #998: select(.field|length CMP N) on a non-object raises the index type error
+try select(.a | length > 0) catch .
+5
+"Cannot index number with string \"a\""
+
+# #998: object missing the field compares length against 0
+select(.a | length == 0)
+{"b":1}
+{"b":1}
