@@ -4207,3 +4207,7 @@ null
 
 [5e-324 * 1] | @csv
 null
+
+# #964: reduce in-place update-assign must not mask index type errors
+try (reduce .[] as $x (.; .sum += $x)) catch .
+[1,2,3]
