@@ -7196,8 +7196,14 @@ fn eval_call_builtin(name: &str, args: &[Expr], input: Value, env: &EnvRef, cb: 
         }
         _ => {}
     }
-    // Default: evaluate args as generators and call runtime with input + args
-    eval_call_builtin_args(name, args, 0, vec![input.clone()], input, env, cb)
+    // Default: evaluate args as generators and call runtime with input + args.
+    // `collected[0]` is the input; `collected[1+i]` is the value of `args[i]`.
+    // jq nests multi-argument builtin generators rightmost-outer (the last
+    // argument is the outer loop), so bind the arguments right-to-left. The
+    // values land in the same positions — only the stream order changes (#978).
+    let mut collected = vec![Value::Null; args.len() + 1];
+    collected[0] = input.clone();
+    eval_call_builtin_args(name, args, args.len(), collected, input, env, cb)
 }
 
 /// Yield each Cartesian-product combination of an array of arrays, in
@@ -7666,14 +7672,20 @@ fn eval_fromcsvh_with_headers(input: &Value, headers_val: &Value, is_tsv: bool, 
     Ok(true)
 }
 
-fn eval_call_builtin_args(name: &str, args: &[Expr], idx: usize, collected: Vec<Value>, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
-    if idx >= args.len() {
+// `remaining` counts arguments not yet bound, from the right: the first call
+// binds `args[remaining-1]` (the rightmost argument, the outer loop), and each
+// nested level binds the next-earlier argument. `collected[0]` holds the input
+// and `collected[1+i]` the value of `args[i]`, so the values stay in argument
+// order regardless of the (rightmost-outer) nesting direction. See #978.
+fn eval_call_builtin_args(name: &str, args: &[Expr], remaining: usize, collected: Vec<Value>, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
+    if remaining == 0 {
         return cb(crate::runtime::call_builtin(name, &collected)?);
     }
+    let idx = remaining - 1;
     eval(&args[idx], input.clone(), env, &mut |val| {
         let mut next = collected.clone();
-        next.push(val);
-        eval_call_builtin_args(name, args, idx + 1, next, input.clone(), env, cb)
+        next[idx + 1] = val;
+        eval_call_builtin_args(name, args, remaining - 1, next, input.clone(), env, cb)
     })
 }
 

@@ -13122,3 +13122,18 @@ true
 IN(1, 2, 3; 9)
 null
 false
+
+# #978: multi-arg math builtins nest generator args rightmost-outer (like jq)
+[pow(10,20; 1,2)]
+null
+[10,20,100,400]
+
+# #978: 3-arg fma nests rightmost-outer across all three generator args
+[fma(1,2; 10,20; 100,200)]
+null
+[110,120,120,140,210,220,220,240]
+
+# #978: ldexp generator args also nest rightmost-outer
+[ldexp(1,3; 0,4)]
+null
+[1,3,16,48]
