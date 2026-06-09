@@ -10,10 +10,10 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-fn run_inputs(stdin: &str) -> (String, bool) {
+fn run_with_args(args: &[&str], stdin: &str) -> (String, bool) {
     let jq_jit = env!("CARGO_BIN_EXE_jq-jit");
     let mut child = Command::new(jq_jit)
-        .args(["-cn", "[inputs]"])
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -30,6 +30,16 @@ fn run_inputs(stdin: &str) -> (String, bool) {
         String::from_utf8_lossy(&out.stdout).trim_end().to_string(),
         out.status.success(),
     )
+}
+
+fn run_inputs(stdin: &str) -> (String, bool) {
+    run_with_args(&["-cn", "[inputs]"], stdin)
+}
+
+/// The default main-loop document reader (plain `jq .`) — a separate raw
+/// streamer from the `inputs` builtin (#1000).
+fn run_main_loop(stdin: &str) -> (String, bool) {
+    run_with_args(&["-c", "."], stdin)
 }
 
 #[test]
@@ -59,6 +69,37 @@ fn well_separated_and_structural_values_ok() {
     for (input, expected) in cases {
         let (out, ok) = run_inputs(input);
         assert!(ok, "expected `{input}` to parse");
+        assert_eq!(out, expected, "for input `{input}`");
+    }
+}
+
+/// #1000: the plain `jq .` main-loop reader (a different code path from
+/// `inputs`) must also reject adjacent word/number tokens instead of splitting
+/// them into separate documents.
+#[test]
+fn main_loop_rejects_adjacent_word_tokens() {
+    for bad in [
+        "nullnull", "truefalse", "true1", "1true", "false0", "false-1", "1-2", "1.2.3",
+    ] {
+        let (out, ok) = run_main_loop(bad);
+        assert!(!ok, "expected main loop to reject `{bad}`, got {out:?}");
+    }
+}
+
+#[test]
+fn main_loop_keeps_structural_and_separated_values() {
+    let cases = [
+        ("{}{}", "{}\n{}"),
+        ("[1][2]", "[1]\n[2]"),
+        (r#""a""b""#, "\"a\"\n\"b\""),
+        (r#""a"-1"#, "\"a\"\n-1"),
+        ("[1]-2", "[1]\n-2"),
+        ("1 2", "1\n2"),
+        ("1\n2\n", "1\n2"),
+    ];
+    for (input, expected) in cases {
+        let (out, ok) = run_main_loop(input);
+        assert!(ok, "expected main loop to accept `{input}`");
         assert_eq!(out, expected, "for input `{input}`");
     }
 }
