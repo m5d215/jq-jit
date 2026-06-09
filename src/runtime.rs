@@ -473,11 +473,20 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
         "scalb" => ternary_arg(args, |a, b| match (a, b) {
-            // C scalb / jq truncate the exponent to an integer: x * 2^trunc(n).
-            // `2f64.powf(n)` honoured the fraction (scalb(1; 0.5) → √2 instead
-            // of 1). Use scalbn with the truncated exponent, matching the
-            // sibling scalbln/ldexp (`f64 as i32` truncates toward zero) (#812).
-            (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(libm::scalbn(*x, *y as i32))),
+            // C scalb / jq truncate a *finite* fractional exponent to an
+            // integer: x * 2^trunc(n) (scalb(1; 0.5) → 1, not √2) (#812). But a
+            // NaN exponent propagates to NaN per IEEE `scalb(x, y)` — truncating
+            // it to 0 (`f64::NAN as i32 == 0`) wrongly returned `x` unchanged
+            // (#960). The sibling ldexp/scalbln take an integer exponent and
+            // legitimately truncate NaN→0, so only scalb propagates. ±inf
+            // exponents already match jq via scalbn's saturating cast.
+            (Value::Num(x, _), Value::Num(y, _)) => {
+                if y.is_nan() {
+                    Ok(Value::number(f64::NAN))
+                } else {
+                    Ok(Value::number(libm::scalbn(*x, *y as i32)))
+                }
+            }
             _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
         // Additional libc binary wrappers (#473).
