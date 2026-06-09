@@ -1263,8 +1263,27 @@ impl Parser {
                 let json_path = self.resolve_data_module(&path, search_path.as_deref())?;
                 let json_content = std::fs::read_to_string(&json_path)
                     .map_err(|e| anyhow::anyhow!("Cannot load data module '{}': {}", path, e))?;
-                // Data modules are wrapped in an array per jq convention
-                let array_json = format!("[{}]", json_content.trim());
+                // A data module is a JSON *text sequence*: jq reads every
+                // whitespace-separated value in the file and binds the array of
+                // them (`1 2` → [1,2], `42` → [42], empty → []). The old code
+                // wrapped the raw content in `[...]`, which `fromjson` then
+                // rejected for any multi-value file (`[1 2]`). Split the file
+                // into its top-level values and join them with commas so the
+                // array JSON is well-formed, preserving each value's original
+                // bytes (number formatting etc.). #1002
+                let mut ranges: Vec<(usize, usize)> = Vec::new();
+                crate::value::json_stream_offsets(&json_content, |_v, s, e| {
+                    ranges.push((s, e));
+                    Ok(())
+                })
+                .map_err(|e| anyhow::anyhow!("Cannot parse data module '{}': {}", path, e))?;
+                let mut array_json = String::with_capacity(json_content.len() + 2);
+                array_json.push('[');
+                for (idx, (s, e)) in ranges.iter().enumerate() {
+                    if idx > 0 { array_json.push(','); }
+                    array_json.push_str(&json_content[*s..*e]);
+                }
+                array_json.push(']');
                 let value_expr = Expr::Literal(Literal::Str(array_json));
                 // Parse at runtime via fromjson
                 let fromjson_expr = Expr::CallBuiltin {
