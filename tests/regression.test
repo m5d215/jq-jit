@@ -13073,3 +13073,17 @@ from_entries
 halt_error(-1)
 null
 
+# #981: @base64d invalid-data error truncates the embedded value like other sites
+try @base64d catch .
+"aaaaaaaaaaaaaa%"
+"string (\"aaaaaaaaaa...) is not valid base64 data"
+
+# #981: @base64d trailing-byte error also truncates the embedded value
+try @base64d catch .
+"aaaaaaaaaaaaaaaaa"
+"string (\"aaaaaaaaaa...) trailing base64 byte found"
+
+# #981: short values are still shown in full (untruncated)
+try @base64d catch .
+"a%"
+"string (\"a%\") is not valid base64 data"

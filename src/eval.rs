@@ -4686,20 +4686,20 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
                 Some(i) => &raw[..i],
                 None => raw,
             };
-            // jq's error message wraps the value in `string (X)` where X is
-            // the value's stringified form re-encoded as a JSON string. For
-            // `Value::Str` that's the existing JSON-quoted form; for other
-            // kinds we wrap the JSON serialisation in another layer of JSON
-            // quoting so `0` → `string ("0")`, `[1,2,3]` → `string ("[1,2,3]")`.
-            let err_value = || crate::value::value_to_json(&Value::from_str(&s));
+            // jq's error message wraps the value in `string (X)`, and X is
+            // truncated exactly like every other type-error site: long previews
+            // are cut to the first 11 bytes (UTF-8-boundary safe) + `...`.
+            // Route through the shared errdesc dumper so this site matches the
+            // others (jq truncates here too; #981).
+            let err_desc = || crate::runtime::errdesc_pub(&Value::from_str(&s));
             for &b in bs {
                 let v = D.get(b as usize).copied().unwrap_or(-1);
                 if v < 0 {
-                    bail!("string ({}) is not valid base64 data", err_value());
+                    bail!("{} is not valid base64 data", err_desc());
                 }
             }
             if bs.len() % 4 == 1 {
-                bail!("string ({}) trailing base64 byte found", err_value());
+                bail!("{} trailing base64 byte found", err_desc());
             }
             let mut r = Vec::new();
             for ch in bs.chunks(4) {
