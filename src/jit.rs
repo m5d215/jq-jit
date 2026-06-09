@@ -966,7 +966,13 @@ impl Flattener {
             // null in dst leaks out — e.g. `.[0]|=. | .a==1` returned null instead
             // of erroring once the surrounding _modify pushed it onto the JIT
             // path (#809).
-            JitOp::FieldBinopConst { .. } | JitOp::FieldBinopField { .. }
+            JitOp::FieldBinopConst { .. } | JitOp::FieldBinopField { .. } |
+            // The reduce in-place update/assign navigation: a type-mismatched
+            // index (string key on array, number key on object, any key on a
+            // scalar) sets the error flag instead of silently navigating to
+            // null, so the accumulator update aborts / is caught by an enclosing
+            // try rather than masking the index type error (#964).
+            JitOp::PathExtract { .. }
         );
         self.ops.push(op);
         if is_fallible {
@@ -7595,9 +7601,28 @@ extern "C" fn jit_rt_path_extract(element: *mut Value, container: *mut Value, ke
                 }
                 0
             }
-            _ => {
+            // jq permits indexing null with any key, yielding null — keep the
+            // in-place update fast path lenient here so a null-valued cell
+            // navigates the same as the generic eval / setpath path.
+            (Value::Null, _) => {
                 std::ptr::write(element, Value::Null);
                 0
+            }
+            // Every other (container, key) pair is a type error in jq (e.g.
+            // a string key on an array, a number key on an object, or any key
+            // on a scalar). The generic eval / setpath path raises it; the
+            // reduce in-place update-assign fast path previously swallowed it
+            // by writing null and no-op'ing the writeback, masking index type
+            // errors inside a reduce accumulator update (#964). Propagate jq's
+            // wording so the JIT aborts the update like setpath/`=`/foreach do.
+            (other, key_ref) => {
+                set_jit_error(format!(
+                    "Cannot index {} with {}",
+                    other.type_name(),
+                    crate::runtime::index_err_desc(key_ref)
+                ));
+                std::ptr::write(element, Value::Null);
+                GEN_ERROR
             }
         }
     }
@@ -9976,6 +10001,10 @@ impl JitCompiler {
                         let e = slot_addr(&mut b, *element);
                         let c = slot_addr(&mut b, *container);
                         let k = slot_addr(&mut b, *key);
+                        // Returns GEN_ERROR + sets env.error_flag on a type
+                        // mismatch (#964). The flag is propagated by the
+                        // CheckError/JumpIfError that `emit()` auto-attaches to
+                        // this op (registered fallible), so the result is unused.
                         b.ins().call(rt["path_extract"], &[e, c, k]);
                     }
                     JitOp::PathInsert { container, key, val } => {

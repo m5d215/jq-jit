@@ -2556,7 +2556,7 @@ fn slice_indices(slice_spec: &crate::value::ObjMap, len: i64) -> (usize, usize) 
 
 /// Match jq 1.8.1's "Cannot index X with Y" wording for the Y side.
 /// Numbers omit the value; strings keep the quoted content; others show the type name.
-fn index_err_desc(key: &Value) -> String {
+pub fn index_err_desc(key: &Value) -> String {
     match key {
         Value::Str(s) => format!("string \"{}\"", s),
         Value::Num(_, _) => "number".to_string(),

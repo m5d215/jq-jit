@@ -12857,3 +12857,23 @@ try ((foreach .[] as $x (0; .+$x; .)) |= 99) catch .
 [path(foreach .[] as $x (0; .; $x))]
 {"a":{"b":2},"c":3}
 [["a"],["c"]]
+
+# #964: reduce in-place update-assign must not mask index type errors (string key on array)
+try (reduce .[] as $x (.; .sum += $x)) catch .
+[1,2,3]
+"Cannot index array with string \"sum\""
+
+# #964: reduce in-place update-assign masking (number key on object)
+try (reduce 0 as $k (.; .[$k] += 1)) catch .
+{"x":0}
+"Cannot index object with number"
+
+# #964: masked error in a multi-level reduce update (.bad.k on an array element)
+try (reduce .[] as $x ({"ok":0,"bad":[1]}; .ok += $x | .bad.k += $x)) catch .
+[10,20]
+"Cannot index array with string \"k\""
+
+# #964: an inner try inside the reduce body still catches the per-iteration error
+reduce .[] as $x (.; try (.sum += $x) catch "ERR")
+[1,2,3]
+"ERR"
