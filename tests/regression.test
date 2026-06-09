@@ -13137,3 +13137,18 @@ null
 [ldexp(1,3; 0,4)]
 null
 [1,3,16,48]
+
+# #983: test/2 nests its (regex; flags) generator args rightmost-outer
+"a" | [test(("a","b"); ("","i"))]
+null
+[true,false,true,false]
+
+# #983: match/2 likewise nests flags as the outer loop
+"ab" | [match(("a","b"); ("","g")) | .string]
+null
+["a","b","a","b"]
+
+# #983: capture/2 likewise nests flags as the outer loop
+"ab" | [capture(("(?<x>a)","(?<y>b)"); ("","g"))]
+null
+[{"x":"a"},{"y":"b"},{"x":"a"},{"y":"b"}]

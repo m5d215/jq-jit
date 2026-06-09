@@ -3725,9 +3725,11 @@ pub fn eval(
         }
 
         Expr::RegexTest { input_expr, re, flags } => {
+            // jq nests the 2-arg `test(re; flags)` generator args rightmost-outer:
+            // `flags` is the outer loop, `re` the inner one (#983).
             eval(input_expr, input.clone(), env, &mut |s| {
-                eval(re, input.clone(), env, &mut |re_val| {
-                    eval(flags, input.clone(), env, &mut |fv| {
+                eval(flags, input.clone(), env, &mut |fv| {
+                    eval(re, input.clone(), env, &mut |re_val| {
                         cb(crate::runtime::call_builtin("test", &[s.clone(), re_val.clone(), fv.clone()])?)
                     })
                 })
@@ -3735,9 +3737,10 @@ pub fn eval(
         }
 
         Expr::RegexMatch { input_expr, re, flags } => {
+            // Rightmost-outer nesting: `flags` outer, `re` inner (#983).
             eval(input_expr, input.clone(), env, &mut |s| {
-                eval(re, input.clone(), env, &mut |re_val| {
-                    eval(flags, input.clone(), env, &mut |fv| {
+                eval(flags, input.clone(), env, &mut |fv| {
+                    eval(re, input.clone(), env, &mut |re_val| {
                         match crate::runtime::call_builtin("match", &[s.clone(), re_val.clone(), fv.clone()]) {
                             Ok(v) => {
                                 // "g" flag: match returns array of all matches
@@ -3769,9 +3772,10 @@ pub fn eval(
         }
 
         Expr::RegexCapture { input_expr, re, flags } => {
+            // Rightmost-outer nesting: `flags` outer, `re` inner (#983).
             eval(input_expr, input.clone(), env, &mut |s| {
-                eval(re, input.clone(), env, &mut |re_val| {
-                    eval(flags, input.clone(), env, &mut |fv| {
+                eval(flags, input.clone(), env, &mut |fv| {
+                    eval(re, input.clone(), env, &mut |re_val| {
                         let global = matches!(&fv, Value::Str(f) if f.as_str().contains('g'));
                         match crate::runtime::call_builtin("capture", &[s.clone(), re_val.clone(), fv.clone()]) {
                             Ok(v) => {
