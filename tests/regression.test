@@ -13068,3 +13068,8 @@ from_entries
 from_entries
 [{"key_":"K_","Key":"K","value":1}]
 {"K":1}
+
+# #979: halt_error with a negative code clamps the process exit status to 0 (was 255)
+halt_error(-1)
+null
+
