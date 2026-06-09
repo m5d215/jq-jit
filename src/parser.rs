@@ -1334,15 +1334,30 @@ impl Parser {
             Token::Str(s) => s,
             t => bail!("expected string after include, got {:?}", t),
         };
-        // Skip optional metadata
+        // Optional metadata — capture `{search:"..."}` (the rest is ignored).
+        // The old code skipped the whole block, dropping the search path so
+        // `include "m" {search:"dir"}` couldn't find the module. #1003
+        let mut search_path = None;
         if self.at(&Token::LBrace) {
-            while !self.at(&Token::RBrace) && !self.at_eof() { self.advance(); }
+            self.advance(); // {
+            while !self.at(&Token::RBrace) && !self.at_eof() {
+                if matches!(self.current(), Token::Ident(s) if s == "search") {
+                    self.advance(); // search
+                    if self.eat(&Token::Colon) {
+                        if let Token::Str(s) = self.advance() {
+                            search_path = Some(s);
+                        }
+                    }
+                } else {
+                    self.advance();
+                }
+            }
             if self.at(&Token::RBrace) { self.advance(); }
         }
         self.expect(&Token::Semicolon)?;
 
         // Load and parse the module without namespace prefix
-        let mod_path = self.resolve_code_module(&path, None)?;
+        let mod_path = self.resolve_code_module(&path, search_path.as_deref())?;
         self.load_code_module(&mod_path, "")?;
         Ok(())
     }
@@ -1379,7 +1394,14 @@ impl Parser {
     fn search_dirs(&self, search: Option<&str>) -> Vec<String> {
         let mut dirs: Vec<String> = Vec::new();
         if let Some(s) = search {
-            // Relative search paths - resolve relative to each lib_dir
+            // The `{search}` metadata path itself: jq honours it even with no
+            // `-L`, resolving an absolute value as-is and a relative one against
+            // the cwd (top-level) / the importing file's directory. The old code
+            // only joined it onto each `-L` dir, so with no `-L` the search path
+            // was dropped entirely and the module wasn't found. #1003
+            dirs.push(s.to_string());
+            // Also resolve it relative to each lib dir (covers a transitive
+            // module import whose own directory was pushed onto `lib_dirs`).
             for lib_dir in &self.lib_dirs {
                 let resolved = std::path::Path::new(lib_dir).join(s);
                 dirs.push(resolved.to_string_lossy().into_owned());
