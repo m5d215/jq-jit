@@ -6707,13 +6707,10 @@ extern "C" fn jit_rt_index(dst: *mut Value, base: *const Value, key: *const Valu
     unsafe {
         // Fast path: Array[Num] — most common in loops
         if let (Value::Arr(a), Value::Num(n, _)) = (&*base, &*key) {
-            if n.is_nan() {
-                std::ptr::write(dst, Value::Null);
-                return 0;
-            }
-            let idx = *n as i64;
-            let i = if idx < 0 { (a.len() as i64 + idx) as usize } else { idx as usize };
-            std::ptr::write(dst, a.get(i).cloned().unwrap_or(Value::Null));
+            let v = crate::value::resolve_array_index(*n, a.len())
+                .map(|i| a[i].clone())
+                .unwrap_or(Value::Null);
+            std::ptr::write(dst, v);
             return 0;
         }
         // Fast path: Object[String]
@@ -8297,9 +8294,12 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                             current = o.get(k.as_str()).cloned().unwrap_or(Value::Null);
                         }
                         (Value::Arr(a), Value::Num(n, _)) => {
-                            let idx = *n as i64;
-                            let actual = if idx < 0 { (a.len() as i64 + idx) as usize } else { idx as usize };
-                            current = a.get(actual).cloned().unwrap_or(Value::Null);
+                            // resolve_array_index also closes the NaN gap this
+                            // inline path had vs the runtime getpath (#813):
+                            // `nan as i64` truncated to 0 and read element 0.
+                            current = crate::value::resolve_array_index(*n, a.len())
+                                .map(|i| a[i].clone())
+                                .unwrap_or(Value::Null);
                         }
                         (Value::Null, Value::Str(_)) | (Value::Null, Value::Num(_, _)) | (Value::Null, Value::Obj(_)) => {
                             current = Value::Null;

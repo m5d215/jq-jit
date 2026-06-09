@@ -4336,10 +4336,9 @@ pub fn eval_index(base: &Value, key: &Value, optional: bool) -> std::result::Res
     match (base, key) {
         (Value::Obj(ObjInner(o)), Value::Str(k)) => Ok(o.get(k.as_str()).cloned().unwrap_or(Value::Null)),
         (Value::Arr(a), Value::Num(n, _)) => {
-            if n.is_nan() { return Ok(Value::Null); }
-            let idx = *n as i64;
-            let i = if idx < 0 { (a.len() as i64 + idx) as usize } else { idx as usize };
-            Ok(a.get(i).cloned().unwrap_or(Value::Null))
+            Ok(crate::value::resolve_array_index(*n, a.len())
+                .map(|i| a[i].clone())
+                .unwrap_or(Value::Null))
         }
         (Value::Str(_), Value::Num(_, _)) => {
             // jq's "Cannot index string with number" omits the value (#440).

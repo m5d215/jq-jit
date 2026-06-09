@@ -2464,17 +2464,9 @@ pub fn rt_getpath(v: &Value, path: &Value) -> Result<Value> {
                         current = o.get(k.as_str()).cloned().unwrap_or(Value::Null);
                     }
                     (Value::Arr(a), Value::Num(n, _)) => {
-                        // A NaN index is out of range → null, matching jq and
-                        // `.[nan]`. `nan as i64` would otherwise truncate to 0
-                        // and return the first element (#813). (An infinite
-                        // index saturates to i64::MAX/MIN and already misses.)
-                        if n.is_nan() {
-                            current = Value::Null;
-                        } else {
-                            let idx = *n as i64;
-                            let actual = if idx < 0 { (a.len() as i64 + idx) as usize } else { idx as usize };
-                            current = a.get(actual).cloned().unwrap_or(Value::Null);
-                        }
+                        current = crate::value::resolve_array_index(*n, a.len())
+                            .map(|i| a[i].clone())
+                            .unwrap_or(Value::Null);
                     }
                     // Slice path element `{start, end}`. Originally added in
                     // #536 for `.[N:M] |= f` (eval's Update branch fetches the
