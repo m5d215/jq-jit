@@ -4328,57 +4328,27 @@ impl Parser {
                     }),
                 })
             }
-            // IN/2: jq's `IN(src; s)` is `any(src == s; .)` — BOTH `src` and the
-            // candidate set `s` are evaluated against the original input. The old
-            // desugar fed the candidate set the reduce accumulator (the update's
-            // `.`), so `IN(1; .[])` iterated `false` and `IN(false; .)` compared
-            // against the accumulator. Bind the original input as `$dot` and pipe
-            // the candidate set from it: #846
-            //   . as $dot
-            //   | reduce src as $x (false;
-            //       . or (first(($dot | s) | if . == $x then true else empty) // false))
+            // IN/2: jq defines `def IN(src; s): any(src == s; .);`. Lower
+            // straight to the short-circuiting `any` over the cartesian
+            // comparison of the two generators. Both `src` and the candidate
+            // set `s` are evaluated against the same input `.` (the `==`
+            // operands share it), matching jq, and `any` stops at the first
+            // match. A prior reduce-based desugar drained `src` fully even
+            // after a match — hanging on an infinite source and surfacing
+            // later errors past the first hit (#984). The candidate-set vs
+            // accumulator issue (#846) and IN/1 membership (#847) both fall
+            // out of the jq definition without the extra `$dot` plumbing.
             ("IN", 2) => {
                 let mut args = args.into_iter();
                 let src = args.next().unwrap();
                 let s = args.next().unwrap();
-                let dot_var = self.scope.alloc_var("__in2_dot__");
-                let x_var = self.scope.alloc_var("__in2_x__");
-                let acc_var = self.scope.alloc_var("__in2_acc__");
-                let in_check = Expr::Alternative {
-                    primary: Box::new(Expr::Limit {
-                        count: Box::new(Expr::Literal(Literal::Num(1.0, None))),
-                        generator: Box::new(Expr::Pipe {
-                            left: Box::new(Expr::Pipe {
-                                left: Box::new(Expr::LoadVar { var_index: dot_var }),
-                                right: Box::new(s),
-                            }),
-                            right: Box::new(Expr::IfThenElse {
-                                cond: Box::new(Expr::BinOp {
-                                    op: BinOp::Eq,
-                                    lhs: Box::new(Expr::Input),
-                                    rhs: Box::new(Expr::LoadVar { var_index: x_var }),
-                                }),
-                                then_branch: Box::new(Expr::Literal(Literal::True)),
-                                else_branch: Box::new(Expr::Empty),
-                            }),
-                        }),
+                Ok(Expr::AnyShort {
+                    generator: Box::new(Expr::BinOp {
+                        op: BinOp::Eq,
+                        lhs: Box::new(src),
+                        rhs: Box::new(s),
                     }),
-                    fallback: Box::new(Expr::Literal(Literal::False)),
-                };
-                Ok(Expr::LetBinding {
-                    var_index: dot_var,
-                    value: Box::new(Expr::Input),
-                    body: Box::new(Expr::Reduce {
-                        source: Box::new(src),
-                        init: Box::new(Expr::Literal(Literal::False)),
-                        var_index: x_var,
-                        acc_index: acc_var,
-                        update: Box::new(Expr::BinOp {
-                            op: BinOp::Or,
-                            lhs: Box::new(Expr::Input),
-                            rhs: Box::new(in_check),
-                        }),
-                    }),
+                    predicate: Box::new(Expr::Input),
                 })
             }
             // INDEX/1: INDEX(idx_expr) = INDEX(.[]; idx_expr).
