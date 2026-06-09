@@ -13017,3 +13017,18 @@ try @urid catch .
 @urid
 "caf%C3%A9"
 "café"
+
+# #960: scalb propagates a NaN exponent to NaN (ldexp/scalbln truncate NaN->0)
+[ldexp(1;nan), scalbln(1;nan), scalb(1;nan)]
+null
+[1,1,null]
+
+# #960: scalb(x; nan) is NaN regardless of x
+scalb(5;nan)|isnan
+null
+true
+
+# #960: scalb still truncates a finite fractional exponent (#812 unchanged)
+[scalb(1;0.5), scalb(3;1.5)]
+null
+[1,6]
