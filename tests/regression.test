@@ -13053,3 +13053,18 @@ try [path(foreach .[] as $x (0; .; $x[0]))] catch .
 [path(foreach .[] as $x (0; .; $x))]
 {"a":{"b":2},"c":3}
 [["a"],["c"]]
+
+# #976: from_entries does not treat key_ as a key alias (jq errors -> null key)
+try from_entries catch .
+[{"key_":"x","value":1}]
+"Cannot use null (null) as object key"
+
+# #976: with a real alias present, key_ does not override it
+from_entries
+[{"key_":"K_","name":"NAME","value":1}]
+{"NAME":1}
+
+# #976: Key is a genuine alias and wins over a spurious key_ field
+from_entries
+[{"key_":"K_","Key":"K","value":1}]
+{"K":1}
