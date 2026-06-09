@@ -3388,9 +3388,17 @@ pub fn apply_field_update_case_raw(
     is_upcase: bool,
     buf: &mut Vec<u8>,
 ) -> RawApplyOutcome {
+    // `json_object_update_field_case` appends the object prefix (`{`, the key,
+    // and copied values) to `buf` as it scans, and only returns false once it
+    // discovers the target value isn't a string. In `-c` mode `buf` is the
+    // shared output buffer, so those partial bytes (`{"a":5`) leak to stdout
+    // ahead of the generic path's error. Roll `buf` back to its pre-attempt
+    // length on Bail so nothing is emitted before the re-run errors. #996
+    let start_len = buf.len();
     if json_object_update_field_case(raw, 0, field, is_upcase, buf) {
         RawApplyOutcome::Emit
     } else {
+        buf.truncate(start_len);
         RawApplyOutcome::Bail
     }
 }

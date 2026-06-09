@@ -13227,3 +13227,13 @@ try select(.a | length > 0) catch .
 select(.a | length == 0)
 {"b":1}
 {"b":1}
+
+# #996: .field |= ascii_upcase emits exactly one line (no stray trailing blank)
+.a |= ascii_upcase
+{"a":"hi"}
+{"a":"HI"}
+
+# #996: ascii_downcase update single line
+.a |= ascii_downcase
+{"a":"HELLO"}
+{"a":"hello"}

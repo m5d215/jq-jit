@@ -3581,7 +3581,11 @@ pub fn json_object_update_field_case(
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
     }
     if !found { return false; }
-    buf.extend_from_slice(b"}\n");
+    // Terminate with `}` only (no trailing newline), matching the sibling
+    // `json_object_update_field_*` helpers — the apply site adds the record's
+    // `\n`. Emitting `}\n` here let the compact apply arm's own `\n` push double
+    // it, so `.field |= ascii_upcase` printed a stray blank line per record. #996
+    buf.push(b'}');
     true
 }
 
