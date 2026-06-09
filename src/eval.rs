@@ -1822,54 +1822,83 @@ fn eval_update_body(
     path_expr: &Expr, update_expr: &Expr, input: Value, env: &EnvRef,
     cb: &mut dyn FnMut(Value) -> GenResult,
 ) -> GenResult {
-    let mut paths = Vec::new();
-    let path_result = eval_path(path_expr, input.clone(), env, &mut |p| { paths.push(p); Ok(true) });
-    if let Err(e) = path_result {
-        let msg = format!("{}", e);
-        if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
-            bail!("Invalid path expression with result {}", trunc_path_dump(json));
+    // Single-output LHS (`.a`, `.a.b`, …) yields exactly one path and can't
+    // hang, so keep the in-place fast path: collect the lone path (dropping
+    // eval_path's input clone), move `input` into `result` so it is uniquely
+    // held, and `rt_setpath_mut` mutates without a per-call deep clone — the
+    // #652 `reduce gen as $x (acc; .[$x] |= …)` shape and per-record `.x += 1`
+    // depend on this.
+    if path_expr.is_single_output() {
+        let mut paths = Vec::new();
+        let path_result = eval_path(path_expr, input.clone(), env, &mut |p| { paths.push(p); Ok(true) });
+        if let Err(e) = path_result {
+            let msg = format!("{}", e);
+            if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
+                bail!("Invalid path expression with result {}", trunc_path_dump(json));
+            }
+            return Err(e);
         }
-        return Err(e);
+        let mut result = input;
+        let mut del_paths = Vec::new();
+        for path in &paths {
+            let old_val = crate::runtime::rt_getpath(&result, path).unwrap_or(Value::Null);
+            let mut has_output = false;
+            let mut new_val = Value::Null;
+            // jq `|=` takes the FIRST value the RHS emits (`.a |= (1,2)` keeps
+            // 1); `Ok(false)` stops after the first (#323).
+            eval(update_expr, old_val, env, &mut |v| { has_output = true; new_val = v; Ok(false) })?;
+            if has_output {
+                let path_slice = match path {
+                    Value::Arr(a) => a.as_slice(),
+                    _ => bail!("Path must be specified as an array"),
+                };
+                crate::runtime::rt_setpath_mut(&mut result, path_slice, new_val)?;
+            } else {
+                del_paths.push(path.clone());
+            }
+        }
+        if !del_paths.is_empty() {
+            let dp = Value::Arr(Rc::new(del_paths));
+            result = crate::runtime::rt_delpaths(&result, &dp)?;
+        }
+        return cb(result);
     }
-    // Move `input` into `result` so `rt_setpath_mut`'s `Rc::make_mut` can
-    // mutate in place when the caller exclusively owns the value. The
-    // previous `input.clone()` bumped the refcount and forced a full
-    // container clone per iteration, defeating the in-place
-    // `reduce gen as $x (acc; .[$x] += 1)` shape whenever the source
-    // generator made the reduce fall off the JIT's fast path (#652).
-    // `eval_path`'s clone above is dropped before this point, so the move
-    // is safe as long as `input` itself was exclusively held.
-    let mut result = input;
+    // Multi-output / generator LHS: apply each update as its path is produced,
+    // matching jq's `_modify` (`reduce path(paths) as $p (.; …)`), instead of
+    // materialising the whole path stream first. An infinite path generator
+    // whose update invalidates a later step (`(recurse(.a)) |= 9`: setpath([];9)
+    // makes the doc `9`, then the next `["a"]` setpath errors) now aborts at the
+    // first bad setpath rather than looping forever collecting paths. After the
+    // first touch `result` is uniquely held, so the remaining setpaths stay
+    // in-place (only the first amortised clone is paid per call). #995
+    let mut result = input.clone();
     let mut del_paths = Vec::new();
-    for path in &paths {
-        let old_val = crate::runtime::rt_getpath(&result, path).unwrap_or(Value::Null);
+    let path_result = eval_path(path_expr, input, env, &mut |path| {
+        let path_slice = match &path {
+            Value::Arr(a) => a.as_slice(),
+            _ => bail!("Path must be specified as an array"),
+        };
+        let old_val = crate::runtime::rt_getpath(&result, &path).unwrap_or(Value::Null);
         let mut has_output = false;
-        let mut new_val = old_val.clone();
-        // jq `|=` takes the FIRST value the RHS emits and discards the
-        // rest (`{a:1} | .a |= (1,2)` is `{a:1}`, not `{a:2}`). Returning
-        // `Ok(false)` from the callback stops the generator after the
-        // first hit; without it the interpreter ended up with the last
-        // emitted value and diverged from JIT / fast-path on the same
-        // filter (#323 self-diff caught this).
+        let mut new_val = Value::Null;
         eval(update_expr, old_val, env, &mut |v| {
             has_output = true;
             new_val = v;
             Ok(false)
         })?;
         if has_output {
-            // `rt_setpath_mut` mutates `result` via Rc::make_mut, so each
-            // level is cloned at most once across the loop instead of once
-            // per touched leaf. Heavy `|=` workloads such as
-            // `(.. | scalars) |= .+1` over a deep tree drop from O(N*D) to
-            // O(distinct internal nodes). See #551.
-            let path_slice = match path {
-                Value::Arr(a) => a.as_slice(),
-                _ => bail!("Path must be specified as an array"),
-            };
             crate::runtime::rt_setpath_mut(&mut result, path_slice, new_val)?;
         } else {
             del_paths.push(path.clone());
         }
+        Ok(true)
+    });
+    if let Err(e) = path_result {
+        let msg = format!("{}", e);
+        if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
+            bail!("Invalid path expression with result {}", trunc_path_dump(json));
+        }
+        return Err(e);
     }
     if !del_paths.is_empty() {
         let dp = Value::Arr(Rc::new(del_paths));
@@ -1885,49 +1914,91 @@ fn eval_assign_body(
     path_expr: &Expr, value_expr: &Expr, input: Value, env: &EnvRef,
     cb: &mut dyn FnMut(Value) -> GenResult,
 ) -> GenResult {
-    // Scalar-value fast path: compute new_val via eval_one so the
-    // generator form's `input.clone()` never sits alive in an outer
-    // callback frame. Once paths are collected, `input` has refcount 1
-    // again, so we can move it into `result` and rt_setpath_mut's
-    // Rc::make_mut mutates in place instead of deep-cloning the
-    // accumulator on every iteration (#659).
+    // Single-output LHS: at most one path, can't hang. Keep the in-place fast
+    // path — collect the lone path (dropping eval_path's clone), move `input`
+    // into `result` (uniquely held), and rt_setpath_mut mutates without a
+    // per-call deep clone (#659). Multi-output / generator LHS applies lazily so
+    // `(recurse(.a)) = 9` aborts at the first invalid setpath instead of
+    // materialising an unbounded path stream. #995
+    let single = path_expr.is_single_output();
+
+    // Scalar-value fast path: compute new_val via eval_one so the generator
+    // form's `input.clone()` never sits alive in an outer callback frame.
     if let Ok(new_val) = eval_one(value_expr, &input, env) {
-        let mut paths = Vec::new();
-        let path_result = eval_path(path_expr, input.clone(), env, &mut |p| { paths.push(p); Ok(true) });
+        if single {
+            let mut paths = Vec::new();
+            let path_result = eval_path(path_expr, input.clone(), env, &mut |p| { paths.push(p); Ok(true) });
+            if let Err(e) = path_result {
+                let msg = format!("{}", e);
+                if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
+                    bail!("Invalid path expression with result {}", trunc_path_dump(json));
+                }
+                return Err(e);
+            }
+            let mut result = input;
+            for path in &paths {
+                let path_slice = match path {
+                    Value::Arr(a) => a.as_slice(),
+                    _ => bail!("Path must be specified as an array"),
+                };
+                crate::runtime::rt_setpath_mut(&mut result, path_slice, new_val.clone())?;
+            }
+            return cb(result);
+        }
+        let mut result = input.clone();
+        let path_result = eval_path(path_expr, input, env, &mut |path| {
+            let path_slice = match &path {
+                Value::Arr(a) => a.as_slice(),
+                _ => bail!("Path must be specified as an array"),
+            };
+            crate::runtime::rt_setpath_mut(&mut result, path_slice, new_val.clone())?;
+            Ok(true)
+        });
         if let Err(e) = path_result {
             let msg = format!("{}", e);
             if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
                 bail!("Invalid path expression with result {}", trunc_path_dump(json));
             }
             return Err(e);
-        }
-        let mut result = input;
-        for path in &paths {
-            let path_slice = match path {
-                Value::Arr(a) => a.as_slice(),
-                _ => bail!("Path must be specified as an array"),
-            };
-            crate::runtime::rt_setpath_mut(&mut result, path_slice, new_val.clone())?;
         }
         return cb(result);
     }
     eval(value_expr, input.clone(), env, &mut |new_val| {
-        let mut paths = Vec::new();
-        let path_result = eval_path(path_expr, input.clone(), env, &mut |p| { paths.push(p); Ok(true) });
+        if single {
+            let mut paths = Vec::new();
+            let path_result = eval_path(path_expr, input.clone(), env, &mut |p| { paths.push(p); Ok(true) });
+            if let Err(e) = path_result {
+                let msg = format!("{}", e);
+                if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
+                    bail!("Invalid path expression with result {}", trunc_path_dump(json));
+                }
+                return Err(e);
+            }
+            let mut result = input.clone();
+            for path in &paths {
+                let path_slice = match path {
+                    Value::Arr(a) => a.as_slice(),
+                    _ => bail!("Path must be specified as an array"),
+                };
+                crate::runtime::rt_setpath_mut(&mut result, path_slice, new_val.clone())?;
+            }
+            return cb(result);
+        }
+        let mut result = input.clone();
+        let path_result = eval_path(path_expr, input.clone(), env, &mut |path| {
+            let path_slice = match &path {
+                Value::Arr(a) => a.as_slice(),
+                _ => bail!("Path must be specified as an array"),
+            };
+            crate::runtime::rt_setpath_mut(&mut result, path_slice, new_val.clone())?;
+            Ok(true)
+        });
         if let Err(e) = path_result {
             let msg = format!("{}", e);
             if let Some(json) = msg.strip_prefix("__pathexpr_result__:") {
                 bail!("Invalid path expression with result {}", trunc_path_dump(json));
             }
             return Err(e);
-        }
-        let mut result = input.clone();
-        for path in &paths {
-            let path_slice = match path {
-                Value::Arr(a) => a.as_slice(),
-                _ => bail!("Path must be specified as an array"),
-            };
-            crate::runtime::rt_setpath_mut(&mut result, path_slice, new_val.clone())?;
         }
         cb(result)
     })

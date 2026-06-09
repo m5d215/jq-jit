@@ -13237,3 +13237,18 @@ select(.a | length == 0)
 .a |= ascii_downcase
 {"a":"HELLO"}
 {"a":"hello"}
+
+# #995: infinite path-generator LHS of |= aborts at first invalid setpath
+try ((recurse(.a)) |= 9) catch "caught"
+{"a":{}}
+"caught"
+
+# #995: same for = (plain assign)
+try ((recurse(.a)) = 9) catch "caught"
+{"a":{}}
+"caught"
+
+# #995: while-generated infinite path LHS also terminates
+try ((while(true; .a)) |= 9) catch "caught"
+{"a":{}}
+"caught"
