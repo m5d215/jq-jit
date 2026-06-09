@@ -2278,14 +2278,14 @@ impl Parser {
         // stay below the `//` rung — read parse_add directly. The `//`
         // operator is handled at parse_alt_top above parse_assign.
         let mut expr = self.parse_add()?;
-        // Check for ?// (alternative destructuring)
-        while self.at(&Token::AltDestructure) {
-            self.advance();
-            let right = self.parse_add()?;
-            expr = Expr::AlternativeDestructure {
-                alternatives: vec![expr, right],
-            };
-        }
+        // `?//` is NOT a general binary operator: it is the destructuring
+        // alternative separator, valid only between patterns in
+        // `EXPR as PAT ?// PAT | body` (and the `reduce`/`foreach` pattern
+        // chains). Those sites consume the token via their own pattern loops;
+        // here at expression level a `?//` is a syntax error in jq, so we must
+        // NOT consume it. Leaving it unconsumed surfaces as a parse error,
+        // matching jq instead of silently running `try LHS catch (LHS // RHS)`
+        // (#977).
         loop {
             let op = match self.current() {
                 Token::Eq => BinOp::Eq,
