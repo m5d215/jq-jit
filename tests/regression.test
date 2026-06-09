@@ -13182,3 +13182,23 @@ def f(g): .a | g; path(f(.b))
 def f(a;b): b; path(f(.x;.y))
 {"x":1,"y":2}
 ["y"]
+
+# #997: debug is path-transparent (= / |= / del / path)
+debug = 9
+5
+9
+
+# #997: path() through debug forwards the incoming path
+path(.a | debug)
+{"a":5}
+["a"]
+
+# #997: del() through debug keeps path tracking
+del(.a | debug | .b)
+{"a":{"b":5},"c":1}
+{"a":{},"c":1}
+
+# #997: stderr is path-transparent too
+(.a | stderr | .b) = 9
+{"a":{"b":5}}
+{"a":{"b":9}}

@@ -6418,6 +6418,26 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 }
             })
         }
+        // `debug`/`stderr` are path-transparent: they emit their side-effect
+        // line on stderr but forward the value and the incoming path unchanged
+        // (identity path `[]`), so `path()`/`=`/`|=`/`del` through a debugging
+        // insertion keep working. Mirror the value arms above but yield the
+        // identity path instead of the value. #997
+        Expr::Debug { expr: de } => {
+            eval(de, input.clone(), env, &mut |val| {
+                eprintln!("[\"DEBUG:\",{}]", crate::value::value_to_json_tojson(&val));
+                cb(Value::Arr(Rc::new(vec![])))
+            })
+        }
+        Expr::Stderr { expr: se } => {
+            eval(se, input.clone(), env, &mut |val| {
+                match &val {
+                    Value::Str(s) => eprint!("{}", s.as_str()),
+                    _ => eprint!("{}", crate::value::value_to_json_tojson(&val)),
+                }
+                cb(Value::Arr(Rc::new(vec![])))
+            })
+        }
         _ => {
             // Non-path-safe expression: evaluate, then accept the value as
             // the empty path `[]` if it is one of `null`/`true`/`false` and
