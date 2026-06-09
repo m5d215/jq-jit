@@ -828,6 +828,11 @@ pub struct Parser {
     /// allocates a deeper binding that shadows it, matching jq. See #886.
     env_var_idx: u16,
     lib_dirs: Vec<String>,
+    /// Source file these tokens came from, reported by `$__loc__.file`. The
+    /// top-level program parser uses `"<top-level>"`; a module parser uses the
+    /// module's (canonicalised) path so a `$__loc__` in a module-defined
+    /// function attributes to the module file, like jq. #1004
+    source_file: String,
     /// The `compiled_funcs` id of the function body currently being parsed, or
     /// `None` at the top level. Used to attribute a deferred unbound-variable
     /// reference to its enclosing def. #765
@@ -870,6 +875,7 @@ impl Parser {
             scope: Scope::new(),
             env_var_idx: 0,
             lib_dirs: lib_dirs.to_vec(),
+            source_file: "<top-level>".to_string(),
             current_func: None,
             deferred_unbound: Vec::new(),
             deferred_unknown_func: Vec::new(),
@@ -1434,6 +1440,12 @@ impl Parser {
         // when closure expressions reference main-scope variables.
         let mut mod_scope = Scope::new();
         mod_scope.next_var = self.scope.next_var;
+        // `$__loc__` in a module function reports the module's source path
+        // (canonicalised, matching jq's realpath). #1004
+        let mod_source_file = std::fs::canonicalize(file_path)
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| file_path.to_string());
         let mut mod_parser = Parser {
             tokens,
             token_lines: mod_token_lines,
@@ -1441,6 +1453,7 @@ impl Parser {
             scope: mod_scope,
             env_var_idx: self.env_var_idx,
             lib_dirs: mod_lib_dirs,
+            source_file: mod_source_file,
             current_func: None,
             deferred_unbound: Vec::new(),
             deferred_unknown_func: Vec::new(),
@@ -2827,7 +2840,7 @@ impl Parser {
                     }
                 }
                 if name == "__loc__" {
-                    Ok(Expr::Loc { file: "<top-level>".to_string(), line: loc_line as i64 })
+                    Ok(Expr::Loc { file: self.source_file.clone(), line: loc_line as i64 })
                 } else if name == "ENV" {
                     Ok(self.resolve_env_ref())
                 } else {
@@ -2939,7 +2952,7 @@ impl Parser {
                 } else {
                     // Shorthand: {$x} = {"x": $x}
                     let val_expr = if name == "__loc__" {
-                        Expr::Loc { file: "<top-level>".to_string(), line: loc_line as i64 }
+                        Expr::Loc { file: self.source_file.clone(), line: loc_line as i64 }
                     } else if name == "ENV" {
                         self.resolve_env_ref()
                     } else {
