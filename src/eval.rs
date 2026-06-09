@@ -2612,7 +2612,7 @@ pub fn eval(
                     // halt / halt_error are non-recoverable: jq lets them
                     // propagate past `try ... catch` so the process exits with
                     // the requested code (#182).
-                    if msg.starts_with("__halt__:") { return Err(e); }
+                    if e.downcast_ref::<crate::signal::HaltSignal>().is_some() { return Err(e); }
                     let catch_val = if let Some(json) = msg.strip_prefix("__jqerror__:") {
                         crate::value::json_to_value(json).unwrap_or(Value::from_str(&msg))
                     } else {
@@ -6044,7 +6044,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                     // halt / halt_error are non-recoverable: jq lets them
                     // propagate past `try ... catch` so the process exits with
                     // the requested code (#182).
-                    if msg.starts_with("__halt__:") { return Err(e); }
+                    if e.downcast_ref::<crate::signal::HaltSignal>().is_some() { return Err(e); }
                     // The `?//` desugar (`restore_dot`) keeps `.` set to the
                     // original input across fallbacks rather than binding the
                     // caught destructuring error: jq never exposes that error to
@@ -7222,14 +7222,14 @@ fn eval_call_builtin(name: &str, args: &[Expr], input: Value, env: &EnvRef, cb: 
         }
         ("halt", 0) => {
             // halt: terminate with status 0 after emitting any values the
-            // preceding generator already yielded. Raising a sentinel
-            // error lets the CLI flush its buffered stdout before exiting
-            // (see `__halt__:` handling in bin/jq-jit.rs).
-            bail!("__halt__:0");
+            // preceding generator already yielded. Raising a signal error
+            // lets the CLI flush its buffered stdout before exiting (see
+            // the HaltSignal handling in bin/jq-jit.rs).
+            return Err(crate::signal::HaltSignal::raise(0));
         }
         ("halt_error", 0) => {
             halt_error_write(&input);
-            bail!("__halt__:5");
+            return Err(crate::signal::HaltSignal::raise(5));
         }
         ("halt_error", 1) => {
             return eval(&args[0], input.clone(), env, &mut |code_val| {
@@ -7246,7 +7246,7 @@ fn eval_call_builtin(name: &str, args: &[Expr], input: Value, env: &EnvRef, cb: 
                     ),
                 };
                 halt_error_write(&input);
-                bail!("__halt__:{}", code);
+                Err(crate::signal::HaltSignal::raise(code))
             });
         }
         ("add", 1) => {
