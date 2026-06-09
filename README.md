@@ -6,13 +6,20 @@ A JIT-compiling [jq](https://jqlang.github.io/jq/) in Rust using [Cranelift](htt
 
 ## Features
 
-- **Targets full jq language compatibility** — passes the official jq test suite in full (509/509); any remaining divergence from jq is treated as a bug
+- **Targets full jq language compatibility** — passes the official jq test suite in full (509/509); remaining divergences from jq are treated as bugs, aside from a few deliberate tradeoffs (see [Known limitations](#known-limitations))
 - **JIT compilation** via Cranelift for hot execution paths
 - **Raw byte fast paths** — 70+ filter shapes operate directly on raw bytes, skipping JSON parsing entirely; 180+ shapes in total route to specialized fast paths
 - **Streaming JSON parser** for memory-efficient NDJSON processing
 - **Memory-mapped file I/O** — mmap-based file reading with no upfront allocation
 - **Optimized value representation** with compact strings, mimalloc, and inline Cranelift codegen
 - **jqx extensions** — shell command execution (`exec`/`execv`), CSV/TSV parsing (`fromcsv`/`fromcsvh`/`fromtsv`/`fromtsvh`), function-result memoization (`memoize`), and the in-place path-update contract (`mutate`)
+
+## Known limitations
+
+A few divergences from jq are deliberate engineering tradeoffs rather than bugs:
+
+- **Number representation** — values are IEEE 754 doubles throughout (there is no decimal-number backend), so integers beyond 2^53 and out-of-range literals such as `1e1000` lose precision or saturate where jq's optional decimal build (`have_decnum`) would preserve them — including through `tojson`/`fromjson` round-trips.
+- **Regex anchors** — the regex engine is the linear-time Rust [`regex`](https://docs.rs/regex) crate (no lookaround or backtracking, which is what keeps matching ReDoS-resistant). As a result `$` matches only end-of-text, not also just before a trailing newline as jq's Oniguruma does; `^` is likewise start-of-text only.
 
 ## Performance
 
