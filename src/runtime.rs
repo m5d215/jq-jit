@@ -4850,12 +4850,39 @@ pub fn rt_get_prog_origin() -> Value {
 /// Module search path list. jq-jit doesn't implement `import`/`include`
 /// (see #614), so this returns jq 1.8.1's static defaults; feature-probing
 /// scripts that enumerate the search list still see a shape they recognise.
+/// The effective `-L` search dirs, set once at CLI startup so the JIT's
+/// generic dispatch reports the same list as eval's env-aware arm (#1003 /
+/// #1089). Empty (the default) means "no -L given" → compile-time defaults.
+static LIB_DIRS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+pub fn set_lib_dirs(dirs: Vec<String>) {
+    let _ = LIB_DIRS.set(dirs);
+}
+
 pub fn rt_get_search_list() -> Value {
-    Value::Arr(Rc::new(vec![
-        Value::from_str("~/.jq"),
-        Value::from_str("$ORIGIN/../lib/jq"),
-        Value::from_str("$ORIGIN/../lib"),
-    ]))
+    // jq reports the *effective* search list: the `-L` dirs (canonicalised
+    // via realpath when they resolve, else kept as given) when any are
+    // present, otherwise the compile-time defaults — mirroring eval's
+    // GetSearchList arm exactly. #1089
+    let dirs = LIB_DIRS.get().map(|d| d.as_slice()).unwrap_or(&[]);
+    if dirs.is_empty() {
+        return Value::Arr(Rc::new(vec![
+            Value::from_str("~/.jq"),
+            Value::from_str("$ORIGIN/../lib/jq"),
+            Value::from_str("$ORIGIN/../lib"),
+        ]));
+    }
+    let list: Vec<Value> = dirs
+        .iter()
+        .map(|d| {
+            let canon = std::fs::canonicalize(d)
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| d.clone());
+            Value::from_str(&canon)
+        })
+        .collect();
+    Value::Arr(Rc::new(list))
 }
 
 pub fn rt_builtins() -> Value {
