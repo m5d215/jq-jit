@@ -479,8 +479,6 @@ enum JitBuiltin {
     Update { path_idx: usize, update_idx: usize },
     /// `paths(f)` native DFS; filter index into JIT_CLOSURE_OPS.
     PathsFiltered { filter_idx: usize },
-    /// `path(f)` delegated to eval; index into JIT_CLOSURE_OPS.
-    PathExpr { expr_idx: usize },
     /// sort_by/group_by/... with the key expression in JIT_CLOSURE_OPS.
     ClosureOp { kind: ClosureOpKind, expr_idx: usize },
     /// "Cannot iterate over ..." error synthesis for `.[]` on a scalar.
@@ -1133,6 +1131,10 @@ impl Flattener {
             // of erroring once the surrounding _modify pushed it onto the JIT
             // path (#809).
             JitOp::FieldBinopConst { .. } | JitOp::FieldBinopField { .. } |
+            // The in-place reduce setpath: a type-mismatched navigation
+            // (setpath on a scalar acc) sets the error flag instead of
+            // silently no-opping (#1085).
+            JitOp::SetPathMut { .. } |
             // The reduce in-place update/assign navigation: a type-mismatched
             // index (string key on array, number key on object, any key on a
             // scalar) sets the error flag instead of silently navigating to
@@ -3642,6 +3644,19 @@ impl Flattener {
                 if is_scalar(path_expr) {
                     if let Some(path_components) = extract_simple_path(path_expr) {
                         let path_arr = self.build_path_array(&path_components, input_slot);
+                        // #1085: eval validates the navigation while
+                        // building the path (`5 | path(.[0])` raises
+                        // "Cannot index number with number"); the static
+                        // array alone skips that. getpath performs the
+                        // identical walk with identical errors, so run it
+                        // for effect and discard the value.
+                        let probe = self.alloc_slot();
+                        self.emit(JitOp::CallBuiltin {
+                            dst: probe,
+                            builtin: JitBuiltin::Rt(crate::runtime::RtBuiltin::Getpath),
+                            args: vec![input_slot, path_arr],
+                        });
+                        self.emit(JitOp::Drop { slot: probe });
                         self.emit_yield(path_arr);
                         self.emit(JitOp::Drop { slot: path_arr });
                         return true;
@@ -3703,25 +3718,16 @@ impl Flattener {
                         }
                     }
                 }
-                // Delegate complex path expressions to runtime
-                let idx = self.closure_ops.len();
-                self.closure_ops.push((**path_expr).clone());
-                let inp = self.alloc_slot();
-                self.emit(JitOp::Clone { dst: inp, src: input_slot });
-                // path() can produce multiple outputs (generator paths)
-                let arr = self.alloc_slot();
-                self.emit_propagating(JitOp::CallBuiltin {
-                    dst: arr,
-                    builtin: JitBuiltin::PathExpr { expr_idx: idx },
-                    args: vec![inp],
-                });
-                self.emit(JitOp::Drop { slot: inp });
-                // arr is an array of paths; iterate and yield each
-                self.flatten_each_with_action(arr, false, &|s, elem| {
-                    s.emit_yield(elem);
-                });
-                self.emit(JitOp::Drop { slot: arr });
-                true
+                // Complex path expressions: bail the whole filter to eval.
+                // The old delegate collected every path into an array up
+                // front, which (a) hangs on infinite streams eval cuts
+                // lazily (`[limit(5; path(recurse(.a)))]`, #1085), and
+                // (b) predates the eval-side provenance fixes (#880/#953),
+                // erroring on rootless anchors like `. as $x | path($x)`.
+                // The flag forces the bail even from emission contexts
+                // that ignore a false return.
+                self.has_unresolved_recursion = true;
+                false
             }
 
             // `not` as a generator (already handled as scalar but needs generator wrapper)
@@ -7397,42 +7403,20 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 return 0;
             }
         }
-        // Fast path: from_entries (op 28). Bail to the generic builtin path when the
-        // key resolves to a non-string so the eval path emits jq's type error (issue #73).
+        // Fast path: from_entries (op 28). Delegate to the shared
+        // rt_from_entries: the previous inline copy still honored the
+        // pre-#976 `key_` alias (wrong key precedence vs jq 1.8.1's
+        // `.key // .Key // .name // .Name`) and bailed to a path that
+        // never raised "Cannot use null (null) as object key". #1085
         if op == 28 {
-            if let Value::Arr(a) = &*input {
-                let mut obj = crate::value::new_objmap();
-                let mut ok = true;
-                for entry in a.iter() {
-                    match entry {
-                        Value::Obj(ObjInner(o)) => {
-                            let pick_truthy = |name: &str| -> Option<&Value> {
-                                match o.get(name) {
-                                    Some(v) if !matches!(v, Value::Null | Value::False) => Some(v),
-                                    _ => None,
-                                }
-                            };
-                            let key = pick_truthy("key")
-                                .or_else(|| pick_truthy("key_"))
-                                .or_else(|| pick_truthy("Key"))
-                                .or_else(|| pick_truthy("name"))
-                                .or_else(|| pick_truthy("Name"))
-                                .cloned()
-                                .unwrap_or(Value::Null);
-                            let val = o.get("value").or_else(|| o.get("Value"))
-                                .cloned().unwrap_or(Value::Null);
-                            let key_str = match &key {
-                                Value::Str(s) => crate::value::KeyStr::from(s.as_str()),
-                                _ => { ok = false; break; }
-                            };
-                            obj.insert(key_str, val);
-                        }
-                        _ => { ok = false; break; }
+            if let Value::Arr(_) = &*input {
+                match crate::runtime::rt_from_entries(&*input) {
+                    Ok(v) => { std::ptr::write(dst, v); return 0; }
+                    Err(e) => {
+                        set_jit_error_from(&e);
+                        std::ptr::write(dst, Value::Null);
+                        return GEN_ERROR;
                     }
-                }
-                if ok {
-                    std::ptr::write(dst, Value::object_from_map(obj));
-                    return 0;
                 }
             }
         }
@@ -7710,24 +7694,19 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 _ => {}
             }
         }
-        // Fast path: transpose (op 26)
+        // Fast path: transpose (op 26). Delegate to the shared rt_transpose:
+        // the previous inline copy null-padded non-array elements where
+        // eval/jq raise "Cannot index <type> with number" (#543). #1085
         if op == 26 {
-            if let Value::Arr(a) = &*input {
-                let max_len = a.iter().filter_map(|v| if let Value::Arr(sub) = v { Some(sub.len()) } else { None }).max().unwrap_or(0);
-                let mut result = Vec::with_capacity(max_len);
-                for i in 0..max_len {
-                    let mut row = Vec::with_capacity(a.len());
-                    for item in a.iter() {
-                        if let Value::Arr(sub) = item {
-                            row.push(sub.get(i).cloned().unwrap_or(Value::Null));
-                        } else {
-                            row.push(Value::Null);
-                        }
+            if let Value::Arr(_) = &*input {
+                match crate::runtime::rt_transpose(&*input) {
+                    Ok(v) => { std::ptr::write(dst, v); return 0; }
+                    Err(e) => {
+                        set_jit_error_from(&e);
+                        std::ptr::write(dst, Value::Null);
+                        return GEN_ERROR;
                     }
-                    result.push(Value::Arr(Rc::new(row)));
                 }
-                std::ptr::write(dst, Value::Arr(Rc::new(result)));
-                return 0;
             }
         }
         // Fast path: infinite (op 34), nan (op 35)
@@ -7856,8 +7835,17 @@ extern "C" fn jit_rt_setpath_mut(container: *mut Value, path: *const Value, val:
         let new_val = std::ptr::read(val);
         std::ptr::write(val, Value::Null);
 
-        if let Value::Arr(p) = path_val {
-            let _ = crate::runtime::rt_setpath_mut(&mut *container, p.as_slice(), new_val);
+        // Surface navigation errors ("Cannot index number with string
+        // \"a\"") through the pending-error flag instead of silently
+        // leaving the accumulator untouched — eval raises here. The op is
+        // marked fallible, so a CheckError follows every emission. #1085
+        let res = if let Value::Arr(p) = path_val {
+            crate::runtime::rt_setpath_mut(&mut *container, p.as_slice(), new_val)
+        } else {
+            Err(anyhow::anyhow!("Path must be specified as an array"))
+        };
+        if let Err(e) = res {
+            set_jit_error_from(&e);
         }
     }
 }
@@ -8914,20 +8902,6 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, builtin: *const JitBuiltin,
                 std::ptr::write(dst, Value::Arr(Rc::new(vec![])));
             }
             return 0;
-        }
-
-        // path expression evaluation delegated to eval
-        if let JitBuiltin::PathExpr { expr_idx } = b {
-            let idx: usize = *expr_idx;
-            let path_expr = JIT_CLOSURE_OPS.with(|cell| (&*cell.get()).get(idx).cloned());
-            if let Some(path_expr) = path_expr {
-                let input = if !args.is_empty() { args[0].clone() } else { Value::Null };
-                let env = new_delegated_env(&[&path_expr]);
-                match crate::eval::eval_path_standalone(&path_expr, input, &env) {
-                    Ok(v) => { std::ptr::write(dst, v); return 0; }
-                    Err(e) => { set_jit_error_from(&e); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
-                }
-            }
         }
 
         // delegate to eval-based closure operation (sort_by/group_by/...)

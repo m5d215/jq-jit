@@ -2171,7 +2171,7 @@ fn rt_to_entries(v: &Value) -> Result<Value> {
     }
 }
 
-fn rt_from_entries(v: &Value) -> Result<Value> {
+pub(crate) fn rt_from_entries(v: &Value) -> Result<Value> {
     match v {
         Value::Arr(a) => {
             let mut obj = new_objmap();
@@ -2232,7 +2232,7 @@ fn rt_from_entries(v: &Value) -> Result<Value> {
     }
 }
 
-fn rt_transpose(v: &Value) -> Result<Value> {
+pub(crate) fn rt_transpose(v: &Value) -> Result<Value> {
     // jq's transpose accepts both arrays and objects (objects iterate
     // their values, like jq's other "iterable" sites). The inner `.[$i]`
     // index against a non-array element fails with the standard
