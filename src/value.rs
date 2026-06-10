@@ -1419,7 +1419,7 @@ pub fn json_object_keys_to_buf_reuse(b: &[u8], pos: usize, buf: &mut Vec<u8>, ke
     buf.push(b'[');
     for (idx, (ks, ke)) in keys.iter().enumerate() {
         if idx > 0 { buf.push(b','); }
-        push_key_canon_solidus(buf, &b[*ks..*ke]);
+        push_key_canon_escapes(buf, &b[*ks..*ke]);
     }
     buf.extend_from_slice(b"]\n");
     true
@@ -1527,19 +1527,11 @@ pub fn json_object_keys_join_to_buf(b: &[u8], pos: usize, sep: &[u8], sorted: bo
             }
         }
         // Key content is between quotes: b[ks+1..ke-1]
-        // Escapes preserved, except `\/` is decoded to `/` (#780).
+        // Canonical escapes copy verbatim; `\/` and `\uXXXX` are re-encoded
+        // to jq's output form (#780, #1027).
         let content = &b[ks+1..ke-1];
-        if raw_contains_escaped_solidus(content) {
-            let mut j = 0;
-            while j < content.len() {
-                let run = j;
-                while j < content.len() && content[j] != b'\\' { j += 1; }
-                if j > run { buf.extend_from_slice(&content[run..j]); }
-                if j >= content.len() { break; }
-                if j + 1 < content.len() && content[j+1] == b'/' { buf.push(b'/'); j += 2; }
-                else if j + 1 < content.len() { buf.push(b'\\'); buf.push(content[j+1]); j += 2; }
-                else { buf.push(b'\\'); j += 1; }
-            }
+        if raw_contains_noncanon_escape(content) {
+            push_string_content_canon(buf, content);
         } else {
             buf.extend_from_slice(content);
         }
@@ -1588,7 +1580,7 @@ pub fn json_object_keys_unsorted_to_buf(b: &[u8], pos: usize, buf: &mut Vec<u8>)
             buf.push(b'[');
             for (idx, (ks, ke, _, _)) in pairs.iter().enumerate() {
                 if idx > 0 { buf.push(b','); }
-                push_key_canon_solidus(buf, &b[*ks..*ke]);
+                push_key_canon_escapes(buf, &b[*ks..*ke]);
             }
             buf.extend_from_slice(b"]\n");
             return true;
@@ -1598,7 +1590,7 @@ pub fn json_object_keys_unsorted_to_buf(b: &[u8], pos: usize, buf: &mut Vec<u8>)
 
         if !first { buf.push(b','); }
         first = false;
-        push_key_canon_solidus(buf, &b[key_start..key_end]);
+        push_key_canon_escapes(buf, &b[key_start..key_end]);
         i = key_end;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
         if i >= b.len() || b[i] != b':' { return false; }
@@ -3323,7 +3315,7 @@ pub fn json_to_entries_raw(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {
             for (idx, (ks, ke, vs, ve)) in pairs.iter().enumerate() {
                 if idx > 0 { buf.push(b','); }
                 buf.extend_from_slice(b"{\"key\":");
-                push_key_canon_solidus(buf, &b[*ks..*ke]);
+                push_key_canon_escapes(buf, &b[*ks..*ke]);
                 buf.extend_from_slice(b",\"value\":");
                 if !append_canonical_value(buf, &b[*vs..*ve]) { buf.truncate(buf_start); return false; }
                 buf.push(b'}');
@@ -3344,7 +3336,7 @@ pub fn json_to_entries_raw(b: &[u8], pos: usize, buf: &mut Vec<u8>) -> bool {
         if !first { buf.push(b','); }
         first = false;
         buf.extend_from_slice(b"{\"key\":");
-        push_key_canon_solidus(buf, &b[key_start..key_end]);
+        push_key_canon_escapes(buf, &b[key_start..key_end]);
         buf.extend_from_slice(b",\"value\":");
         if !append_canonical_value(buf, &b[vs..i]) { buf.truncate(buf_start); return false; }
         buf.push(b'}');
@@ -3977,34 +3969,43 @@ fn walk_json_nums_inner(buf: &mut Vec<u8>, b: &[u8], pos: &mut usize, op: u8, op
     }
 }
 
-/// Returns true if `b` contains an escaped solidus (`\/`) inside a string —
-/// the only escape jq canonicalises that the raw-byte passthrough paths would
-/// otherwise leak verbatim (#780). Escape-aware so `\\/` (escaped backslash
-/// followed by a literal `/`) is not a false positive. Callers gate the
-/// (slightly slower) normalising copy on this so backslash-free input — the
-/// overwhelmingly common case — keeps its single `extend_from_slice`.
+/// Returns true if `b` contains string bytes that jq's output encoder would
+/// not emit verbatim: an escaped solidus (`\/`, #780), a `\uXXXX` escape
+/// (printable ones decode to their literal character on output, #1027), or a
+/// literal DEL byte (0x7F — valid unescaped in JSON input, but jq escapes it
+/// to `\u007f` on output, #446). The raw-byte passthrough paths would
+/// otherwise leak these verbatim. Escape-aware so `\\/` / `\\u` (escaped
+/// backslash followed by a literal `/` / `u`) are not false positives.
+/// Callers gate the (slightly slower) normalising copy on this so
+/// backslash-free input — the overwhelmingly common case — keeps its single
+/// `extend_from_slice`.
 #[inline]
-pub fn raw_contains_escaped_solidus(b: &[u8]) -> bool {
-    // Cheapest pre-filter first: no backslash at all means no escape of any
-    // kind, so no escaped solidus. A single-byte `memchr` has lower per-call
-    // setup than memmem's two-byte searcher, which matters because this gates
-    // every raw string output — one call per record on the NDJSON
-    // field-access hot paths, where the value almost never contains `\`.
-    let Some(first) = memchr::memchr(b'\\', b) else {
+pub fn raw_contains_noncanon_escape(b: &[u8]) -> bool {
+    // Cheapest pre-filter first: no backslash or DEL means nothing to
+    // canonicalise. A two-byte `memchr2` still has low per-call setup, which
+    // matters because this gates every raw string output — one call per
+    // record on the NDJSON field-access hot paths, where the value almost
+    // never contains `\` or 0x7F.
+    let Some(first) = memchr::memchr2(b'\\', 0x7F, b) else {
         return false;
     };
-    // A backslash exists; it may be the `\/` we canonicalise, or a literal `/`
-    // following an escaped backslash (`\\/`). Walk escape-aware from the first
-    // backslash so that case is not a false positive.
+    if b[first] == 0x7F {
+        return true;
+    }
+    // A backslash exists; it may start an escape we canonicalise, or be an
+    // escaped backslash (`\\`) followed by a literal `/`/`u`. Walk
+    // escape-aware from the first backslash so that case is not a false
+    // positive.
     let mut i = first;
     while i + 1 < b.len() {
-        match memchr::memchr(b'\\', &b[i..]) {
+        match memchr::memchr2(b'\\', 0x7F, &b[i..]) {
             Some(off) => {
                 let p = i + off;
+                if b[p] == 0x7F { return true; }
                 if p + 1 >= b.len() { return false; }
-                if b[p + 1] == b'/' { return true; }
+                if b[p + 1] == b'/' || b[p + 1] == b'u' { return true; }
                 // Skip the whole escape pair so `\\` does not let the second
-                // backslash pair with a following `/`.
+                // backslash pair with a following `/`/`u`.
                 i = p + 2;
             }
             None => return false,
@@ -4013,35 +4014,92 @@ pub fn raw_contains_escaped_solidus(b: &[u8]) -> bool {
     false
 }
 
-/// Append the raw JSON value bytes `b` to `buf` verbatim, except that `\/`
-/// inside any string is decoded to `/` (jq canonical form, #780). Object keys
-/// are strings too, so this also fixes keys. Used by identity-passthrough
-/// echo sites; gate with [`raw_contains_escaped_solidus`] so the fast path
-/// (plain `extend_from_slice`) is preserved when no escaped solidus is present.
-pub fn push_raw_canon_solidus(buf: &mut Vec<u8>, b: &[u8]) {
+/// Append the canonical jq re-encoding of a JSON string token's *content*
+/// (the bytes between the quotes, escapes intact) to `buf`, without the
+/// surrounding quotes. Decodes the content through the same parser the typed
+/// path uses (so `\uXXXX` printables, surrogate pairs, and `\/` all
+/// normalise identically, #780 / #1027) and re-escapes with the canonical
+/// output encoder. A malformed escape falls back to the verbatim copy with
+/// only `\/` rewritten — the pre-existing behavior — so these emit sites
+/// never start erroring on input the raw path previously passed through.
+fn push_string_content_canon(buf: &mut Vec<u8>, content: &[u8]) {
+    let mut tok = Vec::with_capacity(content.len() + 2);
+    tok.push(b'"');
+    tok.extend_from_slice(content);
+    tok.push(b'"');
+    if let Ok((s, end)) = parse_json_string_raw(&tok, 0) {
+        if end == tok.len() {
+            let mut enc = Vec::with_capacity(s.len() + 2);
+            push_json_string_to_vec(&mut enc, &s);
+            buf.extend_from_slice(&enc[1..enc.len() - 1]);
+            return;
+        }
+    }
+    // Fallback: verbatim with `\/` → `/` (the #780 rewrite).
+    let mut j = 0;
+    while j < content.len() {
+        let run = j;
+        while j < content.len() && content[j] != b'\\' { j += 1; }
+        if j > run { buf.extend_from_slice(&content[run..j]); }
+        if j >= content.len() { break; }
+        if j + 1 < content.len() && content[j + 1] == b'/' {
+            buf.push(b'/');
+            j += 2;
+        } else if j + 1 < content.len() {
+            buf.push(b'\\');
+            buf.push(content[j + 1]);
+            j += 2;
+        } else {
+            buf.push(b'\\');
+            j += 1;
+        }
+    }
+}
+
+/// Append the raw JSON value bytes `b` to `buf` verbatim, except that every
+/// string token containing a non-canonical escape (`\/`, `\uXXXX`) is
+/// re-encoded to jq's canonical output form (#780, #1027). Object keys are
+/// strings too, so this also fixes keys. Used by identity-passthrough echo
+/// sites; gate with [`raw_contains_noncanon_escape`] so the fast path (plain
+/// `extend_from_slice`) is preserved when no such escape is present.
+pub fn push_raw_canon_escapes(buf: &mut Vec<u8>, b: &[u8]) {
     let mut i = 0;
     let len = b.len();
     while i < len {
         if b[i] == b'"' {
-            buf.push(b'"');
+            // Find the end of the string token, escape-aware.
+            let start = i;
             i += 1;
-            loop {
-                let run_start = i;
-                while i < len && b[i] != b'"' && b[i] != b'\\' { i += 1; }
-                if i > run_start { buf.extend_from_slice(&b[run_start..i]); }
-                if i >= len { return; }
-                if b[i] == b'"' { buf.push(b'"'); i += 1; break; }
-                if i + 1 < len && b[i + 1] == b'/' {
-                    buf.push(b'/');
-                    i += 2;
-                } else if i + 1 < len {
-                    buf.push(b'\\');
-                    buf.push(b[i + 1]);
-                    i += 2;
-                } else {
-                    buf.push(b'\\');
-                    i += 1;
+            let mut end = None;
+            while i < len {
+                match memchr::memchr2(b'"', b'\\', &b[i..]) {
+                    Some(off) => {
+                        i += off;
+                        if b[i] == b'"' {
+                            end = Some(i + 1);
+                            i += 1;
+                            break;
+                        }
+                        i += 2;
+                    }
+                    None => {
+                        i = len;
+                    }
                 }
+            }
+            match end {
+                Some(e) => {
+                    let content = &b[start + 1..e - 1];
+                    if raw_contains_noncanon_escape(content) {
+                        buf.push(b'"');
+                        push_string_content_canon(buf, content);
+                        buf.push(b'"');
+                    } else {
+                        buf.extend_from_slice(&b[start..e]);
+                    }
+                }
+                // Unterminated string (malformed input): copy verbatim.
+                None => buf.extend_from_slice(&b[start..]),
             }
         } else {
             let run_start = i;
@@ -4052,12 +4110,12 @@ pub fn push_raw_canon_solidus(buf: &mut Vec<u8>, b: &[u8]) {
 }
 
 /// Append a JSON string token `key` (including its surrounding quotes),
-/// decoding `\/` to `/` (#780). Fast-paths the common no-escaped-solidus key
-/// with a single `extend_from_slice`.
+/// re-encoding non-canonical escapes (`\/`, `\uXXXX`; #780 / #1027).
+/// Fast-paths the common escape-free key with a single `extend_from_slice`.
 #[inline]
-pub fn push_key_canon_solidus(buf: &mut Vec<u8>, key: &[u8]) {
-    if raw_contains_escaped_solidus(key) {
-        push_raw_canon_solidus(buf, key);
+pub fn push_key_canon_escapes(buf: &mut Vec<u8>, key: &[u8]) {
+    if raw_contains_noncanon_escape(key) {
+        push_raw_canon_escapes(buf, key);
     } else {
         buf.extend_from_slice(key);
     }
@@ -5853,9 +5911,10 @@ pub enum CompositeCanon {
     /// Carries a number whose lexeme differs from jq's output form (or a
     /// special-float / surrogate that must round-trip through the parser).
     NonCanonicalNumber,
-    /// No non-canonical number, but a nested string holds an escaped solidus
-    /// (`\/`) that must be decoded to `/`.
-    EscapedSolidus,
+    /// No non-canonical number, but a nested string holds an escape jq
+    /// re-encodes on output: `\/` -> `/` (#780) or a non-surrogate `\uXXXX`
+    /// (#1027).
+    NoncanonEscape,
     /// Copies verbatim.
     Clean,
 }
@@ -5879,7 +5938,7 @@ pub fn raw_composite_canon_class(bytes: &[u8]) -> CompositeCanon {
         while k < chars.len() { t[chars[k] as usize] = true; k += 1; }
         t
     };
-    let mut saw_solidus = false;
+    let mut saw_noncanon_escape = false;
     let mut i = 0;
     while i < bytes.len() {
         // Skip ahead to the next interesting byte. The hot loop is just
@@ -5890,13 +5949,17 @@ pub fn raw_composite_canon_class(bytes: &[u8]) -> CompositeCanon {
             b'"' => {
                 // Skip string contents — a stray `e` inside a string isn't
                 // a number's exponent marker. Use memchr to jump to the
-                // next `"` or `\` instead of byte-by-byte.
+                // next `"`, `\`, or DEL instead of byte-by-byte.
                 i += 1;
                 while i < bytes.len() {
-                    match memchr::memchr2(b'"', b'\\', &bytes[i..]) {
+                    match memchr::memchr3(b'"', b'\\', 0x7F, &bytes[i..]) {
                         Some(off) => {
                             i += off;
                             if bytes[i] == b'"' { i += 1; break; }
+                            // A literal DEL byte is valid unescaped JSON
+                            // input, but jq escapes it to `\u007f` on
+                            // output (#446) — normalise on copy (#1027).
+                            if bytes[i] == 0x7F { saw_noncanon_escape = true; i += 1; continue; }
                             // \uD[8-F]XX is a surrogate codepoint — jq either
                             // errors (lone high), replaces with U+FFFD (lone
                             // low), or decodes to UTF-8 (valid pair). Identity
@@ -5911,13 +5974,14 @@ pub fn raw_composite_canon_class(bytes: &[u8]) -> CompositeCanon {
                             {
                                 return CompositeCanon::NonCanonicalNumber;
                             }
-                            // `\/` is the one escape jq canonicalises (#780).
-                            // Note it but keep scanning — a later non-canonical
+                            // `\/` (#780) and non-surrogate `\uXXXX` (#1027)
+                            // are escapes jq canonicalises on output. Note
+                            // them but keep scanning — a later non-canonical
                             // number must still take priority. `\\/` is not a
                             // false positive: skipping the whole escape pair
                             // (`i += 2`) lands past the `\\`, so its trailing
                             // `/` is a fresh literal, not paired with a `\`.
-                            if bytes[i + 1] == b'/' { saw_solidus = true; }
+                            if bytes[i + 1] == b'/' || bytes[i + 1] == b'u' { saw_noncanon_escape = true; }
                             // backslash: skip the escape sequence
                             i = i.saturating_add(2);
                         }
@@ -5961,7 +6025,7 @@ pub fn raw_composite_canon_class(bytes: &[u8]) -> CompositeCanon {
             _ => i += 1,
         }
     }
-    if saw_solidus { CompositeCanon::EscapedSolidus } else { CompositeCanon::Clean }
+    if saw_noncanon_escape { CompositeCanon::NoncanonEscape } else { CompositeCanon::Clean }
 }
 
 /// Append a single JSON value's raw bytes `val` to `buf`, canonicalising number
@@ -5993,8 +6057,8 @@ pub fn append_canonical_value(buf: &mut Vec<u8>, val: &[u8]) -> bool {
         Some(b'"') => {
             // Decode `\/` to `/` (jq never escapes the solidus, #780); other
             // escapes copy verbatim. Fast-path the no-escaped-solidus string.
-            if raw_contains_escaped_solidus(val) {
-                push_raw_canon_solidus(buf, val);
+            if raw_contains_noncanon_escape(val) {
+                push_raw_canon_escapes(buf, val);
             } else {
                 buf.extend_from_slice(val);
             }
@@ -6008,7 +6072,7 @@ pub fn append_canonical_value(buf: &mut Vec<u8>, val: &[u8]) -> bool {
             // scan of the composite per record on the construction hot paths.
             match raw_composite_canon_class(val) {
                 CompositeCanon::NonCanonicalNumber => return false,
-                CompositeCanon::EscapedSolidus => push_raw_canon_solidus(buf, val),
+                CompositeCanon::NoncanonEscape => push_raw_canon_escapes(buf, val),
                 CompositeCanon::Clean => buf.extend_from_slice(val),
             }
             true
