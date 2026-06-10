@@ -13497,3 +13497,23 @@ with_entries(.value |= tostring)
 [try (.a | .[0:1]) catch "e", .a.[0], first(.a.[])]
 {"a":[1,2,3]}
 [[1],1,1]
+
+# Issue #1022: strftime normalizes out-of-range broken-down fields like timegm (month carry)
+[2023,13,1,0,0,0,0,0] | strftime("%Y-%m-%d")
+null
+"2024-02-01"
+
+# Issue #1022: minute/second carry and mday borrow normalize; wday/yday recompute
+[([2023,5,1,0,70,0,0,0] | strftime("%H:%M")), ([2023,5,1,0,0,90,0,0] | strftime("%M:%S")), ([2023,5,-1,0,0,0,0,0] | strftime("%Y-%m-%d")), ([2023,0,32,0,0,0,9,999] | strftime("%a %j"))]
+null
+["01:10","01:30","2023-05-30","Wed 032"]
+
+# Issue #1022: short arrays normalize too (mday=0 borrows into previous year)
+[2024] | strftime("%Y-%m-%d")
+null
+"2023-12-31"
+
+# Issue #1022: results landing before 1900 keep the raw year (macOS timegm failure baseline); carries landing >= 1900 normalize
+[([1898,13,1,0,0,0,0,0] | strftime("%Y")), ([1899,13,1,0,0,0,0,0] | strftime("%Y-%m-%d"))]
+null
+["1898","1900-02-01"]
