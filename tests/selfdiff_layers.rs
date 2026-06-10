@@ -85,29 +85,38 @@ impl Config {
         }
     }
 
-    /// Env vars that switch this config on. Always sets/clears all three
-    /// knobs so a leaked env from the caller can't poison the matrix.
-    fn env(self) -> [(&'static str, Option<&'static str>); 3] {
+    /// Env vars that switch this config on. Always sets/clears every knob
+    /// (including the backend-pinning ones, #1059) so a leaked env from the
+    /// caller can't poison the matrix.
+    fn env(self) -> [(&'static str, Option<&'static str>); 5] {
         match self {
             Config::Baseline => [
                 ("JQJIT_DISABLE_RAW_BYTE", None),
                 ("JQJIT_DISABLE_SIMPLIFY", None),
                 ("JQJIT_FORCE_INTERPRETER", None),
+                ("JQJIT_FORCE_JITOP_INTERP", None),
+                ("JQJIT_FORCE_CRANELIFT", None),
             ],
             Config::NoRawByte => [
                 ("JQJIT_DISABLE_RAW_BYTE", Some("1")),
                 ("JQJIT_DISABLE_SIMPLIFY", None),
                 ("JQJIT_FORCE_INTERPRETER", None),
+                ("JQJIT_FORCE_JITOP_INTERP", None),
+                ("JQJIT_FORCE_CRANELIFT", None),
             ],
             Config::NoSimplify => [
                 ("JQJIT_DISABLE_RAW_BYTE", None),
                 ("JQJIT_DISABLE_SIMPLIFY", Some("1")),
                 ("JQJIT_FORCE_INTERPRETER", None),
+                ("JQJIT_FORCE_JITOP_INTERP", None),
+                ("JQJIT_FORCE_CRANELIFT", None),
             ],
             Config::PureInterp => [
                 ("JQJIT_DISABLE_RAW_BYTE", Some("1")),
                 ("JQJIT_DISABLE_SIMPLIFY", Some("1")),
                 ("JQJIT_FORCE_INTERPRETER", Some("1")),
+                ("JQJIT_FORCE_JITOP_INTERP", None),
+                ("JQJIT_FORCE_CRANELIFT", None),
             ],
         }
     }

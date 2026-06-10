@@ -131,6 +131,34 @@ JIT_INTERP_DIFF_LIMIT=200 cargo test --release --test selfdiff_jit_interp -- --n
 理由を書いて allowlist する。allowlist は audit trail なので、ケースを直したら
 必ずエントリも消す（ハーネスは「known なのに今 pass した」も検知して落ちる）。
 
+### JitOp backend self-diff（`tests/selfdiff_jitop_backend.rs` / #1059）
+
+JitOp lowering の 2 backend — Cranelift codegen と直接実行 interpreter
+（`jit::JitProgram`）— が同じ線形 op 列から同じ結果を返すかを
+`tests/regression.test` 全件で突き合わせる true backend diff。knob は:
+
+- `JQJIT_FORCE_JITOP_INTERP=1` — raw-byte fast path / typed fast path を
+  止め、flatten 可能な filter を JitOp interpreter で実行（不可なら eval に
+  fallback）
+- `JQJIT_FORCE_CRANELIFT=1` — 同じルーティングで backend だけ Cranelift
+  （入力サイズの JIT heuristics を無視して必ずコンパイル）
+
+両側は同一の lowering / 同一の fast path 構成なので、ここの divergence は
+「同じ op 列のどちらかの実行が間違っている」ことを意味する。allowlist は
+空維持が原則（直す、waiver しない）。
+
+```bash
+cargo test --release --test selfdiff_jitop_backend
+JITOP_BACKEND_DIFF_LIMIT=200 cargo test --release --test selfdiff_jitop_backend -- --nocapture
+```
+
+注意: `JQJIT_FORCE_CRANELIFT` は小入力でも必ず JIT するため、通常の
+dispatch では eval に流れて不可視だった「lowering vs eval」の divergence
+（literal repr の消失、`combinations`/`modf` の phantom builtin、try-catch
+内の builtin エラー消失など）がこのモードでは表に出る。それらは backend
+diff（このハーネス）では両側一致なので落ちない — lowering 側の既存バグは
+別 issue として追う。
+
 ### テスト出力
 
 `cargo test --release` だけだと regression 通過数が非表示。必ず `--nocapture`:

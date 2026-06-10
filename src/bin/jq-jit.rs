@@ -190,6 +190,38 @@ fn force_interpreter_enabled() -> bool {
     })
 }
 
+/// Self-diff knob (issue #1059): when `JQJIT_FORCE_JITOP_INTERP` is set in
+/// the environment, the binary disables raw-byte fast paths, skips Cranelift
+/// JIT compilation, and routes every flattenable filter through the direct
+/// JitOp interpreter backend (`jq_jit::jit::JitProgram`); filters the
+/// flattener rejects fall back to the tree-walking eval path. The
+/// `tests/selfdiff_jitop_interp.rs` harness shells out twice with the same
+/// arguments and asserts identical stdout / exit-code class.
+fn force_jitop_interp_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("JQJIT_FORCE_JITOP_INTERP")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false)
+    })
+}
+
+/// Self-diff knob (issue #1059), the Cranelift-side counterpart of
+/// `JQJIT_FORCE_JITOP_INTERP`: disables raw-byte fast paths and pins every
+/// flattenable filter to the Cranelift-compiled backend (compile regardless
+/// of input-size heuristics); non-flattenable filters fall back to eval.
+/// Routing is otherwise identical to the JitOp-interpreter mode, so the
+/// `tests/selfdiff_jitop_backend.rs` harness diffs the two *backends* over
+/// the same lowering with no fast-path asymmetry.
+fn force_cranelift_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("JQJIT_FORCE_CRANELIFT")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false)
+    })
+}
+
 /// Layer-pinning knob (issue #685): when `JQJIT_DISABLE_RAW_BYTE` is set,
 /// every `detect_*` raw-byte fast path in this binary is skipped and the
 /// dispatch falls through to `process_input` / `Filter::execute_cb`. JIT
@@ -2752,6 +2784,18 @@ fn real_main() {
     if force_interp {
         jq_jit::interpreter::set_force_interpreter(true);
     }
+    // JitOp interpreter backend knob (#1059). The broader force flags win:
+    // --force-interp/JQJIT_FORCE_INTERPRETER pins eval, --force-jit pins
+    // Cranelift, so the env var only takes effect when neither is set.
+    let force_jitop = force_jitop_interp_enabled() && !force_interp && !force_jit;
+    if force_jitop {
+        jq_jit::interpreter::set_force_jitop_interp(true);
+    }
+    // Cranelift-side counterpart (#1059): same routing, compiled backend.
+    let force_cranelift = force_cranelift_enabled() && !force_interp && !force_jit && !force_jitop;
+    if force_cranelift {
+        jq_jit::interpreter::set_force_cranelift(true);
+    }
     // Layer-pinning knob (issue #685). `disable_raw_byte` is consumed
     // locally below where `use_raw_fast_paths` is computed; the simplify
     // knob threads into `interpreter::set_disable_simplify` so the
@@ -2923,6 +2967,14 @@ fn real_main() {
     if force_interp {
         // Self-diff mode (#323) / --force-interp — leave jit_fn empty and
         // let execute / execute_cb take the eval path.
+    } else if force_jitop {
+        // Self-diff mode (#1059) — build the JitOp program instead of
+        // Cranelift-compiling; non-flattenable filters fall back to eval.
+        filter.compile_jitop_program();
+    } else if force_cranelift {
+        // Self-diff mode (#1059) — pin the Cranelift backend regardless of
+        // input-size heuristics; non-flattenable filters fall back to eval.
+        filter.compile_jit();
     } else if force_jit {
         // --force-jit bypasses the heuristics entirely.
         filter.compile_jit();
@@ -3036,6 +3088,8 @@ fn real_main() {
     let use_raw_fast_paths = (use_compact_buf || use_pretty_buf)
         && !color_output
         && !force_interp
+        && !force_jitop
+        && !force_cranelift
         && !disable_raw_byte;
 
     // JQJIT_TRACE: emit a single [trace] line naming the first fast path that
