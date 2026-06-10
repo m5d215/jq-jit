@@ -6886,12 +6886,25 @@ extern "C" fn jit_rt_field_cmp_num(base: *const Value, key_ptr: *const u8, key_l
                 8 | 10 => 0,      // null > num, null >= num → false
                 _ => 0,
             },
-            // Other types compare as `string > number`, `array > number`,
-            // etc. in jq's ordering. The fast path only supports numeric
-            // operands; falling through to 0 here is the pre-fix behavior
-            // and the wider type-ordering coverage stays on the generic
-            // path.
-            _ => 0,
+            // Other types follow jq's sort total order (null < false <
+            // true < numbers < strings < arrays < objects): booleans rank
+            // below the numeric rhs, strings/arrays/objects above, and
+            // cross-type equality is always false. Returning 0 here made
+            // `select(.x > 3)` drop string fields jq keeps. #1087
+            Some(other) => {
+                use std::cmp::Ordering;
+                let ord = crate::runtime::compare_values(other, &Value::number(rhs));
+                let result = match op {
+                    5 => ord == Ordering::Equal,
+                    6 => ord != Ordering::Equal,
+                    7 => ord == Ordering::Less,
+                    8 => ord == Ordering::Greater,
+                    9 => ord != Ordering::Greater,
+                    10 => ord != Ordering::Less,
+                    _ => return 0,
+                };
+                if result { 1 } else { 0 }
+            }
         }
     }
 }
