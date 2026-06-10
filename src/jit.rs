@@ -7688,12 +7688,14 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 return 0;
             }
         }
-        // Fast path: unique (op 10)
+        // Fast path: unique (op 10). Dedup must use `values_equal`, not the
+        // total-order comparator: jq keeps adjacent NaNs (`nan != nan`)
+        // while `compare_values` ranks them Equal (#1059 Phase 2 sweep).
         if op == 10 {
             if let Value::Arr(a) = &*input {
                 let mut sorted = a.as_ref().clone();
                 sorted.sort_by(crate::runtime::compare_values);
-                sorted.dedup_by(|a, b| crate::runtime::compare_values(a, b) == std::cmp::Ordering::Equal);
+                sorted.dedup_by(|a, b| crate::runtime::values_equal(a, b));
                 std::ptr::write(dst, Value::Arr(Rc::new(sorted)));
                 return 0;
             }
@@ -8791,6 +8793,17 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, builtin: *const JitBuiltin,
                             Value::True => buf.extend_from_slice(b"true"),
                             Value::False => buf.extend_from_slice(b"false"),
                             Value::Num(n, crate::value::NumRepr(repr)) => crate::value::push_value_num_repr_bytes(&mut buf, *n, repr.as_ref()),
+                            // jq rejects arrays/objects as row elements
+                            // (issue #79); mirror eval_format's wording.
+                            Value::Arr(_) | Value::Obj(_) => {
+                                set_jit_error(format!(
+                                    "{} ({}) is not valid in a csv row",
+                                    v.type_name(),
+                                    crate::value::value_to_json(v)
+                                ));
+                                std::ptr::write(dst, Value::Null);
+                                return GEN_ERROR;
+                            }
                             _ => buf.extend_from_slice(crate::value::value_to_json(v).as_bytes()),
                         }
                     }
@@ -8829,6 +8842,17 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, builtin: *const JitBuiltin,
                             Value::True => buf.extend_from_slice(b"true"),
                             Value::False => buf.extend_from_slice(b"false"),
                             Value::Num(n, crate::value::NumRepr(repr)) => crate::value::push_value_num_repr_bytes(&mut buf, *n, repr.as_ref()),
+                            // jq uses the same "csv row" wording for @tsv
+                            // (issue #79); mirror eval_format's validation.
+                            Value::Arr(_) | Value::Obj(_) => {
+                                set_jit_error(format!(
+                                    "{} ({}) is not valid in a csv row",
+                                    v.type_name(),
+                                    crate::value::value_to_json(v)
+                                ));
+                                std::ptr::write(dst, Value::Null);
+                                return GEN_ERROR;
+                            }
                             _ => buf.extend_from_slice(crate::value::value_to_json(v).as_bytes()),
                         }
                     }
