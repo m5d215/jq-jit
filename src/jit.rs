@@ -22,16 +22,16 @@ use anyhow::{Result, bail};
 // `env_ptr + offset_of!(JitEnv, error_flag)`, giving every thread its own
 // flag without runtime address resolution and without a process-wide lock.
 thread_local! {
-    /// Last error message produced by a runtime trampoline.
-    static JIT_LAST_ERROR: UnsafeCell<Option<String>> = const { UnsafeCell::new(None) };
-    /// Direct `Value` storage for the `error` builtin — avoids Value→JSON→Value
-    /// round-trip in try-catch.
-    static JIT_ERROR_VALUE: UnsafeCell<Option<Value>> = const { UnsafeCell::new(None) };
+    /// Last error produced by a runtime trampoline, typed (#1034). One slot
+    /// replaces the former string/Value pair, so `error(value)` payloads,
+    /// halt codes, and break ids cross the FFI boundary without collapsing
+    /// into display text.
+    static JIT_LAST_ERROR: UnsafeCell<Option<JitError>> = const { UnsafeCell::new(None) };
     /// Closure ops captured at compile time; consumed by runtime trampolines
     /// during execution.
     static JIT_CLOSURE_OPS: UnsafeCell<Vec<Expr>> = const { UnsafeCell::new(Vec::new()) };
     /// Pointer to the `JitEnv` currently being driven by `execute_jit*`.
-    /// `set_jit_error` consults this to flip the env's `error_flag` without
+    /// `set_jit_error*` consult this to flip the env's `error_flag` without
     /// plumbing an env pointer through every fallible trampoline signature.
     static CURRENT_ENV: Cell<*mut JitEnv> = const { Cell::new(std::ptr::null_mut()) };
 }
@@ -54,27 +54,94 @@ fn clear_error_flag() {
     }
 }
 
+/// Typed payload of the JIT error channel (#1034). Trampolines store it in
+/// `JIT_LAST_ERROR`; `propagate_error` moves it onto `JitEnv` and the
+/// `execute_jit*` boundary rebuilds the matching typed anyhow signal.
+#[derive(Debug)]
+pub(crate) enum JitError {
+    /// Plain message text (genuine runtime errors).
+    Msg(String),
+    /// `error(value)` payload, lossless.
+    Raise(Value),
+    /// halt / halt_error exit code.
+    Halt(i32),
+    /// label/break id.
+    Break(u64),
+}
+
+impl JitError {
+    /// The legacy string form — what the channel carried before it was
+    /// typed. Used where the consumer is still string-shaped: `Value::Error`
+    /// results from `execute_jit` and catch values for halt/break (#1043).
+    fn legacy_string(&self) -> String {
+        match self {
+            JitError::Msg(s) => s.clone(),
+            JitError::Raise(v) => format!("__jqerror__:{}", crate::value::value_to_json(v)),
+            JitError::Halt(c) => format!("__halt__:{}", c),
+            JitError::Break(id) => format!("__break__:{}:", id),
+        }
+    }
+
+    /// Rebuild the typed anyhow signal at the JIT→caller boundary so
+    /// downstream downcasts (try/catch in eval, the CLI halt handler) see
+    /// the same types the eval engine raises.
+    fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            JitError::Msg(s) => anyhow::anyhow!("{}", s),
+            JitError::Raise(v) => crate::signal::ErrorValue::raise(v),
+            JitError::Halt(c) => crate::signal::HaltSignal::raise(c),
+            JitError::Break(id) => crate::signal::BreakError(id).into(),
+        }
+    }
+
+    /// The value a JIT-compiled `try ... catch` binds. Halt/break keep their
+    /// legacy sentinel-string shape: a JIT catch currently treats them as
+    /// catchable text (#1043 tracks making halt propagate instead).
+    fn into_catch_value(self) -> Value {
+        match self {
+            JitError::Raise(v) => v,
+            other => Value::from_str(&other.legacy_string()),
+        }
+    }
+}
+
+/// Lower an anyhow error into the typed channel payload, preserving the
+/// signal payloads that stringification used to collapse into display text.
+fn jit_error_from_anyhow(e: &anyhow::Error) -> JitError {
+    if let Some(ev) = e.downcast_ref::<crate::signal::ErrorValue>() {
+        return JitError::Raise(crate::signal::take_error_payload(ev));
+    }
+    if let Some(h) = e.downcast_ref::<crate::signal::HaltSignal>() {
+        return JitError::Halt(h.code);
+    }
+    if let Some(b) = e.downcast_ref::<crate::signal::BreakError>() {
+        return JitError::Break(b.0);
+    }
+    JitError::Msg(format!("{}", e))
+}
+
 fn set_jit_error(msg: String) {
-    JIT_LAST_ERROR.with(|cell| unsafe { *cell.get() = Some(msg); });
+    JIT_LAST_ERROR.with(|cell| unsafe { *cell.get() = Some(JitError::Msg(msg)); });
+    set_error_flag();
+}
+
+/// Store an anyhow error in the channel, keeping its signal payload typed.
+fn set_jit_error_from(e: &anyhow::Error) {
+    JIT_LAST_ERROR.with(|cell| unsafe { *cell.get() = Some(jit_error_from_anyhow(e)); });
     set_error_flag();
 }
 
 fn set_jit_error_value(val: Value) {
-    JIT_ERROR_VALUE.with(|cell| unsafe { *cell.get() = Some(val); });
+    JIT_LAST_ERROR.with(|cell| unsafe { *cell.get() = Some(JitError::Raise(val)); });
     set_error_flag();
 }
 
-fn take_jit_error() -> Option<String> {
+fn take_jit_error() -> Option<JitError> {
     JIT_LAST_ERROR.with(|cell| unsafe { (*cell.get()).take() })
-}
-
-fn take_jit_error_value() -> Option<Value> {
-    JIT_ERROR_VALUE.with(|cell| unsafe { (*cell.get()).take() })
 }
 
 fn clear_jit_error() {
     JIT_LAST_ERROR.with(|cell| unsafe { *cell.get() = None; });
-    JIT_ERROR_VALUE.with(|cell| unsafe { *cell.get() = None; });
     clear_error_flag();
 }
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder, StackSlotData, StackSlotKind};
@@ -486,7 +553,7 @@ enum JitOp {
 
     /// Like `CheckError` but does *not* drain the pending error. Used on the
     /// outside-try-catch propagation path so `ReturnError` / `propagate_error`
-    /// can still read `JIT_LAST_ERROR` and transfer it to `env.error_msg`.
+    /// can still read `JIT_LAST_ERROR` and transfer it to `env.error`.
     JumpIfError { label: LabelId },
 
     // Error throwing
@@ -981,7 +1048,7 @@ impl Flattener {
             } else {
                 // Outside a try-catch: branch to ReturnError without draining the
                 // pending error, so `propagate_error` can still hand it off to
-                // `env.error_msg` (fixes generic "JIT execution error" messages).
+                // `env.error` (fixes generic "JIT execution error" messages).
                 let error_label = self.alloc_label();
                 let ok_label = self.alloc_label();
                 self.ops.push(JitOp::JumpIfError { label: error_label });
@@ -6526,7 +6593,7 @@ extern "C" fn jit_rt_field_binop_field(
                 // null.field = null, so this is null OP null
                 match crate::eval::eval_binop(binop_from_i32(op), &Value::Null, &Value::Null) {
                     Ok(v) => { std::ptr::write(dst, v); return 0; }
-                    Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
+                    Err(e) => { set_jit_error_from(&e); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
                 }
             }
             _ => {
@@ -6571,7 +6638,7 @@ extern "C" fn jit_rt_field_binop_field(
         let b = vb.cloned().unwrap_or(Value::Null);
         match crate::eval::eval_binop(binop_from_i32(op), &a, &b) {
             Ok(v) => { std::ptr::write(dst, v); 0 }
-            Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); GEN_ERROR }
+            Err(e) => { set_jit_error_from(&e); std::ptr::write(dst, Value::Null); GEN_ERROR }
         }
     }
 }
@@ -6590,7 +6657,7 @@ extern "C" fn jit_rt_field_binop_const(
                 let (l, r) = if field_is_lhs != 0 { (&a, &*rhs) } else { (&*rhs, &a) };
                 match crate::eval::eval_binop(binop_from_i32(op), l, r) {
                     Ok(v) => { std::ptr::write(dst, v); return 0; }
-                    Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
+                    Err(e) => { set_jit_error_from(&e); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
                 }
             }
             _ => {
@@ -6633,7 +6700,7 @@ extern "C" fn jit_rt_field_binop_const(
         let b = rv.clone();
         match crate::eval::eval_binop(binop_from_i32(op), &a, &b) {
             Ok(v) => { std::ptr::write(dst, v); 0 }
-            Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); GEN_ERROR }
+            Err(e) => { set_jit_error_from(&e); std::ptr::write(dst, Value::Null); GEN_ERROR }
         }
     }
 }
@@ -6654,7 +6721,7 @@ extern "C" fn jit_rt_index_field(dst: *mut Value, base: *const Value, key_ptr: *
                 match crate::eval::eval_index(&*base, &key_val, false) {
                     Ok(v) => { std::ptr::write(dst, v); 0 }
                     Err(e) => {
-                        set_jit_error(e.to_string());
+                        set_jit_error(e);
                         std::ptr::write(dst, Value::Null); GEN_ERROR
                     }
                 }
@@ -6695,7 +6762,7 @@ extern "C" fn jit_rt_yield_field_ref(
                         result
                     }
                     Err(e) => {
-                        set_jit_error(e.to_string());
+                        set_jit_error(e);
                         GEN_ERROR
                     }
                 }
@@ -6726,7 +6793,7 @@ extern "C" fn jit_rt_index(dst: *mut Value, base: *const Value, key: *const Valu
         match crate::eval::eval_index(&*base, &*key, false) {
             Ok(v) => { std::ptr::write(dst, v); 0 }
             Err(e) => {
-                set_jit_error(e.to_string());
+                set_jit_error(e);
                 std::ptr::write(dst, Value::Null); GEN_ERROR
             }
         }
@@ -6783,7 +6850,7 @@ extern "C" fn jit_rt_binop(dst: *mut Value, op: i32, lhs: *const Value, rhs: *co
         };
         match crate::eval::eval_binop(binop, &*lhs, &*rhs) {
             Ok(v) => { std::ptr::write(dst, v); 0 }
-            Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); GEN_ERROR }
+            Err(e) => { set_jit_error_from(&e); std::ptr::write(dst, Value::Null); GEN_ERROR }
         }
     }
 }
@@ -6802,7 +6869,7 @@ extern "C" fn jit_rt_add_move(dst: *mut Value, lhs: *mut Value, rhs: *const Valu
         std::ptr::write(lhs, Value::Null);
         match crate::runtime::rt_add_owned(lhs_val, &*rhs) {
             Ok(v) => { std::ptr::write(dst, v); 0 }
-            Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); GEN_ERROR }
+            Err(e) => { set_jit_error_from(&e); std::ptr::write(dst, Value::Null); GEN_ERROR }
         }
     }
 }
@@ -6979,7 +7046,7 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                         match crate::value::json_to_value_fromjson(s) {
                             Ok(v) => { std::ptr::write(dst, v); return 0; }
                             Err(e) => {
-                                set_jit_error(format!("{}", e));
+                                set_jit_error_from(&e);
                                 std::ptr::write(dst, Value::Null);
                                 return GEN_ERROR;
                             }
@@ -7365,7 +7432,7 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
         match unaryop_from_i32(op) {
             Some(u) => match crate::eval::eval_unaryop(u, &*input) {
                 Ok(v) => { std::ptr::write(dst, v); 0 }
-                Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); GEN_ERROR }
+                Err(e) => { set_jit_error_from(&e); std::ptr::write(dst, Value::Null); GEN_ERROR }
             },
             None => { set_jit_error("invalid unaryop".to_string()); std::ptr::write(dst, Value::Null); GEN_ERROR }
         }
@@ -8318,7 +8385,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             if args.len() >= 3 {
                 match crate::eval::eval_slice(&args[0], &args[1], &args[2]) {
                     Ok(v) => { std::ptr::write(dst, v); return 0; }
-                    Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
+                    Err(e) => { set_jit_error_from(&e); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
                 }
             }
         }
@@ -8413,7 +8480,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
             }
             match crate::eval::eval_format(format_name, &args[0]) {
                 Ok(s) => { std::ptr::write(dst, Value::from_str(&s)); return 0; }
-                Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
+                Err(e) => { set_jit_error_from(&e); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
             }
         }
 
@@ -8432,7 +8499,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                     let env = new_delegated_env(&[&path_expr, &value_expr]);
                     match crate::eval::eval_assign_standalone(&path_expr, &value_expr, input, &env) {
                         Ok(v) => { std::ptr::write(dst, v); return 0; }
-                        Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
+                        Err(e) => { set_jit_error_from(&e); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
                     }
                 }
             }
@@ -8453,7 +8520,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                     let env = new_delegated_env(&[&path_expr, &update_expr]);
                     match crate::eval::eval_update_standalone(&path_expr, &update_expr, input, &env) {
                         Ok(v) => { std::ptr::write(dst, v); return 0; }
-                        Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
+                        Err(e) => { set_jit_error_from(&e); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
                     }
                 }
             }
@@ -8553,7 +8620,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                 let env = new_delegated_env(&[&path_expr]);
                 match crate::eval::eval_path_standalone(&path_expr, input, &env) {
                     Ok(v) => { std::ptr::write(dst, v); return 0; }
-                    Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
+                    Err(e) => { set_jit_error_from(&e); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
                 }
             }
         }
@@ -8597,7 +8664,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                             match eval_result {
                                 Ok(v) => { std::ptr::write(dst, v); return 0; }
                                 Err(e) => {
-                                    set_jit_error(format!("{}", e));
+                                    set_jit_error_from(&e);
                                     std::ptr::write(dst, Value::Null);
                                     return GEN_ERROR;
                                 }
@@ -8637,7 +8704,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
 
         match crate::runtime::call_builtin(name, args) {
             Ok(v) => { std::ptr::write(dst, v); 0 }
-            Err(e) => { set_jit_error(format!("{}", e)); std::ptr::write(dst, Value::Null); GEN_ERROR }
+            Err(e) => { set_jit_error_from(&e); std::ptr::write(dst, Value::Null); GEN_ERROR }
         }
     }
 }
@@ -8651,57 +8718,32 @@ extern "C" fn jit_rt_try_end(env: *mut JitEnv) {
     unsafe { (*env).try_depth -= 1; }
 }
 
-/// Transfer error from JIT_LAST_ERROR to env.error_msg for propagation.
+/// Transfer the pending error from JIT_LAST_ERROR to env.error for
+/// propagation, keeping the payload typed.
 extern "C" fn jit_rt_propagate_error(env: *mut JitEnv) {
     // Always clear the flag — the error is either consumed here or already
     // drained by CheckError::get_error.
     unsafe { (*env).error_flag = 0; }
-    // Check for direct Value from `error` builtin (deferred serialization)
-    if let Some(val) = take_jit_error_value() {
-        let _ = take_jit_error(); // clear the marker
-        let msg_json = crate::value::value_to_json(&val);
-        unsafe { (*env).error_msg = Some(format!("__jqerror__:{}", msg_json)); }
-        return;
-    }
-    if let Some(msg) = take_jit_error() {
-        unsafe { (*env).error_msg = Some(msg); }
+    if let Some(err) = take_jit_error() {
+        unsafe { (*env).error = Some(err); }
     }
 }
 
 /// Check if the last operation produced an error.
 /// Returns 1 if error, 0 if ok.
 extern "C" fn jit_rt_has_error() -> i64 {
-    let has_value = JIT_ERROR_VALUE.with(|cell| unsafe { (*cell.get()).is_some() });
-    let has_msg = JIT_LAST_ERROR.with(|cell| unsafe { (*cell.get()).is_some() });
-    if has_value || has_msg { 1 } else { 0 }
+    let pending = JIT_LAST_ERROR.with(|cell| unsafe { (*cell.get()).is_some() });
+    if pending { 1 } else { 0 }
 }
 
 /// Get the last error as a Value and write it to dst. Clears the error.
 extern "C" fn jit_rt_get_error(dst: *mut Value, env: *mut JitEnv) {
     unsafe { (*env).error_flag = 0; }
-    // Fast path: use directly stored Value from `error` builtin
-    if let Some(v) = take_jit_error_value() {
-        let _ = take_jit_error(); // clear the string too
-        unsafe { std::ptr::write(dst, v); }
-        return;
-    }
-    let err = take_jit_error();
-    unsafe {
-        if let Some(msg) = err {
-            // Parse error: if it starts with __jqerror__, extract the JSON value
-            if let Some(json) = msg.strip_prefix("__jqerror__:") {
-                if let Ok(v) = crate::value::json_to_value(json) {
-                    std::ptr::write(dst, v);
-                } else {
-                    std::ptr::write(dst, Value::from_str(&msg));
-                }
-            } else {
-                std::ptr::write(dst, Value::from_str(&msg));
-            }
-        } else {
-            std::ptr::write(dst, Value::Null);
-        }
-    }
+    let v = match take_jit_error() {
+        Some(err) => err.into_catch_value(),
+        None => Value::Null,
+    };
+    unsafe { std::ptr::write(dst, v); }
 }
 
 fn binop_to_i32(op: BinOp) -> i32 {
@@ -8789,7 +8831,7 @@ pub struct JitEnv {
     pub collect_stacks: Vec<Vec<Value>>,
     pub str_bufs: Vec<String>,
     pub try_depth: u32,
-    pub error_msg: Option<String>,
+    pub(crate) error: Option<JitError>,
     /// Non-zero means a runtime error is pending. Codegen loads this directly
     /// via `env_ptr + offset_of!(JitEnv, error_flag)` in `CheckError` /
     /// `JumpIfError`, avoiding an embedded static address.
@@ -8809,7 +8851,7 @@ impl JitEnv {
             collect_stacks: Vec::new(),
             str_bufs: Vec::new(),
             try_depth: 0,
-            error_msg: None,
+            error: None,
             error_flag: 0,
         }
     }
@@ -10385,7 +10427,7 @@ impl JitCompiler {
                         terminated = true;
                     }
                     JitOp::ReturnError => {
-                        // Transfer error from JIT_LAST_ERROR to env.error_msg
+                        // Transfer error from JIT_LAST_ERROR to env.error
                         b.ins().call(rt["propagate_error"], &[env_ptr]);
                         let v = b.ins().iconst(ptr_ty, GEN_ERROR);
                         b.ins().return_(&[v]);
@@ -10678,7 +10720,7 @@ fn with_jit_env<R>(f: impl FnOnce(&mut JitEnv) -> R) -> R {
         env.collect_stacks.clear();
         env.str_bufs.clear();
         env.try_depth = 0;
-        env.error_msg = None;
+        env.error = None;
         env.error_flag = 0;
         // Publish the env pointer so runtime trampolines that don't take env
         // (e.g. via `set_jit_error`) can flip `error_flag` on the right env.
@@ -10696,7 +10738,11 @@ pub fn execute_jit(func: JitFilterFn, input: &Value) -> Result<Vec<Value>> {
                  &mut results as *mut Vec<Value> as *mut u8)
         };
         if result == GEN_ERROR {
-            let err_msg = env.error_msg.take()
+            // This non-streaming entry returns errors as Value::Error, a
+            // string-shaped channel — keep the legacy text until the
+            // Value::Error variant itself is retired (#1034).
+            let err_msg = env.error.take()
+                .map(|e| e.legacy_string())
                 .unwrap_or_else(|| "JIT execution error".to_string());
             results.push(Value::Error(Rc::new(err_msg)));
         }
@@ -10709,7 +10755,9 @@ pub fn execute_jit(func: JitFilterFn, input: &Value) -> Result<Vec<Value>> {
 struct StreamCtx {
     cb_fat: [usize; 2],
     had_error: bool,
-    error_msg: Option<String>,
+    /// The downstream callback's error, carried as-is — no stringification,
+    /// so typed signals (break from an enclosing label, halt) survive.
+    error: Option<anyhow::Error>,
 }
 
 unsafe extern "C" fn stream_callback(value: *const Value, ctx: *mut u8) -> i64 {
@@ -10721,7 +10769,7 @@ unsafe extern "C" fn stream_callback(value: *const Value, ctx: *mut u8) -> i64 {
         Ok(false) => 0, // stop
         Err(e) => {
             sctx.had_error = true;
-            sctx.error_msg = Some(format!("{}", e));
+            sctx.error = Some(e);
             0 // stop
         }
     }
@@ -10738,21 +10786,21 @@ pub fn execute_jit_cb(func: JitFilterFn, input: &Value, cb: &mut dyn FnMut(&Valu
         let mut sctx = StreamCtx {
             cb_fat,
             had_error: false,
-            error_msg: None,
+            error: None,
         };
         let result = unsafe {
             func(input as *const Value, env, stream_callback,
                  &mut sctx as *mut StreamCtx as *mut u8)
         };
         if sctx.had_error {
-            if let Some(msg) = sctx.error_msg {
-                return Err(anyhow::anyhow!("{}", msg));
+            if let Some(e) = sctx.error {
+                return Err(e);
             }
         }
         if result == GEN_ERROR {
-            let err_msg = env.error_msg.take()
-                .unwrap_or_else(|| "JIT execution error".to_string());
-            return Err(anyhow::anyhow!("{}", err_msg));
+            return Err(env.error.take()
+                .map(JitError::into_anyhow)
+                .unwrap_or_else(|| anyhow::anyhow!("JIT execution error")));
         }
         Ok(true)
     })
