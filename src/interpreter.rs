@@ -26,6 +26,45 @@ pub fn force_interpreter() -> bool {
     FORCE_INTERPRETER.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Self-diff knob for issue #1059: when set, [`Filter::execute`] and
+/// [`Filter::execute_cb`] skip the typed fast path and the Cranelift JIT and
+/// run every flattenable filter on the direct JitOp interpreter backend
+/// ([`crate::jit::JitProgram`]); filters the flattener rejects fall back to
+/// the tree-walking eval path. The binary sets this once at startup when
+/// `JQJIT_FORCE_JITOP_INTERP` is in the environment;
+/// tests/selfdiff_jitop_interp.rs shells out twice — once with it, once
+/// without — and asserts identical output.
+static FORCE_JITOP_INTERP: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_force_jitop_interp(on: bool) {
+    FORCE_JITOP_INTERP.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn force_jitop_interp() -> bool {
+    FORCE_JITOP_INTERP.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Self-diff knob for issue #1059, the Cranelift-side counterpart of
+/// [`force_jitop_interp`]: when set, [`Filter::execute`] and
+/// [`Filter::execute_cb`] skip the typed fast path and run every flattenable
+/// filter on the Cranelift-compiled function; non-flattenable filters fall
+/// back to the tree-walking eval path. Routing is otherwise identical to the
+/// JitOp-interpreter mode, so diffing the two pins the *backends* against
+/// each other over the same lowering with no fast-path asymmetry.
+/// The binary sets this once at startup when `JQJIT_FORCE_CRANELIFT` is in
+/// the environment; see tests/selfdiff_jitop_backend.rs.
+static FORCE_CRANELIFT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_force_cranelift(on: bool) {
+    FORCE_CRANELIFT.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn force_cranelift() -> bool {
+    FORCE_CRANELIFT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Layer-pinning knob for issue #685: when set, [`simplify_expr`] returns its
 /// input unchanged, disabling every fast-path-detection rewrite (the (b)
 /// layer in `docs/maintenance.md` §2). Used by
@@ -323,6 +362,9 @@ pub struct Filter {
     jit_fn: Option<crate::jit::JitFilterFn>,
     /// JIT compiler kept alive to own the compiled code.
     _jit_compiler: Option<Box<crate::jit::JitCompiler>>,
+    /// JitOp program for the direct interpreter backend (#1059). Only built
+    /// when `JQJIT_FORCE_JITOP_INTERP` routes execution through it.
+    jit_program: Option<crate::jit::JitProgram>,
     lib_dirs: Vec<String>,
     /// Cached eval environment to avoid re-allocating per call.
     cached_env: std::cell::RefCell<Option<crate::eval::EnvRef>>,
@@ -2535,6 +2577,7 @@ impl Filter {
             simplified,
             jit_fn,
             _jit_compiler: jit_compiler,
+            jit_program: None,
             lib_dirs: lib_dirs.to_vec(),
             cached_env: std::cell::RefCell::new(None),
             memo_slots,
@@ -2602,6 +2645,20 @@ impl Filter {
     /// Returns true if this filter has a JIT-compiled function.
     pub fn has_jit(&self) -> bool {
         self.jit_fn.is_some()
+    }
+
+    /// Build the JitOp program for the direct interpreter backend (#1059).
+    /// Mirrors `compile_jit` but stops at the shared lowering — no Cranelift
+    /// codegen. No-op if the flattener rejects the filter; execution then
+    /// falls back to the tree-walking eval path.
+    pub fn compile_jitop_program(&mut self) {
+        if self.jit_program.is_some() { return; }
+        let (ref expr, ref funcs) = self.parsed;
+        if crate::jit::is_jit_compilable_with_funcs(expr, funcs) {
+            if let Ok(prog) = crate::jit::JitProgram::compile(expr, funcs) {
+                self.jit_program = Some(prog);
+            }
+        }
     }
 
     /// Returns true if this filter has loop constructs that benefit from JIT.
@@ -11551,18 +11608,28 @@ impl Filter {
     /// Execute the filter against an input value, collecting all results.
     pub fn execute(&self, input: &Value) -> Result<Vec<Value>> {
         let forced = force_interpreter();
+        let forced_jitop = force_jitop_interp();
+        let forced_cranelift = force_cranelift();
         // Typed fast path (issue #83): probed ahead of JIT / eval. Only
         // migrated filter shapes return `Some`; every other shape or
         // unhandled input type returns `None` and falls through to the
         // authoritative generic path below.
-        if !forced {
+        if !forced && !forced_jitop && !forced_cranelift {
             if let Some(verdict) = self.try_typed_fast_path(input) {
                 return verdict.map(|v| vec![v]);
             }
         }
 
+        // JitOp interpreter backend (#1059): forced mode routes every
+        // program-compilable filter through the direct interpreter.
+        if forced_jitop {
+            if let Some(ref prog) = self.jit_program {
+                return crate::jit::execute_program(prog, input);
+            }
+        }
+
         // Try JIT execution first
-        if !forced {
+        if !forced && !forced_jitop {
             if let Some(jit_fn) = self.jit_fn {
                 return crate::jit::execute_jit(jit_fn, input);
             }
@@ -11597,18 +11664,27 @@ impl Filter {
     /// Returns Ok(true) if all values were processed, Ok(false) if stopped early.
     pub fn execute_cb(&self, input: &Value, cb: &mut dyn FnMut(&Value) -> Result<bool>) -> Result<bool> {
         let forced = force_interpreter();
+        let forced_jitop = force_jitop_interp();
+        let forced_cranelift = force_cranelift();
         // Typed fast path (issue #83) — see `execute` for rationale. The
         // current pilot emits a single value, so hitting it closes out the
         // generator: we invoke `cb` once with the verdict and return its
         // continue/stop decision to the caller.
-        if !forced {
+        if !forced && !forced_jitop && !forced_cranelift {
             if let Some(verdict) = self.try_typed_fast_path(input) {
                 let val = verdict?;
                 return cb(&val);
             }
         }
 
-        if !forced {
+        // JitOp interpreter backend (#1059) — see `execute` for rationale.
+        if forced_jitop {
+            if let Some(ref prog) = self.jit_program {
+                return crate::jit::execute_program_cb(prog, input, cb);
+            }
+        }
+
+        if !forced && !forced_jitop {
             if let Some(jit_fn) = self.jit_fn {
                 return crate::jit::execute_jit_cb(jit_fn, input, cb);
             }

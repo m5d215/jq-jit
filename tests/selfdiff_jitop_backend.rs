@@ -1,18 +1,21 @@
-//! Self-diff harness (issue #323): run every regression case through the JIT
-//! / fast-path dispatch *and* through the generic tree-walking interpreter,
-//! and assert identical stdout + exit-code class.
+//! Backend self-diff harness (issue #1059 Phase 1): run every regression
+//! case through BOTH backends of the shared JitOp lowering — the direct
+//! JitOp interpreter (`JQJIT_FORCE_JITOP_INTERP=1`) and the Cranelift
+//! codegen (`JQJIT_FORCE_CRANELIFT=1`) — and assert identical stdout +
+//! exit-code class.
 //!
-//! Differential testing against `jq-1.8.1` (`tests/diff_corpus.rs`) catches
-//! external divergences only. This harness catches the *internal* class —
-//! the JIT path and the interpreter path inside jq-jit drifting apart on the
-//! same filter — without depending on an external `jq` binary.
+//! The two knobs configure *identical* routing (raw-byte fast paths off,
+//! typed fast path off, non-flattenable filters falling back to eval) and
+//! differ only in which backend executes the flattened JitOp sequence, so
+//! any divergence here is a true backend bug: one of the two executions of
+//! the same linear op sequence is wrong.
 //!
-//! The runtime knob is `JQJIT_FORCE_INTERPRETER=1`: the binary then disables
-//! all raw-byte fast paths, skips JIT compilation, and routes
-//! `Filter::execute` / `Filter::execute_cb` through the generic interpreter
-//! (see `jq_jit::interpreter::set_force_interpreter`).
+//! This complements `tests/selfdiff_jit_interp.rs` (default dispatch vs
+//! tree-walking eval): that harness pins the lowering + fast-path layers
+//! against eval semantics, this one pins the two lowering backends against
+//! each other.
 //!
-//! Set `JIT_INTERP_DIFF_LIMIT=N` to truncate the corpus during local
+//! Set `JITOP_BACKEND_DIFF_LIMIT=N` to truncate the corpus during local
 //! development; the default runs every case in `tests/regression.test`.
 
 mod common;
@@ -63,15 +66,23 @@ struct RunOutput {
     is_error: bool,
 }
 
-fn run_once(bin: &str, filter: &str, input: &str, force_interp: bool) -> Option<RunOutput> {
+/// Backend selector for one subprocess run.
+#[derive(Clone, Copy)]
+enum Backend {
+    JitopInterp,
+    Cranelift,
+}
+
+fn run_once(bin: &str, filter: &str, input: &str, backend: Backend) -> Option<RunOutput> {
     let lib_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/modules");
     let mut cmd = Command::new(bin);
     cmd.arg("-L").arg(lib_dir).arg("-c").arg(filter);
     cmd.env_remove("JQJIT_FORCE_INTERPRETER");
     cmd.env_remove("JQJIT_FORCE_JITOP_INTERP");
     cmd.env_remove("JQJIT_FORCE_CRANELIFT");
-    if force_interp {
-        cmd.env("JQJIT_FORCE_INTERPRETER", "1");
+    match backend {
+        Backend::JitopInterp => { cmd.env("JQJIT_FORCE_JITOP_INTERP", "1"); }
+        Backend::Cranelift => { cmd.env("JQJIT_FORCE_CRANELIFT", "1"); }
     }
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
@@ -139,29 +150,19 @@ fn normalize(output: &str) -> String {
     lines.join("\n")
 }
 
-/// Cases the harness flags but does not fail on. Each entry pins a specific
-/// regression-test line to the underlying-divergence note that explains it.
-/// New divergences are NOT silently allowed — they have to be added here with
-/// rationale, which is the point: the allowlist is the audit trail of "we
-/// know about this, here's why we haven't fixed it yet."
-///
-/// Current entries (#323):
-/// - `tojson` on numbers that overflow `f64` (`1e1000` → `±INFINITY`):
-///   the raw-byte fast path on stdin lexes the digits and emits the
-///   canonicalised literal (`"1E+1000"`); the interpreter routes through
-///   `Value::Num(f64, repr)` and `push_jq_number_str` saturates non-finite
-///   values to `±1.7976931348623157e+308`. Plumbing the original `repr`
-///   through `value_to_json_tojson` is the obvious local fix, but doing so
-///   without also flipping `have_decnum` to `true` breaks the upstream
-///   `tests/official/jq.test` decnum consistency check (#443). Tracked
-///   in #415.
-const KNOWN_DIVERGENCES: &[usize] = &[2230, 2235, 2240, 2366, 2371];
+/// Cases the harness flags but does not fail on. Both sides execute the
+/// same JitOp sequence, so this list is expected to stay empty — a true
+/// backend divergence is a bug in one of the two executions and should be
+/// fixed, not allowlisted. The mechanism is kept for parity with the other
+/// self-diff harnesses in case a platform-specific divergence ever needs a
+/// documented waiver.
+const KNOWN_DIVERGENCES: &[usize] = &[];
 
 /// Per-case verdict, produced in parallel and folded sequentially so the
-/// counters and reporting stay identical to the original serial loop.
+/// counters and reporting stay identical across the self-diff harnesses.
 enum Outcome {
-    /// Agreed (jit == interp). `Some(line)` if the case is on the allowlist
-    /// yet agreed anyway — counts as a pass *and* flags a stale entry.
+    /// Agreed (cranelift == jitop interp). `Some(line)` if the case is on the
+    /// allowlist yet agreed anyway — counts as a pass *and* flags a stale entry.
     Pass(Option<usize>),
     KnownDiverged,
     SpawnFail(String),
@@ -169,7 +170,7 @@ enum Outcome {
 }
 
 #[test]
-fn jit_vs_interpreter_self_diff() {
+fn jitop_interp_vs_cranelift_self_diff() {
     let jq_jit = env!("CARGO_BIN_EXE_jq-jit");
 
     let corpus_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/regression.test");
@@ -178,7 +179,7 @@ fn jit_vs_interpreter_self_diff() {
     let mut cases = parse_corpus(&content);
     assert!(!cases.is_empty(), "regression corpus is empty");
 
-    if let Ok(limit) = std::env::var("JIT_INTERP_DIFF_LIMIT") {
+    if let Ok(limit) = std::env::var("JITOP_BACKEND_DIFF_LIMIT") {
         if let Ok(n) = limit.parse::<usize>() {
             cases.truncate(n);
         }
@@ -191,45 +192,45 @@ fn jit_vs_interpreter_self_diff() {
     let mut unexpected_pass: Vec<usize> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
 
-    // Each case spawns two isolated jq-jit subprocesses (JIT vs forced
+    // Each case spawns two isolated jq-jit subprocesses (Cranelift vs JitOp
     // interpreter); no shared in-process state, so fan out across cores and
     // fold the verdicts back in input order.
     let outcomes = common::parallel::par_map(&cases, |case| {
         let known = KNOWN_DIVERGENCES.contains(&case.line);
-        let jit = run_once(jq_jit, &case.filter, &case.input, false);
-        let interp = run_once(jq_jit, &case.filter, &case.input, true);
+        let cranelift = run_once(jq_jit, &case.filter, &case.input, Backend::Cranelift);
+        let jitop = run_once(jq_jit, &case.filter, &case.input, Backend::JitopInterp);
 
-        let (Some(jit), Some(interp)) = (jit, interp) else {
+        let (Some(cranelift), Some(jitop)) = (cranelift, jitop) else {
             return Outcome::SpawnFail(format!(
                 "  line {}: spawn failure\n    filter: {}\n    input:  {}",
                 case.line, case.filter, case.input
             ));
         };
 
-        if jit.is_error && interp.is_error {
+        if cranelift.is_error && jitop.is_error {
             return Outcome::Pass(known.then_some(case.line));
         }
-        if jit.is_error != interp.is_error {
+        if cranelift.is_error != jitop.is_error {
             if known {
                 return Outcome::KnownDiverged;
             }
             return Outcome::Fail(format!(
-                "  line {}: error-class mismatch (jit error={}, interp error={})\n    filter: {}\n    input:  {}\n    jit:    {}\n    interp: {}",
-                case.line, jit.is_error, interp.is_error, case.filter, case.input,
-                jit.stdout.trim(), interp.stdout.trim()
+                "  line {}: error-class mismatch (cranelift error={}, jitop error={})\n    filter: {}\n    input:  {}\n    cranelift: {}\n    jitop:     {}",
+                case.line, cranelift.is_error, jitop.is_error, case.filter, case.input,
+                cranelift.stdout.trim(), jitop.stdout.trim()
             ));
         }
 
-        let jit_norm = normalize(&jit.stdout);
-        let interp_norm = normalize(&interp.stdout);
-        if jit_norm == interp_norm {
+        let cranelift_norm = normalize(&cranelift.stdout);
+        let jitop_norm = normalize(&jitop.stdout);
+        if cranelift_norm == jitop_norm {
             Outcome::Pass(known.then_some(case.line))
         } else if known {
             Outcome::KnownDiverged
         } else {
             Outcome::Fail(format!(
-                "  line {}: value mismatch\n    filter: {}\n    input:  {}\n    jit:    {}\n    interp: {}",
-                case.line, case.filter, case.input, jit_norm, interp_norm
+                "  line {}: value mismatch\n    filter: {}\n    input:  {}\n    cranelift: {}\n    jitop:     {}",
+                case.line, case.filter, case.input, cranelift_norm, jitop_norm
             ))
         }
     });
@@ -255,7 +256,7 @@ fn jit_vs_interpreter_self_diff() {
     }
 
     eprintln!();
-    eprintln!("=== JIT vs interpreter self-diff ===");
+    eprintln!("=== JitOp interpreter vs Cranelift backend self-diff ===");
     eprintln!("PASS:        {}", pass);
     eprintln!("FAIL:        {}", fail);
     eprintln!("SPAWN:       {}", spawn_fail);
@@ -273,7 +274,7 @@ fn jit_vs_interpreter_self_diff() {
     assert_eq!(
         fail + spawn_fail,
         0,
-        "{} self-diff divergences out of {}",
+        "{} backend self-diff divergences out of {}",
         fail + spawn_fail,
         cases.len()
     );

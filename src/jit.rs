@@ -9136,6 +9136,66 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
     ops
 }
 
+/// Outcome of the shared Expr -> JitOp lowering (`flatten_filter`): the
+/// linear op sequence plus the resource counts both backends need to set up
+/// an execution frame (value slots, i64/f64 vars, jump labels).
+struct FlattenedFilter {
+    ops: Vec<JitOp>,
+    num_slots: SlotId,
+    num_vars: u32,
+    num_labels: LabelId,
+    /// Hoisted constants referenced by raw pointer from `LoadConst` /
+    /// `FieldBinopConst` ops inside `ops`; must outlive any execution.
+    value_constants: Vec<Box<Value>>,
+}
+
+/// Shared lowering for both execution backends (Cranelift codegen and the
+/// direct JitOp interpreter, #1059): inline function calls, flatten to the
+/// linear JitOp sequence, publish closure ops for runtime delegation, and
+/// run the clone+yield peephole pass.
+fn flatten_filter(expr: &Expr, funcs: &[CompiledFunc]) -> Result<FlattenedFilter> {
+    let mut fl = Flattener::new();
+    fl.funcs = funcs.to_vec();
+    // Pre-inline function calls and apply semantic optimizations.
+    // Always run to catch to_entries|from_entries and similar rewrites.
+    let inlined = fl.inline_func_calls(expr);
+    // Recursive def left an un-inlined FuncCall in the tree. The JIT
+    // can't safely emit a recursive call (no host-stack management),
+    // and pressing on would produce a partial code path that returns
+    // garbage. Bail so the binary falls back to eval, which already
+    // handles recursion via `stacker::maybe_grow` (#648).
+    if fl.has_unresolved_recursion {
+        bail!("Expression not JIT-compilable: contains recursive function call");
+    }
+    let input_slot = fl.alloc_slot(); // slot 0 = input ptr (read-only, owned by caller)
+    // Use input_slot directly — flatten_gen only reads it, never writes/drops it.
+    // Both backends handle Drop{slot:0} as a no-op.
+    if !fl.flatten_gen(&inlined, input_slot) {
+        bail!("Expression not JIT-compilable");
+    }
+    // Sub-trees can request a JIT bailout mid-flatten (e.g. a reduce
+    // source whose `flatten_gen_with_each_output` would silently emit
+    // no loop body — see #683 and the Reduce arm in flatten_scalar).
+    // Bail here so the binary falls back to the interpreter.
+    if fl.has_unresolved_recursion {
+        bail!("Expression not JIT-compilable: subtree requested bailout");
+    }
+    fl.emit(JitOp::ReturnContinue);
+
+    // Store closure ops for runtime access
+    if !fl.closure_ops.is_empty() {
+        JIT_CLOSURE_OPS.with(|cell| unsafe { *cell.get() = fl.closure_ops.clone(); });
+    }
+
+    Ok(FlattenedFilter {
+        ops: optimize_clone_yield(fl.ops),
+        num_slots: fl.next_slot,
+        num_vars: fl.next_var,
+        num_labels: fl.next_label,
+        value_constants: fl.value_constants,
+    })
+}
+
 pub struct JitCompiler {
     module: JITModule,
     ctx: cranelift_codegen::Context,
@@ -9260,47 +9320,14 @@ impl JitCompiler {
     }
 
     pub fn compile_with_funcs(&mut self, expr: &Expr, funcs: &[CompiledFunc]) -> Result<JitFilterFn> {
-        // Phase 1: Flatten
-        let mut fl = Flattener::new();
-        fl.funcs = funcs.to_vec();
-        // Pre-inline function calls and apply semantic optimizations.
-        // Always run to catch to_entries|from_entries and similar rewrites.
-        let inlined = fl.inline_func_calls(expr);
-        // Recursive def left an un-inlined FuncCall in the tree. The JIT
-        // can't safely emit a recursive call (no host-stack management),
-        // and pressing on would produce a partial code path that returns
-        // garbage. Bail so the binary falls back to eval, which already
-        // handles recursion via `stacker::maybe_grow` (#648).
-        if fl.has_unresolved_recursion {
-            bail!("Expression not JIT-compilable: contains recursive function call");
-        }
-        let compile_expr = &inlined;
-        let input_slot = fl.alloc_slot(); // slot 0 = input ptr (read-only, owned by caller)
-        // Use input_slot directly — flatten_gen only reads it, never writes/drops it.
-        // The codegen handles Drop{slot:0} as a no-op.
-        if !fl.flatten_gen(compile_expr, input_slot) {
-            bail!("Expression not JIT-compilable");
-        }
-        // Sub-trees can request a JIT bailout mid-flatten (e.g. a reduce
-        // source whose `flatten_gen_with_each_output` would silently emit
-        // no loop body — see #683 and the Reduce arm in flatten_scalar).
-        // Bail here so the binary falls back to the interpreter.
-        if fl.has_unresolved_recursion {
-            bail!("Expression not JIT-compilable: subtree requested bailout");
-        }
-        fl.emit(JitOp::ReturnContinue);
-
-        // Store closure ops for runtime access
-        if !fl.closure_ops.is_empty() {
-            JIT_CLOSURE_OPS.with(|cell| unsafe { *cell.get() = fl.closure_ops.clone(); });
-        }
-
-        let ops = optimize_clone_yield(fl.ops);
-        let num_slots = fl.next_slot;
-        let num_vars = fl.next_var;
-        let num_labels = fl.next_label;
+        // Phase 1: Flatten (shared with the JitOp interpreter backend)
+        let flat = flatten_filter(expr, funcs)?;
+        let ops = flat.ops;
+        let num_slots = flat.num_slots;
+        let num_vars = flat.num_vars;
+        let num_labels = flat.num_labels;
         // Transfer hoisted value constants to compiler lifetime
-        self._value_constants.extend(fl.value_constants);
+        self._value_constants.extend(flat.value_constants);
 
         // Phase 2: Cranelift codegen
         let ptr_ty = types::I64;
@@ -10789,13 +10816,17 @@ fn with_jit_env<R>(f: impl FnOnce(&mut JitEnv) -> R) -> R {
 }
 
 
-pub fn execute_jit(func: JitFilterFn, input: &Value) -> Result<Vec<Value>> {
+/// Raw generator callback shared by every filter backend.
+type RawYieldCb = unsafe extern "C" fn(*const Value, *mut u8) -> i64;
+
+/// Shared non-streaming driver: run a filter backend (compiled function or
+/// JitOp interpreter) against the collect callback and convert the terminal
+/// status into the legacy `Vec<Value>` shape.
+fn execute_collect(run: impl FnOnce(&mut JitEnv, RawYieldCb, *mut u8) -> i64) -> Result<Vec<Value>> {
     with_jit_env(|env| {
         let mut results: Vec<Value> = Vec::new();
-        let result = unsafe {
-            func(input as *const Value, env, collect_callback,
-                 &mut results as *mut Vec<Value> as *mut u8)
-        };
+        let ctx = &mut results as *mut Vec<Value> as *mut u8;
+        let result = run(env, collect_callback, ctx);
         if result == GEN_ERROR {
             // This non-streaming entry returns errors as Value::Error, a
             // string-shaped channel — keep the legacy text until the
@@ -10807,6 +10838,10 @@ pub fn execute_jit(func: JitFilterFn, input: &Value) -> Result<Vec<Value>> {
         }
         Ok(results)
     })
+}
+
+pub fn execute_jit(func: JitFilterFn, input: &Value) -> Result<Vec<Value>> {
+    execute_collect(|env, cb, ctx| unsafe { func(input as *const Value, env, cb, ctx) })
 }
 
 /// Streaming callback context for execute_jit_cb.
@@ -10834,8 +10869,10 @@ unsafe extern "C" fn stream_callback(value: *const Value, ctx: *mut u8) -> i64 {
     }
 }
 
-/// Execute JIT filter with streaming callback (avoids Vec allocation).
-pub fn execute_jit_cb(func: JitFilterFn, input: &Value, cb: &mut dyn FnMut(&Value) -> Result<bool>) -> Result<bool> {
+/// Shared streaming driver: run a filter backend (compiled function or JitOp
+/// interpreter) with a per-value callback, avoiding the Vec allocation.
+fn execute_stream(run: impl FnOnce(&mut JitEnv, RawYieldCb, *mut u8) -> i64,
+                  cb: &mut dyn FnMut(&Value) -> Result<bool>) -> Result<bool> {
     with_jit_env(|env| {
         // Store the fat pointer as raw bytes to avoid lifetime issues.
         // Safety: sctx lives only within this scope, same as cb.
@@ -10847,10 +10884,7 @@ pub fn execute_jit_cb(func: JitFilterFn, input: &Value, cb: &mut dyn FnMut(&Valu
             had_error: false,
             error: None,
         };
-        let result = unsafe {
-            func(input as *const Value, env, stream_callback,
-                 &mut sctx as *mut StreamCtx as *mut u8)
-        };
+        let result = run(env, stream_callback, &mut sctx as *mut StreamCtx as *mut u8);
         if sctx.had_error {
             if let Some(e) = sctx.error {
                 return Err(e);
@@ -10863,6 +10897,505 @@ pub fn execute_jit_cb(func: JitFilterFn, input: &Value, cb: &mut dyn FnMut(&Valu
         }
         Ok(true)
     })
+}
+
+/// Execute JIT filter with streaming callback (avoids Vec allocation).
+pub fn execute_jit_cb(func: JitFilterFn, input: &Value, cb: &mut dyn FnMut(&Value) -> Result<bool>) -> Result<bool> {
+    execute_stream(|env, raw_cb, ctx| unsafe { func(input as *const Value, env, raw_cb, ctx) }, cb)
+}
+
+// ============================================================================
+// JitOp direct interpreter (#1059 Phase 1)
+//
+// A switch-loop backend over the same linear JitOp sequence the Cranelift
+// codegen consumes. Both backends share the lowering (`flatten_filter`) and
+// the runtime helpers (`jit_rt_*`), so the semantics of every op are defined
+// in exactly one place; the codegen's inline fast paths (trivial clone/drop,
+// Num+Num arithmetic, null field access) are pure shortcuts of the same
+// helper semantics and are simply not replicated here.
+// ============================================================================
+
+/// A flattened filter ready for direct interpretation: the JitOp sequence
+/// plus a label -> op-index table.
+pub struct JitProgram {
+    ops: Vec<JitOp>,
+    num_slots: SlotId,
+    num_vars: u32,
+    /// LabelId -> index of its `Label` op in `ops`. Jumps land on the Label
+    /// op itself (a no-op for the interpreter).
+    label_pc: Vec<usize>,
+    /// Keeps the `LoadConst` / `FieldBinopConst` pointer targets inside
+    /// `ops` alive for the lifetime of the program.
+    _value_constants: Vec<Box<Value>>,
+}
+
+impl JitProgram {
+    /// Lower an expression to a directly interpretable JitOp program.
+    /// Fails for exactly the shapes `JitCompiler::compile_with_funcs`
+    /// rejects — the two backends share `flatten_filter`.
+    pub fn compile(expr: &Expr, funcs: &[CompiledFunc]) -> Result<JitProgram> {
+        let flat = flatten_filter(expr, funcs)?;
+        let mut label_pc = vec![usize::MAX; flat.num_labels as usize];
+        for (i, op) in flat.ops.iter().enumerate() {
+            if let JitOp::Label { id } = op {
+                label_pc[*id as usize] = i;
+            }
+        }
+        // Every label referenced by a branch must have been emitted —
+        // jumping to an unemitted label would silently fall off the end of
+        // the program instead of failing loudly. (Allocated-but-unreferenced
+        // labels are fine; the codegen tolerates those too.)
+        {
+            let check = |l: LabelId| -> Result<()> {
+                if label_pc[l as usize] == usize::MAX {
+                    bail!("JitOp program references unemitted label {}", l);
+                }
+                Ok(())
+            };
+            for op in &flat.ops {
+                match op {
+                    JitOp::IfTruthy { then_label, else_label, .. }
+                    | JitOp::TypeCmpBranch { then_label, else_label, .. } => {
+                        check(*then_label)?;
+                        check(*else_label)?;
+                    }
+                    JitOp::Jump { label }
+                    | JitOp::JumpIfError { label } => check(*label)?,
+                    JitOp::BranchKind { arr_label, obj_label, other_label, .. } => {
+                        check(*arr_label)?;
+                        check(*obj_label)?;
+                        check(*other_label)?;
+                    }
+                    JitOp::LoopCheck { body_label, done_label, .. } => {
+                        check(*body_label)?;
+                        check(*done_label)?;
+                    }
+                    JitOp::BranchOnVar { nonzero_label, zero_label, .. } => {
+                        check(*nonzero_label)?;
+                        check(*zero_label)?;
+                    }
+                    JitOp::CheckError { catch_label, .. } => check(*catch_label)?,
+                    _ => {}
+                }
+            }
+        }
+        Ok(JitProgram {
+            ops: flat.ops,
+            num_slots: flat.num_slots,
+            num_vars: flat.num_vars,
+            label_pc,
+            _value_constants: flat.value_constants,
+        })
+    }
+
+    /// Execute the program. Same contract as a compiled `JitFilterFn`:
+    /// yields each output through `cb`, returns `GEN_CONTINUE` on normal
+    /// completion, the callback's verdict when it stops the stream, or
+    /// `GEN_ERROR` with the error transferred to `env.error`.
+    ///
+    /// Slot discipline mirrors the compiled stack frame: writes are
+    /// `ptr::write` (never dropping the previous occupant) and `Drop` ops
+    /// are the only deallocation points, so the buffer must not run element
+    /// destructors on exit. Null-initialization keeps never-written slots
+    /// valid; the flattener guarantees write-before-read for everything it
+    /// emits.
+    fn run(&self, input: &Value, env: &mut JitEnv, cb: RawYieldCb, ctx: *mut u8) -> i64 {
+        use std::mem::MaybeUninit;
+
+        let mut slots: Vec<MaybeUninit<Value>> = (0..self.num_slots)
+            .map(|_| MaybeUninit::new(Value::Null))
+            .collect();
+        let mut vars: Vec<i64> = vec![0; self.num_vars as usize];
+        let env_ptr: *mut JitEnv = env;
+
+        let slots_ptr = slots.as_mut_ptr();
+        let input_ptr = input as *const Value as *mut Value;
+        // Slot 0 aliases the caller's input (read-only by flattener
+        // contract); slots 1.. point into the frame buffer.
+        let sp = move |s: SlotId| -> *mut Value {
+            if s == 0 { input_ptr } else { unsafe { (*slots_ptr.add(s as usize)).as_mut_ptr() } }
+        };
+        let lp = |l: LabelId| -> usize { self.label_pc[l as usize] };
+        let fbits = |v: i64| -> f64 { f64::from_bits(v as u64) };
+        let tbits = |v: f64| -> i64 { v.to_bits() as i64 };
+
+        let ops = &self.ops;
+        let mut pc = 0usize;
+        while pc < ops.len() {
+            match &ops[pc] {
+                JitOp::Clone { dst, src } => jit_rt_clone(sp(*dst), sp(*src)),
+                JitOp::LoadConst { dst, const_ptr } => jit_rt_clone(sp(*dst), *const_ptr),
+                JitOp::Drop { slot } => {
+                    if *slot != 0 { jit_rt_drop(sp(*slot)); }
+                }
+                JitOp::Null { dst } => unsafe { std::ptr::write(sp(*dst), Value::Null) },
+                JitOp::True { dst } => unsafe { std::ptr::write(sp(*dst), Value::True) },
+                JitOp::False { dst } => unsafe { std::ptr::write(sp(*dst), Value::False) },
+                JitOp::Num { dst, val, repr } => {
+                    let v = match repr {
+                        Some(r) => Value::number_with_repr(*val, r.clone()),
+                        None => Value::number(*val),
+                    };
+                    unsafe { std::ptr::write(sp(*dst), v) }
+                }
+                JitOp::Str { dst, val } => unsafe {
+                    std::ptr::write(sp(*dst), Value::Str(crate::value::KeyStr::from(val.as_str())))
+                },
+                JitOp::Index { dst, base, key } => {
+                    jit_rt_index(sp(*dst), sp(*base), sp(*key));
+                }
+                JitOp::IndexField { dst, base, field } => {
+                    jit_rt_index_field(sp(*dst), sp(*base), field.as_ptr(), field.len());
+                }
+                JitOp::BinOp { dst, op, lhs, rhs } => {
+                    jit_rt_binop(sp(*dst), binop_to_i32(*op), sp(*lhs), sp(*rhs));
+                }
+                JitOp::AddMove { dst, lhs, rhs } => {
+                    jit_rt_add_move(sp(*dst), sp(*lhs), sp(*rhs));
+                }
+                JitOp::FieldBinopField { dst, base, field_a, field_b, op } => {
+                    jit_rt_field_binop_field(
+                        sp(*dst), sp(*base),
+                        field_a.as_ptr(), field_a.len(),
+                        field_b.as_ptr(), field_b.len(),
+                        *op,
+                    );
+                }
+                JitOp::FieldBinopConst { dst, base, field, const_ptr, op, field_is_lhs } => {
+                    jit_rt_field_binop_const(
+                        sp(*dst), sp(*base),
+                        field.as_ptr(), field.len(),
+                        *const_ptr, *op, *field_is_lhs as i32,
+                    );
+                }
+                JitOp::UnaryOp { dst, op, src } => {
+                    jit_rt_unaryop(sp(*dst), unaryop_to_i32(*op), sp(*src));
+                }
+                JitOp::Negate { dst, src } => {
+                    // Mirror the codegen's inline Num path: `0.0 - x`
+                    // normalizes -0 to +0 (#919) and drops any literal repr,
+                    // exactly like the compiled fast path. Non-Num inputs
+                    // take the runtime helper.
+                    let neg = match unsafe { &*sp(*src) } {
+                        Value::Num(n, _) => Some(0.0 - *n),
+                        _ => None,
+                    };
+                    match neg {
+                        Some(n) => unsafe { std::ptr::write(sp(*dst), Value::number(n)) },
+                        None => { jit_rt_negate(sp(*dst), sp(*src)); }
+                    }
+                }
+                JitOp::Not { dst, src } => {
+                    jit_rt_not(sp(*dst), sp(*src));
+                }
+                JitOp::Yield { output } => {
+                    let r = unsafe { cb(sp(*output), ctx) };
+                    if r <= 0 { return r; }
+                }
+                JitOp::YieldFieldRef { base, field } => {
+                    let r = jit_rt_yield_field_ref(sp(*base), field.as_ptr(), field.len(), cb, ctx);
+                    if r <= 0 { return r; }
+                }
+                JitOp::IfTruthy { src, then_label, else_label } => {
+                    let truthy = unsafe { (*sp(*src)).is_truthy() };
+                    pc = lp(if truthy { *then_label } else { *else_label });
+                    continue;
+                }
+                JitOp::FieldIsTruthy { base, field, dst_var } => {
+                    vars[*dst_var as usize] =
+                        jit_rt_field_is_truthy(sp(*base), field.as_ptr(), field.len());
+                }
+                JitOp::FieldCmpNum { base, field, value, op, dst_var } => {
+                    vars[*dst_var as usize] =
+                        jit_rt_field_cmp_num(sp(*base), field.as_ptr(), field.len(), *value, *op);
+                }
+                JitOp::TypeCmpBranch { src, tags, then_label, else_label } => {
+                    // Same tag-bitmask test as the codegen: bit N of `tags`
+                    // matches Value discriminant byte N.
+                    let tag = unsafe { *(sp(*src) as *const u8) };
+                    let hit = (1u64 << (tag as u32 & 63)) & (*tags as u64) != 0;
+                    pc = lp(if hit { *then_label } else { *else_label });
+                    continue;
+                }
+                JitOp::Jump { label } => {
+                    pc = lp(*label);
+                    continue;
+                }
+                JitOp::Label { .. } => {}
+                JitOp::GetKind { dst_var, src } => {
+                    vars[*dst_var as usize] = jit_rt_kind(sp(*src));
+                }
+                JitOp::GetLen { dst_var, src } => {
+                    vars[*dst_var as usize] = jit_rt_len(sp(*src));
+                }
+                JitOp::BranchKind { kind_var, arr_label, obj_label, other_label } => {
+                    pc = lp(match vars[*kind_var as usize] {
+                        5 => *arr_label,
+                        6 => *obj_label,
+                        _ => *other_label,
+                    });
+                    continue;
+                }
+                JitOp::LoopCheck { idx_var, len_var, body_label, done_label } => {
+                    let go = vars[*idx_var as usize] < vars[*len_var as usize];
+                    pc = lp(if go { *body_label } else { *done_label });
+                    continue;
+                }
+                JitOp::ArrayGet { dst, arr, idx_var } => {
+                    jit_rt_array_get(sp(*dst), sp(*arr), vars[*idx_var as usize]);
+                }
+                JitOp::ObjGetByIdx { dst, obj, idx_var } => {
+                    jit_rt_obj_get_idx(sp(*dst), sp(*obj), vars[*idx_var as usize]);
+                }
+                JitOp::IncVar { var } => {
+                    vars[*var as usize] += 1;
+                }
+                JitOp::InitVar { var } => {
+                    vars[*var as usize] = 0;
+                }
+                JitOp::GetVar { dst, var_index } => {
+                    jit_rt_get_var(sp(*dst), env_ptr, u32::from(var_index.0));
+                }
+                JitOp::SetVar { var_index, src } => {
+                    jit_rt_set_var(env_ptr, u32::from(var_index.0), sp(*src));
+                }
+                JitOp::TakeVar { dst, var_index } => {
+                    jit_rt_take_var(sp(*dst), env_ptr, u32::from(var_index.0));
+                }
+                JitOp::MoveToVar { var_index, src } => {
+                    jit_rt_move_to_var(env_ptr, u32::from(var_index.0), sp(*src));
+                }
+                JitOp::PathExtract { element, container, key } => {
+                    // Errors surface via env.error_flag; the flattener
+                    // auto-attaches CheckError/JumpIfError after fallible ops.
+                    jit_rt_path_extract(sp(*element), sp(*container), sp(*key));
+                }
+                JitOp::PathInsert { container, key, val } => {
+                    jit_rt_path_insert(sp(*container), sp(*key), sp(*val));
+                }
+                JitOp::TakeByIdx { dst, container, idx_var } => {
+                    jit_rt_take_by_idx(sp(*dst), sp(*container), vars[*idx_var as usize]);
+                }
+                JitOp::PutByIdx { container, idx_var, val } => {
+                    jit_rt_put_by_idx(sp(*container), vars[*idx_var as usize], sp(*val));
+                }
+                JitOp::SetPathMut { container, path, val } => {
+                    jit_rt_setpath_mut(sp(*container), sp(*path), sp(*val));
+                }
+                JitOp::CollectBegin => jit_rt_collect_begin(env_ptr),
+                JitOp::CollectPush { src } => jit_rt_collect_push(env_ptr, sp(*src)),
+                JitOp::CollectFinish { dst } => jit_rt_collect_finish(sp(*dst), env_ptr),
+                JitOp::ObjNew { dst, cap } => jit_rt_obj_new(sp(*dst), *cap as usize),
+                JitOp::ObjInsert { obj, key, val } => {
+                    let status = jit_rt_obj_insert(sp(*obj), sp(*key), sp(*val));
+                    if status != 0 {
+                        jit_rt_propagate_error(env_ptr);
+                        return GEN_ERROR;
+                    }
+                }
+                JitOp::ObjInsertStrKey { obj, key, val } => {
+                    jit_rt_obj_insert_str_key(sp(*obj), key.as_ptr(), key.len(), sp(*val));
+                }
+                JitOp::ObjPushStrKey { obj, key, val } => {
+                    jit_rt_obj_push_str_key(sp(*obj), key.as_ptr(), key.len(), sp(*val));
+                }
+                JitOp::ObjCopyField { obj, src, obj_key, src_field } => {
+                    jit_rt_obj_copy_field(
+                        sp(*obj), sp(*src),
+                        obj_key.as_ptr(), obj_key.len(),
+                        src_field.as_ptr(), src_field.len(),
+                    );
+                }
+                JitOp::ObjFromFields { dst, src, pairs } => {
+                    let table: Vec<(*const u8, usize, *const u8, usize)> = pairs.iter()
+                        .map(|(ok, sf)| (ok.as_ptr(), ok.len(), sf.as_ptr(), sf.len()))
+                        .collect();
+                    jit_rt_obj_from_fields(sp(*dst), sp(*src), table.as_ptr(), table.len());
+                }
+                JitOp::IsNullOrFalse { dst_var, src } => {
+                    vars[*dst_var as usize] = jit_rt_is_null_or_false(sp(*src));
+                }
+                JitOp::BranchOnVar { var, nonzero_label, zero_label } => {
+                    let nz = vars[*var as usize] != 0;
+                    pc = lp(if nz { *nonzero_label } else { *zero_label });
+                    continue;
+                }
+                JitOp::ToF64Var { dst_var, src } => {
+                    vars[*dst_var as usize] = tbits(jit_rt_to_f64(sp(*src)));
+                }
+                JitOp::F64Less { dst_var, a_var, b_var } => {
+                    let r = fbits(vars[*a_var as usize]) < fbits(vars[*b_var as usize]);
+                    vars[*dst_var as usize] = r as i64;
+                }
+                JitOp::F64Equal { dst_var, a_var, b_var } => {
+                    // Ordered equality: a NaN operand yields 0 (flags a NaN
+                    // limit count), matching the codegen's fcmp Equal.
+                    let r = fbits(vars[*a_var as usize]) == fbits(vars[*b_var as usize]);
+                    vars[*dst_var as usize] = r as i64;
+                }
+                JitOp::F64Add { dst_var, a_var, b_var } => {
+                    vars[*dst_var as usize] = tbits(fbits(vars[*a_var as usize]) + fbits(vars[*b_var as usize]));
+                }
+                JitOp::F64Sub { dst_var, a_var, b_var } => {
+                    vars[*dst_var as usize] = tbits(fbits(vars[*a_var as usize]) - fbits(vars[*b_var as usize]));
+                }
+                JitOp::F64Mul { dst_var, a_var, b_var } => {
+                    vars[*dst_var as usize] = tbits(fbits(vars[*a_var as usize]) * fbits(vars[*b_var as usize]));
+                }
+                JitOp::F64Div { dst_var, a_var, b_var } => {
+                    vars[*dst_var as usize] = tbits(fbits(vars[*a_var as usize]) / fbits(vars[*b_var as usize]));
+                }
+                JitOp::F64Rem { dst_var, a_var, b_var } => {
+                    // jq's `%` truncates both operands toward zero before the
+                    // remainder (#183) — same formula as the codegen:
+                    // trunc(a) - trunc(trunc(a)/trunc(b)) * trunc(b).
+                    let a_t = fbits(vars[*a_var as usize]).trunc();
+                    let b_t = fbits(vars[*b_var as usize]).trunc();
+                    let q = (a_t / b_t).trunc();
+                    vars[*dst_var as usize] = tbits(a_t - q * b_t);
+                }
+                JitOp::F64Neg { dst_var, src_var } => {
+                    vars[*dst_var as usize] = tbits(-fbits(vars[*src_var as usize]));
+                }
+                JitOp::F64Math { dst_var, src_var, kind } => {
+                    let x = fbits(vars[*src_var as usize]);
+                    let r = match kind {
+                        0 => x.floor(),
+                        1 => x.ceil(),
+                        2 => x.sqrt(),
+                        3 => x.abs(),
+                        4 => x.trunc(),
+                        5 => x.round_ties_even(),
+                        _ => unreachable!(),
+                    };
+                    vars[*dst_var as usize] = tbits(r);
+                }
+                JitOp::F64Libm { dst_var, src_var, func } => {
+                    let x = fbits(vars[*src_var as usize]);
+                    let r = match func {
+                        0 => sys_sin(x), 1 => sys_cos(x), 2 => sys_tan(x),
+                        3 => sys_asin(x), 4 => sys_acos(x), 5 => sys_atan(x),
+                        6 => sys_exp(x), 7 => sys_exp2(x),
+                        8 => sys_log(x), 9 => sys_log2(x), 10 => sys_log10(x),
+                        11 => sys_cbrt(x),
+                        _ => unreachable!(),
+                    };
+                    vars[*dst_var as usize] = tbits(r);
+                }
+                JitOp::F64Cmp { dst_var, a_var, b_var, cc } => {
+                    let a = fbits(vars[*a_var as usize]);
+                    let b = fbits(vars[*b_var as usize]);
+                    // Ordering (cc 0-3) follows jq's sort total order — NaN
+                    // ranks below every number (#1062). Equality (cc 4-5)
+                    // stays IEEE. Mirrors the codegen's formulas exactly.
+                    let r = match cc {
+                        0 => !(a.is_nan() || a < b),            // Ge
+                        1 => !a.is_nan() && (b.is_nan() || a > b), // Gt
+                        2 => !(!a.is_nan() && (b.is_nan() || a > b)), // Le
+                        3 => a.is_nan() || a < b,               // Lt
+                        4 => a == b,                            // Eq
+                        5 => a != b,                            // Ne
+                        _ => unreachable!(),
+                    };
+                    vars[*dst_var as usize] = r as i64;
+                }
+                JitOp::RangeCheck { dst_var, cur_var, to_var, step_var } => {
+                    let cur = fbits(vars[*cur_var as usize]);
+                    let to = fbits(vars[*to_var as usize]);
+                    let step = fbits(vars[*step_var as usize]);
+                    let selected = if step > 0.0 { cur < to } else { cur > to };
+                    vars[*dst_var as usize] = (selected && step != 0.0) as i64;
+                }
+                JitOp::F64Const { dst_var, val } => {
+                    vars[*dst_var as usize] = tbits(*val);
+                }
+                JitOp::F64Move { dst_var, src_var } => {
+                    vars[*dst_var as usize] = vars[*src_var as usize];
+                }
+                JitOp::F64Num { dst, src_var } => {
+                    jit_rt_f64_to_num(sp(*dst), fbits(vars[*src_var as usize]));
+                }
+                JitOp::StrBufNew => jit_rt_strbuf_new(env_ptr),
+                JitOp::StrBufAppendLit { val } => {
+                    jit_rt_strbuf_append_lit(env_ptr, val.as_ptr(), val.len());
+                }
+                JitOp::StrBufAppendVal { src } => {
+                    jit_rt_strbuf_append_val(env_ptr, sp(*src));
+                }
+                JitOp::StrBufFinish { dst } => jit_rt_strbuf_finish(sp(*dst), env_ptr),
+                JitOp::TryCatchBegin => jit_rt_try_begin(env_ptr),
+                JitOp::TryCatchEnd => jit_rt_try_end(env_ptr),
+                JitOp::CheckError { error_dst, catch_label } => {
+                    if env.error_flag != 0 {
+                        // get_error returns 0 for a non-catchable halt
+                        // (#182, #1043) — propagate it out like ReturnError
+                        // instead of entering the catch handler.
+                        let caught = jit_rt_get_error(sp(*error_dst), env_ptr);
+                        if caught != 0 {
+                            pc = lp(*catch_label);
+                            continue;
+                        }
+                        jit_rt_propagate_error(env_ptr);
+                        return GEN_ERROR;
+                    }
+                }
+                JitOp::JumpIfError { label } => {
+                    if env.error_flag != 0 {
+                        pc = lp(*label);
+                        continue;
+                    }
+                }
+                JitOp::ReturnContinue => return GEN_CONTINUE,
+                JitOp::ReturnError => {
+                    jit_rt_propagate_error(env_ptr);
+                    return GEN_ERROR;
+                }
+                JitOp::CallBuiltin { dst, builtin, args } => {
+                    if args.is_empty() {
+                        jit_rt_call_builtin(sp(*dst), builtin, std::ptr::null(), 0);
+                    } else {
+                        // Clone args into a temporary frame (the callee
+                        // borrows them); dropping the Vec afterwards mirrors
+                        // the codegen's per-arg jit_rt_drop calls.
+                        let cloned: Vec<Value> = args.iter()
+                            .map(|a| unsafe { (*sp(*a)).clone() })
+                            .collect();
+                        jit_rt_call_builtin(sp(*dst), builtin, cloned.as_ptr(), cloned.len());
+                    }
+                }
+                JitOp::ThrowError { msg } => {
+                    jit_rt_throw_error(sp(*msg), env_ptr);
+                    // Don't return here — CheckError or ReturnError handles it.
+                }
+                JitOp::CollectRange { dst, n } => {
+                    let n_f64 = jit_rt_to_f64(sp(*n));
+                    jit_rt_collect_range(sp(*dst), n_f64);
+                }
+                JitOp::ArrPush { arr, val } => {
+                    jit_rt_arr_push(sp(*arr), sp(*val));
+                }
+                JitOp::TraceMutate { kind, slot } => {
+                    let kind_byte = match kind {
+                        MutateKind::Assign => 0,
+                        MutateKind::Update => 1,
+                    };
+                    jit_rt_trace_mutate(kind_byte, sp(*slot));
+                }
+            }
+            pc += 1;
+        }
+        GEN_CONTINUE
+    }
+}
+
+/// Execute a JitProgram, collecting all outputs (mirror of `execute_jit`).
+pub fn execute_program(prog: &JitProgram, input: &Value) -> Result<Vec<Value>> {
+    execute_collect(|env, cb, ctx| prog.run(input, env, cb, ctx))
+}
+
+/// Execute a JitProgram with a streaming callback (mirror of `execute_jit_cb`).
+pub fn execute_program_cb(prog: &JitProgram, input: &Value, cb: &mut dyn FnMut(&Value) -> Result<bool>) -> Result<bool> {
+    execute_stream(|env, raw_cb, ctx| prog.run(input, env, raw_cb, ctx), cb)
 }
 
 #[cfg(test)]
@@ -10898,5 +11431,38 @@ mod tests {
         let r = execute_jit(f, &Value::number(7.0)).unwrap();
         assert_eq!(r.len(), 1);
         assert!(matches!(&r[0], Value::Num(n, _) if *n == 7.0));
+    }
+
+    #[test]
+    fn test_program_identity() {
+        let p = JitProgram::compile(&Expr::Input, &[]).unwrap();
+        let r = execute_program(&p, &Value::number(42.0)).unwrap();
+        assert_eq!(r.len(), 1);
+        assert!(matches!(&r[0], Value::Num(n, _) if *n == 42.0));
+    }
+
+    #[test]
+    fn test_program_literal() {
+        let p = JitProgram::compile(&Expr::Literal(Literal::Str("hello".into())), &[]).unwrap();
+        let r = execute_program(&p, &Value::Null).unwrap();
+        assert_eq!(r.len(), 1);
+        assert!(matches!(&r[0], Value::Str(s) if s.as_str() == "hello"));
+    }
+
+    #[test]
+    fn test_program_streaming_stop() {
+        // `.[]` over an array, stopping after the first output — exercises
+        // the Yield early-return path of the interpreter loop.
+        let expr = Expr::Each { input_expr: Box::new(Expr::Input) };
+        let p = JitProgram::compile(&expr, &[]).unwrap();
+        let input = crate::value::json_to_value("[1,2,3]").unwrap();
+        let mut seen = Vec::new();
+        let done = execute_program_cb(&p, &input, &mut |v| {
+            seen.push(v.clone());
+            Ok(false)
+        }).unwrap();
+        assert!(done);
+        assert_eq!(seen.len(), 1);
+        assert!(matches!(&seen[0], Value::Num(n, _) if *n == 1.0));
     }
 }
