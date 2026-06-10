@@ -1865,7 +1865,7 @@ fn rt_round(v: &Value) -> Result<Value> {
     }
 }
 
-fn rt_fabs(v: &Value) -> Result<Value> {
+pub(crate) fn rt_fabs(v: &Value) -> Result<Value> {
     match v {
         // jq's `fabs` is the math-style absolute value: it always returns
         // the canonical f64 form regardless of the input repr — `0.0 |
@@ -1878,7 +1878,7 @@ fn rt_fabs(v: &Value) -> Result<Value> {
     }
 }
 
-fn rt_abs(v: &Value) -> Result<Value> {
+pub(crate) fn rt_abs(v: &Value) -> Result<Value> {
     match v {
         // jq's `abs` keeps the literal repr — `0.0 | abs` stays `0.0`,
         // `-1.0 | abs` becomes `1.0`, `-1e10 | abs` becomes `1E+10`.
@@ -1926,7 +1926,7 @@ fn rt_tostring(v: &Value) -> Result<Value> {
     }
 }
 
-fn rt_tonumber(v: &Value) -> Result<Value> {
+pub(crate) fn rt_tonumber(v: &Value) -> Result<Value> {
     match v {
         Value::Num(_, _) => Ok(v.clone()),
         Value::Str(s) => {
