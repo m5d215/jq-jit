@@ -13432,3 +13432,13 @@ null
 [try format("zzz") catch ., try format(123) catch .]
 "t"
 ["zzz is not a valid format","number (123) is not a valid format"]
+
+# Issue #1049: literal-only @fmt strings pass through without invoking the format
+[@invalid "", @base64 "x", @uri "a b", @csv "x", @html "<>"]
+null
+["","x","a b","x","<>"]
+
+# Issue #1049: interpolated segments still apply the format; unknown names error there
+[@base64 "a\(1)b", try (@invalid "a\(1)b") catch .]
+null
+["aMQ==b","invalid is not a valid format"]

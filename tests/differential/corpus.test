@@ -4243,3 +4243,11 @@ try @urid catch .
 # #953: $x-anchored navigation in a navigating-source foreach is document-rooted
 [path(foreach .[] as $x (0; .; $x.b))]
 {"a":{"b":2},"c":{"b":9}}
+
+# #1049: literal-only @fmt strings never invoke the format
+[@invalid "", @base64 "x", @uri "a b", @csv "x", @html "<>"]
+null
+
+# #1049: only interpolated segments are formatted; unknown names error on interpolation
+[@base64 "a\(1)b", try (@invalid "a\(1)b") catch .]
+null
