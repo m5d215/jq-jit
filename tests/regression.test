@@ -13642,3 +13642,48 @@ null
 [path(.a[].b)]
 {"a":[{"b":1},{"b":2}]}
 [["a",0,"b"],["a",1,"b"]]
+
+# #1059 Phase 3b: gsub with interpolated replacement delegates whole-node
+gsub("(?<x>.)"; "\(.x|ascii_upcase)")
+"hello"
+"HELLO"
+
+# #1059 Phase 3b: scan generator form
+[ "abcabc" | scan("a*") ] | length
+null
+7
+
+# #1059 Phase 3b: tostream delegates as a stream
+[tostream]
+{"a":[1,2]}
+[[["a",0],1],[["a",1],2],[["a",1]],[["a"]]]
+
+# #1059 Phase 3b: fromstream skips the cartesian gen-arg rewrite (stream semantics)
+[tostream] | fromstream(.[])
+{"a":[1,2]}
+{"a":[1,2]}
+
+# #1059 Phase 3b: combinations delegates (was a phantom-builtin bail, #1082)
+[combinations]
+[[1,2],[3,4]]
+[[1,3],[1,4],[2,3],[2,4]]
+
+# #1059 Phase 3b: ?// destructuring alternative delegates
+. as [$a] ?// $a | $a
+7
+7
+
+# #1059 Phase 3b: setpath with generator arguments keeps cartesian semantics
+[setpath((["a"],["b"]); (1,2))]
+{}
+[{"a":1},{"b":1},{"a":2},{"b":2}]
+
+# #1059 Phase 3b: nested generator subscripts via the delegate
+[.[0,1][0,1]]
+[[1,2],[3,4]]
+[1,3,2,4]
+
+# #1059 Phase 3b: multi-generator string interpolation
+["\(1,2)\(3,4)"]
+null
+["13","23","14","24"]
