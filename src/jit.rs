@@ -6574,13 +6574,16 @@ extern "C" fn jit_rt_field_cmp_num(base: *const Value, key_ptr: *const u8, key_l
         };
         match field_val {
             Some(Value::Num(lhs, _)) => {
+                // Ordering uses jq's sort total order (NaN below every
+                // number, reachable via computed objects like {x: nan});
+                // equality stays IEEE, matching jq (#1062).
                 let result = match op {
                     5 => lhs == &rhs,
                     6 => lhs != &rhs,
-                    7 => lhs < &rhs,
-                    8 => lhs > &rhs,
-                    9 => lhs <= &rhs,
-                    10 => lhs >= &rhs,
+                    7 => crate::eval::jq_num_lt(*lhs, rhs),
+                    8 => crate::eval::jq_num_gt(*lhs, rhs),
+                    9 => crate::eval::jq_num_le(*lhs, rhs),
+                    10 => crate::eval::jq_num_ge(*lhs, rhs),
                     _ => return 0,
                 };
                 if result { 1 } else { 0 }
@@ -6649,12 +6652,14 @@ extern "C" fn jit_rt_field_binop_field(
                 0 => { std::ptr::write(dst, Value::number(na + nb)); return 0; }
                 1 => { std::ptr::write(dst, Value::number(na - nb)); return 0; }
                 2 => { std::ptr::write(dst, Value::number(na * nb)); return 0; }
+                // Ordering follows jq's sort total order (NaN below every
+                // number); equality stays IEEE, matching jq (#1062).
                 5 => { std::ptr::write(dst, Value::from_bool(na == nb)); return 0; }
                 6 => { std::ptr::write(dst, Value::from_bool(na != nb)); return 0; }
-                7 => { std::ptr::write(dst, Value::from_bool(na < nb)); return 0; }
-                8 => { std::ptr::write(dst, Value::from_bool(na > nb)); return 0; }
-                9 => { std::ptr::write(dst, Value::from_bool(na <= nb)); return 0; }
-                10 => { std::ptr::write(dst, Value::from_bool(na >= nb)); return 0; }
+                7 => { std::ptr::write(dst, Value::from_bool(crate::eval::jq_num_lt(*na, *nb))); return 0; }
+                8 => { std::ptr::write(dst, Value::from_bool(crate::eval::jq_num_gt(*na, *nb))); return 0; }
+                9 => { std::ptr::write(dst, Value::from_bool(crate::eval::jq_num_le(*na, *nb))); return 0; }
+                10 => { std::ptr::write(dst, Value::from_bool(crate::eval::jq_num_ge(*na, *nb))); return 0; }
                 _ => {} // div, mod: fall through to general path
             }
         }
@@ -6702,12 +6707,14 @@ extern "C" fn jit_rt_field_binop_const(
                 0 => { std::ptr::write(dst, Value::number(na + nb)); return 0; }
                 1 => { std::ptr::write(dst, Value::number(na - nb)); return 0; }
                 2 => { std::ptr::write(dst, Value::number(na * nb)); return 0; }
+                // Ordering follows jq's sort total order (NaN below every
+                // number); equality stays IEEE, matching jq (#1062).
                 5 => { std::ptr::write(dst, Value::from_bool(na == nb)); return 0; }
                 6 => { std::ptr::write(dst, Value::from_bool(na != nb)); return 0; }
-                7 => { std::ptr::write(dst, Value::from_bool(na < nb)); return 0; }
-                8 => { std::ptr::write(dst, Value::from_bool(na > nb)); return 0; }
-                9 => { std::ptr::write(dst, Value::from_bool(na <= nb)); return 0; }
-                10 => { std::ptr::write(dst, Value::from_bool(na >= nb)); return 0; }
+                7 => { std::ptr::write(dst, Value::from_bool(crate::eval::jq_num_lt(*na, *nb))); return 0; }
+                8 => { std::ptr::write(dst, Value::from_bool(crate::eval::jq_num_gt(*na, *nb))); return 0; }
+                9 => { std::ptr::write(dst, Value::from_bool(crate::eval::jq_num_le(*na, *nb))); return 0; }
+                10 => { std::ptr::write(dst, Value::from_bool(crate::eval::jq_num_ge(*na, *nb))); return 0; }
                 _ => {}
             }
         }
@@ -6848,12 +6855,15 @@ extern "C" fn jit_rt_binop(dst: *mut Value, op: i32, lhs: *const Value, rhs: *co
                         }
                     }
                 }
+                // Equality is IEEE (nan != nan), but the ordering operators
+                // follow jq's sort total order, where NaN ranks below every
+                // number — delegate to the canonical eval comparators (#1062).
                 5 => { std::ptr::write(dst, Value::from_bool(a == b)); return 0; }
                 6 => { std::ptr::write(dst, Value::from_bool(a != b)); return 0; }
-                7 => { std::ptr::write(dst, Value::from_bool(a < b)); return 0; }
-                8 => { std::ptr::write(dst, Value::from_bool(a > b)); return 0; }
-                9 => { std::ptr::write(dst, Value::from_bool(a <= b)); return 0; }
-                10 => { std::ptr::write(dst, Value::from_bool(a >= b)); return 0; }
+                7 => { std::ptr::write(dst, Value::from_bool(crate::eval::jq_num_lt(*a, *b))); return 0; }
+                8 => { std::ptr::write(dst, Value::from_bool(crate::eval::jq_num_gt(*a, *b))); return 0; }
+                9 => { std::ptr::write(dst, Value::from_bool(crate::eval::jq_num_le(*a, *b))); return 0; }
+                10 => { std::ptr::write(dst, Value::from_bool(crate::eval::jq_num_ge(*a, *b))); return 0; }
                 _ => {}
             }
         }
@@ -9678,6 +9688,20 @@ impl JitCompiler {
                             let lf = b.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), l2, 8);
                             let rf = b.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), r2, 8);
                             let d2 = slot_addr(&mut b, *dst);
+                            if kind >= 12 {
+                                // Ordering comparison: jq uses the sort total
+                                // order (NaN below every number), which raw
+                                // fcmp cannot express — send unordered operand
+                                // pairs to jit_rt_binop's canonical path
+                                // (#1062). Eq/Ne (10/11) are IEEE in jq too.
+                                let lhs_is_nan = b.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::Unordered, lf, lf);
+                                let rhs_is_nan = b.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::Unordered, rf, rf);
+                                let any_nan = b.ins().bor(lhs_is_nan, rhs_is_nan);
+                                let cmp_ok_blk = b.create_block();
+                                b.ins().brif(any_nan, slow_blk, &[], cmp_ok_blk, &[]);
+                                b.switch_to_block(cmp_ok_blk);
+                                b.seal_block(cmp_ok_blk);
+                            }
                             if kind == 3 {
                                 // Div: need to check for zero/NaN divisor
                                 let fzero = b.ins().f64const(0.0);
@@ -10337,15 +10361,33 @@ impl JitCompiler {
                         let b_bits = b.use_var(vars[*bv as usize]);
                         let a_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), a_bits);
                         let b_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), b_bits);
-                        let fcc = match cc {
-                            0 => FloatCC::GreaterThanOrEqual,
-                            1 => FloatCC::GreaterThan,
-                            2 => FloatCC::LessThanOrEqual,
-                            3 => FloatCC::LessThan,
-                            4 => FloatCC::Equal,
-                            _ => FloatCC::NotEqual,
+                        // Ordering (cc 0-3) follows jq's sort total order —
+                        // NaN ranks below every number (eval's jq_num_lt/gt
+                        // family, #1062): lt = a_nan | (a < b);
+                        // gt = !a_nan & (b_nan | (a > b)); ge/le negate them.
+                        // Equality (cc 4-5) stays IEEE, matching jq.
+                        let cmp = match cc {
+                            4 => b.ins().fcmp(FloatCC::Equal, a_f, b_f),
+                            5 => b.ins().fcmp(FloatCC::NotEqual, a_f, b_f),
+                            _ => {
+                                let a_nan = b.ins().fcmp(FloatCC::Unordered, a_f, a_f);
+                                let b_nan = b.ins().fcmp(FloatCC::Unordered, b_f, b_f);
+                                match cc {
+                                    3 | 0 => {
+                                        let raw_lt = b.ins().fcmp(FloatCC::LessThan, a_f, b_f);
+                                        let lt = b.ins().bor(a_nan, raw_lt);
+                                        if *cc == 3 { lt } else { b.ins().bxor_imm(lt, 1) }
+                                    }
+                                    _ => {
+                                        let raw_gt = b.ins().fcmp(FloatCC::GreaterThan, a_f, b_f);
+                                        let gt_rhs = b.ins().bor(b_nan, raw_gt);
+                                        let not_a_nan = b.ins().bxor_imm(a_nan, 1);
+                                        let gt = b.ins().band(not_a_nan, gt_rhs);
+                                        if *cc == 1 { gt } else { b.ins().bxor_imm(gt, 1) }
+                                    }
+                                }
+                            }
                         };
-                        let cmp = b.ins().fcmp(fcc, a_f, b_f);
                         let result = b.ins().uextend(ptr_ty, cmp);
                         b.def_var(vars[*dst_var as usize], result);
                     }

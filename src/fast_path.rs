@@ -882,10 +882,10 @@ where
         None => return RawApplyOutcome::Bail,
     };
     let result = match cmp_op {
-        BinOp::Gt => a > b,
-        BinOp::Lt => a < b,
-        BinOp::Ge => a >= b,
-        BinOp::Le => a <= b,
+        BinOp::Gt => crate::eval::jq_num_gt(a, b),
+        BinOp::Lt => crate::eval::jq_num_lt(a, b),
+        BinOp::Ge => crate::eval::jq_num_ge(a, b),
+        BinOp::Le => crate::eval::jq_num_le(a, b),
         BinOp::Eq => a == b,
         BinOp::Ne => a != b,
         _ => return RawApplyOutcome::Bail,
@@ -1299,10 +1299,10 @@ where
                 None => return RawApplyOutcome::Bail,
             };
             match cmp_op {
-                BinOp::Gt => n > *threshold,
-                BinOp::Lt => n < *threshold,
-                BinOp::Ge => n >= *threshold,
-                BinOp::Le => n <= *threshold,
+                BinOp::Gt => crate::eval::jq_num_gt(n, *threshold),
+                BinOp::Lt => crate::eval::jq_num_lt(n, *threshold),
+                BinOp::Ge => crate::eval::jq_num_ge(n, *threshold),
+                BinOp::Le => crate::eval::jq_num_le(n, *threshold),
                 BinOp::Eq => n == *threshold,
                 BinOp::Ne => n != *threshold,
                 _ => unreachable!(),
@@ -1865,10 +1865,10 @@ where
                     None => return RawApplyOutcome::Bail,
                 };
                 match op {
-                    BinOp::Gt => n > *threshold,
-                    BinOp::Lt => n < *threshold,
-                    BinOp::Ge => n >= *threshold,
-                    BinOp::Le => n <= *threshold,
+                    BinOp::Gt => crate::eval::jq_num_gt(n, *threshold),
+                    BinOp::Lt => crate::eval::jq_num_lt(n, *threshold),
+                    BinOp::Ge => crate::eval::jq_num_ge(n, *threshold),
+                    BinOp::Le => crate::eval::jq_num_le(n, *threshold),
                     BinOp::Eq => n == *threshold,
                     BinOp::Ne => n != *threshold,
                     _ => return RawApplyOutcome::Bail,
@@ -2201,10 +2201,10 @@ where
         None => return RawApplyOutcome::Bail,
     };
     let pass = match cmp_op {
-        BinOp::Gt => val > threshold,
-        BinOp::Lt => val < threshold,
-        BinOp::Ge => val >= threshold,
-        BinOp::Le => val <= threshold,
+        BinOp::Gt => crate::eval::jq_num_gt(val, threshold),
+        BinOp::Lt => crate::eval::jq_num_lt(val, threshold),
+        BinOp::Ge => crate::eval::jq_num_ge(val, threshold),
+        BinOp::Le => crate::eval::jq_num_le(val, threshold),
         BinOp::Eq => val == threshold,
         BinOp::Ne => val != threshold,
         _ => unreachable!(),
@@ -2277,10 +2277,10 @@ where
         None => return RawApplyOutcome::Bail,
     };
     let num_pass = match num_op {
-        BinOp::Gt => n > num_threshold,
-        BinOp::Lt => n < num_threshold,
-        BinOp::Ge => n >= num_threshold,
-        BinOp::Le => n <= num_threshold,
+        BinOp::Gt => crate::eval::jq_num_gt(n, num_threshold),
+        BinOp::Lt => crate::eval::jq_num_lt(n, num_threshold),
+        BinOp::Ge => crate::eval::jq_num_ge(n, num_threshold),
+        BinOp::Le => crate::eval::jq_num_le(n, num_threshold),
         BinOp::Eq => n == num_threshold,
         BinOp::Ne => n != num_threshold,
         _ => unreachable!(),
@@ -2389,10 +2389,10 @@ where
     for (idx, op, threshold) in cmp_spec {
         let v = vals_buf[*idx];
         let cmp_result = match op {
-            BinOp::Gt => v > *threshold,
-            BinOp::Lt => v < *threshold,
-            BinOp::Ge => v >= *threshold,
-            BinOp::Le => v <= *threshold,
+            BinOp::Gt => crate::eval::jq_num_gt(v, *threshold),
+            BinOp::Lt => crate::eval::jq_num_lt(v, *threshold),
+            BinOp::Ge => crate::eval::jq_num_ge(v, *threshold),
+            BinOp::Le => crate::eval::jq_num_le(v, *threshold),
             BinOp::Eq => v == *threshold,
             BinOp::Ne => v != *threshold,
             _ => return RawApplyOutcome::Bail,
@@ -2432,10 +2432,10 @@ where
         None => return RawApplyOutcome::Bail,
     };
     let result = match cmp_op {
-        BinOp::Gt => n > cval,
-        BinOp::Lt => n < cval,
-        BinOp::Ge => n >= cval,
-        BinOp::Le => n <= cval,
+        BinOp::Gt => crate::eval::jq_num_gt(n, cval),
+        BinOp::Lt => crate::eval::jq_num_lt(n, cval),
+        BinOp::Ge => crate::eval::jq_num_ge(n, cval),
+        BinOp::Le => crate::eval::jq_num_le(n, cval),
         BinOp::Eq => n == cval,
         BinOp::Ne => n != cval,
         _ => return RawApplyOutcome::Bail,
@@ -3128,10 +3128,10 @@ where
         None => return RawApplyOutcome::Bail,
     };
     let pass = match op {
-        BinOp::Gt => val > threshold,
-        BinOp::Lt => val < threshold,
-        BinOp::Ge => val >= threshold,
-        BinOp::Le => val <= threshold,
+        BinOp::Gt => crate::eval::jq_num_gt(val, threshold),
+        BinOp::Lt => crate::eval::jq_num_lt(val, threshold),
+        BinOp::Ge => crate::eval::jq_num_ge(val, threshold),
+        BinOp::Le => crate::eval::jq_num_le(val, threshold),
         BinOp::Eq => val == threshold,
         BinOp::Ne => val != threshold,
         _ => return RawApplyOutcome::Bail,
@@ -3671,10 +3671,10 @@ where
         };
     }
     let pass = match cmp_op {
-        BinOp::Gt => val > threshold,
-        BinOp::Lt => val < threshold,
-        BinOp::Ge => val >= threshold,
-        BinOp::Le => val <= threshold,
+        BinOp::Gt => crate::eval::jq_num_gt(val, threshold),
+        BinOp::Lt => crate::eval::jq_num_lt(val, threshold),
+        BinOp::Ge => crate::eval::jq_num_ge(val, threshold),
+        BinOp::Le => crate::eval::jq_num_le(val, threshold),
         BinOp::Eq => val == threshold,
         BinOp::Ne => val != threshold,
         _ => return RawApplyOutcome::Bail,
@@ -3729,10 +3729,10 @@ where
         };
     }
     let result = match cmp_op {
-        BinOp::Gt => n > threshold,
-        BinOp::Lt => n < threshold,
-        BinOp::Ge => n >= threshold,
-        BinOp::Le => n <= threshold,
+        BinOp::Gt => crate::eval::jq_num_gt(n, threshold),
+        BinOp::Lt => crate::eval::jq_num_lt(n, threshold),
+        BinOp::Ge => crate::eval::jq_num_ge(n, threshold),
+        BinOp::Le => crate::eval::jq_num_le(n, threshold),
         BinOp::Eq => n == threshold,
         BinOp::Ne => n != threshold,
         _ => return RawApplyOutcome::Bail,
