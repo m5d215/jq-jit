@@ -3797,23 +3797,18 @@ impl Flattener {
                     op: *op,
                     args: var_args.iter().map(|(vi, _)| Expr::LoadVar { var_index: *vi }).collect(),
                 };
+                // Wrap arg0 first so it becomes the INNERMOST binding:
+                // eval iterates the first argument fastest
+                // (`[pow(10,20; 1,2)]` → [10,20,100,400]), so the last
+                // argument must be the outermost loop. The previous .rev()
+                // nesting produced the transposed order. #1088
                 let mut rewritten = inner;
-                for (vi, arg) in var_args.iter().rev() {
-                    if is_scalar(arg) {
-                        // Scalar arg: still use LetBinding for uniformity
-                        rewritten = Expr::LetBinding {
-                            var_index: *vi,
-                            value: Box::new((*arg).clone()),
-                            body: Box::new(rewritten),
-                        };
-                    } else {
-                        // Generator arg: wrap in LetBinding
-                        rewritten = Expr::LetBinding {
-                            var_index: *vi,
-                            value: Box::new((*arg).clone()),
-                            body: Box::new(rewritten),
-                        };
-                    }
+                for (vi, arg) in var_args.iter() {
+                    rewritten = Expr::LetBinding {
+                        var_index: *vi,
+                        value: Box::new((*arg).clone()),
+                        body: Box::new(rewritten),
+                    };
                 }
                 self.flatten_gen(&rewritten, input_slot)
             }
@@ -4014,6 +4009,42 @@ impl Flattener {
                 self.flatten_each_with_action(container, true, action);
                 self.emit(JitOp::Drop { slot: container });
                 true
+            }
+            // BinOp with exactly one generator operand: stream it through
+            // `action` per item instead of collecting every output first.
+            // The collect fallback below defeats short-circuiting consumers
+            // — `IN(2, error("x"); 2)` desugars to any((2,error("x")) == 2; .)
+            // and must stop at the first match without evaluating the
+            // error. #1088
+            Expr::BinOp { op, lhs, rhs }
+                if !matches!(op, BinOp::And | BinOp::Or)
+                    && is_scalar(rhs) && !is_scalar(lhs) =>
+            {
+                let rhs_val = self.flatten_scalar(rhs, input_slot);
+                let op_code = *op;
+                let ok = self.flatten_gen_with_each_output(lhs, input_slot, &|s, elem| {
+                    let out = s.alloc_slot();
+                    s.emit(JitOp::BinOp { dst: out, op: op_code, lhs: elem, rhs: rhs_val });
+                    action(s, out);
+                    s.emit(JitOp::Drop { slot: out });
+                });
+                self.emit(JitOp::Drop { slot: rhs_val });
+                ok
+            }
+            Expr::BinOp { op, lhs, rhs }
+                if !matches!(op, BinOp::And | BinOp::Or)
+                    && is_scalar(lhs) && !is_scalar(rhs) =>
+            {
+                let lhs_val = self.flatten_scalar(lhs, input_slot);
+                let op_code = *op;
+                let ok = self.flatten_gen_with_each_output(rhs, input_slot, &|s, elem| {
+                    let out = s.alloc_slot();
+                    s.emit(JitOp::BinOp { dst: out, op: op_code, lhs: lhs_val, rhs: elem });
+                    action(s, out);
+                    s.emit(JitOp::Drop { slot: out });
+                });
+                self.emit(JitOp::Drop { slot: lhs_val });
+                ok
             }
             _ => {
                 // Generic fallback: collect all outputs, then iterate
