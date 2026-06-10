@@ -2872,6 +2872,10 @@ fn real_main() {
         prefix
     };
 
+    // Publish the effective -L dirs so the JIT's get_search_list dispatch
+    // reports the same list as eval's env-aware arm (#1089).
+    jq_jit::runtime::set_lib_dirs(lib_dirs.clone());
+
     // Create filter without JIT initially — JIT is compiled lazily when input is large enough.
     let mut filter = match Filter::with_options(&filter_str, &lib_dirs, false) {
         Ok(f) => f,
