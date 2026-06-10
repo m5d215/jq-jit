@@ -105,45 +105,55 @@ impl FormatKind {
     }
 }
 
-/// Defines [`BuiltinOp`] together with its bijective name mapping so the
-/// variant list, `name()`, and `from_name()` can never drift apart.
-macro_rules! builtin_ops {
-    ($($(#[$attr:meta])* $variant:ident => $name:literal),+ $(,)?) => {
-        /// Identity of a runtime-dispatched builtin (`Expr::CallBuiltin`),
-        /// resolved from its source name once, in the parser (#1035).
-        ///
-        /// This covers only builtins that flow through `CallBuiltin`; most
-        /// builtins lower to dedicated `Expr` nodes (`UnaryOp`, `RegexTest`,
-        /// `Limit`, ...) and never appear here. The JIT keeps a *wider*
-        /// string keyspace at its own `JitOp::CallBuiltin` boundary (it
-        /// synthesizes names like `_slice` and `@text` that have no `Expr`
-        /// form), so `name()` remains the bridge into that layer.
+/// Defines an enum together with its bijective name mapping so the variant
+/// list, `name()`, and `from_name()` can never drift apart. Used for
+/// [`BuiltinOp`] here and the runtime dispatch key (`RtBuiltin`) in
+/// runtime.rs (#1035).
+macro_rules! named_op_enum {
+    ($(#[$emeta:meta])* $vis:vis enum $E:ident { $($(#[$vmeta:meta])* $variant:ident => $name:literal),+ $(,)? }) => {
+        $(#[$emeta])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-        pub enum BuiltinOp {
-            $($(#[$attr])* $variant),+
+        $vis enum $E {
+            $($(#[$vmeta])* $variant),+
         }
 
-        impl BuiltinOp {
-            /// The jq-source-level builtin name (also the runtime/JIT dispatch key).
+        impl $E {
+            /// The builtin name this variant dispatches as.
             pub fn name(self) -> &'static str {
                 match self {
-                    $(BuiltinOp::$variant => $name),+
+                    $($E::$variant => $name),+
                 }
             }
 
-            /// Resolve a builtin name; `None` for names not routed through
-            /// `CallBuiltin` (parse sites match on a closed name set first).
-            pub fn from_name(name: &str) -> Option<BuiltinOp> {
+            /// Resolve a builtin name; `None` for names outside this keyspace.
+            pub fn from_name(name: &str) -> Option<$E> {
                 match name {
-                    $($name => Some(BuiltinOp::$variant)),+,
+                    $($name => Some($E::$variant)),+,
                     _ => None,
                 }
             }
         }
+
+        impl std::fmt::Display for $E {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.name())
+            }
+        }
     };
 }
+pub(crate) use named_op_enum;
 
-builtin_ops! {
+named_op_enum! {
+    /// Identity of a runtime-dispatched builtin (`Expr::CallBuiltin`),
+    /// resolved from its source name once, in the parser (#1035).
+    ///
+    /// This covers only builtins that flow through `CallBuiltin`; most
+    /// builtins lower to dedicated `Expr` nodes (`UnaryOp`, `RegexTest`,
+    /// `Limit`, ...) and never appear here. The JIT keeps a *wider*
+    /// string keyspace at its own `JitOp::CallBuiltin` boundary (it
+    /// synthesizes names like `_slice` and `@text` that have no `Expr`
+    /// form), so `name()` remains the bridge into that layer.
+    pub enum BuiltinOp {
     // Strings
     StartsWith => "startswith",
     EndsWith => "endswith",
@@ -247,6 +257,7 @@ builtin_ops! {
     /// jqx extensions (process execution).
     Exec => "exec",
     Execv => "execv",
+    }
 }
 
 impl BuiltinOp {
@@ -258,12 +269,6 @@ impl BuiltinOp {
     pub fn resolve(name: &str) -> BuiltinOp {
         BuiltinOp::from_name(name)
             .unwrap_or_else(|| panic!("builtin name {name:?} not in BuiltinOp"))
-    }
-}
-
-impl std::fmt::Display for BuiltinOp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.name())
     }
 }
 
