@@ -1212,11 +1212,14 @@ impl Flattener {
     ///   generator left in a CollectBegin, and an infinite delegated stream
     ///   (`limit(1; path(recurse(.+1)) | .)`) would hang there where eval
     ///   stops lazily.
-    /// - the subtree contains `break`: a break crossing the delegation
-    ///   boundary would surface as a plain eval error instead of unwinding
-    ///   to its label. The scan is a conservative Debug-format substring
-    ///   probe — a false positive (e.g. a literal string "Break") merely
-    ///   keeps the eval bail of the caller.
+    /// - the subtree contains `break` (cannot unwind across the delegation
+    ///   boundary — it would surface as a plain eval error), an un-inlined
+    ///   `FuncCall` (the delegated env carries no function table; these
+    ///   only survive inlining for recursive defs, which the feasibility
+    ///   probes already reject — belt and suspenders), or `memoize` (the
+    ///   delegated env has no memo slots wired). The scan is a conservative
+    ///   Debug-format substring probe — a false positive (e.g. a literal
+    ///   string "Break") merely keeps the eval bail of the caller.
     /// - `path_semantic` nodes (`path(...)`, `del(...)`, `pick(...)`)
     ///   referencing any `$var`: the env seeding copies plain values, but
     ///   eval's path provenance (#880/#953) also tracks *where* a variable
@@ -1224,12 +1227,38 @@ impl Flattener {
     ///   "Invalid path expression" through a value-only seed. Value-semantic
     ///   delegates (walk/skip/add) are fine with value seeding.
     fn emit_delegate_gen(&mut self, expr: &Expr, input_slot: SlotId, path_semantic: bool) -> bool {
-        if self.limit_state.is_some() { return false; }
-        if format!("{:?}", expr).contains("Break") { return false; }
-        if path_semantic {
+        // Every rejection below also raises `has_unresolved_recursion`:
+        // callers in ignored-false emission contexts would otherwise drop
+        // the subtree's ops silently and ship a program with a hole
+        // (`first(repeat(7) | .+1)` returned nothing instead of bailing) —
+        // the flag forces the whole-filter bail that `flatten_filter` and
+        // the feasibility probes check after flattening. Same pattern as
+        // the PathExpr arm / #683.
+        let mut rejected = self.limit_state.is_some();
+        if !rejected {
+            let dbg = format!("{:?}", expr);
+            rejected = dbg.contains("Break") || dbg.contains("FuncCall") || dbg.contains("Memoize");
+            // Push mode is eager: the delegate fills a collect stack the
+            // lowering materialized (pipe fallback, explicit collect), so a
+            // potentially-infinite delegated stream would hang where eval
+            // cuts it lazily downstream (`first(repeat(7) | . + 1)`).
+            // Native lowering upholds the same invariant by never
+            // flattening unbounded generators; mirror it for delegates.
+            // Yield-mode (tail-position) delegates stay lazy through the
+            // callback and are exempt.
+            rejected = rejected
+                || (self.collect_depth > 0
+                    && (dbg.contains("Repeat") || dbg.contains("While")
+                        || dbg.contains("Until") || dbg.contains("Recurse")));
+        }
+        if !rejected && path_semantic {
             let mut vars = Vec::new();
             Self::collect_loadvar_indices(expr, &mut vars);
-            if !vars.is_empty() { return false; }
+            rejected = !vars.is_empty();
+        }
+        if rejected {
+            self.has_unresolved_recursion = true;
+            return false;
         }
         let idx = self.closure_ops.len();
         self.closure_ops.push(expr.clone());
@@ -3843,7 +3872,18 @@ impl Flattener {
 
             // CallBuiltin with generator args: rewrite as nested LetBinding
             // e.g., join(",","/") → (",","/") as $__arg | join($__arg)
-            Expr::CallBuiltin { op, args } if !args.is_empty() && args.iter().any(|a| !is_scalar(a)) => {
+            //
+            // The rewrite encodes *cartesian* argument semantics (the builtin
+            // runs once per argument combination). Stream-consuming builtins
+            // (`fromstream`, `truncate_stream`) read the whole event stream
+            // statefully instead, so they must skip the rewrite and fall
+            // through to the generic eval delegate below, which runs the
+            // original node wholesale (#1059 Phase 3). Before the delegate
+            // existed the rewritten body failed to flatten and the filter
+            // bailed — the rewrite's wrong shape was never executed.
+            Expr::CallBuiltin { op, args } if !args.is_empty()
+                && args.iter().any(|a| !is_scalar(a))
+                && !matches!(op, BuiltinOp::FromStream | BuiltinOp::TruncateStream) => {
                 // Each generator arg gets bound to a temp var
                 let base_var = VarIdx(10200);
                 let mut var_args = Vec::new();
@@ -3966,11 +4006,18 @@ impl Flattener {
                     self.emit(JitOp::Drop { slot: out });
                     true
                 } else {
-                    false
+                    self.emit_delegate_gen(expr, input_slot, false)
                 }
             }
 
-            _ => false,
+            // Last resort (#1059 Phase 3): any generator-position node with
+            // no native lowering streams through the eval delegate instead
+            // of bailing the whole filter — value semantics only (path
+            // computation never flows through `flatten_gen`; `path(...)`
+            // has its own provenance-guarded arm above). The delegate's own
+            // guards (limit context, `break` / `FuncCall` / `Memoize` in
+            // the subtree) keep the bail where delegation would be wrong.
+            _ => self.emit_delegate_gen(expr, input_slot, false),
         }
     }
 

@@ -181,16 +181,29 @@ gate を通れば tree-walking eval ではなく JitOp interpreter で実行さ�
 
 #### streaming eval delegate（#1059 Phase 3 / `JitOp::DelegateGen`）
 
-flatten 不能だったサブツリー（複雑な `path()`、`del`/`pick`/`walk`/`skip`/
-`add(gen)`）は、ノード単位で eval に **streaming 委譲**して flatten を続行
-できる（`emit_delegate_gen` → `jit_rt_delegate_gen`）。yield は生成順に
-cb / collect stack へ流れるので lazy 性と downstream early-stop が保たれる
-（旧 eager delegate の #1085 hang は再発しない）。委譲しない条件:
+flatten 不能なサブツリーは、ノード単位で eval に **streaming 委譲**して
+flatten を続行できる（`emit_delegate_gen` → `jit_rt_delegate_gen`）。
+`flatten_gen` の最終 fallback が generic に委譲を試みるため、複雑な
+`path()` / `del` / `pick` / `walk` 系に加え、regex 族（scan/match/sub
+補間 replacement）、tostream 族、`?//`、generator subscript なども
+カバーされる。yield は生成順に cb / collect stack へ流れるので lazy 性と
+downstream early-stop が保たれる（旧 eager delegate の #1085 hang は
+再発しない）。委譲しない条件（**拒否時は `has_unresolved_recursion` で
+全体 bail を強制** — ignored-false 文脈で op が落ちる #1093 パターン防止）:
 
 - `limit(n; …)` 内（per-yield counter が helper 内で回せない）
-- サブツリーに `break`（委譲境界を越える break は label に戻れない）
-- path 意味論ノード（`path`/`del`/`pick`）が `$var` を参照（値 seed では
+- サブツリーに `break`（委譲境界を越える break は label に戻れない）、
+  `FuncCall`（委譲 env に関数表が無い）、`memoize`（memo slot 未配線）
+- **push mode（collect 文脈）で無限になり得るサブツリー**
+  （Repeat/While/Until/Recurse）— pipe fallback の collect は eager なので
+  eval が lazy に切る stream が hang する（`first(repeat(7) | .+1)`）。
+  yield mode（tail position）は cb で lazy 停止できるので対象外
+- path 意味論ノード（`path`/`del`/`pick`）が `$var` を参照(値 seed では
   path provenance #880/#953 が失われ `. as $x | path($x)` が誤エラー化）
+
+stream 消費 builtin（`fromstream`/`truncate_stream`）は CallBuiltin の
+generator-arg LetBinding 書き換え（cartesian 意味論）から除外し、原型
+ノードごと委譲する。
 
 **default dispatch は委譲プログラムをコンパイルしない**
 （`is_jit_compilable_with_funcs` が reject）。delegate 支配的な filter は
