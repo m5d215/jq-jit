@@ -151,71 +151,7 @@ pub fn read_next_input() -> Option<Value> {
     }
 }
 
-/// Typed error for label/break to avoid string formatting/parsing overhead.
-#[derive(Debug)]
-struct BreakError(u64);
-impl std::fmt::Display for BreakError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "__break__:{}:", self.0)
-    }
-}
-impl std::error::Error for BreakError {}
-
-thread_local! {
-    /// Lossless payload slot for the most recently raised `error(value)`
-    /// (#844). `Value` holds `Rc`s, so it cannot live inside an
-    /// `anyhow::Error` (which requires `Send + Sync`); instead `error`
-    /// stashes the value here and bails with the `Send + Sync` [`ErrorValue`]
-    /// marker. The matching `catch` takes the value straight back. This
-    /// mirrors jit.rs's `JIT_ERROR_VALUE` channel. The slot is safe as a
-    /// single cell because error propagation is synchronous LIFO unwinding:
-    /// only one `error(value)` is ever in flight, and the catching `try`
-    /// takes it immediately. A stale value left by an uncaught error is
-    /// overwritten by the next `error` and is never read by the string path
-    /// (which only fires when the `ErrorValue` downcast fails).
-    static ERROR_PAYLOAD: std::cell::RefCell<Option<Value>> = const { std::cell::RefCell::new(None) };
-}
-
-/// Typed marker error carrying an `error(value)` payload losslessly (#844).
-///
-/// The string channel (`__jqerror__:<JSON>`) serializes the payload with
-/// `value_to_json_precise`, which is lossy for non-finite numbers anywhere
-/// in the value: `nan` becomes `null` and `±infinite` saturates to the
-/// nearest finite f64. Round-tripping that JSON back in a `catch` branch
-/// therefore corrupts the caught value. The exact `Value` rides in
-/// [`ERROR_PAYLOAD`] instead; `Display` still emits the `__jqerror__:<JSON>`
-/// form so uncaught errors print exactly as before.
-#[derive(Debug)]
-struct ErrorValue {
-    display: String,
-}
-impl ErrorValue {
-    /// Stash `value` in the thread-local payload slot and build the marker
-    /// error whose `Display` reproduces the legacy `__jqerror__:<JSON>` text.
-    fn raise(value: Value) -> anyhow::Error {
-        let display = format!("__jqerror__:{}", crate::value::value_to_json_precise(&value));
-        ERROR_PAYLOAD.with(|slot| *slot.borrow_mut() = Some(value));
-        ErrorValue { display }.into()
-    }
-}
-impl std::fmt::Display for ErrorValue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.display)
-    }
-}
-impl std::error::Error for ErrorValue {}
-
-/// Take the payload stashed by the most recent `error(value)`. Falls back to
-/// re-parsing the marker's `display` JSON if the slot is somehow empty.
-fn take_error_payload(ev: &ErrorValue) -> Value {
-    if let Some(v) = ERROR_PAYLOAD.with(|slot| slot.borrow_mut().take()) {
-        return v;
-    }
-    match ev.display.strip_prefix("__jqerror__:") {
-        Some(json) => crate::value::json_to_value(json).unwrap_or_else(|_| Value::from_str(&ev.display)),
-        None => Value::from_str(&ev.display),
-    }
-}
+use crate::signal::{BreakError, ErrorValue, take_error_payload};
 
 /// The value a `try ... catch` / `?` receives when it catches a `break`
 /// signal. jq surfaces the break as `{"__jq": <label id>}`; matching the
