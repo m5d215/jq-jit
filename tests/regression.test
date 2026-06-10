@@ -13442,3 +13442,23 @@ null
 [@base64 "a\(1)b", try (@invalid "a\(1)b") catch .]
 null
 ["aMQ==b","invalid is not a valid format"]
+
+# Issue #1027: raw passthrough re-encodes printable \uXXXX escapes (field access)
+.x
+{"x":"\u0041\u3042"}
+"Aあ"
+
+# Issue #1027: identity passthrough re-encodes \uXXXX in values and keys
+.
+{"\u0041k":"\u3042","y":["\uD83D\uDE00"]}
+{"Ak":"あ","y":["😀"]}
+
+# Issue #1027: control \uXXXX stays escaped, \u0009 becomes \t, lone low surrogate becomes U+FFFD
+.x
+{"x":"\u0007\u0009\uDE00"}
+"\u0007\t�"
+
+# Issue #1027: literal DEL byte (0x7F) is escaped on output like jq (#446)
+.x
+{"x":"ab"}
+"a\u007fb"
