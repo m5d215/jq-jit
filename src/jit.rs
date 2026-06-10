@@ -94,9 +94,10 @@ impl JitError {
         }
     }
 
-    /// The value a JIT-compiled `try ... catch` binds. Halt/break keep their
-    /// legacy sentinel-string shape: a JIT catch currently treats them as
-    /// catchable text (#1043 tracks making halt propagate instead).
+    /// The value a JIT-compiled `try ... catch` binds. Break keeps its
+    /// legacy sentinel-string shape (catchable text); a pending Halt never
+    /// reaches this — `jit_rt_get_error` refuses to consume it so it
+    /// propagates past the catch (#182, #1043).
     fn into_catch_value(self) -> Value {
         match self {
             JitError::Raise(v) => v,
@@ -8750,14 +8751,26 @@ extern "C" fn jit_rt_has_error() -> i64 {
     if pending { 1 } else { 0 }
 }
 
-/// Get the last error as a Value and write it to dst. Clears the error.
-extern "C" fn jit_rt_get_error(dst: *mut Value, env: *mut JitEnv) {
+/// Consume the pending error into a catch value, write it to dst, and
+/// return 1 (caught). halt / halt_error are non-recoverable: jq lets them
+/// propagate past `try ... catch` so the process exits with the requested
+/// code (#182). For a pending halt the error is left in the channel and 0
+/// is returned, so the CheckError lowering propagates it out of the JIT
+/// function instead of entering the catch handler (#1043).
+extern "C" fn jit_rt_get_error(dst: *mut Value, env: *mut JitEnv) -> i64 {
+    let halt = JIT_LAST_ERROR.with(|cell| unsafe {
+        matches!(&*cell.get(), Some(JitError::Halt(_)))
+    });
+    if halt {
+        return 0;
+    }
     unsafe { (*env).error_flag = 0; }
     let v = match take_jit_error() {
         Some(err) => err.into_catch_value(),
         None => Value::Null,
     };
     unsafe { std::ptr::write(dst, v); }
+    1
 }
 
 fn binop_to_i32(op: BinOp) -> i32 {
@@ -10442,12 +10455,24 @@ impl JitCompiler {
                         let err_blk = b.create_block();
                         let ok_blk = b.create_block();
                         b.ins().brif(is_err, err_blk, &[], ok_blk, &[]);
-                        // Error path: get the error value and jump to catch
+                        // Error path: consume the error into the catch slot.
+                        // get_error returns 0 for a non-catchable halt (#182,
+                        // #1043) — propagate it out of the JIT function like
+                        // ReturnError instead of entering the catch handler.
                         b.switch_to_block(err_blk);
                         b.seal_block(err_blk);
                         let d = slot_addr(&mut b, *error_dst);
-                        b.ins().call(rt["get_error"], &[d, env_ptr]);
-                        b.ins().jump(label_blocks[*catch_label as usize], &[]);
+                        let call = b.ins().call(rt["get_error"], &[d, env_ptr]);
+                        let caught = b.inst_results(call)[0];
+                        let zero2 = b.ins().iconst(ptr_ty, 0);
+                        let is_caught = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, caught, zero2);
+                        let prop_blk = b.create_block();
+                        b.ins().brif(is_caught, label_blocks[*catch_label as usize], &[], prop_blk, &[]);
+                        b.switch_to_block(prop_blk);
+                        b.seal_block(prop_blk);
+                        b.ins().call(rt["propagate_error"], &[env_ptr]);
+                        let gen_err = b.ins().iconst(ptr_ty, GEN_ERROR);
+                        b.ins().return_(&[gen_err]);
                         // OK path: continue
                         b.switch_to_block(ok_blk);
                         b.seal_block(ok_blk);
@@ -10629,7 +10654,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("try_end", [p], []);
     decl!("propagate_error", [p], []);
     decl!("has_error", [], [p]);  // -> 0/1
-    decl!("get_error", [p, p], []);  // dst, env
+    decl!("get_error", [p, p], [p]);  // dst, env -> 1=caught / 0=non-catchable (halt)
     decl!("throw_error", [p, p], [p]);
     decl!("call_builtin", [p, p, p, p], [p]);  // dst, builtin_desc, args_ptr, nargs -> status
     decl!("collect_range", [p, f], []);  // dst, n (f64)

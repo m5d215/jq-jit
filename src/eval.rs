@@ -7608,7 +7608,7 @@ fn eval_truncate_stream(
 /// string inputs are written raw (no quotes, no newline); null inputs
 /// produce no output at all; everything else is JSON-encoded (no
 /// trailing newline).
-fn halt_error_write(input: &Value) {
+pub(crate) fn halt_error_write(input: &Value) {
     use std::io::Write;
     let stderr = std::io::stderr();
     let mut stderr = stderr.lock();
