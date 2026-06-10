@@ -929,8 +929,8 @@ impl Flattener {
                     StringPart::Expr(e) => StringPart::Expr(self.inline_func_calls(e)),
                 }).collect(),
             },
-            Expr::Format { name, expr } => Expr::Format {
-                name: name.clone(),
+            Expr::Format { kind, expr } => Expr::Format {
+                kind: kind.clone(),
                 expr: Box::new(self.inline_func_calls(expr)),
             },
             Expr::SetPath { path, value } => Expr::SetPath {
@@ -1697,10 +1697,10 @@ impl Flattener {
                 self.emit(JitOp::Drop { slot: to_slot });
                 out
             }
-            Expr::Format { name, expr: format_expr } => {
+            Expr::Format { kind, expr: format_expr } => {
                 let val = self.flatten_scalar(format_expr, input_slot);
                 let out = self.alloc_slot();
-                self.emit(JitOp::CallBuiltin { dst: out, name: format!("@{}", name), args: vec![val] });
+                self.emit(JitOp::CallBuiltin { dst: out, name: format!("@{}", kind.name()), args: vec![val] });
                 self.emit(JitOp::Drop { slot: val });
                 out
             }
@@ -8478,7 +8478,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, name_ptr: *const u8, name_len
                     return GEN_ERROR;
                 }
             }
-            match crate::eval::eval_format(format_name, &args[0]) {
+            match crate::eval::eval_format(&crate::ir::FormatKind::from_name(format_name), &args[0]) {
                 Ok(s) => { std::ptr::write(dst, Value::from_str(&s)); return 0; }
                 Err(e) => { set_jit_error_from(&e); std::ptr::write(dst, Value::Null); return GEN_ERROR; }
             }
