@@ -6831,6 +6831,17 @@ extern "C" fn jit_rt_index(dst: *mut Value, base: *const Value, key: *const Valu
         }
     }
 }
+/// FFI contract (#1036): `op` is the `binop_to_i32` encoding (Add=0, Sub=1,
+/// Mul=2, Div=3, Mod=4, Eq=5, Ne=6, Lt=7, Gt=8, Le=9, Ge=10); `dst` is
+/// uninitialized and must be `ptr::write`-ten exactly once on every path;
+/// the return value is 0 for success, GEN_ERROR after `set_jit_error`.
+///
+/// The canonical semantics live in `eval::eval_binop` (the fall-through);
+/// the inline arms here are duplicates restricted to cases where the
+/// duplicate provably agrees: Num/Num arithmetic (Div/Mod only with the
+/// zero/NaN guards), ordering via the shared `jq_num_*` total-order
+/// helpers, IEEE equality, and Str+Str concatenation. Anything else must
+/// fall through rather than approximate.
 extern "C" fn jit_rt_binop(dst: *mut Value, op: i32, lhs: *const Value, rhs: *const Value) -> i64 {
     unsafe {
         // Fast path for Num op Num (most common case in filters)
@@ -7485,41 +7496,6 @@ extern "C" fn jit_rt_throw_error(msg: *const Value, env: *mut JitEnv) -> i64 {
 }
 /// In-place reverse: Rc::make_mut avoids inner Vec clone when refcount == 1.
 ///
-/// `reverse` is `def reverse: [.[length - 1 - range(0; length)]];`. For a
-/// non-empty string that desugaring indexes the string with numbers,
-/// which jq rejects ("Cannot index string with number"). The empty
-/// string yields `[]` because the `range` is empty. Mirror the runtime
-/// `rt_reverse` shape here instead of silently reversing codepoints —
-/// surfaced by the metamorphic harness (#683) via
-/// `reduce ((type) | ({a: reverse})) as $x ...` on `null`.
-extern "C" fn jit_rt_reverse_inplace(v: *mut Value) -> i64 {
-    unsafe {
-        match &mut *v {
-            Value::Arr(a) => { Rc::make_mut(a).reverse(); 0 }
-            Value::Null => { *v = Value::Arr(Rc::new(vec![])); 0 }
-            Value::Str(s) if s.is_empty() => { *v = Value::Arr(Rc::new(vec![])); 0 }
-            Value::Str(_) => {
-                set_jit_error("Cannot index string with number".to_string());
-                GEN_ERROR
-            }
-            _ => { set_jit_error(format!("{} cannot be reversed", (*v).type_name())); GEN_ERROR }
-        }
-    }
-}
-/// In-place sort.
-extern "C" fn jit_rt_sort_inplace(v: *mut Value) -> i64 {
-    unsafe {
-        match &mut *v {
-            Value::Arr(a) => {
-                let arr = Rc::make_mut(a);
-                arr.sort_by(crate::runtime::compare_values);
-                0
-            }
-            Value::Null => { *v = Value::Arr(Rc::new(vec![])); 0 }
-            _ => { set_jit_error(format!("{} is not an array", (*v).type_name())); GEN_ERROR }
-        }
-    }
-}
 extern "C" fn jit_rt_negate(dst: *mut Value, input: *const Value) -> i64 {
     unsafe {
         match &*input {
@@ -9231,8 +9207,6 @@ impl JitCompiler {
             ("jit_rt_get_error", jit_rt_get_error as *const u8),
             ("jit_rt_throw_error", jit_rt_throw_error as *const u8),
             ("jit_rt_call_builtin", jit_rt_call_builtin as *const u8),
-            ("jit_rt_reverse_inplace", jit_rt_reverse_inplace as *const u8),
-            ("jit_rt_sort_inplace", jit_rt_sort_inplace as *const u8),
             ("jit_rt_collect_range", jit_rt_collect_range as *const u8),
             ("jit_rt_arr_push", jit_rt_arr_push as *const u8),
             ("jit_rt_trace_mutate", jit_rt_trace_mutate as *const u8),
@@ -10658,8 +10632,6 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("get_error", [p, p], []);  // dst, env
     decl!("throw_error", [p, p], [p]);
     decl!("call_builtin", [p, p, p, p], [p]);  // dst, builtin_desc, args_ptr, nargs -> status
-    decl!("reverse_inplace", [p], [p]);  // v: *mut Value -> status
-    decl!("sort_inplace", [p], [p]);     // v: *mut Value -> status
     decl!("collect_range", [p, f], []);  // dst, n (f64)
     decl!("arr_push", [p, p], []);       // arr: *mut Value, val: *const Value
     decl!("trace_mutate", [i, p], []);   // kind_byte (0=Assign,1=Update), v: *const Value
