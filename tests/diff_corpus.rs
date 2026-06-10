@@ -19,6 +19,8 @@ use common::json_normalize::normalize;
 
 const TEST_LABEL: &str = "diff_corpus";
 const TIMEOUT: Duration = Duration::from_secs(5);
+/// Retry budget for cases whose first run involved a `<timeout>` (#1053).
+const RETRY_TIMEOUT: Duration = Duration::from_secs(20);
 
 struct Case {
     filter: String,
@@ -76,57 +78,78 @@ fn differential_against_jq_1_8() {
     let mut fail = 0usize;
     let mut failures: Vec<String> = Vec::new();
 
-    // Each case spawns its own jq and jq-jit subprocesses with no shared
-    // in-process state, so fan out across cores; verdicts are folded back in
-    // input order to keep the failure report deterministic.
-    let verdicts = common::parallel::par_map(&cases, |case| -> Result<(), String> {
-        let jq_out = run_filter(&jq, &case.filter, &case.input, TIMEOUT);
-        let jit_out = run_filter(jq_jit, &case.filter, &case.input, TIMEOUT);
+    // Run one case at the given per-process timeout. The bool in the error
+    // marks whether either side reported `<timeout>` — under full-suite
+    // parallelism the reference jq occasionally exceeds the budget on
+    // trivially fast filters, which would otherwise surface as a spurious
+    // one-sided divergence (#1053).
+    fn run_case(
+        jq: &str,
+        jq_jit: &str,
+        case: &Case,
+        timeout: Duration,
+    ) -> Result<(), (String, bool)> {
+        let jq_out = run_filter(jq, &case.filter, &case.input, timeout);
+        let jit_out = run_filter(jq_jit, &case.filter, &case.input, timeout);
 
         let (Some(a), Some(b)) = (jq_out, jit_out) else {
-            return Err(format!(
+            return Err((format!(
                 "  line {}: spawn failure\n    filter: {}\n    input:  {}",
                 case.line, case.filter, case.input
-            ));
+            ), false));
         };
+        let timed_out = a.stdout == "<timeout>" || b.stdout == "<timeout>";
 
         if a.is_error && b.is_error {
             return Ok(());
         }
         if a.is_error != b.is_error {
-            return Err(format!(
+            return Err((format!(
                 "  line {}: error mismatch (jq error={}, jit error={})\n    filter: {}\n    input:  {}\n    jq:  {}\n    jit: {}",
                 case.line, a.is_error, b.is_error, case.filter, case.input,
                 a.stdout.trim(), b.stdout.trim()
-            ));
+            ), timed_out));
         }
 
         let a_norm = match normalize(&a.stdout) {
             Ok(s) => s,
             Err(e) => {
-                return Err(format!(
+                return Err((format!(
                     "  line {}: jq output not JSON-parsable ({})\n    filter: {}\n    input:  {}\n    jq:  {}",
                     case.line, e, case.filter, case.input, a.stdout.trim()
-                ));
+                ), timed_out));
             }
         };
         let b_norm = match normalize(&b.stdout) {
             Ok(s) => s,
             Err(e) => {
-                return Err(format!(
+                return Err((format!(
                     "  line {}: jit output not JSON-parsable ({})\n    filter: {}\n    input:  {}\n    jit: {}",
                     case.line, e, case.filter, case.input, b.stdout.trim()
-                ));
+                ), timed_out));
             }
         };
 
         if a_norm == b_norm {
             Ok(())
         } else {
-            Err(format!(
+            Err((format!(
                 "  line {}: value mismatch\n    filter: {}\n    input:  {}\n    jq:  {}\n    jit: {}",
                 case.line, case.filter, case.input, a_norm, b_norm
-            ))
+            ), timed_out))
+        }
+    }
+
+    // Each case spawns its own jq and jq-jit subprocesses with no shared
+    // in-process state, so fan out across cores; verdicts are folded back in
+    // input order to keep the failure report deterministic. A failure that
+    // involved a per-process timeout is retried once with a larger budget:
+    // a load-induced timeout heals, a genuine hang times out again (#1053).
+    let verdicts = common::parallel::par_map(&cases, |case| -> Result<(), String> {
+        match run_case(&jq, jq_jit, case, TIMEOUT) {
+            Ok(()) => Ok(()),
+            Err((_, true)) => run_case(&jq, jq_jit, case, RETRY_TIMEOUT).map_err(|(m, _)| m),
+            Err((m, false)) => Err(m),
         }
     });
 
