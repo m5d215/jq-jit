@@ -243,6 +243,8 @@ crate::ir::named_op_enum! {
         Bsearch => "bsearch",
         Strflocaltime => "strflocaltime",
         Format => "format",
+        Halt => "halt",
+        HaltError => "halt_error",
         ShiftCodepoints => "__shift_codepoints__",
     }
 }
@@ -250,7 +252,7 @@ crate::ir::named_op_enum! {
 impl RtBuiltin {
     /// Total mapping from the parser-level builtin identity to the runtime
     /// dispatch key. `None` marks builtins implemented only in eval's
-    /// special arms (filter arguments, halt family, CSV/TSV parsers, ...);
+    /// special arms (filter arguments, CSV/TSV parsers, ...);
     /// routing one of those here is the #1043 bug class, and the generic
     /// path reports it as "unknown builtin" exactly as before.
     pub fn from_builtin(op: crate::ir::BuiltinOp) -> Option<RtBuiltin> {
@@ -893,6 +895,28 @@ pub fn call_builtin_op(op: RtBuiltin, args: &[Value]) -> Result<Value> {
                 other => bail!("{} is not a valid format", errdesc(other)),
             };
             Ok(Value::from_str(&crate::eval::eval_format(&kind, &args[0])?))
+        }
+        RtBuiltin::Halt => {
+            // halt: exit 0. Raised as a typed signal so the CLI flushes
+            // buffered stdout before exiting; a JIT catch refuses to
+            // consume it (see jit_rt_get_error), matching jq's
+            // propagate-past-try semantics (#182, #1043).
+            Err(crate::signal::HaltSignal::raise(0))
+        }
+        RtBuiltin::HaltError => {
+            // halt_error/0 (args=[input]) exits 5; halt_error/1
+            // (args=[input, code]) exits with the code, clamping negatives
+            // to 0 (#979). Both write the input payload to stderr first.
+            // Mirrors eval's special arms (#1043).
+            let input = &args[0];
+            let code = match args.get(1) {
+                None => 5,
+                Some(Value::Num(n, _)) if *n < 0.0 => 0,
+                Some(Value::Num(n, _)) => *n as i32,
+                Some(_) => bail!("{} halt_error/1: number required", errdesc(input)),
+            };
+            crate::eval::halt_error_write(input);
+            Err(crate::signal::HaltSignal::raise(code))
         }
         // Fused: explode | map(. + N) | implode
         RtBuiltin::ShiftCodepoints => {
