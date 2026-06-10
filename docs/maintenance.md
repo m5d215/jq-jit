@@ -157,7 +157,16 @@ dispatch では eval に流れて不可視だった「lowering vs eval」の div
 （literal repr の消失、`combinations`/`modf` の phantom builtin、try-catch
 内の builtin エラー消失など）がこのモードでは表に出る。それらは backend
 diff（このハーネス）では両側一致なので落ちない — lowering 側の既存バグは
-別 issue として追う。
+別 issue として追う（#1082–#1090 で一掃済み、3-backend 全量 diff ゼロ）。
+
+#1059 Phase 2 以降、この「lowering vs eval」クラスは通常 dispatch でも
+表に出る: Cranelift heuristics（`JIT_THRESHOLD` / loop constructs / #658
+null-input cap）がコンパイルを見送った filter は、flatten 可能なら
+tree-walking eval ではなく JitOp interpreter で実行される（`src/bin/jq-jit.rs`
+の heuristics チェーン直後の catch-all）。eval に落ちるのは flatten が bail
+する filter（closure / `?//` / path-tracking / `memoize` など）と
+`JQJIT_FORCE_INTERPRETER=1` 時のみ。`JQJIT_TRACE=1` の generic fallback
+ラベルは `jit` / `jitop` / `eval` の 3 値。
 
 ### テスト出力
 

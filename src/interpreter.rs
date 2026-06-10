@@ -2669,6 +2669,11 @@ impl Filter {
         }
     }
 
+    /// Returns true if this filter has a compiled JitOp program (#1059).
+    pub fn has_jitop_program(&self) -> bool {
+        self.jit_program.is_some()
+    }
+
     /// Returns true if this filter has loop constructs that benefit from JIT.
     /// Specifically: Update (.[] |= f), While/Until/Repeat, and Reduce/Foreach
     /// whose source references the input (e.g. `.[]` but not `range(N)`).
@@ -11629,9 +11634,13 @@ impl Filter {
             }
         }
 
-        // JitOp interpreter backend (#1059): forced mode routes every
-        // program-compilable filter through the direct interpreter.
-        if forced_jitop {
+        // JitOp interpreter backend (#1059). The program is compiled either
+        // by the forced-mode knob (Phase 1 self-diff) or by the default
+        // sub-threshold routing (Phase 2): whenever the Cranelift heuristics
+        // decline to codegen, the binary builds the JitOp program instead and
+        // execution lands here rather than on the tree-walking eval below.
+        // Only `JQJIT_FORCE_INTERPRETER` skips it (that knob pins eval).
+        if !forced {
             if let Some(ref prog) = self.jit_program {
                 return crate::jit::execute_program(prog, input);
             }
@@ -11688,7 +11697,7 @@ impl Filter {
         }
 
         // JitOp interpreter backend (#1059) — see `execute` for rationale.
-        if forced_jitop {
+        if !forced {
             if let Some(ref prog) = self.jit_program {
                 return crate::jit::execute_program_cb(prog, input, cb);
             }

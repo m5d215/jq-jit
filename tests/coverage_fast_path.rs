@@ -159,7 +159,7 @@ fn fast_paths_have_nonzero_corpus_coverage() {
         trace_one(jq_jit, &case.filter, &case.input)
     });
     for name in traced.into_iter().flatten() {
-        if name == "jit" || name == "eval" {
+        if name == "jit" || name == "jitop" || name == "eval" {
             *generic_counts.entry(name).or_insert(0) += 1;
         } else {
             *counts.entry(name).or_insert(0) += 1;
