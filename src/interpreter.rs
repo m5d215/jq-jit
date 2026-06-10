@@ -2674,6 +2674,24 @@ impl Filter {
         self.jit_program.is_some()
     }
 
+    /// Like `compile_jitop_program`, but for the default dispatch (#1059
+    /// Phase 2): additionally rejects programs whose loop bodies materialize
+    /// slot Values, where the tree-walking evaluator measures 1.4-2.6x
+    /// faster (see `JitProgram::eligible_for_default_routing`). The
+    /// forced-mode knob keeps the ungated compile so the backend self-diff
+    /// still covers every flattenable filter.
+    pub fn compile_jitop_program_for_routing(&mut self) {
+        if self.jit_program.is_some() { return; }
+        let (ref expr, ref funcs) = self.parsed;
+        if crate::jit::is_jit_compilable_with_funcs(expr, funcs) {
+            if let Ok(prog) = crate::jit::JitProgram::compile(expr, funcs) {
+                if prog.eligible_for_default_routing() {
+                    self.jit_program = Some(prog);
+                }
+            }
+        }
+    }
+
     /// Returns true if this filter has loop constructs that benefit from JIT.
     /// Specifically: Update (.[] |= f), While/Until/Repeat, and Reduce/Foreach
     /// whose source references the input (e.g. `.[]` but not `range(N)`).

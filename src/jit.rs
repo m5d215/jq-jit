@@ -11276,6 +11276,9 @@ pub struct JitProgram {
     /// Keeps the `LoadConst` / `FieldBinopConst` pointer targets inside
     /// `ops` alive for the lifetime of the program.
     _value_constants: Vec<Box<Value>>,
+    /// Whether every loop in the program (backward-jump span) touches only
+    /// unboxed f64 variables — see `eligible_for_default_routing`.
+    var_only_loops: bool,
 }
 
 impl JitProgram {
@@ -11328,13 +11331,90 @@ impl JitProgram {
                 }
             }
         }
+        let var_only_loops = Self::loops_are_var_only(&flat.ops, &label_pc);
         Ok(JitProgram {
             ops: flat.ops,
             num_slots: flat.num_slots,
             num_vars: flat.num_vars,
             label_pc,
             _value_constants: flat.value_constants,
+            var_only_loops,
         })
+    }
+
+    /// Default-dispatch routing gate (#1059 Phase 2). The interpreter wins
+    /// over tree-walking eval when per-record work is op-count-bounded
+    /// (straight-line programs) or loops stay on unboxed f64 variables (the
+    /// constant-range reduce/foreach class). It loses 1.4–2.6x when a loop
+    /// body materializes slot Values each iteration — expansion shapes like
+    /// `[range(.) | f]` or generator-arg `any`/`all`, where eval's fused
+    /// builtins avoid the per-element dispatch + boxing. Those programs are
+    /// still correct (the forced-mode self-diff runs them); they are just
+    /// not routed by default. Cranelift routing is unaffected.
+    pub fn eligible_for_default_routing(&self) -> bool {
+        self.var_only_loops
+    }
+
+    /// True when no op inside a backward-jump span (a loop body) creates,
+    /// clones, yields, or calls on slot Values. Ops on the allowlist only
+    /// move control or unboxed f64/i64 variables; `Drop` is allowed because
+    /// it never appears alone — any value it cleans up was produced by an
+    /// op outside the allowlist, which already disqualifies the span.
+    fn loops_are_var_only(ops: &[JitOp], label_pc: &[usize]) -> bool {
+        let var_only = |op: &JitOp| -> bool {
+            matches!(op,
+                JitOp::Label { .. } | JitOp::Jump { .. } | JitOp::JumpIfError { .. }
+                | JitOp::BranchOnVar { .. } | JitOp::LoopCheck { .. }
+                | JitOp::BranchKind { .. } | JitOp::IfTruthy { .. }
+                | JitOp::TypeCmpBranch { .. } | JitOp::FieldIsTruthy { .. }
+                | JitOp::FieldCmpNum { .. } | JitOp::GetKind { .. }
+                | JitOp::GetLen { .. } | JitOp::IncVar { .. } | JitOp::InitVar { .. }
+                | JitOp::IsNullOrFalse { .. } | JitOp::ToF64Var { .. }
+                | JitOp::ToF64VarRangeBound { .. } | JitOp::RangeCheck { .. }
+                | JitOp::F64Const { .. } | JitOp::F64Move { .. }
+                | JitOp::F64Less { .. } | JitOp::F64Equal { .. }
+                | JitOp::F64Add { .. } | JitOp::F64Sub { .. }
+                | JitOp::F64Mul { .. } | JitOp::F64Div { .. }
+                | JitOp::F64Rem { .. } | JitOp::F64Neg { .. }
+                | JitOp::F64Math { .. } | JitOp::F64Libm { .. }
+                | JitOp::F64Cmp { .. } | JitOp::Drop { .. }
+            )
+        };
+        // A jump at index j targeting a label at pc t <= j loops over [t, j].
+        let mut spans: Vec<(usize, usize)> = Vec::new();
+        for (j, op) in ops.iter().enumerate() {
+            let mut targets: [Option<LabelId>; 3] = [None, None, None];
+            match op {
+                JitOp::Jump { label } | JitOp::JumpIfError { label } => targets[0] = Some(*label),
+                JitOp::IfTruthy { then_label, else_label, .. }
+                | JitOp::TypeCmpBranch { then_label, else_label, .. } => {
+                    targets[0] = Some(*then_label);
+                    targets[1] = Some(*else_label);
+                }
+                JitOp::BranchOnVar { nonzero_label, zero_label, .. } => {
+                    targets[0] = Some(*nonzero_label);
+                    targets[1] = Some(*zero_label);
+                }
+                JitOp::LoopCheck { body_label, done_label, .. } => {
+                    targets[0] = Some(*body_label);
+                    targets[1] = Some(*done_label);
+                }
+                JitOp::BranchKind { arr_label, obj_label, other_label, .. } => {
+                    targets[0] = Some(*arr_label);
+                    targets[1] = Some(*obj_label);
+                    targets[2] = Some(*other_label);
+                }
+                JitOp::CheckError { catch_label, .. } => targets[0] = Some(*catch_label),
+                _ => {}
+            }
+            for t in targets.into_iter().flatten() {
+                let pc = label_pc[t as usize];
+                if pc <= j {
+                    spans.push((pc, j));
+                }
+            }
+        }
+        spans.iter().all(|&(start, end)| ops[start..=end].iter().all(var_only))
     }
 
     /// Execute the program. Same contract as a compiled `JitFilterFn`:

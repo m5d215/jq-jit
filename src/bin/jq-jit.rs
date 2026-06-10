@@ -3014,14 +3014,17 @@ fn real_main() {
     // Phase 2 of #1059: whatever the Cranelift heuristics above left to the
     // tree-walking evaluator (sub-threshold stdin/file input, the #658
     // null-input shape, or a loop-construct filter whose codegen bailed)
-    // runs on the JitOp interpreter instead, when the filter flattens fully.
-    // `JitProgram::compile` is the shared lowering only — no codegen — so
-    // there is no compile-cost cliff on small inputs; non-flattenable
-    // filters keep the eval fallback. The forced-mode knobs are excluded so
-    // they keep pinning exactly one backend, and --force-jit keeps its
-    // "Cranelift or eval" debug semantics.
+    // runs on the JitOp interpreter instead, when the filter flattens fully
+    // and passes the routing gate (no Value-materializing loop bodies —
+    // those shapes measure faster on eval; see
+    // `JitProgram::eligible_for_default_routing`). `JitProgram::compile` is
+    // the shared lowering only — no codegen — so there is no compile-cost
+    // cliff on small inputs; non-flattenable filters keep the eval
+    // fallback. The forced-mode knobs are excluded so they keep pinning
+    // exactly one backend, and --force-jit keeps its "Cranelift or eval"
+    // debug semantics.
     if !force_interp && !force_jit && !force_jitop && !force_cranelift && !filter.has_jit() {
-        filter.compile_jitop_program();
+        filter.compile_jitop_program_for_routing();
     }
 
     // Use Vec-based buffering for compact output to avoid per-value write_all overhead

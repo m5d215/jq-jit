@@ -61,6 +61,35 @@ fn non_flattenable_falls_back_to_eval() {
     assert_eq!(label, "eval");
 }
 
+/// The routing gate keeps Value-materializing loop bodies on eval: the
+/// expansion shape `[range(.) | f] | ...` flattens fine (forced-mode
+/// self-diff still runs it) but measures 1.4-2.6x slower on the
+/// interpreter than on eval's fused builtins, so default dispatch must
+/// not route it.
+#[test]
+fn value_materializing_loop_stays_on_eval() {
+    let label = traced_label("[range(.) | . % 1000] | unique | length", "1000", None);
+    assert_eq!(label, "eval");
+}
+
+/// Loops that stay on unboxed f64 variables pass the gate: the
+/// constant-range reduce class (kept on eval by `has_loop_constructs`'
+/// input-referencing-source rule, so it reaches the JitOp catch-all)
+/// measures 1.6-1.8x faster on the interpreter than on eval.
+#[test]
+fn var_only_reduce_loop_routes_to_jitop() {
+    let label = traced_label("reduce range(0; 1000) as $i (0; . + $i)", "null", None);
+    assert_eq!(label, "jitop");
+}
+
+/// Fused `[range(n)]` collect is a single runtime call, not a loop span,
+/// so a straight-line program around it passes the gate too.
+#[test]
+fn straight_line_collect_range_routes_to_jitop() {
+    let label = traced_label("[range(.)] | length", "1000", None);
+    assert_eq!(label, "jitop");
+}
+
 /// `--force-jit` keeps its "Cranelift or eval" debug semantics: the JitOp
 /// routing must not capture it.
 #[test]
