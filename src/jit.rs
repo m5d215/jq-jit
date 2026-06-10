@@ -336,6 +336,13 @@ fn is_scalar(expr: &Expr) -> bool {
                 | (BuiltinOp::ToStream, _) | (BuiltinOp::FromStream, _)
                 | (BuiltinOp::TruncateStream, _) => false,
                 (BuiltinOp::Add, 1) => false,
+                // Builtins with no generic runtime dispatch arm (eval-only,
+                // e.g. combinations/modf) must bail to eval: emitting
+                // CallBuiltin for them is the phantom "unknown builtin"
+                // class (#1082). InputLineNumber/InputFilename are exempt —
+                // flatten_scalar routes them to dedicated JitBuiltin arms.
+                _ if !matches!(op, BuiltinOp::InputLineNumber | BuiltinOp::InputFilename)
+                    && crate::runtime::RtBuiltin::from_builtin(*op).is_none() => false,
                 _ => args.iter().all(is_scalar),
             }
         }
