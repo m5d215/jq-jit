@@ -2860,10 +2860,12 @@ impl Parser {
                         Token::Str(s) => s,
                         _ => unreachable!(),
                     };
-                    Ok(Expr::Format {
-                        kind,
-                        expr: Box::new(Expr::Literal(Literal::Str(s))),
-                    })
+                    // jq formats only the *interpolated segments* of a
+                    // `@fmt "..."` string (see the interpolation branch
+                    // below). A literal-only string never invokes the
+                    // format: `@base64 "x"` is `"x"` and `@invalid ""`
+                    // passes through without erroring (#1049).
+                    Ok(Expr::Literal(Literal::Str(s)))
                 } else if matches!(self.current(), Token::Ident(n) if n == "__string_interp__") {
                     // Interpolated string after format: @html "<b>\(.)</b>"
                     // Apply format to each interpolated expr, not literals
