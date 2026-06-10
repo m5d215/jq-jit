@@ -13517,3 +13517,18 @@ null
 [([1898,13,1,0,0,0,0,0] | strftime("%Y")), ([1899,13,1,0,0,0,0,0] | strftime("%Y-%m-%d"))]
 null
 ["1898","1900-02-01"]
+
+# Multi-branch cond-chain field output canonicalizes a non-canonical number lexeme (#729 class)
+if .b == 1 then .a elif .n == "q" then "x" else .a end
+{"a":1e3,"b":1,"n":"t"}
+1E+3
+
+# Multi-branch cond-chain field output renders a parsed NaN as null
+if .b == 1 then .a elif .n == "q" then "x" else .a end
+{"a":nan,"b":1,"n":"t"}
+null
+
+# Classified raw passthrough: dirty values still canonicalize on multi-field array construct
+[.a, .b]
+{"a":"x\/y","b":2e3}
+["x/y",2E+3]

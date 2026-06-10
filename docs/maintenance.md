@@ -276,6 +276,31 @@ silently null になる）。`tests/enforce_collect_loadvar_exhaustive.rs` が
 `src/ir.rs` の `Expr` enum を parse して、walker 本体に各 variant が出現することを
 強制する。
 
+### Classified boundary scan（clean フラグ）の契約
+
+raw passthrough のホットパス（field access / multi-field / array・object
+construct / cond-chain）は、フィールド境界スキャン
+（`value.rs::skip_json_value_classify` / `json_object_get_field_raw_classified` /
+`json_object_get_fields_raw_buf_classified`）が値の **verbatim-safety** を
+同じ 1 パスで分類し、apply 関数が emit closure に `clean: bool` を渡す。
+
+- `clean == true` の保証: その値は**スカラ**で、バックスラッシュ escape
+  なし・DEL (0x7F) なし・非 canonical 数値 lexeme（`e/E` 指数、`+` 符号、
+  special float、`.000000` run #611）なし。emit 側は dup-key /
+  compactness / escape / number-canon の各ゲートを**スキップして
+  `extend_from_slice` してよい**。
+- composite（`{`/`[`）は常に `clean == false`（dup-key・整形の判定は
+  emit パイプラインに残る）。
+- `clean == false` 側のゲート（`raw_value_bails_canon` → Bail、または
+  per-value の escape/number ゲート）は従来どおり必須。**clean 判定を
+  緩める変更（新しい「これも clean」扱い）は、ゲートが守っていた
+  canonicalisation 全種（#729 / #780 / #1027 / #446 / #615）と突き合わせて
+  からにする**。
+- 背景: v1.8.1 (#753) / v1.8.2 (#800) が per-value スキャンを積んで
+  Value 構築系ベンチが 15〜35% 劣化した。スキャンは境界スキャンに
+  融合済みなので、新しい per-value ゲートを足す時は classify に
+  畳めないか先に検討する。
+
 ### `paths` / `paths(f)` は root を落とす
 
 jq の `paths` は `path(..) | select(length > 0)`。scalar 入力で空 path `[]` を yield しない。派生する `paths(f)` も同じ不変性を持つ。rewrite を書き直す時は `length > 0` の guard を必ず最後に挟む。
