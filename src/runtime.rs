@@ -242,6 +242,7 @@ crate::ir::named_op_enum! {
         Toboolean => "toboolean",
         Bsearch => "bsearch",
         Strflocaltime => "strflocaltime",
+        Format => "format",
         ShiftCodepoints => "__shift_codepoints__",
     }
 }
@@ -880,6 +881,18 @@ pub fn call_builtin_op(op: RtBuiltin, args: &[Value]) -> Result<Value> {
             // strflocaltime(fmt): args[0] = input, args[1] = format string
             if args.len() < 2 { bail!("strflocaltime requires 2 arguments"); }
             rt_strflocaltime_impl(&args[0], &args[1])
+        }
+        RtBuiltin::Format => {
+            // format(f): apply the @<fmt> directive named by f to the input.
+            // Mirrors eval's special arm so engines that dispatch
+            // CallBuiltin through this table don't bail with "unknown
+            // builtin: format" (#1048, the #1043 dispatch-gap class).
+            if args.len() < 2 { bail!("format requires 2 arguments"); }
+            let kind = match &args[1] {
+                Value::Str(s) => crate::ir::FormatKind::from_name(s.as_str()),
+                other => bail!("{} is not a valid format", errdesc(other)),
+            };
+            Ok(Value::from_str(&crate::eval::eval_format(&kind, &args[0])?))
         }
         // Fused: explode | map(. + N) | implode
         RtBuiltin::ShiftCodepoints => {

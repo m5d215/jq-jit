@@ -7242,7 +7242,9 @@ fn eval_call_builtin(op: BuiltinOp, args: &[Expr], input: Value, env: &EnvRef, c
             return eval(&args[0], input.clone(), env, &mut |fmt_val| {
                 let kind = match &fmt_val {
                     Value::Str(s) => FormatKind::from_name(s.as_str()),
-                    _ => bail!("{} is not a valid format", crate::value::value_to_json(&fmt_val)),
+                    // jq's wording uses the errdesc shape: `number (123) is
+                    // not a valid format`, not the bare JSON value (#1048).
+                    _ => bail!("{} is not a valid format", crate::runtime::errdesc_pub(&fmt_val)),
                 };
                 cb(Value::from_str(&eval_format(&kind, &input)?))
             });

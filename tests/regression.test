@@ -13417,3 +13417,18 @@ null
 [try path(null, .a, 1) catch .]
 null
 [[],["a"],"Invalid path expression with result 1"]
+
+# Issue #1048: format/1 dispatches through the runtime table instead of "unknown builtin"
+[format("text"), format("json")]
+"t"
+["t","\"t\""]
+
+# Issue #1048: array formats through the runtime dispatch
+[format("csv"), format("tsv")]
+[1,"a b"]
+["1,\"a b\"","1\ta b"]
+
+# Issue #1048: invalid format name and non-string argument use jq's error wording
+[try format("zzz") catch ., try format(123) catch .]
+"t"
+["zzz is not a valid format","number (123) is not a valid format"]
