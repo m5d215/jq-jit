@@ -43,32 +43,255 @@ unsafe extern "C" {
     ) -> usize;
 }
 
-/// Dispatch a builtin call by name.
+crate::ir::named_op_enum! {
+    /// Keyspace of the generic runtime dispatch (`call_builtin_op`), #1035.
+    ///
+    /// This is *wider* than `ir::BuiltinOp`: JIT lowering routes operators
+    /// and fused forms through the same entry point under synthesized names
+    /// (`_plus`, `_slice`, regex builtins, ...) that have no
+    /// `Expr::CallBuiltin` form, and some arms exist only for that path.
+    /// The eval tree reaches this table through [`RtBuiltin::from_builtin`].
+    pub enum RtBuiltin {
+        Plus => "_plus",
+        Minus => "_minus",
+        Multiply => "_multiply",
+        Divide => "_divide",
+        Modulo => "_modulo",
+        Equal => "_equal",
+        Notequal => "_notequal",
+        Less => "_less",
+        Greater => "_greater",
+        Lesseq => "_lesseq",
+        Greatereq => "_greatereq",
+        Length => "length",
+        Utf8bytelength => "utf8bytelength",
+        Type => "type",
+        Keys => "keys",
+        KeysUnsorted => "keys_unsorted",
+        Values => "values",
+        Sort => "sort",
+        Reverse => "reverse",
+        Flatten => "flatten",
+        Unique => "unique",
+        Min => "min",
+        Max => "max",
+        Add => "add",
+        Any => "any",
+        All => "all",
+        Floor => "floor",
+        Ceil => "ceil",
+        Round => "round",
+        Fabs => "fabs",
+        Abs => "abs",
+        Sqrt => "sqrt",
+        Tostring => "tostring",
+        Tonumber => "tonumber",
+        AsciiDowncase => "ascii_downcase",
+        AsciiUpcase => "ascii_upcase",
+        Ltrim => "ltrim",
+        Rtrim => "rtrim",
+        Trim => "trim",
+        Explode => "explode",
+        Implode => "implode",
+        Tojson => "tojson",
+        Fromjson => "fromjson",
+        ToEntries => "to_entries",
+        FromEntries => "from_entries",
+        Transpose => "transpose",
+        Not => "not",
+        Null => "null",
+        True => "true",
+        False => "false",
+        Empty => "empty",
+        Error => "error",
+        Nan => "nan",
+        Infinite => "infinite",
+        Isinfinite => "isinfinite",
+        Isnan => "isnan",
+        Isnormal => "isnormal",
+        Isfinite => "isfinite",
+        Env => "env",
+        DollarEnv => "$ENV",
+        Builtins => "builtins",
+        GetJqOrigin => "get_jq_origin",
+        GetProgOrigin => "get_prog_origin",
+        GetSearchList => "get_search_list",
+        Debug => "debug",
+        Stderr => "stderr",
+        Input => "input",
+        Inputs => "inputs",
+        Now => "now",
+        Path => "path",
+        Has => "has",
+        In => "in",
+        Contains => "contains",
+        Inside => "inside",
+        Startswith => "startswith",
+        Endswith => "endswith",
+        Exec => "exec",
+        Execv => "execv",
+        Ltrimstr => "ltrimstr",
+        Rtrimstr => "rtrimstr",
+        Split => "split",
+        Join => "join",
+        Index => "index",
+        Rindex => "rindex",
+        Indices => "indices",
+        Rindices => "rindices",
+        Test => "test",
+        Match => "match",
+        Capture => "capture",
+        Scan => "scan",
+        Sub => "sub",
+        Gsub => "gsub",
+        Limit => "limit",
+        First => "first",
+        Last => "last",
+        Nth => "nth",
+        Range => "range",
+        While => "while",
+        Until => "until",
+        Repeat => "repeat",
+        Recurse => "recurse",
+        Getpath => "getpath",
+        Setpath => "setpath",
+        Delpaths => "delpaths",
+        SortBy => "sort_by",
+        GroupBy => "group_by",
+        UniqueBy => "unique_by",
+        MinBy => "min_by",
+        MaxBy => "max_by",
+        Map => "map",
+        Select => "select",
+        MapValues => "map_values",
+        WithEntries => "with_entries",
+        Pow => "pow",
+        Atan2 => "atan2",
+        Log => "log",
+        Log2 => "log2",
+        Log10 => "log10",
+        Exp => "exp",
+        Exp2 => "exp2",
+        Sin => "sin",
+        Cos => "cos",
+        Tan => "tan",
+        Asin => "asin",
+        Acos => "acos",
+        Atan => "atan",
+        Sinh => "sinh",
+        Cosh => "cosh",
+        Tanh => "tanh",
+        Asinh => "asinh",
+        Acosh => "acosh",
+        Atanh => "atanh",
+        Cbrt => "cbrt",
+        Erf => "erf",
+        Erfc => "erfc",
+        Expm1 => "expm1",
+        Log1p => "log1p",
+        Y0 => "y0",
+        Y1 => "y1",
+        Exp10 => "exp10",
+        Gamma => "gamma",
+        Tgamma => "tgamma",
+        Lgamma => "lgamma",
+        LgammaR => "lgamma_r",
+        Frexp => "frexp",
+        Hypot => "hypot",
+        Remainder => "remainder",
+        Drem => "drem",
+        Ldexp => "ldexp",
+        Scalbn => "scalbn",
+        Scalbln => "scalbln",
+        Scalb => "scalb",
+        Copysign => "copysign",
+        Fdim => "fdim",
+        Fmax => "fmax",
+        Fmin => "fmin",
+        Fmod => "fmod",
+        Nextafter => "nextafter",
+        Nexttoward => "nexttoward",
+        Jn => "jn",
+        Yn => "yn",
+        Fma => "fma",
+        Significand => "significand",
+        Logb => "logb",
+        Nearbyint => "nearbyint",
+        Trunc => "trunc",
+        Rint => "rint",
+        J0 => "j0",
+        J1 => "j1",
+        Gmtime => "gmtime",
+        Localtime => "localtime",
+        Mktime => "mktime",
+        Strftime => "strftime",
+        Strptime => "strptime",
+        Todate => "todate",
+        Date => "date",
+        Fromdate => "fromdate",
+        Fromdateiso8601 => "fromdateiso8601",
+        Fromisodate => "fromisodate",
+        Todateiso8601 => "todateiso8601",
+        Toisodate => "toisodate",
+        Trimstr => "trimstr",
+        Modulemeta => "modulemeta",
+        HaveDecnum => "have_decnum",
+        HaveLiteralNumbers => "have_literal_numbers",
+        HaveSql => "have_sql",
+        HaveBom => "have_bom",
+        Toboolean => "toboolean",
+        Bsearch => "bsearch",
+        Strflocaltime => "strflocaltime",
+        ShiftCodepoints => "__shift_codepoints__",
+    }
+}
+
+impl RtBuiltin {
+    /// Total mapping from the parser-level builtin identity to the runtime
+    /// dispatch key. `None` marks builtins implemented only in eval's
+    /// special arms (filter arguments, halt family, CSV/TSV parsers, ...);
+    /// routing one of those here is the #1043 bug class, and the generic
+    /// path reports it as "unknown builtin" exactly as before.
+    pub fn from_builtin(op: crate::ir::BuiltinOp) -> Option<RtBuiltin> {
+        RtBuiltin::from_name(op.name())
+    }
+}
+
+/// String-keyed entry point for JIT-compiled code, whose call sites still
+/// pass builtin names across the FFI boundary (stage-4b of #1035 will type
+/// that channel); everything else should call [`call_builtin_op`] directly.
 pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
-    match name {
+    match RtBuiltin::from_name(name) {
+        Some(op) => call_builtin_op(op, args),
+        None => bail!("unknown builtin: {} (nargs={})", name, args.len()),
+    }
+}
+
+pub fn call_builtin_op(op: RtBuiltin, args: &[Value]) -> Result<Value> {
+    match op {
         // Binary arithmetic (nargs=3: input, lhs, rhs)
-        "_plus" => binary_op(args, rt_add),
-        "_minus" => binary_op(args, rt_sub),
-        "_multiply" => binary_op(args, rt_mul),
-        "_divide" => binary_op(args, rt_div),
-        "_modulo" => binary_op(args, rt_mod),
-        "_equal" => binary_op(args, rt_eq),
-        "_notequal" => binary_op(args, rt_ne),
-        "_less" => binary_op(args, rt_lt),
-        "_greater" => binary_op(args, rt_gt),
-        "_lesseq" => binary_op(args, rt_le),
-        "_greatereq" => binary_op(args, rt_ge),
+        RtBuiltin::Plus => binary_op(args, rt_add),
+        RtBuiltin::Minus => binary_op(args, rt_sub),
+        RtBuiltin::Multiply => binary_op(args, rt_mul),
+        RtBuiltin::Divide => binary_op(args, rt_div),
+        RtBuiltin::Modulo => binary_op(args, rt_mod),
+        RtBuiltin::Equal => binary_op(args, rt_eq),
+        RtBuiltin::Notequal => binary_op(args, rt_ne),
+        RtBuiltin::Less => binary_op(args, rt_lt),
+        RtBuiltin::Greater => binary_op(args, rt_gt),
+        RtBuiltin::Lesseq => binary_op(args, rt_le),
+        RtBuiltin::Greatereq => binary_op(args, rt_ge),
 
         // Unary (nargs=1: input)
-        "length" => unary_op(args, rt_length),
-        "utf8bytelength" => unary_op(args, rt_utf8bytelength),
-        "type" => unary_op(args, rt_type),
-        "keys" | "keys_unsorted" => unary_op(args, |v| rt_keys(v, name == "keys")),
-        "values" => unary_op(args, rt_values),
-        "sort" => unary_op(args, rt_sort),
-        "reverse" => unary_op(args, rt_reverse),
-        "flatten" if args.len() < 2 => unary_op(args, |v| rt_flatten(v, None)),
-        "flatten" => {
+        RtBuiltin::Length => unary_op(args, rt_length),
+        RtBuiltin::Utf8bytelength => unary_op(args, rt_utf8bytelength),
+        RtBuiltin::Type => unary_op(args, rt_type),
+        RtBuiltin::Keys | RtBuiltin::KeysUnsorted => unary_op(args, |v| rt_keys(v, op == RtBuiltin::Keys)),
+        RtBuiltin::Values => unary_op(args, rt_values),
+        RtBuiltin::Sort => unary_op(args, rt_sort),
+        RtBuiltin::Reverse => unary_op(args, rt_reverse),
+        RtBuiltin::Flatten if args.len() < 2 => unary_op(args, |v| rt_flatten(v, None)),
+        RtBuiltin::Flatten => {
             // jq's stdlib desugars `flatten($d)` to roughly
             // `if $d < 0 then error("flatten depth must not be negative")
             //  else <reduce that subtracts 1 from $d each step> end`.
@@ -96,113 +319,113 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                 ),
             }
         }
-        "unique" => unary_op(args, rt_unique),
-        "min" => unary_op(args, rt_min),
-        "max" => unary_op(args, rt_max),
-        "add" => unary_op(args, rt_add_all),
-        "any" => unary_op(args, rt_any),
-        "all" => unary_op(args, rt_all),
-        "floor" => unary_op(args, rt_floor),
-        "ceil" => unary_op(args, rt_ceil),
-        "round" => unary_op(args, rt_round),
-        "fabs" => unary_op(args, rt_fabs),
-        "abs" => unary_op(args, rt_abs),
-        "sqrt" => unary_op(args, rt_sqrt),
-        "tostring" => unary_op(args, rt_tostring),
-        "tonumber" => unary_op(args, rt_tonumber),
-        "ascii_downcase" => unary_op(args, rt_ascii_downcase),
-        "ascii_upcase" => unary_op(args, rt_ascii_upcase),
-        "ltrim" => unary_op(args, rt_ltrim),
-        "rtrim" => unary_op(args, rt_rtrim),
-        "trim" => unary_op(args, rt_trim),
-        "explode" => unary_op(args, rt_explode),
-        "implode" => unary_op(args, rt_implode),
-        "tojson" => unary_op(args, rt_tojson),
-        "fromjson" => unary_op(args, rt_fromjson),
-        "to_entries" => unary_op(args, rt_to_entries),
-        "from_entries" => unary_op(args, rt_from_entries),
-        "transpose" => unary_op(args, rt_transpose),
-        "not" => unary_op(args, rt_not),
-        "null" | "true" | "false" => unary_op(args, |_| Ok(match name {
-            "null" => Value::Null,
-            "true" => Value::True,
-            "false" => Value::False,
+        RtBuiltin::Unique => unary_op(args, rt_unique),
+        RtBuiltin::Min => unary_op(args, rt_min),
+        RtBuiltin::Max => unary_op(args, rt_max),
+        RtBuiltin::Add => unary_op(args, rt_add_all),
+        RtBuiltin::Any => unary_op(args, rt_any),
+        RtBuiltin::All => unary_op(args, rt_all),
+        RtBuiltin::Floor => unary_op(args, rt_floor),
+        RtBuiltin::Ceil => unary_op(args, rt_ceil),
+        RtBuiltin::Round => unary_op(args, rt_round),
+        RtBuiltin::Fabs => unary_op(args, rt_fabs),
+        RtBuiltin::Abs => unary_op(args, rt_abs),
+        RtBuiltin::Sqrt => unary_op(args, rt_sqrt),
+        RtBuiltin::Tostring => unary_op(args, rt_tostring),
+        RtBuiltin::Tonumber => unary_op(args, rt_tonumber),
+        RtBuiltin::AsciiDowncase => unary_op(args, rt_ascii_downcase),
+        RtBuiltin::AsciiUpcase => unary_op(args, rt_ascii_upcase),
+        RtBuiltin::Ltrim => unary_op(args, rt_ltrim),
+        RtBuiltin::Rtrim => unary_op(args, rt_rtrim),
+        RtBuiltin::Trim => unary_op(args, rt_trim),
+        RtBuiltin::Explode => unary_op(args, rt_explode),
+        RtBuiltin::Implode => unary_op(args, rt_implode),
+        RtBuiltin::Tojson => unary_op(args, rt_tojson),
+        RtBuiltin::Fromjson => unary_op(args, rt_fromjson),
+        RtBuiltin::ToEntries => unary_op(args, rt_to_entries),
+        RtBuiltin::FromEntries => unary_op(args, rt_from_entries),
+        RtBuiltin::Transpose => unary_op(args, rt_transpose),
+        RtBuiltin::Not => unary_op(args, rt_not),
+        RtBuiltin::Null | RtBuiltin::True | RtBuiltin::False => unary_op(args, |_| Ok(match op {
+            RtBuiltin::Null => Value::Null,
+            RtBuiltin::True => Value::True,
+            RtBuiltin::False => Value::False,
             _ => unreachable!(),
         })),
-        "empty" => bail!("empty"),
-        "error" => {
+        RtBuiltin::Empty => bail!("empty"),
+        RtBuiltin::Error => {
             let input = &args[0];
             let msg = crate::value::value_to_json(input);
             bail!("{}", msg);
         }
-        "nan" => Ok(Value::number(f64::NAN)),
-        "infinite" => Ok(Value::number(f64::INFINITY)),
-        "isinfinite" => unary_op(args, |v| match v {
+        RtBuiltin::Nan => Ok(Value::number(f64::NAN)),
+        RtBuiltin::Infinite => Ok(Value::number(f64::INFINITY)),
+        RtBuiltin::Isinfinite => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::from_bool(n.is_infinite())),
             _ => Ok(Value::False),
         }),
-        "isnan" => unary_op(args, |v| match v {
+        RtBuiltin::Isnan => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::from_bool(n.is_nan())),
             _ => Ok(Value::False),
         }),
-        "isnormal" => unary_op(args, |v| match v {
+        RtBuiltin::Isnormal => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::from_bool(n.is_normal())),
             _ => Ok(Value::False),
         }),
-        "isfinite" => unary_op(args, |v| match v {
+        RtBuiltin::Isfinite => unary_op(args, |v| match v {
             // jq's isfinite is `type == "number" and (isinfinite | not)`,
             // so NaN counts as finite (issue #108).
             Value::Num(n, _) => Ok(Value::from_bool(!n.is_infinite())),
             _ => Ok(Value::False),
         }),
-        "env" | "$ENV" => Ok(rt_env()),
-        "builtins" => Ok(rt_builtins()),
-        "get_jq_origin" => Ok(rt_get_jq_origin()),
-        "get_prog_origin" => Ok(rt_get_prog_origin()),
-        "get_search_list" => Ok(rt_get_search_list()),
-        "debug" => unary_op(args, |v| {
+        RtBuiltin::Env | RtBuiltin::DollarEnv => Ok(rt_env()),
+        RtBuiltin::Builtins => Ok(rt_builtins()),
+        RtBuiltin::GetJqOrigin => Ok(rt_get_jq_origin()),
+        RtBuiltin::GetProgOrigin => Ok(rt_get_prog_origin()),
+        RtBuiltin::GetSearchList => Ok(rt_get_search_list()),
+        RtBuiltin::Debug => unary_op(args, |v| {
             eprintln!("[\"DEBUG:\",{}]", crate::value::value_to_json_tojson(v));
             Ok(v.clone())
         }),
-        "stderr" => unary_op(args, |v| {
+        RtBuiltin::Stderr => unary_op(args, |v| {
             eprint!("{}", crate::value::value_to_json_tojson(v));
             Ok(v.clone())
         }),
-        "input" | "inputs" => {
+        RtBuiltin::Input | RtBuiltin::Inputs => {
             // These need special handling with the input source
             Ok(Value::Null)
         }
-        "now" => Ok(Value::number(std::time::SystemTime::now()
+        RtBuiltin::Now => Ok(Value::number(std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs_f64())),
-        "path" => {
+        RtBuiltin::Path => {
             // path() needs special handling
             Ok(Value::Arr(Rc::new(vec![])))
         }
 
         // Binary (nargs=2: input, arg)
-        "has" => binary_arg(args, rt_has),
-        "in" => binary_arg(args, rt_in),
-        "contains" => binary_arg(args, rt_contains),
-        "inside" => binary_arg(args, |a, b| rt_contains(b, a)),
-        "startswith" => binary_arg(args, rt_startswith),
-        "endswith" => binary_arg(args, rt_endswith),
-        "exec" => binary_arg(args, rt_exec),
-        "execv" => binary_arg(args, rt_execv),
-        "ltrimstr" => binary_arg(args, rt_ltrimstr),
-        "rtrimstr" => binary_arg(args, rt_rtrimstr),
-        "split" if args.len() <= 2 => binary_arg(args, rt_split),
-        "split" => {
+        RtBuiltin::Has => binary_arg(args, rt_has),
+        RtBuiltin::In => binary_arg(args, rt_in),
+        RtBuiltin::Contains => binary_arg(args, rt_contains),
+        RtBuiltin::Inside => binary_arg(args, |a, b| rt_contains(b, a)),
+        RtBuiltin::Startswith => binary_arg(args, rt_startswith),
+        RtBuiltin::Endswith => binary_arg(args, rt_endswith),
+        RtBuiltin::Exec => binary_arg(args, rt_exec),
+        RtBuiltin::Execv => binary_arg(args, rt_execv),
+        RtBuiltin::Ltrimstr => binary_arg(args, rt_ltrimstr),
+        RtBuiltin::Rtrimstr => binary_arg(args, rt_rtrimstr),
+        RtBuiltin::Split if args.len() <= 2 => binary_arg(args, rt_split),
+        RtBuiltin::Split => {
             // split(re; flags) — regex split
             let pat_str = coerce_regex_pat_str(&args[1])?;
             let (pat, _, not_empty) = apply_regex_flags(&pat_str, &args[2])?;
             rt_regex_split_ne(&args[0], &Value::from_string(pat), not_empty)
         }
-        "join" => binary_arg(args, rt_join),
-        "index" | "rindex" => binary_arg(args, |a, b| rt_str_index(a, b, name == "rindex")),
-        "indices" | "rindices" => binary_arg(args, rt_indices),
-        "test" => {
+        RtBuiltin::Join => binary_arg(args, rt_join),
+        RtBuiltin::Index | RtBuiltin::Rindex => binary_arg(args, |a, b| rt_str_index(a, b, op == RtBuiltin::Rindex)),
+        RtBuiltin::Indices | RtBuiltin::Rindices => binary_arg(args, rt_indices),
+        RtBuiltin::Test => {
             if args.len() >= 3 {
                 // 1-arg form is the only one that accepts array patterns;
                 // we infer it from a Null flags arg (parser default). See
@@ -220,7 +443,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                 binary_arg(args, |a, b| rt_test(a, b, false))
             }
         }
-        "match" => {
+        RtBuiltin::Match => {
             if args.len() >= 3 {
                 let allow_array = matches!(&args[2], Value::Null);
                 let (pat_str, arr_flags) = coerce_regex_pat_or_array(&args[1], allow_array)?;
@@ -240,7 +463,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                 binary_arg(args, |a, b| rt_match(a, b, false))
             }
         }
-        "capture" => {
+        RtBuiltin::Capture => {
             if args.len() >= 3 {
                 let allow_array = matches!(&args[2], Value::Null);
                 let (pat_str, arr_flags) = coerce_regex_pat_or_array(&args[1], allow_array)?;
@@ -260,7 +483,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                 binary_arg(args, |a, b| rt_capture(a, b, false))
             }
         }
-        "scan" => {
+        RtBuiltin::Scan => {
             if args.len() >= 3 {
                 let pat_str = coerce_regex_pat_str(&args[1])?;
                 let (pat, _, not_empty) = apply_regex_flags(&pat_str, &args[2])?;
@@ -269,7 +492,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                 binary_arg(args, |a, b| rt_scan(a, b, false))
             }
         }
-        "sub" | "gsub" => {
+        RtBuiltin::Sub | RtBuiltin::Gsub => {
             if args.len() >= 4 {
                 // sub/gsub with flags: input, regex, replacement, flags
                 let pat_str = coerce_regex_pat_str(&args[1])?;
@@ -278,100 +501,100 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                 // matches. Discarding it (binding to `_`) silently dropped the
                 // global flag on this dispatch (the JIT scalar path). #931
                 let (pat, flag_global, not_empty) = apply_regex_flags(&pat_str, &args[3])?;
-                let global = name == "gsub" || flag_global;
+                let global = op == RtBuiltin::Gsub || flag_global;
                 rt_sub_gsub(&args[0], &Value::from_string(pat), &args[2], global, not_empty)
             } else if args.len() >= 3 {
-                rt_sub_gsub(&args[0], &args[1], &args[2], name == "gsub", false)
+                rt_sub_gsub(&args[0], &args[1], &args[2], op == RtBuiltin::Gsub, false)
             } else {
-                bail!("{} requires 3 arguments", name);
+                bail!("{} requires 3 arguments", op.name());
             }
         }
-        "limit" => binary_arg(args, |_a, _b| {
+        RtBuiltin::Limit => binary_arg(args, |_a, _b| {
             // limit needs special handling as a generator
             Ok(Value::Null)
         }),
-        "first" | "last" | "nth" | "range" | "while" | "until" | "repeat" | "recurse"
-        | "getpath" | "setpath" | "delpaths" => {
+        RtBuiltin::First | RtBuiltin::Last | RtBuiltin::Nth | RtBuiltin::Range | RtBuiltin::While | RtBuiltin::Until | RtBuiltin::Repeat | RtBuiltin::Recurse
+        | RtBuiltin::Getpath | RtBuiltin::Setpath | RtBuiltin::Delpaths => {
             // These need special handling
-            match name {
-                "getpath" => binary_arg(args, rt_getpath),
-                "setpath" => {
+            match op {
+                RtBuiltin::Getpath => binary_arg(args, rt_getpath),
+                RtBuiltin::Setpath => {
                     if args.len() >= 3 {
                         rt_setpath(&args[0], &args[1], &args[2])
                     } else {
                         bail!("setpath requires 3 arguments");
                     }
                 }
-                "delpaths" => binary_arg(args, rt_delpaths),
+                RtBuiltin::Delpaths => binary_arg(args, rt_delpaths),
                 _ => Ok(Value::Null),
             }
         }
-        "sort_by" | "group_by" | "unique_by" | "min_by" | "max_by" => {
+        RtBuiltin::SortBy | RtBuiltin::GroupBy | RtBuiltin::UniqueBy | RtBuiltin::MinBy | RtBuiltin::MaxBy => {
             // Closure-based operations need special handling
             Ok(args.first().cloned().unwrap_or(Value::Null))
         }
-        "map" | "select" | "map_values" | "with_entries" => {
+        RtBuiltin::Map | RtBuiltin::Select | RtBuiltin::MapValues | RtBuiltin::WithEntries => {
             Ok(args.first().cloned().unwrap_or(Value::Null))
         }
         // flatten with depth already handled above
-        "pow" => ternary_arg(args, rt_pow),
-        "atan2" => ternary_arg(args, |a, b| match (a, b) {
+        RtBuiltin::Pow => ternary_arg(args, rt_pow),
+        RtBuiltin::Atan2 => ternary_arg(args, |a, b| match (a, b) {
             (Value::Num(y, _), Value::Num(x, _)) => Ok(Value::number(y.atan2(*x))),
             _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
-        "log" => unary_op(args, |v| match v {
+        RtBuiltin::Log => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.ln())),
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "log2" => unary_op(args, |v| match v {
+        RtBuiltin::Log2 => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.log2())),
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "log10" => unary_op(args, |v| match v {
+        RtBuiltin::Log10 => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.log10())),
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "exp" => unary_op(args, |v| match v {
+        RtBuiltin::Exp => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.exp())),
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "exp2" => unary_op(args, |v| match v {
+        RtBuiltin::Exp2 => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(2f64.powf(*n))),
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "sin" => unary_op(args, |v| match v {
+        RtBuiltin::Sin => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.sin())),
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "cos" => unary_op(args, |v| match v {
+        RtBuiltin::Cos => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.cos())),
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "tan" => unary_op(args, |v| match v {
+        RtBuiltin::Tan => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.tan())),
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "asin" => unary_op(args, |v| match v {
+        RtBuiltin::Asin => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.asin())),
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "acos" => unary_op(args, |v| match v {
+        RtBuiltin::Acos => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.acos())),
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "atan" => unary_op(args, |v| match v {
+        RtBuiltin::Atan => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.atan())),
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "sinh" => unary_op(args, |v| match v {
+        RtBuiltin::Sinh => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.sinh())),
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "cosh" => unary_op(args, |v| match v {
+        RtBuiltin::Cosh => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.cosh())),
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "tanh" => unary_op(args, |v| match v {
+        RtBuiltin::Tanh => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.tanh())),
             _ => bail!("{} number required", errdesc(v)),
         }),
@@ -379,49 +602,49 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
         // overflows to +inf (→ DBL_MAX) once 2x exceeds DBL_MAX (|x| ≳ 9e307).
         // libm (a musl port, like the libm jq links) uses log1p/scaling and
         // stays accurate for large arguments (~709.9 at 1e308) (#811).
-        "asinh" => unary_op(args, |v| match v {
+        RtBuiltin::Asinh => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(libm::asinh(*n))),
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "acosh" => unary_op(args, |v| match v {
+        RtBuiltin::Acosh => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(libm::acosh(*n))),
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "atanh" => unary_op(args, |v| match v {
+        RtBuiltin::Atanh => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.atanh())),
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "cbrt" => unary_op(args, |v| match v {
+        RtBuiltin::Cbrt => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(n.cbrt())),
             _ => bail!("{} number required", errdesc(v)),
         }),
         // Additional libc unary wrappers (#473). libc-backed for ULP
         // parity with jq's libm-direct calls.
-        "erf" => unary_op(args, |v| match v {
+        RtBuiltin::Erf => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(unsafe { erf(*n) })),
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "erfc" => unary_op(args, |v| match v {
+        RtBuiltin::Erfc => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(unsafe { erfc(*n) })),
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "expm1" => unary_op(args, |v| match v {
+        RtBuiltin::Expm1 => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(unsafe { expm1(*n) })),
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "log1p" => unary_op(args, |v| match v {
+        RtBuiltin::Log1p => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(unsafe { log1p(*n) })),
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "y0" => unary_op(args, |v| match v {
+        RtBuiltin::Y0 => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(libm::y0(*n))),
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "y1" => unary_op(args, |v| match v {
+        RtBuiltin::Y1 => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(libm::y1(*n))),
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "exp10" => unary_op(args, |v| match v {
+        RtBuiltin::Exp10 => unary_op(args, |v| match v {
             // Use `10.powf(n)` rather than `libm::exp10`. jq's libc-backed
             // exp10 reuses pow internally on Apple/Linux, so they agree;
             // libm::exp10 takes a different polynomial path that drops the
@@ -429,15 +652,15 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             Value::Num(n, _) => Ok(Value::number(10f64.powf(*n))),
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "gamma" | "tgamma" => unary_op(args, |v| match v {
+        RtBuiltin::Gamma | RtBuiltin::Tgamma => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(unsafe { tgamma(*n) })),
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "lgamma" => unary_op(args, |v| match v {
+        RtBuiltin::Lgamma => unary_op(args, |v| match v {
             Value::Num(n, _) => Ok(Value::number(unsafe { lgamma(*n) })),
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "lgamma_r" => unary_op(args, |v| match v {
+        RtBuiltin::LgammaR => unary_op(args, |v| match v {
             Value::Num(n, _) => {
                 let mut sign: i32 = 0;
                 let r = unsafe { lgamma_r(*n, &mut sign) };
@@ -451,28 +674,28 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             }
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "frexp" => unary_op(args, |v| match v {
+        RtBuiltin::Frexp => unary_op(args, |v| match v {
             Value::Num(n, _) => {
                 let (m, e) = libm::frexp(*n);
                 Ok(Value::Arr(Rc::new(vec![Value::number(m), Value::number(e as f64)])))
             }
             _ => bail!("{} number required", errdesc(v)),
         }),
-        "hypot" => ternary_arg(args, |a, b| match (a, b) {
+        RtBuiltin::Hypot => ternary_arg(args, |a, b| match (a, b) {
             (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(libm::hypot(*x, *y))),
             _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
-        "remainder" | "drem" => ternary_arg(args, |a, b| match (a, b) {
+        RtBuiltin::Remainder | RtBuiltin::Drem => ternary_arg(args, |a, b| match (a, b) {
             (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(libm::remainder(*x, *y))),
             _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
-        "ldexp" | "scalbn" | "scalbln" => ternary_arg(args, |a, b| match (a, b) {
+        RtBuiltin::Ldexp | RtBuiltin::Scalbn | RtBuiltin::Scalbln => ternary_arg(args, |a, b| match (a, b) {
             (Value::Num(x, _), Value::Num(y, _)) => {
                 Ok(Value::number(libm::scalbn(*x, *y as i32)))
             }
             _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
-        "scalb" => ternary_arg(args, |a, b| match (a, b) {
+        RtBuiltin::Scalb => ternary_arg(args, |a, b| match (a, b) {
             // C scalb / jq truncate a *finite* fractional exponent to an
             // integer: x * 2^trunc(n) (scalb(1; 0.5) → 1, not √2) (#812). But a
             // NaN exponent propagates to NaN per IEEE `scalb(x, y)` — truncating
@@ -490,39 +713,39 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
         // Additional libc binary wrappers (#473).
-        "copysign" => ternary_arg(args, |a, b| match (a, b) {
+        RtBuiltin::Copysign => ternary_arg(args, |a, b| match (a, b) {
             (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(unsafe { copysign(*x, *y) })),
             _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
-        "fdim" => ternary_arg(args, |a, b| match (a, b) {
+        RtBuiltin::Fdim => ternary_arg(args, |a, b| match (a, b) {
             (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(unsafe { fdim(*x, *y) })),
             _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
-        "fmax" => ternary_arg(args, |a, b| match (a, b) {
+        RtBuiltin::Fmax => ternary_arg(args, |a, b| match (a, b) {
             (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(unsafe { fmax(*x, *y) })),
             _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
-        "fmin" => ternary_arg(args, |a, b| match (a, b) {
+        RtBuiltin::Fmin => ternary_arg(args, |a, b| match (a, b) {
             (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(unsafe { fmin(*x, *y) })),
             _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
-        "fmod" => ternary_arg(args, |a, b| match (a, b) {
+        RtBuiltin::Fmod => ternary_arg(args, |a, b| match (a, b) {
             (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(unsafe { fmod(*x, *y) })),
             _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
-        "nextafter" | "nexttoward" => ternary_arg(args, |a, b| match (a, b) {
+        RtBuiltin::Nextafter | RtBuiltin::Nexttoward => ternary_arg(args, |a, b| match (a, b) {
             (Value::Num(x, _), Value::Num(y, _)) => Ok(Value::number(unsafe { nextafter(*x, *y) })),
             _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
-        "jn" => ternary_arg(args, |a, b| match (a, b) {
+        RtBuiltin::Jn => ternary_arg(args, |a, b| match (a, b) {
             (Value::Num(n, _), Value::Num(x, _)) => Ok(Value::number(libm::jn(*n as i32, *x))),
             _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
-        "yn" => ternary_arg(args, |a, b| match (a, b) {
+        RtBuiltin::Yn => ternary_arg(args, |a, b| match (a, b) {
             (Value::Num(n, _), Value::Num(x, _)) => Ok(Value::number(libm::yn(*n as i32, *x))),
             _ => bail!("{} number required", errdesc(if !matches!(a, Value::Num(..)) { a } else { b })),
         }),
-        "fma" => {
+        RtBuiltin::Fma => {
             // jq registers fma as fma/3: `fma(a; b; c) = a * b + c` with the
             // pipeline input ignored. Args here = [input, a, b, c].
             if args.len() != 4 { bail!("fma: wrong number of args ({})", args.len()); }
@@ -538,11 +761,11 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                 }
             }
         },
-        "significand" | "logb" | "nearbyint" | "trunc" | "rint" | "j0" | "j1" => {
+        RtBuiltin::Significand | RtBuiltin::Logb | RtBuiltin::Nearbyint | RtBuiltin::Trunc | RtBuiltin::Rint | RtBuiltin::J0 | RtBuiltin::J1 => {
             unary_op(args, |v| match v {
                 Value::Num(n, _) => {
-                    let r = match name {
-                        "significand" => {
+                    let r = match op {
+                        RtBuiltin::Significand => {
                             // significand(x) = x * 2^(-ilogb(x)). Compute via
                             // scalbn so the exponent is applied directly to the
                             // mantissa field — `2f64.powi(-e)` overflows to +inf
@@ -552,12 +775,12 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                             let e = libm::ilogb(*n);
                             libm::scalbn(*n, -e)
                         }
-                        "logb" => unsafe { logb(*n) },
-                        "nearbyint" => libm::rint(*n),
-                        "trunc" => n.trunc(),
-                        "rint" => libm::rint(*n),
-                        "j0" => libm::j0(*n),
-                        "j1" => libm::j1(*n),
+                        RtBuiltin::Logb => unsafe { logb(*n) },
+                        RtBuiltin::Nearbyint => libm::rint(*n),
+                        RtBuiltin::Trunc => n.trunc(),
+                        RtBuiltin::Rint => libm::rint(*n),
+                        RtBuiltin::J0 => libm::j0(*n),
+                        RtBuiltin::J1 => libm::j1(*n),
                         _ => unreachable!(),
                     };
                     Ok(Value::number(r))
@@ -565,27 +788,27 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                 _ => bail!("{} number required", errdesc(v)),
             })
         }
-        "gmtime" => unary_op(args, rt_gmtime),
-        "localtime" => unary_op(args, rt_localtime),
-        "mktime" => unary_op(args, rt_mktime),
-        "strftime" => binary_arg(args, rt_strftime),
-        "strptime" => binary_arg(args, rt_strptime),
+        RtBuiltin::Gmtime => unary_op(args, rt_gmtime),
+        RtBuiltin::Localtime => unary_op(args, rt_localtime),
+        RtBuiltin::Mktime => unary_op(args, rt_mktime),
+        RtBuiltin::Strftime => binary_arg(args, rt_strftime),
+        RtBuiltin::Strptime => binary_arg(args, rt_strptime),
         // jq defines `todate` / `fromdate` as aliases for the ISO-8601
         // variants: `todate := todateiso8601`, `fromdate := fromdateiso8601`.
         // `date` is a long-standing jq-jit extension kept for compatibility.
-        "todate" | "date" => unary_op(args, rt_toisodate),
-        "fromdate" => unary_op(args, rt_fromisodate),
+        RtBuiltin::Todate | RtBuiltin::Date => unary_op(args, rt_toisodate),
+        RtBuiltin::Fromdate => unary_op(args, rt_fromisodate),
         // Canonical jq names per the docs at
         // https://jqlang.github.io/jq/manual/#Dates. Keep the
         // non-standard `fromisodate` / `toisodate` aliases for backward
         // compatibility with callers that adopted them before #116.
-        "fromdateiso8601" | "fromisodate" => unary_op(args, rt_fromisodate),
-        "todateiso8601"   | "toisodate"   => unary_op(args, rt_toisodate),
-        "trimstr" => binary_arg(args, |a, b| {
+        RtBuiltin::Fromdateiso8601 | RtBuiltin::Fromisodate => unary_op(args, rt_fromisodate),
+        RtBuiltin::Todateiso8601   | RtBuiltin::Toisodate   => unary_op(args, rt_toisodate),
+        RtBuiltin::Trimstr => binary_arg(args, |a, b| {
             let v = rt_ltrimstr(a, b)?;
             rt_rtrimstr(&v, b)
         }),
-        "modulemeta" => {
+        RtBuiltin::Modulemeta => {
             // modulemeta takes a module name string as input and returns metadata
             let input = &args[0];
             let _name = match input {
@@ -602,11 +825,11 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                 m
             }))
         }
-        "have_decnum" => {
+        RtBuiltin::HaveDecnum => {
             // We don't have arbitrary precision, return false
             Ok(Value::False)
         }
-        "have_literal_numbers" => {
+        RtBuiltin::HaveLiteralNumbers => {
             // jq 1.8.1 returns true (decnum literals are supported in
             // mainline). jq-jit reads literals through f64 so number
             // identity isn't preserved across all magnitudes; the flag
@@ -615,9 +838,9 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
             // #473.
             Ok(Value::True)
         }
-        "have_sql" => Ok(Value::False),
-        "have_bom" => Ok(Value::True),
-        "toboolean" => unary_op(args, |v| {
+        RtBuiltin::HaveSql => Ok(Value::False),
+        RtBuiltin::HaveBom => Ok(Value::True),
+        RtBuiltin::Toboolean => unary_op(args, |v| {
             match v {
                 Value::True => Ok(Value::True),
                 Value::False => Ok(Value::False),
@@ -633,7 +856,7 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                 }
             }
         }),
-        "bsearch" => {
+        RtBuiltin::Bsearch => {
             // bsearch(target): args[0] = input array, args[1] = target
             if args.len() < 2 { bail!("bsearch requires 2 arguments"); }
             let input = &args[0];
@@ -663,13 +886,13 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                 }
             }
         }
-        "strflocaltime" => {
+        RtBuiltin::Strflocaltime => {
             // strflocaltime(fmt): args[0] = input, args[1] = format string
             if args.len() < 2 { bail!("strflocaltime requires 2 arguments"); }
             rt_strflocaltime_impl(&args[0], &args[1])
         }
         // Fused: explode | map(. + N) | implode
-        "__shift_codepoints__" => {
+        RtBuiltin::ShiftCodepoints => {
             if args.len() >= 2 {
                 if let (Value::Str(s), Value::Num(n, _)) = (&args[0], &args[1]) {
                     let shift = *n as i32;
@@ -690,10 +913,6 @@ pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
                 }
             }
             bail!("__shift_codepoints__ requires string input and numeric shift");
-        }
-        _ => {
-            // Unknown builtin - try to handle common patterns
-            bail!("unknown builtin: {} (nargs={})", name, args.len());
         }
     }
 }

@@ -12,6 +12,7 @@ use std::rc::Rc;
 use anyhow::{Result, bail};
 
 use crate::ir::*;
+use crate::runtime::RtBuiltin;
 use crate::value::{Value, ObjInner, NumRepr, KeyStr, ValueKey};
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -3707,7 +3708,7 @@ pub fn eval(
             eval(input_expr, input.clone(), env, &mut |s| {
                 eval(flags, input.clone(), env, &mut |fv| {
                     eval(re, input.clone(), env, &mut |re_val| {
-                        cb(crate::runtime::call_builtin("test", &[s.clone(), re_val.clone(), fv.clone()])?)
+                        cb(crate::runtime::call_builtin_op(crate::runtime::RtBuiltin::Test, &[s.clone(), re_val.clone(), fv.clone()])?)
                     })
                 })
             })
@@ -3718,7 +3719,7 @@ pub fn eval(
             eval(input_expr, input.clone(), env, &mut |s| {
                 eval(flags, input.clone(), env, &mut |fv| {
                     eval(re, input.clone(), env, &mut |re_val| {
-                        match crate::runtime::call_builtin("match", &[s.clone(), re_val.clone(), fv.clone()]) {
+                        match crate::runtime::call_builtin_op(crate::runtime::RtBuiltin::Match, &[s.clone(), re_val.clone(), fv.clone()]) {
                             Ok(v) => {
                                 // "g" flag: match returns array of all matches
                                 if let Value::Arr(a) = &v {
@@ -3754,7 +3755,7 @@ pub fn eval(
                 eval(flags, input.clone(), env, &mut |fv| {
                     eval(re, input.clone(), env, &mut |re_val| {
                         let global = matches!(&fv, Value::Str(f) if f.as_str().contains('g'));
-                        match crate::runtime::call_builtin("capture", &[s.clone(), re_val.clone(), fv.clone()]) {
+                        match crate::runtime::call_builtin_op(crate::runtime::RtBuiltin::Capture, &[s.clone(), re_val.clone(), fv.clone()]) {
                             Ok(v) => {
                                 if global {
                                     if let Value::Arr(a) = &v {
@@ -3784,7 +3785,7 @@ pub fn eval(
             eval(input_expr, input.clone(), env, &mut |s| {
                 eval(re, input.clone(), env, &mut |re_val| {
                     eval(flags, input.clone(), env, &mut |fv| {
-                        let result = crate::runtime::call_builtin("scan", &[s.clone(), re_val.clone(), fv.clone()])?;
+                        let result = crate::runtime::call_builtin_op(crate::runtime::RtBuiltin::Scan, &[s.clone(), re_val.clone(), fv.clone()])?;
                         if let Value::Arr(a) = &result {
                             for v in a.iter() { if !cb(v.clone())? { return Ok(false); } }
                             Ok(true)
@@ -4203,39 +4204,42 @@ pub fn eval_unaryop(op: UnaryOp, val: &Value) -> Result<Value> {
         UnaryOp::Nan => return Ok(Value::number(f64::NAN)),
         _ => {}
     }
-    let name = match op {
-        UnaryOp::Length => "length", UnaryOp::Type | UnaryOp::TypeOf => "type",
-        UnaryOp::IsInfinite => "isinfinite", UnaryOp::IsNan => "isnan",
-        UnaryOp::IsNormal => "isnormal", UnaryOp::IsFinite => "isfinite",
-        UnaryOp::ToString => "tostring", UnaryOp::ToNumber => "tonumber",
-        UnaryOp::ToJson => "tojson", UnaryOp::FromJson => "fromjson",
-        UnaryOp::Ascii => "ascii", UnaryOp::Explode => "explode", UnaryOp::Implode => "implode",
-        UnaryOp::AsciiDowncase => "ascii_downcase", UnaryOp::AsciiUpcase => "ascii_upcase",
-        UnaryOp::Trim => "trim", UnaryOp::Ltrim => "ltrim", UnaryOp::Rtrim => "rtrim",
-        UnaryOp::Utf8ByteLength => "utf8bytelength",
-        UnaryOp::Floor => "floor", UnaryOp::Ceil => "ceil", UnaryOp::Round => "round",
-        UnaryOp::Fabs => "fabs", UnaryOp::Sqrt => "sqrt",
-        UnaryOp::Sin => "sin", UnaryOp::Cos => "cos", UnaryOp::Tan => "tan",
-        UnaryOp::Asin => "asin", UnaryOp::Acos => "acos", UnaryOp::Atan => "atan",
-        UnaryOp::Sinh => "sinh", UnaryOp::Cosh => "cosh", UnaryOp::Tanh => "tanh",
-        UnaryOp::Asinh => "asinh", UnaryOp::Acosh => "acosh", UnaryOp::Atanh => "atanh",
-        UnaryOp::Exp => "exp", UnaryOp::Exp2 => "exp2", UnaryOp::Exp10 => "exp10",
-        UnaryOp::Log => "log", UnaryOp::Log2 => "log2", UnaryOp::Log10 => "log10",
-        UnaryOp::Cbrt => "cbrt", UnaryOp::Significand => "significand",
-        UnaryOp::Logb => "logb",
-        UnaryOp::NearbyInt => "nearbyint", UnaryOp::Trunc => "trunc",
-        UnaryOp::Rint => "rint", UnaryOp::J0 => "j0", UnaryOp::J1 => "j1",
-        UnaryOp::Keys => "keys", UnaryOp::KeysUnsorted => "keys_unsorted",
-        UnaryOp::Values => "values", UnaryOp::Sort => "sort", UnaryOp::Reverse => "reverse",
-        UnaryOp::Unique => "unique", UnaryOp::Flatten => "flatten",
-        UnaryOp::Min => "min", UnaryOp::Max => "max", UnaryOp::Add => "add",
-        UnaryOp::Any => "any", UnaryOp::All => "all", UnaryOp::Transpose => "transpose",
-        UnaryOp::ToEntries => "to_entries", UnaryOp::FromEntries => "from_entries",
-        UnaryOp::Gmtime => "gmtime", UnaryOp::Localtime => "localtime", UnaryOp::Mktime => "mktime", UnaryOp::Now => "now",
-        UnaryOp::Abs => "abs", UnaryOp::GetModuleMeta => "modulemeta",
+    let rt = match op {
+        UnaryOp::Length => RtBuiltin::Length, UnaryOp::Type | UnaryOp::TypeOf => RtBuiltin::Type,
+        UnaryOp::IsInfinite => RtBuiltin::Isinfinite, UnaryOp::IsNan => RtBuiltin::Isnan,
+        UnaryOp::IsNormal => RtBuiltin::Isnormal, UnaryOp::IsFinite => RtBuiltin::Isfinite,
+        UnaryOp::ToString => RtBuiltin::Tostring, UnaryOp::ToNumber => RtBuiltin::Tonumber,
+        UnaryOp::ToJson => RtBuiltin::Tojson, UnaryOp::FromJson => RtBuiltin::Fromjson,
+        // `ascii/0` (jqx) was removed at the parser level in #112; the variant
+        // is unreachable plumbing. Preserve the old generic-dispatch error.
+        UnaryOp::Ascii => return Err(anyhow::anyhow!("unknown builtin: ascii (nargs=1)")),
+        UnaryOp::Explode => RtBuiltin::Explode, UnaryOp::Implode => RtBuiltin::Implode,
+        UnaryOp::AsciiDowncase => RtBuiltin::AsciiDowncase, UnaryOp::AsciiUpcase => RtBuiltin::AsciiUpcase,
+        UnaryOp::Trim => RtBuiltin::Trim, UnaryOp::Ltrim => RtBuiltin::Ltrim, UnaryOp::Rtrim => RtBuiltin::Rtrim,
+        UnaryOp::Utf8ByteLength => RtBuiltin::Utf8bytelength,
+        UnaryOp::Floor => RtBuiltin::Floor, UnaryOp::Ceil => RtBuiltin::Ceil, UnaryOp::Round => RtBuiltin::Round,
+        UnaryOp::Fabs => RtBuiltin::Fabs, UnaryOp::Sqrt => RtBuiltin::Sqrt,
+        UnaryOp::Sin => RtBuiltin::Sin, UnaryOp::Cos => RtBuiltin::Cos, UnaryOp::Tan => RtBuiltin::Tan,
+        UnaryOp::Asin => RtBuiltin::Asin, UnaryOp::Acos => RtBuiltin::Acos, UnaryOp::Atan => RtBuiltin::Atan,
+        UnaryOp::Sinh => RtBuiltin::Sinh, UnaryOp::Cosh => RtBuiltin::Cosh, UnaryOp::Tanh => RtBuiltin::Tanh,
+        UnaryOp::Asinh => RtBuiltin::Asinh, UnaryOp::Acosh => RtBuiltin::Acosh, UnaryOp::Atanh => RtBuiltin::Atanh,
+        UnaryOp::Exp => RtBuiltin::Exp, UnaryOp::Exp2 => RtBuiltin::Exp2, UnaryOp::Exp10 => RtBuiltin::Exp10,
+        UnaryOp::Log => RtBuiltin::Log, UnaryOp::Log2 => RtBuiltin::Log2, UnaryOp::Log10 => RtBuiltin::Log10,
+        UnaryOp::Cbrt => RtBuiltin::Cbrt, UnaryOp::Significand => RtBuiltin::Significand,
+        UnaryOp::Logb => RtBuiltin::Logb,
+        UnaryOp::NearbyInt => RtBuiltin::Nearbyint, UnaryOp::Trunc => RtBuiltin::Trunc,
+        UnaryOp::Rint => RtBuiltin::Rint, UnaryOp::J0 => RtBuiltin::J0, UnaryOp::J1 => RtBuiltin::J1,
+        UnaryOp::Keys => RtBuiltin::Keys, UnaryOp::KeysUnsorted => RtBuiltin::KeysUnsorted,
+        UnaryOp::Values => RtBuiltin::Values, UnaryOp::Sort => RtBuiltin::Sort, UnaryOp::Reverse => RtBuiltin::Reverse,
+        UnaryOp::Unique => RtBuiltin::Unique, UnaryOp::Flatten => RtBuiltin::Flatten,
+        UnaryOp::Min => RtBuiltin::Min, UnaryOp::Max => RtBuiltin::Max, UnaryOp::Add => RtBuiltin::Add,
+        UnaryOp::Any => RtBuiltin::Any, UnaryOp::All => RtBuiltin::All, UnaryOp::Transpose => RtBuiltin::Transpose,
+        UnaryOp::ToEntries => RtBuiltin::ToEntries, UnaryOp::FromEntries => RtBuiltin::FromEntries,
+        UnaryOp::Gmtime => RtBuiltin::Gmtime, UnaryOp::Localtime => RtBuiltin::Localtime, UnaryOp::Mktime => RtBuiltin::Mktime, UnaryOp::Now => RtBuiltin::Now,
+        UnaryOp::Abs => RtBuiltin::Abs, UnaryOp::GetModuleMeta => RtBuiltin::Modulemeta,
         _ => unreachable!(),
     };
-    crate::runtime::call_builtin(name, std::slice::from_ref(val))
+    crate::runtime::call_builtin_op(rt, std::slice::from_ref(val))
 }
 
 pub fn eval_index(base: &Value, key: &Value, optional: bool) -> std::result::Result<Value, String> {
@@ -4258,7 +4262,7 @@ pub fn eval_index(base: &Value, key: &Value, optional: bool) -> std::result::Res
         // offsets where the subsequence appears. String receivers still
         // error (`Cannot index string with array`). See #467.
         (Value::Arr(_), Value::Arr(_)) => {
-            crate::runtime::call_builtin("indices", &[base.clone(), key.clone()])
+            crate::runtime::call_builtin_op(crate::runtime::RtBuiltin::Indices, &[base.clone(), key.clone()])
                 .map_err(|e| e.to_string())
         }
         // jq dispatches `.[obj]` on an array or string as a slice when the
@@ -7730,9 +7734,13 @@ fn eval_fromcsvh_with_headers(input: &Value, headers_val: &Value, is_tsv: bool, 
 // order regardless of the (rightmost-outer) nesting direction. See #978.
 fn eval_call_builtin_args(op: BuiltinOp, args: &[Expr], remaining: usize, collected: Vec<Value>, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> GenResult) -> GenResult {
     if remaining == 0 {
-        // Stage-4 boundary (#1035): the generic runtime dispatch is still
-        // keyed by the builtin's name string.
-        return cb(crate::runtime::call_builtin(op.name(), &collected)?);
+        return match crate::runtime::RtBuiltin::from_builtin(op) {
+            Some(rt) => cb(crate::runtime::call_builtin_op(rt, &collected)?),
+            // Eval-only builtins (filter arguments, halt family, ...) are
+            // handled by eval_call_builtin's special arms; reaching the
+            // generic path with one is the #1043 dispatch-gap bug class.
+            None => bail!("unknown builtin: {} (nargs={})", op.name(), collected.len()),
+        };
     }
     let idx = remaining - 1;
     eval(&args[idx], input.clone(), env, &mut |val| {
@@ -8207,7 +8215,7 @@ fn rt_bsearch(input: &Value, target: &Value) -> Result<Value> {
 
 // strflocaltime(fmt): delegates to runtime
 fn rt_strflocaltime(input: &Value, fmt: &Value) -> Result<Value> {
-    crate::runtime::call_builtin("strflocaltime", &[input.clone(), fmt.clone()])
+    crate::runtime::call_builtin_op(crate::runtime::RtBuiltin::Strflocaltime, &[input.clone(), fmt.clone()])
 }
 
 fn hex_val(b: u8) -> Option<u8> {
