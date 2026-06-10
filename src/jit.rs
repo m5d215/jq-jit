@@ -325,13 +325,16 @@ fn is_scalar(expr: &Expr) -> bool {
         Expr::LetBinding { value, body, .. } => is_scalar(value) && is_scalar(body),
         Expr::Alternative { primary, fallback } => is_scalar(primary) && is_scalar(fallback),
         Expr::Until { cond, update } => is_scalar(cond) && is_scalar(update),
-        Expr::CallBuiltin { name, args } => {
+        Expr::CallBuiltin { op, args } => {
             // Filter-argument builtins can't be treated as scalar
-            match (name.as_str(), args.len()) {
-                ("walk", _) | ("pick", _) | ("skip", _) | ("del", _) | ("exec", 2)
-                | ("fromcsv", _) | ("fromtsv", _) | ("fromcsvh", _) | ("fromtsvh", _)
-                | ("tostream", _) | ("fromstream", _) | ("truncate_stream", _) => false,
-                ("add", 1) => false,
+            match (op, args.len()) {
+                (BuiltinOp::Walk, _) | (BuiltinOp::Pick, _) | (BuiltinOp::Skip, _)
+                | (BuiltinOp::Del, _) | (BuiltinOp::Exec, 2)
+                | (BuiltinOp::FromCsv, _) | (BuiltinOp::FromTsv, _)
+                | (BuiltinOp::FromCsvh, _) | (BuiltinOp::FromTsvh, _)
+                | (BuiltinOp::ToStream, _) | (BuiltinOp::FromStream, _)
+                | (BuiltinOp::TruncateStream, _) => false,
+                (BuiltinOp::Add, 1) => false,
                 _ => args.iter().all(is_scalar),
             }
         }
@@ -401,9 +404,6 @@ fn is_scalar(expr: &Expr) -> bool {
 
 type SlotId = u32;
 type LabelId = u32;
-
-#[derive(Debug, Clone, Copy)]
-enum MutateFn { Reverse, Sort }
 
 #[derive(Debug, Clone)]
 enum JitOp {
@@ -565,7 +565,6 @@ enum JitOp {
 
     /// In-place unary mutate: call runtime fn(v: *mut Value) -> i64
     /// Consumes input_slot and mutates the clone in-place.
-    MutateInplace { slot: SlotId, func: MutateFn },
 
     /// Fused [range(n)]: pre-allocate and fill array in one call.
     CollectRange { dst: SlotId, n: SlotId },
@@ -911,8 +910,8 @@ impl Flattener {
                 var_index: *var_index,
                 value: Box::new(self.inline_func_calls(value)),
             },
-            Expr::CallBuiltin { name, args } => Expr::CallBuiltin {
-                name: name.clone(),
+            Expr::CallBuiltin { op, args } => Expr::CallBuiltin {
+                op: *op,
                 args: args.iter().map(|a| self.inline_func_calls(a)).collect(),
             },
             Expr::ObjectConstruct { pairs } => Expr::ObjectConstruct {
@@ -1026,7 +1025,7 @@ impl Flattener {
             JitOp::Index { .. } | JitOp::IndexField { .. } |
             JitOp::BinOp { .. } | JitOp::AddMove { .. } | JitOp::UnaryOp { .. } |
             JitOp::Negate { .. } | JitOp::CallBuiltin { .. } |
-            JitOp::MutateInplace { .. } | JitOp::ThrowError { .. } |
+            JitOp::ThrowError { .. } |
             // The fused field-op runtimes index `.field` on the base and return
             // GEN_ERROR for a non-object base ("Cannot index <type> with string").
             // Without a CheckError that error is set but never propagated, so the
@@ -1635,29 +1634,7 @@ impl Flattener {
                 }
                 out
             }
-            Expr::CallBuiltin { name, args } => {
-                // In-place mutation for unary builtins: reverse, sort
-                // Clone input → out, drop input_slot (so Rc refcount → 1), mutate in-place
-                let mutate_fn = if args.is_empty() {
-                    match name.as_str() {
-                        "reverse" => Some(MutateFn::Reverse),
-                        "sort" => Some(MutateFn::Sort),
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
-                if let Some(func) = mutate_fn {
-                    let out = self.alloc_slot();
-                    self.emit(JitOp::Clone { dst: out, src: input_slot });
-                    // Drop input_slot so the clone becomes sole owner (refcount 1)
-                    // → Rc::make_mut can mutate in-place without cloning inner data
-                    self.emit(JitOp::Drop { slot: input_slot });
-                    self.emit(JitOp::Null { dst: input_slot });
-                    self.emit_propagating(JitOp::MutateInplace { slot: out, func });
-                    return out;
-                }
-
+            Expr::CallBuiltin { op, args } => {
                 let mut arg_slots = Vec::new();
                 // First arg is always the input (.)
                 let inp = self.alloc_slot();
@@ -1667,7 +1644,7 @@ impl Flattener {
                     arg_slots.push(self.flatten_scalar(arg, input_slot));
                 }
                 let out = self.alloc_slot();
-                self.emit(JitOp::CallBuiltin { dst: out, name: name.clone(), args: arg_slots.clone() });
+                self.emit(JitOp::CallBuiltin { dst: out, name: op.name().to_string(), args: arg_slots.clone() });
                 for s in &arg_slots {
                     self.emit(JitOp::Drop { slot: *s });
                 }
@@ -3602,16 +3579,17 @@ impl Flattener {
             }
 
             // Filter-argument builtins: delegate to eval (not JIT-compilable)
-            Expr::CallBuiltin { name, args } if matches!(
-                (name.as_str(), args.len()),
-                ("walk", _) | ("pick", _) | ("skip", _) | ("add", 1) | ("del", _)
+            Expr::CallBuiltin { op, args } if matches!(
+                (op, args.len()),
+                (BuiltinOp::Walk, _) | (BuiltinOp::Pick, _) | (BuiltinOp::Skip, _)
+                | (BuiltinOp::Add, 1) | (BuiltinOp::Del, _)
             ) => {
                 false
             }
 
             // CallBuiltin with generator args: rewrite as nested LetBinding
             // e.g., join(",","/") → (",","/") as $__arg | join($__arg)
-            Expr::CallBuiltin { name, args } if !args.is_empty() && args.iter().any(|a| !is_scalar(a)) => {
+            Expr::CallBuiltin { op, args } if !args.is_empty() && args.iter().any(|a| !is_scalar(a)) => {
                 // Each generator arg gets bound to a temp var
                 let base_var = VarIdx(10200);
                 let mut var_args = Vec::new();
@@ -3632,7 +3610,7 @@ impl Flattener {
 
                 // Build nested LetBinding: arg0 as $v0 | arg1 as $v1 | ... | CallBuiltin(name, [$v0, $v1, ...])
                 let inner = Expr::CallBuiltin {
-                    name: name.clone(),
+                    op: *op,
                     args: var_args.iter().map(|(vi, _)| Expr::LoadVar { var_index: *vi }).collect(),
                 };
                 let mut rewritten = inner;
@@ -8928,7 +8906,6 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
             }
             JitOp::StrBufAppendVal { src } => { *use_count.entry(*src).or_insert(0) += 1; }
             JitOp::ThrowError { msg } => { *use_count.entry(*msg).or_insert(0) += 1; }
-            JitOp::MutateInplace { slot, .. } => { *use_count.entry(*slot).or_insert(0) += 1; }
             JitOp::CollectRange { n, .. } => { *use_count.entry(*n).or_insert(0) += 1; }
             JitOp::ArrPush { arr, val } => {
                 *use_count.entry(*arr).or_insert(0) += 1;
@@ -9015,7 +8992,6 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 }
                 JitOp::StrBufAppendVal { src } => { *use_count.entry(*src).or_insert(0) += 1; }
                 JitOp::ThrowError { msg } => { *use_count.entry(*msg).or_insert(0) += 1; }
-                JitOp::MutateInplace { slot, .. } => { *use_count.entry(*slot).or_insert(0) += 1; }
                 JitOp::CollectRange { n, .. } => { *use_count.entry(*n).or_insert(0) += 1; }
                 JitOp::ArrPush { arr, val } => {
                     *use_count.entry(*arr).or_insert(0) += 1;
@@ -10472,14 +10448,6 @@ impl JitCompiler {
                         let msg_addr = slot_addr(&mut b, *msg);
                         b.ins().call(rt["throw_error"], &[msg_addr, env_ptr]);
                         // Don't return here — CheckError or ReturnError will handle it
-                    }
-                    JitOp::MutateInplace { slot, func } => {
-                        let s = slot_addr(&mut b, *slot);
-                        let rt_name = match func {
-                            MutateFn::Reverse => "reverse_inplace",
-                            MutateFn::Sort => "sort_inplace",
-                        };
-                        b.ins().call(rt[rt_name], &[s]);
                     }
                     JitOp::CollectRange { dst, n } => {
                         let d = slot_addr(&mut b, *dst);

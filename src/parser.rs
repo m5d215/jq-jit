@@ -1293,7 +1293,7 @@ impl Parser {
                 let value_expr = Expr::Literal(Literal::Str(array_json));
                 // Parse at runtime via fromjson
                 let fromjson_expr = Expr::CallBuiltin {
-                    name: "fromjson".to_string(),
+                    op: BuiltinOp::FromJson,
                     args: vec![],
                 };
                 let pipe_expr = Expr::Pipe {
@@ -2201,7 +2201,7 @@ impl Parser {
                 // the deletion form (issue #155).
                 if matches!(&update, Expr::Empty) {
                     return Ok(Expr::CallBuiltin {
-                        name: "del".to_string(),
+                        op: BuiltinOp::Del,
                         args: vec![expr],
                     });
                 }
@@ -3483,7 +3483,7 @@ impl Parser {
                 // Run through CallBuiltin so the runtime dispatches them.
                 // `have_literal_numbers` is a feature-flag builtin; jq 1.8.1
                 // returns true (decnum is enabled in mainline). See #473.
-                Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::resolve(name), args: vec![] })
             }
             "values" => {
                 // values = select(. != null) - type filter
@@ -3598,36 +3598,36 @@ impl Parser {
                 Ok(Expr::Literal(Literal::False))
             }
             "toboolean" => {
-                Ok(Expr::CallBuiltin { name: "toboolean".to_string(), args: vec![] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::ToBoolean, args: vec![] })
             }
             "halt" => {
-                Ok(Expr::CallBuiltin { name: "halt".to_string(), args: vec![] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::Halt, args: vec![] })
             }
             "halt_error" => {
-                Ok(Expr::CallBuiltin { name: "halt_error".to_string(), args: vec![] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::HaltError, args: vec![] })
             }
             "input_line_number" => {
                 // Resolved at eval/JIT time from the current input's line counter
                 // (set by the CLI before each input is processed).
-                Ok(Expr::CallBuiltin { name: "input_line_number".to_string(), args: vec![] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::InputLineNumber, args: vec![] })
             }
             "fromcsv" | "fromtsv" | "fromcsvh" | "fromtsvh" => {
-                Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::resolve(name), args: vec![] })
             }
             "fromdateiso8601" | "todateiso8601" | "fromisodate" | "toisodate" => {
-                Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::resolve(name), args: vec![] })
             }
             "todate" | "fromdate" | "date" => {
-                Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::resolve(name), args: vec![] })
             }
             "combinations" | "modf" => {
-                Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::resolve(name), args: vec![] })
             }
             "get_jq_origin" | "get_prog_origin" | "get_search_list" => {
-                Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::resolve(name), args: vec![] })
             }
             "tostream" => {
-                Ok(Expr::CallBuiltin { name: "tostream".to_string(), args: vec![] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::ToStream, args: vec![] })
             }
             "input_filename" => {
                 // Resolved at eval/JIT time from the current input's filename
@@ -3635,7 +3635,7 @@ impl Parser {
                 // file path for a named file argument, "<stdin>" for the stdin
                 // stream, and null before any input has been read (e.g. `-n`
                 // mode before the first `input`). See #926.
-                Ok(Expr::CallBuiltin { name: "input_filename".to_string(), args: vec![] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::InputFilename, args: vec![] })
             }
             _ => {
                 // User defs and filter parameters were already resolved at the
@@ -4007,19 +4007,19 @@ impl Parser {
             }
             ("has", 1) => {
                 let key = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "has".to_string(), args: vec![key] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::Has, args: vec![key] })
             }
             ("in", 1) => {
                 let container = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "in".to_string(), args: vec![container] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::In, args: vec![container] })
             }
             ("contains", 1) => {
                 let other = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "contains".to_string(), args: vec![other] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::Contains, args: vec![other] })
             }
             ("inside", 1) => {
                 let other = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "inside".to_string(), args: vec![other] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::Inside, args: vec![other] })
             }
             ("test", 1) | ("test", 2) => {
                 let mut args = args.into_iter();
@@ -4087,7 +4087,7 @@ impl Parser {
             }
             ("flatten", 1) => {
                 let depth = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "flatten".to_string(), args: vec![depth] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::Flatten, args: vec![depth] })
             }
             ("splits", 1) | ("splits", 2) => {
                 // splits(re) = split(re; null) | .[] — regex split streamed
@@ -4096,7 +4096,7 @@ impl Parser {
                 let re = args_iter.next().unwrap();
                 let flags = args_iter.next().unwrap_or(Expr::Literal(Literal::Null));
                 Ok(Expr::Pipe {
-                    left: Box::new(Expr::CallBuiltin { name: "split".to_string(), args: vec![re, flags] }),
+                    left: Box::new(Expr::CallBuiltin { op: BuiltinOp::Split, args: vec![re, flags] }),
                     right: Box::new(Expr::Each { input_expr: Box::new(Expr::Input) }),
                 })
             }
@@ -4106,36 +4106,36 @@ impl Parser {
                 let sep = args.next().unwrap();
                 if n == 2 {
                     let flags = args.next().unwrap();
-                    Ok(Expr::CallBuiltin { name: "split".to_string(), args: vec![sep, flags] })
+                    Ok(Expr::CallBuiltin { op: BuiltinOp::Split, args: vec![sep, flags] })
                 } else {
-                    Ok(Expr::CallBuiltin { name: "split".to_string(), args: vec![sep] })
+                    Ok(Expr::CallBuiltin { op: BuiltinOp::Split, args: vec![sep] })
                 }
             }
             ("join", 1) => {
                 let sep = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "join".to_string(), args: vec![sep] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::Join, args: vec![sep] })
             }
             ("ascii_downcase", 0) => Ok(Expr::UnaryOp { op: UnaryOp::AsciiDowncase, operand: Box::new(Expr::Input) }),
             ("ascii_upcase", 0) => Ok(Expr::UnaryOp { op: UnaryOp::AsciiUpcase, operand: Box::new(Expr::Input) }),
             ("ltrimstr", 1) => {
                 let s = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "ltrimstr".to_string(), args: vec![s] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::LtrimStr, args: vec![s] })
             }
             ("rtrimstr", 1) => {
                 let s = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "rtrimstr".to_string(), args: vec![s] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::RtrimStr, args: vec![s] })
             }
             ("startswith", 1) => {
                 let s = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "startswith".to_string(), args: vec![s] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::StartsWith, args: vec![s] })
             }
             ("endswith", 1) => {
                 let s = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "endswith".to_string(), args: vec![s] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::EndsWith, args: vec![s] })
             }
             ("indices", 1) | ("index", 1) | ("rindex", 1) => {
                 let s = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: name.to_string(), args: vec![s] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::resolve(name), args: vec![s] })
             }
             ("error", 1) => {
                 let msg = args.into_iter().next().unwrap();
@@ -4151,7 +4151,7 @@ impl Parser {
                 // print the *input* to stderr, then terminate. Runtime
                 // handles message encoding — see eval_call_builtin.
                 let code = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "halt_error".to_string(), args: vec![code] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::HaltError, args: vec![code] })
             }
             ("pow", 2) | ("atan2", 2) | ("fma", 3)
             | ("remainder", 2) | ("drem", 2) | ("hypot", 2)
@@ -4159,7 +4159,7 @@ impl Parser {
             | ("copysign", 2) | ("fdim", 2) | ("fmax", 2) | ("fmin", 2)
             | ("fmod", 2) | ("nextafter", 2) | ("nexttoward", 2)
             | ("jn", 2) | ("yn", 2) => {
-                Ok(Expr::CallBuiltin { name: name.to_string(), args })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::resolve(name), args })
             }
             ("nth", 1) => {
                 // jq 1.8.1: def nth($n): .[$n];
@@ -4255,10 +4255,10 @@ impl Parser {
             ("fromjson", 0) => Ok(Expr::UnaryOp { op: UnaryOp::FromJson, operand: Box::new(Expr::Input) }),
             ("strftime", 1) | ("strptime", 1)
             | ("todate", 0) | ("fromdate", 0) | ("date", 0) => {
-                Ok(Expr::CallBuiltin { name: name.to_string(), args })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::resolve(name), args })
             }
             ("combinations", 1) => {
-                Ok(Expr::CallBuiltin { name: "combinations".to_string(), args })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::Combinations, args })
             }
             ("input", 0) => Ok(Expr::ReadInput),
             ("inputs", 0) => Ok(Expr::ReadInputs),
@@ -4270,23 +4270,23 @@ impl Parser {
                 // format to the current input. Delegate to the runtime so
                 // the directive name can vary per input.
                 let fmt = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "format".to_string(), args: vec![fmt] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::Format, args: vec![fmt] })
             }
             ("length", 0) => Ok(Expr::UnaryOp { op: UnaryOp::Length, operand: Box::new(Expr::Input) }),
             ("type", 0) => Ok(Expr::UnaryOp { op: UnaryOp::Type, operand: Box::new(Expr::Input) }),
             ("trimstr", 1) => {
                 let s = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "trimstr".to_string(), args: vec![s] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::TrimStr, args: vec![s] })
             }
             // toboolean/0: convert to boolean
             ("toboolean", 0) => {
-                Ok(Expr::CallBuiltin { name: "toboolean".to_string(), args: vec![] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::ToBoolean, args: vec![] })
             }
             // add/1: add(f) = reduce .[] as $x (null; . + ($x | f))
             // But it's simpler to delegate to CallBuiltin
             ("add", 1) => {
                 let f = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "add".to_string(), args: vec![f] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::Add, args: vec![f] })
             }
             // skip/2: skip(n; gen) = limit(n; gen) | empty, limit(n; gen) outputs n items then the rest
             // Actually: skip(n; exp) = def _skip(n; exp): if n > 0 then (exp | _skip(n-1; exp)) else ., exp end;
@@ -4297,86 +4297,86 @@ impl Parser {
                 let mut args = args.into_iter();
                 let n = args.next().unwrap();
                 let generator = args.next().unwrap();
-                Ok(Expr::CallBuiltin { name: "skip".to_string(), args: vec![n, generator] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::Skip, args: vec![n, generator] })
             }
             // pick/1: pick(f) extracts paths from . that f generates
             ("pick", 1) => {
                 let f = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "pick".to_string(), args: vec![f] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::Pick, args: vec![f] })
             }
             // bsearch/1: binary search
             ("bsearch", 1) => {
                 let target = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "bsearch".to_string(), args: vec![target] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::Bsearch, args: vec![target] })
             }
             // strflocaltime/1
             ("strflocaltime", 1) => {
                 let fmt = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "strflocaltime".to_string(), args: vec![fmt] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::Strflocaltime, args: vec![fmt] })
             }
             // walk/1: walk(f) recursively applies f to all values
             ("walk", 1) => {
                 let f = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "walk".to_string(), args: vec![f] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::Walk, args: vec![f] })
             }
             // fromstream/1, truncate_stream/1: stream reassembly + slicing (#89)
             ("fromstream", 1) => {
                 let f = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "fromstream".to_string(), args: vec![f] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::FromStream, args: vec![f] })
             }
             ("truncate_stream", 1) => {
                 let f = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "truncate_stream".to_string(), args: vec![f] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::TruncateStream, args: vec![f] })
             }
             // exec/1: execute shell command and return stdout
             ("exec", 1) => {
                 let cmd = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "exec".to_string(), args: vec![cmd] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::Exec, args: vec![cmd] })
             }
             // execv/1: execute shell command, return {exitcode, stdout, stderr}
             ("execv", 1) => {
                 let cmd = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "execv".to_string(), args: vec![cmd] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::Execv, args: vec![cmd] })
             }
             // exec/2: pipe generator output to shell command, yield stdout lines
             ("exec", 2) => {
                 let mut args = args.into_iter();
                 let gen = args.next().unwrap();
                 let cmd = args.next().unwrap();
-                Ok(Expr::CallBuiltin { name: "exec".to_string(), args: vec![gen, cmd] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::Exec, args: vec![gen, cmd] })
             }
             // fromcsv/0, fromtsv/0: parse CSV/TSV string, yield arrays per row
             ("fromcsv", 0) => {
-                Ok(Expr::CallBuiltin { name: "fromcsv".to_string(), args: vec![] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::FromCsv, args: vec![] })
             }
             ("fromtsv", 0) => {
-                Ok(Expr::CallBuiltin { name: "fromtsv".to_string(), args: vec![] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::FromTsv, args: vec![] })
             }
             // fromcsvh/0, fromcsvh/1: parse CSV with headers, yield objects per row
             ("fromcsvh", 0) => {
-                Ok(Expr::CallBuiltin { name: "fromcsvh".to_string(), args: vec![] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::FromCsvh, args: vec![] })
             }
             ("fromcsvh", 1) => {
                 let headers = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "fromcsvh".to_string(), args: vec![headers] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::FromCsvh, args: vec![headers] })
             }
             // fromtsvh/0, fromtsvh/1: parse TSV with headers, yield objects per row
             ("fromtsvh", 0) => {
-                Ok(Expr::CallBuiltin { name: "fromtsvh".to_string(), args: vec![] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::FromTsvh, args: vec![] })
             }
             ("fromtsvh", 1) => {
                 let headers = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "fromtsvh".to_string(), args: vec![headers] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::FromTsvh, args: vec![headers] })
             }
             // fromdateiso8601/0, todateiso8601/0 (canonical jq names)
             // plus fromisodate/0, toisodate/0 aliases kept for
             // backward compatibility: all four route to the same
             // runtime impl.
             ("fromdateiso8601", 0) | ("fromisodate", 0) => {
-                Ok(Expr::CallBuiltin { name: "fromisodate".to_string(), args: vec![] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::FromIsoDate, args: vec![] })
             }
             ("todateiso8601", 0) | ("toisodate", 0) => {
-                Ok(Expr::CallBuiltin { name: "toisodate".to_string(), args: vec![] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::ToIsoDate, args: vec![] })
             }
             // IN/1: IN(s) = any(. == s; .)... actually IN(s) = . as $x | first(s | if . == $x then true else empty end) // false
             ("IN", 1) => {
@@ -4533,7 +4533,7 @@ impl Parser {
             // del/1: del(f) — delegate to eval for proper slice handling
             ("del", 1) => {
                 let f = args.into_iter().next().unwrap();
-                Ok(Expr::CallBuiltin { name: "del".to_string(), args: vec![f] })
+                Ok(Expr::CallBuiltin { op: BuiltinOp::Del, args: vec![f] })
             }
             _ => {
                 // Check user-defined functions
@@ -4820,8 +4820,8 @@ fn remap_func_ids(expr: Expr, map: &[(FuncId, FuncId)]) -> Expr {
         Expr::AlternativeDestructure { alternatives } => Expr::AlternativeDestructure {
             alternatives: alternatives.into_iter().map(|a| remap_func_ids(a, map)).collect(),
         },
-        Expr::CallBuiltin { name, args } => Expr::CallBuiltin {
-            name, args: args.into_iter().map(|a| remap_func_ids(a, map)).collect(),
+        Expr::CallBuiltin { op, args } => Expr::CallBuiltin {
+            op, args: args.into_iter().map(|a| remap_func_ids(a, map)).collect(),
         },
         Expr::Memoize { slot_id, key, body } => Expr::Memoize {
             slot_id,
