@@ -171,7 +171,7 @@ $ JQJIT_TRACE=1 jq-jit '{a:.x, a:.x+1}' <<< '{"x":1}'
 
 ### (d) `src/jit.rs` の Flattener
 
-JIT にまで降りる filter はここ。`flatten_scalar` / `flatten_gen` の match 群。複雑 path の Update/Assign は `__update__:idx:idx` closure op で eval にバックアウトする。
+JIT にまで降りる filter はここ。`flatten_scalar` / `flatten_gen` の match 群。複雑 path の Update/Assign は `JitBuiltin::Update { path_idx, update_idx }` closure op で eval にバックアウトする。
 
 ### `memoize/1` は interpreter 専用
 
@@ -234,8 +234,9 @@ invariant 回帰は `tests/regression.test` の "Issue #30" ブロックと
 ### JIT → eval 委譲時の env seeding
 
 JIT が複雑な Update/Assign/sort_by/paths(f)/path(..) などを処理する時、
-`__update__:path_idx:update_idx` / `__assign__:…` / `__closure_op__:sort_by:idx`
-/ `__paths_filtered__:idx` / `__path__:idx` といった closure op 経由で eval
+`JitBuiltin::Update { path_idx, update_idx }` / `JitBuiltin::Assign { … }` /
+`JitBuiltin::ClosureOp { kind, expr_idx }` / `JitBuiltin::PathsFiltered { … }` /
+`JitBuiltin::PathExpr { … }` といった closure op 経由で eval
 側の `eval_*_standalone` に落とす。このとき**新しい `eval::Env` を作る**ので、
 JIT が set していた let-binding 変数がそのままでは消える。
 

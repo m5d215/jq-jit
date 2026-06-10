@@ -1,25 +1,27 @@
 //! Enforce maintenance.md §3 "JIT → eval 委譲時の env seeding": every
-//! `__<op>__:` runtime dispatcher in `src/jit.rs` that delegates to the
-//! eval interpreter must seed its `eval::Env` via `new_delegated_env`
-//! or `reset_delegated_env`.
+//! `JitBuiltin` dispatcher in `src/jit.rs` that delegates to the eval
+//! interpreter must seed its `eval::Env` via `new_delegated_env` or
+//! `reset_delegated_env`.
 //!
-//! `__<op>__:` tags surface in two places:
+//! `JitBuiltin` variants surface in two places:
 //!
-//! * **emitters** — `format!("__<op>__:...")` calls inside JIT op
-//!   construction, which embed the tag in a `JitOp::CallBuiltin` name.
-//! * **dispatchers** — `name.strip_prefix("__<op>__:")` arms in the
-//!   runtime trampoline, which decode the tag and invoke the matching
-//!   eval-side `eval_*_standalone` helper.
+//! * **emitters** — `JitOp::CallBuiltin { builtin: JitBuiltin::<V> ... }`
+//!   constructions inside JIT op lowering.
+//! * **dispatchers** — `if let JitBuiltin::<V> ...` / `matches!(b,
+//!   JitBuiltin::<V>)` arms in the runtime trampoline
+//!   (`jit_rt_call_builtin`), which invoke the matching eval-side
+//!   `eval_*_standalone` helper.
 //!
 //! Dispatchers that build a fresh `Env` must call `new_delegated_env`
 //! (or `reset_delegated_env` for cached envs) so JIT-set let-bindings
 //! are seeded into the delegated env. A bare `Env::new(...)` here is
 //! how the `(.a, .b) += 100` regression slipped in.
 //!
-//! Some tags are not eval-delegation dispatchers — `__loc__:` returns a
-//! constant from a JIT-side parser literal, `__jqerror__:` is a runtime
-//! error-message marker — and they live in
-//! `tests/enforce_closure_op_env_seeding.allowlist` with the reason.
+//! Variants that are not eval-delegation dispatchers — constant values,
+//! fast paths over already-evaluated arguments, the generic `Rt` runtime
+//! dispatch — live in `tests/enforce_closure_op_env_seeding.allowlist`
+//! with the reason. A new variant must either seed its env or be
+//! allowlisted explicitly.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -32,59 +34,90 @@ fn read_target() -> String {
         .unwrap_or_else(|e| panic!("read {}: {}", TARGET_FILE, e))
 }
 
-/// Collect every `__<name>__:` tag literal from string-quoted contexts
-/// (`"__loc__:..."`, `format!("__loc__:...")`, `strip_prefix("__loc__:")`).
-fn collect_tags(src: &str) -> BTreeSet<String> {
+/// Collect the `JitBuiltin` variant names from the enum definition.
+fn collect_variants(src: &str) -> BTreeSet<String> {
+    let start = src
+        .find("enum JitBuiltin {")
+        .unwrap_or_else(|| panic!("enum JitBuiltin not found in {}", TARGET_FILE));
+    let body = &src[start..];
     let mut out = BTreeSet::new();
-    let bytes = src.as_bytes();
-    let needle = b"\"__";
-    let mut i = 0;
-    while i + needle.len() < bytes.len() {
-        if &bytes[i..i + needle.len()] == needle {
-            // Scan forward to find the closing `__` followed by `:`.
-            let mut j = i + 3;
-            while j + 3 < bytes.len() {
-                if &bytes[j..j + 3] == b"__:" {
-                    let name = &src[i + 3..j];
-                    if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                        && !name.is_empty()
-                    {
-                        out.insert(name.to_string());
-                    }
-                    break;
-                }
-                if bytes[j] == b'"' || bytes[j] == b'\n' { break; }
-                j += 1;
-            }
-            i = j + 1;
+    let mut depth = 0;
+    for line in body.lines() {
+        depth += line.matches('{').count() as i32;
+        depth -= line.matches('}').count() as i32;
+        if depth <= 0 && !out.is_empty() {
+            break;
+        }
+        let t = line.trim();
+        if t.starts_with("///") || t.starts_with("//") || t.starts_with('#') {
             continue;
         }
-        i += 1;
+        // A variant line starts with an UpperCamelCase ident at depth 1.
+        if depth == 1 {
+            let ident: String = t
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if ident
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_uppercase())
+                && ident != "JitBuiltin"
+            {
+                out.insert(ident);
+            }
+        }
     }
     out
 }
 
-/// Find the dispatcher handler block for a given tag: the block of code
-/// starting at `name.strip_prefix("__<tag>__:")` and ending at the next
-/// `if let Some(rest) = name.strip_prefix(` or `if name ==` line, or EOF.
-fn extract_handler_block<'a>(src: &'a str, tag: &str) -> Option<&'a str> {
-    let needle = format!("name.strip_prefix(\"__{}__:\")", tag);
-    let start = src.find(&needle)?;
-    // Walk forward from `start` to find the matching `}` at brace depth 0
-    // relative to this `if let` block, OR until we hit the next dispatcher
-    // arm at the outer level.
-    let bytes = src.as_bytes();
-    let mut depth: i32 = 0;
-    let mut seen_brace = false;
+/// Find the dispatcher handler block for a variant inside the runtime
+/// trampoline: the block of code starting at `if let JitBuiltin::<V>` or
+/// `matches!(b, JitBuiltin::<V>)` and ending at its closing brace.
+fn extract_handler_block<'a>(src: &'a str, variant: &str) -> Option<&'a str> {
+    let tramp_start = src.find("extern \"C\" fn jit_rt_call_builtin")?;
+    let tramp = &src[tramp_start..];
+    let needle_a = format!("if let JitBuiltin::{variant}");
+    let needle_b = format!("matches!(b, JitBuiltin::{variant})");
+    let start = tramp.find(&needle_a).or_else(|| tramp.find(&needle_b))?;
+    let bytes = tramp.as_bytes();
+    // The handler body opens at the `{` that ends the `if` line; a payload
+    // destructure (`if let JitBuiltin::Assign { path_idx, .. } = b {`) puts
+    // earlier braces on the same line, so find the line-trailing `{` first.
+    let mut body_open = None;
     let mut i = start;
     while i < bytes.len() {
-        let ch = bytes[i];
-        if ch == b'{' { depth += 1; seen_brace = true; }
-        else if ch == b'}' { depth -= 1; }
-        if seen_brace && depth == 0 { return Some(&src[start..=i]); }
+        if bytes[i] == b'{' {
+            let mut j = i + 1;
+            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\r') {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'\n' {
+                body_open = Some(i);
+                break;
+            }
+        }
+        if bytes[i] == b'\n' {
+            break;
+        }
         i += 1;
     }
-    Some(&src[start..])
+    let body_open = body_open?;
+    let mut depth: i32 = 0;
+    let mut i = body_open;
+    while i < bytes.len() {
+        let ch = bytes[i];
+        if ch == b'{' {
+            depth += 1;
+        } else if ch == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(&tramp[start..=i]);
+            }
+        }
+        i += 1;
+    }
+    Some(&tramp[start..])
 }
 
 fn load_allowlist() -> BTreeSet<String> {
@@ -95,9 +128,13 @@ fn load_allowlist() -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for (n, raw) in content.lines().enumerate() {
         let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
-        // Allowlist line format: `<tag>` (rest of line is comment/justification).
-        let tag = line.split_whitespace().next()
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Allowlist line format: `<variant>` (rest of line is comment).
+        let tag = line
+            .split_whitespace()
+            .next()
             .unwrap_or_else(|| panic!("allowlist line {}: empty", n + 1));
         out.insert(tag.to_string());
     }
@@ -107,20 +144,21 @@ fn load_allowlist() -> BTreeSet<String> {
 #[test]
 fn closure_op_dispatchers_seed_delegated_env() {
     let src = read_target();
-    let tags = collect_tags(&src);
+    let variants = collect_variants(&src);
     let allowed = load_allowlist();
 
     eprintln!();
     eprintln!("=== closure-op dispatcher env-seeding enforcement ===");
     eprintln!("target:      {}", TARGET_FILE);
-    eprintln!("tags found:  {:?}", tags);
+    eprintln!("variants:    {:?}", variants);
     eprintln!("allowlisted: {:?}", allowed);
 
-    // Sanity: known tags must be present (catches a parser breakage).
-    for required in ["assign", "update", "path", "paths_filtered", "closure_op"] {
+    // Sanity: the known eval-delegating variants must be present (catches
+    // a parser breakage or a rename that would silently skip enforcement).
+    for required in ["Assign", "Update", "PathExpr", "PathsFiltered", "ClosureOp"] {
         assert!(
-            tags.contains(required),
-            "tag parser sanity: expected to find `__{}__:` literal in {}",
+            variants.contains(required),
+            "variant parser sanity: expected JitBuiltin::{} in {}",
             required, TARGET_FILE,
         );
     }
@@ -129,23 +167,25 @@ fn closure_op_dispatchers_seed_delegated_env() {
     let mut no_dispatcher: Vec<String> = Vec::new();
     let mut stale_allowlist: Vec<String> = Vec::new();
 
-    for tag in &tags {
-        if allowed.contains(tag) { continue; }
-        let Some(block) = extract_handler_block(&src, tag) else {
-            // No `strip_prefix` dispatcher for this tag — it's an emitter-only
-            // literal (e.g. a regex pattern or a comment). Skip silently.
-            no_dispatcher.push(tag.clone());
+    for variant in &variants {
+        if allowed.contains(variant) {
+            continue;
+        }
+        let Some(block) = extract_handler_block(&src, variant) else {
+            // No dispatcher arm in the trampoline — emitter-only or handled
+            // by the final generic match. Informational.
+            no_dispatcher.push(variant.clone());
             continue;
         };
         let has_seed = block.contains("new_delegated_env(")
             || block.contains("reset_delegated_env(");
         if !has_seed {
-            missing_seeding.push(tag.clone());
+            missing_seeding.push(variant.clone());
         }
     }
 
     for tag in &allowed {
-        if !tags.contains(tag) {
+        if !variants.contains(tag) {
             stale_allowlist.push(tag.clone());
         }
     }
@@ -153,8 +193,8 @@ fn closure_op_dispatchers_seed_delegated_env() {
     if !missing_seeding.is_empty() {
         eprintln!();
         eprintln!("=== Closure-op dispatchers missing env seeding ===");
-        for tag in &missing_seeding {
-            eprintln!("  __{}__:", tag);
+        for v in &missing_seeding {
+            eprintln!("  JitBuiltin::{}", v);
         }
         eprintln!();
         eprintln!("Each dispatcher must construct its delegated `eval::Env`");
@@ -162,19 +202,18 @@ fn closure_op_dispatchers_seed_delegated_env() {
         eprintln!("`reset_delegated_env(&env, &[&delegated_expr, ...])` (cached)");
         eprintln!("so JIT-set let-bindings are seeded into the env.");
         eprintln!();
-        eprintln!("If a tag genuinely does not delegate to eval (e.g. a constant");
-        eprintln!("emitter like `__loc__:` or an error-message marker like");
-        eprintln!("`__jqerror__:`), add it to the allowlist with a justifying");
-        eprintln!("comment.");
+        eprintln!("If a variant genuinely does not delegate to eval (constant");
+        eprintln!("values, fast paths over evaluated args, generic Rt dispatch),");
+        eprintln!("add it to the allowlist with a justifying comment.");
         eprintln!();
         eprintln!("See maintenance.md §3 \"JIT → eval 委譲時の env seeding\".");
     }
 
     if !no_dispatcher.is_empty() {
         eprintln!();
-        eprintln!("=== Tags with no dispatcher arm (informational) ===");
-        for tag in &no_dispatcher {
-            eprintln!("  __{}__:", tag);
+        eprintln!("=== Variants with no dedicated dispatcher arm (informational) ===");
+        for v in &no_dispatcher {
+            eprintln!("  JitBuiltin::{}", v);
         }
     }
 
@@ -182,13 +221,14 @@ fn closure_op_dispatchers_seed_delegated_env() {
         eprintln!();
         eprintln!("=== Stale allowlist entries ===");
         for tag in &stale_allowlist {
-            eprintln!("  __{}__:  no longer found in {}", tag, TARGET_FILE);
+            eprintln!("  {}  no longer a JitBuiltin variant in {}", tag, TARGET_FILE);
         }
     }
 
     assert!(
         missing_seeding.is_empty() && stale_allowlist.is_empty(),
         "closure-op env seeding: {} dispatcher(s) missing seeding, {} stale allowlist entries",
-        missing_seeding.len(), stale_allowlist.len(),
+        missing_seeding.len(),
+        stale_allowlist.len(),
     );
 }
