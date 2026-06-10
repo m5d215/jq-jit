@@ -4218,6 +4218,31 @@ fn strip_expanded_year_sign(s: String) -> String {
     String::from_utf8(out).expect("removing ASCII '+' preserves UTF-8")
 }
 
+/// jq's strftime feeds a broken-down array through `timegm` before
+/// formatting, which normalizes out-of-range fields (month/min/sec/mday
+/// carry and borrow across neighbours) and recomputes wday/yday (#1022).
+/// macOS libc — the project's reference baseline — fails timegm for results
+/// landing before year 1900 and leaves the raw fields in place; mirror that
+/// by returning `None` when the normalized result is pre-1900 (or beyond
+/// chrono's representable range), so the caller formats the raw fields.
+fn strftime_normalize(t: &BrokenTime) -> Option<BrokenTime> {
+    use chrono::{Datelike, Timelike};
+    let dt = mktime_normalize(t)?;
+    if dt.year() < 1900 {
+        return None;
+    }
+    Some(BrokenTime {
+        year: dt.year(),
+        mon: dt.month0() as i32,
+        mday: dt.day() as i32,
+        hour: dt.hour() as i32,
+        min: dt.minute() as i32,
+        sec: dt.second() as i32,
+        wday: dt.weekday().num_days_from_sunday() as i32,
+        yday: dt.ordinal0() as i32,
+    })
+}
+
 fn rt_strftime(v: &Value, fmt: &Value) -> Result<Value> {
     let fmt_str = match fmt {
         Value::Str(f) => f.as_ref(),
@@ -4231,6 +4256,7 @@ fn rt_strftime(v: &Value, fmt: &Value) -> Result<Value> {
                 }
             }
             let t = time_arr_to_broken(a)?;
+            let t = strftime_normalize(&t).unwrap_or(t);
             Ok(Value::from_str(&format_broken(&t, fmt_str)))
         }
         Value::Num(n, _) => {
