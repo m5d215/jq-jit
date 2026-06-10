@@ -155,7 +155,9 @@ fn closure_op_dispatchers_seed_delegated_env() {
 
     // Sanity: the known eval-delegating variants must be present (catches
     // a parser breakage or a rename that would silently skip enforcement).
-    for required in ["Assign", "Update", "PathExpr", "PathsFiltered", "ClosureOp"] {
+    // PathExpr was removed in #1085 — complex path() now bails the whole
+    // filter to eval instead of delegating an eager collection.
+    for required in ["Assign", "Update", "PathsFiltered", "ClosureOp"] {
         assert!(
             variants.contains(required),
             "variant parser sanity: expected JitBuiltin::{} in {}",
