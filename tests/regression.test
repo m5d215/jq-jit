@@ -13592,3 +13592,23 @@ select(.b > 0) | .a | tostring
 select(.b > 0) | .a | tostring
 {"a":1.50,"b":2}
 "1.50"
+
+# #1059 Phase 2: jit unique dedup keeps adjacent NaNs (values_equal, not the total-order comparator)
+[nan, nan] | unique | length
+null
+2
+
+# #1059 Phase 2: jit @csv rejects array cells like eval (issue #79 wording)
+try @csv catch .
+[[1,2]]
+"array ([1,2]) is not valid in a csv row"
+
+# #1059 Phase 2: jit @csv rejects object cells like eval
+try @csv catch .
+[{"a":1}]
+"object ({\"a\":1}) is not valid in a csv row"
+
+# #1059 Phase 2: jit @tsv rejects array/object cells with the csv-row wording
+try @tsv catch .
+[[1,2]]
+"array ([1,2]) is not valid in a csv row"
