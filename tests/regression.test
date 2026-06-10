@@ -13397,3 +13397,23 @@ try ({r: (.x % .y)}) catch "fmod0"
 [{r: (.x / 2)}, {m: (.x % 3)}, (select(.x / 2 > 0.4) | .x)]
 {"x":7}
 [{"r":3.5},{"m":1},7]
+
+# Issue #1019: path() over a value-generator short-circuits on the first non-path output
+[try path(range(3)) catch .]
+null
+["Invalid path expression with result 0"]
+
+# Issue #1019: infinite value-generator terminates with an eager error instead of hanging
+[try path(repeat(5)) catch .]
+null
+["Invalid path expression with result 5"]
+
+# Issue #1019: rootless pipe streams per value — discarding RHS skips, first survivor errors
+[try path(paths) catch .]
+[1,2,3]
+["Invalid path expression with result [0]"]
+
+# Issue #1019: valid identity paths still emit before the first invalid output errors
+[try path(null, .a, 1) catch .]
+null
+[[],["a"],"Invalid path expression with result 1"]
