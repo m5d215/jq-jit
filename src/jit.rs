@@ -236,7 +236,8 @@ fn const_eval_gen(expr: &Expr, out: &mut Vec<Value>) -> Option<()> {
             Some(())
         }
         Expr::Range { from, to, step } => {
-            let f = if let Value::Num(n, _) = try_const_eval(from)? { n } else { return None; };
+            let from_val = try_const_eval(from)?;
+            let f = if let Value::Num(n, _) = from_val { n } else { return None; };
             let t = if let Value::Num(n, _) = try_const_eval(to)? { n } else { return None; };
             let s = if let Some(step_expr) = step {
                 if let Value::Num(n, _) = try_const_eval(step_expr)? { n } else { return None; }
@@ -245,11 +246,18 @@ fn const_eval_gen(expr: &Expr, out: &mut Vec<Value>) -> Option<()> {
             // Limit constant range to avoid huge arrays
             let count = ((t - f) / s).ceil() as i64;
             if count < 0 || count > 10000 { return None; }
+            // eval yields the original `from` Value for the first item, so
+            // its literal repr survives (`range(0.0; 3)` starts with `0.0`);
+            // later items are computed. #1083
             let mut i = f;
+            let mut first = true;
+            let mut push = |out: &mut Vec<Value>, i: f64| {
+                if first { first = false; out.push(from_val.clone()); } else { out.push(Value::number(i)); }
+            };
             if s > 0.0 {
-                while i < t { out.push(Value::number(i)); i += s; }
+                while i < t { push(out, i); i += s; }
             } else {
-                while i > t { out.push(Value::number(i)); i += s; }
+                while i > t { push(out, i); i += s; }
             }
             Some(())
         }
@@ -305,6 +313,15 @@ fn can_scalar_collect(expr: &Expr) -> bool {
         }
         _ => false,
     }
+}
+
+/// True when a `range` seed expression may carry a literal repr the first
+/// yielded value must preserve (#1083). Only a reprless number literal —
+/// the common `range(N)` / `range(0; n)` shape — is provably repr-free;
+/// everything else (repr-carrying literals, variables, field reads) gets
+/// the first-iteration machinery.
+fn range_from_may_carry_repr(from: &Expr) -> bool {
+    !matches!(from, Expr::Literal(Literal::Num(_, None)))
 }
 
 fn is_scalar(expr: &Expr) -> bool {
@@ -2016,8 +2033,15 @@ impl Flattener {
                 // jq's "X and Y cannot be added" error.
                 let is_fused_range_f64 = if let Expr::Range { from, to, step } = source.as_ref() {
                     is_scalar(from) && is_scalar(to) && step.as_ref().is_none_or(|s| is_scalar(s))
-                        && matches!(init.as_ref(), Expr::Literal(Literal::Num(..)))
+                        // Reprless init only: an empty range yields the init
+                        // verbatim in eval (`reduce range(0) as $x (0.0; ...)`
+                        // → `0.0`), which the f64 round-trip would drop. #1083
+                        && matches!(init.as_ref(), Expr::Literal(Literal::Num(_, None)))
                         && Self::is_pure_f64_expr(update, *var_index)
+                        // A repr-carrying seed can reach the result only when
+                        // the update's result position aliases `$x`/`.` raw
+                        // (`reduce range(0.0;1) as $x (0; $x)` → `0.0`). #1083
+                        && !(range_from_may_carry_repr(from) && Self::f64_result_may_alias(update))
                 } else { false };
 
                 if is_fused_range_f64 {
@@ -2202,10 +2226,13 @@ impl Flattener {
                     self.emit(JitOp::LoadConst { dst: out, const_ptr: ptr });
                     return out;
                 }
-                // Fused [range(n)]: single call creates the array directly
+                // Fused [range(n)]: single call creates the array directly.
+                // Reprless zero literal only: `[range(0.0; 3)]` must start
+                // with `0.0`, which CollectRange's plain f64 boxing would
+                // drop. #1083
                 if let Expr::Range { from, to, step } = generator.as_ref() {
                     let is_from_zero = matches!(from.as_ref(),
-                        Expr::Literal(Literal::Num(n, _)) if *n == 0.0);
+                        Expr::Literal(Literal::Num(n, None)) if *n == 0.0);
                     if is_from_zero && step.is_none() {
                         let n_slot = self.flatten_scalar(to, input_slot);
                         let out = self.alloc_slot();
@@ -2856,7 +2883,7 @@ impl Flattener {
                     self.emit(JitOp::Num { dst: s, val: 1.0, repr: None });
                     s
                 };
-                self.emit_range_loop(from_val, to_val, step_val);
+                self.emit_range_loop(from_val, to_val, step_val, range_from_may_carry_repr(from));
                 self.emit(JitOp::Drop { slot: from_val });
                 self.emit(JitOp::Drop { slot: to_val });
                 self.emit(JitOp::Drop { slot: step_val });
@@ -3833,7 +3860,7 @@ impl Flattener {
                 self.emit(JitOp::ToF64Var { dst_var: cur, src: from_val });
                 self.emit(JitOp::ToF64Var { dst_var: to_v, src: to_val });
                 self.emit(JitOp::ToF64Var { dst_var: step_v, src: step_val });
-                self.emit(JitOp::Drop { slot: from_val });
+                let first = self.range_first_flag(range_from_may_carry_repr(from), from_val);
                 self.emit(JitOp::Drop { slot: to_val });
                 self.emit(JitOp::Drop { slot: step_val });
                 let head = self.alloc_label();
@@ -3844,12 +3871,13 @@ impl Flattener {
                 self.emit(JitOp::BranchOnVar { var: cmp, nonzero_label: body, zero_label: done });
                 self.emit(JitOp::Label { id: body });
                 let num = self.alloc_slot();
-                self.emit(JitOp::F64Num { dst: num, src_var: cur });
+                self.emit_range_item(num, cur, first, from_val);
                 action(self, num);
                 self.emit(JitOp::Drop { slot: num });
                 self.emit(JitOp::F64Add { dst_var: cur, a_var: cur, b_var: step_v });
                 self.emit(JitOp::Jump { label: head });
                 self.emit(JitOp::Label { id: done });
+                self.end_range_first_flag(first, from_val);
                 true
             }
             Expr::IfThenElse { cond, then_branch, else_branch } if is_scalar(cond) => {
@@ -4074,7 +4102,7 @@ impl Flattener {
                 self.emit(JitOp::ToF64Var { dst_var: cur, src: from_val });
                 self.emit(JitOp::ToF64Var { dst_var: to_v, src: to_val });
                 self.emit(JitOp::ToF64Var { dst_var: step_v, src: step_val });
-                self.emit(JitOp::Drop { slot: from_val });
+                let first = self.range_first_flag(range_from_may_carry_repr(from), from_val);
                 self.emit(JitOp::Drop { slot: to_val });
                 self.emit(JitOp::Drop { slot: step_val });
                 let head = self.alloc_label();
@@ -4085,13 +4113,14 @@ impl Flattener {
                 self.emit(JitOp::BranchOnVar { var: cmp, nonzero_label: body, zero_label: done });
                 self.emit(JitOp::Label { id: body });
                 let num = self.alloc_slot();
-                self.emit(JitOp::F64Num { dst: num, src_var: cur });
+                self.emit_range_item(num, cur, first, from_val);
                 // Apply right to each number
                 self.flatten_gen(right, num);
                 self.emit(JitOp::Drop { slot: num });
                 self.emit(JitOp::F64Add { dst_var: cur, a_var: cur, b_var: step_v });
                 self.emit(JitOp::Jump { label: head });
                 self.emit(JitOp::Label { id: done });
+                self.end_range_first_flag(first, from_val);
                 true
             }
             // TryCatch | right: compile try-catch body inline, each output piped to right
@@ -4290,7 +4319,61 @@ impl Flattener {
     }
 
     /// Emit a range loop from f_slot to t_slot with step s_slot. Yields numbers.
-    fn emit_range_loop(&mut self, f_slot: SlotId, t_slot: SlotId, s_slot: SlotId) {
+    /// #1083: range loops re-box every item from the f64 counter, which
+    /// loses the literal repr of the seed. eval yields the original `from`
+    /// Value untouched for the first item (`range(0.0; 3)` starts with
+    /// `0.0`, `range(.a; 3)` on `{"a":1.50}` starts with `1.50`), so when
+    /// the seed may carry a repr the loop keeps the seed slot alive and
+    /// consults a first-iteration flag. Reprless seeds (integer literals,
+    /// the common `range(N)` case) skip the machinery entirely.
+    ///
+    /// Initializes the flag var to 1.0 and returns it; `None` means the
+    /// seed cannot carry a repr and `from_val` has been dropped.
+    fn range_first_flag(&mut self, track: bool, from_val: SlotId) -> Option<u32> {
+        if !track {
+            self.emit(JitOp::Drop { slot: from_val });
+            return None;
+        }
+        let first = self.alloc_var();
+        let tmp = self.alloc_slot();
+        self.emit(JitOp::Num { dst: tmp, val: 1.0, repr: None });
+        self.emit(JitOp::ToF64Var { dst_var: first, src: tmp });
+        self.emit(JitOp::Drop { slot: tmp });
+        Some(first)
+    }
+
+    /// Box the current range item into `num`: the original seed Value on
+    /// the first iteration (repr preserved), the f64 counter afterwards.
+    fn emit_range_item(&mut self, num: SlotId, cur_var: u32, first: Option<u32>, from_val: SlotId) {
+        let Some(first) = first else {
+            self.emit(JitOp::F64Num { dst: num, src_var: cur_var });
+            return;
+        };
+        let isf = self.alloc_label();
+        let notf = self.alloc_label();
+        let after = self.alloc_label();
+        self.emit(JitOp::BranchOnVar { var: first, nonzero_label: isf, zero_label: notf });
+        self.emit(JitOp::Label { id: isf });
+        let tmp = self.alloc_slot();
+        self.emit(JitOp::Num { dst: tmp, val: 0.0, repr: None });
+        self.emit(JitOp::ToF64Var { dst_var: first, src: tmp });
+        self.emit(JitOp::Drop { slot: tmp });
+        self.emit(JitOp::Clone { dst: num, src: from_val });
+        self.emit(JitOp::Jump { label: after });
+        self.emit(JitOp::Label { id: notf });
+        self.emit(JitOp::F64Num { dst: num, src_var: cur_var });
+        self.emit(JitOp::Label { id: after });
+    }
+
+    /// Drop the seed slot kept alive for the first-item repr (no-op when
+    /// the flag machinery was skipped — the seed was dropped up front).
+    fn end_range_first_flag(&mut self, first: Option<u32>, from_val: SlotId) {
+        if first.is_some() {
+            self.emit(JitOp::Drop { slot: from_val });
+        }
+    }
+
+    fn emit_range_loop(&mut self, f_slot: SlotId, t_slot: SlotId, s_slot: SlotId, track_first: bool) {
         let cur_var = self.alloc_var();
         let to_var = self.alloc_var();
         let step_var = self.alloc_var();
@@ -4298,6 +4381,18 @@ impl Flattener {
         self.emit(JitOp::ToF64Var { dst_var: cur_var, src: f_slot });
         self.emit(JitOp::ToF64Var { dst_var: to_var, src: t_slot });
         self.emit(JitOp::ToF64Var { dst_var: step_var, src: s_slot });
+        // The caller owns f_slot/t_slot/s_slot and drops them after the
+        // loop, so the first-item Clone below can read f_slot directly.
+        let first = if track_first {
+            let first = self.alloc_var();
+            let tmp = self.alloc_slot();
+            self.emit(JitOp::Num { dst: tmp, val: 1.0, repr: None });
+            self.emit(JitOp::ToF64Var { dst_var: first, src: tmp });
+            self.emit(JitOp::Drop { slot: tmp });
+            Some(first)
+        } else {
+            None
+        };
         let head = self.alloc_label();
         let body = self.alloc_label();
         let done = self.alloc_label();
@@ -4306,7 +4401,7 @@ impl Flattener {
         self.emit(JitOp::BranchOnVar { var: cmp_var, nonzero_label: body, zero_label: done });
         self.emit(JitOp::Label { id: body });
         let num_slot = self.alloc_slot();
-        self.emit(JitOp::F64Num { dst: num_slot, src_var: cur_var });
+        self.emit_range_item(num_slot, cur_var, first, f_slot);
         self.emit_yield(num_slot);
         self.emit(JitOp::Drop { slot: num_slot });
         self.emit(JitOp::F64Add { dst_var: cur_var, a_var: cur_var, b_var: step_var });
@@ -4329,7 +4424,7 @@ impl Flattener {
                 self.emit(JitOp::Num { dst: v, val: 1.0, repr: None });
                 v
             };
-            self.emit_range_loop(fv, tv, sv);
+            self.emit_range_loop(fv, tv, sv, range_from_may_carry_repr(from));
             self.emit(JitOp::Drop { slot: fv });
             self.emit(JitOp::Drop { slot: tv });
             self.emit(JitOp::Drop { slot: sv });
@@ -4339,7 +4434,8 @@ impl Flattener {
         // Strategy: iterate generators as needed, calling emit_range_loop for each combo
         // Use Comma { ... } rewriting or flatten_gen_with_each_output
         if !is_scalar(from) {
-            // from is generator
+            // from is generator — the seed slot is a runtime value, so it
+            // may always carry a repr.
             let to_clone = to.clone();
             let step_clone = step.cloned();
             return self.flatten_gen_with_each_output(from, input_slot, &|this, fv| {
@@ -4349,6 +4445,7 @@ impl Flattener {
         }
 
         // from is scalar, to is generator
+        let from_track = range_from_may_carry_repr(from);
         let fv = self.flatten_scalar(from, input_slot);
         if !is_scalar(to) {
             let step_clone = step.cloned();
@@ -4357,17 +4454,17 @@ impl Flattener {
                 if let Some(s) = step_ref {
                     if is_scalar(s) {
                         let sv = this.flatten_scalar(s, input_slot);
-                        this.emit_range_loop(fv, tv, sv);
+                        this.emit_range_loop(fv, tv, sv, from_track);
                         this.emit(JitOp::Drop { slot: sv });
                     } else {
                         this.flatten_gen_with_each_output(s, input_slot, &|this2, sv| {
-                            this2.emit_range_loop(fv, tv, sv);
+                            this2.emit_range_loop(fv, tv, sv, from_track);
                         });
                     }
                 } else {
                     let sv = this.alloc_slot();
                     this.emit(JitOp::Num { dst: sv, val: 1.0, repr: None });
-                    this.emit_range_loop(fv, tv, sv);
+                    this.emit_range_loop(fv, tv, sv, from_track);
                     this.emit(JitOp::Drop { slot: sv });
                 }
             });
@@ -4379,7 +4476,7 @@ impl Flattener {
         let tv = self.flatten_scalar(to, input_slot);
         if let Some(s) = step {
             let ok = self.flatten_gen_with_each_output(s, input_slot, &|this, sv| {
-                this.emit_range_loop(fv, tv, sv);
+                this.emit_range_loop(fv, tv, sv, from_track);
             });
             self.emit(JitOp::Drop { slot: fv });
             self.emit(JitOp::Drop { slot: tv });
@@ -4391,23 +4488,24 @@ impl Flattener {
     }
 
     /// Inner helper for flatten_range_gen when from is already resolved.
+    /// The seed slot holds a runtime value, so it may always carry a repr.
     fn flatten_range_gen_inner(&mut self, fv: SlotId, to: &Expr, step: Option<&Expr>, input_slot: SlotId) {
         if is_scalar(to) {
             let tv = self.flatten_scalar(to, input_slot);
             if let Some(s) = step {
                 if is_scalar(s) {
                     let sv = self.flatten_scalar(s, input_slot);
-                    self.emit_range_loop(fv, tv, sv);
+                    self.emit_range_loop(fv, tv, sv, true);
                     self.emit(JitOp::Drop { slot: sv });
                 } else {
                     self.flatten_gen_with_each_output(s, input_slot, &|this, sv| {
-                        this.emit_range_loop(fv, tv, sv);
+                        this.emit_range_loop(fv, tv, sv, true);
                     });
                 }
             } else {
                 let sv = self.alloc_slot();
                 self.emit(JitOp::Num { dst: sv, val: 1.0, repr: None });
-                self.emit_range_loop(fv, tv, sv);
+                self.emit_range_loop(fv, tv, sv, true);
                 self.emit(JitOp::Drop { slot: sv });
             }
             self.emit(JitOp::Drop { slot: tv });
@@ -4418,17 +4516,17 @@ impl Flattener {
                 if let Some(s) = step_ref {
                     if is_scalar(s) {
                         let sv = this.flatten_scalar(s, input_slot);
-                        this.emit_range_loop(fv, tv, sv);
+                        this.emit_range_loop(fv, tv, sv, true);
                         this.emit(JitOp::Drop { slot: sv });
                     } else {
                         this.flatten_gen_with_each_output(s, input_slot, &|this2, sv| {
-                            this2.emit_range_loop(fv, tv, sv);
+                            this2.emit_range_loop(fv, tv, sv, true);
                         });
                     }
                 } else {
                     let sv = this.alloc_slot();
                     this.emit(JitOp::Num { dst: sv, val: 1.0, repr: None });
-                    this.emit_range_loop(fv, tv, sv);
+                    this.emit_range_loop(fv, tv, sv, true);
                     this.emit(JitOp::Drop { slot: sv });
                 }
             });
@@ -4720,7 +4818,7 @@ impl Flattener {
                 self.emit(JitOp::ToF64Var { dst_var: cur, src: from_val });
                 self.emit(JitOp::ToF64Var { dst_var: to_v, src: to_val });
                 self.emit(JitOp::ToF64Var { dst_var: step_v, src: step_val });
-                self.emit(JitOp::Drop { slot: from_val });
+                let first = self.range_first_flag(range_from_may_carry_repr(from), from_val);
                 self.emit(JitOp::Drop { slot: to_val });
                 self.emit(JitOp::Drop { slot: step_val });
                 let head = self.alloc_label();
@@ -4731,12 +4829,13 @@ impl Flattener {
                 self.emit(JitOp::BranchOnVar { var: cmp, nonzero_label: body, zero_label: done });
                 self.emit(JitOp::Label { id: body });
                 let num = self.alloc_slot();
-                self.emit(JitOp::F64Num { dst: num, src_var: cur });
+                self.emit_range_item(num, cur, first, from_val);
                 emit_update(self, num);
                 self.emit(JitOp::Drop { slot: num });
                 self.emit(JitOp::F64Add { dst_var: cur, a_var: cur, b_var: step_v });
                 self.emit(JitOp::Jump { label: head });
                 self.emit(JitOp::Label { id: done });
+                self.end_range_first_flag(first, from_val);
                 true
             }
             _ => false,
@@ -4747,6 +4846,24 @@ impl Flattener {
     /// Single-var convenience wrapper.
     fn is_pure_f64_expr(expr: &Expr, var_index: VarIdx) -> bool {
         Self::is_pure_f64_expr_multi(expr, &[var_index])
+    }
+
+    /// True when the expression's *result position* can pass a Value through
+    /// unmodified (raw `.`/`$x` reference), so a literal repr could survive
+    /// in eval where a fused f64 path would drop it (#1083). Arithmetic,
+    /// unary math, comparisons, `not` and literals always produce computed
+    /// (reprless) values.
+    fn f64_result_may_alias(expr: &Expr) -> bool {
+        match expr {
+            Expr::Input | Expr::LoadVar { .. } => true,
+            Expr::IfThenElse { then_branch, else_branch, .. } =>
+                Self::f64_result_may_alias(then_branch) || Self::f64_result_may_alias(else_branch),
+            Expr::Pipe { right, .. } => Self::f64_result_may_alias(right),
+            Expr::LetBinding { body, .. } => Self::f64_result_may_alias(body),
+            Expr::Comma { left, right } =>
+                Self::f64_result_may_alias(left) || Self::f64_result_may_alias(right),
+            _ => false,
+        }
     }
 
     /// Check with multiple allowed variable indices (for LetBinding support).
@@ -5204,13 +5321,18 @@ impl Flattener {
 
                 // Check if extract is fuseable as f64
                 // None = yield acc, scalar f64 = yield result, Comma of f64 = yield both
+                // A yield position that aliases `$x`/`.` raw would expose the
+                // seed/acc repr that the f64 round-trip drops (`foreach
+                // range(0.0;2) as $i (0; $i)` → eval `[0.0,1]`). #1083
+                let ext_fuses = |e: &Expr| {
+                    Self::is_pure_f64_expr(e, var_index) && !Self::f64_result_may_alias(e)
+                };
                 let is_f64_extract = is_f64_update && match extract {
-                    None => true,
+                    None => !Self::f64_result_may_alias(update),
                     Some(ext) => {
-                        Self::is_pure_f64_expr(ext, var_index)
+                        ext_fuses(ext)
                         || matches!(ext, Expr::Comma { left, right }
-                            if Self::is_pure_f64_expr(left, var_index)
-                                && Self::is_pure_f64_expr(right, var_index))
+                            if ext_fuses(left) && ext_fuses(right))
                     }
                 };
 
@@ -5230,11 +5352,11 @@ impl Flattener {
                 self.emit(JitOp::ToF64Var { dst_var: cur, src: from_val });
                 self.emit(JitOp::ToF64Var { dst_var: to_v, src: to_val });
                 self.emit(JitOp::ToF64Var { dst_var: step_v, src: step_val });
-                self.emit(JitOp::Drop { slot: from_val });
                 self.emit(JitOp::Drop { slot: to_val });
                 self.emit(JitOp::Drop { slot: step_val });
 
                 if is_f64_extract {
+                    self.emit(JitOp::Drop { slot: from_val });
                     // Fused path: compile update as pure f64, yield extract result
                     let acc_f64 = self.alloc_var();
                     let init_slot = self.alloc_slot();
@@ -5289,6 +5411,7 @@ impl Flattener {
                     self.emit(JitOp::F64Num { dst: final_val, src_var: acc_f64 });
                     self.emit(JitOp::MoveToVar { var_index: acc_index, src: final_val });
                 } else {
+                    let first = self.range_first_flag(range_from_may_carry_repr(from), from_val);
                     let head = self.alloc_label();
                     let body = self.alloc_label();
                     let done = self.alloc_label();
@@ -5297,12 +5420,13 @@ impl Flattener {
                     self.emit(JitOp::BranchOnVar { var: cmp, nonzero_label: body, zero_label: done });
                     self.emit(JitOp::Label { id: body });
                     let num = self.alloc_slot();
-                    self.emit(JitOp::F64Num { dst: num, src_var: cur });
+                    self.emit_range_item(num, cur, first, from_val);
                     emit_step(self, num);
                     self.emit(JitOp::Drop { slot: num });
                     self.emit(JitOp::F64Add { dst_var: cur, a_var: cur, b_var: step_v });
                     self.emit(JitOp::Jump { label: head });
                     self.emit(JitOp::Label { id: done });
+                    self.end_range_first_flag(first, from_val);
                 }
                 true
             }
@@ -5371,7 +5495,7 @@ impl Flattener {
                 self.emit(JitOp::ToF64Var { dst_var: cur, src: from_val });
                 self.emit(JitOp::ToF64Var { dst_var: to_v, src: to_val });
                 self.emit(JitOp::ToF64Var { dst_var: step_v, src: step_val });
-                self.emit(JitOp::Drop { slot: from_val });
+                let first = self.range_first_flag(range_from_may_carry_repr(from), from_val);
                 self.emit(JitOp::Drop { slot: to_val });
                 self.emit(JitOp::Drop { slot: step_val });
                 let head = self.alloc_label();
@@ -5382,13 +5506,14 @@ impl Flattener {
                 self.emit(JitOp::BranchOnVar { var: cmp, nonzero_label: body_lbl, zero_label: done });
                 self.emit(JitOp::Label { id: body_lbl });
                 let num = self.alloc_slot();
-                self.emit(JitOp::F64Num { dst: num, src_var: cur });
+                self.emit_range_item(num, cur, first, from_val);
                 self.emit(JitOp::SetVar { var_index, src: num });
                 self.emit(JitOp::Drop { slot: num });
                 self.flatten_gen(body, input_slot);
                 self.emit(JitOp::F64Add { dst_var: cur, a_var: cur, b_var: step_v });
                 self.emit(JitOp::Jump { label: head });
                 self.emit(JitOp::Label { id: done });
+                self.end_range_first_flag(first, from_val);
             }
             _ => {
                 // Generic fallback: collect value outputs, iterate each
@@ -6949,18 +7074,20 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 _ => { /* arrays/objects → fall through to value_to_json */ }
             }
         }
-        // Fast path: tonumber (op 16) — avoid full eval chain
+        // Fast path: tonumber (op 16) — avoid full eval chain.
+        // Delegate strings to the shared rt_tonumber: the previous inline
+        // `trim().parse()` dropped the literal repr (`"1e10"` came back as
+        // `10000000000`, not `1E+10`), accepted whitespace jq rejects, and
+        // produced an `invalid number:` message instead of jq's canonical
+        // `cannot be parsed as a number` wording. #1083 / #1084.
         if op == 16 {
             match &*input {
                 Value::Num(_, _) => { std::ptr::write(dst, (*input).clone()); return 0; }
-                Value::Str(s) => {
-                    match s.as_str().trim().parse::<f64>() {
-                        Ok(n) => {
-                            std::ptr::write(dst, Value::number(n));
-                            return 0;
-                        }
-                        Err(_) => {
-                            set_jit_error(format!("invalid number: {:?}", s.as_str()));
+                Value::Str(_) => {
+                    match crate::runtime::rt_tonumber(&*input) {
+                        Ok(v) => { std::ptr::write(dst, v); return 0; }
+                        Err(e) => {
+                            set_jit_error_from(&e);
                             std::ptr::write(dst, Value::Null);
                             return GEN_ERROR;
                         }
@@ -6982,7 +7109,10 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                     std::ptr::write(dst, Value::Null);
                     return GEN_ERROR;
                 }
-                Value::Num(n, _) => Value::number(n.abs()),
+                // Value::length preserves the literal repr (`-1e10 | length`
+                // → `1E+10`); the previous `Value::number(n.abs())` dropped
+                // it. The Num arm of length() never errors. #1083.
+                Value::Num(_, _) => (*input).length().unwrap_or_else(|_| Value::number(0.0)),
                 Value::Str(s) => {
                     let len = if s.is_ascii() { s.len() } else { s.chars().count() };
                     Value::number(len as f64)
@@ -7054,9 +7184,12 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 return 0;
             }
         }
-        // Fast path: tojson (op 17)
+        // Fast path: tojson (op 17). value_to_json_tojson (not value_to_json)
+        // is the formatter rt_tojson uses: it canonicalizes literal reprs to
+        // jq's decnum form (`1e10` → `1E+10`) and keeps `1.0` as `1.0`
+        // recursively inside arrays/objects. #1083.
         if op == 17 {
-            std::ptr::write(dst, Value::from_string(crate::value::value_to_json(&*input)));
+            std::ptr::write(dst, Value::from_string(crate::value::value_to_json_tojson(&*input)));
             return 0;
         }
         // Fast path: fromjson (op 18)
@@ -7074,7 +7207,10 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 } else if !trimmed.is_empty() {
                     let b = trimmed.as_bytes()[0];
                     if b == b'-' || b.is_ascii_digit() {
-                        trimmed.parse::<f64>().ok().map(Value::number)
+                        // No inline number branch: json_to_value preserves the
+                        // literal repr (`"0.00001"` must stay `0.00001`, not
+                        // `1e-05`), a bare `parse::<f64>` does not. #1083.
+                        None
                     } else if b == b'"' {
                         if trimmed.len() >= 2 && trimmed.as_bytes()[trimmed.len()-1] == b'"' && !trimmed[1..trimmed.len()-1].contains('\\') {
                             Some(Value::from_string(trimmed[1..trimmed.len()-1].to_string()))
@@ -7277,16 +7413,21 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
         // Fast path: inline math ops on numbers — avoids eval_unaryop → call_builtin chain
         if let Value::Num(n, NumRepr(repr)) = &*input {
             let n = *n;
-            // abs/fabs: preserve repr for non-negative numbers
-            if (op == 7 || op == 31) && n >= 0.0 {
-                std::ptr::write(dst, (*input).clone());
-                return 0;
+            // abs keeps the literal repr (stripping the sign), fabs always
+            // returns the canonical f64 form — delegate to the shared rt_
+            // arms so the policies can't drift (#578 semantics, #1083). The
+            // Num arms never error.
+            if op == 7 || op == 31 {
+                let f = if op == 7 { crate::runtime::rt_fabs } else { crate::runtime::rt_abs };
+                if let Ok(v) = f(&*input) {
+                    std::ptr::write(dst, v);
+                    return 0;
+                }
             }
             let result = match op {
                 4 => Some(n.floor()),   // Floor
                 5 => Some(n.ceil()),    // Ceil
                 6 => Some(n.round()),   // Round
-                7 | 31 => Some(n.abs()), // Fabs / Abs (negative case)
                 30 => Some(n.sqrt()),   // Sqrt
                 44 => Some(n.sin()),    // Sin
                 45 => Some(n.cos()),    // Cos
@@ -7304,9 +7445,12 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 _ => None,
             };
             if let Some(r) = result {
-                // Preserve repr if result equals the original value
-                let keep_repr = repr.is_some() && r == n;
-                std::ptr::write(dst, Value::number_opt(r, if keep_repr { repr.clone() } else { None }));
+                // The rt_ arms (rt_floor, rt_sqrt, ...) always return the
+                // canonical f64 form — `1.0 | floor` is `1`, not `1.0`.
+                // Keeping the repr when the value was unchanged diverged
+                // from eval/jq. #1083.
+                let _ = repr;
+                std::ptr::write(dst, Value::number(r));
                 return 0;
             }
         }
@@ -7413,14 +7557,24 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                     if let Value::Num(_, _) = &a[0] {
                         let mut sum = 0.0f64;
                         let mut all_num = true;
+                        let mut num_count = 0usize;
+                        let mut last_num: Option<&Value> = None;
                         for item in a.iter() {
                             match item {
-                                Value::Num(n, _) => sum += n,
+                                Value::Num(n, _) => { sum += n; num_count += 1; last_num = Some(item); }
                                 Value::Null => {}
                                 _ => { all_num = false; break; }
                             }
                         }
                         if all_num {
+                            // jq's add folds `+` over the array: with a single
+                            // numeric element (rest null) the value passes
+                            // through unchanged, keeping its literal repr
+                            // (`[1.0] | add` → `1.0`). #1083
+                            if num_count == 1 {
+                                std::ptr::write(dst, last_num.unwrap().clone());
+                                return 0;
+                            }
                             std::ptr::write(dst, Value::number(sum));
                             return 0;
                         }
