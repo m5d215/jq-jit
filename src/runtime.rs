@@ -257,16 +257,6 @@ impl RtBuiltin {
     }
 }
 
-/// String-keyed entry point for JIT-compiled code, whose call sites still
-/// pass builtin names across the FFI boundary (stage-4b of #1035 will type
-/// that channel); everything else should call [`call_builtin_op`] directly.
-pub fn call_builtin(name: &str, args: &[Value]) -> Result<Value> {
-    match RtBuiltin::from_name(name) {
-        Some(op) => call_builtin_op(op, args),
-        None => bail!("unknown builtin: {} (nargs={})", name, args.len()),
-    }
-}
-
 pub fn call_builtin_op(op: RtBuiltin, args: &[Value]) -> Result<Value> {
     match op {
         // Binary arithmetic (nargs=3: input, lhs, rhs)
@@ -2714,7 +2704,7 @@ pub fn rt_getpath(v: &Value, path: &Value) -> Result<Value> {
                     // src/eval.rs and #467). getpath inherits the same
                     // semantics so `getpath([[]])` returns `[]`, etc.
                     (Value::Arr(_), Value::Arr(_)) => {
-                        current = call_builtin("indices", &[current.clone(), key.clone()])?;
+                        current = call_builtin_op(RtBuiltin::Indices, &[current.clone(), key.clone()])?;
                     }
                     // jq short-circuits getpath on null for string/number/object keys
                     // (matching `.[k]` on null), but still errors for null/bool/array keys.
