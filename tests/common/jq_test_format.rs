@@ -238,22 +238,12 @@ pub fn run_test(case: &TestCase) -> TestResult {
                     };
                 }
 
-                let mut actual_lines: Vec<&str> = actual_normalized.lines().collect();
-                let mut expected_lines: Vec<&str> = expected_normalized.lines().collect();
-                actual_lines.sort();
-                expected_lines.sort();
-
-                if actual_lines == expected_lines {
-                    return TestResult {
-                        test_num: case.test_num,
-                        filter: case.filter.clone(),
-                        input: case.input.clone(),
-                        expected: case.expected.clone(),
-                        actual: actual_raw,
-                        status: TestStatus::Pass,
-                    };
-                }
-
+                // No order-insensitive fallback: jq's output order is
+                // deterministic semantics (generator emission order, object
+                // key insertion order), and the bug class most likely to
+                // reorder outputs — a fast-path or JIT divergence from the
+                // generic evaluator — is exactly what a sorted comparison
+                // would mask (#1025).
                 return TestResult {
                     test_num: case.test_num,
                     filter: case.filter.clone(),
