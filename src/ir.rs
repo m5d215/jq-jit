@@ -50,6 +50,61 @@ impl std::fmt::Display for FuncId {
     }
 }
 
+/// A format directive: `@base64`, `@uri`, etc. (#1035).
+///
+/// Known directives resolve to a variant at parse time; an unknown `@name`
+/// is kept as `Invalid(name)` rather than rejected, because jq reports it
+/// only when the format is actually applied (`if false then @nope else 1
+/// end` is fine), via "<name> is not a valid format" at runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FormatKind {
+    Text,
+    Json,
+    Html,
+    Uri,
+    Urid,
+    Csv,
+    Tsv,
+    Sh,
+    Base64,
+    Base64d,
+    Invalid(std::rc::Rc<str>),
+}
+
+impl FormatKind {
+    pub fn from_name(name: &str) -> FormatKind {
+        match name {
+            "text" => FormatKind::Text,
+            "json" => FormatKind::Json,
+            "html" => FormatKind::Html,
+            "uri" => FormatKind::Uri,
+            "urid" => FormatKind::Urid,
+            "csv" => FormatKind::Csv,
+            "tsv" => FormatKind::Tsv,
+            "sh" => FormatKind::Sh,
+            "base64" => FormatKind::Base64,
+            "base64d" => FormatKind::Base64d,
+            other => FormatKind::Invalid(other.into()),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            FormatKind::Text => "text",
+            FormatKind::Json => "json",
+            FormatKind::Html => "html",
+            FormatKind::Uri => "uri",
+            FormatKind::Urid => "urid",
+            FormatKind::Csv => "csv",
+            FormatKind::Tsv => "tsv",
+            FormatKind::Sh => "sh",
+            FormatKind::Base64 => "base64",
+            FormatKind::Base64d => "base64d",
+            FormatKind::Invalid(n) => n,
+        }
+    }
+}
+
 /// A filter expression in the IR.
 #[derive(Debug, Clone)]
 pub enum Expr {
@@ -311,7 +366,7 @@ pub enum Expr {
 
     /// Format string: `@base64`, `@uri`, etc.
     Format {
-        name: String,
+        kind: FormatKind,
         expr: Box<Expr>,
     },
 
@@ -920,8 +975,8 @@ impl Expr {
                 primary: Box::new(primary.substitute_input(replacement)),
                 fallback: Box::new(fallback.substitute_input(replacement)),
             },
-            Expr::Format { name, expr } => Expr::Format {
-                name: name.clone(),
+            Expr::Format { kind, expr } => Expr::Format {
+                kind: kind.clone(),
                 expr: Box::new(expr.substitute_input(replacement)),
             },
             Expr::Debug { expr } => Expr::Debug {
@@ -1083,8 +1138,8 @@ impl Expr {
             // `@fmt EXPR` formats its operand: a `$x` in the operand must be
             // substituted, otherwise inlining `E as $x | $x | @json` leaves a
             // dangling LoadVar that the input-free fast path reads as null (#808).
-            Expr::Format { name, expr } => Expr::Format {
-                name: name.clone(),
+            Expr::Format { kind, expr } => Expr::Format {
+                kind: kind.clone(),
                 expr: Box::new(expr.substitute_var(var_index, replacement)),
             },
             _ => self.clone(),

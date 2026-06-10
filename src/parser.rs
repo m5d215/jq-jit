@@ -2851,7 +2851,9 @@ impl Parser {
 
             Token::Format(name) => {
                 self.advance();
-                // @base64, @uri, etc.
+                // @base64, @uri, etc. — resolved to FormatKind here; unknown
+                // names stay as FormatKind::Invalid and error when applied.
+                let kind = FormatKind::from_name(&name);
                 // May be followed by a string for @base64 "str" or interpolated string
                 if matches!(self.current(), Token::Str(_)) {
                     let s = match self.advance() {
@@ -2859,7 +2861,7 @@ impl Parser {
                         _ => unreachable!(),
                     };
                     Ok(Expr::Format {
-                        name,
+                        kind,
                         expr: Box::new(Expr::Literal(Literal::Str(s))),
                     })
                 } else if matches!(self.current(), Token::Ident(n) if n == "__string_interp__") {
@@ -2871,7 +2873,7 @@ impl Parser {
                         let new_parts = parts.into_iter().map(|p| match p {
                             StringPart::Literal(s) => StringPart::Literal(s),
                             StringPart::Expr(e) => StringPart::Expr(Expr::Format {
-                                name: name.clone(),
+                                kind: kind.clone(),
                                 expr: Box::new(e),
                             }),
                         }).collect();
@@ -2879,13 +2881,13 @@ impl Parser {
                     } else {
                         // Shouldn't happen but fallback
                         Ok(Expr::Format {
-                            name,
+                            kind,
                             expr: Box::new(interp),
                         })
                     }
                 } else {
                     Ok(Expr::Format {
-                        name,
+                        kind,
                         expr: Box::new(Expr::Input),
                     })
                 }
@@ -3004,10 +3006,10 @@ impl Parser {
                 Ok((key_expr, val))
             }
             Token::Format(ref name) => {
-                let name = name.clone();
+                let kind = FormatKind::from_name(name);
                 self.advance();
                 let key_expr = Expr::Format {
-                    name,
+                    kind,
                     expr: Box::new(Expr::Input),
                 };
                 if self.eat(&Token::Colon) {
@@ -4765,7 +4767,7 @@ fn remap_func_ids(expr: Expr, map: &[(FuncId, FuncId)]) -> Expr {
             predicate: Box::new(remap_func_ids(*predicate, map)),
         },
         Expr::Error { msg } => Expr::Error { msg: msg.map(|m| Box::new(remap_func_ids(*m, map))) },
-        Expr::Format { name, expr } => Expr::Format { name, expr: Box::new(remap_func_ids(*expr, map)) },
+        Expr::Format { kind, expr } => Expr::Format { kind, expr: Box::new(remap_func_ids(*expr, map)) },
         Expr::ClosureOp { op, input_expr, key_expr } => Expr::ClosureOp {
             op, input_expr: Box::new(remap_func_ids(*input_expr, map)),
             key_expr: Box::new(remap_func_ids(*key_expr, map)),

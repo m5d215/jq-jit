@@ -410,7 +410,7 @@ fn subst_inner(
             Expr::Break { var_index: idx, value: sb!(value) }
         }
         Expr::Error { msg } => Expr::Error { msg: msg.as_ref().map(|m| sb!(m)) },
-        Expr::Format { name, expr: e } => Expr::Format { name: name.clone(), expr: sb!(e) },
+        Expr::Format { kind, expr: e } => Expr::Format { kind: kind.clone(), expr: sb!(e) },
         Expr::ClosureOp { op, input_expr, key_expr } => Expr::ClosureOp {
             op: *op, input_expr: sb!(input_expr), key_expr: sb!(key_expr),
         },
@@ -514,7 +514,7 @@ pub(crate) fn append_call_args(expr: &Expr, target: FuncId, extra: &[Expr]) -> E
         Expr::Label { var_index, body } => Expr::Label { var_index: *var_index, body: rb!(body) },
         Expr::Break { var_index, value } => Expr::Break { var_index: *var_index, value: rb!(value) },
         Expr::Error { msg } => Expr::Error { msg: msg.as_ref().map(|m| rb!(m)) },
-        Expr::Format { name, expr: e } => Expr::Format { name: name.clone(), expr: rb!(e) },
+        Expr::Format { kind, expr: e } => Expr::Format { kind: kind.clone(), expr: rb!(e) },
         Expr::ClosureOp { op, input_expr, key_expr } => Expr::ClosureOp {
             op: *op, input_expr: rb!(input_expr), key_expr: rb!(key_expr),
         },
@@ -785,7 +785,7 @@ fn subst_cow(expr: &Expr, pv: &[VarIdx], args: &[Expr]) -> Option<Expr> {
             let m = msg.as_ref().and_then(|m2| s!(m2));
             m.map(|v| Expr::Error { msg: Some(Box::new(v)) })
         }
-        Expr::Format { name, expr: e } => s!(e).map(|v| Expr::Format { name: name.clone(), expr: Box::new(v) }),
+        Expr::Format { kind, expr: e } => s!(e).map(|v| Expr::Format { kind: kind.clone(), expr: Box::new(v) }),
         Expr::ClosureOp { op, input_expr, key_expr } => {
             let i = s!(input_expr); let k = s!(key_expr);
             if i.is_none() && k.is_none() { return None; }
@@ -3689,9 +3689,9 @@ pub fn eval(
             }
         }
 
-        Expr::Format { name, expr: fmt_expr } => {
+        Expr::Format { kind, expr: fmt_expr } => {
             eval(fmt_expr, input, env, &mut |val| {
-                cb(Value::from_str(&eval_format(name, &val)?))
+                cb(Value::from_str(&eval_format(kind, &val)?))
             })
         }
 
@@ -4468,10 +4468,10 @@ fn format_sh(val: &Value) -> Result<String> {
     }
 }
 
-pub fn eval_format(name: &str, val: &Value) -> Result<String> {
+pub fn eval_format(kind: &FormatKind, val: &Value) -> Result<String> {
     // For csv/tsv, the input must be an array
-    match name {
-        "csv" => {
+    match kind {
+        FormatKind::Csv => {
             let arr = match val { Value::Arr(a) => a, _ => bail!("{} cannot be csv-formatted, only array", crate::runtime::errdesc_pub(val)) };
             let mut buf = String::with_capacity(arr.len() * 16);
             for (i, v) in arr.iter().enumerate() {
@@ -4512,7 +4512,7 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
             }
             return Ok(buf);
         }
-        "tsv" => {
+        FormatKind::Tsv => {
             let arr = match val { Value::Arr(a) => a, _ => bail!("{} cannot be tsv-formatted, only array", crate::runtime::errdesc_pub(val)) };
             let mut buf = String::with_capacity(arr.len() * 16);
             for (i, v) in arr.iter().enumerate() {
@@ -4558,15 +4558,17 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
     // `MC4w`). `value_to_json_tojson` keeps the literal form when f64 can
     // round-trip it, matching `rt_tostring`. See #564.
     let s = match val { Value::Str(s) => s.to_string(), _ => crate::value::value_to_json_tojson(val) };
-    match name {
-        "text" => Ok(s),
+    match kind {
+        // Returned from the array-format match above.
+        FormatKind::Csv | FormatKind::Tsv => unreachable!(),
+        FormatKind::Text => Ok(s),
         // `@json` mirrors the `tojson` builtin, so it must preserve the
         // carried number repr exactly the way `rt_tojson` does — otherwise
         // `0.0 | @json | length` returned 1 (the value was the string
         // `"0"`, even though the raw-byte CLI fast path printed `"0.0"` for
         // the standalone `@json` form). See #562.
-        "json" => Ok(crate::value::value_to_json_tojson(val)),
-        "html" => {
+        FormatKind::Json => Ok(crate::value::value_to_json_tojson(val)),
+        FormatKind::Html => {
             let mut r = String::with_capacity(s.len());
             for c in s.chars() {
                 match c {
@@ -4584,7 +4586,7 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
             }
             Ok(r)
         }
-        "uri" => {
+        FormatKind::Uri => {
             const HEX: &[u8; 16] = b"0123456789ABCDEF";
             let mut r = String::with_capacity(s.len());
             for b in s.bytes() {
@@ -4595,7 +4597,7 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
             }
             Ok(r)
         }
-        "urid" => {
+        FormatKind::Urid => {
             // jq validates `@urid` input (#961): a `%` must be followed by two
             // hex digits, and a maximal run of consecutive `%XX` escapes must
             // decode to valid UTF-8 — a malformed escape (`%`, `%4`, `%GG`) or
@@ -4639,8 +4641,8 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
             flush(&mut esc, &mut out)?;
             Ok(out)
         }
-        "sh" => format_sh(val),
-        "base64" => {
+        FormatKind::Sh => format_sh(val),
+        FormatKind::Base64 => {
             const C: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
             let d = s.as_bytes(); let mut r = String::new();
             for ch in d.chunks(3) { let (b0,b1,b2) = (ch[0] as u32, ch.get(1).copied().unwrap_or(0) as u32, ch.get(2).copied().unwrap_or(0) as u32); let n = (b0<<16)|(b1<<8)|b2;
@@ -4648,7 +4650,7 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
                 r.push(if ch.len()>1 { C[((n>>6)&0x3f) as usize] as char } else { '=' }); r.push(if ch.len()>2 { C[(n&0x3f) as usize] as char } else { '=' }); }
             Ok(r)
         }
-        "base64d" => {
+        FormatKind::Base64d => {
             const D: [i8;128] = { let mut t = [-1i8;128]; let c = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"; let mut i=0; while i<c.len() { t[c[i] as usize]=i as i8; i+=1; } t };
             // jq's `@base64d` validates the data in this order (#557, #605):
             //
@@ -4697,7 +4699,7 @@ pub fn eval_format(name: &str, val: &Value) -> Result<String> {
             }
             Ok(jq_utf8_lossy(&r))
         }
-        _ => bail!("{} is not a valid format", name),
+        FormatKind::Invalid(name) => bail!("{} is not a valid format", name),
     }
 }
 
@@ -7219,11 +7221,11 @@ fn eval_call_builtin(name: &str, args: &[Expr], input: Value, env: &EnvRef, cb: 
             // format(f): evaluate f to get the format directive name, then
             // apply it to the current input (same result as `@<fmt>`).
             return eval(&args[0], input.clone(), env, &mut |fmt_val| {
-                let fmt_name = match &fmt_val {
-                    Value::Str(s) => s.as_str().to_string(),
+                let kind = match &fmt_val {
+                    Value::Str(s) => FormatKind::from_name(s.as_str()),
                     _ => bail!("{} is not a valid format", crate::value::value_to_json(&fmt_val)),
                 };
-                cb(Value::from_str(&eval_format(&fmt_name, &input)?))
+                cb(Value::from_str(&eval_format(&kind, &input)?))
             });
         }
         ("combinations", 0) => {

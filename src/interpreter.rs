@@ -5487,15 +5487,19 @@ impl Filter {
     pub fn detect_field_format(&self) -> Option<(String, String)> {
         use crate::ir::{Expr, Literal};
         let expr = self.detect_expr()?;
-        let is_supported = |name: &str| matches!(name, "base64" | "uri" | "html" | "json" | "text");
+        use crate::ir::FormatKind;
+        let is_supported = |kind: &FormatKind| matches!(
+            kind,
+            FormatKind::Base64 | FormatKind::Uri | FormatKind::Html | FormatKind::Json | FormatKind::Text
+        );
         // Pipe form: .field | @format
         if let Expr::Pipe { left, right } = expr {
             if let Expr::Index { expr: base, key } = left.as_ref() {
                 if matches!(base.as_ref(), Expr::Input) {
                     if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
-                        if let Expr::Format { name, expr: fmt_expr } = right.as_ref() {
-                            if matches!(fmt_expr.as_ref(), Expr::Input) && is_supported(name) {
-                                return Some((field.clone(), name.clone()));
+                        if let Expr::Format { kind, expr: fmt_expr } = right.as_ref() {
+                            if matches!(fmt_expr.as_ref(), Expr::Input) && is_supported(kind) {
+                                return Some((field.clone(), kind.name().to_string()));
                             }
                         }
                     }
@@ -5503,12 +5507,12 @@ impl Filter {
             }
         }
         // Beta-reduced form: @format(.field)
-        if let Expr::Format { name, expr: fmt_expr } = expr {
-            if is_supported(name) {
+        if let Expr::Format { kind, expr: fmt_expr } = expr {
+            if is_supported(kind) {
                 if let Expr::Index { expr: base, key } = fmt_expr.as_ref() {
                     if matches!(base.as_ref(), Expr::Input) {
                         if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
-                            return Some((field.clone(), name.clone()));
+                            return Some((field.clone(), kind.name().to_string()));
                         }
                     }
                 }
@@ -7683,7 +7687,7 @@ impl Filter {
         use crate::ir::{Expr, UnaryOp};
         let expr = match self.detect_expr() { Some(e) => e, None => return false };
         matches!(expr, Expr::UnaryOp { op: UnaryOp::ToJson, operand } if matches!(operand.as_ref(), Expr::Input))
-            || matches!(expr, Expr::Format { name, expr: inner } if name == "json" && matches!(inner.as_ref(), Expr::Input))
+            || matches!(expr, Expr::Format { kind: crate::ir::FormatKind::Json, expr: inner } if matches!(inner.as_ref(), Expr::Input))
     }
 
     /// Detect `tojson | fromjson` — identity for valid JSON input (from files).
@@ -7717,7 +7721,7 @@ impl Filter {
         let is_tojson = matches!(tojson_check,
             Expr::UnaryOp { op: UnaryOp::ToJson, operand } if matches!(operand.as_ref(), Expr::Input))
             || matches!(tojson_check,
-            Expr::Format { name, expr: inner } if name == "json" && matches!(inner.as_ref(), Expr::Input));
+            Expr::Format { kind: crate::ir::FormatKind::Json, expr: inner } if matches!(inner.as_ref(), Expr::Input));
         if !is_tojson { return None; }
         // Check left is {key: .field, ...}
         if let Expr::ObjectConstruct { pairs } = remap_expr {
@@ -7978,12 +7982,12 @@ impl Filter {
         use crate::ir::Expr;
         let expr = self.detect_expr()?;
         if let Expr::Pipe { left, right } = expr {
-            if let Expr::Format { name, .. } = right.as_ref() {
-                if matches!(name.as_str(), "csv" | "tsv") {
+            if let Expr::Format { kind, .. } = right.as_ref() {
+                if matches!(kind, crate::ir::FormatKind::Csv | crate::ir::FormatKind::Tsv) {
                     if let Expr::Collect { generator } = left.as_ref() {
                         let mut fields = Vec::new();
                         if collect_comma_fields(generator, &mut fields) && fields.len() >= 2 {
-                            return Some((fields, name.clone()));
+                            return Some((fields, kind.name().to_string()));
                         }
                     }
                 }
