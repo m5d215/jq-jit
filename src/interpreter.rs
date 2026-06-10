@@ -9,60 +9,68 @@ use anyhow::Result;
 use crate::ir::{BuiltinOp, CompiledFunc};
 use crate::value::Value;
 
-/// Self-diff knob for issue #323: when set, [`Filter::execute`] and
-/// [`Filter::execute_cb`] skip the typed fast path and JIT and run the generic
-/// tree-walking interpreter, regardless of whether `compile_jit` was called.
-/// The binary sets this once at startup when `JQJIT_FORCE_INTERPRETER` is in
-/// the environment; tests/selfdiff_jit_interp.rs shells out twice — once with it,
-/// once without — and asserts identical output.
-static FORCE_INTERPRETER: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+/// Forced-execution-mode bits, packed into a single atomic so the
+/// per-record [`Filter::execute`] / [`Filter::execute_cb`] paths pay one
+/// relaxed load regardless of how many force knobs exist (the ~55ns/record
+/// NDJSON loops notice every extra load — see the classified-boundary-scan
+/// notes in docs/maintenance.md).
+///
+/// - `FORCE_EVAL_BIT` — self-diff knob for issue #323
+///   (`JQJIT_FORCE_INTERPRETER`): skip the typed fast path and JIT and run
+///   the generic tree-walking interpreter, regardless of whether
+///   `compile_jit` was called. See tests/selfdiff_jit_interp.rs.
+/// - `FORCE_JITOP_BIT` — self-diff knob for issue #1059
+///   (`JQJIT_FORCE_JITOP_INTERP`): skip the typed fast path and the
+///   Cranelift JIT and run every flattenable filter on the direct JitOp
+///   interpreter backend ([`crate::jit::JitProgram`]); filters the
+///   flattener rejects fall back to the tree-walking eval path.
+/// - `FORCE_CRANELIFT_BIT` — the Cranelift-side counterpart
+///   (`JQJIT_FORCE_CRANELIFT`): identical routing, compiled backend.
+///   Diffing the two pins the *backends* against each other over the same
+///   lowering with no fast-path asymmetry. See
+///   tests/selfdiff_jitop_backend.rs.
+///
+/// The binary sets these once at startup from the environment / CLI flags.
+const FORCE_EVAL_BIT: u8 = 1;
+const FORCE_JITOP_BIT: u8 = 2;
+const FORCE_CRANELIFT_BIT: u8 = 4;
+
+static FORCED_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn set_forced_mode_bit(bit: u8, on: bool) {
+    if on {
+        FORCED_MODE.fetch_or(bit, std::sync::atomic::Ordering::Relaxed);
+    } else {
+        FORCED_MODE.fetch_and(!bit, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn forced_mode() -> u8 {
+    FORCED_MODE.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 pub fn set_force_interpreter(on: bool) {
-    FORCE_INTERPRETER.store(on, std::sync::atomic::Ordering::Relaxed);
+    set_forced_mode_bit(FORCE_EVAL_BIT, on);
 }
 
 pub fn force_interpreter() -> bool {
-    FORCE_INTERPRETER.load(std::sync::atomic::Ordering::Relaxed)
+    forced_mode() & FORCE_EVAL_BIT != 0
 }
 
-/// Self-diff knob for issue #1059: when set, [`Filter::execute`] and
-/// [`Filter::execute_cb`] skip the typed fast path and the Cranelift JIT and
-/// run every flattenable filter on the direct JitOp interpreter backend
-/// ([`crate::jit::JitProgram`]); filters the flattener rejects fall back to
-/// the tree-walking eval path. The binary sets this once at startup when
-/// `JQJIT_FORCE_JITOP_INTERP` is in the environment;
-/// tests/selfdiff_jitop_interp.rs shells out twice — once with it, once
-/// without — and asserts identical output.
-static FORCE_JITOP_INTERP: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 pub fn set_force_jitop_interp(on: bool) {
-    FORCE_JITOP_INTERP.store(on, std::sync::atomic::Ordering::Relaxed);
+    set_forced_mode_bit(FORCE_JITOP_BIT, on);
 }
 
 pub fn force_jitop_interp() -> bool {
-    FORCE_JITOP_INTERP.load(std::sync::atomic::Ordering::Relaxed)
+    forced_mode() & FORCE_JITOP_BIT != 0
 }
 
-/// Self-diff knob for issue #1059, the Cranelift-side counterpart of
-/// [`force_jitop_interp`]: when set, [`Filter::execute`] and
-/// [`Filter::execute_cb`] skip the typed fast path and run every flattenable
-/// filter on the Cranelift-compiled function; non-flattenable filters fall
-/// back to the tree-walking eval path. Routing is otherwise identical to the
-/// JitOp-interpreter mode, so diffing the two pins the *backends* against
-/// each other over the same lowering with no fast-path asymmetry.
-/// The binary sets this once at startup when `JQJIT_FORCE_CRANELIFT` is in
-/// the environment; see tests/selfdiff_jitop_backend.rs.
-static FORCE_CRANELIFT: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 pub fn set_force_cranelift(on: bool) {
-    FORCE_CRANELIFT.store(on, std::sync::atomic::Ordering::Relaxed);
+    set_forced_mode_bit(FORCE_CRANELIFT_BIT, on);
 }
 
 pub fn force_cranelift() -> bool {
-    FORCE_CRANELIFT.load(std::sync::atomic::Ordering::Relaxed)
+    forced_mode() & FORCE_CRANELIFT_BIT != 0
 }
 
 /// Layer-pinning knob for issue #685: when set, [`simplify_expr`] returns its
@@ -11607,9 +11615,10 @@ impl Filter {
 
     /// Execute the filter against an input value, collecting all results.
     pub fn execute(&self, input: &Value) -> Result<Vec<Value>> {
-        let forced = force_interpreter();
-        let forced_jitop = force_jitop_interp();
-        let forced_cranelift = force_cranelift();
+        let mode = forced_mode();
+        let forced = mode & FORCE_EVAL_BIT != 0;
+        let forced_jitop = mode & FORCE_JITOP_BIT != 0;
+        let forced_cranelift = mode & FORCE_CRANELIFT_BIT != 0;
         // Typed fast path (issue #83): probed ahead of JIT / eval. Only
         // migrated filter shapes return `Some`; every other shape or
         // unhandled input type returns `None` and falls through to the
@@ -11663,9 +11672,10 @@ impl Filter {
     /// Execute the filter with a callback for each result (avoids Vec allocation).
     /// Returns Ok(true) if all values were processed, Ok(false) if stopped early.
     pub fn execute_cb(&self, input: &Value, cb: &mut dyn FnMut(&Value) -> Result<bool>) -> Result<bool> {
-        let forced = force_interpreter();
-        let forced_jitop = force_jitop_interp();
-        let forced_cranelift = force_cranelift();
+        let mode = forced_mode();
+        let forced = mode & FORCE_EVAL_BIT != 0;
+        let forced_jitop = mode & FORCE_JITOP_BIT != 0;
+        let forced_cranelift = mode & FORCE_CRANELIFT_BIT != 0;
         // Typed fast path (issue #83) — see `execute` for rationale. The
         // current pilot emits a single value, so hitting it closes out the
         // generator: we invoke `cb` once with the verdict and return its
