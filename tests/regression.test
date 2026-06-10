@@ -13612,3 +13612,33 @@ try @csv catch .
 try @tsv catch .
 [[1,2]]
 "array ([1,2]) is not valid in a csv row"
+
+# #1059 Phase 3: complex path() streams through the eval delegate on the JIT backends
+[path(.a // .b)]
+{"b":1}
+[["b"]]
+
+# #1059 Phase 3: del with a generator path argument delegates whole-node
+del(.[] | select(. == 2))
+[1,2,3]
+[1,3]
+
+# #1059 Phase 3: walk delegate sees outer $var bindings via env seeding
+.x as $n | walk(if type == "number" then . + $n else . end) | .v
+{"x":10,"v":[1,2]}
+[11,12]
+
+# #1059 Phase 3: $x-anchored path keeps whole-filter eval (provenance guard)
+. as $x | path($x)
+{"a":1}
+[]
+
+# #1059 Phase 3: delegated path() validation error stays catchable
+5 | [try path(.[0]) catch .]
+null
+["Cannot index number with number"]
+
+# #1059 Phase 3: paths through nested generators via the delegate
+[path(.a[].b)]
+{"a":[{"b":1},{"b":2}]}
+[["a",0,"b"],["a",1,"b"]]

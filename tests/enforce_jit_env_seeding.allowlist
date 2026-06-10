@@ -13,13 +13,15 @@
 #
 # Currently allowlisted sites (all in src/jit.rs):
 #
-# - Two `thread_local!` cache `get_or_insert_with` closures that build the
+# - Three `thread_local!` cache `get_or_insert_with` closures that build the
 #   cached `eval::Env` lazily and call `reset_delegated_env` immediately
 #   after to seed it. (Sites: the `PATHS_FILTER_ENV` cache in the
-#   `__paths_filtered__:` handler and the `CLOSURE_OP_ENV` cache in the
-#   `__closure_op__:` handler.) These satisfy the invariant in practice
-#   because the seeding happens inline; the test for closure-op env
-#   seeding (tests/enforce_closure_op_env_seeding.rs) verifies that.
+#   `__paths_filtered__:` handler, the `CLOSURE_OP_ENV` cache in the
+#   `__closure_op__:` handler, and the `DELEGATE_ENV` cache in
+#   `jit_rt_delegate_gen` — the streaming eval delegate of #1059 Phase 3.)
+#   These satisfy the invariant in practice because the seeding happens
+#   inline; the test for closure-op env seeding
+#   (tests/enforce_closure_op_env_seeding.rs) verifies that.
 # - The body of `new_delegated_env` itself, which IS the helper.
 
-src/jit.rs  3
+src/jit.rs  4

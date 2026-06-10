@@ -2978,10 +2978,12 @@ fn real_main() {
     } else if force_cranelift {
         // Self-diff mode (#1059) — pin the Cranelift backend regardless of
         // input-size heuristics; non-flattenable filters fall back to eval.
-        filter.compile_jit();
+        // Delegated programs are accepted here (forced modes carry the
+        // delegation coverage; the default heuristics below do not).
+        filter.compile_jit_with_delegates();
     } else if force_jit {
-        // --force-jit bypasses the heuristics entirely.
-        filter.compile_jit();
+        // --force-jit bypasses the heuristics entirely (delegates included).
+        filter.compile_jit_with_delegates();
     } else if filter.has_loop_constructs() {
         filter.compile_jit();
     } else if null_input {

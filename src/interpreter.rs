@@ -2655,6 +2655,27 @@ impl Filter {
         self.jit_fn.is_some()
     }
 
+    /// Like `compile_jit`, but also accepts programs that lower with
+    /// streaming eval delegation (#1059 Phase 3). Used by the forced-mode
+    /// knobs (`JQJIT_FORCE_CRANELIFT`, `--force-jit`) so the backend
+    /// self-diff covers delegable filters; the default heuristics keep
+    /// them on whole-filter eval, which measures faster when the delegate
+    /// dominates.
+    pub fn compile_jit_with_delegates(&mut self) {
+        if self.jit_fn.is_some() { return; }
+        {
+            let (ref expr, ref funcs) = self.parsed;
+            if crate::jit::is_jit_compilable_with_delegates(expr, funcs) {
+                if let Ok(mut compiler) = crate::jit::JitCompiler::new() {
+                    if let Ok(func) = compiler.compile_with_funcs(expr, funcs) {
+                        self.jit_fn = Some(func);
+                        self._jit_compiler = Some(Box::new(compiler));
+                    }
+                }
+            }
+        }
+    }
+
     /// Build the JitOp program for the direct interpreter backend (#1059).
     /// Mirrors `compile_jit` but stops at the shared lowering — no Cranelift
     /// codegen. No-op if the flattener rejects the filter; execution then
@@ -2662,7 +2683,9 @@ impl Filter {
     pub fn compile_jitop_program(&mut self) {
         if self.jit_program.is_some() { return; }
         let (ref expr, ref funcs) = self.parsed;
-        if crate::jit::is_jit_compilable_with_funcs(expr, funcs) {
+        // Forced-mode knob: accept delegated programs too, mirroring
+        // `compile_jit_with_delegates` on the Cranelift side.
+        if crate::jit::is_jit_compilable_with_delegates(expr, funcs) {
             if let Ok(prog) = crate::jit::JitProgram::compile(expr, funcs) {
                 self.jit_program = Some(prog);
             }

@@ -179,6 +179,29 @@ gate を通れば tree-walking eval ではなく JitOp interpreter で実行さ�
 `JQJIT_TRACE=1` の generic fallback ラベルは `jit` / `jitop` / `eval` の
 3 値（`tests/jitop_routing.rs` がルーティング決定をガードする）。
 
+#### streaming eval delegate（#1059 Phase 3 / `JitOp::DelegateGen`）
+
+flatten 不能だったサブツリー（複雑な `path()`、`del`/`pick`/`walk`/`skip`/
+`add(gen)`）は、ノード単位で eval に **streaming 委譲**して flatten を続行
+できる（`emit_delegate_gen` → `jit_rt_delegate_gen`）。yield は生成順に
+cb / collect stack へ流れるので lazy 性と downstream early-stop が保たれる
+（旧 eager delegate の #1085 hang は再発しない）。委譲しない条件:
+
+- `limit(n; …)` 内（per-yield counter が helper 内で回せない）
+- サブツリーに `break`（委譲境界を越える break は label に戻れない）
+- path 意味論ノード（`path`/`del`/`pick`）が `$var` を参照（値 seed では
+  path provenance #880/#953 が失われ `. as $x | path($x)` が誤エラー化）
+
+**default dispatch は委譲プログラムをコンパイルしない**
+（`is_jit_compilable_with_funcs` が reject）。delegate 支配的な filter は
+whole-filter eval の方が速い（200k NDJSON A/B で委譲側が最大 ~1.1x 劣化、
+per-record の env reset 分）ため。forced knob（`JQJIT_FORCE_CRANELIFT` /
+`JQJIT_FORCE_JITOP_INTERP` / `--force-jit`）は
+`is_jit_compilable_with_delegates` / `compile_jit_with_delegates` 経由で
+委譲込みコンパイルし、backend self-diff がそこをカバーする。
+JIT_CLOSURE_OPS は `Vec<Rc<Expr>>`（per-record の Expr clone を排除、
+既存の closure-op delegate も同恩恵）。
+
 ### テスト出力
 
 `cargo test --release` だけだと regression 通過数が非表示。必ず `--nocapture`:
