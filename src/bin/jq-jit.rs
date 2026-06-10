@@ -3759,6 +3759,12 @@ fn real_main() {
                     if let Some(raw) = raw_bytes {
                         if std::ptr::eq(result, input) && is_json_compact(raw)
                             && !raw_contains_non_canonical_number(raw)
+                            // jq dedupes input objects last-wins at parse
+                            // time; copying bytes verbatim would leak the
+                            // duplicates (#233 class). The select verdict is
+                            // computed on the parsed (deduped) Value, so only
+                            // the emitted bytes diverge without this. #1090
+                            && !json_value_has_duplicate_keys(raw)
                         {
                             // `\/` in input strings must be canonicalised to `/`
                             // (jq never escapes the solidus, #780). The verbatim
