@@ -105,6 +105,168 @@ impl FormatKind {
     }
 }
 
+/// Defines [`BuiltinOp`] together with its bijective name mapping so the
+/// variant list, `name()`, and `from_name()` can never drift apart.
+macro_rules! builtin_ops {
+    ($($(#[$attr:meta])* $variant:ident => $name:literal),+ $(,)?) => {
+        /// Identity of a runtime-dispatched builtin (`Expr::CallBuiltin`),
+        /// resolved from its source name once, in the parser (#1035).
+        ///
+        /// This covers only builtins that flow through `CallBuiltin`; most
+        /// builtins lower to dedicated `Expr` nodes (`UnaryOp`, `RegexTest`,
+        /// `Limit`, ...) and never appear here. The JIT keeps a *wider*
+        /// string keyspace at its own `JitOp::CallBuiltin` boundary (it
+        /// synthesizes names like `_slice` and `@text` that have no `Expr`
+        /// form), so `name()` remains the bridge into that layer.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum BuiltinOp {
+            $($(#[$attr])* $variant),+
+        }
+
+        impl BuiltinOp {
+            /// The jq-source-level builtin name (also the runtime/JIT dispatch key).
+            pub fn name(self) -> &'static str {
+                match self {
+                    $(BuiltinOp::$variant => $name),+
+                }
+            }
+
+            /// Resolve a builtin name; `None` for names not routed through
+            /// `CallBuiltin` (parse sites match on a closed name set first).
+            pub fn from_name(name: &str) -> Option<BuiltinOp> {
+                match name {
+                    $($name => Some(BuiltinOp::$variant)),+,
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+builtin_ops! {
+    // Strings
+    StartsWith => "startswith",
+    EndsWith => "endswith",
+    LtrimStr => "ltrimstr",
+    RtrimStr => "rtrimstr",
+    /// jqx extension (jq has no `trimstr/1`).
+    TrimStr => "trimstr",
+    Split => "split",
+    Join => "join",
+    Index => "index",
+    Rindex => "rindex",
+    Indices => "indices",
+    /// `explode | map(. + N) | implode` fused by the interpreter (internal).
+    ShiftCodepoints => "__shift_codepoints__",
+
+    // Containers
+    Has => "has",
+    In => "in",
+    Contains => "contains",
+    Inside => "inside",
+    Add => "add",
+    Flatten => "flatten",
+    Del => "del",
+    Pick => "pick",
+    Walk => "walk",
+    Bsearch => "bsearch",
+    Combinations => "combinations",
+    Skip => "skip",
+
+    // Streaming
+    ToStream => "tostream",
+    FromStream => "fromstream",
+    TruncateStream => "truncate_stream",
+
+    // Conversion
+    FromJson => "fromjson",
+    ToBoolean => "toboolean",
+    Format => "format",
+    /// jqx extensions (jq has no CSV/TSV *parsers*).
+    FromCsv => "fromcsv",
+    FromCsvh => "fromcsvh",
+    FromTsv => "fromtsv",
+    FromTsvh => "fromtsvh",
+
+    // Date/time
+    ToDate => "todate",
+    FromDate => "fromdate",
+    Date => "date",
+    ToDateIso8601 => "todateiso8601",
+    FromDateIso8601 => "fromdateiso8601",
+    ToIsoDate => "toisodate",
+    FromIsoDate => "fromisodate",
+    Strftime => "strftime",
+    Strptime => "strptime",
+    Strflocaltime => "strflocaltime",
+
+    // libm, no explicit args (input-driven; not in `UnaryOp` because the
+    // runtime owns their edge-case semantics)
+    Gamma => "gamma",
+    Tgamma => "tgamma",
+    Lgamma => "lgamma",
+    LgammaR => "lgamma_r",
+    Frexp => "frexp",
+    Modf => "modf",
+    Expm1 => "expm1",
+    Log1p => "log1p",
+    Erf => "erf",
+    Erfc => "erfc",
+    Y0 => "y0",
+    Y1 => "y1",
+
+    // libm, 2-3 explicit args
+    Pow => "pow",
+    Atan2 => "atan2",
+    Fma => "fma",
+    Remainder => "remainder",
+    Drem => "drem",
+    Hypot => "hypot",
+    Ldexp => "ldexp",
+    Scalb => "scalb",
+    Scalbln => "scalbln",
+    Copysign => "copysign",
+    Fdim => "fdim",
+    Fmax => "fmax",
+    Fmin => "fmin",
+    Fmod => "fmod",
+    Nextafter => "nextafter",
+    Nexttoward => "nexttoward",
+    Jn => "jn",
+    Yn => "yn",
+
+    // Process / environment
+    Halt => "halt",
+    HaltError => "halt_error",
+    InputFilename => "input_filename",
+    InputLineNumber => "input_line_number",
+    GetJqOrigin => "get_jq_origin",
+    GetProgOrigin => "get_prog_origin",
+    GetSearchList => "get_search_list",
+    HaveLiteralNumbers => "have_literal_numbers",
+    /// jqx extensions (process execution).
+    Exec => "exec",
+    Execv => "execv",
+}
+
+impl BuiltinOp {
+    /// Resolve a name the caller already matched against the builtin set
+    /// (parse sites whose `match` arm patterns pin the name). Panicking on
+    /// a miss is deliberate: it would mean the arm pattern and the
+    /// `builtin_ops!` table drifted, which is a parser bug, not user input.
+    #[track_caller]
+    pub fn resolve(name: &str) -> BuiltinOp {
+        BuiltinOp::from_name(name)
+            .unwrap_or_else(|| panic!("builtin name {name:?} not in BuiltinOp"))
+    }
+}
+
+impl std::fmt::Display for BuiltinOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// A filter expression in the IR.
 #[derive(Debug, Clone)]
 pub enum Expr {
@@ -462,7 +624,7 @@ pub enum Expr {
 
     /// Runtime builtin call with evaluated args: contains, startswith, etc.
     CallBuiltin {
-        name: String,
+        op: BuiltinOp,
         args: Vec<Expr>,
     },
 
@@ -996,8 +1158,8 @@ impl Expr {
                     StringPart::Expr(e) => StringPart::Expr(e.substitute_input(replacement)),
                 }).collect(),
             },
-            Expr::CallBuiltin { name, args } => Expr::CallBuiltin {
-                name: name.clone(),
+            Expr::CallBuiltin { op, args } => Expr::CallBuiltin {
+                op: *op,
                 args: args.iter().map(|a| a.substitute_input(replacement)).collect(),
             },
             Expr::Error { msg } => Expr::Error {
@@ -1077,8 +1239,8 @@ impl Expr {
                     Expr::LetBinding { var_index: *vi, value: new_value, body: Box::new(body.substitute_var(var_index, replacement)) }
                 }
             },
-            Expr::CallBuiltin { name, args } => Expr::CallBuiltin {
-                name: name.clone(),
+            Expr::CallBuiltin { op, args } => Expr::CallBuiltin {
+                op: *op,
                 args: args.iter().map(|a| a.substitute_var(var_index, replacement)).collect(),
             },
             Expr::Update { path_expr, update_expr } => Expr::Update {

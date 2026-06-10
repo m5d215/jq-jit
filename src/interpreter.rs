@@ -6,7 +6,7 @@
 
 use anyhow::Result;
 
-use crate::ir::CompiledFunc;
+use crate::ir::{BuiltinOp, CompiledFunc};
 use crate::value::Value;
 
 /// Self-diff knob for issue #323: when set, [`Filter::execute`] and
@@ -348,13 +348,13 @@ fn extract_strfunc_cond(expr: &crate::ir::Expr) -> Option<StrFuncCond> {
                 return Some(StrFuncCond::Test(pattern.clone(), flags_str));
             }
         }
-        Expr::CallBuiltin { name, args } => {
+        Expr::CallBuiltin { op: name, args } => {
             if args.len() == 2 && matches!(args[0], Expr::Input) {
                 if let Expr::Literal(Literal::Str(s)) = &args[1] {
-                    match name.as_str() {
-                        "startswith" => return Some(StrFuncCond::Startswith(s.clone())),
-                        "endswith" => return Some(StrFuncCond::Endswith(s.clone())),
-                        "contains" => return Some(StrFuncCond::Contains(s.clone())),
+                    match name {
+                        BuiltinOp::StartsWith => return Some(StrFuncCond::Startswith(s.clone())),
+                        BuiltinOp::EndsWith => return Some(StrFuncCond::Endswith(s.clone())),
+                        BuiltinOp::Contains => return Some(StrFuncCond::Contains(s.clone())),
                         _ => {}
                     }
                 }
@@ -986,7 +986,7 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     if matches!(el.as_ref(), Expr::UnaryOp { op: UnaryOp::Explode, operand } if matches!(operand.as_ref(), Expr::Input)) {
                         if let Some(shift) = is_map_shift(er) {
                             return Expr::CallBuiltin {
-                                name: "__shift_codepoints__".to_string(),
+                                op: BuiltinOp::ShiftCodepoints,
                                 args: vec![Expr::Literal(Literal::Num(shift, None))],
                             };
                         }
@@ -999,7 +999,7 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                     if matches!(ir.as_ref(), Expr::UnaryOp { op: UnaryOp::Implode, operand } if matches!(operand.as_ref(), Expr::Input)) {
                         if let Some(shift) = is_map_shift(mr) {
                             return Expr::CallBuiltin {
-                                name: "__shift_codepoints__".to_string(),
+                                op: BuiltinOp::ShiftCodepoints,
                                 args: vec![Expr::Literal(Literal::Num(shift, None))],
                             };
                         }
@@ -1582,8 +1582,8 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                 }
             }
             // split("s") | length > 1 → contains("s")  (more efficient, enables raw byte path)
-            if let Expr::CallBuiltin { name, args } = &sl {
-                if name == "split" && args.len() == 1 {
+            if let Expr::CallBuiltin { op: name, args } = &sl {
+                if *name == BuiltinOp::Split && args.len() == 1 {
                     if let Expr::Literal(crate::ir::Literal::Str(delim)) = &args[0] {
                         if let Expr::BinOp { op, lhs: cmp_lhs, rhs: cmp_rhs } = &sr {
                             if let Expr::UnaryOp { op: crate::ir::UnaryOp::Length, operand } = cmp_lhs.as_ref() {
@@ -1593,7 +1593,7 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                                         // split(S) | length > 0 is always true for any finite string
                                         if !delim.is_empty() && *n == 1.0 && matches!(op, crate::ir::BinOp::Gt) {
                                             return Expr::CallBuiltin {
-                                                name: "contains".to_string(),
+                                                op: BuiltinOp::Contains,
                                                 args: vec![Expr::Literal(crate::ir::Literal::Str(delim.clone()))],
                                             };
                                         }
@@ -1906,13 +1906,13 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             }
             Expr::IndexOpt { expr: Box::new(se), key: Box::new(sk) }
         }
-        Expr::CallBuiltin { name, args } => {
+        Expr::CallBuiltin { op: name, args } => {
             let sargs: Vec<_> = args.iter().map(|a| simplify_expr(a)).collect();
             // walk(.) → identity
-            if name == "walk" && sargs.len() == 1 && matches!(&sargs[0], Expr::Input) {
+            if *name == BuiltinOp::Walk && sargs.len() == 1 && matches!(&sargs[0], Expr::Input) {
                 return Expr::Input;
             }
-            Expr::CallBuiltin { name: name.clone(), args: sargs }
+            Expr::CallBuiltin { op: *name, args: sargs }
         }
         Expr::Alternative { primary, fallback } => {
             Expr::Alternative { primary: Box::new(simplify_expr(primary)), fallback: Box::new(simplify_expr(fallback)) }
@@ -1981,7 +1981,7 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
             // `del` at compile time (issue #155).
             if matches!(&su, Expr::Empty) {
                 return Expr::CallBuiltin {
-                    name: "del".to_string(),
+                    op: BuiltinOp::Del,
                     args: vec![sp],
                 };
             }
@@ -2014,13 +2014,13 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                                 Expr::UnaryOp { op, operand } => {
                                     replace_field_with_input(operand, field).map(|o| Expr::UnaryOp { op: *op, operand: Box::new(o) })
                                 }
-                                Expr::CallBuiltin { name, args } => {
+                                Expr::CallBuiltin { op: name, args } => {
                                     let mut any_replaced = false;
                                     let new_args: Vec<_> = args.iter().map(|a| {
                                         if let Some(r) = replace_field_with_input(a, field) { any_replaced = true; r }
                                         else { a.clone() }
                                     }).collect();
-                                    if any_replaced { Some(Expr::CallBuiltin { name: name.clone(), args: new_args }) }
+                                    if any_replaced { Some(Expr::CallBuiltin { op: *name, args: new_args }) }
                                     else { None }
                                 }
                                 Expr::RegexTest { input_expr, re, flags } => {
@@ -2145,7 +2145,7 @@ fn simplify_expr(expr: &crate::ir::Expr) -> crate::ir::Expr {
                 if let Expr::Collect { generator: inner } = generator.as_ref() {
                     if let Expr::Literal(Literal::Str(field)) = inner.as_ref() {
                         return Expr::CallBuiltin {
-                            name: "del".into(),
+                            op: BuiltinOp::Del,
                             args: vec![Expr::Index {
                                 expr: Box::new(Expr::Input),
                                 key: Box::new(Expr::Literal(Literal::Str(field.clone()))),
@@ -3397,11 +3397,11 @@ impl Filter {
                             if !matches!(base.as_ref(), Expr::Input) { return None; }
                             if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                                 // CallBuiltin(startswith/endswith/contains, [Literal(Str)])
-                                if let Expr::CallBuiltin { name, args } = right.as_ref() {
+                                if let Expr::CallBuiltin { op: name, args } = right.as_ref() {
                                     if args.len() == 1 {
                                         if let Expr::Literal(Literal::Str(arg)) = &args[0] {
-                                            if matches!(name.as_str(), "startswith" | "endswith" | "contains") {
-                                                return Some((field.clone(), name.clone(), arg.clone()));
+                                            if matches!(name, BuiltinOp::StartsWith | BuiltinOp::EndsWith | BuiltinOp::Contains) {
+                                                return Some((field.clone(), name.name().to_string(), arg.clone()));
                                             }
                                         }
                                     }
@@ -3411,14 +3411,6 @@ impl Filter {
                                     if matches!(input_expr.as_ref(), Expr::Input) {
                                         if let Expr::Literal(Literal::Str(pat)) = re.as_ref() {
                                             return Some((field.clone(), "test".to_string(), pat.clone()));
-                                        }
-                                    }
-                                }
-                                // CallBuiltin("test", [Literal(Str)])
-                                if let Expr::CallBuiltin { name, args } = right.as_ref() {
-                                    if name == "test" && args.len() == 1 {
-                                        if let Expr::Literal(Literal::Str(arg)) = &args[0] {
-                                            return Some((field.clone(), "test".to_string(), arg.clone()));
                                         }
                                     }
                                 }
@@ -3923,11 +3915,11 @@ impl Filter {
                 if let Expr::Index { expr: base, key } = left.as_ref() {
                     if !matches!(base.as_ref(), Expr::Input) { return None; }
                     if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
-                        if let Expr::CallBuiltin { name, args } = right.as_ref() {
+                        if let Expr::CallBuiltin { op: name, args } = right.as_ref() {
                             if args.len() == 1 {
                                 if let Expr::Literal(Literal::Str(arg)) = &args[0] {
-                                    if matches!(name.as_str(), "startswith" | "endswith" | "contains") {
-                                        return Some((field.clone(), name.clone(), arg.clone()));
+                                    if matches!(name, BuiltinOp::StartsWith | BuiltinOp::EndsWith | BuiltinOp::Contains) {
+                                        return Some((field.clone(), name.name().to_string(), arg.clone()));
                                     }
                                 }
                             }
@@ -3979,10 +3971,10 @@ impl Filter {
                     if let Expr::Index { expr: base, key } = left.as_ref() {
                         if !matches!(base.as_ref(), Expr::Input) { return None; }
                         if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
-                            if let Expr::CallBuiltin { name, args } = right.as_ref() {
-                                if matches!(name.as_str(), "startswith" | "endswith" | "contains") && args.len() == 1 {
+                            if let Expr::CallBuiltin { op: name, args } = right.as_ref() {
+                                if matches!(name, BuiltinOp::StartsWith | BuiltinOp::EndsWith | BuiltinOp::Contains) && args.len() == 1 {
                                     if let Expr::Literal(Literal::Str(arg)) = &args[0] {
-                                        return Some((field.clone(), name.clone(), arg.clone()));
+                                        return Some((field.clone(), name.name().to_string(), arg.clone()));
                                     }
                                 }
                             }
@@ -3990,13 +3982,13 @@ impl Filter {
                     }
                 }
                 // Also handle beta-reduced form: CallBuiltin("startswith", [Index(Input, "field"), Literal("str")])
-                if let Expr::CallBuiltin { name, args } = e {
-                    if matches!(name.as_str(), "startswith" | "endswith" | "contains") && args.len() == 2 {
+                if let Expr::CallBuiltin { op: name, args } = e {
+                    if matches!(name, BuiltinOp::StartsWith | BuiltinOp::EndsWith | BuiltinOp::Contains) && args.len() == 2 {
                         if let Expr::Index { expr: base, key } = &args[0] {
                             if matches!(base.as_ref(), Expr::Input) {
                                 if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                                     if let Expr::Literal(Literal::Str(arg)) = &args[1] {
-                                        return Some((field.clone(), name.clone(), arg.clone()));
+                                        return Some((field.clone(), name.name().to_string(), arg.clone()));
                                     }
                                 }
                             }
@@ -4061,10 +4053,10 @@ impl Filter {
                     if let Expr::Index { expr: base, key } = left.as_ref() {
                         if matches!(base.as_ref(), Expr::Input) {
                             if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
-                                if let Expr::CallBuiltin { name, args } = right.as_ref() {
-                                    if matches!(name.as_str(), "startswith" | "endswith" | "contains") && args.len() == 1 {
+                                if let Expr::CallBuiltin { op: name, args } = right.as_ref() {
+                                    if matches!(name, BuiltinOp::StartsWith | BuiltinOp::EndsWith | BuiltinOp::Contains) && args.len() == 1 {
                                         if let Expr::Literal(Literal::Str(arg)) = &args[0] {
-                                            return Some(MixedCond::StrTest(field.clone(), name.clone(), arg.clone()));
+                                            return Some(MixedCond::StrTest(field.clone(), name.name().to_string(), arg.clone()));
                                         }
                                     }
                                 }
@@ -4081,13 +4073,13 @@ impl Filter {
                     }
                 }
                 // Beta-reduced: CallBuiltin("startswith", [Index, Literal])
-                if let Expr::CallBuiltin { name, args } = e {
-                    if matches!(name.as_str(), "startswith" | "endswith" | "contains") && args.len() == 2 {
+                if let Expr::CallBuiltin { op: name, args } = e {
+                    if matches!(name, BuiltinOp::StartsWith | BuiltinOp::EndsWith | BuiltinOp::Contains) && args.len() == 2 {
                         if let Expr::Index { expr: base, key } = &args[0] {
                             if matches!(base.as_ref(), Expr::Input) {
                                 if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                                     if let Expr::Literal(Literal::Str(arg)) = &args[1] {
-                                        return Some(MixedCond::StrTest(field.clone(), name.clone(), arg.clone()));
+                                        return Some(MixedCond::StrTest(field.clone(), name.name().to_string(), arg.clone()));
                                     }
                                 }
                             }
@@ -4545,8 +4537,8 @@ impl Filter {
                     if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                         // .field | split(sep) | ...
                         if let Expr::Pipe { left: split_expr, right: tail_expr } = right.as_ref() {
-                            if let Expr::CallBuiltin { name: sn, args: sa } = split_expr.as_ref() {
-                                if sn == "split" && sa.len() == 1 {
+                            if let Expr::CallBuiltin { op: sn, args: sa } = split_expr.as_ref() {
+                                if *sn == BuiltinOp::Split && sa.len() == 1 {
                                     if let Expr::Literal(Literal::Str(sep)) = &sa[0] {
                                         // .field | split(sep) | length
                                         if matches!(tail_expr.as_ref(), Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
@@ -4571,16 +4563,16 @@ impl Filter {
                             }
                         }
                         // .field | builtin("arg") — string builtins
-                        if let Expr::CallBuiltin { name: bn, args: ba } = right.as_ref() {
+                        if let Expr::CallBuiltin { op: bn, args: ba } = right.as_ref() {
                             if ba.len() == 1 {
                                 if let Expr::Literal(Literal::Str(arg)) = &ba[0] {
-                                    let op = match bn.as_str() {
-                                        "ltrimstr" => Some(StrBuiltin::Ltrimstr),
-                                        "rtrimstr" => Some(StrBuiltin::Rtrimstr),
-                                        "startswith" => Some(StrBuiltin::Startswith),
-                                        "endswith" => Some(StrBuiltin::Endswith),
-                                        "index" => Some(StrBuiltin::Index),
-                                        "contains" => Some(StrBuiltin::Contains),
+                                    let op = match bn {
+                                        BuiltinOp::LtrimStr => Some(StrBuiltin::Ltrimstr),
+                                        BuiltinOp::RtrimStr => Some(StrBuiltin::Rtrimstr),
+                                        BuiltinOp::StartsWith => Some(StrBuiltin::Startswith),
+                                        BuiltinOp::EndsWith => Some(StrBuiltin::Endswith),
+                                        BuiltinOp::Index => Some(StrBuiltin::Index),
+                                        BuiltinOp::Contains => Some(StrBuiltin::Contains),
                                         _ => None,
                                     };
                                     if let Some(op) = op {
@@ -4630,11 +4622,11 @@ impl Filter {
                 if matches!(base.as_ref(), Expr::Input) {
                     if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                         if let Expr::Pipe { left: split_expr, right: join_expr } = right.as_ref() {
-                            if let Expr::CallBuiltin { name: sn, args: sa } = split_expr.as_ref() {
-                                if sn == "split" && sa.len() == 1 {
+                            if let Expr::CallBuiltin { op: sn, args: sa } = split_expr.as_ref() {
+                                if *sn == BuiltinOp::Split && sa.len() == 1 {
                                     if let Expr::Literal(Literal::Str(sep)) = &sa[0] {
-                                        if let Expr::CallBuiltin { name: jn, args: ja } = join_expr.as_ref() {
-                                            if jn == "join" && ja.len() == 1 {
+                                        if let Expr::CallBuiltin { op: jn, args: ja } = join_expr.as_ref() {
+                                            if *jn == BuiltinOp::Join && ja.len() == 1 {
                                                 if let Expr::Literal(Literal::Str(rep)) = &ja[0] {
                                                     return Some(RemapExpr::FieldSplitJoin(field.clone(), sep.clone(), rep.clone()));
                                                 }
@@ -5159,11 +5151,11 @@ impl Filter {
             if let Expr::Index { expr: base, key } = left.as_ref() {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
                 if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
-                    if let Expr::CallBuiltin { name, args } = right.as_ref() {
+                    if let Expr::CallBuiltin { op: name, args } = right.as_ref() {
                         if args.len() == 1 {
-                            if matches!(name.as_str(), "startswith" | "endswith" | "ltrimstr" | "rtrimstr" | "split" | "index" | "rindex" | "indices" | "contains") {
+                            if matches!(name, BuiltinOp::StartsWith | BuiltinOp::EndsWith | BuiltinOp::LtrimStr | BuiltinOp::RtrimStr | BuiltinOp::Split | BuiltinOp::Index | BuiltinOp::Rindex | BuiltinOp::Indices | BuiltinOp::Contains) {
                                 if let Expr::Literal(Literal::Str(arg)) = &args[0] {
-                                    return Some((field.clone(), name.clone(), arg.clone()));
+                                    return Some((field.clone(), name.name().to_string(), arg.clone()));
                                 }
                             }
                         }
@@ -5185,11 +5177,11 @@ impl Filter {
                 if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                     if let Expr::BinOp { op, lhs, rhs } = right.as_ref() {
                         if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) { return None; }
-                        if let Expr::CallBuiltin { name, args } = lhs.as_ref() {
-                            if (name == "index" || name == "rindex") && args.len() == 1 {
+                        if let Expr::CallBuiltin { op: name, args } = lhs.as_ref() {
+                            if (*name == BuiltinOp::Index || *name == BuiltinOp::Rindex) && args.len() == 1 {
                                 if let Expr::Literal(Literal::Str(search)) = &args[0] {
                                     if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
-                                        return Some((field.clone(), search.clone(), name == "rindex", *op, *n));
+                                        return Some((field.clone(), search.clone(), *name == BuiltinOp::Rindex, *op, *n));
                                     }
                                 }
                             }
@@ -5249,13 +5241,13 @@ impl Filter {
     fn try_extract_terminal(expr: &crate::ir::Expr) -> StringChainTerminal {
         use crate::ir::{Expr, Literal, UnaryOp};
         match expr {
-            Expr::CallBuiltin { name, args } if args.len() == 1 => {
+            Expr::CallBuiltin { op: name, args } if args.len() == 1 => {
                 if let Expr::Literal(Literal::Str(arg)) = &args[0] {
-                    match name.as_str() {
-                        "startswith" => return StringChainTerminal::Startswith(arg.clone()),
-                        "endswith" => return StringChainTerminal::Endswith(arg.clone()),
-                        "contains" => return StringChainTerminal::Contains(arg.clone()),
-                        "index" => return StringChainTerminal::Index(arg.clone()),
+                    match name {
+                        BuiltinOp::StartsWith => return StringChainTerminal::Startswith(arg.clone()),
+                        BuiltinOp::EndsWith => return StringChainTerminal::Endswith(arg.clone()),
+                        BuiltinOp::Contains => return StringChainTerminal::Contains(arg.clone()),
+                        BuiltinOp::Index => return StringChainTerminal::Index(arg.clone()),
                         _ => {}
                     }
                 }
@@ -5277,23 +5269,23 @@ impl Filter {
             Expr::UnaryOp { op: UnaryOp::AsciiUpcase, operand } if matches!(operand.as_ref(), Expr::Input) => {
                 ops.push(StringChainOp::AsciiUpcase); true
             }
-            Expr::CallBuiltin { name, args } if args.len() == 1 => {
+            Expr::CallBuiltin { op: name, args } if args.len() == 1 => {
                 if let Expr::Literal(Literal::Str(arg)) = &args[0] {
-                    match name.as_str() {
-                        "ltrimstr" => { ops.push(StringChainOp::Ltrimstr(arg.clone())); true }
-                        "rtrimstr" => { ops.push(StringChainOp::Rtrimstr(arg.clone())); true }
+                    match name {
+                        BuiltinOp::LtrimStr => { ops.push(StringChainOp::Ltrimstr(arg.clone())); true }
+                        BuiltinOp::RtrimStr => { ops.push(StringChainOp::Rtrimstr(arg.clone())); true }
                         _ => false,
                     }
                 } else { false }
             }
             // split(sep) | join(rep) — fused as SplitJoin
             Expr::Pipe { left, right } => {
-                if let Expr::CallBuiltin { name: sn, args: sa } = left.as_ref() {
-                    if sn == "split" && sa.len() == 1 {
+                if let Expr::CallBuiltin { op: sn, args: sa } = left.as_ref() {
+                    if *sn == BuiltinOp::Split && sa.len() == 1 {
                         if let Expr::Literal(Literal::Str(sep)) = &sa[0] {
                             // Check for split | join
-                            if let Expr::CallBuiltin { name: jn, args: ja } = right.as_ref() {
-                                if jn == "join" && ja.len() == 1 {
+                            if let Expr::CallBuiltin { op: jn, args: ja } = right.as_ref() {
+                                if *jn == BuiltinOp::Join && ja.len() == 1 {
                                     if let Expr::Literal(Literal::Str(rep)) = &ja[0] {
                                         ops.push(StringChainOp::SplitJoin(sep.clone(), rep.clone()));
                                         return true;
@@ -5303,8 +5295,8 @@ impl Filter {
                             // Check for split | reverse | join
                             if let Expr::Pipe { left: rev, right: join_expr } = right.as_ref() {
                                 if matches!(rev.as_ref(), Expr::UnaryOp { op: UnaryOp::Reverse, operand } if matches!(operand.as_ref(), Expr::Input)) {
-                                    if let Expr::CallBuiltin { name: jn, args: ja } = join_expr.as_ref() {
-                                        if jn == "join" && ja.len() == 1 {
+                                    if let Expr::CallBuiltin { op: jn, args: ja } = join_expr.as_ref() {
+                                        if *jn == BuiltinOp::Join && ja.len() == 1 {
                                             if let Expr::Literal(Literal::Str(rep)) = &ja[0] {
                                                 ops.push(StringChainOp::SplitReverseJoin(sep.clone(), rep.clone()));
                                                 return true;
@@ -5364,10 +5356,10 @@ impl Filter {
                     if let Expr::Index { expr: base, key } = pl.as_ref() {
                         if matches!(base.as_ref(), Expr::Input) {
                             if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
-                                if let Expr::CallBuiltin { name, args } = pr.as_ref() {
-                                    if matches!(name.as_str(), "startswith" | "endswith" | "contains") && args.len() == 1 {
+                                if let Expr::CallBuiltin { op: name, args } = pr.as_ref() {
+                                    if matches!(name, BuiltinOp::StartsWith | BuiltinOp::EndsWith | BuiltinOp::Contains) && args.len() == 1 {
                                         if let Expr::Literal(Literal::Str(arg)) = &args[0] {
-                                            return Some((field.clone(), name.clone(), arg.clone(), remap));
+                                            return Some((field.clone(), name.name().to_string(), arg.clone(), remap));
                                         }
                                     }
                                 }
@@ -5615,11 +5607,6 @@ impl Filter {
                                     }
                                 }
                             }
-                            Expr::CallBuiltin { name, args } if name == "test" && args.len() == 1 => {
-                                if let Expr::Literal(Literal::Str(pattern)) = &args[0] {
-                                    return Some((field.clone(), is_upper, pattern.clone()));
-                                }
-                            }
                             _ => {}
                         }
                     }
@@ -5641,8 +5628,8 @@ impl Filter {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
                 if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                     if let Expr::Pipe { left: mid, right: rr } = right.as_ref() {
-                        if let Expr::CallBuiltin { name, args } = mid.as_ref() {
-                            if name == "ltrimstr" && args.len() == 1 {
+                        if let Expr::CallBuiltin { op: name, args } = mid.as_ref() {
+                            if *name == BuiltinOp::LtrimStr && args.len() == 1 {
                                 if let Expr::Literal(Literal::Str(prefix)) = &args[0] {
                                     // tonumber with no further ops
                                     if let Expr::UnaryOp { op: UnaryOp::ToNumber, operand } = rr.as_ref() {
@@ -5714,8 +5701,8 @@ impl Filter {
         let expr = self.detect_expr()?;
         if let Expr::Pipe { left, right } = expr {
             // right must be join("sep")
-            if let Expr::CallBuiltin { name, args } = right.as_ref() {
-                if name != "join" || args.len() != 1 { return None; }
+            if let Expr::CallBuiltin { op: name, args } = right.as_ref() {
+                if *name != BuiltinOp::Join || args.len() != 1 { return None; }
                 if let Expr::Literal(Literal::Str(sep)) = &args[0] {
                     // left must be [expr1, expr2, ...]
                     if let Expr::Collect { generator } = left.as_ref() {
@@ -5771,8 +5758,8 @@ impl Filter {
             if let Expr::Collect { generator } = left.as_ref() {
                 if let Expr::Pipe { left: map_expr, right: join_expr } = right.as_ref() {
                     // Check join(sep)
-                    let sep = if let Expr::CallBuiltin { name, args } = join_expr.as_ref() {
-                        if name != "join" || args.len() != 1 { return None; }
+                    let sep = if let Expr::CallBuiltin { op: name, args } = join_expr.as_ref() {
+                        if *name != BuiltinOp::Join || args.len() != 1 { return None; }
                         if let Expr::Literal(Literal::Str(s)) = &args[0] { s.clone() } else { return None; }
                     } else { return None; };
                     // Check map(tostring) = [.[] | tostring]
@@ -6028,14 +6015,14 @@ impl Filter {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
                 if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                     if let Expr::Pipe { left: split_expr, right: rest } = right.as_ref() {
-                        if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
-                            if name == "split" && args.len() == 1 {
+                        if let Expr::CallBuiltin { op: name, args } = split_expr.as_ref() {
+                            if *name == BuiltinOp::Split && args.len() == 1 {
                                 if let Expr::Literal(Literal::Str(sep)) = &args[0] {
                                     if sep.is_empty() {
                                         if let Expr::Pipe { left: rev_expr, right: join_expr } = rest.as_ref() {
                                             if matches!(rev_expr.as_ref(), Expr::UnaryOp { op: UnaryOp::Reverse, operand } if matches!(operand.as_ref(), Expr::Input)) {
-                                                if let Expr::CallBuiltin { name: jn, args: ja } = join_expr.as_ref() {
-                                                    if jn == "join" && ja.len() == 1 {
+                                                if let Expr::CallBuiltin { op: jn, args: ja } = join_expr.as_ref() {
+                                                    if *jn == BuiltinOp::Join && ja.len() == 1 {
                                                         if let Expr::Literal(Literal::Str(js)) = &ja[0] {
                                                             if js.is_empty() {
                                                                 return Some(field.clone());
@@ -6066,13 +6053,13 @@ impl Filter {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
                 if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                     if let Expr::Pipe { left: split_expr, right: rest } = right.as_ref() {
-                        if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
-                            if name == "split" && args.len() == 1 {
+                        if let Expr::CallBuiltin { op: name, args } = split_expr.as_ref() {
+                            if *name == BuiltinOp::Split && args.len() == 1 {
                                 if let Expr::Literal(Literal::Str(sep)) = &args[0] {
                                     if let Expr::Pipe { left: rev_expr, right: join_expr } = rest.as_ref() {
                                         if matches!(rev_expr.as_ref(), Expr::UnaryOp { op: UnaryOp::Reverse, operand } if matches!(operand.as_ref(), Expr::Input)) {
-                                            if let Expr::CallBuiltin { name: jn, args: ja } = join_expr.as_ref() {
-                                                if jn == "join" && ja.len() == 1 {
+                                            if let Expr::CallBuiltin { op: jn, args: ja } = join_expr.as_ref() {
+                                                if *jn == BuiltinOp::Join && ja.len() == 1 {
                                                     if let Expr::Literal(Literal::Str(js)) = &ja[0] {
                                                         if !sep.is_empty() {
                                                             return Some((field.clone(), sep.clone(), js.clone()));
@@ -6108,11 +6095,11 @@ impl Filter {
                             _ => return None,
                         };
                         if let Expr::Pipe { left: split_expr, right: join_expr } = rest.as_ref() {
-                            if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
-                                if name == "split" && args.len() == 1 {
+                            if let Expr::CallBuiltin { op: name, args } = split_expr.as_ref() {
+                                if *name == BuiltinOp::Split && args.len() == 1 {
                                     if let Expr::Literal(Literal::Str(sep)) = &args[0] {
-                                        if let Expr::CallBuiltin { name: jn, args: ja } = join_expr.as_ref() {
-                                            if jn == "join" && ja.len() == 1 {
+                                        if let Expr::CallBuiltin { op: jn, args: ja } = join_expr.as_ref() {
+                                            if *jn == BuiltinOp::Join && ja.len() == 1 {
                                                 if let Expr::Literal(Literal::Str(js)) = &ja[0] {
                                                     if !sep.is_empty() {
                                                         return Some((field.clone(), is_upper, sep.clone(), js.clone()));
@@ -6146,8 +6133,8 @@ impl Filter {
                             Expr::UnaryOp { op: UnaryOp::AsciiDowncase, operand } if matches!(operand.as_ref(), Expr::Input) => false,
                             _ => return None,
                         };
-                        if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
-                            if name == "split" && args.len() == 1 {
+                        if let Expr::CallBuiltin { op: name, args } = split_expr.as_ref() {
+                            if *name == BuiltinOp::Split && args.len() == 1 {
                                 if let Expr::Literal(Literal::Str(sep)) = &args[0] {
                                     if !sep.is_empty() {
                                         return Some((field.clone(), is_upper, sep.clone()));
@@ -6157,8 +6144,8 @@ impl Filter {
                         }
                     }
                     // Also handle beta-reduced form: CallBuiltin(split, [UnaryOp(case, .field)])
-                    if let Expr::CallBuiltin { name, args } = right.as_ref() {
-                        if name == "split" && args.len() == 1 {
+                    if let Expr::CallBuiltin { op: name, args } = right.as_ref() {
+                        if *name == BuiltinOp::Split && args.len() == 1 {
                             if let Expr::Literal(Literal::Str(_sep)) = &args[0] {
                                 // This form doesn't include the case op, skip
                             }
@@ -6168,8 +6155,8 @@ impl Filter {
             }
         }
         // Beta-reduced: CallBuiltin(split, [UnaryOp(case, Index(.field))])
-        if let Expr::CallBuiltin { name, args } = expr {
-            if name == "split" && args.len() == 1 {
+        if let Expr::CallBuiltin { op: name, args } = expr {
+            if *name == BuiltinOp::Split && args.len() == 1 {
                 if let Expr::Literal(Literal::Str(sep)) = &args[0] {
                     if !sep.is_empty() {
                         // The input to split would be the case-converted field — check operand
@@ -6199,8 +6186,8 @@ impl Filter {
                             _ => return None,
                         };
                         if let Expr::Pipe { left: split_expr, right: idx_expr } = rest.as_ref() {
-                            if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
-                                if name == "split" && args.len() == 1 {
+                            if let Expr::CallBuiltin { op: name, args } = split_expr.as_ref() {
+                                if *name == BuiltinOp::Split && args.len() == 1 {
                                     if let Expr::Literal(Literal::Str(sep)) = &args[0] {
                                         if !sep.is_empty() {
                                             if let Expr::Index { expr: ibase, key: ikey } = idx_expr.as_ref() {
@@ -6208,16 +6195,6 @@ impl Filter {
                                                     if let Expr::Literal(Literal::Num(n, _)) = ikey.as_ref() {
                                                         let idx = *n as i64;
                                                         return Some((field.clone(), is_upper, sep.clone(), idx));
-                                                    }
-                                                }
-                                            }
-                                            // Check for first/last
-                                            if let Expr::CallBuiltin { name: fn_name, args: fn_args } = idx_expr.as_ref() {
-                                                if fn_args.is_empty() || (fn_args.len() == 1 && matches!(fn_args[0], Expr::Input)) {
-                                                    if fn_name == "first" {
-                                                        return Some((field.clone(), is_upper, sep.clone(), 0));
-                                                    } else if fn_name == "last" {
-                                                        return Some((field.clone(), is_upper, sep.clone(), -1));
                                                     }
                                                 }
                                             }
@@ -6654,8 +6631,8 @@ impl Filter {
     pub fn detect_del_field(&self) -> Option<String> {
         use crate::ir::{Expr, Literal};
         let expr = self.detect_expr()?;
-        if let Expr::CallBuiltin { name, args } = expr {
-            if name == "del" && args.len() == 1 {
+        if let Expr::CallBuiltin { op: name, args } = expr {
+            if *name == BuiltinOp::Del && args.len() == 1 {
                 if let Expr::Index { expr: base, key } = &args[0] {
                     if matches!(base.as_ref(), Expr::Input) {
                         if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
@@ -6699,8 +6676,8 @@ impl Filter {
             } else { return None; }
         } else { return None; };
         // Parse del expression
-        if let Expr::CallBuiltin { name, args } = del_expr {
-            if name != "del" || args.len() != 1 { return None; }
+        if let Expr::CallBuiltin { op: name, args } = del_expr {
+            if *name != BuiltinOp::Del || args.len() != 1 { return None; }
             let mut del_fields = Vec::new();
             fn collect_del_fields(expr: &Expr, fields: &mut Vec<String>) -> bool {
                 match expr {
@@ -6747,12 +6724,12 @@ impl Filter {
             if let Expr::Index { expr: base, key } = left.as_ref() {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
                 if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
-                    if let Expr::CallBuiltin { name, args } = right.as_ref() {
+                    if let Expr::CallBuiltin { op: name, args } = right.as_ref() {
                         if args.len() == 1 {
                             if let Expr::Literal(Literal::Str(s)) = &args[0] {
-                                match name.as_str() {
-                                    "startswith" | "endswith" | "test" | "contains" => {
-                                        (f.clone(), name.clone(), s.clone())
+                                match name {
+                                    BuiltinOp::StartsWith | BuiltinOp::EndsWith | BuiltinOp::Contains => {
+                                        (f.clone(), name.name().to_string(), s.clone())
                                     }
                                     _ => return None,
                                 }
@@ -6774,8 +6751,8 @@ impl Filter {
             } else { return None; }
         } else { return None; };
         // Parse del expression
-        if let Expr::CallBuiltin { name, args } = del_expr {
-            if name != "del" || args.len() != 1 { return None; }
+        if let Expr::CallBuiltin { op: name, args } = del_expr {
+            if *name != BuiltinOp::Del || args.len() != 1 { return None; }
             let mut del_fields = Vec::new();
             fn collect_del(expr: &Expr, fields: &mut Vec<String>) -> bool {
                 match expr {
@@ -6883,12 +6860,12 @@ impl Filter {
             if let Expr::Index { expr: base, key } = left.as_ref() {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
                 if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
-                    if let Expr::CallBuiltin { name, args } = right.as_ref() {
+                    if let Expr::CallBuiltin { op: name, args } = right.as_ref() {
                         if args.len() == 1 {
                             if let Expr::Literal(Literal::Str(s)) = &args[0] {
-                                match name.as_str() {
-                                    "startswith" | "endswith" | "test" | "contains" => {
-                                        (f.clone(), name.clone(), s.clone())
+                                match name {
+                                    BuiltinOp::StartsWith | BuiltinOp::EndsWith | BuiltinOp::Contains => {
+                                        (f.clone(), name.name().to_string(), s.clone())
                                     }
                                     _ => return None,
                                 }
@@ -6934,8 +6911,8 @@ impl Filter {
     pub fn detect_del_fields(&self) -> Option<Vec<String>> {
         use crate::ir::{Expr, Literal};
         let expr = self.detect_expr()?;
-        if let Expr::CallBuiltin { name, args } = expr {
-            if name == "del" && args.len() == 1 {
+        if let Expr::CallBuiltin { op: name, args } = expr {
+            if *name == BuiltinOp::Del && args.len() == 1 {
                 let mut fields = Vec::new();
                 fn collect_fields(expr: &Expr, fields: &mut Vec<String>) -> bool {
                     match expr {
@@ -6973,8 +6950,8 @@ impl Filter {
     pub fn detect_has_field(&self) -> Option<String> {
         use crate::ir::{Expr, Literal};
         let expr = self.detect_expr()?;
-        if let Expr::CallBuiltin { name, args } = expr {
-            if name == "has" && args.len() == 1 {
+        if let Expr::CallBuiltin { op: name, args } = expr {
+            if *name == BuiltinOp::Has && args.len() == 1 {
                 if let Expr::Literal(Literal::Str(field)) = &args[0] {
                     return Some(field.clone());
                 }
@@ -6999,8 +6976,8 @@ impl Filter {
                             return collect(lhs, fields, is_and) && collect(rhs, fields, is_and);
                         }
                     }
-                    if let Expr::CallBuiltin { name, args } = e {
-                        if name == "has" && args.len() == 1 {
+                    if let Expr::CallBuiltin { op: name, args } = e {
+                        if *name == BuiltinOp::Has && args.len() == 1 {
                             if let Expr::Literal(Literal::Str(f)) = &args[0] {
                                 fields.push(f.clone());
                                 return true;
@@ -7027,8 +7004,8 @@ impl Filter {
             if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
             if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
             // Also handle single has: select(has("a"))
-            if let Expr::CallBuiltin { name, args } = cond.as_ref() {
-                if name == "has" && args.len() == 1 {
+            if let Expr::CallBuiltin { op: name, args } = cond.as_ref() {
+                if *name == BuiltinOp::Has && args.len() == 1 {
                     if let crate::ir::Literal::Str(f) = match &args[0] {
                         Expr::Literal(l) => l,
                         _ => return None,
@@ -7046,8 +7023,8 @@ impl Filter {
                         return collect_has(lhs, fields, is_and) && collect_has(rhs, fields, is_and);
                     }
                 }
-                if let Expr::CallBuiltin { name, args } = e {
-                    if name == "has" && args.len() == 1 {
+                if let Expr::CallBuiltin { op: name, args } = e {
+                    if *name == BuiltinOp::Has && args.len() == 1 {
                         if let Expr::Literal(Literal::Str(f)) = &args[0] {
                             fields.push(f.clone());
                             return true;
@@ -7362,14 +7339,14 @@ impl Filter {
                             if !matches!(then_branch.as_ref(), Expr::Input) { return None; }
                             if !matches!(else_branch.as_ref(), Expr::Empty) { return None; }
                             // .key | startswith("str") — beta-reduced form
-                            if let Expr::CallBuiltin { name, args } = cond.as_ref() {
-                                if matches!(name.as_str(), "startswith" | "endswith" | "contains") && args.len() == 2 {
+                            if let Expr::CallBuiltin { op: name, args } = cond.as_ref() {
+                                if matches!(name, BuiltinOp::StartsWith | BuiltinOp::EndsWith | BuiltinOp::Contains) && args.len() == 2 {
                                     if let Expr::Index { expr: base, key } = &args[0] {
                                         if matches!(base.as_ref(), Expr::Input) {
                                             if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
                                                 if f == "key" {
                                                     if let Expr::Literal(Literal::Str(s)) = &args[1] {
-                                                        return Some((name.clone(), s.clone()));
+                                                        return Some((name.name().to_string(), s.clone()));
                                                     }
                                                 }
                                             }
@@ -7384,18 +7361,18 @@ impl Filter {
                                     if matches!(base.as_ref(), Expr::Input) {
                                         if let Expr::Literal(Literal::Str(f)) = key.as_ref() {
                                             if f == "key" {
-                                                if let Expr::CallBuiltin { name, args } = pr.as_ref() {
-                                                    if matches!(name.as_str(), "startswith" | "endswith" | "contains") {
+                                                if let Expr::CallBuiltin { op: name, args } = pr.as_ref() {
+                                                    if matches!(name, BuiltinOp::StartsWith | BuiltinOp::EndsWith | BuiltinOp::Contains) {
                                                         // 1-arg form: CallBuiltin("startswith", [Literal("str")])
                                                         if args.len() == 1 {
                                                             if let Expr::Literal(Literal::Str(s)) = &args[0] {
-                                                                return Some((name.clone(), s.clone()));
+                                                                return Some((name.name().to_string(), s.clone()));
                                                             }
                                                         }
                                                         // 2-arg form: CallBuiltin("startswith", [Input, Literal("str")])
                                                         if args.len() == 2 && matches!(args[0], Expr::Input) {
                                                             if let Expr::Literal(Literal::Str(s)) = &args[1] {
-                                                                return Some((name.clone(), s.clone()));
+                                                                return Some((name.name().to_string(), s.clone()));
                                                             }
                                                         }
                                                     }
@@ -8008,11 +7985,11 @@ impl Filter {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
                 if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                     if let Expr::Pipe { left: split_expr, right: join_expr } = right.as_ref() {
-                        if let Expr::CallBuiltin { name: split_name, args: split_args } = split_expr.as_ref() {
-                            if split_name != "split" || split_args.len() != 1 { return None; }
+                        if let Expr::CallBuiltin { op: split_name, args: split_args } = split_expr.as_ref() {
+                            if *split_name != BuiltinOp::Split || split_args.len() != 1 { return None; }
                             if let Expr::Literal(Literal::Str(split_str)) = &split_args[0] {
-                                if let Expr::CallBuiltin { name: join_name, args: join_args } = join_expr.as_ref() {
-                                    if join_name != "join" || join_args.len() != 1 { return None; }
+                                if let Expr::CallBuiltin { op: join_name, args: join_args } = join_expr.as_ref() {
+                                    if *join_name != BuiltinOp::Join || join_args.len() != 1 { return None; }
                                     if let Expr::Literal(Literal::Str(join_str)) = &join_args[0] {
                                         return Some((field.clone(), split_str.clone(), join_str.clone()));
                                     }
@@ -8040,8 +8017,8 @@ impl Filter {
                 else { return None; }
             } else { return None; };
             if let Expr::Pipe { left: l2, right: r2 } = right.as_ref() {
-                let split_sep = if let Expr::CallBuiltin { name, args } = l2.as_ref() {
-                    if name != "split" || args.len() != 1 { return None; }
+                let split_sep = if let Expr::CallBuiltin { op: name, args } = l2.as_ref() {
+                    if *name != BuiltinOp::Split || args.len() != 1 { return None; }
                     if let Expr::Literal(Literal::Str(s)) = &args[0] { s.clone() }
                     else { return None; }
                 } else { return None; };
@@ -8069,8 +8046,8 @@ impl Filter {
                         };
                         (from_val, to_val)
                     } else { return None; };
-                    let join_sep = if let Expr::CallBuiltin { name, args } = r3.as_ref() {
-                        if name != "join" || args.len() != 1 { return None; }
+                    let join_sep = if let Expr::CallBuiltin { op: name, args } = r3.as_ref() {
+                        if *name != BuiltinOp::Join || args.len() != 1 { return None; }
                         if let Expr::Literal(Literal::Str(s)) = &args[0] { s.clone() }
                         else { return None; }
                     } else { return None; };
@@ -8093,8 +8070,8 @@ impl Filter {
                 _ => return None,
             };
             if !matches!(operand.as_ref(), Expr::Input) { return None; }
-            if let Expr::CallBuiltin { name, args } = right.as_ref() {
-                if name == "join" && args.len() == 1 {
+            if let Expr::CallBuiltin { op: name, args } = right.as_ref() {
+                if *name == BuiltinOp::Join && args.len() == 1 {
                     if let Expr::Literal(crate::ir::Literal::Str(sep)) = &args[0] {
                         return Some((sep.clone(), is_sorted));
                     }
@@ -8260,8 +8237,8 @@ impl Filter {
                         None
                     }
                     fn extract_split(e: &Expr) -> Option<String> {
-                        if let Expr::CallBuiltin { name, args } = e {
-                            if name == "split" && args.len() == 1 {
+                        if let Expr::CallBuiltin { op: name, args } = e {
+                            if *name == BuiltinOp::Split && args.len() == 1 {
                                 if let Expr::Literal(Literal::Str(sep)) = &args[0] {
                                     return Some(sep.clone());
                                 }
@@ -8314,17 +8291,11 @@ impl Filter {
                                 if let Some(sep) = extract_split(inner) { return Some(sep); }
                             }
                         }
-                        // Form 3: CallBuiltin("last", [split])
-                        if let Expr::CallBuiltin { name, args } = e {
-                            if name == "last" && args.len() == 1 {
-                                if let Some(sep) = extract_split(&args[0]) { return Some(sep); }
-                            }
-                        }
                         None
                     }
                     fn extract_split(e: &Expr) -> Option<String> {
-                        if let Expr::CallBuiltin { name, args } = e {
-                            if name == "split" && args.len() == 1 {
+                        if let Expr::CallBuiltin { op: name, args } = e {
+                            if *name == BuiltinOp::Split && args.len() == 1 {
                                 if let Expr::Literal(Literal::Str(sep)) = &args[0] {
                                     return Some(sep.clone());
                                 }
@@ -8344,11 +8315,6 @@ impl Filter {
                         // last is .[-1] or CallBuiltin("last", [Input])
                         if let Expr::Index { expr: inner, key } = e {
                             if matches!(inner.as_ref(), Expr::Input) && matches!(key.as_ref(), Expr::Literal(Literal::Num(n, _)) if *n == -1.0) {
-                                return true;
-                            }
-                        }
-                        if let Expr::CallBuiltin { name, args } = e {
-                            if name == "last" && args.len() == 1 && matches!(args[0], Expr::Input) {
                                 return true;
                             }
                         }
@@ -8426,12 +8392,12 @@ impl Filter {
             if let Expr::Index { expr: base, key } = path_expr.as_ref() {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
                 if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
-                    if let Expr::CallBuiltin { name, args } = upd.as_ref() {
+                    if let Expr::CallBuiltin { op: name, args } = upd.as_ref() {
                         if args.len() == 1 {
                             if let Expr::Literal(Literal::Str(arg)) = &args[0] {
-                                match name.as_str() {
-                                    "ltrimstr" => return Some((field.clone(), arg.clone(), false)),
-                                    "rtrimstr" => return Some((field.clone(), arg.clone(), true)),
+                                match name {
+                                    BuiltinOp::LtrimStr => return Some((field.clone(), arg.clone(), false)),
+                                    BuiltinOp::RtrimStr => return Some((field.clone(), arg.clone(), true)),
                                     _ => {}
                                 }
                             }
@@ -8657,8 +8623,8 @@ impl Filter {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
                 if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                     if let Expr::Pipe { left: split_expr, right: index_expr } = right.as_ref() {
-                        if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
-                            if name != "split" || args.len() != 1 { return None; }
+                        if let Expr::CallBuiltin { op: name, args } = split_expr.as_ref() {
+                            if *name != BuiltinOp::Split || args.len() != 1 { return None; }
                             if let Expr::Literal(Literal::Str(delim)) = &args[0] {
                                 // Check for .[0]
                                 let is_first = match index_expr.as_ref() {
@@ -8690,8 +8656,8 @@ impl Filter {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
                 if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                     if let Expr::Pipe { left: split_expr, right: index_expr } = right.as_ref() {
-                        if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
-                            if name != "split" || args.len() != 1 { return None; }
+                        if let Expr::CallBuiltin { op: name, args } = split_expr.as_ref() {
+                            if *name != BuiltinOp::Split || args.len() != 1 { return None; }
                             if let Expr::Literal(Literal::Str(delim)) = &args[0] {
                                 if let Expr::Index { expr: ibase, key: ikey } = index_expr.as_ref() {
                                     if matches!(ibase.as_ref(), Expr::Input) {
@@ -8723,8 +8689,8 @@ impl Filter {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
                 if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                     if let Expr::Pipe { left: split_expr, right: last_expr } = right.as_ref() {
-                        if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
-                            if name != "split" || args.len() != 1 { return None; }
+                        if let Expr::CallBuiltin { op: name, args } = split_expr.as_ref() {
+                            if *name != BuiltinOp::Split || args.len() != 1 { return None; }
                             if let Expr::Literal(Literal::Str(delim)) = &args[0] {
                                 // Check for .[-1] (last is parsed as .[-1])
                                 let is_last = matches!(last_expr.as_ref(),
@@ -8754,8 +8720,8 @@ impl Filter {
                 if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                     // Pipe(split("s"), Pipe(last, tonumber)) or Pipe(split("s"), tonumber(last))
                     if let Expr::Pipe { left: split_expr, right: rest } = right.as_ref() {
-                        if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
-                            if name != "split" || args.len() != 1 { return None; }
+                        if let Expr::CallBuiltin { op: name, args } = split_expr.as_ref() {
+                            if *name != BuiltinOp::Split || args.len() != 1 { return None; }
                             if let Expr::Literal(Literal::Str(delim)) = &args[0] {
                                 // rest should be Pipe(last, tonumber) or UnaryOp(Tonumber, last)
                                 if let Expr::Pipe { left: last_expr, right: tonum_expr } = rest.as_ref() {
@@ -8802,8 +8768,8 @@ impl Filter {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
                 if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                     if let Expr::Pipe { left: split_expr, right: rest } = right.as_ref() {
-                        if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
-                            if name != "split" || args.len() != 1 { return None; }
+                        if let Expr::CallBuiltin { op: name, args } = split_expr.as_ref() {
+                            if *name != BuiltinOp::Split || args.len() != 1 { return None; }
                             if let Expr::Literal(Literal::Str(delim)) = &args[0] {
                                 // rest: Pipe(.[N], tonumber) or UnaryOp(ToNumber, .[N])
                                 if let Expr::Pipe { left: idx_expr, right: tonum_expr } = rest.as_ref() {
@@ -8856,8 +8822,8 @@ impl Filter {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
                 if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                     if let Expr::Pipe { left: split_expr, right: len_expr } = right.as_ref() {
-                        if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
-                            if name != "split" || args.len() != 1 { return None; }
+                        if let Expr::CallBuiltin { op: name, args } = split_expr.as_ref() {
+                            if *name != BuiltinOp::Split || args.len() != 1 { return None; }
                             if let Expr::Literal(Literal::Str(delim)) = &args[0] {
                                 // Plain length
                                 if matches!(len_expr.as_ref(), Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
@@ -8904,8 +8870,8 @@ impl Filter {
                             if matches!(base.as_ref(), Expr::Input) {
                                 if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                                     if let Expr::Pipe { left: split_expr, right: len_expr } = right.as_ref() {
-                                        if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
-                                            if name == "split" && args.len() == 1 {
+                                        if let Expr::CallBuiltin { op: name, args } = split_expr.as_ref() {
+                                            if *name == BuiltinOp::Split && args.len() == 1 {
                                                 if let Expr::Literal(Literal::Str(delim)) = &args[0] {
                                                     if matches!(len_expr.as_ref(), Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
                                                         return Some((field.clone(), delim.clone(), *op, *n));
@@ -8920,8 +8886,8 @@ impl Filter {
                     }
                     // Beta-reduced: lhs might be Length(Split(.field, "sep"))
                     if let Expr::UnaryOp { op: UnaryOp::Length, operand: inner } = lhs.as_ref() {
-                        if let Expr::CallBuiltin { name, args } = inner.as_ref() {
-                            if name == "split" && args.len() == 2 {
+                        if let Expr::CallBuiltin { op: name, args } = inner.as_ref() {
+                            if *name == BuiltinOp::Split && args.len() == 2 {
                                 if let Expr::Index { expr: base, key } = &args[0] {
                                     if matches!(base.as_ref(), Expr::Input) {
                                         if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
@@ -8943,8 +8909,8 @@ impl Filter {
                 if matches!(base.as_ref(), Expr::Input) {
                     if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                         if let Expr::Pipe { left: split_expr, right: cmp_expr } = right.as_ref() {
-                            if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
-                                if name == "split" && args.len() == 1 {
+                            if let Expr::CallBuiltin { op: name, args } = split_expr.as_ref() {
+                                if *name == BuiltinOp::Split && args.len() == 1 {
                                     if let Expr::Literal(Literal::Str(delim)) = &args[0] {
                                         if let Expr::BinOp { op, lhs: cmp_lhs, rhs: cmp_rhs } = cmp_expr.as_ref() {
                                             if matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne) {
@@ -8976,8 +8942,8 @@ impl Filter {
                 if !matches!(base.as_ref(), Expr::Input) { return None; }
                 if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
                     if let Expr::Pipe { left: split_expr, right: concat_expr } = right.as_ref() {
-                        if let Expr::CallBuiltin { name, args } = split_expr.as_ref() {
-                            if name != "split" || args.len() != 1 { return None; }
+                        if let Expr::CallBuiltin { op: name, args } = split_expr.as_ref() {
+                            if *name != BuiltinOp::Split || args.len() != 1 { return None; }
                             if let Expr::Literal(Literal::Str(delim)) = &args[0] {
                                 let mut parts = Vec::new();
                                 if Self::collect_split_concat_parts(concat_expr, &mut parts) && parts.len() >= 2 {
@@ -9055,10 +9021,10 @@ impl Filter {
             if let Expr::Pipe { left: op_expr, right: len_expr } = right.as_ref() {
                 if matches!(len_expr.as_ref(), Expr::UnaryOp { op: UnaryOp::Length, operand } if matches!(operand.as_ref(), Expr::Input)) {
                     match op_expr.as_ref() {
-                        Expr::CallBuiltin { name, args } if args.len() == 1 => {
+                        Expr::CallBuiltin { op: name, args } if args.len() == 1 => {
                             if let Expr::Literal(Literal::Str(arg)) = &args[0] {
-                                match name.as_str() {
-                                    "ltrimstr" | "rtrimstr" => return Some((field, name.clone(), Some(arg.clone()))),
+                                match name {
+                                    BuiltinOp::LtrimStr | BuiltinOp::RtrimStr => return Some((field, name.name().to_string(), Some(arg.clone()))),
                                     _ => {}
                                 }
                             }
@@ -9240,10 +9206,6 @@ impl Filter {
                         else { return None; }
                     } else { return None; };
                     match right.as_ref() {
-                        Expr::CallBuiltin { name, args } if args.is_empty() => {
-                            if name == "max" { return Some((field1, field2, true)); }
-                            if name == "min" { return Some((field1, field2, false)); }
-                        }
                         Expr::UnaryOp { op: UnaryOp::Max, operand } if matches!(operand.as_ref(), Expr::Input) => {
                             return Some((field1, field2, true));
                         }
@@ -9994,14 +9956,13 @@ impl Filter {
                 if let Expr::Index { expr: base, key } = left.as_ref() {
                     if matches!(base.as_ref(), Expr::Input) {
                         if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
-                            if let Expr::CallBuiltin { name, args } = right.as_ref() {
+                            if let Expr::CallBuiltin { op: name, args } = right.as_ref() {
                                 if args.len() == 1 {
                                     if let Expr::Literal(Literal::Str(s)) = &args[0] {
-                                        let rhs = match name.as_str() {
-                                            "startswith" => Some(CondRhs::Startswith(s.clone())),
-                                            "endswith" => Some(CondRhs::Endswith(s.clone())),
-                                            "contains" => Some(CondRhs::Contains(s.clone())),
-                                            "test" => Some(CondRhs::Test(s.clone())),
+                                        let rhs = match name {
+                                            BuiltinOp::StartsWith => Some(CondRhs::Startswith(s.clone())),
+                                            BuiltinOp::EndsWith => Some(CondRhs::Endswith(s.clone())),
+                                            BuiltinOp::Contains => Some(CondRhs::Contains(s.clone())),
                                             _ => None,
                                         };
                                         if let Some(r) = rhs {
@@ -10973,10 +10934,10 @@ impl Filter {
                     if let Expr::Index { expr: base, key } = pl.as_ref() {
                         if matches!(base.as_ref(), Expr::Input) {
                             if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
-                                if let Expr::CallBuiltin { name, args } = pr.as_ref() {
-                                    if matches!(name.as_str(), "startswith" | "endswith" | "contains") && args.len() == 1 {
+                                if let Expr::CallBuiltin { op: name, args } = pr.as_ref() {
+                                    if matches!(name, BuiltinOp::StartsWith | BuiltinOp::EndsWith | BuiltinOp::Contains) && args.len() == 1 {
                                         if let Expr::Literal(Literal::Str(arg)) = &args[0] {
-                                            return Some((field.clone(), name.clone(), arg.clone(), rexprs));
+                                            return Some((field.clone(), name.name().to_string(), arg.clone(), rexprs));
                                         }
                                     }
                                 }
@@ -11039,10 +11000,10 @@ impl Filter {
                     if let Expr::Index { expr: base, key } = pipe_left.as_ref() {
                         if matches!(base.as_ref(), Expr::Input) {
                             if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
-                                if let Expr::CallBuiltin { name, args } = pipe_right.as_ref() {
-                                    if matches!(name.as_str(), "startswith" | "endswith" | "contains") && args.len() == 1 {
+                                if let Expr::CallBuiltin { op: name, args } = pipe_right.as_ref() {
+                                    if matches!(name, BuiltinOp::StartsWith | BuiltinOp::EndsWith | BuiltinOp::Contains) && args.len() == 1 {
                                         if let Expr::Literal(Literal::Str(arg)) = &args[0] {
-                                            return Some((field.clone(), name.clone(), arg.clone(), output_field));
+                                            return Some((field.clone(), name.name().to_string(), arg.clone(), output_field));
                                         }
                                     }
                                 }
@@ -11104,10 +11065,10 @@ impl Filter {
                     if let Expr::Index { expr: base, key } = pipe_left.as_ref() {
                         if matches!(base.as_ref(), Expr::Input) {
                             if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
-                                if let Expr::CallBuiltin { name, args } = pipe_right.as_ref() {
-                                    if matches!(name.as_str(), "startswith" | "endswith" | "contains") && args.len() == 1 {
+                                if let Expr::CallBuiltin { op: name, args } = pipe_right.as_ref() {
+                                    if matches!(name, BuiltinOp::StartsWith | BuiltinOp::EndsWith | BuiltinOp::Contains) && args.len() == 1 {
                                         if let Expr::Literal(Literal::Str(arg)) = &args[0] {
-                                            return Some((field.clone(), name.clone(), arg.clone(), upd_field, arith_op, arith_val));
+                                            return Some((field.clone(), name.name().to_string(), arg.clone(), upd_field, arith_op, arith_val));
                                         }
                                     }
                                 }
@@ -11201,10 +11162,10 @@ impl Filter {
                 if let Expr::Index { expr: base, key } = left.as_ref() {
                     if matches!(base.as_ref(), Expr::Input) {
                         if let Expr::Literal(Literal::Str(field)) = key.as_ref() {
-                            if let Expr::CallBuiltin { name, args } = right.as_ref() {
-                                if matches!(name.as_str(), "startswith" | "endswith" | "contains") && args.len() == 1 {
+                            if let Expr::CallBuiltin { op: name, args } = right.as_ref() {
+                                if matches!(name, BuiltinOp::StartsWith | BuiltinOp::EndsWith | BuiltinOp::Contains) && args.len() == 1 {
                                     if let Expr::Literal(Literal::Str(arg)) = &args[0] {
-                                        return Some((field.clone(), name.clone(), arg.clone()));
+                                        return Some((field.clone(), name.name().to_string(), arg.clone()));
                                     }
                                 }
                             }
@@ -11505,8 +11466,8 @@ impl Filter {
     pub fn detect_walk_num_op(&self) -> Option<(crate::ir::BinOp, f64)> {
         use crate::ir::{Expr, BinOp, Literal, UnaryOp};
         let expr = self.detect_expr()?;
-        if let Expr::CallBuiltin { name, args } = expr {
-            if name != "walk" || args.len() != 1 { return None; }
+        if let Expr::CallBuiltin { op: name, args } = expr {
+            if *name != BuiltinOp::Walk || args.len() != 1 { return None; }
             // The body should be: if type == "number" then . op N else . end
             if let Expr::IfThenElse { cond, then_branch, else_branch } = &args[0] {
                 // else_branch must be identity (.)

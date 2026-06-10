@@ -414,8 +414,8 @@ fn subst_inner(
         Expr::ClosureOp { op, input_expr, key_expr } => Expr::ClosureOp {
             op: *op, input_expr: sb!(input_expr), key_expr: sb!(key_expr),
         },
-        Expr::CallBuiltin { name, args: bargs } => Expr::CallBuiltin {
-            name: name.clone(), args: bargs.iter().map(|a| s!(a)).collect(),
+        Expr::CallBuiltin { op, args: bargs } => Expr::CallBuiltin {
+            op: *op, args: bargs.iter().map(|a| s!(a)).collect(),
         },
         Expr::Slice { expr: e, from, to } => Expr::Slice {
             expr: sb!(e), from: from.as_ref().map(|f| sb!(f)), to: to.as_ref().map(|t| sb!(t)),
@@ -518,8 +518,8 @@ pub(crate) fn append_call_args(expr: &Expr, target: FuncId, extra: &[Expr]) -> E
         Expr::ClosureOp { op, input_expr, key_expr } => Expr::ClosureOp {
             op: *op, input_expr: rb!(input_expr), key_expr: rb!(key_expr),
         },
-        Expr::CallBuiltin { name, args } => Expr::CallBuiltin {
-            name: name.clone(), args: args.iter().map(|a| r!(a)).collect(),
+        Expr::CallBuiltin { op, args } => Expr::CallBuiltin {
+            op: *op, args: args.iter().map(|a| r!(a)).collect(),
         },
         Expr::Slice { expr: e, from, to } => Expr::Slice {
             expr: rb!(e), from: from.as_ref().map(|f| rb!(f)), to: to.as_ref().map(|t| rb!(t)),
@@ -795,11 +795,11 @@ fn subst_cow(expr: &Expr, pv: &[VarIdx], args: &[Expr]) -> Option<Expr> {
                 key_expr: Box::new(k.unwrap_or_else(|| key_expr.as_ref().clone())),
             })
         }
-        Expr::CallBuiltin { name, args: bargs } => {
+        Expr::CallBuiltin { op, args: bargs } => {
             let results: Vec<_> = bargs.iter().map(|a| s!(a)).collect();
             if results.iter().all(|r| r.is_none()) { return None; }
             Some(Expr::CallBuiltin {
-                name: name.clone(),
+                op: *op,
                 args: bargs.iter().zip(results).map(|(a, r)| r.unwrap_or_else(|| a.clone())).collect(),
             })
         }
@@ -4000,8 +4000,8 @@ pub fn eval(
             cb(Value::number(id as f64))
         }
 
-        Expr::CallBuiltin { name, args } => {
-            eval_call_builtin(name, args, input, env, cb)
+        Expr::CallBuiltin { op, args } => {
+            eval_call_builtin(op.name(), args, input, env, cb)
         }
 
         Expr::Memoize { slot_id, key, body } => {
@@ -5551,24 +5551,24 @@ fn source_nav_error(source: &Expr, input: &Value, env: &EnvRef) -> anyhow::Error
 /// argument. `$x` (`arg`) is evaluated against the same input as the builtin,
 /// matching `def`-bound semantics; it is referenced twice, so a generator
 /// argument (vanishingly rare in a path expression) is re-evaluated.
-fn lower_trimstr_path(name: &str, arg: &Expr) -> Expr {
+fn lower_trimstr_path(op: BuiltinOp, arg: &Expr) -> Expr {
     let len_of_arg = || Expr::UnaryOp { op: crate::ir::UnaryOp::Length, operand: Box::new(arg.clone()) };
-    match name {
-        "ltrimstr" => Expr::IfThenElse {
-            cond: Box::new(Expr::CallBuiltin { name: "startswith".to_string(), args: vec![arg.clone()] }),
+    match op {
+        BuiltinOp::LtrimStr => Expr::IfThenElse {
+            cond: Box::new(Expr::CallBuiltin { op: BuiltinOp::StartsWith, args: vec![arg.clone()] }),
             then_branch: Box::new(Expr::Slice { expr: Box::new(Expr::Input), from: Some(Box::new(len_of_arg())), to: None }),
             else_branch: Box::new(Expr::Input),
         },
-        "rtrimstr" => Expr::IfThenElse {
-            cond: Box::new(Expr::CallBuiltin { name: "endswith".to_string(), args: vec![arg.clone()] }),
+        BuiltinOp::RtrimStr => Expr::IfThenElse {
+            cond: Box::new(Expr::CallBuiltin { op: BuiltinOp::EndsWith, args: vec![arg.clone()] }),
             then_branch: Box::new(Expr::Slice { expr: Box::new(Expr::Input), from: None, to: Some(Box::new(Expr::Negate { operand: Box::new(len_of_arg()) })) }),
             else_branch: Box::new(Expr::Input),
         },
         // `trimstr` is `ltrimstr | rtrimstr`: a left match then a right match
         // compose into a two-component slice path, exactly as jq emits.
         _ => Expr::Pipe {
-            left: Box::new(lower_trimstr_path("ltrimstr", arg)),
-            right: Box::new(lower_trimstr_path("rtrimstr", arg)),
+            left: Box::new(lower_trimstr_path(BuiltinOp::LtrimStr, arg)),
+            right: Box::new(lower_trimstr_path(BuiltinOp::RtrimStr, arg)),
         },
     }
 }
@@ -5896,17 +5896,6 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 }
             }
             Ok(true)
-        }
-        Expr::CallBuiltin { name, args } if name == "getpath" && args.len() == 1 => {
-            // In path context, getpath(p) yields the path p — but jq still
-            // traverses the input along p and raises a type error if an
-            // intermediate value cannot be indexed. `rt_getpath` performs that
-            // exact check (lenient on missing keys, strict on type mismatch), so
-            // validate before emitting the path. #775
-            eval(&args[0], input.clone(), env, &mut |pv| {
-                crate::runtime::rt_getpath(&input, &pv)?;
-                cb(pv)
-            })
         }
         Expr::GetPath { path } => {
             // In path context, getpath(p) = the path p itself, validated against
@@ -6385,10 +6374,10 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
         // The `*str` trim builtins are jq-defined slice expressions, so they are
         // path-transparent: lower to that definition and reuse the slice-path
         // machinery (no-match → identity `[]`, match → slice path). #962
-        Expr::CallBuiltin { name, args }
-            if args.len() == 1 && matches!(name.as_str(), "ltrimstr" | "rtrimstr" | "trimstr") =>
+        Expr::CallBuiltin { op, args }
+            if args.len() == 1 && matches!(op, BuiltinOp::LtrimStr | BuiltinOp::RtrimStr | BuiltinOp::TrimStr) =>
         {
-            let lowered = lower_trimstr_path(name, &args[0]);
+            let lowered = lower_trimstr_path(*op, &args[0]);
             eval_path(&lowered, input, env, cb)
         }
         // The whitespace trim builtins (`trim`/`ltrim`/`rtrim`) are value-
