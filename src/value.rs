@@ -2520,6 +2520,21 @@ pub fn json_object_update_field_slice(
 pub fn json_object_values_tostring(
     b: &[u8], pos: usize, buf: &mut Vec<u8>,
 ) -> bool {
+    // Wrapper: roll back partial output when the walk bails mid-object —
+    // the caller falls back to the generic path and would otherwise emit
+    // the partial bytes in front of the real record (#1021).
+    let start_len = buf.len();
+    if json_object_values_tostring_inner(b, pos, buf) {
+        true
+    } else {
+        buf.truncate(start_len);
+        false
+    }
+}
+
+fn json_object_values_tostring_inner(
+    b: &[u8], pos: usize, buf: &mut Vec<u8>,
+) -> bool {
     if pos >= b.len() || b[pos] != b'{' { return false; }
     buf.push(b'{');
     let mut i = pos + 1;
@@ -2560,6 +2575,11 @@ pub fn json_object_values_tostring(
                 i += 1;
             }
             buf.extend_from_slice(&b[val_start..i]);
+        } else if b[i] == b'{' || b[i] == b'[' {
+            // Composite: jq's tostring is the tojson text with inner quotes
+            // escaped for the surrounding string — defer to the generic path
+            // (the verbatim wrap emitted invalid JSON, #1021).
+            return false;
         } else {
             // Number, bool, null — find end, wrap in quotes
             let end = match skip_json_value(b, val_start) {
@@ -2567,18 +2587,20 @@ pub fn json_object_values_tostring(
                 Err(_) => return false,
             };
             let val_bytes = &b[val_start..end];
-            buf.push(b'"');
-            // For numbers, use push_jq_number_bytes for jq-compatible formatting
-            if b[val_start] == b'-' || b[val_start].is_ascii_digit() {
-                if let Ok(n) = unsafe { std::str::from_utf8_unchecked(val_bytes) }.parse::<f64>() {
-                    push_jq_number_bytes(buf, n);
-                } else {
-                    buf.extend_from_slice(val_bytes);
-                }
-            } else {
-                // true, false, null
-                buf.extend_from_slice(val_bytes);
+            // A 16+ digit lexeme exceeds f64 exactness — the typed path
+            // renders its f64 form (no decnum), so verbatim copy would
+            // diverge from the engine. Defer to the generic path.
+            if (b[val_start] == b'-' || b[val_start].is_ascii_digit())
+                && val_bytes.iter().filter(|c| c.is_ascii_digit()).count() > 15
+            {
+                return false;
             }
+            buf.push(b'"');
+            // The caller bails on non-canonical number lexemes, so a number
+            // here is already in jq's output form — copy it verbatim. The
+            // old parse + push_jq_number_bytes round-trip dropped the
+            // literal repr ("1.50" became "1.5", #1021).
+            buf.extend_from_slice(val_bytes);
             buf.push(b'"');
             i = end;
         }
@@ -4022,7 +4044,7 @@ pub fn raw_contains_noncanon_escape(b: &[u8]) -> bool {
 /// output encoder. A malformed escape falls back to the verbatim copy with
 /// only `\/` rewritten — the pre-existing behavior — so these emit sites
 /// never start erroring on input the raw path previously passed through.
-fn push_string_content_canon(buf: &mut Vec<u8>, content: &[u8]) {
+pub fn push_string_content_canon(buf: &mut Vec<u8>, content: &[u8]) {
     let mut tok = Vec::with_capacity(content.len() + 2);
     tok.push(b'"');
     tok.extend_from_slice(content);
@@ -6278,6 +6300,38 @@ pub fn value_to_json_tojson(v: &Value) -> String {
     out
 }
 
+/// Append a number in tojson/tostring form: a valid, exactly round-tripping
+/// literal repr is kept in jq's canonical (uppercase-E decnum) form; anything
+/// else — a computed value, a NaN/Infinity lexeme (`nan`, `infinity`), or a
+/// repr that doesn't round-trip — takes the canonical f64 writer (`null` for
+/// NaN, the clamped max double for Infinity). Shared by `tojson`/`tostring`,
+/// the JIT string-interpolation buffer, and `@json`/`@text` so a parsed-input
+/// NaN or non-canonical lexeme cannot leak through one formatter after being
+/// fixed in another (#771, #1021).
+pub fn push_num_tojson_str(out: &mut String, n: f64, repr: Option<&Rc<str>>) {
+    if let Some(r) = repr.filter(|r| is_valid_json_number(r) && repr_is_exact_for_f64(r, n)) {
+        if let Some(canonical) = normalize_jq_repr(r) {
+            out.push_str(&canonical);
+        } else {
+            out.push_str(r);
+        }
+    } else if let Some(canonical) = repr
+        .filter(|r| is_valid_json_number(r) && n.is_finite() && n != 0.0)
+        .and_then(|r| normalize_jq_repr(r))
+        .filter(|c| c.as_str().parse::<f64>().ok() == Some(n))
+    {
+        // Subnormal-edge case (#616): `repr_is_exact_for_f64` is too
+        // conservative for tiny exponents (< -323), but the literal
+        // can still round-trip through f64 — e.g. `5e-324` is the
+        // canonical form for the smallest positive subnormal. Prefer
+        // the normalised repr when it parses back to the same bits;
+        // otherwise fall through to the lossy f64 dtoa form.
+        out.push_str(&canonical);
+    } else {
+        push_jq_number_str(out, n);
+    }
+}
+
 fn push_value_tojson(v: &Value, out: &mut String, depth: usize) {
     if depth > MAX_JSON_DEPTH {
         out.push_str("\"<skipped: too deep>\"");
@@ -6287,30 +6341,7 @@ fn push_value_tojson(v: &Value, out: &mut String, depth: usize) {
         Value::Null => out.push_str("null"),
         Value::False => out.push_str("false"),
         Value::True => out.push_str("true"),
-        Value::Num(n, NumRepr(repr)) => {
-            if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r) && repr_is_exact_for_f64(r, *n)) {
-                if let Some(canonical) = normalize_jq_repr(r) {
-                    out.push_str(&canonical);
-                } else {
-                    out.push_str(r);
-                }
-            } else if let Some(canonical) = repr
-                .as_ref()
-                .filter(|r| is_valid_json_number(r) && n.is_finite() && *n != 0.0)
-                .and_then(|r| normalize_jq_repr(r))
-                .filter(|c| c.as_str().parse::<f64>().ok() == Some(*n))
-            {
-                // Subnormal-edge case (#616): `repr_is_exact_for_f64` is too
-                // conservative for tiny exponents (< -323), but the literal
-                // can still round-trip through f64 — e.g. `5e-324` is the
-                // canonical form for the smallest positive subnormal. Prefer
-                // the normalised repr when it parses back to the same bits;
-                // otherwise fall through to the lossy f64 dtoa form.
-                out.push_str(&canonical);
-            } else {
-                push_jq_number_str(out, *n);
-            }
-        }
+        Value::Num(n, NumRepr(repr)) => push_num_tojson_str(out, *n, repr.as_ref()),
         Value::Str(s) => push_json_string(out, s),
         Value::Arr(a) => {
             out.push('[');

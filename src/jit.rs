@@ -8006,16 +8006,18 @@ extern "C" fn jit_rt_strbuf_append_val(env: *mut JitEnv, val: *const Value) {
             Value::False => buf.push_str("false"),
             Value::True => buf.push_str("true"),
             Value::Num(n, NumRepr(repr)) => {
-                if let Some(r) = repr {
-                    buf.push_str(r);
-                } else {
-                    // Write directly to the string's byte buffer — avoids intermediate String
-                    let bytes = buf.as_mut_vec();
-                    crate::value::push_jq_number_bytes(bytes, *n);
-                }
+                // Mirror eval's interpolation, which runs tostring semantics
+                // (#560): a parsed NaN/Infinity lexeme ("nan", "infinity") or
+                // a non-canonical literal ("1e3") retained as repr must not
+                // be echoed verbatim — jq prints null / the clamped max
+                // double / the canonical uppercase-E form (#1021).
+                crate::value::push_num_tojson_str(buf, *n, repr.as_ref());
             }
             v => {
-                let s = crate::value::value_to_json(v);
+                // Composites carry reprs on nested numbers too — use the
+                // tojson writer so "\([1e3])" matches eval's "[1E+3]" and a
+                // nested parsed NaN renders null (#1021).
+                let s = crate::value::value_to_json_tojson(v);
                 buf.push_str(&s);
             }
         }

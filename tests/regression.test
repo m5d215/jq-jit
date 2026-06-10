@@ -13462,3 +13462,33 @@ null
 .x
 {"x":"ab"}
 "a\u007fb"
+
+# Issue #1021: parsed-input NaN normalizes through @json/@text/interpolation
+[(.a | @json), (.a | @text), "\(.a)"]
+{"a":nan}
+["null","null","null"]
+
+# Issue #1021: parsed Infinity and non-canonical lexemes render canonically in interpolation
+"\(.a)|\(.b)|\(.c)"
+{"a":infinity,"b":1e3,"c":5e-324}
+"1.7976931348623157e+308|1E+3|5E-324"
+
+# Issue #1021: composites in interpolation use tojson number formatting
+"\(.a)"
+{"a":[1e3,{"k":nan}]}
+"[1E+3,{\"k\":null}]"
+
+# Issue #1021: @json/@text on composites escape inner quotes
+[(.a | @text), (.a | @json)]
+{"a":{"k":1}}
+["{\"k\":1}","{\"k\":1}"]
+
+# Issue #1021: tostring preserves the literal repr through the raw fast paths
+[(.a | tostring), (.a | tostring | length)]
+{"a":1.50}
+["1.50",4]
+
+# Issue #1021: with_entries tostring keeps reprs and escapes composites correctly
+with_entries(.value |= tostring)
+{"a":1.50,"b":"x"}
+{"a":"1.50","b":"x"}

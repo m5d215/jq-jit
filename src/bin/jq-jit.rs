@@ -874,40 +874,136 @@ fn resolve_remap_exprs_array(
 fn emit_tostring_raw(buf: &mut Vec<u8>, val: &[u8]) {
     if val.is_empty() { buf.extend_from_slice(b"null"); return; }
     match val[0] {
-        b'"' => buf.extend_from_slice(val), // string → as-is
+        // String: identity, but `\/` / `\uXXXX` re-encode like any raw
+        // string output (#1027).
+        b'"' => {
+            if raw_contains_noncanon_escape(val) {
+                push_raw_canon_escapes(buf, val);
+            } else {
+                buf.extend_from_slice(val);
+            }
+        }
         b't' => buf.extend_from_slice(b"\"true\""),
         b'f' => buf.extend_from_slice(b"\"false\""),
         b'n' => buf.extend_from_slice(b"\"null\""),
         _ => {
-            // number → wrap in quotes
+            // Number → wrap in quotes. A canonical lexeme copies verbatim —
+            // jq's tostring preserves the literal repr ("1.50" stays
+            // "1.50") — and a NaN/Infinity/non-canonical lexeme re-renders
+            // through the tojson number writer (#1021).
             buf.push(b'"');
-            // Re-format through push_jq_number_bytes for jq compat
-            if let Some(n) = parse_json_num(val) {
-                push_jq_number_bytes(buf, n);
-            } else {
-                buf.extend_from_slice(val);
-            }
+            push_interp_num_canon(buf, val);
             buf.push(b'"');
         }
     }
 }
 
+/// Append a raw JSON number lexeme in tostring form: canonical lexemes copy
+/// verbatim (preserving the literal repr, e.g. `1.50`), while a NaN/Infinity
+/// or non-canonical lexeme (`nan`, `1e3`) re-renders through the typed tojson
+/// number writer so it matches eval (`null`, `1E+3`; #1021).
+#[inline]
+fn push_interp_num_canon(buf: &mut Vec<u8>, val: &[u8]) {
+    // Plain integers — the overwhelmingly common case — are always canonical;
+    // a tight all-digits check skips the LUT classifier (mirrors
+    // append_canonical_value's hot path).
+    if val.iter().all(|&x| x.is_ascii_digit() || x == b'-') {
+        buf.extend_from_slice(val);
+        return;
+    }
+    if raw_contains_non_canonical_number(val) {
+        if let Ok(v @ jq_jit::value::Value::Num(..)) =
+            json_to_value(unsafe { std::str::from_utf8_unchecked(val) })
+        {
+            // value_to_json_tojson on a bare number is exactly the tojson
+            // number writer (push_num_tojson_str) — NaN -> null, Infinity ->
+            // clamped max double, literal reprs in canonical uppercase-E form.
+            buf.extend_from_slice(jq_jit::value::value_to_json_tojson(&v).as_bytes());
+            return;
+        }
+    }
+    buf.extend_from_slice(val);
+}
+
+/// Variant of [`emit_interp_field_raw`] for records pre-checked to contain
+/// no `\` / DEL byte anywhere (one per-record `memchr2` amortizes the
+/// per-field escape scans on the interpolation hot paths): string content
+/// copies verbatim, composites still escape their quotes for embedding and
+/// re-render on a non-canonical nested number, numbers go through the
+/// canonical lexeme gate (#1021).
+#[inline]
+fn emit_interp_field_raw_clean(buf: &mut Vec<u8>, val: &[u8]) {
+    if val.is_empty() { return; }
+    match val[0] {
+        b'"' if val.len() >= 2 => buf.extend_from_slice(&val[1..val.len()-1]),
+        b't' => buf.extend_from_slice(b"true"),
+        b'f' => buf.extend_from_slice(b"false"),
+        b'n' if val == b"null" => buf.extend_from_slice(b"null"),
+        b'[' | b'{' => {
+            if raw_contains_non_canonical_number(val) {
+                if let Ok(v) = json_to_value(unsafe { std::str::from_utf8_unchecked(val) }) {
+                    let s = jq_jit::value::value_to_json_tojson(&v);
+                    for &b in s.as_bytes() {
+                        match b {
+                            b'"' => buf.extend_from_slice(b"\\\""),
+                            b'\\' => buf.extend_from_slice(b"\\\\"),
+                            _ => buf.push(b),
+                        }
+                    }
+                    return;
+                }
+            }
+            for &b in val {
+                match b {
+                    b'"' => buf.extend_from_slice(b"\\\""),
+                    // No backslash in a clean record; only quotes need escaping.
+                    _ => buf.push(b),
+                }
+            }
+        }
+        _ => push_interp_num_canon(buf, val),
+    }
+}
+
 /// Emit a raw JSON field value into a string interpolation context (tostring, no outer quotes).
-/// Strings: copy inner content (already JSON-escaped). Numbers/bool/null: copy as-is.
-/// Arrays/objects: copy raw JSON but escape any " and \ for embedding in JSON string.
+/// Strings: copy inner content, re-encoding non-canonical escapes (#1027).
+/// Numbers: canonical lexemes as-is, NaN/Infinity/non-canonical re-rendered (#1021).
+/// Arrays/objects: copy raw JSON, escaping " and \ for embedding; nested
+/// non-canonical numbers/escapes re-render through the typed writer first.
 #[inline]
 fn emit_interp_field_raw(buf: &mut Vec<u8>, val: &[u8]) {
     if val.is_empty() { return; }
     match val[0] {
         b'"' if val.len() >= 2 => {
-            // String: inner content is already JSON-escaped
-            buf.extend_from_slice(&val[1..val.len()-1]);
+            // String: inner content is already JSON-escaped; `\/` / `\uXXXX`
+            // must be re-encoded the way jq's output encoder would (#1027).
+            let content = &val[1..val.len()-1];
+            if raw_contains_noncanon_escape(content) {
+                jq_jit::value::push_string_content_canon(buf, content);
+            } else {
+                buf.extend_from_slice(content);
+            }
         }
         b't' => buf.extend_from_slice(b"true"),
         b'f' => buf.extend_from_slice(b"false"),
-        b'n' => buf.extend_from_slice(b"null"),
+        b'n' if val == b"null" => buf.extend_from_slice(b"null"),
         b'[' | b'{' => {
-            // Array/object: tojson — need to escape " and \ for embedding
+            // Array/object: tojson — escape " and \ for embedding. A nested
+            // non-canonical number lexeme or string escape re-renders through
+            // the typed tojson writer first so "\([1e3])" matches eval (#1021).
+            if raw_contains_non_canonical_number(val) || raw_contains_noncanon_escape(val) {
+                if let Ok(v) = json_to_value(unsafe { std::str::from_utf8_unchecked(val) }) {
+                    let s = jq_jit::value::value_to_json_tojson(&v);
+                    for &b in s.as_bytes() {
+                        match b {
+                            b'"' => buf.extend_from_slice(b"\\\""),
+                            b'\\' => buf.extend_from_slice(b"\\\\"),
+                            _ => buf.push(b),
+                        }
+                    }
+                    return;
+                }
+            }
             for &b in val {
                 match b {
                     b'"' => buf.extend_from_slice(b"\\\""),
@@ -916,14 +1012,7 @@ fn emit_interp_field_raw(buf: &mut Vec<u8>, val: &[u8]) {
                 }
             }
         }
-        _ => {
-            // Number: re-format for jq compat
-            if let Some(n) = parse_json_num(val) {
-                push_jq_number_bytes(buf, n);
-            } else {
-                buf.extend_from_slice(val);
-            }
-        }
+        _ => push_interp_num_canon(buf, val),
     }
 }
 
@@ -2168,6 +2257,9 @@ fn emit_resolved_value(
             }
         }
         ResolvedRemap::StringChain(ref parts) => {
+            // Per-record escape gate (#1027 cost control): no backslash/DEL
+            // anywhere means no string part can need re-encoding.
+            let strings_clean = memchr::memchr2(b'\\', 0x7F, raw).is_none();
             buf.push(b'"');
             for part in parts {
                 match part {
@@ -2178,9 +2270,16 @@ fn emit_resolved_value(
                         let (vs, ve) = ranges[*idx];
                         let val = &raw[vs..ve];
                         if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"' {
-                            // String field: emit unquoted inner content
-                            // Need to check for backslash escapes inside
-                            buf.extend_from_slice(&val[1..val.len()-1]);
+                            // String field: emit unquoted inner content,
+                            // re-encoding non-canonical escapes (#1027).
+                            let content = &val[1..val.len()-1];
+                            if strings_clean {
+                                buf.extend_from_slice(content);
+                            } else if raw_contains_noncanon_escape(content) {
+                                jq_jit::value::push_string_content_canon(buf, content);
+                            } else {
+                                buf.extend_from_slice(content);
+                            }
                         } else {
                             // Non-string field used in string concatenation — emit as-is
                             buf.extend_from_slice(val);
@@ -2190,11 +2289,20 @@ fn emit_resolved_value(
                         let (vs, ve) = ranges[*idx];
                         let val = &raw[vs..ve];
                         if val.len() >= 2 && val[0] == b'"' && val[val.len()-1] == b'"' {
-                            // Already a string — emit inner content
-                            buf.extend_from_slice(&val[1..val.len()-1]);
+                            // Already a string — emit inner content,
+                            // re-encoding non-canonical escapes (#1027).
+                            let content = &val[1..val.len()-1];
+                            if strings_clean {
+                                buf.extend_from_slice(content);
+                            } else if raw_contains_noncanon_escape(content) {
+                                jq_jit::value::push_string_content_canon(buf, content);
+                            } else {
+                                buf.extend_from_slice(content);
+                            }
                         } else {
-                            // Number/bool/null — emit raw bytes as string representation
-                            buf.extend_from_slice(val);
+                            // Number/bool/null — tostring form; a NaN/Infinity
+                            // or non-canonical lexeme re-renders (#1021).
+                            push_interp_num_canon(buf, val);
                         }
                     }
                     ResolvedStringChainPart::FieldArithToString(idx, ref ops) => {
@@ -7448,7 +7556,16 @@ fn real_main() {
                                     RawApplyOutcome::Emit
                                 }
                                 ("json" | "text", None) => {
-                                    // @json/@text on non-string scalars: wrap raw bytes in quotes
+                                    // @json/@text on non-string scalars: wrap raw bytes in
+                                    // quotes. A composite needs its inner quotes escaped, and
+                                    // a NaN/Infinity or non-canonical number lexeme must be
+                                    // normalised, not echoed (#1021) — both defer to the
+                                    // typed path.
+                                    if matches!(val.first(), Some(b'{') | Some(b'['))
+                                        || raw_contains_non_canonical_number(val)
+                                    {
+                                        return RawApplyOutcome::Bail;
+                                    }
                                     compact_buf.push(b'"');
                                     if raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                     compact_buf.extend_from_slice(b"\"\n");
@@ -7665,6 +7782,10 @@ fn real_main() {
                         }
                         // Extract all needed fields
                         if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
+                            // One scan amortizes the per-field escape checks:
+                            // a record with no backslash/DEL anywhere cannot
+                            // need string re-encoding (#1027 cost control).
+                            let strings_clean = memchr::memchr2(b'\\', 0x7F, raw).is_none();
                             compact_buf.push(b'"');
                             let mut field_idx = 0;
                             for (i, (is_lit, _)) in interp_parts.iter().enumerate() {
@@ -7674,29 +7795,15 @@ fn real_main() {
                                     let (vs, ve) = ranges_buf[field_idx];
                                     field_idx += 1;
                                     let val = &raw[vs..ve];
-                                    if val[0] == b'"' && val.len() >= 2 {
-                                        // String: copy inner content (already JSON-escaped)
-                                        compact_buf.extend_from_slice(&val[1..val.len()-1]);
-                                    } else if val[0] == b'[' || val[0] == b'{' {
-                                        // Container: embed JSON text, re-escaping for the
-                                        // surrounding string literal so the output stays
-                                        // valid JSON. Whitespace is copied as-is, which is
-                                        // fine since json_object_get_fields_raw_buf returns
-                                        // the compact slice from input.
-                                        for &b in val {
-                                            match b {
-                                                b'"' => compact_buf.extend_from_slice(b"\\\""),
-                                                b'\\' => compact_buf.extend_from_slice(b"\\\\"),
-                                                b'\n' => compact_buf.extend_from_slice(b"\\n"),
-                                                b'\r' => compact_buf.extend_from_slice(b"\\r"),
-                                                b'\t' => compact_buf.extend_from_slice(b"\\t"),
-                                                c if c < 0x20 => { let _ = write!(compact_buf, "\\u{:04x}", c); }
-                                                _ => compact_buf.push(b),
-                                            }
-                                        }
+                                    // Shared emitters: strings re-encode
+                                    // non-canonical escapes (#1027); numbers
+                                    // keep canonical lexemes and re-render
+                                    // NaN/Infinity/non-canonical ones (#1021);
+                                    // composites re-escape for embedding.
+                                    if strings_clean {
+                                        emit_interp_field_raw_clean(&mut compact_buf, val);
                                     } else {
-                                        // Number/bool/null: copy as-is (jq tostring behavior)
-                                        if raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
+                                        emit_interp_field_raw(&mut compact_buf, val);
                                     }
                                 }
                             }
@@ -7784,6 +7891,8 @@ fn real_main() {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             } else {
+                                // Per-record escape gate (#1027 cost control).
+                                let strings_clean = memchr::memchr2(b'\\', 0x7F, raw).is_none();
                                 compact_buf.push(b'"');
                                 for &(idx, typ, ai) in &actions {
                                     match typ {
@@ -7792,7 +7901,15 @@ fn real_main() {
                                             let (vs, ve) = ranges_buf[idx];
                                             let val = &raw[vs..ve];
                                             // val is guaranteed quoted-string here.
-                                            compact_buf.extend_from_slice(&val[1..val.len()-1]);
+                                            // Re-encode non-canonical escapes (#1027).
+                                            let content = &val[1..val.len()-1];
+                                            if strings_clean {
+                                                compact_buf.extend_from_slice(content);
+                                            } else if raw_contains_noncanon_escape(content) {
+                                                jq_jit::value::push_string_content_canon(&mut compact_buf, content);
+                                            } else {
+                                                compact_buf.extend_from_slice(content);
+                                            }
                                         }
                                         _ => {
                                             // FieldArithToString: parse number, apply ops, format
@@ -12279,14 +12396,16 @@ fn real_main() {
                                     compact_buf.extend_from_slice(b"5\n");
                                 }
                                 _ => {
-                                    // Number: format with push_jq_number_bytes, count the bytes
-                                    if let Some(n) = parse_json_num(val) {
-                                        let start_len = compact_buf.len();
-                                        push_jq_number_bytes(&mut compact_buf, n);
-                                        let formatted_len = compact_buf.len() - start_len;
-                                        compact_buf.truncate(start_len);
+                                    // Number: tostring preserves the canonical literal
+                                    // lexeme, so the length is the lexeme's byte count
+                                    // ("1.50" -> 4, not 3). Non-canonical / 16+ digit
+                                    // lexemes defer to the generic path (#1021).
+                                    if parse_json_num(val).is_some()
+                                        && !raw_contains_non_canonical_number(val)
+                                        && val.iter().filter(|c| c.is_ascii_digit()).count() <= 15
+                                    {
                                         let mut ibuf = itoa::Buffer::new();
-                                        compact_buf.extend_from_slice(ibuf.format(formatted_len).as_bytes());
+                                        compact_buf.extend_from_slice(ibuf.format(val.len()).as_bytes());
                                         compact_buf.push(b'\n');
                                     } else {
                                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
@@ -19970,6 +20089,13 @@ fn real_main() {
                                 RawApplyOutcome::Emit
                             }
                             ("json" | "text", None) => {
+                                // Composite / non-canonical number lexeme: defer to the
+                                // typed path (inner-quote escaping, NaN -> null; #1021).
+                                if matches!(val.first(), Some(b'{') | Some(b'['))
+                                    || raw_contains_non_canonical_number(val)
+                                {
+                                    return RawApplyOutcome::Bail;
+                                }
                                 compact_buf.push(b'"');
                                 if raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                 compact_buf.extend_from_slice(b"\"\n");
@@ -20185,6 +20311,8 @@ fn real_main() {
                         return Ok(());
                     }
                     if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
+                        // See the NDJSON twin: per-record escape gate (#1027).
+                        let strings_clean = memchr::memchr2(b'\\', 0x7F, raw).is_none();
                         compact_buf.push(b'"');
                         let mut field_idx = 0;
                         for (i, (is_lit, _)) in interp_parts.iter().enumerate() {
@@ -20194,22 +20322,12 @@ fn real_main() {
                                 let (vs, ve) = ranges_buf[field_idx];
                                 field_idx += 1;
                                 let val = &raw[vs..ve];
-                                if val[0] == b'"' && val.len() >= 2 {
-                                    compact_buf.extend_from_slice(&val[1..val.len()-1]);
-                                } else if val[0] == b'[' || val[0] == b'{' {
-                                    for &b in val {
-                                        match b {
-                                            b'"' => compact_buf.extend_from_slice(b"\\\""),
-                                            b'\\' => compact_buf.extend_from_slice(b"\\\\"),
-                                            b'\n' => compact_buf.extend_from_slice(b"\\n"),
-                                            b'\r' => compact_buf.extend_from_slice(b"\\r"),
-                                            b'\t' => compact_buf.extend_from_slice(b"\\t"),
-                                            c if c < 0x20 => { let _ = write!(compact_buf, "\\u{:04x}", c); }
-                                            _ => compact_buf.push(b),
-                                        }
-                                    }
+                                // Shared emitter (see the NDJSON twin): #1027 /
+                                // #1021 canonicalisation in one place.
+                                if strings_clean {
+                                    emit_interp_field_raw_clean(&mut compact_buf, val);
                                 } else {
-                                    if raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
+                                    emit_interp_field_raw(&mut compact_buf, val);
                                 }
                             }
                         }
@@ -20291,6 +20409,8 @@ fn real_main() {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         } else {
+                            // Per-record escape gate (#1027 cost control).
+                            let strings_clean = memchr::memchr2(b'\\', 0x7F, raw).is_none();
                             compact_buf.push(b'"');
                             for &(idx, typ, ai) in &actions {
                                 match typ {
@@ -20298,7 +20418,15 @@ fn real_main() {
                                     1 => {
                                         let (vs, ve) = ranges_buf[idx];
                                         let val = &raw[vs..ve];
-                                        compact_buf.extend_from_slice(&val[1..val.len()-1]);
+                                        // Re-encode non-canonical escapes (#1027).
+                                        let content = &val[1..val.len()-1];
+                                        if strings_clean {
+                                            compact_buf.extend_from_slice(content);
+                                        } else if raw_contains_noncanon_escape(content) {
+                                            jq_jit::value::push_string_content_canon(&mut compact_buf, content);
+                                        } else {
+                                            compact_buf.extend_from_slice(content);
+                                        }
                                     }
                                     _ => {
                                         let (vs, ve) = ranges_buf[idx];
@@ -21032,13 +21160,15 @@ fn real_main() {
                             b't' => { compact_buf.extend_from_slice(b"4\n"); }
                             b'f' => { compact_buf.extend_from_slice(b"5\n"); }
                             _ => {
-                                if let Some(n) = parse_json_num(val) {
-                                    let start_len = compact_buf.len();
-                                    push_jq_number_bytes(&mut compact_buf, n);
-                                    let formatted_len = compact_buf.len() - start_len;
-                                    compact_buf.truncate(start_len);
+                                // Number length = canonical lexeme byte count
+                                // ("1.50" -> 4); non-canonical / 16+ digit
+                                // lexemes defer (#1021, see NDJSON twin).
+                                if parse_json_num(val).is_some()
+                                    && !raw_contains_non_canonical_number(val)
+                                    && val.iter().filter(|c| c.is_ascii_digit()).count() <= 15
+                                {
                                     let mut ibuf = itoa::Buffer::new();
-                                    compact_buf.extend_from_slice(ibuf.format(formatted_len).as_bytes());
+                                    compact_buf.extend_from_slice(ibuf.format(val.len()).as_bytes());
                                     compact_buf.push(b'\n');
                                 } else {
                                     let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;

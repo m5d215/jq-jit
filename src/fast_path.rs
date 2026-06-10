@@ -2112,9 +2112,11 @@ pub fn apply_with_entries_tostring_raw(
     buf: &mut Vec<u8>,
 ) -> RawApplyOutcome {
     // `tostring` on a number must use jq's canonical repr (`2e3` -> `"2E+3"`,
-    // not `"2000"`). The raw helper stringifies the f64 form, so bail to the
-    // generic path whenever a value holds a non-canonical number (#729).
-    if raw_contains_non_canonical_number(raw) {
+    // not `"2000"`), and string values/keys holding `\/` / `\uXXXX` escapes
+    // need re-encoding (#1027) — bail to the generic path for both (#729).
+    if raw_contains_non_canonical_number(raw)
+        || crate::value::raw_contains_noncanon_escape(raw)
+    {
         return RawApplyOutcome::Bail;
     }
     if json_object_values_tostring(raw, 0, buf) {
@@ -2698,9 +2700,15 @@ pub fn apply_field_unary_num_raw(
                         return RawApplyOutcome::Bail;
                     }
                     match parse_json_num(val) {
-                        Some(n) => {
+                        Some(_) => {
+                            // The non-canonical check above guarantees the
+                            // lexeme is already in jq's output form — copy it
+                            // verbatim. The old parse + reformat round-trip
+                            // dropped the literal repr ("1.50" became "1.5",
+                            // #1021). parse_json_num stays as the
+                            // numbers-only gate (strings/bools/null bail).
                             buf.push(b'"');
-                            push_jq_number_bytes(buf, n);
+                            buf.extend_from_slice(val);
                             buf.extend_from_slice(b"\"\n");
                         }
                         None => return RawApplyOutcome::Bail,
