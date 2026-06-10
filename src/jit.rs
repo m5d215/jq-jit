@@ -29,7 +29,7 @@ thread_local! {
     static JIT_LAST_ERROR: UnsafeCell<Option<JitError>> = const { UnsafeCell::new(None) };
     /// Closure ops captured at compile time; consumed by runtime trampolines
     /// during execution.
-    static JIT_CLOSURE_OPS: UnsafeCell<Vec<Expr>> = const { UnsafeCell::new(Vec::new()) };
+    static JIT_CLOSURE_OPS: UnsafeCell<Vec<Rc<Expr>>> = const { UnsafeCell::new(Vec::new()) };
     /// Pointer to the `JitEnv` currently being driven by `execute_jit*`.
     /// `set_jit_error*` consult this to flip the env's `error_flag` without
     /// plumbing an env pointer through every fallible trampoline signature.
@@ -531,6 +531,18 @@ enum JitOp {
     /// Fused field lookup + yield: borrows the field value from base without cloning.
     /// Replaces IndexField(dst) + Yield(dst) + Drop(dst).
     YieldFieldRef { base: SlotId, field: String },
+    /// Streaming eval delegation (#1059 Phase 3): run the stashed
+    /// closure-op expression `JIT_CLOSURE_OPS[expr_idx]` on the
+    /// tree-walking evaluator with the slot value as input, forwarding
+    /// every yielded value as it is produced — to the generator callback
+    /// when `push` is false, or onto the JitEnv collect stack (the
+    /// CollectPush equivalent) when the emission site sits inside a
+    /// Collect. Unlike the eager collect-then-iterate delegates this
+    /// preserves eval's streaming order and downstream early-stop.
+    /// Returns the early-stop verdict (<= 0) when the callback stops the
+    /// stream; eval errors go through the pending-error flag like
+    /// CallBuiltin (the emitter appends CheckError / JumpIfError).
+    DelegateGen { input: SlotId, expr_idx: usize, push: bool },
 
     // Control flow
     IfTruthy { src: SlotId, then_label: LabelId, else_label: LabelId },
@@ -725,6 +737,10 @@ struct Flattener {
     /// emitting partial code returns the init value instead of the right
     /// answer. (#648)
     has_unresolved_recursion: bool,
+    /// Set by `emit_delegate_gen` when the program contains a streaming
+    /// eval delegation (#1059 Phase 3). The default-dispatch feasibility
+    /// probe rejects such programs (see `is_jit_compilable_with_funcs`).
+    emitted_delegate: bool,
 }
 
 impl Flattener {
@@ -734,7 +750,8 @@ impl Flattener {
                      label_targets: HashMap::new(), funcs: Vec::new(),
                      limit_state: None, closure_ops: Vec::new(),
                      expanding_funcs: HashSet::new(), value_constants: Vec::new(),
-                     is_test: false, has_unresolved_recursion: false }
+                     is_test: false, has_unresolved_recursion: false,
+                     emitted_delegate: false }
     }
 
     /// Materialize a Literal into a heap-allocated Value and return a stable pointer.
@@ -1128,6 +1145,9 @@ impl Flattener {
             JitOp::Negate { .. } | JitOp::CallBuiltin { .. } |
             JitOp::ToF64VarRangeBound { .. } |
             JitOp::ThrowError { .. } |
+            // The eval delegate surfaces eval-side errors through the
+            // pending-error flag after zero or more yields (#1059 Phase 3).
+            JitOp::DelegateGen { .. } |
             // The fused field-op runtimes index `.field` on the base and return
             // GEN_ERROR for a non-object base ("Cannot index <type> with string").
             // Without a CheckError that error is set but never propagated, so the
@@ -1179,6 +1199,47 @@ impl Flattener {
             self.ops.push(JitOp::ReturnError);
             self.ops.push(JitOp::Label { id: ok_label });
         }
+    }
+
+    /// Emit a streaming eval delegation for `expr` (#1059 Phase 3), or
+    /// return false when the context cannot host one:
+    ///
+    /// - anywhere inside `limit(n; …)`: the per-yield counter ops the
+    ///   flattener plants after each yield cannot run inside the helper, so
+    ///   an unbounded delegated stream would ignore the limit — the exact
+    ///   eager-delegate hang of #1085. This blocks even collect contexts
+    ///   nested under the limit: the pipe fallback wraps an unmatched
+    ///   generator left in a CollectBegin, and an infinite delegated stream
+    ///   (`limit(1; path(recurse(.+1)) | .)`) would hang there where eval
+    ///   stops lazily.
+    /// - the subtree contains `break`: a break crossing the delegation
+    ///   boundary would surface as a plain eval error instead of unwinding
+    ///   to its label. The scan is a conservative Debug-format substring
+    ///   probe — a false positive (e.g. a literal string "Break") merely
+    ///   keeps the eval bail of the caller.
+    /// - `path_semantic` nodes (`path(...)`, `del(...)`, `pick(...)`)
+    ///   referencing any `$var`: the env seeding copies plain values, but
+    ///   eval's path provenance (#880/#953) also tracks *where* a variable
+    ///   was bound from — `. as $x | path($x)` is `[]` in eval and an
+    ///   "Invalid path expression" through a value-only seed. Value-semantic
+    ///   delegates (walk/skip/add) are fine with value seeding.
+    fn emit_delegate_gen(&mut self, expr: &Expr, input_slot: SlotId, path_semantic: bool) -> bool {
+        if self.limit_state.is_some() { return false; }
+        if format!("{:?}", expr).contains("Break") { return false; }
+        if path_semantic {
+            let mut vars = Vec::new();
+            Self::collect_loadvar_indices(expr, &mut vars);
+            if !vars.is_empty() { return false; }
+        }
+        let idx = self.closure_ops.len();
+        self.closure_ops.push(expr.clone());
+        self.emitted_delegate = true;
+        self.emit(JitOp::DelegateGen {
+            input: input_slot,
+            expr_idx: idx,
+            push: self.collect_depth > 0,
+        });
+        true
     }
 
     fn emit_yield(&mut self, output: SlotId) {
@@ -3742,14 +3803,19 @@ impl Flattener {
                         }
                     }
                 }
-                // Complex path expressions: bail the whole filter to eval.
-                // The old delegate collected every path into an array up
-                // front, which (a) hangs on infinite streams eval cuts
-                // lazily (`[limit(5; path(recurse(.a)))]`, #1085), and
-                // (b) predates the eval-side provenance fixes (#880/#953),
-                // erroring on rootless anchors like `. as $x | path($x)`.
-                // The flag forces the bail even from emission contexts
-                // that ignore a false return.
+                // Complex path expressions: stream the whole `path(...)`
+                // through the eval delegate (#1059 Phase 3). Unlike the old
+                // eager delegate this preserves laziness (downstream
+                // early-stop flows through the callback) and runs on
+                // today's eval, after the provenance fixes (#880/#953) —
+                // the two reasons the delegate was previously removed.
+                // Contexts the delegate cannot host (inside limit, break in
+                // the subtree) still bail the whole filter to eval; the
+                // flag forces that bail even from emission contexts that
+                // ignore a false return.
+                if self.emit_delegate_gen(expr, input_slot, true) {
+                    return true;
+                }
                 self.has_unresolved_recursion = true;
                 false
             }
@@ -3762,13 +3828,17 @@ impl Flattener {
                 true
             }
 
-            // Filter-argument builtins: delegate to eval (not JIT-compilable)
+            // Filter-argument builtins: stream the whole node through the
+            // eval delegate (#1059 Phase 3) instead of bailing the filter.
+            // `del`/`pick` take path expressions (provenance-sensitive);
+            // `walk`/`skip`/`add` take value filters.
             Expr::CallBuiltin { op, args } if matches!(
                 (op, args.len()),
                 (BuiltinOp::Walk, _) | (BuiltinOp::Pick, _) | (BuiltinOp::Skip, _)
                 | (BuiltinOp::Add, 1) | (BuiltinOp::Del, _)
             ) => {
-                false
+                let path_semantic = matches!(op, BuiltinOp::Del | BuiltinOp::Pick);
+                self.emit_delegate_gen(expr, input_slot, path_semantic)
             }
 
             // CallBuiltin with generator args: rewrite as nested LetBinding
@@ -7135,6 +7205,62 @@ extern "C" fn jit_rt_yield_field_ref(
         }
     }
 }
+/// Streaming eval delegation (#1059 Phase 3). Runs `JIT_CLOSURE_OPS[expr_idx]`
+/// on the tree-walking evaluator with `*input` as input, forwarding each
+/// yielded value as it is produced: `push != 0` pushes onto the JitEnv
+/// collect stack (the CollectPush equivalent for delegates emitted inside a
+/// Collect); otherwise the value goes to the generator callback, whose
+/// verdict <= 0 lazily stops the eval stream. Returns that verdict when
+/// stopped early, GEN_CONTINUE otherwise; eval errors set the pending-error
+/// flag (the flattener emits CheckError / JumpIfError after the op, like
+/// CallBuiltin).
+extern "C" fn jit_rt_delegate_gen(
+    input: *const Value, expr_idx: usize, push: i64,
+    cb: unsafe extern "C" fn(*const Value, *mut u8) -> i64, ctx: *mut u8,
+    env: *mut JitEnv,
+) -> i64 {
+    let expr = JIT_CLOSURE_OPS.with(|cell| unsafe { (&*cell.get()).get(expr_idx).cloned() });
+    let Some(expr) = expr else {
+        set_jit_error(format!("delegate_gen: missing closure op {}", expr_idx));
+        return GEN_CONTINUE;
+    };
+    thread_local! {
+        static DELEGATE_ENV: RefCell<Option<Rc<RefCell<crate::eval::Env>>>> =
+            const { RefCell::new(None) };
+    }
+    let eval_env = DELEGATE_ENV.with(|cell| {
+        let mut opt = cell.borrow_mut();
+        let env = opt
+            .get_or_insert_with(|| Rc::new(RefCell::new(crate::eval::Env::new(vec![]))))
+            .clone();
+        reset_delegated_env(&env, &[&expr]);
+        env
+    });
+    let input_val = unsafe { (*input).clone() };
+    let mut verdict: i64 = GEN_CONTINUE;
+    let result = crate::eval::eval(&expr, input_val, &eval_env, &mut |v| {
+        if push != 0 {
+            jit_rt_collect_push(env, &v as *const Value);
+            Ok(true)
+        } else {
+            let r = unsafe { cb(&v as *const Value, ctx) };
+            if r <= 0 {
+                verdict = r;
+                Ok(false)
+            } else {
+                Ok(true)
+            }
+        }
+    });
+    if let Err(e) = result {
+        // The delegated subtree is break-free by construction (the emitter
+        // skips subtrees containing `break`), so any error here — including
+        // eval's BreakError sentinel, defensively — is a plain jq error.
+        set_jit_error_from(&e);
+    }
+    verdict
+}
+
 extern "C" fn jit_rt_index(dst: *mut Value, base: *const Value, key: *const Value) -> i64 {
     unsafe {
         // Fast path: Array[Num] — most common in loops
@@ -9269,6 +9395,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 *use_count.entry(*key).or_insert(0) += 1;
             }
             JitOp::IndexField { base, .. } | JitOp::FieldBinopField { base, .. } | JitOp::YieldFieldRef { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
+            JitOp::DelegateGen { input, .. } => { *use_count.entry(*input).or_insert(0) += 1; }
             JitOp::FieldBinopConst { base, .. } => {
                 *use_count.entry(*base).or_insert(0) += 1;
             }
@@ -9355,6 +9482,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                     *use_count.entry(*key).or_insert(0) += 1;
                 }
                 JitOp::IndexField { base, .. } | JitOp::FieldBinopField { base, .. } | JitOp::YieldFieldRef { base, .. } => { *use_count.entry(*base).or_insert(0) += 1; }
+                JitOp::DelegateGen { input, .. } => { *use_count.entry(*input).or_insert(0) += 1; }
             JitOp::FieldBinopConst { base, .. } => {
                 *use_count.entry(*base).or_insert(0) += 1;
             }
@@ -9548,7 +9676,9 @@ fn flatten_filter(expr: &Expr, funcs: &[CompiledFunc]) -> Result<FlattenedFilter
 
     // Store closure ops for runtime access
     if !fl.closure_ops.is_empty() {
-        JIT_CLOSURE_OPS.with(|cell| unsafe { *cell.get() = fl.closure_ops.clone(); });
+        JIT_CLOSURE_OPS.with(|cell| unsafe {
+            *cell.get() = fl.closure_ops.iter().cloned().map(Rc::new).collect();
+        });
     }
 
     Ok(FlattenedFilter {
@@ -9604,6 +9734,7 @@ impl JitCompiler {
             ("jit_rt_index", jit_rt_index as *const u8),
             ("jit_rt_index_field", jit_rt_index_field as *const u8),
             ("jit_rt_yield_field_ref", jit_rt_yield_field_ref as *const u8),
+            ("jit_rt_delegate_gen", jit_rt_delegate_gen as *const u8),
             ("jit_rt_binop", jit_rt_binop as *const u8),
             ("jit_rt_add_move", jit_rt_add_move as *const u8),
             ("jit_rt_unaryop", jit_rt_unaryop as *const u8),
@@ -10338,6 +10469,28 @@ impl JitCompiler {
                         b.switch_to_block(cont_blk);
                         b.seal_block(cont_blk);
                     }
+                    JitOp::DelegateGen { input, expr_idx, push } => {
+                        // Same early-return discipline as YieldFieldRef: a
+                        // verdict <= 0 is the callback's stop signal and
+                        // propagates out of the generator immediately; eval
+                        // errors arrive via the pending-error flag and the
+                        // CheckError / JumpIfError the emitter placed next.
+                        let ia = slot_addr(&mut b, *input);
+                        let idx = b.ins().iconst(ptr_ty, *expr_idx as i64);
+                        let push_v = b.ins().iconst(ptr_ty, *push as i64);
+                        let call = b.ins().call(rt["delegate_gen"], &[ia, idx, push_v, cb_fn, cb_ctx, env_ptr]);
+                        let result = b.inst_results(call)[0];
+                        let zero = b.ins().iconst(ptr_ty, 0);
+                        let stop = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual, result, zero);
+                        let stop_blk = b.create_block();
+                        let cont_blk = b.create_block();
+                        b.ins().brif(stop, stop_blk, &[], cont_blk, &[]);
+                        b.switch_to_block(stop_blk);
+                        b.seal_block(stop_blk);
+                        b.ins().return_(&[result]);
+                        b.switch_to_block(cont_blk);
+                        b.seal_block(cont_blk);
+                    }
                     JitOp::IfTruthy { src, then_label, else_label } => {
                         // Inline: null(0) and false(1) are falsy, everything else truthy
                         let sa = slot_addr(&mut b, *src);
@@ -11016,6 +11169,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("index", [p, p, p], [p]);
     decl!("index_field", [p, p, p, p], [p]);
     decl!("yield_field_ref", [p, p, p, p, p], [p]);
+    decl!("delegate_gen", [p, p, p, p, p, p], [p]);  // input, expr_idx, push, cb, ctx, env -> verdict
     decl!("binop", [p, i, p, p], [p]);
     decl!("add_move", [p, p, p], [p]);
     decl!("unaryop", [p, i, p], [p]);
@@ -11086,7 +11240,26 @@ pub fn is_jit_compilable(expr: &Expr) -> bool {
     is_jit_compilable_with_funcs(expr, &[])
 }
 
+/// Default-dispatch feasibility: like the full probe, but rejects programs
+/// that would contain a `DelegateGen` op. Per-record eval delegation
+/// measures up to ~1.1x slower than whole-filter eval when the delegate
+/// dominates the filter (A/B on 200k-record NDJSON, #1059 Phase 3), so the
+/// default heuristics keep those filters on the tree-walking evaluator.
+/// The forced-mode knobs use [`is_jit_compilable_with_delegates`] so the
+/// backend self-diff still covers every delegable filter.
 pub fn is_jit_compilable_with_funcs(expr: &Expr, funcs: &[CompiledFunc]) -> bool {
+    let (ok, emitted_delegate) = jit_feasibility(expr, funcs);
+    ok && !emitted_delegate
+}
+
+/// Forced-mode feasibility: accepts programs that lower with streaming
+/// eval delegation (`DelegateGen`).
+pub fn is_jit_compilable_with_delegates(expr: &Expr, funcs: &[CompiledFunc]) -> bool {
+    jit_feasibility(expr, funcs).0
+}
+
+/// Returns `(flattens, emitted_delegate)`.
+fn jit_feasibility(expr: &Expr, funcs: &[CompiledFunc]) -> (bool, bool) {
     let mut fl = Flattener::new();
     fl.funcs = funcs.to_vec();
     // Mirror `compile_with_funcs`'s inline step so we detect the same
@@ -11096,14 +11269,14 @@ pub fn is_jit_compilable_with_funcs(expr: &Expr, funcs: &[CompiledFunc]) -> bool
     // the eventual `compile_with_funcs` then stack-overflows in
     // `inline_func_calls` (#648).
     let inlined = fl.inline_func_calls(expr);
-    if fl.has_unresolved_recursion { return false; }
+    if fl.has_unresolved_recursion { return (false, false); }
     let input = fl.alloc_slot();
     let ok = fl.flatten_gen(&inlined, input);
     // Subtrees may set `has_unresolved_recursion` mid-flatten to request
     // a JIT bailout (see #683 — Reduce arm in flatten_scalar). Re-check
     // here so the feasibility query agrees with `compile_with_funcs`.
-    if fl.has_unresolved_recursion { return false; }
-    ok
+    if fl.has_unresolved_recursion { return (false, false); }
+    (ok, fl.emitted_delegate)
 }
 
 unsafe extern "C" fn collect_callback(value: *const Value, ctx: *mut u8) -> i64 {
@@ -11355,7 +11528,14 @@ impl JitProgram {
                 }
             }
         }
-        let var_only_loops = Self::loops_are_var_only(&flat.ops, &label_pc);
+        // Delegated programs are excluded from the default sub-threshold
+        // routing (#1059 Phase 3): per-record delegation pays an eval-env
+        // reset that whole-filter eval does not, so until that class is
+        // A/B-measured the status quo (tree-walking eval) keeps those
+        // filters. Forced modes and above-threshold Cranelift still run
+        // them — that is where the delegation coverage pays off.
+        let var_only_loops = !flat.ops.iter().any(|op| matches!(op, JitOp::DelegateGen { .. }))
+            && Self::loops_are_var_only(&flat.ops, &label_pc);
         Ok(JitProgram {
             ops: flat.ops,
             num_slots: flat.num_slots,
@@ -11547,6 +11727,10 @@ impl JitProgram {
                 }
                 JitOp::YieldFieldRef { base, field } => {
                     let r = jit_rt_yield_field_ref(sp(*base), field.as_ptr(), field.len(), cb, ctx);
+                    if r <= 0 { return r; }
+                }
+                JitOp::DelegateGen { input, expr_idx, push } => {
+                    let r = jit_rt_delegate_gen(sp(*input), *expr_idx, *push as i64, cb, ctx, env_ptr);
                     if r <= 0 { return r; }
                 }
                 JitOp::IfTruthy { src, then_label, else_label } => {

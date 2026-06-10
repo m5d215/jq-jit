@@ -90,6 +90,23 @@ fn straight_line_collect_range_routes_to_jitop() {
     assert_eq!(label, "jitop");
 }
 
+/// Programs that lower with a streaming eval delegate (#1059 Phase 3)
+/// stay on whole-filter eval in default dispatch: per-record delegation
+/// measures slower than eval when the delegate dominates. The forced-mode
+/// knobs compile them (tests/selfdiff_jitop_backend.rs covers that side).
+#[test]
+fn delegated_program_stays_on_eval_by_default() {
+    let label = traced_label("[path(.a // .b)]", r#"{"b":1}"#, None);
+    assert_eq!(label, "eval");
+}
+
+/// `--force-jit` accepts delegated programs (debug knob, full coverage).
+#[test]
+fn force_jit_compiles_delegated_program() {
+    let label = traced_label("[path(.a // .b)]", r#"{"b":1}"#, Some("--force-jit"));
+    assert_eq!(label, "jit");
+}
+
 /// `--force-jit` keeps its "Cranelift or eval" debug semantics: the JitOp
 /// routing must not capture it.
 #[test]
