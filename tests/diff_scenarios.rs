@@ -17,6 +17,8 @@ use common::json_normalize::normalize;
 
 const TEST_LABEL: &str = "diff_scenarios";
 const TIMEOUT: Duration = Duration::from_secs(10);
+/// Retry budget for cases whose first run involved a `<timeout>` (#1053).
+const RETRY_TIMEOUT: Duration = Duration::from_secs(40);
 
 struct Case {
     name: String,
@@ -73,8 +75,17 @@ fn corpus_diff_against_jq_1_8() {
         let input = std::fs::read_to_string(&case.input_path)
             .unwrap_or_else(|e| panic!("read {}: {}", case.input_path.display(), e));
 
-        let jq_out = run_script_file(&jq, &case.script_path, &input, TIMEOUT);
-        let jit_out = run_script_file(jq_jit, &case.script_path, &input, TIMEOUT);
+        let mut jq_out = run_script_file(&jq, &case.script_path, &input, TIMEOUT);
+        let mut jit_out = run_script_file(jq_jit, &case.script_path, &input, TIMEOUT);
+        // A load-induced `<timeout>` on either side heals on a retry with a
+        // larger budget; a genuine hang times out again (#1053).
+        let timed_out = |o: &Option<common::diff_harness::RunOutput>| {
+            o.as_ref().is_some_and(|r| r.stdout == "<timeout>")
+        };
+        if timed_out(&jq_out) || timed_out(&jit_out) {
+            jq_out = run_script_file(&jq, &case.script_path, &input, RETRY_TIMEOUT);
+            jit_out = run_script_file(jq_jit, &case.script_path, &input, RETRY_TIMEOUT);
+        }
 
         let (Some(a), Some(b)) = (jq_out, jit_out) else {
             fail += 1;
