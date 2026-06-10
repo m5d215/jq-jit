@@ -697,6 +697,8 @@ where
         Err(_) => return RawApplyOutcome::Bail,
     };
     for (op, c) in arith_ops {
+        // jq raises on a zero divisor; bail to generic eval (#1063)
+        if matches!(op, BinOp::Div | BinOp::Mod) && *c == 0.0 { return RawApplyOutcome::Bail; }
         n = match op {
             BinOp::Add => n + c,
             BinOp::Sub => n - c,
@@ -835,6 +837,8 @@ where
         Some(p) => p,
         None => return RawApplyOutcome::Bail,
     };
+    // jq raises on a zero divisor; bail to generic eval (#1063)
+    if matches!(op, BinOp::Div | BinOp::Mod) && b == 0.0 { return RawApplyOutcome::Bail; }
     let result = match op {
         BinOp::Add => a + b,
         BinOp::Sub => a - b,
@@ -2502,6 +2506,8 @@ where
         };
         if let Some(p) = pos {
             let cp_pos = inner[..p].iter().filter(|&&b| (b & 0xC0) != 0x80).count() as f64;
+            // jq raises on a zero divisor; bail to generic eval (#1063)
+            if matches!(op, BinOp::Div | BinOp::Mod) && n == 0.0 { return RawApplyOutcome::Bail; }
             let result = match op {
                 BinOp::Add => cp_pos + n,
                 BinOp::Sub => cp_pos - n,
@@ -2812,6 +2818,8 @@ where
     };
     let mut v = base;
     for (op, c) in arith_steps {
+        // jq raises on a zero divisor; bail to generic eval (#1063)
+        if matches!(op, BinOp::Div | BinOp::Mod) && *c == 0.0 { return RawApplyOutcome::Bail; }
         v = match op {
             BinOp::Add => v + c,
             BinOp::Sub => v - c,
@@ -2869,6 +2877,8 @@ where
         None => return RawApplyOutcome::Bail,
     };
     let (a, b) = if const_left { (cval, n) } else { (n, cval) };
+    // jq raises on a zero divisor; bail to generic eval (#1063)
+    if matches!(bop, BinOp::Div | BinOp::Mod) && b == 0.0 { return RawApplyOutcome::Bail; }
     let mid = match bop {
         BinOp::Add => a + b,
         BinOp::Sub => a - b,
@@ -2929,6 +2939,8 @@ where
         Some(p) => p,
         None => return RawApplyOutcome::Bail,
     };
+    // jq raises on a zero divisor; bail to generic eval (#1063)
+    if matches!(op1, BinOp::Div | BinOp::Mod) && b == 0.0 { return RawApplyOutcome::Bail; }
     let inner = match op1 {
         BinOp::Add => a + b,
         BinOp::Sub => a - b,
@@ -2937,6 +2949,8 @@ where
         BinOp::Mod => jq_mod_f64(a, b).unwrap_or(f64::NAN),
         _ => return RawApplyOutcome::Bail,
     };
+    // jq raises on a zero divisor; bail to generic eval (#1063)
+    if matches!(op2, BinOp::Div | BinOp::Mod) && cval == 0.0 { return RawApplyOutcome::Bail; }
     let result = match op2 {
         BinOp::Add => inner + cval,
         BinOp::Sub => inner - cval,
@@ -2987,6 +3001,8 @@ where
     };
     let mut result = n;
     for (op, c) in ops {
+        // jq raises on a zero divisor; bail to generic eval (#1063)
+        if matches!(op, BinOp::Div | BinOp::Mod) && *c == 0.0 { return RawApplyOutcome::Bail; }
         result = match op {
             BinOp::Add => result + c,
             BinOp::Sub => result - c,
@@ -3661,6 +3677,8 @@ where
         None => return RawApplyOutcome::Bail,
     };
     for (op, n) in arith_ops {
+        // jq raises on a zero divisor; bail to generic eval (#1063)
+        if matches!(op, BinOp::Div | BinOp::Mod) && *n == 0.0 { return RawApplyOutcome::Bail; }
         val = match op {
             BinOp::Add => val + n,
             BinOp::Sub => val - n,
@@ -3719,6 +3737,8 @@ where
         None => return RawApplyOutcome::Bail,
     };
     for (op, c) in arith_ops {
+        // jq raises on a zero divisor; bail to generic eval (#1063)
+        if matches!(op, BinOp::Div | BinOp::Mod) && *c == 0.0 { return RawApplyOutcome::Bail; }
         n = match op {
             BinOp::Add => n + c,
             BinOp::Sub => n - c,
