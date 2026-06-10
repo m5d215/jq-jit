@@ -149,6 +149,13 @@ crate::ir::named_op_enum! {
         Last => "last",
         Nth => "nth",
         Range => "range",
+        /// JIT-only: validate `range` bounds before the f64 loop (the
+        /// unboxed counter silently coerces non-numbers). #1084
+        RangeBoundsGuard => "_range_bounds_guard",
+        /// JIT-only: the match/capture generator lowering swallows the
+        /// internal no-match error; this arm rethrows everything else so
+        /// genuine type errors stay catchable. #1084
+        RethrowUnlessNoMatch => "_match_rethrow",
         While => "while",
         Until => "until",
         Repeat => "repeat",
@@ -486,6 +493,12 @@ pub fn call_builtin_op(op: RtBuiltin, args: &[Value]) -> Result<Value> {
             }
         }
         RtBuiltin::Sub | RtBuiltin::Gsub => {
+            // eval validates the input before the regex, so a non-string
+            // input wins over a non-string pattern; keep that order and
+            // wording here (#1084).
+            if !matches!(&args[0], Value::Str(_)) {
+                bail!("{} cannot be matched, as it is not a string", errdesc(&args[0]));
+            }
             if args.len() >= 4 {
                 // sub/gsub with flags: input, regex, replacement, flags
                 let pat_str = coerce_regex_pat_str(&args[1])?;
@@ -506,6 +519,29 @@ pub fn call_builtin_op(op: RtBuiltin, args: &[Value]) -> Result<Value> {
             // limit needs special handling as a generator
             Ok(Value::Null)
         }),
+        RtBuiltin::RangeBoundsGuard => {
+            // JIT-only (#1084): the range loops run on unboxed f64 counters
+            // that silently coerce non-numbers, so validate the bounds with
+            // eval's message before entering the loop. args: [from, to].
+            match (&args[0], &args[1]) {
+                (Value::Num(_, _), Value::Num(_, _)) => Ok(Value::Null),
+                _ => bail!("Range bounds must be numeric"),
+            }
+        }
+        RtBuiltin::RethrowUnlessNoMatch => {
+            // JIT-only (#1084): the match/capture generator lowering catches
+            // every error to map jq's internal no-match signal to "no
+            // output"; everything else (type errors, bad regexes) must
+            // propagate so try/catch sees the canonical message.
+            match &args[0] {
+                Value::Str(s) if s.as_str() == "match failed" => Ok(Value::Null),
+                Value::Str(s) => bail!("{}", s.as_str()),
+                other => bail!(
+                    "__jqerror__:{}",
+                    crate::value::value_to_json_precise(other),
+                ),
+            }
+        }
         RtBuiltin::First | RtBuiltin::Last | RtBuiltin::Nth | RtBuiltin::Range | RtBuiltin::While | RtBuiltin::Until | RtBuiltin::Repeat | RtBuiltin::Recurse
         | RtBuiltin::Getpath | RtBuiltin::Setpath | RtBuiltin::Delpaths => {
             // These need special handling
@@ -3814,29 +3850,41 @@ fn rt_sub_gsub(v: &Value, re: &Value, replacement: &Value, global: bool, not_emp
     match (v, re, replacement) {
         (Value::Str(s), Value::Str(r), Value::Str(rep)) => {
             let result = with_regex(r, |regex| {
-                if not_empty {
-                    // With `n`, replace only the non-empty matches. `replace`/
-                    // `replace_all` cannot skip zero-width matches, so walk the
-                    // filtered spans and splice the literal replacement (this
-                    // builtin path takes a plain string replacement). #773
-                    let spans = drop_empty_spans(jq_match_spans(regex, s), true);
-                    let mut out = String::with_capacity(s.len());
-                    let mut last = 0;
-                    for (start, end) in spans {
-                        out.push_str(&s[last..start]);
-                        out.push_str(rep.as_str());
-                        last = end;
-                        if !global { break; }
-                    }
-                    out.push_str(&s[last..]);
-                    out
-                } else if global {
-                    regex.replace_all(s, rep.as_str()).to_string()
-                } else {
-                    regex.replace(s, rep.as_str()).to_string()
+                // Walk jq_match_spans and splice the literal replacement
+                // (this builtin path takes a plain string replacement).
+                // `replace`/`replace_all` cannot be used here: jq
+                // enumerates an empty match adjacent to a non-empty one
+                // for zero-width regexes (`gsub("a*"; "X")` on `"abc"` →
+                // `"XXbXcX"`), which find_iter-based replacement skips
+                // (#444); with `n`, the zero-width matches are dropped
+                // instead (#773).
+                if !global && !not_empty {
+                    // Non-global sub replaces only the leftmost match, which
+                    // find/replace locates identically — skip the full span
+                    // enumeration.
+                    return regex.replace(s, rep.as_str()).to_string();
                 }
+                let spans = drop_empty_spans(jq_match_spans(regex, s), not_empty);
+                let mut out = String::with_capacity(s.len());
+                let mut last = 0;
+                for (start, end) in spans {
+                    out.push_str(&s[last..start]);
+                    out.push_str(rep.as_str());
+                    last = end;
+                    if !global { break; }
+                }
+                out.push_str(&s[last..]);
+                out
             })?;
             Ok(Value::from_string(result))
+        }
+        (other, _, _) if !matches!(other, Value::Str(_)) => {
+            // eval's wording for a non-string input (#1084).
+            bail!("{} cannot be matched, as it is not a string", errdesc(other));
+        }
+        (_, other, _) if !matches!(other, Value::Str(_)) => {
+            // eval's wording for a non-string pattern (#1084).
+            bail!("{} is not a string", errdesc(other));
         }
         _ => bail!("sub/gsub requires string, regex, and replacement"),
     }

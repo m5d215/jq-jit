@@ -297,7 +297,7 @@ fn can_scalar_collect(expr: &Expr) -> bool {
         }
         Expr::Empty => true,
         Expr::Range { from, to, step } => {
-            is_scalar(from) && is_scalar(to) && step.as_ref().is_none_or(|s| is_scalar(s))
+            is_scalar(from) && is_scalar(to) && range_step_is_safe(step.as_deref())
         }
         Expr::Collect { generator } => can_scalar_collect(generator),
         Expr::LetBinding { value, body, .. } => {
@@ -322,6 +322,31 @@ fn can_scalar_collect(expr: &Expr) -> bool {
 /// the first-iteration machinery.
 fn range_from_may_carry_repr(from: &Expr) -> bool {
     !matches!(from, Expr::Literal(Literal::Num(_, None)))
+}
+
+/// True when the expression is provably a number at compile time.
+fn expr_is_num_literal(e: &Expr) -> bool {
+    matches!(e, Expr::Literal(Literal::Num(..)))
+}
+
+/// #1084: a non-numeric `step` needs eval's lazy semantics (yield the first
+/// item, then surface "X and Y cannot be added" on the increment — or
+/// nothing at all when the loop condition fails under jq's total order).
+/// The f64 loop can't express that, so provably non-numeric literal steps
+/// bail to eval. Dynamic steps stay on the JIT path: they are numeric in
+/// practice (where the loop is exact), and bailing them would silently
+/// drop loops in emission contexts that ignore a `false` return (the
+/// nested in-place reduce shapes, cf. #683).
+fn range_step_is_safe(step: Option<&Expr>) -> bool {
+    match step {
+        None => true,
+        Some(Expr::Literal(lit)) => matches!(lit, Literal::Num(..)),
+        // Array/object/string constructions are provably non-numeric.
+        Some(Expr::Collect { .. })
+        | Some(Expr::ObjectConstruct { .. })
+        | Some(Expr::StringInterpolation { .. }) => false,
+        Some(_) => true,
+    }
 }
 
 fn is_scalar(expr: &Expr) -> bool {
@@ -585,6 +610,11 @@ enum JitOp {
 
     // Range loop
     ToF64Var { dst_var: u32, src: SlotId },
+    /// ToF64Var that raises "Range bounds must be numeric" on a non-number
+    /// instead of coercing to 0.0. Used for range bounds that are not
+    /// provably numeric at compile time (#1084) — same single FFI call as
+    /// the unchecked form, so dynamic-bound range loops pay nothing extra.
+    ToF64VarRangeBound { dst_var: u32, src: SlotId },
     F64Less { dst_var: u32, a_var: u32, b_var: u32 },
     F64Equal { dst_var: u32, a_var: u32, b_var: u32 },
     F64Add { dst_var: u32, a_var: u32, b_var: u32 },
@@ -1094,6 +1124,7 @@ impl Flattener {
             JitOp::Index { .. } | JitOp::IndexField { .. } |
             JitOp::BinOp { .. } | JitOp::AddMove { .. } | JitOp::UnaryOp { .. } |
             JitOp::Negate { .. } | JitOp::CallBuiltin { .. } |
+            JitOp::ToF64VarRangeBound { .. } |
             JitOp::ThrowError { .. } |
             // The fused field-op runtimes index `.field` on the base and return
             // GEN_ERROR for a non-object base ("Cannot index <type> with string").
@@ -2032,7 +2063,7 @@ impl Flattener {
                 // dynamic init falls back to the boxed reduce path that surfaces
                 // jq's "X and Y cannot be added" error.
                 let is_fused_range_f64 = if let Expr::Range { from, to, step } = source.as_ref() {
-                    is_scalar(from) && is_scalar(to) && step.as_ref().is_none_or(|s| is_scalar(s))
+                    is_scalar(from) && is_scalar(to) && range_step_is_safe(step.as_deref())
                         // Reprless init only: an empty range yields the init
                         // verbatim in eval (`reduce range(0) as $x (0.0; ...)`
                         // → `0.0`), which the f64 round-trip would drop. #1083
@@ -2061,8 +2092,7 @@ impl Flattener {
                         let step_v = self.alloc_var();
                         let cmp = self.alloc_var();
                         let acc_f64 = self.alloc_var();
-                        self.emit(JitOp::ToF64Var { dst_var: cur, src: from_val });
-                        self.emit(JitOp::ToF64Var { dst_var: to_v, src: to_val });
+                        self.emit_range_bound_vars(cur, from_val, Some(from), to_v, to_val, Some(to));
                         self.emit(JitOp::ToF64Var { dst_var: step_v, src: step_val });
                         // The MoveToVar at the start of this Reduce arm consumed
                         // `acc_val` and replaced the slot with Null, so reading
@@ -2073,7 +2103,7 @@ impl Flattener {
                         self.emit(JitOp::GetVar { dst: acc_init, var_index: *acc_index });
                         self.emit(JitOp::ToF64Var { dst_var: acc_f64, src: acc_init });
                         self.emit(JitOp::Drop { slot: acc_init });
-                        self.emit(JitOp::Drop { slot: from_val });
+                                self.emit(JitOp::Drop { slot: from_val });
                         self.emit(JitOp::Drop { slot: to_val });
                         self.emit(JitOp::Drop { slot: step_val });
                         let head = self.alloc_label();
@@ -2235,6 +2265,14 @@ impl Flattener {
                         Expr::Literal(Literal::Num(n, None)) if *n == 0.0);
                     if is_from_zero && step.is_none() {
                         let n_slot = self.flatten_scalar(to, input_slot);
+                        // #1084: a non-numeric bound must raise "Range
+                        // bounds must be numeric" instead of being coerced.
+                        if !expr_is_num_literal(to) {
+                            let zero = self.alloc_slot();
+                            self.emit(JitOp::Num { dst: zero, val: 0.0, repr: None });
+                            self.emit_range_bounds_guard_slots(zero, n_slot);
+                            self.emit(JitOp::Drop { slot: zero });
+                        }
                         let out = self.alloc_slot();
                         self.emit(JitOp::CollectRange { dst: out, n: n_slot });
                         self.emit(JitOp::Drop { slot: n_slot });
@@ -2864,6 +2902,9 @@ impl Flattener {
             }
 
             Expr::Range { from, to, step } => {
+                // #1084: non-numeric steps need eval's lazy add-error
+                // semantics; bail the whole filter to eval.
+                if !range_step_is_safe(step.as_deref()) { return false; }
                 let step_scalar = step.as_ref().is_none_or(|s| is_scalar(s));
                 if !is_scalar(from) || !is_scalar(to) || !step_scalar {
                     // Convert to nested evaluation:
@@ -2883,7 +2924,8 @@ impl Flattener {
                     self.emit(JitOp::Num { dst: s, val: 1.0, repr: None });
                     s
                 };
-                self.emit_range_loop(from_val, to_val, step_val, range_from_may_carry_repr(from));
+                let check = !(expr_is_num_literal(from) && expr_is_num_literal(to));
+                self.emit_range_loop(from_val, to_val, step_val, range_from_may_carry_repr(from), check);
                 self.emit(JitOp::Drop { slot: from_val });
                 self.emit(JitOp::Drop { slot: to_val });
                 self.emit(JitOp::Drop { slot: step_val });
@@ -2962,9 +3004,20 @@ impl Flattener {
                 self.try_depth -= 1;
                 self.try_catch_target = old_target;
                 self.emit(JitOp::Jump { label: done_label });
-                // Catch: non-match → empty (just drop error)
+                // Catch: jq's internal no-match error → empty; everything
+                // else (type errors, bad regexes) rethrows so an enclosing
+                // try/catch sees the canonical message instead of silence.
+                // self.emit wires the rethrow's CheckError to the enclosing
+                // target (try_catch_target was restored above). #1084
                 self.emit(JitOp::Label { id: catch_label });
                 self.emit(JitOp::TryCatchEnd);
+                let guard_out = self.alloc_slot();
+                self.emit(JitOp::CallBuiltin {
+                    dst: guard_out,
+                    builtin: JitBuiltin::Rt(crate::runtime::RtBuiltin::RethrowUnlessNoMatch),
+                    args: vec![error_slot],
+                });
+                self.emit(JitOp::Drop { slot: guard_out });
                 self.emit(JitOp::Drop { slot: error_slot });
                 self.emit(JitOp::Label { id: done_label });
                 self.emit(JitOp::Drop { slot: inp });
@@ -3439,6 +3492,17 @@ impl Flattener {
             }
 
             Expr::Limit { count, generator } => {
+                // jq validates the count with type-specific behavior the f64
+                // counter can't express: null/false/true take the
+                // "doesn't support negative count" branch, strings/arrays/
+                // objects surface "X and number (1) cannot be subtracted"
+                // lazily — only once the generator yields (#806). ToF64Var
+                // would silently coerce all of those to 0. Only a numeric
+                // literal count (the overwhelmingly common case) is provably
+                // safe; everything else bails to eval. #1084
+                if !matches!(count.as_ref(), Expr::Literal(Literal::Num(..))) {
+                    return false;
+                }
                 // Pre-check: generator must be compilable
                 {
                     let mut test = self.test_flattener();
@@ -3843,7 +3907,7 @@ impl Flattener {
                 self.emit(JitOp::Drop { slot: mid });
                 ok
             }
-            Expr::Range { from, to, step } if is_scalar(from) && is_scalar(to) && step.as_ref().is_none_or(|s| is_scalar(s)) => {
+            Expr::Range { from, to, step } if is_scalar(from) && is_scalar(to) && range_step_is_safe(step.as_deref()) => {
                 let from_val = self.flatten_scalar(from, input_slot);
                 let to_val = self.flatten_scalar(to, input_slot);
                 let step_val = if let Some(s) = step {
@@ -3857,8 +3921,7 @@ impl Flattener {
                 let to_v = self.alloc_var();
                 let step_v = self.alloc_var();
                 let cmp = self.alloc_var();
-                self.emit(JitOp::ToF64Var { dst_var: cur, src: from_val });
-                self.emit(JitOp::ToF64Var { dst_var: to_v, src: to_val });
+                self.emit_range_bound_vars(cur, from_val, Some(from), to_v, to_val, Some(to));
                 self.emit(JitOp::ToF64Var { dst_var: step_v, src: step_val });
                 let first = self.range_first_flag(range_from_may_carry_repr(from), from_val);
                 self.emit(JitOp::Drop { slot: to_val });
@@ -4079,6 +4142,7 @@ impl Flattener {
             }
             Expr::Range { from, to, step } => {
                 if !is_scalar(from) || !is_scalar(to) { return false; }
+                if !range_step_is_safe(step.as_deref()) { return false; }
                 if let Some(s) = step { if !is_scalar(s) { return false; } }
                 // Pre-check: can we compile the body (right)?
                 {
@@ -4099,8 +4163,7 @@ impl Flattener {
                 let to_v = self.alloc_var();
                 let step_v = self.alloc_var();
                 let cmp = self.alloc_var();
-                self.emit(JitOp::ToF64Var { dst_var: cur, src: from_val });
-                self.emit(JitOp::ToF64Var { dst_var: to_v, src: to_val });
+                self.emit_range_bound_vars(cur, from_val, Some(from), to_v, to_val, Some(to));
                 self.emit(JitOp::ToF64Var { dst_var: step_v, src: step_val });
                 let first = self.range_first_flag(range_from_may_carry_repr(from), from_val);
                 self.emit(JitOp::Drop { slot: to_val });
@@ -4373,13 +4436,74 @@ impl Flattener {
         }
     }
 
-    fn emit_range_loop(&mut self, f_slot: SlotId, t_slot: SlotId, s_slot: SlotId, track_first: bool) {
+    /// #1084: validate range bounds before the f64 loop unless both are
+    /// provably numeric literals. The unboxed counter silently coerces
+    /// non-numbers to 0.0 where eval raises "Range bounds must be numeric";
+    /// the guard is one fallible builtin call per range *invocation* (not
+    /// per iteration), wired into the enclosing try/catch by self.emit.
+    fn emit_range_bounds_guard_slots(&mut self, from_val: SlotId, to_val: SlotId) {
+        let out = self.alloc_slot();
+        self.emit(JitOp::CallBuiltin {
+            dst: out,
+            builtin: JitBuiltin::Rt(crate::runtime::RtBuiltin::RangeBoundsGuard),
+            args: vec![from_val, to_val],
+        });
+        self.emit(JitOp::Drop { slot: out });
+    }
+
+    /// Unbox a range bound into an f64 var: checked (raises "Range bounds
+    /// must be numeric") unless the bound is a numeric literal. Same single
+    /// FFI call either way — dynamic-bound loops pay nothing extra.
+    /// Unbox both range bounds into f64 vars. Bounds that are not numeric
+    /// literals use the checked conversion (raises "Range bounds must be
+    /// numeric") — same single FFI call as the unchecked form. The pending-
+    /// error check is emitted ONCE for the pair (raw pushes bypass emit()'s
+    /// per-op CheckError), so a dynamic-bound range invocation pays one
+    /// branch, not two.
+    fn emit_range_bound_vars(
+        &mut self,
+        cur_var: u32, from_val: SlotId, from: Option<&Expr>,
+        to_var: u32, to_val: SlotId, to: Option<&Expr>,
+    ) {
+        let from_lit = from.is_some_and(expr_is_num_literal);
+        let to_lit = to.is_some_and(expr_is_num_literal);
+        if from_lit {
+            self.ops.push(JitOp::ToF64Var { dst_var: cur_var, src: from_val });
+        } else {
+            self.ops.push(JitOp::ToF64VarRangeBound { dst_var: cur_var, src: from_val });
+        }
+        if to_lit {
+            self.ops.push(JitOp::ToF64Var { dst_var: to_var, src: to_val });
+        } else {
+            self.ops.push(JitOp::ToF64VarRangeBound { dst_var: to_var, src: to_val });
+        }
+        if from_lit && to_lit {
+            return;
+        }
+        if let Some((catch_label, error_slot)) = self.try_catch_target {
+            self.ops.push(JitOp::CheckError { error_dst: error_slot, catch_label });
+        } else {
+            let error_label = self.alloc_label();
+            let ok_label = self.alloc_label();
+            self.ops.push(JitOp::JumpIfError { label: error_label });
+            self.ops.push(JitOp::Jump { label: ok_label });
+            self.ops.push(JitOp::Label { id: error_label });
+            self.ops.push(JitOp::ReturnError);
+            self.ops.push(JitOp::Label { id: ok_label });
+        }
+    }
+
+    fn emit_range_loop(&mut self, f_slot: SlotId, t_slot: SlotId, s_slot: SlotId, track_first: bool, check_bounds: bool) {
         let cur_var = self.alloc_var();
         let to_var = self.alloc_var();
         let step_var = self.alloc_var();
         let cmp_var = self.alloc_var();
-        self.emit(JitOp::ToF64Var { dst_var: cur_var, src: f_slot });
-        self.emit(JitOp::ToF64Var { dst_var: to_var, src: t_slot });
+        if check_bounds {
+            self.emit_range_bound_vars(cur_var, f_slot, None, to_var, t_slot, None);
+        } else {
+            self.emit(JitOp::ToF64Var { dst_var: cur_var, src: f_slot });
+            self.emit(JitOp::ToF64Var { dst_var: to_var, src: t_slot });
+        }
         self.emit(JitOp::ToF64Var { dst_var: step_var, src: s_slot });
         // The caller owns f_slot/t_slot/s_slot and drops them after the
         // loop, so the first-item Clone below can read f_slot directly.
@@ -4411,6 +4535,8 @@ impl Flattener {
 
     /// Handle range(from; to; step) where some args are generators.
     fn flatten_range_gen(&mut self, from: &Expr, to: &Expr, step: Option<&Expr>, input_slot: SlotId) -> bool {
+        // #1084: non-numeric steps need eval's lazy add-error semantics.
+        if !range_step_is_safe(step) { return false; }
         // Build a fully scalar range call wrapped in appropriate generator nesting
         // For each combination of (from_val, to_val, step_val), emit range loop
         if is_scalar(from) && is_scalar(to) && step.is_none_or(is_scalar) {
@@ -4424,7 +4550,8 @@ impl Flattener {
                 self.emit(JitOp::Num { dst: v, val: 1.0, repr: None });
                 v
             };
-            self.emit_range_loop(fv, tv, sv, range_from_may_carry_repr(from));
+            let check = !(expr_is_num_literal(from) && expr_is_num_literal(to));
+            self.emit_range_loop(fv, tv, sv, range_from_may_carry_repr(from), check);
             self.emit(JitOp::Drop { slot: fv });
             self.emit(JitOp::Drop { slot: tv });
             self.emit(JitOp::Drop { slot: sv });
@@ -4454,17 +4581,17 @@ impl Flattener {
                 if let Some(s) = step_ref {
                     if is_scalar(s) {
                         let sv = this.flatten_scalar(s, input_slot);
-                        this.emit_range_loop(fv, tv, sv, from_track);
+                        this.emit_range_loop(fv, tv, sv, from_track, true);
                         this.emit(JitOp::Drop { slot: sv });
                     } else {
                         this.flatten_gen_with_each_output(s, input_slot, &|this2, sv| {
-                            this2.emit_range_loop(fv, tv, sv, from_track);
+                            this2.emit_range_loop(fv, tv, sv, from_track, true);
                         });
                     }
                 } else {
                     let sv = this.alloc_slot();
                     this.emit(JitOp::Num { dst: sv, val: 1.0, repr: None });
-                    this.emit_range_loop(fv, tv, sv, from_track);
+                    this.emit_range_loop(fv, tv, sv, from_track, true);
                     this.emit(JitOp::Drop { slot: sv });
                 }
             });
@@ -4476,7 +4603,7 @@ impl Flattener {
         let tv = self.flatten_scalar(to, input_slot);
         if let Some(s) = step {
             let ok = self.flatten_gen_with_each_output(s, input_slot, &|this, sv| {
-                this.emit_range_loop(fv, tv, sv, from_track);
+                this.emit_range_loop(fv, tv, sv, from_track, true);
             });
             self.emit(JitOp::Drop { slot: fv });
             self.emit(JitOp::Drop { slot: tv });
@@ -4495,17 +4622,17 @@ impl Flattener {
             if let Some(s) = step {
                 if is_scalar(s) {
                     let sv = self.flatten_scalar(s, input_slot);
-                    self.emit_range_loop(fv, tv, sv, true);
+                    self.emit_range_loop(fv, tv, sv, true, true);
                     self.emit(JitOp::Drop { slot: sv });
                 } else {
                     self.flatten_gen_with_each_output(s, input_slot, &|this, sv| {
-                        this.emit_range_loop(fv, tv, sv, true);
+                        this.emit_range_loop(fv, tv, sv, true, true);
                     });
                 }
             } else {
                 let sv = self.alloc_slot();
                 self.emit(JitOp::Num { dst: sv, val: 1.0, repr: None });
-                self.emit_range_loop(fv, tv, sv, true);
+                self.emit_range_loop(fv, tv, sv, true, true);
                 self.emit(JitOp::Drop { slot: sv });
             }
             self.emit(JitOp::Drop { slot: tv });
@@ -4516,17 +4643,17 @@ impl Flattener {
                 if let Some(s) = step_ref {
                     if is_scalar(s) {
                         let sv = this.flatten_scalar(s, input_slot);
-                        this.emit_range_loop(fv, tv, sv, true);
+                        this.emit_range_loop(fv, tv, sv, true, true);
                         this.emit(JitOp::Drop { slot: sv });
                     } else {
                         this.flatten_gen_with_each_output(s, input_slot, &|this2, sv| {
-                            this2.emit_range_loop(fv, tv, sv, true);
+                            this2.emit_range_loop(fv, tv, sv, true, true);
                         });
                     }
                 } else {
                     let sv = this.alloc_slot();
                     this.emit(JitOp::Num { dst: sv, val: 1.0, repr: None });
-                    this.emit_range_loop(fv, tv, sv, true);
+                    this.emit_range_loop(fv, tv, sv, true, true);
                     this.emit(JitOp::Drop { slot: sv });
                 }
             });
@@ -4801,6 +4928,7 @@ impl Flattener {
             }
             Expr::Range { from, to, step } => {
                 if !is_scalar(from) || !is_scalar(to) { return false; }
+                if !range_step_is_safe(step.as_deref()) { return false; }
                 if let Some(s) = step { if !is_scalar(s) { return false; } }
                 let from_val = self.flatten_scalar(from, input_slot);
                 let to_val = self.flatten_scalar(to, input_slot);
@@ -4815,8 +4943,7 @@ impl Flattener {
                 let to_v = self.alloc_var();
                 let step_v = self.alloc_var();
                 let cmp = self.alloc_var();
-                self.emit(JitOp::ToF64Var { dst_var: cur, src: from_val });
-                self.emit(JitOp::ToF64Var { dst_var: to_v, src: to_val });
+                self.emit_range_bound_vars(cur, from_val, Some(from), to_v, to_val, Some(to));
                 self.emit(JitOp::ToF64Var { dst_var: step_v, src: step_val });
                 let first = self.range_first_flag(range_from_may_carry_repr(from), from_val);
                 self.emit(JitOp::Drop { slot: to_val });
@@ -5314,6 +5441,7 @@ impl Flattener {
             }
             Expr::Range { from, to, step } => {
                 if !is_scalar(from) || !is_scalar(to) { return false; }
+                if !range_step_is_safe(step.as_deref()) { return false; }
                 if let Some(s) = step { if !is_scalar(s) { return false; } }
 
                 // Check if update is a pure f64 expression of . (acc) and $x (loop var)
@@ -5349,8 +5477,7 @@ impl Flattener {
                 let to_v = self.alloc_var();
                 let step_v = self.alloc_var();
                 let cmp = self.alloc_var();
-                self.emit(JitOp::ToF64Var { dst_var: cur, src: from_val });
-                self.emit(JitOp::ToF64Var { dst_var: to_v, src: to_val });
+                self.emit_range_bound_vars(cur, from_val, Some(from), to_v, to_val, Some(to));
                 self.emit(JitOp::ToF64Var { dst_var: step_v, src: step_val });
                 self.emit(JitOp::Drop { slot: to_val });
                 self.emit(JitOp::Drop { slot: step_val });
@@ -5477,7 +5604,7 @@ impl Flattener {
             // call before iterating, which makes deep `range as $x | …` chains
             // allocate one Vec per outer iteration at every nested level (#641).
             Expr::Range { from, to, step }
-                if is_scalar(from) && is_scalar(to) && step.as_ref().is_none_or(|s| is_scalar(s)) =>
+                if is_scalar(from) && is_scalar(to) && range_step_is_safe(step.as_deref()) =>
             {
                 let from_val = self.flatten_scalar(from, input_slot);
                 let to_val = self.flatten_scalar(to, input_slot);
@@ -5492,8 +5619,7 @@ impl Flattener {
                 let to_v = self.alloc_var();
                 let step_v = self.alloc_var();
                 let cmp = self.alloc_var();
-                self.emit(JitOp::ToF64Var { dst_var: cur, src: from_val });
-                self.emit(JitOp::ToF64Var { dst_var: to_v, src: to_val });
+                self.emit_range_bound_vars(cur, from_val, Some(from), to_v, to_val, Some(to));
                 self.emit(JitOp::ToF64Var { dst_var: step_v, src: step_val });
                 let first = self.range_first_flag(range_from_may_carry_repr(from), from_val);
                 self.emit(JitOp::Drop { slot: to_val });
@@ -8139,6 +8265,17 @@ extern "C" fn jit_rt_is_null_or_false(v: *const Value) -> i64 {
 extern "C" fn jit_rt_to_f64(v: *const Value) -> f64 {
     unsafe { match &*v { Value::Num(n, _) => *n, _ => 0.0 } }
 }
+extern "C" fn jit_rt_to_f64_range_bound(v: *const Value) -> f64 {
+    unsafe {
+        match &*v {
+            Value::Num(n, _) => *n,
+            _ => {
+                set_jit_error("Range bounds must be numeric".to_string());
+                0.0
+            }
+        }
+    }
+}
 extern "C" fn jit_rt_f64_to_num(dst: *mut Value, n: f64) {
     unsafe { std::ptr::write(dst, Value::number(n)); }
 }
@@ -9132,7 +9269,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
             JitOp::GetKind { src, .. } | JitOp::GetLen { src, .. } => {
                 *use_count.entry(*src).or_insert(0) += 1;
             }
-            JitOp::ToF64Var { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
+            JitOp::ToF64Var { src, .. } | JitOp::ToF64VarRangeBound { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
             _ => {}
         }
     }
@@ -9218,7 +9355,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 JitOp::GetKind { src, .. } | JitOp::GetLen { src, .. } => {
                     *use_count.entry(*src).or_insert(0) += 1;
                 }
-                JitOp::ToF64Var { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
+                JitOp::ToF64Var { src, .. } | JitOp::ToF64VarRangeBound { src, .. } => { *use_count.entry(*src).or_insert(0) += 1; }
                 _ => {}
             }
         }
@@ -9430,6 +9567,7 @@ impl JitCompiler {
             ("jit_rt_obj_from_fields", jit_rt_obj_from_fields as *const u8),
             ("jit_rt_is_null_or_false", jit_rt_is_null_or_false as *const u8),
             ("jit_rt_to_f64", jit_rt_to_f64 as *const u8),
+            ("jit_rt_to_f64_range_bound", jit_rt_to_f64_range_bound as *const u8),
             ("jit_rt_f64_to_num", jit_rt_f64_to_num as *const u8),
             ("jit_rt_range_check", jit_rt_range_check as *const u8),
             ("jit_rt_strbuf_new", jit_rt_strbuf_new as *const u8),
@@ -10420,6 +10558,13 @@ impl JitCompiler {
                         let bits = b.ins().bitcast(ptr_ty, cranelift_codegen::ir::MemFlags::new(), f_val);
                         b.def_var(vars[*dst_var as usize], bits);
                     }
+                    JitOp::ToF64VarRangeBound { dst_var, src } => {
+                        let s = slot_addr(&mut b, *src);
+                        let call = b.ins().call(rt["to_f64_range_bound"], &[s]);
+                        let f_val = b.inst_results(call)[0];
+                        let bits = b.ins().bitcast(ptr_ty, cranelift_codegen::ir::MemFlags::new(), f_val);
+                        b.def_var(vars[*dst_var as usize], bits);
+                    }
                     JitOp::F64Less { dst_var, a_var, b_var: bv } => {
                         let a_bits = b.use_var(vars[*a_var as usize]);
                         let b_bits = b.use_var(vars[*bv as usize]);
@@ -10834,6 +10979,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("obj_from_fields", [p, p, p, p], []);
     decl!("is_null_or_false", [p], [p]);
     decl!("to_f64", [p], [f]);
+    decl!("to_f64_range_bound", [p], [f]);
     decl!("f64_to_num", [p, f], []);
     decl!("range_check", [f, f, f], [p]);
     decl!("strbuf_new", [p], []);
@@ -11383,6 +11529,9 @@ impl JitProgram {
                 }
                 JitOp::ToF64Var { dst_var, src } => {
                     vars[*dst_var as usize] = tbits(jit_rt_to_f64(sp(*src)));
+                }
+                JitOp::ToF64VarRangeBound { dst_var, src } => {
+                    vars[*dst_var as usize] = tbits(jit_rt_to_f64_range_bound(sp(*src)));
                 }
                 JitOp::F64Less { dst_var, a_var, b_var } => {
                     let r = fbits(vars[*a_var as usize]) < fbits(vars[*b_var as usize]);
