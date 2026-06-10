@@ -13372,3 +13372,28 @@ null
 (.x*nan) as $n | [[1, $n, 2, -0.0, 0.0] | sort | map(tostring), (-0.0 + 0.0 | tostring), $n != $n]
 {"x":1}
 [["null","0.0","0.0","1","2"],"0",true]
+
+# Issue #1063: select with an arithmetic condition must raise on a zero constant divisor, not mask it
+try (select(.x / 0 > 1)) catch "div0"
+{"x":1}
+"div0"
+
+# Issue #1063: modulo by zero in a select condition raises (was: NaN compare, silently empty)
+try (select(.x % 0 >= 0)) catch "mod0"
+{"x":1}
+"mod0"
+
+# Issue #1063: zero field divisor in a remap raises (was: emitted clamped inf)
+try ({r: (.x / .y)}) catch "fdiv0"
+{"x":1,"y":0}
+"fdiv0"
+
+# Issue #1063: zero field divisor in modulo remap raises (was: emitted null)
+try ({r: (.x % .y)}) catch "fmod0"
+{"x":1,"y":0}
+"fmod0"
+
+# Issue #1063: nonzero divisors keep taking the fast path with jq's values
+[{r: (.x / 2)}, {m: (.x % 3)}, (select(.x / 2 > 0.4) | .x)]
+{"x":7}
+[{"r":3.5},{"m":1},7]

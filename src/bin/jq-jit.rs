@@ -1296,8 +1296,10 @@ fn eval_arith_raw_unresolved(
                 BinOp::Add => l + r,
                 BinOp::Sub => l - r,
                 BinOp::Mul => l * r,
-                BinOp::Div => l / r,
-                BinOp::Mod => jq_jit::runtime::jq_mod_f64(l, r).unwrap_or(f64::NAN),
+                // jq raises on a zero divisor — None routes the row to
+                // generic eval via the would-error probes (#1063).
+                BinOp::Div => { if r == 0.0 { return None; } l / r }
+                BinOp::Mod => jq_jit::runtime::jq_mod_f64(l, r)?,
                 _ => return None,
             })
         }
@@ -1423,7 +1425,13 @@ fn resolved_would_error(
     let arith_fastpath_ok = |a: &[u8], b: &[u8], op: &BinOp| -> bool {
         match op {
             BinOp::Add => (is_num(a) && is_num(b)) || (is_str(a) && is_str(b)),
-            BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => is_num(a) && is_num(b),
+            BinOp::Sub | BinOp::Mul => is_num(a) && is_num(b),
+            // jq raises on a zero divisor; the inline emitters compute
+            // IEEE inf/NaN instead, so route those rows to generic eval
+            // (#1063).
+            BinOp::Div | BinOp::Mod => {
+                is_num(a) && matches!(parse_json_num(b), Some(d) if d != 0.0)
+            }
             _ => true,
         }
     };
@@ -1446,8 +1454,18 @@ fn resolved_would_error(
     let str_domain = |idx: usize| -> bool { !is_str(bytes_of(idx)) };
     match resolved {
         ResolvedRemap::FieldOpField(i1, op, i2) => !arith_fastpath_ok(bytes_of(*i1), bytes_of(*i2), op),
-        ResolvedRemap::FieldOpConst(i, op, _) => !arith_op_with_const_ok(bytes_of(*i), op),
-        ResolvedRemap::ConstOpField(_, op, i) => !arith_op_with_const_ok(bytes_of(*i), op),
+        // Zero divisors raise in jq: a Div/Mod *constant* divisor of 0
+        // (`.x / 0`), or a zero *field* divisor when the field is on the
+        // right (`5 / .y`) — bail those rows to generic eval (#1063).
+        ResolvedRemap::FieldOpConst(i, op, n) => {
+            !arith_op_with_const_ok(bytes_of(*i), op)
+                || (matches!(op, BinOp::Div | BinOp::Mod) && *n == 0.0)
+        }
+        ResolvedRemap::ConstOpField(_, op, i) => {
+            !arith_op_with_const_ok(bytes_of(*i), op)
+                || (matches!(op, BinOp::Div | BinOp::Mod)
+                    && parse_json_num(bytes_of(*i)) == Some(0.0))
+        }
         ResolvedRemap::FieldArray(items) => items.iter().any(|r| resolved_would_error(r, raw, ranges)),
         // FieldSlice's inline emitter handles only ASCII-quoted strings;
         // every other shape lands in its `else` branch and emits null
@@ -1489,10 +1507,13 @@ fn resolved_would_error(
         ResolvedRemap::ArithToString(arith) => eval_arith_raw(arith, raw, ranges).is_none(),
         ResolvedRemap::ArithUnary(_, arith) => eval_arith_raw(arith, raw, ranges).is_none(),
         ResolvedRemap::ArithCmp(arith, _, _) => eval_arith_raw(arith, raw, ranges).is_none(),
-        ResolvedRemap::FieldOpFieldToString(i1, _, i2) => {
-            parse_json_num(bytes_of(*i1)).is_none() || parse_json_num(bytes_of(*i2)).is_none()
+        ResolvedRemap::FieldOpFieldToString(i1, op, i2) => {
+            !arith_fastpath_ok(bytes_of(*i1), bytes_of(*i2), op) || is_str(bytes_of(*i1))
         }
-        ResolvedRemap::FieldOpConstToString(i, _, _) => parse_json_num(bytes_of(*i)).is_none(),
+        ResolvedRemap::FieldOpConstToString(i, op, n) => {
+            parse_json_num(bytes_of(*i)).is_none()
+                || (matches!(op, BinOp::Div | BinOp::Mod) && *n == 0.0)
+        }
         // `field cmp const` — the inline emitter handles only numeric
         // fields. For non-numeric, jq still produces a verdict via its
         // total ordering (`null < false < true < number < string <
@@ -1566,7 +1587,10 @@ fn resolved_would_error(
             ResolvedStringChainPart::Literal(_) => false,
             ResolvedStringChainPart::Field(idx) => !is_str(bytes_of(*idx)),
             ResolvedStringChainPart::FieldToString(_) => false,
-            ResolvedStringChainPart::FieldArithToString(idx, _) => parse_json_num(bytes_of(*idx)).is_none(),
+            ResolvedStringChainPart::FieldArithToString(idx, ops) => {
+                parse_json_num(bytes_of(*idx)).is_none()
+                    || ops.iter().any(|(op, n)| matches!(op, BinOp::Div | BinOp::Mod) && *n == 0.0)
+            }
         }),
         _ => false,
     }
@@ -2264,8 +2288,10 @@ fn eval_arith_raw(
                 BinOp::Add => l + r,
                 BinOp::Sub => l - r,
                 BinOp::Mul => l * r,
-                BinOp::Div => l / r,
-                BinOp::Mod => jq_jit::runtime::jq_mod_f64(l, r).unwrap_or(f64::NAN),
+                // jq raises on a zero divisor — None routes the row to
+                // generic eval via the would-error probes (#1063).
+                BinOp::Div => { if r == 0.0 { return None; } l / r }
+                BinOp::Mod => jq_jit::runtime::jq_mod_f64(l, r)?,
                 _ => return None,
             })
         }

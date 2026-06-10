@@ -3056,6 +3056,8 @@ impl Filter {
                         if let Expr::BinOp { op: aop, lhs: al, rhs: ar } = cur {
                             if matches!(aop, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
                                 if let Expr::Literal(Literal::Num(n, _)) = ar.as_ref() {
+                                    // jq raises on a zero divisor; keep the chain on generic eval (#1063)
+                                    if matches!(aop, BinOp::Div | BinOp::Mod) && *n == 0.0 { break; }
                                     arith_ops.push((*aop, *n));
                                     cur = al.as_ref();
                                     continue;
@@ -3769,6 +3771,8 @@ impl Filter {
                 if let Expr::BinOp { op: aop, lhs, rhs } = cur {
                     if matches!(aop, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
                         if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                            // jq raises on a zero divisor; keep the chain on generic eval (#1063)
+                            if matches!(aop, BinOp::Div | BinOp::Mod) && *n == 0.0 { break; }
                             arith_ops.push((*aop, *n));
                             cur = lhs.as_ref();
                             continue;
@@ -4739,6 +4743,8 @@ impl Filter {
                     if let Expr::BinOp { op: aop, lhs, rhs } = cur {
                         if matches!(aop, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
                             if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                // jq raises on a zero divisor; keep the chain on generic eval (#1063)
+                                if matches!(aop, BinOp::Div | BinOp::Mod) && *n == 0.0 { break; }
                                 arith_ops.push((*aop, *n));
                                 cur = lhs.as_ref();
                                 continue;
@@ -4847,6 +4853,8 @@ impl Filter {
                     if let Expr::BinOp { op: aop, lhs: al, rhs: ar } = cur {
                         if matches!(aop, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
                             if let Expr::Literal(Literal::Num(n, _)) = ar.as_ref() {
+                                // jq raises on a zero divisor; keep the chain on generic eval (#1063)
+                                if matches!(aop, BinOp::Div | BinOp::Mod) && *n == 0.0 { break; }
                                 arith_ops.push((*aop, *n));
                                 cur = al.as_ref();
                                 continue;
@@ -5651,6 +5659,8 @@ impl Filter {
                                                 if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
                                                     if matches!(lhs.as_ref(), Expr::Input) {
                                                         if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                                                            // jq raises on a zero divisor; keep the row on generic eval (#1063)
+                                                            if matches!(op, BinOp::Div | BinOp::Mod) && *n == 0.0 { break; }
                                                             arith_ops.push((*op, *n));
                                                             continue;
                                                         }
@@ -6553,6 +6563,8 @@ impl Filter {
                 if let Expr::BinOp { op: aop, lhs, rhs } = cur {
                     if matches!(aop, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
                         if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                            // jq raises on a zero divisor; keep the chain on generic eval (#1063)
+                            if matches!(aop, BinOp::Div | BinOp::Mod) && *n == 0.0 { break; }
                             arith_ops.push((*aop, *n));
                             cur = lhs.as_ref();
                             continue;
@@ -9904,6 +9916,8 @@ impl Filter {
                     if let Expr::BinOp { op: aop, lhs: al, rhs: ar } = cur {
                         if matches!(aop, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
                             if let Expr::Literal(Literal::Num(n, _)) = ar.as_ref() {
+                                // jq raises on a zero divisor; keep the chain on generic eval (#1063)
+                                if matches!(aop, BinOp::Div | BinOp::Mod) && *n == 0.0 { break; }
                                 arith_ops.push((*aop, *n));
                                 cur = al.as_ref();
                                 continue;
@@ -10075,6 +10089,8 @@ impl Filter {
                             if let Expr::BinOp { op: aop, lhs: al, rhs: ar } = cur {
                                 if matches!(aop, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
                                     if let Expr::Literal(Literal::Num(n, _)) = ar.as_ref() {
+                                        // jq raises on a zero divisor; keep the chain on generic eval (#1063)
+                                        if matches!(aop, BinOp::Div | BinOp::Mod) && *n == 0.0 { break; }
                                         arith_ops.push((*aop, *n));
                                         cur = al.as_ref();
                                         continue;
@@ -10746,6 +10762,8 @@ impl Filter {
                             if let Expr::BinOp { op: aop, lhs: al, rhs: ar } = cur {
                                 if matches!(aop, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
                                     if let Expr::Literal(Literal::Num(n, _)) = ar.as_ref() {
+                                        // jq raises on a zero divisor; keep the chain on generic eval (#1063)
+                                        if matches!(aop, BinOp::Div | BinOp::Mod) && *n == 0.0 { break; }
                                         arith_ops.push((*aop, *n));
                                         cur = al.as_ref();
                                         continue;
@@ -11101,6 +11119,8 @@ impl Filter {
                 if let Expr::BinOp { op: aop, lhs, rhs } = cur {
                     if matches!(aop, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
                         if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                            // jq raises on a zero divisor; keep the chain on generic eval (#1063)
+                            if matches!(aop, BinOp::Div | BinOp::Mod) && *n == 0.0 { break; }
                             arith_ops.push((*aop, *n));
                             cur = lhs.as_ref();
                             continue;
@@ -11219,6 +11239,8 @@ impl Filter {
                 if let Expr::BinOp { op: aop, lhs, rhs } = cur {
                     if matches!(aop, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
                         if let Expr::Literal(Literal::Num(n, _)) = rhs.as_ref() {
+                            // jq raises on a zero divisor; keep the chain on generic eval (#1063)
+                            if matches!(aop, BinOp::Div | BinOp::Mod) && *n == 0.0 { break; }
                             arith_ops.push((*aop, *n));
                             cur = lhs.as_ref();
                             continue;
