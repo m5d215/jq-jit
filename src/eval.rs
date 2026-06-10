@@ -5764,30 +5764,48 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                                 // first hop (`near attempt to access element 0 of
                                 // [1]`); an identity B leaves the value at the sink
                                 // (`result <A>`). #839
-                                {
-                                    let v = pv;
-                                    {
-                                        let mut nav: Option<Value> = None;
-                                        match eval_path(right, v.clone(), env, &mut |rp| {
-                                            nav = Some(rp);
-                                            Ok(false)
-                                        }) {
-                                            Err(re) => Err(re),
-                                            Ok(_) => match &nav {
-                                                None => Ok(true),
-                                                Some(Value::Arr(comps)) if !comps.is_empty() => {
-                                                    let key_desc = match &comps[0] {
-                                                        Value::Num(n, _) => format!("element {} of", crate::value::format_jq_number(*n)),
-                                                        Value::Str(s) => format!("element \"{}\" of", s),
-                                                        other => format!("element {} of", crate::value::value_to_json(other)),
-                                                    };
-                                                    bail!("Invalid path expression near attempt to access {} {}", key_desc, trunc_path_dump(&crate::value::value_to_json(&v)))
-                                                }
-                                                _ => Err(e),
-                                            },
-                                        }
+                                //
+                                // A is re-run as a VALUE stream and B is applied per
+                                // output: the signal that got us here carries only
+                                // A's first output, but a discarding B must skip it
+                                // and move on to A's next output (`path(paths)` =
+                                // `path(path(..) | select(length > 0))` discards `[]`
+                                // and errors on `[0]`). Streaming keeps the error
+                                // eager, so an infinite A short-circuits at its first
+                                // surviving output. #1019
+                                // As in the `_ =>` arm below, the verdict is
+                                // deferred and raised after `eval` returns so
+                                // a sentinel never unwinds through A's own
+                                // nested `path(..)` frames (which would
+                                // rewrite it into a plain error).
+                                drop(pv);
+                                let mut deferred: Option<anyhow::Error> = None;
+                                let cont = eval(left, input.clone(), env, &mut |v| {
+                                    let mut nav: Option<Value> = None;
+                                    match eval_path(right, v.clone(), env, &mut |rp| {
+                                        nav = Some(rp);
+                                        Ok(false)
+                                    }) {
+                                        Err(re) => { deferred = Some(re); Ok(false) }
+                                        Ok(_) => match &nav {
+                                            None => Ok(true),
+                                            Some(Value::Arr(comps)) if !comps.is_empty() => {
+                                                let key_desc = match &comps[0] {
+                                                    Value::Num(n, _) => format!("element {} of", crate::value::format_jq_number(*n)),
+                                                    Value::Str(s) => format!("element \"{}\" of", s),
+                                                    other => format!("element {} of", crate::value::value_to_json(other)),
+                                                };
+                                                deferred = Some(anyhow::anyhow!("Invalid path expression near attempt to access {} {}", key_desc, trunc_path_dump(&crate::value::value_to_json(&v))));
+                                                Ok(false)
+                                            }
+                                            _ => { deferred = Some(crate::signal::PathResultSignal::raise(&v)); Ok(false) }
+                                        },
                                     }
+                                })?;
+                                if let Some(err) = deferred {
+                                    return Err(err);
                                 }
+                                Ok(cont)
                             }
                         }
                     } else {
@@ -6426,30 +6444,35 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             })
         }
         _ => {
-            // Non-path-safe expression: evaluate, then accept the value as
-            // the empty path `[]` if it is one of `null`/`true`/`false` and
-            // equals the input. jq treats those three literals as identity
+            // Non-path-safe expression: validate each output as it streams.
+            // A `null`/`true`/`false` output that equals the input is an
+            // identity path `[]` — jq treats those three literals as identity
             // path expressions when their result matches the current input
             // (so `path(.a // null)` and `path(if .x then .y else null end)`
-            // work on falsy branches that produce a literal value). All
-            // other shapes still report the original "Invalid path
-            // expression" error. See #434.
+            // work on falsy branches that produce a literal value, #434).
+            // The FIRST other output raises "Invalid path expression"
+            // eagerly: draining the generator before validating hung on
+            // infinite generators (`path(repeat(5))`) and embedded the last
+            // output instead of the first in the error (#1019). The callback
+            // only STOPS the generator (`Ok(false)`) and the signal is raised
+            // after `eval` returns: raising from inside the callback would
+            // unwind through a nested `path(..)`'s PathExpr arm, which
+            // rewrites the sentinel into a plain error and hides it from the
+            // enclosing Pipe recovery.
             let input_for_check = input.clone();
-            let mut result_val = Value::Null;
-            let mut has_result = false;
-            eval(expr, input, env, &mut |val| {
-                result_val = val;
-                has_result = true;
-                Ok(true)
-            })?;
-            if has_result {
-                let is_id_value = matches!(&result_val, Value::Null | Value::True | Value::False);
-                if is_id_value && result_val == input_for_check {
+            let mut invalid: Option<Value> = None;
+            let cont = eval(expr, input, env, &mut |val| {
+                let is_id_value = matches!(&val, Value::Null | Value::True | Value::False);
+                if is_id_value && val == input_for_check {
                     return cb(Value::Arr(Rc::new(vec![])));
                 }
-                return Err(crate::signal::PathResultSignal::raise(&result_val));
+                invalid = Some(val);
+                Ok(false)
+            })?;
+            if let Some(v) = invalid {
+                return Err(crate::signal::PathResultSignal::raise(&v));
             }
-            Ok(true)
+            Ok(cont)
         }
     }
 }
