@@ -694,7 +694,11 @@ struct Flattener {
     /// After each fallible op, CheckError is emitted to branch to catch_label on error.
     try_catch_target: Option<(LabelId, SlotId)>,
     /// Label targets for break: var_index → done_label
-    label_targets: HashMap<VarIdx, LabelId>,
+    /// Break targets: label var → (jump target, try_depth at registration).
+    /// The depth lets `break` distinguish a label inside the current try
+    /// (plain jump) from a try sitting between the break and its label
+    /// (the catch intercepts the break, #1086).
+    label_targets: HashMap<VarIdx, (LabelId, u32)>,
     /// Available compiled functions for FuncCall
     funcs: Vec<CompiledFunc>,
     /// Limit state: when inside a `limit(n; gen)`, emit_yield increments counter and breaks.
@@ -3463,7 +3467,7 @@ impl Flattener {
 
             Expr::Label { var_index, body } => {
                 let done_label = self.alloc_label();
-                self.label_targets.insert(*var_index, done_label);
+                self.label_targets.insert(*var_index, (done_label, self.try_depth));
                 let ok = self.flatten_gen(body, input_slot);
                 self.label_targets.remove(var_index);
                 self.emit(JitOp::Label { id: done_label });
@@ -3471,7 +3475,27 @@ impl Flattener {
             }
 
             Expr::Break { var_index, .. } => {
-                if let Some(&done_label) = self.label_targets.get(var_index) {
+                // jq implements `break $label` as a special error value
+                // carrying `__jq`, which try/catch DOES intercept and `?`
+                // suppresses (only the break — siblings keep running). A
+                // direct jump bypasses the enclosing catch, so inside a try
+                // scope the break must be thrown as the `{"__jq": id}`
+                // object instead (matching eval's catch shape, #715). Only
+                // the shape is guaranteed; the id is internal. #1086
+                let label_entry = self.label_targets.get(var_index).copied();
+                let intercepted = self.try_catch_target.is_some()
+                    && label_entry.is_none_or(|(_, label_depth)| self.try_depth > label_depth);
+                if intercepted {
+                    let obj = self.alloc_slot();
+                    self.emit(JitOp::ObjNew { dst: obj, cap: 1 });
+                    let idv = self.alloc_slot();
+                    self.emit(JitOp::Num { dst: idv, val: var_index.0 as f64, repr: None });
+                    self.emit(JitOp::ObjInsertStrKey { obj, key: "__jq".to_string(), val: idv });
+                    self.emit(JitOp::ThrowError { msg: obj });
+                    self.emit(JitOp::Drop { slot: obj });
+                    return true;
+                }
+                if let Some((done_label, _)) = label_entry {
                     self.emit(JitOp::Jump { label: done_label });
                     true
                 } else {
