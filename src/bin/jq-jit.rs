@@ -1100,7 +1100,9 @@ fn emit_remap_value(
             let idx = field_idx[f.as_str()];
             let (vs, ve) = ranges[idx];
             if let Some(a) = parse_json_num(&raw[vs..ve]) {
-                let r = match op { BinOp::Gt => a > *n, BinOp::Lt => a < *n, BinOp::Ge => a >= *n, BinOp::Le => a <= *n, BinOp::Eq => a == *n, BinOp::Ne => a != *n, _ => unreachable!() };
+                // Ordering uses jq's total order — the threshold literal can
+                // be nan (`.x > nan`); equality stays IEEE (#1062).
+                let r = match op { BinOp::Gt => jq_jit::eval::jq_num_gt(a, *n), BinOp::Lt => jq_jit::eval::jq_num_lt(a, *n), BinOp::Ge => jq_jit::eval::jq_num_ge(a, *n), BinOp::Le => jq_jit::eval::jq_num_le(a, *n), BinOp::Eq => a == *n, BinOp::Ne => a != *n, _ => unreachable!() };
                 buf.extend_from_slice(if r { b"true" } else { b"false" });
             } else { buf.extend_from_slice(b"null"); }
         }
@@ -1629,7 +1631,8 @@ fn emit_resolved_value(
         ResolvedRemap::FieldCmpConst(idx, ref op, n) => {
             let (vs, ve) = ranges[idx];
             if let Some(a) = parse_json_num(&raw[vs..ve]) {
-                let r = match op { BinOp::Gt => a > n, BinOp::Lt => a < n, BinOp::Ge => a >= n, BinOp::Le => a <= n, BinOp::Eq => a == n, BinOp::Ne => a != n, _ => unreachable!() };
+                // jq total order for the (possibly nan) literal threshold (#1062).
+                let r = match op { BinOp::Gt => jq_jit::eval::jq_num_gt(a, n), BinOp::Lt => jq_jit::eval::jq_num_lt(a, n), BinOp::Ge => jq_jit::eval::jq_num_ge(a, n), BinOp::Le => jq_jit::eval::jq_num_le(a, n), BinOp::Eq => a == n, BinOp::Ne => a != n, _ => unreachable!() };
                 buf.extend_from_slice(if r { b"true" } else { b"false" });
             } else { buf.extend_from_slice(b"null"); }
         }
@@ -2074,11 +2077,13 @@ fn emit_resolved_value(
         }
         ResolvedRemap::ArithCmp(ref arith, cmp_op, rhs_const) => {
             if let Some(lhs_val) = eval_arith_raw(arith, raw, ranges) {
+                // Computed arithmetic can be NaN (nan consts, inf - inf):
+                // jq total order for ordering, IEEE equality (#1062).
                 let result = match cmp_op {
-                    jq_jit::ir::BinOp::Gt => lhs_val > rhs_const,
-                    jq_jit::ir::BinOp::Lt => lhs_val < rhs_const,
-                    jq_jit::ir::BinOp::Ge => lhs_val >= rhs_const,
-                    jq_jit::ir::BinOp::Le => lhs_val <= rhs_const,
+                    jq_jit::ir::BinOp::Gt => jq_jit::eval::jq_num_gt(lhs_val, rhs_const),
+                    jq_jit::ir::BinOp::Lt => jq_jit::eval::jq_num_lt(lhs_val, rhs_const),
+                    jq_jit::ir::BinOp::Ge => jq_jit::eval::jq_num_ge(lhs_val, rhs_const),
+                    jq_jit::ir::BinOp::Le => jq_jit::eval::jq_num_le(lhs_val, rhs_const),
                     jq_jit::ir::BinOp::Eq => lhs_val == rhs_const,
                     jq_jit::ir::BinOp::Ne => lhs_val != rhs_const,
                     _ => false,
@@ -2200,7 +2205,8 @@ fn eval_resolved_bool(resolved: &ResolvedRemap, raw: &[u8], ranges: &[(usize, us
         ResolvedRemap::FieldCmpConst(idx, ref op, n) => {
             let (vs, ve) = ranges[*idx];
             let a = parse_json_num(&raw[vs..ve])?;
-            Some(match op { BinOp::Gt => a > *n, BinOp::Lt => a < *n, BinOp::Ge => a >= *n, BinOp::Le => a <= *n, BinOp::Eq => a == *n, BinOp::Ne => a != *n, _ => return None })
+            // jq total order for the (possibly nan) literal threshold (#1062).
+            Some(match op { BinOp::Gt => jq_jit::eval::jq_num_gt(a, *n), BinOp::Lt => jq_jit::eval::jq_num_lt(a, *n), BinOp::Ge => jq_jit::eval::jq_num_ge(a, *n), BinOp::Le => jq_jit::eval::jq_num_le(a, *n), BinOp::Eq => a == *n, BinOp::Ne => a != *n, _ => return None })
         }
         ResolvedRemap::FieldCmpField(idx1, ref op, idx2) => {
             let r1 = ranges[*idx1];

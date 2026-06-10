@@ -1267,13 +1267,15 @@ fn eval_bool_compound(expr: &Expr, input: &Value, vars: &[Value]) -> Option<bool
                 BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
                     let ln = get_num_leaf(lhs, input, vars)?;
                     let rn = get_num_leaf(rhs, input, vars)?;
+                    // Ordering follows jq's total order (NaN below every
+                    // number); equality stays IEEE, matching jq (#1062).
                     Some(match op {
                         BinOp::Eq => ln == rn,
                         BinOp::Ne => ln != rn,
-                        BinOp::Lt => ln < rn,
-                        BinOp::Gt => ln > rn,
-                        BinOp::Le => ln <= rn,
-                        BinOp::Ge => ln >= rn,
+                        BinOp::Lt => jq_num_lt(ln, rn),
+                        BinOp::Gt => jq_num_gt(ln, rn),
+                        BinOp::Le => jq_num_le(ln, rn),
+                        BinOp::Ge => jq_num_ge(ln, rn),
                         _ => unreachable!(),
                     })
                 }
@@ -1295,10 +1297,11 @@ fn eval_bool_numeric(expr: &Expr, vars: &[Value], override_vi: VarIdx, override_
             match op {
                 BinOp::Eq => Some(ln == rn),
                 BinOp::Ne => Some(ln != rn),
-                BinOp::Lt => Some(ln < rn),
-                BinOp::Gt => Some(ln > rn),
-                BinOp::Le => Some(ln <= rn),
-                BinOp::Ge => Some(ln >= rn),
+                // jq's total order for NaN, IEEE equality (#1062).
+                BinOp::Lt => Some(jq_num_lt(ln, rn)),
+                BinOp::Gt => Some(jq_num_gt(ln, rn)),
+                BinOp::Le => Some(jq_num_le(ln, rn)),
+                BinOp::Ge => Some(jq_num_ge(ln, rn)),
                 BinOp::And => {
                     if ln == 0.0 { return Some(false); }
                     Some(rn != 0.0)

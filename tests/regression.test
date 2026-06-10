@@ -13347,3 +13347,28 @@ null
 .[-0.9]
 [10,20]
 10
+
+# Issue #1062: ordering comparisons follow jq's total order for NaN (NaN below every number) on every layer
+[((.x*nan) < 1), ((.x*nan) <= 1), ((.x*nan) > 1), ((.x*nan) >= 1)]
+{"x":1}
+[true,true,false,false]
+
+# Issue #1062: NaN as the comparison threshold (literal in the filter)
+[(.x > nan), (.x >= nan), (.x < nan), (.x <= nan), (.x == nan), (.x != nan)]
+{"x":1}
+[true,true,false,false,false,true]
+
+# Issue #1062: NaN ordering through the collect/map fast paths
+[.x, .x] | map((.*nan) < 1)
+{"x":1}
+[true,true]
+
+# Issue #1062: select on a computed-object NaN field (field-compare fast paths)
+{y: nan} | [(select(.y < 1) | "lt") // "not-lt", (select(.y > 1) | "gt") // "not-gt"]
+null
+["lt","not-gt"]
+
+# Issue #1062: NaN/-0.0 pinned through sort and arithmetic (Phase 3 #1036 path-equivalence gate)
+(.x*nan) as $n | [[1, $n, 2, -0.0, 0.0] | sort | map(tostring), (-0.0 + 0.0 | tostring), $n != $n]
+{"x":1}
+[["null","0.0","0.0","1","2"],"0",true]
