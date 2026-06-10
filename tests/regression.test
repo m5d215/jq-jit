@@ -13532,3 +13532,63 @@ null
 [.a, .b]
 {"a":"x\/y","b":2e3}
 ["x/y",2E+3]
+
+# Select-then-field passthrough canonicalizes a non-canonical number lexeme (#729 class)
+select(.b > 0) | .a
+{"a":1e3,"b":2}
+1E+3
+
+# Select-then-field passthrough renders a parsed NaN as null
+select(.b > 0) | .a
+{"a":nan,"b":2}
+null
+
+# Select-then-field passthrough re-encodes an escaped solidus (#780 class)
+select(.b > .c) | .a
+{"a":"x\/y","b":2,"c":1}
+"x/y"
+
+# Select-then-field passthrough collapses duplicate keys in a composite output
+select(.b > 0) | .a
+{"a":{"k":1,"k":2},"b":2}
+{"k":2}
+
+# Single-branch cond field output canonicalizes the number lexeme
+if .b == 1 then .a else "z" end
+{"a":0.0000001,"b":1}
+1E-7
+
+# Compound-select field output canonicalizes
+select(.b > 0 and .c < 9) | .a
+{"a":2e3,"b":2,"c":1}
+2E+3
+
+# String-select field output canonicalizes
+select(.n == "t") | .a
+{"a":1e3,"n":"t"}
+1E+3
+
+# Missing output field on a passing select row emits null, not a dropped row
+select(.b * 2 > 1) | .a
+{"b":2}
+null
+
+# Missing output field with a unary op applies the op to null
+select(.b > 0) | .a | length
+{"b":2}
+0
+
+# select|length on a number preserves the sign-stripped literal repr
+select(.b > 0) | .a | length
+{"a":-1.50,"b":2}
+1.50
+
+# select|tostring re-renders a non-canonical lexeme through the tojson writer
+select(.b > 0) | .a | tostring
+{"a":2e3,"b":2}
+"2E+3"
+
+# select|tostring preserves a canonical literal lexeme
+select(.b > 0) | .a | tostring
+{"a":1.50,"b":2}
+"1.50"
