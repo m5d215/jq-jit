@@ -1096,6 +1096,15 @@ pub fn json_object_get_num(b: &[u8], pos: usize, field: &str) -> Option<f64> {
 /// Returns Some((start, end)) byte offsets of the field's value, or None if not found
 /// or the input isn't a JSON object. Used for field access fast paths.
 pub fn json_object_get_field_raw(b: &[u8], pos: usize, field: &str) -> Option<(usize, usize)> {
+    json_object_get_field_raw_classified(b, pos, field).map(|(s, e, _)| (s, e))
+}
+
+/// [`json_object_get_field_raw`] variant that also classifies the matched
+/// value's verbatim-safety in the same walk (see
+/// [`skip_json_value_classify`]); the third tuple element is that `clean`
+/// flag. Lets the raw passthrough apply-sites skip every per-value
+/// canonicalisation scan on clean data without a second pass.
+pub fn json_object_get_field_raw_classified(b: &[u8], pos: usize, field: &str) -> Option<(usize, usize, bool)> {
     if pos >= b.len() || b[pos] != b'{' { return None; }
     let field_bytes = field.as_bytes();
     // jq dedupes duplicate input keys last-wins (#233 / #325). After
@@ -1108,7 +1117,7 @@ pub fn json_object_get_field_raw(b: &[u8], pos: usize, field: &str) -> Option<(u
     let mut i = pos + 1;
     while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
     if i < b.len() && b[i] == b'}' { return None; }
-    let mut last_match: Option<(usize, usize)> = None;
+    let mut last_match: Option<(usize, usize, bool)> = None;
     loop {
         if i >= b.len() || b[i] != b'"' { return last_match; }
         let key_start = i + 1;
@@ -1124,10 +1133,13 @@ pub fn json_object_get_field_raw(b: &[u8], pos: usize, field: &str) -> Option<(u
         i += 1;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
         let val_start = i;
-        let val_end = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return last_match };
-        if key_matches {
-            last_match = Some((val_start, val_end));
-        }
+        let val_end = if key_matches {
+            let (end, vclean) = match skip_json_value_classify(b, i) { Ok(r) => r, Err(_) => return last_match };
+            last_match = Some((val_start, end, vclean));
+            end
+        } else {
+            match skip_json_value(b, i) { Ok(end) => end, Err(_) => return last_match }
+        };
         i = val_end;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
         if i >= b.len() { return last_match; }
@@ -3783,7 +3795,17 @@ pub fn json_object_get_fields_raw(b: &[u8], pos: usize, input_fields: &[&str]) -
 /// Returns true if all fields were found; false otherwise.
 /// `out` must have length >= `input_fields.len()`.
 pub fn json_object_get_fields_raw_buf(b: &[u8], pos: usize, input_fields: &[&str], out: &mut [(usize, usize)]) -> bool {
-    if pos >= b.len() || b[pos] != b'{' { return false; }
+    json_object_get_fields_raw_buf_classified(b, pos, input_fields, out).is_some()
+}
+
+/// [`json_object_get_fields_raw_buf`] variant that also classifies every
+/// matched value's verbatim-safety in the same walk (see
+/// [`skip_json_value_classify`]). Returns `None` on the same conditions the
+/// boolean variant returns `false`; on success, `Some(all_clean)` where
+/// `all_clean` is true when every matched value can be emitted with a plain
+/// copy — letting the apply-sites skip all per-value canonicalisation scans.
+pub fn json_object_get_fields_raw_buf_classified(b: &[u8], pos: usize, input_fields: &[&str], out: &mut [(usize, usize)]) -> Option<bool> {
+    if pos >= b.len() || b[pos] != b'{' { return None; }
     let n = input_fields.len();
     debug_assert!(out.len() >= n);
     // jq dedupes duplicate input keys last-wins (#233 / #325): the
@@ -3814,11 +3836,12 @@ pub fn json_object_get_fields_raw_buf(b: &[u8], pos: usize, input_fields: &[&str
     };
     let mut early_exit_attempted = false;
     let mut found_mask: u64 = 0;
+    let mut all_clean = true;
     let mut i = pos + 1;
     while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
-    if i < b.len() && b[i] == b'}' { return false; }
+    if i < b.len() && b[i] == b'}' { return None; }
     loop {
-        if i >= b.len() || b[i] != b'"' { return false; }
+        if i >= b.len() || b[i] != b'"' { return None; }
         let key_start = i + 1;
         let mut j = key_start;
         while j < b.len() {
@@ -3834,24 +3857,25 @@ pub fn json_object_get_fields_raw_buf(b: &[u8], pos: usize, input_fields: &[&str
         }
         i = j + 1;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
-        if i >= b.len() || b[i] != b':' { return false; }
+        if i >= b.len() || b[i] != b':' { return None; }
         i += 1;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
         if let Some(idx) = matched_idx {
             let val_start = i;
-            let val_end = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return false };
+            let (val_end, vclean) = match skip_json_value_classify(b, i) { Ok(r) => r, Err(_) => return None };
             out[idx] = (val_start, val_end);
             found_mask |= 1u64 << idx;
+            all_clean &= vclean;
             i = val_end;
         } else {
-            i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return false };
+            i = match skip_json_value(b, i) { Ok(end) => end, Err(_) => return None };
         }
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
-        if i >= b.len() { return false; }
+        if i >= b.len() { return None; }
         if b[i] == b'}' {
-            return found_mask.count_ones() as usize == n;
+            return if found_mask.count_ones() as usize == n { Some(all_clean) } else { None };
         }
-        if b[i] != b',' { return false; }
+        if b[i] != b',' { return None; }
         i += 1;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
         // All requested fields seen and there are more keys ahead →
@@ -3868,7 +3892,7 @@ pub fn json_object_get_fields_raw_buf(b: &[u8], pos: usize, input_fields: &[&str
         {
             early_exit_attempted = true;
             if no_target_first_byte_in_remainder(b, i, &first_bytes_small[..n]) {
-                return true;
+                return Some(all_clean);
             }
         }
     }
@@ -4001,14 +4025,15 @@ fn walk_json_nums_inner(buf: &mut Vec<u8>, b: &[u8], pos: &mut usize, op: u8, op
 /// Callers gate the (slightly slower) normalising copy on this so
 /// backslash-free input — the overwhelmingly common case — keeps its single
 /// `extend_from_slice`.
-#[inline]
+#[inline(always)]
 pub fn raw_contains_noncanon_escape(b: &[u8]) -> bool {
     // Cheapest pre-filter first: no backslash or DEL means nothing to
-    // canonicalise. A two-byte `memchr2` still has low per-call setup, which
-    // matters because this gates every raw string output — one call per
-    // record on the NDJSON field-access hot paths, where the value almost
-    // never contains `\` or 0x7F.
-    let Some(first) = memchr::memchr2(b'\\', 0x7F, b) else {
+    // canonicalise. This gates every raw string output — one call per record
+    // on the NDJSON field-access hot paths, where the value is typically a
+    // handful of bytes and almost never contains `\` or 0x7F — so short
+    // inputs take an inlined loop instead of paying `memchr2`'s per-call
+    // setup.
+    let Some(first) = find_backslash_or_del(b) else {
         return false;
     };
     if b[first] == 0x7F {
@@ -4744,6 +4769,93 @@ pub fn skip_json_value(b: &[u8], pos: usize) -> Result<usize> {
             Ok(i)
         }
         c => bail!("Unexpected character '{}' at position {}", c as char, pos),
+    }
+}
+
+/// [`skip_json_value`] fused with a verbatim-safety classification for the
+/// raw passthrough hot paths. Returns `(end, clean)`: `clean` is true when
+/// the value's raw bytes can be emitted by the raw-byte fast paths with a
+/// plain copy — a scalar with no backslash escape, no DEL byte (0x7F), and
+/// no number lexeme jq would re-render (`e`/`E` exponent, `+` sign,
+/// special-float spelling, `.000000` run; #729/#780/#1027/#446). Composites
+/// always report `clean = false` (their dup-key / compactness questions
+/// stay with the emit pipeline), so the classification never costs more
+/// than the boundary scan the caller was already paying.
+#[inline]
+pub fn skip_json_value_classify(b: &[u8], pos: usize) -> Result<(usize, bool)> {
+    if pos >= b.len() { bail!("Unexpected end of JSON"); }
+    match b[pos] {
+        b'n' => {
+            if b.get(pos..pos+4) == Some(b"null") { Ok((pos + 4, true)) }
+            else if let Some((_, adv)) = try_special_float_token(b, pos, false) { Ok((pos + adv, false)) }
+            else { bail!("Invalid JSON at position {}", pos) }
+        }
+        b't' => { if b.get(pos..pos+4) == Some(b"true") { Ok((pos + 4, true)) } else { bail!("Invalid JSON at position {}", pos) } }
+        b'f' => { if b.get(pos..pos+5) == Some(b"false") { Ok((pos + 5, true)) } else { bail!("Invalid JSON at position {}", pos) } }
+        b'"' => {
+            // Mirrors skip_json_value's string arm; additionally flags DEL
+            // (jq escapes it on output, #446) and any backslash escape
+            // (precise escape classification is left to the dirty-path
+            // gates — most data has none, and a single flag keeps this walk
+            // as cheap as the plain boundary scan).
+            let mut clean = true;
+            let mut i = pos + 1;
+            loop {
+                let rest = &b[i..];
+                match memchr::memchr2(b'"', b'\\', rest) {
+                    Some(offset) => {
+                        let mut ctl = false;
+                        let mut del = false;
+                        for &c in &rest[..offset] {
+                            ctl |= c < 0x20;
+                            del |= c == 0x7F;
+                        }
+                        if ctl {
+                            bail!("Invalid string: control characters from U+0000 through U+001F must be escaped");
+                        }
+                        if del { clean = false; }
+                        if rest[offset] == b'"' { return Ok((i + offset + 1, clean)); }
+                        // '\' : consume escape pair
+                        if i + offset + 1 >= b.len() { bail!("Unterminated string escape"); }
+                        clean = false;
+                        i += offset + 2;
+                    }
+                    None => bail!("Unterminated string"),
+                }
+            }
+        }
+        b'-' | b'+' | b'0'..=b'9' => {
+            // Mirrors skip_json_value's number arm; flags the lexeme shapes
+            // [`raw_composite_canon_class`] would classify as non-canonical
+            // (`+` sign, special floats, any exponent, `.000000` run, #611).
+            let mut i = pos;
+            let mut clean = b[i] != b'+';
+            if b[i] == b'-' || b[i] == b'+' {
+                if let Some((_, adv)) = try_special_float_token(b, pos + 1, false) {
+                    return Ok((pos + 1 + adv, false));
+                }
+                i += 1;
+            }
+            let digits_start = i;
+            while i < b.len() && b[i].is_ascii_digit() { i += 1; }
+            if i < b.len() && b[i] == b'.' {
+                if i > digits_start && b.get(i + 1..i + 7) == Some(&[b'0'; 6][..]) {
+                    clean = false;
+                }
+                i += 1;
+                while i < b.len() && b[i].is_ascii_digit() { i += 1; }
+            }
+            if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+                clean = false;
+                i += 1;
+                if i < b.len() && (b[i] == b'+' || b[i] == b'-') { i += 1; }
+                while i < b.len() && b[i].is_ascii_digit() { i += 1; }
+            }
+            Ok((i, clean))
+        }
+        // Composites and the remaining special-float spellings (`N`/`i`/`I`)
+        // delegate to the plain walker and report dirty.
+        _ => skip_json_value(b, pos).map(|end| (end, false)),
     }
 }
 
@@ -6048,6 +6160,88 @@ pub fn raw_composite_canon_class(bytes: &[u8]) -> CompositeCanon {
         }
     }
     if saw_noncanon_escape { CompositeCanon::NoncanonEscape } else { CompositeCanon::Clean }
+}
+
+/// Per-value bail gate for the scalar-dominated raw passthrough hot paths
+/// (field access, multi-field access, object/array construction). Decides
+/// the same bail-to-generic question as [`raw_contains_non_canonical_number`]
+/// but dispatches on the first byte so the common shapes pay the minimum
+/// scan: a plain integer one vectorisable all-digits pass, a backslash-free
+/// string one `memchr`, and `true`/`false`/`null` nothing at all. A string
+/// only bails on a surrogate `\uDXXX` escape (#615) — the one string shape
+/// the emit-side canonicaliser cannot reproduce (jq errors on a lone high
+/// surrogate); `\/`, non-surrogate `\uXXXX`, and DEL stay on the fast path
+/// and are re-encoded by the emit site's [`raw_contains_noncanon_escape`]
+/// gate.
+#[inline(always)]
+pub fn raw_value_bails_canon(v: &[u8]) -> bool {
+    match v.first() {
+        Some(c) if c.is_ascii_digit() || *c == b'-' => {
+            // A plain integer is always canonical; only lexemes carrying
+            // `.`/`e`/`E`/`+` (or a `-nan`/`-inf` spelling) need the full
+            // classifier.
+            !v.iter().all(|&x| x.is_ascii_digit() || x == b'-')
+                && raw_contains_non_canonical_number(v)
+        }
+        Some(b'"') => raw_string_has_surrogate_escape(v),
+        Some(b't') | Some(b'f') => false,
+        // `null` passes; the bare `nan` special-float spelling bails.
+        Some(b'n') => v != b"null",
+        // Composites and the remaining special-float spellings (`NaN`,
+        // `Infinity`, ...) keep the full single-pass classifier.
+        _ => raw_contains_non_canonical_number(v),
+    }
+}
+
+/// Locate the first `\` or DEL (0x7F) byte. Hybrid scanner for the raw
+/// passthrough gates: values on the NDJSON hot paths are usually a few
+/// bytes, where `memchr2`'s per-call setup costs more than a plain inlined
+/// loop; longer inputs still get `memchr2`'s vectorised throughput.
+#[inline(always)]
+fn find_backslash_or_del(b: &[u8]) -> Option<usize> {
+    if b.len() <= 64 {
+        b.iter().position(|&x| x == b'\\' || x == 0x7F)
+    } else {
+        memchr::memchr2(b'\\', 0x7F, b)
+    }
+}
+
+/// Single-byte variant of [`find_backslash_or_del`], same hybrid rationale.
+#[inline(always)]
+fn find_backslash(b: &[u8]) -> Option<usize> {
+    if b.len() <= 64 {
+        b.iter().position(|&x| x == b'\\')
+    } else {
+        memchr::memchr(b'\\', b)
+    }
+}
+
+/// True if the raw string token `v` (quotes included) contains a surrogate
+/// `\uD8XX`–`\uDFXX` escape. Escape-aware (an escaped backslash cannot pair
+/// with a following `u`), mirroring the surrogate detection inside
+/// [`raw_composite_canon_class`].
+#[inline(always)]
+pub fn raw_string_has_surrogate_escape(v: &[u8]) -> bool {
+    let mut i = 0;
+    while let Some(off) = find_backslash(&v[i..]) {
+        let p = i + off;
+        if p + 5 < v.len()
+            && v[p + 1] == b'u'
+            && (v[p + 2] == b'D' || v[p + 2] == b'd')
+            && matches!(v[p + 3],
+                b'8' | b'9' | b'A' | b'B' | b'C' | b'D' | b'E' | b'F'
+                     | b'a' | b'b' | b'c' | b'd' | b'e' | b'f')
+        {
+            return true;
+        }
+        // Skip the whole escape pair so `\\` does not pair with a following
+        // `u`.
+        i = p + 2;
+        if i >= v.len() {
+            return false;
+        }
+    }
+    false
 }
 
 /// Append a single JSON value's raw bytes `val` to `buf`, canonicalising number

@@ -201,7 +201,7 @@ fn execute_cb_field_access_invokes_callback_once() {
 #[test]
 fn raw_field_access_object_emits_value_bytes() {
     let mut emitted: Vec<Vec<u8>> = Vec::new();
-    let outcome = apply_field_access_raw(b"{\"x\":42,\"y\":7}", "x", |b| emitted.push(b.to_vec()));
+    let outcome = apply_field_access_raw(b"{\"x\":42,\"y\":7}", "x", |b, _| emitted.push(b.to_vec()));
     assert!(matches!(outcome, RawApplyOutcome::Emit));
     assert_eq!(emitted, vec![b"42".to_vec()]);
 }
@@ -209,7 +209,7 @@ fn raw_field_access_object_emits_value_bytes() {
 #[test]
 fn raw_field_access_object_missing_key_emits_null_literal() {
     let mut emitted: Vec<Vec<u8>> = Vec::new();
-    let outcome = apply_field_access_raw(b"{\"y\":7}", "x", |b| emitted.push(b.to_vec()));
+    let outcome = apply_field_access_raw(b"{\"y\":7}", "x", |b, _| emitted.push(b.to_vec()));
     assert!(matches!(outcome, RawApplyOutcome::Emit));
     assert_eq!(emitted, vec![b"null".to_vec()]);
 }
@@ -217,7 +217,7 @@ fn raw_field_access_object_missing_key_emits_null_literal() {
 #[test]
 fn raw_field_access_null_input_emits_null_literal() {
     let mut emitted: Vec<Vec<u8>> = Vec::new();
-    let outcome = apply_field_access_raw(b"null", "x", |b| emitted.push(b.to_vec()));
+    let outcome = apply_field_access_raw(b"null", "x", |b, _| emitted.push(b.to_vec()));
     assert!(matches!(outcome, RawApplyOutcome::Emit));
     assert_eq!(emitted, vec![b"null".to_vec()]);
 }
@@ -236,7 +236,7 @@ fn raw_field_access_non_object_non_null_bails() {
         b"[1,2,3]".as_slice(),
     ] {
         let mut emitted: Vec<Vec<u8>> = Vec::new();
-        let outcome = apply_field_access_raw(raw, "x", |b| emitted.push(b.to_vec()));
+        let outcome = apply_field_access_raw(raw, "x", |b, _| emitted.push(b.to_vec()));
         assert!(
             matches!(outcome, RawApplyOutcome::Bail),
             "expected Bail for input {:?}, got {:?}",
@@ -343,7 +343,7 @@ fn raw_multi_field_complete_object_emits_each_field() {
         b"{\"a\":1,\"b\":2,\"c\":3}",
         &["a", "b", "c"],
         &mut ranges_buf,
-        |bytes| emitted.push(bytes.to_vec()),
+        |bytes, _| emitted.push(bytes.to_vec()),
     );
     assert!(matches!(outcome, RawApplyOutcome::Emit));
     assert_eq!(emitted, vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()]);
@@ -359,7 +359,7 @@ fn raw_multi_field_partial_object_bails() {
         b"{\"a\":1,\"c\":3}",
         &["a", "b", "c"],
         &mut ranges_buf,
-        |bytes| emitted.push(bytes.to_vec()),
+        |bytes, _| emitted.push(bytes.to_vec()),
     );
     assert!(matches!(outcome, RawApplyOutcome::Bail));
     assert!(emitted.is_empty());
@@ -375,7 +375,7 @@ fn raw_multi_field_null_input_bails() {
         b"null",
         &["a", "b"],
         &mut ranges_buf,
-        |bytes| emitted.push(bytes.to_vec()),
+        |bytes, _| emitted.push(bytes.to_vec()),
     );
     assert!(matches!(outcome, RawApplyOutcome::Bail));
     assert!(emitted.is_empty());
@@ -395,7 +395,7 @@ fn raw_multi_field_non_object_non_null_input_bails() {
             raw,
             &["a", "b"],
             &mut ranges_buf,
-            |bytes| emitted.push(bytes.to_vec()),
+            |bytes, _| emitted.push(bytes.to_vec()),
         );
         assert!(
             matches!(outcome, RawApplyOutcome::Bail),
@@ -421,7 +421,7 @@ fn raw_full_object_fields_complete_object_invokes_emit_once() {
         b"{\"a\":1,\"b\":2,\"c\":3}",
         &["a", "b", "c"],
         &mut ranges_buf,
-        |ranges, raw| {
+        |ranges, raw, _| {
             calls += 1;
             for (vs, ve) in ranges {
                 collected.push(raw[*vs..*ve].to_vec());
@@ -441,7 +441,7 @@ fn raw_full_object_fields_partial_object_bails_without_calling_emit() {
         b"{\"a\":1,\"c\":3}",
         &["a", "b", "c"],
         &mut ranges_buf,
-        |_, _| { calls += 1; },
+        |_, _, _| { calls += 1; },
     );
     assert!(matches!(outcome, RawApplyOutcome::Bail));
     assert_eq!(calls, 0, "Bail must not invoke emit_array");
@@ -455,7 +455,7 @@ fn raw_full_object_fields_null_input_bails_without_calling_emit() {
         b"null",
         &["a", "b"],
         &mut ranges_buf,
-        |_, _| { calls += 1; },
+        |_, _, _| { calls += 1; },
     );
     assert!(matches!(outcome, RawApplyOutcome::Bail));
     assert_eq!(calls, 0);
@@ -475,7 +475,7 @@ fn raw_full_object_fields_non_object_non_null_input_bails() {
             raw,
             &["a", "b"],
             &mut ranges_buf,
-            |_, _| { calls += 1; },
+            |_, _, _| { calls += 1; },
         );
         assert!(
             matches!(outcome, RawApplyOutcome::Bail),
@@ -623,7 +623,7 @@ fn raw_object_compute_full_object_invokes_emit_after_inner_check() {
         &["a", "b"],
         &mut ranges_buf,
         |_, _| { bail_calls += 1; false }, // inner check passes
-        |_, _| { emit_calls += 1; },
+        |_, _, _| { emit_calls += 1; },
     );
     assert!(matches!(outcome, RawApplyOutcome::Emit));
     assert_eq!(bail_calls, 1, "bail_check must run exactly once on outer success");
@@ -641,7 +641,7 @@ fn raw_object_compute_outer_bail_skips_inner_and_emit() {
         &["a", "b"],
         &mut ranges_buf,
         |_, _| { bail_calls += 1; false },
-        |_, _| { emit_calls += 1; },
+        |_, _, _| { emit_calls += 1; },
     );
     assert!(matches!(outcome, RawApplyOutcome::Bail));
     assert_eq!(bail_calls, 0, "outer bail must skip the inner check");
@@ -658,7 +658,7 @@ fn raw_object_compute_inner_bail_skips_emit() {
         &["a", "b"],
         &mut ranges_buf,
         |_, _| true, // inner says bail
-        |_, _| { emit_calls += 1; },
+        |_, _, _| { emit_calls += 1; },
     );
     assert!(matches!(outcome, RawApplyOutcome::Bail));
     assert_eq!(emit_calls, 0, "inner bail must skip emit");
@@ -677,7 +677,7 @@ fn raw_object_compute_partial_object_outer_bails() {
         &["a", "b"],
         &mut ranges_buf,
         |_, _| { bail_calls += 1; false },
-        |_, _| { emit_calls += 1; },
+        |_, _, _| { emit_calls += 1; },
     );
     assert!(matches!(outcome, RawApplyOutcome::Bail));
     assert_eq!(bail_calls, 0);

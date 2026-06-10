@@ -178,34 +178,44 @@ pub enum RawApplyOutcome {
 /// dup-key / pretty-print pipeline (e.g. the `emit_raw_ln!` macro in
 /// `bin/jq-jit.rs`) without forcing two simultaneous `&mut` borrows of the
 /// output buffer.
+///
+/// `emit`'s second argument is the value's verbatim-safety verdict from the
+/// boundary scan ([`skip_json_value_classify`]): `true` means the bytes are a
+/// scalar jq would output unchanged, so the apply-site may append them
+/// directly and skip its dup-key / compactness / escape gating.
 pub fn apply_field_access_raw<E>(
     raw: &[u8],
     field: &str,
     mut emit: E,
 ) -> RawApplyOutcome
 where
-    E: FnMut(&[u8]),
+    E: FnMut(&[u8], bool),
 {
     match raw.first().copied() {
         Some(b'{') => {
-            match json_object_get_field_raw(raw, 0, field) {
-                // A non-canonical number in the field value (`1e10`,
-                // `0.0000001`, `nan`) must be re-rendered through Value to
-                // match jq's canonical output, so bail to the generic path
-                // rather than echoing the source lexeme (#729).
-                Some((vs, ve)) => {
+            match crate::value::json_object_get_field_raw_classified(raw, 0, field) {
+                Some((vs, ve, clean)) => {
                     let v = &raw[vs..ve];
-                    if raw_contains_non_canonical_number(v) {
-                        return RawApplyOutcome::Bail;
+                    if clean {
+                        emit(v, true);
+                    } else {
+                        // A non-canonical number in the field value (`1e10`,
+                        // `0.0000001`, `nan`) or a surrogate escape must be
+                        // re-rendered through Value to match jq's canonical
+                        // output, so bail to the generic path rather than
+                        // echoing the source lexeme (#729 / #615).
+                        if crate::value::raw_value_bails_canon(v) {
+                            return RawApplyOutcome::Bail;
+                        }
+                        emit(v, false);
                     }
-                    emit(v);
                 }
-                None => emit(b"null"),
+                None => emit(b"null", true),
             }
             RawApplyOutcome::Emit
         }
         Some(b'n') => {
-            emit(b"null");
+            emit(b"null", true);
             RawApplyOutcome::Emit
         }
         // Non-object, non-null: jq raises a type error. Hand off to the
@@ -241,17 +251,23 @@ pub fn apply_multi_field_access_raw<E>(
     mut emit: E,
 ) -> RawApplyOutcome
 where
-    E: FnMut(&[u8]),
+    E: FnMut(&[u8], bool),
 {
-    if json_object_get_fields_raw_buf(raw, 0, fields, ranges_buf) {
+    if let Some(all_clean) =
+        crate::value::json_object_get_fields_raw_buf_classified(raw, 0, fields, ranges_buf)
+    {
         // A non-canonical number in any emitted field value must be
         // re-rendered through Value to match jq's canonical output; bail to
-        // the generic path rather than echo the source lexeme (#729).
-        if ranges_buf.iter().any(|(vs, ve)| raw_contains_non_canonical_number(&raw[*vs..*ve])) {
+        // the generic path rather than echo the source lexeme (#729). When
+        // the boundary scan already proved every value verbatim-safe, skip
+        // the per-value gates entirely.
+        if !all_clean
+            && ranges_buf.iter().any(|(vs, ve)| crate::value::raw_value_bails_canon(&raw[*vs..*ve]))
+        {
             return RawApplyOutcome::Bail;
         }
         for (vs, ve) in ranges_buf.iter() {
-            emit(&raw[*vs..*ve]);
+            emit(&raw[*vs..*ve], all_clean);
         }
         RawApplyOutcome::Emit
     } else {
@@ -293,11 +309,13 @@ pub fn apply_object_compute_raw<C, E>(
 ) -> RawApplyOutcome
 where
     C: FnOnce(&[(usize, usize)], &[u8]) -> bool,
-    E: FnOnce(&[(usize, usize)], &[u8]),
+    E: FnOnce(&[(usize, usize)], &[u8], bool),
 {
-    if !json_object_get_fields_raw_buf(raw, 0, fields, ranges_buf) {
+    let Some(all_clean) =
+        crate::value::json_object_get_fields_raw_buf_classified(raw, 0, fields, ranges_buf)
+    else {
         return RawApplyOutcome::Bail;
-    }
+    };
     let ranges = &ranges_buf[..fields.len()];
     if bail_check(ranges, raw) {
         return RawApplyOutcome::Bail;
@@ -306,10 +324,14 @@ where
     // lexeme through a passthrough cell (`{x:.b}` with `.b == 2e3`), so bail to
     // the generic path which re-renders it canonically (#729). Computed cells
     // (`.b + 0`) over-bail harmlessly — the generic path yields the same value.
-    if ranges.iter().any(|(vs, ve)| raw_contains_non_canonical_number(&raw[*vs..*ve])) {
+    // When the boundary scan already proved every value verbatim-safe, skip
+    // the per-value gates.
+    if !all_clean
+        && ranges.iter().any(|(vs, ve)| crate::value::raw_value_bails_canon(&raw[*vs..*ve]))
+    {
         return RawApplyOutcome::Bail;
     }
-    emit(ranges, raw);
+    emit(ranges, raw, all_clean);
     RawApplyOutcome::Emit
 }
 
@@ -3998,18 +4020,22 @@ pub fn apply_full_object_fields_raw<E>(
     emit_structural: E,
 ) -> RawApplyOutcome
 where
-    E: FnOnce(&[(usize, usize)], &[u8]),
+    E: FnOnce(&[(usize, usize)], &[u8], bool),
 {
-    if json_object_get_fields_raw_buf(raw, 0, fields, ranges_buf) {
+    if let Some(all_clean) =
+        crate::value::json_object_get_fields_raw_buf_classified(raw, 0, fields, ranges_buf)
+    {
         // A non-canonical number in any field value must be re-rendered through
         // Value to match jq's canonical output; bail to the generic path rather
-        // than echo the source lexeme (#729).
-        if ranges_buf[..fields.len()].iter()
-            .any(|(vs, ve)| raw_contains_non_canonical_number(&raw[*vs..*ve]))
+        // than echo the source lexeme (#729). When the boundary scan already
+        // proved every value verbatim-safe, skip the per-value gates.
+        if !all_clean
+            && ranges_buf[..fields.len()].iter()
+                .any(|(vs, ve)| crate::value::raw_value_bails_canon(&raw[*vs..*ve]))
         {
             return RawApplyOutcome::Bail;
         }
-        emit_structural(&ranges_buf[..fields.len()], raw);
+        emit_structural(&ranges_buf[..fields.len()], raw, all_clean);
         RawApplyOutcome::Emit
     } else {
         RawApplyOutcome::Bail
@@ -4044,7 +4070,7 @@ where
             Some((vs, ve)) => {
                 let v = &raw[vs..ve];
                 // Canonicalise non-canonical numbers via the generic path (#729).
-                if raw_contains_non_canonical_number(v) {
+                if crate::value::raw_value_bails_canon(v) {
                     return RawApplyOutcome::Bail;
                 }
                 emit(v);

@@ -1036,7 +1036,7 @@ fn emit_resolved_branch_output(
             buf.extend_from_slice(b"null");
         }
         ResolvedBranchOutput::Computed(ref resolved) => {
-            emit_resolved_value(buf, resolved, raw, ranges);
+            emit_resolved_value(buf, resolved, raw, ranges, false);
         }
     }
 }
@@ -1253,7 +1253,7 @@ fn emit_remap_value(
         RemapExpr::FieldLength(f) => {
             let idx = field_idx[f.as_str()];
             let resolved = ResolvedRemap::FieldLength(idx);
-            emit_resolved_value(buf, &resolved, raw, ranges);
+            emit_resolved_value(buf, &resolved, raw, ranges, false);
         }
         RemapExpr::FieldSplitJoin(f, sep, rep) => {
             let idx = field_idx[f.as_str()];
@@ -1263,22 +1263,22 @@ fn emit_remap_value(
         RemapExpr::FieldStringCase(f, is_upper) => {
             let idx = field_idx[f.as_str()];
             let resolved = ResolvedRemap::FieldStringCase(idx, *is_upper);
-            emit_resolved_value(buf, &resolved, raw, ranges);
+            emit_resolved_value(buf, &resolved, raw, ranges, false);
         }
         RemapExpr::FieldSplitLength(f, sep) => {
             let idx = field_idx[f.as_str()];
             let resolved = ResolvedRemap::FieldSplitLength(idx, sep.as_bytes().to_vec());
-            emit_resolved_value(buf, &resolved, raw, ranges);
+            emit_resolved_value(buf, &resolved, raw, ranges, false);
         }
         RemapExpr::FieldStrBuiltin(f, op, arg) => {
             let idx = field_idx[f.as_str()];
             let resolved = ResolvedRemap::FieldStrBuiltin(idx, *op, arg.as_bytes().to_vec());
-            emit_resolved_value(buf, &resolved, raw, ranges);
+            emit_resolved_value(buf, &resolved, raw, ranges, false);
         }
         RemapExpr::FieldSplitIndex(f, sep, sidx) => {
             let idx = field_idx[f.as_str()];
             let resolved = ResolvedRemap::FieldSplitIndex(idx, sep.as_bytes().to_vec(), *sidx);
-            emit_resolved_value(buf, &resolved, raw, ranges);
+            emit_resolved_value(buf, &resolved, raw, ranges, false);
         }
         RemapExpr::FieldOpFieldToString(f1, op, f2) => {
             let idx1 = field_idx[f1.as_str()];
@@ -1308,7 +1308,7 @@ fn emit_remap_value(
         RemapExpr::FieldSlice(f, from, to) => {
             let idx = field_idx[f.as_str()];
             let resolved = ResolvedRemap::FieldSlice(idx, *from, *to);
-            emit_resolved_value(buf, &resolved, raw, ranges);
+            emit_resolved_value(buf, &resolved, raw, ranges, false);
         }
         RemapExpr::FieldArray(ref exprs) => {
             buf.push(b'[');
@@ -1320,12 +1320,12 @@ fn emit_remap_value(
         }
         RemapExpr::BoolExpr(_, _, _) | RemapExpr::FieldType(_) | RemapExpr::FieldNegate(_) | RemapExpr::ArithCmp(_, _, _, _) => {
             let resolved = resolve_one_remap(rexpr, field_idx);
-            emit_resolved_value(buf, &resolved, raw, ranges);
+            emit_resolved_value(buf, &resolved, raw, ranges, false);
         }
         RemapExpr::CondChain(_, _) => {
             // Resolve and emit (slow path, used for non-pre-resolved paths)
             let resolved = resolve_one_remap(rexpr, field_idx);
-            emit_resolved_value(buf, &resolved, raw, ranges);
+            emit_resolved_value(buf, &resolved, raw, ranges, false);
         }
         RemapExpr::StringInterp(parts) => {
             buf.push(b'"');
@@ -1355,7 +1355,7 @@ fn emit_remap_value(
         }
         RemapExpr::StringChain(_) => {
             let resolved = resolve_one_remap(rexpr, field_idx);
-            emit_resolved_value(buf, &resolved, raw, ranges);
+            emit_resolved_value(buf, &resolved, raw, ranges, false);
         }
     }
 }
@@ -1686,12 +1686,18 @@ fn resolved_would_error(
 }
 
 /// Emit a pre-resolved remap value — no HashMap lookups, just direct index access.
+///
+/// `clean` is the apply-site's record-level verbatim-safety verdict (from the
+/// classified boundary scan): when true, every range in `ranges` is a scalar
+/// jq would output unchanged, so passthrough cells skip their per-value
+/// canonicalisation gates. Callers without that proof pass `false`.
 #[inline]
 fn emit_resolved_value(
     buf: &mut Vec<u8>,
     resolved: &ResolvedRemap,
     raw: &[u8],
     ranges: &[(usize, usize)],
+    clean: bool,
 ) {
     use jq_jit::ir::BinOp;
     match *resolved {
@@ -1702,7 +1708,9 @@ fn emit_resolved_value(
             // number lexeme (`1e10`, `2e3`) would leak; re-render through Value
             // to obtain jq's canonical repr (#729). Scalars/strings/composites
             // without such a literal copy as-is (the common, hot path).
-            if raw_contains_non_canonical_number(val) {
+            if clean {
+                buf.extend_from_slice(val);
+            } else if raw_contains_non_canonical_number(val) {
                 match json_to_value(unsafe { std::str::from_utf8_unchecked(val) }) {
                     Ok(v) => buf.extend_from_slice(value_to_json_precise(&v).as_bytes()),
                     Err(_) => buf.extend_from_slice(val),
@@ -2210,7 +2218,7 @@ fn emit_resolved_value(
             buf.push(b'[');
             for (i, elem) in elements.iter().enumerate() {
                 if i > 0 { buf.push(b','); }
-                emit_resolved_value(buf, elem, raw, ranges);
+                emit_resolved_value(buf, elem, raw, ranges, false);
             }
             buf.push(b']');
         }
@@ -2355,7 +2363,7 @@ fn eval_resolved_bool(resolved: &ResolvedRemap, raw: &[u8], ranges: &[(usize, us
         _ => {
             // Evaluate as JSON and check truthiness
             let mut tmp = Vec::new();
-            emit_resolved_value(&mut tmp, resolved, raw, ranges);
+            emit_resolved_value(&mut tmp, resolved, raw, ranges, false);
             // JSON truthiness: null and false are falsy, everything else is truthy
             if tmp == b"null" || tmp == b"false" { Some(false) } else { Some(true) }
         }
@@ -5498,13 +5506,13 @@ fn real_main() {
                                     compact_buf.extend_from_slice(b"{\n  ");
                                     compact_buf.extend_from_slice(key_val);
                                     compact_buf.extend_from_slice(b": ");
-                                    emit_resolved_value(&mut compact_buf, &resolved_val, raw, &ranges_buf);
+                                    emit_resolved_value(&mut compact_buf, &resolved_val, raw, &ranges_buf, false);
                                     compact_buf.extend_from_slice(b"\n}\n");
                                 } else {
                                     compact_buf.push(b'{');
                                     compact_buf.extend_from_slice(key_val);
                                     compact_buf.push(b':');
-                                    emit_resolved_value(&mut compact_buf, &resolved_val, raw, &ranges_buf);
+                                    emit_resolved_value(&mut compact_buf, &resolved_val, raw, &ranges_buf, false);
                                     compact_buf.extend_from_slice(b"}\n");
                                 }
                             } else {
@@ -5570,20 +5578,20 @@ fn real_main() {
                                     compact_buf.extend_from_slice(b"{\n  ");
                                     compact_buf.extend_from_slice(key_val);
                                     compact_buf.extend_from_slice(b": ");
-                                    emit_resolved_value(&mut compact_buf, &resolved_dk_val, raw, &ranges_buf);
+                                    emit_resolved_value(&mut compact_buf, &resolved_dk_val, raw, &ranges_buf, false);
                                     for (i, resolved) in resolved_static.iter().enumerate() {
                                         compact_buf.extend_from_slice(&static_key_bufs_pretty[i]);
-                                        emit_resolved_value(&mut compact_buf, resolved, raw, &ranges_buf);
+                                        emit_resolved_value(&mut compact_buf, resolved, raw, &ranges_buf, false);
                                     }
                                     compact_buf.extend_from_slice(b"\n}\n");
                                 } else {
                                     compact_buf.push(b'{');
                                     compact_buf.extend_from_slice(key_val);
                                     compact_buf.push(b':');
-                                    emit_resolved_value(&mut compact_buf, &resolved_dk_val, raw, &ranges_buf);
+                                    emit_resolved_value(&mut compact_buf, &resolved_dk_val, raw, &ranges_buf, false);
                                     for (i, resolved) in resolved_static.iter().enumerate() {
                                         compact_buf.extend_from_slice(&static_key_bufs[i]);
-                                        emit_resolved_value(&mut compact_buf, resolved, raw, &ranges_buf);
+                                        emit_resolved_value(&mut compact_buf, resolved, raw, &ranges_buf, false);
                                     }
                                     compact_buf.extend_from_slice(b"}\n");
                                 }
@@ -6367,8 +6375,16 @@ fn real_main() {
                 } else if let Some(ref fa_field) = field_access {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        let outcome = apply_field_access_raw(raw, fa_field, |bytes| {
-                            emit_raw_ln!(&mut compact_buf, bytes);
+                        let outcome = apply_field_access_raw(raw, fa_field, |bytes, clean| {
+                            // `clean` scalars are verbatim-safe (no dup keys,
+                            // already compact, no escape to re-encode) — skip
+                            // the emit_raw_ln! gates.
+                            if clean {
+                                compact_buf.extend_from_slice(bytes);
+                                compact_buf.push(b'\n');
+                            } else {
+                                emit_raw_ln!(&mut compact_buf, bytes);
+                            }
                         });
                         if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
@@ -6422,20 +6438,20 @@ fn real_main() {
                             // jq type error (e.g. str + num). The raw scanner only handles
                             // num+num / str+str arithmetic; everything else goes generic.
                             |ranges, raw| resolved.iter().any(|r| resolved_would_error(r, raw, ranges)),
-                            |ranges, raw| {
+                            |ranges, raw, all_clean| {
                                 if use_pretty_buf {
                                     compact_buf.extend_from_slice(b"[\n");
                                     for (i, res) in resolved.iter().enumerate() {
                                         if i > 0 { compact_buf.extend_from_slice(b",\n"); }
                                         compact_buf.extend_from_slice(b"  ");
-                                        emit_resolved_value(&mut compact_buf, res, raw, ranges);
+                                        emit_resolved_value(&mut compact_buf, res, raw, ranges, all_clean);
                                     }
                                     compact_buf.extend_from_slice(b"\n]\n");
                                 } else {
                                     compact_buf.push(b'[');
                                     for (i, res) in resolved.iter().enumerate() {
                                         if i > 0 { compact_buf.push(b','); }
-                                        emit_resolved_value(&mut compact_buf, res, raw, ranges);
+                                        emit_resolved_value(&mut compact_buf, res, raw, ranges, all_clean);
                                     }
                                     compact_buf.extend_from_slice(b"]\n");
                                 }
@@ -6460,7 +6476,7 @@ fn real_main() {
                             raw,
                             &af_refs,
                             &mut ranges_buf,
-                            |ranges, raw| {
+                            |ranges, raw, all_clean| {
                                 if use_pretty_buf {
                                     compact_buf.extend_from_slice(b"[\n");
                                     for (i, (vs, ve)) in ranges.iter().enumerate() {
@@ -6470,7 +6486,7 @@ fn real_main() {
                                         if val[0] == b'{' || val[0] == b'[' {
                                             push_json_pretty_raw_at(&mut compact_buf, val, 2, false, 1);
                                         } else {
-                                            if raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
+                                            if !all_clean && raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                         }
                                     }
                                     compact_buf.extend_from_slice(b"\n]\n");
@@ -6478,7 +6494,7 @@ fn real_main() {
                                     compact_buf.push(b'[');
                                     for (i, (vs, ve)) in ranges.iter().enumerate() {
                                         if i > 0 { compact_buf.push(b','); }
-                                        { let _vv = &raw[*vs..*ve]; if raw_contains_noncanon_escape(_vv) { push_raw_canon_escapes(&mut compact_buf, _vv); } else { compact_buf.extend_from_slice(_vv); } }
+                                        { let _vv = &raw[*vs..*ve]; if !all_clean && raw_contains_noncanon_escape(_vv) { push_raw_canon_escapes(&mut compact_buf, _vv); } else { compact_buf.extend_from_slice(_vv); } }
                                     }
                                     compact_buf.extend_from_slice(b"]\n");
                                 }
@@ -6503,7 +6519,14 @@ fn real_main() {
                             raw,
                             &mf_refs,
                             &mut ranges_buf,
-                            |bytes| { emit_raw_ln!(&mut compact_buf, bytes); },
+                            |bytes, clean| {
+                                if clean {
+                                    compact_buf.extend_from_slice(bytes);
+                                    compact_buf.push(b'\n');
+                                } else {
+                                    emit_raw_ln!(&mut compact_buf, bytes);
+                                }
+                            },
                         );
                         if let RawApplyOutcome::Bail = outcome {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
@@ -6529,7 +6552,7 @@ fn real_main() {
                                 raw,
                                 &input_fields,
                                 &mut ranges_buf,
-                                |ranges, raw| {
+                                |ranges, raw, all_clean| {
                                     compact_buf.extend_from_slice(b"{\n");
                                     for (i, (vs, ve)) in ranges.iter().enumerate() {
                                         if i > 0 { compact_buf.extend_from_slice(b",\n"); }
@@ -6540,7 +6563,7 @@ fn real_main() {
                                         if val[0] == b'{' || val[0] == b'[' {
                                             push_json_pretty_raw_at(&mut compact_buf, val, 2, false, 1);
                                         } else {
-                                            if raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
+                                            if !all_clean && raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                         }
                                     }
                                     compact_buf.extend_from_slice(b"\n}\n");
@@ -6572,10 +6595,10 @@ fn real_main() {
                                 raw,
                                 &input_fields,
                                 &mut ranges_buf,
-                                |ranges, raw| {
+                                |ranges, raw, all_clean| {
                                     for (i, (vs, ve)) in ranges.iter().enumerate() {
                                         compact_buf.extend_from_slice(&key_prefixes[i]);
-                                        { let _vv = &raw[*vs..*ve]; if raw_contains_noncanon_escape(_vv) { push_raw_canon_escapes(&mut compact_buf, _vv); } else { compact_buf.extend_from_slice(_vv); } }
+                                        { let _vv = &raw[*vs..*ve]; if !all_clean && raw_contains_noncanon_escape(_vv) { push_raw_canon_escapes(&mut compact_buf, _vv); } else { compact_buf.extend_from_slice(_vv); } }
                                     }
                                     compact_buf.extend_from_slice(b"}\n");
                                 },
@@ -6618,10 +6641,10 @@ fn real_main() {
                             &field_refs,
                             &mut ranges_buf,
                             |ranges, raw| resolved.iter().any(|r| resolved_would_error(r, raw, ranges)),
-                            |ranges, raw| {
+                            |ranges, raw, all_clean| {
                                 for (i, res) in resolved.iter().enumerate() {
                                     compact_buf.extend_from_slice(&key_prefixes[i]);
-                                    emit_resolved_value(&mut compact_buf, res, raw, ranges);
+                                    emit_resolved_value(&mut compact_buf, res, raw, ranges, all_clean);
                                 }
                                 compact_buf.extend_from_slice(obj_close);
                             },
@@ -6659,11 +6682,11 @@ fn real_main() {
                             &field_refs,
                             &mut ranges_buf,
                             |ranges, raw| resolved.iter().any(|r| resolved_would_error(r, raw, ranges)),
-                            |ranges, raw| {
+                            |ranges, raw, all_clean| {
                                 compact_buf.push(b'[');
                                 for (i, res) in resolved.iter().enumerate() {
                                     if i > 0 { compact_buf.push(b','); }
-                                    emit_resolved_value(&mut compact_buf, res, raw, ranges);
+                                    emit_resolved_value(&mut compact_buf, res, raw, ranges, all_clean);
                                 }
                                 compact_buf.extend_from_slice(b"]\n");
                             },
@@ -7725,7 +7748,7 @@ fn real_main() {
                                 if i > 0 { compact_buf.extend_from_slice(&escaped_sep); }
                                 // Emit each element as a string (tostring semantics)
                                 num_buf.clear();
-                                emit_resolved_value(&mut num_buf, res, raw, &ranges);
+                                emit_resolved_value(&mut num_buf, res, raw, &ranges, false);
                                 // If it's a JSON string, strip quotes; otherwise use as-is
                                 if num_buf.len() >= 2 && num_buf[0] == b'"' && num_buf[num_buf.len()-1] == b'"' {
                                     compact_buf.extend_from_slice(&num_buf[1..num_buf.len()-1]);
@@ -8194,7 +8217,7 @@ fn real_main() {
                                 }
                                 return Ok(());
                             }
-                            emit_resolved_value(&mut compact_buf, &resolved, raw, &ranges_buf);
+                            emit_resolved_value(&mut compact_buf, &resolved, raw, &ranges_buf, false);
                             compact_buf.push(b'\n');
                             if compact_buf.len() >= 1 << 17 {
                                 let _ = out.write_all(&compact_buf);
@@ -8615,7 +8638,7 @@ fn real_main() {
                     let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                        if let Some(all_clean) = jq_jit::value::json_object_get_fields_raw_buf_classified(raw, 0, &field_refs, &mut ranges_buf) {
                             let mut output = None;
                             let mut output_idx = 0usize;
                             let mut needs_generic = false;
@@ -8788,7 +8811,21 @@ fn real_main() {
                                     if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
                                         push_json_pretty_raw(&mut compact_buf, val, 2, false);
                                     } else {
-                                        if raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
+                                        // A passthrough field value with a non-canonical number lexeme
+                                        // (`1e3`, `nan`) must re-render through Value to match jq's
+                                        // canonical output (#729 class); escapes re-encode (#780/#1027).
+                                        if all_clean {
+                                            compact_buf.extend_from_slice(val);
+                                        } else if raw_contains_non_canonical_number(val) {
+                                            match json_to_value(unsafe { std::str::from_utf8_unchecked(val) }) {
+                                                Ok(v) => compact_buf.extend_from_slice(value_to_json_precise(&v).as_bytes()),
+                                                Err(_) => compact_buf.extend_from_slice(val),
+                                            }
+                                        } else if raw_contains_noncanon_escape(val) {
+                                            push_raw_canon_escapes(&mut compact_buf, val);
+                                        } else {
+                                            compact_buf.extend_from_slice(val);
+                                        }
                                     }
                                     compact_buf.push(b'\n');
                                 }
@@ -8801,7 +8838,7 @@ fn real_main() {
                                     if let Some((ref kp, ref res, close)) = resolved_data {
                                         for (j, rv) in res.iter().enumerate() {
                                             compact_buf.extend_from_slice(&kp[j]);
-                                            emit_resolved_value(&mut compact_buf, rv, raw, &ranges_buf);
+                                            emit_resolved_value(&mut compact_buf, rv, raw, &ranges_buf, all_clean);
                                         }
                                         compact_buf.extend_from_slice(close);
                                     }
@@ -8813,7 +8850,7 @@ fn real_main() {
                                         else_computed.as_ref()
                                     };
                                     if let Some(rv) = resolved_remap {
-                                        emit_resolved_value(&mut compact_buf, rv, raw, &ranges_buf);
+                                        emit_resolved_value(&mut compact_buf, rv, raw, &ranges_buf, all_clean);
                                         compact_buf.push(b'\n');
                                     }
                                 }
@@ -9379,7 +9416,7 @@ fn real_main() {
                             compact_buf.push(b'[');
                             for (i, res) in resolved.iter().enumerate() {
                                 if i > 0 { compact_buf.push(b','); }
-                                emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf, false);
                             }
                             compact_buf.extend_from_slice(b"]\n");
                         } else {
@@ -9677,7 +9714,7 @@ fn real_main() {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                 process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             } else {
-                                emit_resolved_value(&mut compact_buf, &resolved, raw, &ranges_buf);
+                                emit_resolved_value(&mut compact_buf, &resolved, raw, &ranges_buf, false);
                                 compact_buf.push(b'\n');
                             }
                         }
@@ -9740,7 +9777,7 @@ fn real_main() {
                             } else {
                                 for (i, res) in resolved.iter().enumerate() {
                                     compact_buf.extend_from_slice(&key_prefixes[i]);
-                                    emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                    emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf, false);
                                 }
                                 compact_buf.extend_from_slice(obj_close);
                             }
@@ -10207,7 +10244,7 @@ fn real_main() {
                                 if !resolved.iter().any(|res| resolved_would_error(res, raw, &ranges_buf)) {
                                     for (i, res) in resolved.iter().enumerate() {
                                         compact_buf.extend_from_slice(&key_prefixes[i]);
-                                        emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                        emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf, false);
                                     }
                                     compact_buf.extend_from_slice(obj_close);
                                     handled = true;
@@ -10262,7 +10299,7 @@ fn real_main() {
                                     compact_buf.push(b'{');
                                     compact_buf.extend_from_slice(key_raw);
                                     compact_buf.push(b':');
-                                    emit_resolved_value(&mut compact_buf, &resolved_val, raw, &ranges_buf);
+                                    emit_resolved_value(&mut compact_buf, &resolved_val, raw, &ranges_buf, false);
                                     compact_buf.extend_from_slice(b"}\n");
                                 }
                             }
@@ -10327,10 +10364,10 @@ fn real_main() {
                                     compact_buf.push(b'{');
                                     compact_buf.extend_from_slice(key_raw);
                                     compact_buf.push(b':');
-                                    emit_resolved_value(&mut compact_buf, &resolved_dk_val, raw, &ranges_buf);
+                                    emit_resolved_value(&mut compact_buf, &resolved_dk_val, raw, &ranges_buf, false);
                                     for (i, res) in resolved_static.iter().enumerate() {
                                         compact_buf.extend_from_slice(&static_key_prefixes[i]);
-                                        emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                        emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf, false);
                                     }
                                     compact_buf.extend_from_slice(b"}\n");
                                 }
@@ -10387,7 +10424,7 @@ fn real_main() {
                                 compact_buf.push(b'[');
                                 for (i, res) in resolved.iter().enumerate() {
                                     if i > 0 { compact_buf.push(b','); }
-                                    emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                    emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf, false);
                                 }
                                 compact_buf.extend_from_slice(b"]\n");
                                 handled = true;
@@ -10452,7 +10489,7 @@ fn real_main() {
                                 compact_buf.push(b'[');
                                 for (i, res) in resolved.iter().enumerate() {
                                     if i > 0 { compact_buf.push(b','); }
-                                    emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                    emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf, false);
                                 }
                                 compact_buf.extend_from_slice(b"]\n");
                                 handled = true;
@@ -10601,7 +10638,7 @@ fn real_main() {
                                     } else if json_object_get_fields_raw_buf(raw, 0, &gen_field_refs, &mut ranges_buf) {
                                         let res = gen_resolved.as_ref().unwrap();
                                         if !resolved_would_error(res, raw, &ranges_buf) {
-                                            emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                            emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf, false);
                                             compact_buf.push(b'\n');
                                             handled = true;
                                         }
@@ -10918,7 +10955,7 @@ fn real_main() {
                                     if pass {
                                         for (i, res) in resolved.iter().enumerate() {
                                             compact_buf.extend_from_slice(&key_prefixes[i]);
-                                            emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                            emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf, false);
                                         }
                                         compact_buf.extend_from_slice(obj_close);
                                     }
@@ -10983,7 +11020,7 @@ fn real_main() {
                                     if !pass {
                                         handled = true;
                                     } else if !resolved_would_error(&resolved, raw, &ranges_buf) {
-                                        emit_resolved_value(&mut compact_buf, &resolved, raw, &ranges_buf);
+                                        emit_resolved_value(&mut compact_buf, &resolved, raw, &ranges_buf, false);
                                         compact_buf.push(b'\n');
                                         handled = true;
                                     }
@@ -11058,7 +11095,7 @@ fn real_main() {
                                         compact_buf.push(b'[');
                                         for (i, res) in resolved.iter().enumerate() {
                                             if i > 0 { compact_buf.push(b','); }
-                                            emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                            emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf, false);
                                         }
                                         compact_buf.extend_from_slice(b"]\n");
                                         handled = true;
@@ -11130,7 +11167,7 @@ fn real_main() {
                                 compact_buf.push(b'[');
                                 for (i, res) in resolved.iter().enumerate() {
                                     if i > 0 { compact_buf.push(b','); }
-                                    emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                    emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf, false);
                                 }
                                 compact_buf.extend_from_slice(b"]\n");
                             }
@@ -11597,7 +11634,7 @@ fn real_main() {
                                     {
                                         for (i, (prefix, res)) in key_prefixes.iter().zip(resolved.iter()).enumerate() {
                                             compact_buf.extend_from_slice(prefix);
-                                            emit_resolved_value(&mut compact_buf, res, raw, &ranges);
+                                            emit_resolved_value(&mut compact_buf, res, raw, &ranges, false);
                                             let _ = i;
                                         }
                                         compact_buf.extend_from_slice(obj_close);
@@ -11671,7 +11708,7 @@ fn real_main() {
                                         compact_buf.push(b'[');
                                         for (i, res) in resolved.iter().enumerate() {
                                             if i > 0 { compact_buf.push(b','); }
-                                            emit_resolved_value(&mut compact_buf, res, raw, &ranges);
+                                            emit_resolved_value(&mut compact_buf, res, raw, &ranges, false);
                                         }
                                         compact_buf.extend_from_slice(b"]\n");
                                         handled = true;
@@ -14537,13 +14574,13 @@ fn real_main() {
                                 compact_buf.extend_from_slice(b"{\n  ");
                                 compact_buf.extend_from_slice(key_val);
                                 compact_buf.extend_from_slice(b": ");
-                                emit_resolved_value(&mut compact_buf, &resolved_val, raw, &ranges_buf);
+                                emit_resolved_value(&mut compact_buf, &resolved_val, raw, &ranges_buf, false);
                                 compact_buf.extend_from_slice(b"\n}\n");
                             } else {
                                 compact_buf.push(b'{');
                                 compact_buf.extend_from_slice(key_val);
                                 compact_buf.push(b':');
-                                emit_resolved_value(&mut compact_buf, &resolved_val, raw, &ranges_buf);
+                                emit_resolved_value(&mut compact_buf, &resolved_val, raw, &ranges_buf, false);
                                 compact_buf.extend_from_slice(b"}\n");
                             }
                         } else {
@@ -14608,20 +14645,20 @@ fn real_main() {
                                 compact_buf.extend_from_slice(b"{\n  ");
                                 compact_buf.extend_from_slice(key_val);
                                 compact_buf.extend_from_slice(b": ");
-                                emit_resolved_value(&mut compact_buf, &resolved_dk_val, raw, &ranges_buf);
+                                emit_resolved_value(&mut compact_buf, &resolved_dk_val, raw, &ranges_buf, false);
                                 for (i, resolved) in resolved_static.iter().enumerate() {
                                     compact_buf.extend_from_slice(&static_key_bufs_pretty[i]);
-                                    emit_resolved_value(&mut compact_buf, resolved, raw, &ranges_buf);
+                                    emit_resolved_value(&mut compact_buf, resolved, raw, &ranges_buf, false);
                                 }
                                 compact_buf.extend_from_slice(b"\n}\n");
                             } else {
                                 compact_buf.push(b'{');
                                 compact_buf.extend_from_slice(key_val);
                                 compact_buf.push(b':');
-                                emit_resolved_value(&mut compact_buf, &resolved_dk_val, raw, &ranges_buf);
+                                emit_resolved_value(&mut compact_buf, &resolved_dk_val, raw, &ranges_buf, false);
                                 for (i, resolved) in resolved_static.iter().enumerate() {
                                     compact_buf.extend_from_slice(&static_key_bufs[i]);
-                                    emit_resolved_value(&mut compact_buf, resolved, raw, &ranges_buf);
+                                    emit_resolved_value(&mut compact_buf, resolved, raw, &ranges_buf, false);
                                 }
                                 compact_buf.extend_from_slice(b"}\n");
                             }
@@ -15292,8 +15329,13 @@ fn real_main() {
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    let outcome = apply_field_access_raw(raw, fa_field, |bytes| {
-                        emit_raw_ln!(&mut compact_buf, bytes);
+                    let outcome = apply_field_access_raw(raw, fa_field, |bytes, clean| {
+                        if clean {
+                            compact_buf.extend_from_slice(bytes);
+                            compact_buf.push(b'\n');
+                        } else {
+                            emit_raw_ln!(&mut compact_buf, bytes);
+                        }
                     });
                     if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
@@ -15346,20 +15388,20 @@ fn real_main() {
                         &field_refs,
                         &mut ranges_buf,
                         |ranges, raw| resolved.iter().any(|r| resolved_would_error(r, raw, ranges)),
-                        |ranges, raw| {
+                        |ranges, raw, all_clean| {
                             if use_pretty_buf {
                                 compact_buf.extend_from_slice(b"[\n");
                                 for (i, res) in resolved.iter().enumerate() {
                                     if i > 0 { compact_buf.extend_from_slice(b",\n"); }
                                     compact_buf.extend_from_slice(b"  ");
-                                    emit_resolved_value(&mut compact_buf, res, raw, ranges);
+                                    emit_resolved_value(&mut compact_buf, res, raw, ranges, all_clean);
                                 }
                                 compact_buf.extend_from_slice(b"\n]\n");
                             } else {
                                 compact_buf.push(b'[');
                                 for (i, res) in resolved.iter().enumerate() {
                                     if i > 0 { compact_buf.push(b','); }
-                                    emit_resolved_value(&mut compact_buf, res, raw, ranges);
+                                    emit_resolved_value(&mut compact_buf, res, raw, ranges, all_clean);
                                 }
                                 compact_buf.extend_from_slice(b"]\n");
                             }
@@ -15385,7 +15427,7 @@ fn real_main() {
                         raw,
                         &af_refs,
                         &mut ranges_buf,
-                        |ranges, raw| {
+                        |ranges, raw, all_clean| {
                             if use_pretty_buf {
                                 compact_buf.extend_from_slice(b"[\n");
                                 for (i, (vs, ve)) in ranges.iter().enumerate() {
@@ -15395,7 +15437,7 @@ fn real_main() {
                                     if val[0] == b'{' || val[0] == b'[' {
                                         push_json_pretty_raw_at(&mut compact_buf, val, 2, false, 1);
                                     } else {
-                                        if raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
+                                        if !all_clean && raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                     }
                                 }
                                 compact_buf.extend_from_slice(b"\n]\n");
@@ -15403,7 +15445,7 @@ fn real_main() {
                                 compact_buf.push(b'[');
                                 for (i, (vs, ve)) in ranges.iter().enumerate() {
                                     if i > 0 { compact_buf.push(b','); }
-                                    { let _vv = &raw[*vs..*ve]; if raw_contains_noncanon_escape(_vv) { push_raw_canon_escapes(&mut compact_buf, _vv); } else { compact_buf.extend_from_slice(_vv); } }
+                                    { let _vv = &raw[*vs..*ve]; if !all_clean && raw_contains_noncanon_escape(_vv) { push_raw_canon_escapes(&mut compact_buf, _vv); } else { compact_buf.extend_from_slice(_vv); } }
                                 }
                                 compact_buf.extend_from_slice(b"]\n");
                             }
@@ -15429,7 +15471,14 @@ fn real_main() {
                         raw,
                         &mf_refs,
                         &mut ranges_buf,
-                        |bytes| { emit_raw_ln!(&mut compact_buf, bytes); },
+                        |bytes, clean| {
+                            if clean {
+                                compact_buf.extend_from_slice(bytes);
+                                compact_buf.push(b'\n');
+                            } else {
+                                emit_raw_ln!(&mut compact_buf, bytes);
+                            }
+                        },
                     );
                     if let RawApplyOutcome::Bail = outcome {
                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
@@ -15697,7 +15746,7 @@ fn real_main() {
                             }
                             return Ok(());
                         }
-                        emit_resolved_value(&mut compact_buf, &resolved, raw, &ranges_buf);
+                        emit_resolved_value(&mut compact_buf, &resolved, raw, &ranges_buf, false);
                         compact_buf.push(b'\n');
                         if compact_buf.len() >= 1 << 17 {
                             let _ = out.write_all(&compact_buf);
@@ -16096,7 +16145,7 @@ fn real_main() {
                 let mut ranges_buf = vec![(0usize, 0usize); field_refs.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                    if let Some(all_clean) = jq_jit::value::json_object_get_fields_raw_buf_classified(raw, 0, &field_refs, &mut ranges_buf) {
                         let mut output = None;
                         let mut output_idx = 0usize;
                         let mut needs_generic = false;
@@ -16263,7 +16312,21 @@ fn real_main() {
                                 if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
                                     push_json_pretty_raw(&mut compact_buf, val, 2, false);
                                 } else {
-                                    if raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
+                                    // A passthrough field value with a non-canonical number lexeme
+                                    // (`1e3`, `nan`) must re-render through Value to match jq's
+                                    // canonical output (#729 class); escapes re-encode (#780/#1027).
+                                    if all_clean {
+                                        compact_buf.extend_from_slice(val);
+                                    } else if raw_contains_non_canonical_number(val) {
+                                        match json_to_value(unsafe { std::str::from_utf8_unchecked(val) }) {
+                                            Ok(v) => compact_buf.extend_from_slice(value_to_json_precise(&v).as_bytes()),
+                                            Err(_) => compact_buf.extend_from_slice(val),
+                                        }
+                                    } else if raw_contains_noncanon_escape(val) {
+                                        push_raw_canon_escapes(&mut compact_buf, val);
+                                    } else {
+                                        compact_buf.extend_from_slice(val);
+                                    }
                                 }
                                 compact_buf.push(b'\n');
                             }
@@ -16276,7 +16339,7 @@ fn real_main() {
                                 if let Some((ref kp, ref res, close)) = resolved_data {
                                     for (j, rv) in res.iter().enumerate() {
                                         compact_buf.extend_from_slice(&kp[j]);
-                                        emit_resolved_value(&mut compact_buf, rv, raw, &ranges_buf);
+                                        emit_resolved_value(&mut compact_buf, rv, raw, &ranges_buf, all_clean);
                                     }
                                     compact_buf.extend_from_slice(close);
                                 }
@@ -16288,7 +16351,7 @@ fn real_main() {
                                     else_computed2.as_ref()
                                 };
                                 if let Some(rv) = resolved_remap {
-                                    emit_resolved_value(&mut compact_buf, rv, raw, &ranges_buf);
+                                    emit_resolved_value(&mut compact_buf, rv, raw, &ranges_buf, all_clean);
                                     compact_buf.push(b'\n');
                                 }
                             }
@@ -16840,7 +16903,7 @@ fn real_main() {
                         compact_buf.push(b'[');
                         for (i, res) in resolved.iter().enumerate() {
                             if i > 0 { compact_buf.push(b','); }
-                            emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                            emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf, false);
                         }
                         compact_buf.extend_from_slice(b"]\n");
                     } else {
@@ -17134,7 +17197,7 @@ fn real_main() {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         } else {
-                            emit_resolved_value(&mut compact_buf, &resolved, raw, &ranges_buf);
+                            emit_resolved_value(&mut compact_buf, &resolved, raw, &ranges_buf, false);
                             compact_buf.push(b'\n');
                         }
                     }
@@ -17197,7 +17260,7 @@ fn real_main() {
                         } else {
                             for (i, res) in resolved.iter().enumerate() {
                                 compact_buf.extend_from_slice(&key_prefixes[i]);
-                                emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf, false);
                             }
                             compact_buf.extend_from_slice(obj_close);
                         }
@@ -17636,7 +17699,7 @@ fn real_main() {
                             if !resolved.iter().any(|res| resolved_would_error(res, raw, &ranges_buf)) {
                                 for (i, res) in resolved.iter().enumerate() {
                                     compact_buf.extend_from_slice(&key_prefixes[i]);
-                                    emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                    emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf, false);
                                 }
                                 compact_buf.extend_from_slice(obj_close);
                                 handled = true;
@@ -17691,7 +17754,7 @@ fn real_main() {
                                 compact_buf.push(b'{');
                                 compact_buf.extend_from_slice(key_raw);
                                 compact_buf.push(b':');
-                                emit_resolved_value(&mut compact_buf, &resolved_val, raw, &ranges_buf);
+                                emit_resolved_value(&mut compact_buf, &resolved_val, raw, &ranges_buf, false);
                                 compact_buf.extend_from_slice(b"}\n");
                             }
                         }
@@ -17756,10 +17819,10 @@ fn real_main() {
                                 compact_buf.push(b'{');
                                 compact_buf.extend_from_slice(key_raw);
                                 compact_buf.push(b':');
-                                emit_resolved_value(&mut compact_buf, &resolved_dk_val, raw, &ranges_buf);
+                                emit_resolved_value(&mut compact_buf, &resolved_dk_val, raw, &ranges_buf, false);
                                 for (i, res) in resolved_static.iter().enumerate() {
                                     compact_buf.extend_from_slice(&static_key_prefixes[i]);
-                                    emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                    emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf, false);
                                 }
                                 compact_buf.extend_from_slice(b"}\n");
                             }
@@ -17808,7 +17871,7 @@ fn real_main() {
                             compact_buf.push(b'[');
                             for (i, res) in resolved.iter().enumerate() {
                                 if i > 0 { compact_buf.push(b','); }
-                                emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf, false);
                             }
                             compact_buf.extend_from_slice(b"]\n");
                             handled = true;
@@ -17869,7 +17932,7 @@ fn real_main() {
                             compact_buf.push(b'[');
                             for (i, res) in resolved.iter().enumerate() {
                                 if i > 0 { compact_buf.push(b','); }
-                                emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf, false);
                             }
                             compact_buf.extend_from_slice(b"]\n");
                             handled = true;
@@ -17995,7 +18058,7 @@ fn real_main() {
                                 } else if json_object_get_fields_raw_buf(raw, 0, &gen_field_refs, &mut ranges_buf) {
                                     let res = gen_resolved.as_ref().unwrap();
                                     if !resolved_would_error(res, raw, &ranges_buf) {
-                                        emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                        emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf, false);
                                         compact_buf.push(b'\n');
                                         handled = true;
                                     }
@@ -18298,7 +18361,7 @@ fn real_main() {
                                 if pass {
                                     for (i, res) in resolved.iter().enumerate() {
                                         compact_buf.extend_from_slice(&key_prefixes[i]);
-                                        emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                        emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf, false);
                                     }
                                     compact_buf.extend_from_slice(obj_close);
                                 }
@@ -18359,7 +18422,7 @@ fn real_main() {
                                 if !pass {
                                     handled = true;
                                 } else if !resolved_would_error(&resolved, raw, &ranges_buf) {
-                                    emit_resolved_value(&mut compact_buf, &resolved, raw, &ranges_buf);
+                                    emit_resolved_value(&mut compact_buf, &resolved, raw, &ranges_buf, false);
                                     compact_buf.push(b'\n');
                                     handled = true;
                                 }
@@ -18426,7 +18489,7 @@ fn real_main() {
                                     compact_buf.push(b'[');
                                     for (i, res) in resolved.iter().enumerate() {
                                         if i > 0 { compact_buf.push(b','); }
-                                        emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                        emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf, false);
                                     }
                                     compact_buf.extend_from_slice(b"]\n");
                                     handled = true;
@@ -18498,7 +18561,7 @@ fn real_main() {
                             compact_buf.push(b'[');
                             for (i, res) in resolved.iter().enumerate() {
                                 if i > 0 { compact_buf.push(b','); }
-                                emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf);
+                                emit_resolved_value(&mut compact_buf, res, raw, &ranges_buf, false);
                             }
                             compact_buf.extend_from_slice(b"]\n");
                         }
@@ -18937,7 +19000,7 @@ fn real_main() {
                                 {
                                     for (prefix, res) in key_prefixes.iter().zip(resolved.iter()) {
                                         compact_buf.extend_from_slice(prefix);
-                                        emit_resolved_value(&mut compact_buf, res, raw, &ranges);
+                                        emit_resolved_value(&mut compact_buf, res, raw, &ranges, false);
                                     }
                                     compact_buf.extend_from_slice(obj_close);
                                     handled = true;
@@ -19009,7 +19072,7 @@ fn real_main() {
                                     compact_buf.push(b'[');
                                     for (i, res) in resolved.iter().enumerate() {
                                         if i > 0 { compact_buf.push(b','); }
-                                        emit_resolved_value(&mut compact_buf, res, raw, &ranges);
+                                        emit_resolved_value(&mut compact_buf, res, raw, &ranges, false);
                                     }
                                     compact_buf.extend_from_slice(b"]\n");
                                     handled = true;
@@ -19038,7 +19101,7 @@ fn real_main() {
                             raw,
                             &input_fields,
                             &mut ranges_buf,
-                            |ranges, raw| {
+                            |ranges, raw, all_clean| {
                                 compact_buf.extend_from_slice(b"{\n");
                                 for (i, (vs, ve)) in ranges.iter().enumerate() {
                                     if i > 0 { compact_buf.extend_from_slice(b",\n"); }
@@ -19049,7 +19112,7 @@ fn real_main() {
                                     if val[0] == b'{' || val[0] == b'[' {
                                         push_json_pretty_raw_at(&mut compact_buf, val, 2, false, 1);
                                     } else {
-                                        if raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
+                                        if !all_clean && raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                     }
                                 }
                                 compact_buf.extend_from_slice(b"\n}\n");
@@ -19081,10 +19144,10 @@ fn real_main() {
                             raw,
                             &input_fields,
                             &mut ranges_buf,
-                            |ranges, raw| {
+                            |ranges, raw, all_clean| {
                                 for (i, (vs, ve)) in ranges.iter().enumerate() {
                                     compact_buf.extend_from_slice(&key_prefixes[i]);
-                                    { let _vv = &raw[*vs..*ve]; if raw_contains_noncanon_escape(_vv) { push_raw_canon_escapes(&mut compact_buf, _vv); } else { compact_buf.extend_from_slice(_vv); } }
+                                    { let _vv = &raw[*vs..*ve]; if !all_clean && raw_contains_noncanon_escape(_vv) { push_raw_canon_escapes(&mut compact_buf, _vv); } else { compact_buf.extend_from_slice(_vv); } }
                                 }
                                 compact_buf.extend_from_slice(b"}\n");
                             },
@@ -19128,10 +19191,10 @@ fn real_main() {
                         &field_refs,
                         &mut ranges_buf,
                         |ranges, raw| resolved.iter().any(|r| resolved_would_error(r, raw, ranges)),
-                        |ranges, raw| {
+                        |ranges, raw, all_clean| {
                             for (i, res) in resolved.iter().enumerate() {
                                 compact_buf.extend_from_slice(&key_prefixes[i]);
-                                emit_resolved_value(&mut compact_buf, res, raw, ranges);
+                                emit_resolved_value(&mut compact_buf, res, raw, ranges, all_clean);
                             }
                             compact_buf.extend_from_slice(obj_close);
                         },
@@ -19170,11 +19233,11 @@ fn real_main() {
                         &field_refs,
                         &mut ranges_buf,
                         |ranges, raw| resolved.iter().any(|r| resolved_would_error(r, raw, ranges)),
-                        |ranges, raw| {
+                        |ranges, raw, all_clean| {
                             compact_buf.push(b'[');
                             for (i, res) in resolved.iter().enumerate() {
                                 if i > 0 { compact_buf.push(b','); }
-                                emit_resolved_value(&mut compact_buf, res, raw, ranges);
+                                emit_resolved_value(&mut compact_buf, res, raw, ranges, all_clean);
                             }
                             compact_buf.extend_from_slice(b"]\n");
                         },
@@ -20258,7 +20321,7 @@ fn real_main() {
                         for (i, res) in resolved.iter().enumerate() {
                             if i > 0 { compact_buf.extend_from_slice(&escaped_sep); }
                             num_buf.clear();
-                            emit_resolved_value(&mut num_buf, res, raw, &ranges);
+                            emit_resolved_value(&mut num_buf, res, raw, &ranges, false);
                             if num_buf.len() >= 2 && num_buf[0] == b'"' && num_buf[num_buf.len()-1] == b'"' {
                                 compact_buf.extend_from_slice(&num_buf[1..num_buf.len()-1]);
                             } else {

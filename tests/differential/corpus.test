@@ -4251,3 +4251,11 @@ null
 # #1049: only interpolated segments are formatted; unknown names error on interpolation
 [@base64 "a\(1)b", try (@invalid "a\(1)b") catch .]
 null
+
+# perf-recovery classify gate: cond-chain field output canonicalizes number lexemes
+if .b == 1 then .a elif .n == "q" then "x" else .a end
+{"a":1e3,"b":1,"n":"t"}
+
+# perf-recovery classify gate: mixed dirty values on array construct
+[.a, .b]
+{"a":"x\/y","b":2e3}
