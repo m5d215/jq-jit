@@ -3005,6 +3005,28 @@ fn real_main() {
             }
         };
     }
+    // Emit a select/cond passthrough field value with full canonicalisation
+    // parity. Evaluates to whether the value was emitted: a clean scalar
+    // (per the classified boundary scan) copies verbatim; a value the raw
+    // layer cannot canonicalise (non-canonical number lexeme, surrogate
+    // escape, special float) yields `false` so the caller falls through to
+    // the generic path for jq's re-rendered verdict (#729 / #615);
+    // everything else routes through the emit_raw_ln! pipeline (escape
+    // re-encode #780/#1027, dup-key collapse #233, pretty formatting).
+    macro_rules! emit_field_passthrough {
+        ($buf:expr, $val:expr, $clean:expr) => {{
+            if $clean {
+                $buf.extend_from_slice($val);
+                $buf.push(b'\n');
+                true
+            } else if jq_jit::value::raw_value_bails_canon($val) {
+                false
+            } else {
+                emit_raw_ln!($buf, $val);
+                true
+            }
+        }};
+    }
     // Raw byte fast paths bypass Value construction and cannot inject color codes.
     // Disable them when color output is requested.
     // Self-diff mode (#323) also disables them so every filter shape is
@@ -5170,7 +5192,7 @@ fn real_main() {
                     let mut ranges_buf = vec![(0usize, 0usize); fields.len()];
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        if json_object_get_fields_raw_buf(raw, 0, &fields, &mut ranges_buf) {
+                        if let Some(all_clean) = jq_jit::value::json_object_get_fields_raw_buf_classified(raw, 0, &fields, &mut ranges_buf) {
                             let cond_range = ranges_buf[0];
                             let cond_val = &raw[cond_range.0..cond_range.1];
                             if cond_val.len() >= 2 && cond_val[0] == b'"' && cond_val[cond_val.len()-1] == b'"'
@@ -5190,12 +5212,10 @@ fn real_main() {
                                 if pass {
                                     let out_range = if fields.len() == 1 { ranges_buf[0] } else { ranges_buf[1] };
                                     let out_val = &raw[out_range.0..out_range.1];
-                                    if use_pretty_buf && (out_val[0] == b'{' || out_val[0] == b'[') {
-                                        push_json_pretty_raw(&mut compact_buf, out_val, 2, false);
-                                    } else {
-                                        compact_buf.extend_from_slice(out_val);
+                                    if !emit_field_passthrough!(&mut compact_buf, out_val, all_clean) {
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                     }
-                                    compact_buf.push(b'\n');
                                 }
                             } else {
                                 let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
@@ -8403,14 +8423,12 @@ fn real_main() {
                                         compact_buf.push(b'\n');
                                     }
                                     BranchOutput::Field(ref f) => {
-                                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, f) {
+                                        if let Some((vs, ve, fclean)) = jq_jit::value::json_object_get_field_raw_classified(raw, 0, f) {
                                             let val = &raw[vs..ve];
-                                            if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
-                                                push_json_pretty_raw(&mut compact_buf, val, 2, false);
-                                            } else {
-                                                if raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
+                                            if !emit_field_passthrough!(&mut compact_buf, val, fclean) {
+                                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                             }
-                                            compact_buf.push(b'\n');
                                         } else {
                                             compact_buf.extend_from_slice(b"null\n");
                                         }
@@ -8467,14 +8485,12 @@ fn real_main() {
                                             push_jq_number_bytes(&mut compact_buf, rv);
                                             compact_buf.push(b'\n');
                                         } else {
-                                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, f) {
+                                            if let Some((vs, ve, fclean)) = jq_jit::value::json_object_get_field_raw_classified(raw, 0, f) {
                                                 let val = &raw[vs..ve];
-                                                if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
-                                                    push_json_pretty_raw(&mut compact_buf, val, 2, false);
-                                                } else {
-                                                    if raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
+                                                if !emit_field_passthrough!(&mut compact_buf, val, fclean) {
+                                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                                 }
-                                                compact_buf.push(b'\n');
                                             } else {
                                                 // A missing field is `null`, like `.x` — the
                                                 // absent-field case must still emit, not drop
@@ -8525,14 +8541,12 @@ fn real_main() {
                                         compact_buf.push(b'\n');
                                     }
                                     BranchOutput::Field(ref f) => {
-                                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, f) {
+                                        if let Some((vs, ve, fclean)) = jq_jit::value::json_object_get_field_raw_classified(raw, 0, f) {
                                             let val = &raw[vs..ve];
-                                            if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
-                                                push_json_pretty_raw(&mut compact_buf, val, 2, false);
-                                            } else {
-                                                if raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
+                                            if !emit_field_passthrough!(&mut compact_buf, val, fclean) {
+                                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                             }
-                                            compact_buf.push(b'\n');
                                         } else {
                                             compact_buf.extend_from_slice(b"null\n");
                                         }
@@ -9588,14 +9602,12 @@ fn real_main() {
                         }
                         let pass = verdict.unwrap_or(false);
                         if pass {
-                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, of) {
+                            if let Some((vs, ve, fclean)) = jq_jit::value::json_object_get_field_raw_classified(raw, 0, of) {
                                 let val = &raw[vs..ve];
-                                if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
-                                    push_json_pretty_raw(&mut compact_buf, val, 2, false);
-                                } else {
-                                    if raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
+                                if !emit_field_passthrough!(&mut compact_buf, val, fclean) {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                 }
-                                compact_buf.push(b'\n');
                             } else {
                                 // Output field absent on a passing row — jq reads
                                 // missing as null. Without this branch the fast path
@@ -9954,7 +9966,7 @@ fn real_main() {
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
                         let mut handled = false;
-                        if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                        if let Some(all_clean) = jq_jit::value::json_object_get_fields_raw_buf_classified(raw, 0, &field_refs, &mut ranges_buf) {
                             let r_sel = &ranges_buf[sel_idx];
                             if r_sel.0 < r_sel.1 {
                                 if let Some(val) = parse_json_num(&raw[r_sel.0..r_sel.1]) {
@@ -9969,10 +9981,15 @@ fn real_main() {
                                     };
                                     if pass {
                                         let r_out = &ranges_buf[out_idx];
-                                        compact_buf.extend_from_slice(&raw[r_out.0..r_out.1]);
-                                        compact_buf.push(b'\n');
+                                        let out_val = &raw[r_out.0..r_out.1];
+                                        // Passthrough output: a verbatim copy
+                                        // leaked non-canonical number lexemes,
+                                        // escapes, dup keys, and skipped pretty
+                                        // formatting.
+                                        handled = emit_field_passthrough!(&mut compact_buf, out_val, all_clean);
+                                    } else {
+                                        handled = true;
                                     }
-                                    handled = true;
                                 }
                             }
                         }
@@ -10005,9 +10022,17 @@ fn real_main() {
                                 _ => false,
                             };
                             if pass {
-                                if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
-                                    compact_buf.extend_from_slice(&raw[vs..ve]);
-                                    compact_buf.push(b'\n');
+                                match jq_jit::value::json_object_get_field_raw_classified(raw, 0, out_field) {
+                                    Some((vs, ve, fclean)) => {
+                                        let out_val = &raw[vs..ve];
+                                        if !emit_field_passthrough!(&mut compact_buf, out_val, fclean) {
+                                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                        }
+                                    }
+                                    // A missing output field on a passing row is `null` in jq,
+                                    // not a dropped row (#387 class).
+                                    None => compact_buf.extend_from_slice(b"null\n"),
                                 }
                             }
                         }
@@ -10034,7 +10059,15 @@ fn real_main() {
                             if pass {
                                 if is_length {
                                     // .field | length — for strings, count chars
-                                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
+                                    let fetched = json_object_get_field_raw(raw, 0, out_field);
+                                    if fetched.is_none() {
+                                        // Missing output field on a passing row: jq still applies
+                                        // the unary op to null (length -> 0, tostring -> "null");
+                                        // fall to the generic path instead of dropping the row (#387 class).
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    }
+                                    if let Some((vs, ve)) = fetched {
                                         let fval = &raw[vs..ve];
                                         if fval.len() >= 2 && fval[0] == b'"' && fval[fval.len()-1] == b'"' {
                                             let inner = &fval[1..fval.len()-1];
@@ -10053,16 +10086,34 @@ fn real_main() {
                                             // Array/object length — fall back
                                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                                        } else if let Some(n) = parse_json_num(fval) {
-                                            // Number: fabs
-                                            push_jq_number_bytes(&mut compact_buf, n.abs());
-                                            compact_buf.push(b'\n');
+                                        } else if parse_json_num(fval).is_some() {
+                                            if matches!(uop, UnaryOp::Utf8ByteLength) {
+                                                // utf8bytelength on a number is a type error in jq.
+                                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                            } else {
+                                                // Number: fabs — jq preserves the literal repr of the
+                                                // sign-stripped lexeme (1.50|length -> 1.50, 2e3|length ->
+                                                // 2E+3), so emit the canonicalised lexeme rather than
+                                                // re-formatting from f64.
+                                                let mag = if fval[0] == b'-' { &fval[1..] } else { fval };
+                                                push_interp_num_canon(&mut compact_buf, mag);
+                                                compact_buf.push(b'\n');
+                                            }
                                         } else {
                                             compact_buf.extend_from_slice(b"null\n");
                                         }
                                     }
                                 } else if is_string_op {
-                                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
+                                    let fetched = json_object_get_field_raw(raw, 0, out_field);
+                                    if fetched.is_none() {
+                                        // Missing output field on a passing row: jq still applies
+                                        // the unary op to null (length -> 0, tostring -> "null");
+                                        // fall to the generic path instead of dropping the row (#387 class).
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    }
+                                    if let Some((vs, ve)) = fetched {
                                         let fval = &raw[vs..ve];
                                         if fval.len() >= 2 && fval[0] == b'"' && !fval[1..fval.len()-1].contains(&b'\\') {
                                             compact_buf.push(b'"');
@@ -10080,19 +10131,27 @@ fn real_main() {
                                         }
                                     }
                                 } else if matches!(uop, UnaryOp::ToString) {
-                                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
+                                    let fetched = json_object_get_field_raw(raw, 0, out_field);
+                                    if fetched.is_none() {
+                                        // Missing output field on a passing row: jq still applies
+                                        // the unary op to null (length -> 0, tostring -> "null");
+                                        // fall to the generic path instead of dropping the row (#387 class).
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    }
+                                    if let Some((vs, ve)) = fetched {
                                         let fval = &raw[vs..ve];
                                         if fval[0] == b'"' {
-                                            compact_buf.extend_from_slice(fval);
+                                            // tostring on a string is identity; re-encode escapes (#1027).
+                                            if raw_contains_noncanon_escape(fval) { push_raw_canon_escapes(&mut compact_buf, fval); } else { compact_buf.extend_from_slice(fval); }
                                             compact_buf.push(b'\n');
-                                        } else if let Some(n) = parse_json_num(fval) {
+                                        } else if fval[0] != b'{' && fval[0] != b'[' && parse_json_num(fval).is_some() {
+                                            // tostring preserves a canonical literal lexeme ("1.50" stays "1.50")
+                                            // and re-renders NaN/Infinity/non-canonical lexemes through the
+                                            // tojson writer (#1021), instead of re-formatting from f64
+                                            // (which broke 2e3 -> "2000").
                                             compact_buf.push(b'"');
-                                            let i = n as i64;
-                                            if i as f64 == n {
-                                                compact_buf.extend_from_slice(itoa::Buffer::new().format(i).as_bytes());
-                                            } else {
-                                                compact_buf.extend_from_slice(ryu::Buffer::new().format(n).as_bytes());
-                                            }
+                                            push_interp_num_canon(&mut compact_buf, fval);
                                             compact_buf.extend_from_slice(b"\"\n");
                                         } else {
                                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
@@ -10796,14 +10855,12 @@ fn real_main() {
                                     // missing, jq emits null — bail to
                                     // generic instead of silently dropping
                                     // the row (#387).
-                                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sff_out) {
+                                    if let Some((vs, ve, fclean)) = jq_jit::value::json_object_get_field_raw_classified(raw, 0, sff_out) {
                                         let out_val = &raw[vs..ve];
-                                        if use_pretty_buf && (out_val[0] == b'{' || out_val[0] == b'[') {
-                                            push_json_pretty_raw(&mut compact_buf, out_val, 2, false);
-                                        } else {
-                                            compact_buf.extend_from_slice(out_val);
+                                        if !emit_field_passthrough!(&mut compact_buf, out_val, fclean) {
+                                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                         }
-                                        compact_buf.push(b'\n');
                                     } else {
                                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -11231,14 +11288,12 @@ fn real_main() {
                             }
                         };
                         if pass {
-                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
+                            if let Some((vs, ve, fclean)) = jq_jit::value::json_object_get_field_raw_classified(raw, 0, out_field) {
                                 let val = &raw[vs..ve];
-                                if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
-                                    push_json_pretty_raw(&mut compact_buf, val, 2, false);
-                                } else {
-                                    if raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
+                                if !emit_field_passthrough!(&mut compact_buf, val, fclean) {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                 }
-                                compact_buf.push(b'\n');
                             } else {
                                 // Output field missing — jq emits null.
                                 compact_buf.extend_from_slice(b"null\n");
@@ -14241,7 +14296,7 @@ fn real_main() {
                 let mut ranges_buf = vec![(0usize, 0usize); fields.len()];
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    if json_object_get_fields_raw_buf(raw, 0, &fields, &mut ranges_buf) {
+                    if let Some(all_clean) = jq_jit::value::json_object_get_fields_raw_buf_classified(raw, 0, &fields, &mut ranges_buf) {
                         let cond_range = ranges_buf[0];
                         let cond_val = &raw[cond_range.0..cond_range.1];
                         if cond_val.len() >= 2 && cond_val[0] == b'"' && cond_val[cond_val.len()-1] == b'"'
@@ -14261,12 +14316,10 @@ fn real_main() {
                             if pass {
                                 let out_range = if fields.len() == 1 { ranges_buf[0] } else { ranges_buf[1] };
                                 let out_val = &raw[out_range.0..out_range.1];
-                                if use_pretty_buf && (out_val[0] == b'{' || out_val[0] == b'[') {
-                                    push_json_pretty_raw(&mut compact_buf, out_val, 2, false);
-                                } else {
-                                    compact_buf.extend_from_slice(out_val);
+                                if !emit_field_passthrough!(&mut compact_buf, out_val, all_clean) {
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                 }
-                                compact_buf.push(b'\n');
                             }
                         } else {
                             let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
@@ -15920,14 +15973,12 @@ fn real_main() {
                                     compact_buf.push(b'\n');
                                 }
                                 BranchOutput::Field(ref f) => {
-                                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, f) {
+                                    if let Some((vs, ve, fclean)) = jq_jit::value::json_object_get_field_raw_classified(raw, 0, f) {
                                         let val = &raw[vs..ve];
-                                        if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
-                                            push_json_pretty_raw(&mut compact_buf, val, 2, false);
-                                        } else {
-                                            if raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
+                                        if !emit_field_passthrough!(&mut compact_buf, val, fclean) {
+                                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                         }
-                                        compact_buf.push(b'\n');
                                     } else {
                                         compact_buf.extend_from_slice(b"null\n");
                                     }
@@ -15982,14 +16033,12 @@ fn real_main() {
                                         push_jq_number_bytes(&mut compact_buf, rv);
                                         compact_buf.push(b'\n');
                                     } else {
-                                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, f) {
+                                        if let Some((vs, ve, fclean)) = jq_jit::value::json_object_get_field_raw_classified(raw, 0, f) {
                                             let val = &raw[vs..ve];
-                                            if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
-                                                push_json_pretty_raw(&mut compact_buf, val, 2, false);
-                                            } else {
-                                                if raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
+                                            if !emit_field_passthrough!(&mut compact_buf, val, fclean) {
+                                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                             }
-                                            compact_buf.push(b'\n');
                                         } else {
                                             // A missing field is `null`, like `.x` — emit it
                                             // rather than dropping the output (#734).
@@ -16035,14 +16084,12 @@ fn real_main() {
                                     compact_buf.push(b'\n');
                                 }
                                 BranchOutput::Field(ref f) => {
-                                    if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, f) {
+                                    if let Some((vs, ve, fclean)) = jq_jit::value::json_object_get_field_raw_classified(raw, 0, f) {
                                         let val = &raw[vs..ve];
-                                        if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
-                                            push_json_pretty_raw(&mut compact_buf, val, 2, false);
-                                        } else {
-                                            if raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
+                                        if !emit_field_passthrough!(&mut compact_buf, val, fclean) {
+                                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                         }
-                                        compact_buf.push(b'\n');
                                     } else {
                                         compact_buf.extend_from_slice(b"null\n");
                                     }
@@ -17075,14 +17122,12 @@ fn real_main() {
                     }
                     let pass = verdict.unwrap_or(false);
                     if pass {
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, of) {
+                        if let Some((vs, ve, fclean)) = jq_jit::value::json_object_get_field_raw_classified(raw, 0, of) {
                             let val = &raw[vs..ve];
-                            if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
-                                push_json_pretty_raw(&mut compact_buf, val, 2, false);
-                            } else {
-                                if raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
+                            if !emit_field_passthrough!(&mut compact_buf, val, fclean) {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             }
-                            compact_buf.push(b'\n');
                         } else {
                             // Sibling fix to the in-memory apply above —
                             // emit `null` for missing-output-field rows.
@@ -17431,7 +17476,7 @@ fn real_main() {
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
                     let mut handled = false;
-                    if json_object_get_fields_raw_buf(raw, 0, &field_refs, &mut ranges_buf) {
+                    if let Some(all_clean) = jq_jit::value::json_object_get_fields_raw_buf_classified(raw, 0, &field_refs, &mut ranges_buf) {
                         let r_sel = &ranges_buf[sel_idx];
                         if r_sel.0 < r_sel.1 {
                             if let Some(val) = parse_json_num(&raw[r_sel.0..r_sel.1]) {
@@ -17446,10 +17491,11 @@ fn real_main() {
                                 };
                                 if pass {
                                     let r_out = &ranges_buf[out_idx];
-                                    compact_buf.extend_from_slice(&raw[r_out.0..r_out.1]);
-                                    compact_buf.push(b'\n');
+                                    let out_val = &raw[r_out.0..r_out.1];
+                                    handled = emit_field_passthrough!(&mut compact_buf, out_val, all_clean);
+                                } else {
+                                    handled = true;
                                 }
-                                handled = true;
                             }
                         }
                     }
@@ -17483,9 +17529,17 @@ fn real_main() {
                             _ => false,
                         };
                         if pass {
-                            if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
-                                compact_buf.extend_from_slice(&raw[vs..ve]);
-                                compact_buf.push(b'\n');
+                            match jq_jit::value::json_object_get_field_raw_classified(raw, 0, out_field) {
+                                Some((vs, ve, fclean)) => {
+                                    let out_val = &raw[vs..ve];
+                                    if !emit_field_passthrough!(&mut compact_buf, out_val, fclean) {
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                    }
+                                }
+                                // A missing output field on a passing row is `null` in jq,
+                                // not a dropped row (#387 class).
+                                None => compact_buf.extend_from_slice(b"null\n"),
                             }
                         }
                     }
@@ -17511,7 +17565,15 @@ fn real_main() {
                         };
                         if pass {
                             if is_length {
-                                if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
+                                let fetched = json_object_get_field_raw(raw, 0, out_field);
+                                if fetched.is_none() {
+                                    // Missing output field on a passing row: jq still applies
+                                    // the unary op to null (length -> 0, tostring -> "null");
+                                    // fall to the generic path instead of dropping the row (#387 class).
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                                if let Some((vs, ve)) = fetched {
                                     let fval = &raw[vs..ve];
                                     if fval.len() >= 2 && fval[0] == b'"' && fval[fval.len()-1] == b'"' {
                                         let inner = &fval[1..fval.len()-1];
@@ -17528,15 +17590,34 @@ fn real_main() {
                                     } else if fval[0] == b'[' || fval[0] == b'{' {
                                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
-                                    } else if let Some(n) = parse_json_num(fval) {
-                                        push_jq_number_bytes(&mut compact_buf, n.abs());
-                                        compact_buf.push(b'\n');
+                                    } else if parse_json_num(fval).is_some() {
+                                        if matches!(uop, UnaryOp::Utf8ByteLength) {
+                                            // utf8bytelength on a number is a type error in jq.
+                                            let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                        } else {
+                                            // Number: fabs — jq preserves the literal repr of the
+                                            // sign-stripped lexeme (1.50|length -> 1.50, 2e3|length ->
+                                            // 2E+3), so emit the canonicalised lexeme rather than
+                                            // re-formatting from f64.
+                                            let mag = if fval[0] == b'-' { &fval[1..] } else { fval };
+                                            push_interp_num_canon(&mut compact_buf, mag);
+                                            compact_buf.push(b'\n');
+                                        }
                                     } else {
                                         compact_buf.extend_from_slice(b"null\n");
                                     }
                                 }
                             } else if is_string_op {
-                                if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
+                                let fetched = json_object_get_field_raw(raw, 0, out_field);
+                                if fetched.is_none() {
+                                    // Missing output field on a passing row: jq still applies
+                                    // the unary op to null (length -> 0, tostring -> "null");
+                                    // fall to the generic path instead of dropping the row (#387 class).
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                                if let Some((vs, ve)) = fetched {
                                     let fval = &raw[vs..ve];
                                     if fval.len() >= 2 && fval[0] == b'"' && !fval[1..fval.len()-1].contains(&b'\\') {
                                         compact_buf.push(b'"');
@@ -17554,19 +17635,27 @@ fn real_main() {
                                     }
                                 }
                             } else if matches!(uop, UnaryOp::ToString) {
-                                if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
+                                let fetched = json_object_get_field_raw(raw, 0, out_field);
+                                if fetched.is_none() {
+                                    // Missing output field on a passing row: jq still applies
+                                    // the unary op to null (length -> 0, tostring -> "null");
+                                    // fall to the generic path instead of dropping the row (#387 class).
+                                    let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                    process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+                                }
+                                if let Some((vs, ve)) = fetched {
                                     let fval = &raw[vs..ve];
                                     if fval[0] == b'"' {
-                                        compact_buf.extend_from_slice(fval);
+                                        // tostring on a string is identity; re-encode escapes (#1027).
+                                        if raw_contains_noncanon_escape(fval) { push_raw_canon_escapes(&mut compact_buf, fval); } else { compact_buf.extend_from_slice(fval); }
                                         compact_buf.push(b'\n');
-                                    } else if let Some(n) = parse_json_num(fval) {
+                                    } else if fval[0] != b'{' && fval[0] != b'[' && parse_json_num(fval).is_some() {
+                                        // tostring preserves a canonical literal lexeme ("1.50" stays "1.50")
+                                        // and re-renders NaN/Infinity/non-canonical lexemes through the
+                                        // tojson writer (#1021), instead of re-formatting from f64
+                                        // (which broke 2e3 -> "2000").
                                         compact_buf.push(b'"');
-                                        let i = n as i64;
-                                        if i as f64 == n {
-                                            compact_buf.extend_from_slice(itoa::Buffer::new().format(i).as_bytes());
-                                        } else {
-                                            compact_buf.extend_from_slice(ryu::Buffer::new().format(n).as_bytes());
-                                        }
+                                        push_interp_num_canon(&mut compact_buf, fval);
                                         compact_buf.extend_from_slice(b"\"\n");
                                     } else {
                                         let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
@@ -18208,14 +18297,12 @@ fn real_main() {
                             };
                             if pass {
                                 // Sibling fix to the stdin apply-site above (#387).
-                                if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, sff_out) {
+                                if let Some((vs, ve, fclean)) = jq_jit::value::json_object_get_field_raw_classified(raw, 0, sff_out) {
                                     let out_val = &raw[vs..ve];
-                                    if use_pretty_buf && (out_val[0] == b'{' || out_val[0] == b'[') {
-                                        push_json_pretty_raw(&mut compact_buf, out_val, 2, false);
-                                    } else {
-                                        compact_buf.extend_from_slice(out_val);
+                                    if !emit_field_passthrough!(&mut compact_buf, out_val, fclean) {
+                                        let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                        process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                                     }
-                                    compact_buf.push(b'\n');
                                 } else {
                                     let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
                                     process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
@@ -18619,14 +18706,12 @@ fn real_main() {
                         }
                     };
                     if pass {
-                        if let Some((vs, ve)) = json_object_get_field_raw(raw, 0, out_field) {
+                        if let Some((vs, ve, fclean)) = jq_jit::value::json_object_get_field_raw_classified(raw, 0, out_field) {
                             let val = &raw[vs..ve];
-                            if use_pretty_buf && (val[0] == b'{' || val[0] == b'[') {
-                                push_json_pretty_raw(&mut compact_buf, val, 2, false);
-                            } else {
-                                if raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
+                            if !emit_field_passthrough!(&mut compact_buf, val, fclean) {
+                                let v = json_to_value(unsafe { std::str::from_utf8_unchecked(raw) })?;
+                                process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             }
-                            compact_buf.push(b'\n');
                         } else {
                             compact_buf.extend_from_slice(b"null\n");
                         }
