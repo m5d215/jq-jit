@@ -2498,9 +2498,35 @@ impl Parser {
                             }
                         }
                         Token::LBracket => {
-                            // .expr.[] or .expr.[key] — handle like LBracket postfix
-                            // Don't advance — let the LBracket case handle it
-                            continue;
+                            // .expr.[] or .expr.[key] — like the LBracket
+                            // postfix below, EXCEPT that jq's dotted bracket
+                            // form only carries an index/iterate: the slice
+                            // form (.a.[lo:hi]) is a compile error in jq 1.8,
+                            // while the undotted .a[lo:hi] is fine (#1023).
+                            self.advance();
+                            if self.eat(&Token::RBracket) {
+                                let optional = self.eat(&Token::Question);
+                                expr = if optional {
+                                    Expr::EachOpt { input_expr: Box::new(expr) }
+                                } else {
+                                    Expr::Each { input_expr: Box::new(expr) }
+                                };
+                            } else {
+                                if self.at(&Token::Colon) {
+                                    anyhow::bail!("syntax error, unexpected ':'");
+                                }
+                                let key = self.parse_pipe()?;
+                                if self.at(&Token::Colon) {
+                                    anyhow::bail!("syntax error, unexpected ':', expecting '|' or ',' or ']'");
+                                }
+                                self.expect(&Token::RBracket)?;
+                                let optional = self.eat(&Token::Question);
+                                expr = if optional {
+                                    Expr::IndexOpt { expr: Box::new(expr), key: Box::new(key) }
+                                } else {
+                                    Expr::Index { expr: Box::new(expr), key: Box::new(key) }
+                                };
+                            }
                         }
                         _ => {
                             // Just a trailing dot - this shouldn't normally happen after a postfix

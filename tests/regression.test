@@ -13492,3 +13492,8 @@ null
 with_entries(.value |= tostring)
 {"a":1.50,"b":"x"}
 {"a":"1.50","b":"x"}
+
+# Issue #1023: postfix dotted bracket rejects the slice form like jq (index/iterate still fine)
+[try (.a | .[0:1]) catch "e", .a.[0], first(.a.[])]
+{"a":[1,2,3]}
+[[1],1,1]
