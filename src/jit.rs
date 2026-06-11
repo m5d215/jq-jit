@@ -30,6 +30,16 @@ thread_local! {
     /// Closure ops captured at compile time; consumed by runtime trampolines
     /// during execution.
     static JIT_CLOSURE_OPS: UnsafeCell<Vec<Rc<Expr>>> = const { UnsafeCell::new(Vec::new()) };
+    /// Delegate configuration captured at compile time (#1059 Phase 3c):
+    /// the program's funcs table, the $vars its bodies reference, and the
+    /// memoize slot setup. Installed into cached delegated eval Envs by
+    /// `reset_delegated_env` / `new_delegated_env`; the generation counter
+    /// lets a cached Env skip reinstallation until the next compile.
+    static JIT_DELEGATE_CFG: RefCell<Rc<DelegateCfg>> = RefCell::new(Rc::new(DelegateCfg::default()));
+    /// Monotonic source for `DelegateCfg::gen`. Starts at 1 so the default
+    /// config (gen 0) matches a fresh Env's `delegate_cfg_gen()` of 0 and
+    /// installs nothing.
+    static JIT_DELEGATE_CFG_GEN: Cell<u64> = const { Cell::new(1) };
     /// Pointer to the `JitEnv` currently being driven by `execute_jit*`.
     /// `set_jit_error*` consult this to flip the env's `error_flag` without
     /// plumbing an env pointer through every fallible trampoline signature.
@@ -741,6 +751,19 @@ struct Flattener {
     /// eval delegation (#1059 Phase 3). The default-dispatch feasibility
     /// probe rejects such programs (see `is_jit_compilable_with_funcs`).
     emitted_delegate: bool,
+    /// Function ids exempt from inlining: recursive defs discovered by
+    /// `inline_with_recursion_exemption`. Calls to these stay as `FuncCall`
+    /// nodes in the inlined tree so `flatten_gen` can stream the whole call
+    /// through the eval delegate — eval owns recursion via
+    /// `stacker::maybe_grow`, the JIT has no recursion-safe lowering (#648).
+    inline_exempt: HashSet<crate::ir::FuncId>,
+    /// Recursive func ids hit during the current `inline_func_calls` pass;
+    /// drained into `inline_exempt` by the retry loop in
+    /// `inline_with_recursion_exemption`.
+    recursion_detected: HashSet<crate::ir::FuncId>,
+    /// Cached verdict of `funcs_bodies_block_delegation` (the function
+    /// table is fixed for the lifetime of a Flattener).
+    funcs_body_block: Option<bool>,
 }
 
 impl Flattener {
@@ -751,7 +774,8 @@ impl Flattener {
                      limit_state: None, closure_ops: Vec::new(),
                      expanding_funcs: HashSet::new(), value_constants: Vec::new(),
                      is_test: false, has_unresolved_recursion: false,
-                     emitted_delegate: false }
+                     emitted_delegate: false, inline_exempt: HashSet::new(),
+                     recursion_detected: HashSet::new(), funcs_body_block: None }
     }
 
     /// Materialize a Literal into a heap-allocated Value and return a stable pointer.
@@ -788,7 +812,35 @@ impl Flattener {
         t.expanding_funcs = self.expanding_funcs.clone();
         t.is_test = true;
         t.has_unresolved_recursion = self.has_unresolved_recursion;
+        t.inline_exempt = self.inline_exempt.clone();
+        t.funcs_body_block = self.funcs_body_block;
         t
+    }
+
+    /// Inline function calls, exempting recursive defs (#1059 Phase 3c).
+    ///
+    /// `inline_func_calls` discovers recursion only mid-expansion (the inner
+    /// call's id is already in `expanding_funcs`), at which point the outer
+    /// call's body is partially inlined. Restart the pass with the detected
+    /// ids exempted so the *outer* call survives as a clean `FuncCall` node
+    /// — that is the shape `flatten_gen` can hand to the eval delegate
+    /// whole. Each retry exempts at least one more func, so the loop runs
+    /// at most `funcs.len() + 1` times (in practice: twice, and only for
+    /// filters that use recursive defs).
+    fn inline_with_recursion_exemption(&mut self, expr: &Expr) -> Expr {
+        loop {
+            let result = self.inline_func_calls(expr);
+            if self.recursion_detected.is_empty() {
+                return result;
+            }
+            let detected = std::mem::take(&mut self.recursion_detected);
+            self.inline_exempt.extend(detected);
+            // The flag and the expansion stack are inline-pass state here
+            // (inline_func_calls is the only inline-time setter); clear them
+            // for the retry. Flatten-time setters run after inlining.
+            self.has_unresolved_recursion = false;
+            self.expanding_funcs.clear();
+        }
     }
 
     /// Inline FuncCall nodes by substituting function bodies.
@@ -805,7 +857,17 @@ impl Flattener {
         match expr {
             Expr::FuncCall { func_id, args } => {
                 if func_id.idx() >= self.funcs.len() { return expr.clone(); }
+                if self.inline_exempt.contains(func_id) {
+                    // Recursive def: keep the call un-inlined so flatten_gen
+                    // can stream the whole call through the eval delegate
+                    // (#1059 Phase 3c). Args still get inlined — they may
+                    // reference non-recursive defs.
+                    let new_args: Vec<Expr> =
+                        args.iter().map(|a| self.inline_func_calls(a)).collect();
+                    return Expr::FuncCall { func_id: *func_id, args: new_args };
+                }
                 if self.expanding_funcs.contains(func_id) {
+                    self.recursion_detected.insert(*func_id);
                     self.has_unresolved_recursion = true;
                     return expr.clone();
                 }
@@ -1201,6 +1263,25 @@ impl Flattener {
         }
     }
 
+    /// True when some function body contains a construct that cannot cross
+    /// the eval-delegation boundary. Delegated `FuncCall`s execute raw
+    /// bodies from the funcs table wired into the delegated env, so the
+    /// emit-time Debug probe on the delegated expression cannot see into
+    /// them; probe the whole table once instead (user defs only — builtins
+    /// are native ops, so the table is small). "Del" / "Pick" / "Paths"
+    /// match the path-semantic builtin-op and Expr variant names; the odd
+    /// substring false positive only costs a bail.
+    fn funcs_bodies_block_delegation(&mut self) -> bool {
+        if let Some(b) = self.funcs_body_block { return b; }
+        let b = self.funcs.iter().any(|f| {
+            let d = format!("{:?}", f.body);
+            d.contains("Break") || d.contains("PathExpr")
+                || d.contains("Del") || d.contains("Pick") || d.contains("Paths")
+        });
+        self.funcs_body_block = Some(b);
+        b
+    }
+
     /// Emit a streaming eval delegation for `expr` (#1059 Phase 3), or
     /// return false when the context cannot host one:
     ///
@@ -1213,13 +1294,15 @@ impl Flattener {
     ///   (`limit(1; path(recurse(.+1)) | .)`) would hang there where eval
     ///   stops lazily.
     /// - the subtree contains `break` (cannot unwind across the delegation
-    ///   boundary — it would surface as a plain eval error), an un-inlined
-    ///   `FuncCall` (the delegated env carries no function table; these
-    ///   only survive inlining for recursive defs, which the feasibility
-    ///   probes already reject — belt and suspenders), or `memoize` (the
-    ///   delegated env has no memo slots wired). The scan is a conservative
-    ///   Debug-format substring probe — a false positive (e.g. a literal
-    ///   string "Break") merely keeps the eval bail of the caller.
+    ///   boundary — it would surface as a plain eval error). The scan is a
+    ///   conservative Debug-format substring probe — a false positive
+    ///   (e.g. a literal string "Break") merely keeps the eval bail of the
+    ///   caller. `FuncCall` / `memoize` are no longer blanket-rejected:
+    ///   the delegated env carries the funcs table and memo slots (#1059
+    ///   Phase 3c). A delegated `FuncCall` is still rejected in push mode
+    ///   (a recursive def can be an unbounded generator) and when any
+    ///   function body contains `break` / path-semantic nodes (see
+    ///   `funcs_bodies_block_delegation`).
     /// - `path_semantic` nodes (`path(...)`, `del(...)`, `pick(...)`)
     ///   referencing any `$var`: the env seeding copies plain values, but
     ///   eval's path provenance (#880/#953) also tracks *where* a variable
@@ -1237,7 +1320,7 @@ impl Flattener {
         let mut rejected = self.limit_state.is_some();
         if !rejected {
             let dbg = format!("{:?}", expr);
-            rejected = dbg.contains("Break") || dbg.contains("FuncCall") || dbg.contains("Memoize");
+            rejected = dbg.contains("Break");
             // Push mode is eager: the delegate fills a collect stack the
             // lowering materialized (pipe fallback, explicit collect), so a
             // potentially-infinite delegated stream would hang where eval
@@ -1250,6 +1333,18 @@ impl Flattener {
                 || (self.collect_depth > 0
                     && (dbg.contains("Repeat") || dbg.contains("While")
                         || dbg.contains("Until") || dbg.contains("Recurse")));
+            if !rejected && dbg.contains("FuncCall") {
+                // The delegate executes raw `CompiledFunc` bodies in eval
+                // (the funcs table is wired into the delegated env, #1059
+                // Phase 3c), and the Debug probe above cannot see into
+                // them. Apply the boundary guards to the bodies too:
+                // - push mode: a recursive def can be an unbounded
+                //   generator (`def f: ., f;`) — same hazard as Repeat
+                // - a `break` inside a body cannot jump back across the
+                //   delegation boundary to a JIT label; path-semantic
+                //   nodes inside a body would lose $var provenance (#880)
+                rejected = self.collect_depth > 0 || self.funcs_bodies_block_delegation();
+            }
         }
         if !rejected && path_semantic {
             let mut vars = Vec::new();
@@ -2479,7 +2574,19 @@ impl Flattener {
                 self.emit(JitOp::Label { id: end_lbl });
                 out
             }
-            Expr::FuncCall { func_id, args } if func_id.idx() < self.funcs.len() && !self.expanding_funcs.contains(func_id) => {
+            // Call to a recursive def (inline-exempt, #1059 Phase 3c) in
+            // scalar position: no delegation here yet (scalar contexts
+            // expect exactly one value; that's a later installment). Force
+            // the whole-filter bail — falling through to the default Null
+            // emit would silently fabricate a value (#1093 pattern).
+            Expr::FuncCall { func_id, .. } if self.inline_exempt.contains(func_id) => {
+                self.has_unresolved_recursion = true;
+                let out = self.alloc_slot();
+                self.emit(JitOp::Null { dst: out });
+                out
+            }
+            Expr::FuncCall { func_id, args } if func_id.idx() < self.funcs.len()
+                && !self.expanding_funcs.contains(func_id) => {
                 self.expanding_funcs.insert(*func_id);
                 let func = &self.funcs[func_id.idx()].clone();
                 let body = if !func.param_vars.is_empty() && !args.is_empty() {
@@ -3297,8 +3404,14 @@ impl Flattener {
                     });
                     return ok;
                 }
-                // Complex path: delegate to runtime (only safe without FuncCall refs)
+                // Complex path: delegate to runtime. Calls to recursive
+                // defs (inline-exempt FuncCall nodes, #1059 Phase 3c) can
+                // reach here now — the assign delegate's path machinery is
+                // not validated for them, so force the whole-filter bail
+                // (plain `false` risks an op hole in ignored-false
+                // contexts, #1093 pattern).
                 if contains_func_call(path_expr) || contains_func_call(value_expr) {
+                    self.has_unresolved_recursion = true;
                     return false;
                 }
                 let idx = self.closure_ops.len();
@@ -3501,8 +3614,10 @@ impl Flattener {
                     self.emit(JitOp::Drop { slot: path_arr });
                     return ok;
                 }
-                // Complex path: delegate to runtime (only safe without FuncCall refs)
+                // Complex path: delegate to runtime. Same recursive-def
+                // guard as the Assign arm above (#1059 Phase 3c / #1093).
                 if contains_func_call(path_expr) || contains_func_call(update_expr) {
+                    self.has_unresolved_recursion = true;
                     return false;
                 }
                 let idx = self.closure_ops.len();
@@ -3697,6 +3812,15 @@ impl Flattener {
                 });
                 self.emit(JitOp::Drop { slot: arr });
                 true
+            }
+
+            // Call to a recursive def (inline-exempt, #1059 Phase 3c):
+            // stream the whole call through the eval delegate. Eval owns
+            // recursion via `stacker::maybe_grow`; the delegate guards
+            // (push-mode rejection, func-body probe) live in
+            // `emit_delegate_gen`.
+            Expr::FuncCall { func_id, .. } if self.inline_exempt.contains(func_id) => {
+                self.emit_delegate_gen(expr, input_slot, false)
             }
 
             Expr::FuncCall { func_id, args } => {
@@ -4176,7 +4300,17 @@ impl Flattener {
                 self.collect_depth += 1;
                 let ok = self.flatten_gen(gen_expr, input_slot);
                 self.collect_depth -= 1;
-                if !ok { return false; }
+                if !ok {
+                    // The pre-check above ran at the caller's collect depth;
+                    // the real flatten runs one deeper, where depth-sensitive
+                    // delegate guards (push-mode rejections, #1059) can fail
+                    // after the probe passed. Several dispatch sites (the
+                    // scalar Reduce family, #683) ignore our return value, so
+                    // a plain false here would ship a loop with no body —
+                    // force the whole-filter bail instead (#1093 pattern).
+                    self.has_unresolved_recursion = true;
+                    return false;
+                }
                 let arr = self.alloc_slot();
                 self.emit(JitOp::CollectFinish { dst: arr });
                 // Iterate the collected array
@@ -9697,12 +9831,11 @@ fn flatten_filter(expr: &Expr, funcs: &[CompiledFunc]) -> Result<FlattenedFilter
     fl.funcs = funcs.to_vec();
     // Pre-inline function calls and apply semantic optimizations.
     // Always run to catch to_entries|from_entries and similar rewrites.
-    let inlined = fl.inline_func_calls(expr);
-    // Recursive def left an un-inlined FuncCall in the tree. The JIT
-    // can't safely emit a recursive call (no host-stack management),
-    // and pressing on would produce a partial code path that returns
-    // garbage. Bail so the binary falls back to eval, which already
-    // handles recursion via `stacker::maybe_grow` (#648).
+    // Calls to recursive defs survive as `FuncCall` nodes (inline-exempt,
+    // #1059 Phase 3c); flatten_gen streams them through the eval delegate
+    // or bails — the JIT has no recursion-safe lowering of its own (#648).
+    let inlined = fl.inline_with_recursion_exemption(expr);
+    // Backstop: the exemption loop should leave no unresolved recursion.
     if fl.has_unresolved_recursion {
         bail!("Expression not JIT-compilable: contains recursive function call");
     }
@@ -9727,6 +9860,26 @@ fn flatten_filter(expr: &Expr, funcs: &[CompiledFunc]) -> Result<FlattenedFilter
             *cell.get() = fl.closure_ops.iter().cloned().map(Rc::new).collect();
         });
     }
+
+    // Publish the delegate funcs config (#1059 Phase 3c). Always overwrite
+    // so a previous compile's table can't leak into this filter's
+    // delegates; the table is only populated when some closure op actually
+    // calls a function (delegated recursive defs, closure-op keys).
+    let needs_funcs = !fl.funcs.is_empty()
+        && fl.closure_ops.iter().any(|e| format!("{:?}", e).contains("FuncCall"));
+    let (cfg_funcs, cfg_body_vars) = if needs_funcs {
+        let mut vars: Vec<VarIdx> = Vec::new();
+        for f in &fl.funcs {
+            Flattener::collect_loadvar_indices(&f.body, &mut vars);
+        }
+        (fl.funcs.iter().cloned().map(Rc::new).collect(), vars)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    publish_delegate_cfg(move |c| {
+        c.funcs = cfg_funcs;
+        c.func_body_vars = cfg_body_vars;
+    });
 
     Ok(FlattenedFilter {
         ops: optimize_clone_yield(fl.ops),
@@ -11309,13 +11462,11 @@ pub fn is_jit_compilable_with_delegates(expr: &Expr, funcs: &[CompiledFunc]) -> 
 fn jit_feasibility(expr: &Expr, funcs: &[CompiledFunc]) -> (bool, bool) {
     let mut fl = Flattener::new();
     fl.funcs = funcs.to_vec();
-    // Mirror `compile_with_funcs`'s inline step so we detect the same
-    // "recursive def in expr" shape it would reject. Without this, the
-    // Reduce scalar fast path in `flatten_gen` (line 2062) silently returns
-    // true even when the source generator references a recursive def — and
-    // the eventual `compile_with_funcs` then stack-overflows in
-    // `inline_func_calls` (#648).
-    let inlined = fl.inline_func_calls(expr);
+    // Mirror `compile_with_funcs`'s inline step (including the recursion
+    // exemption) so the feasibility verdict agrees with what the real
+    // compile would produce. Diverging here is the #648 failure mode: the
+    // probe accepts a shape the compile then chokes on.
+    let inlined = fl.inline_with_recursion_exemption(expr);
     if fl.has_unresolved_recursion { return (false, false); }
     let input = fl.alloc_slot();
     let ok = fl.flatten_gen(&inlined, input);
@@ -11354,6 +11505,13 @@ fn seed_eval_env_from_jit(env: &Rc<RefCell<crate::eval::Env>>, exprs: &[&Expr]) 
     for e in exprs {
         Flattener::collect_loadvar_indices(e, &mut indices);
     }
+    seed_var_indices(env, &indices);
+}
+
+/// Copy the given JIT-env var slots into the eval Env (the seed loop shared
+/// by the expression walk above and the func-body var list in the delegate
+/// config).
+fn seed_var_indices(env: &Rc<RefCell<crate::eval::Env>>, indices: &[VarIdx]) {
     if indices.is_empty() { return; }
     REUSABLE_ENV.with(|cell| {
         let jit_env_opt = unsafe { &*cell.get() };
@@ -11362,10 +11520,82 @@ fn seed_eval_env_from_jit(env: &Rc<RefCell<crate::eval::Env>>, exprs: &[&Expr]) 
         for idx in indices {
             let i = idx.idx();
             if i < jit_env.vars.len() {
-                env_mut.seed_var(idx, jit_env.vars[i].clone());
+                env_mut.seed_var(*idx, jit_env.vars[i].clone());
             }
         }
     });
+}
+
+/// Compile-time delegate configuration (#1059 Phase 3c). `flatten_filter`
+/// publishes the funcs side; `publish_delegate_memo_config` (called from
+/// `Filter::compile_*`, which owns the parse-time slot count) publishes the
+/// memoize side. Each publish bumps `gen`, so cached delegated Envs
+/// reinstall lazily on their next use after a compile.
+#[derive(Default)]
+struct DelegateCfg {
+    gen: u64,
+    /// The program's function table — populated only when some closure op
+    /// references a `FuncCall`, so func-less programs (the common case)
+    /// install nothing.
+    funcs: Vec<Rc<CompiledFunc>>,
+    /// $vars referenced by any function body. A delegated call can reach a
+    /// body that closes over an outer JIT-bound $var, and the per-record
+    /// seed walk only sees the delegated expression — so these are seeded
+    /// whenever the table is non-empty. Over-seeding is harmless: eval
+    /// rebinds anything bound inside the delegate before reading it.
+    func_body_vars: Vec<VarIdx>,
+    memo_slots: u32,
+    memo_max_entries: usize,
+}
+
+/// Replace the published delegate config, carrying over fields the caller
+/// doesn't touch and stamping a fresh generation.
+fn publish_delegate_cfg(update: impl FnOnce(&mut DelegateCfg)) {
+    JIT_DELEGATE_CFG.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let mut cfg = DelegateCfg {
+            gen: JIT_DELEGATE_CFG_GEN.with(|g| {
+                let v = g.get();
+                g.set(v + 1);
+                v
+            }),
+            funcs: slot.funcs.clone(),
+            func_body_vars: slot.func_body_vars.clone(),
+            memo_slots: slot.memo_slots,
+            memo_max_entries: slot.memo_max_entries,
+        };
+        update(&mut cfg);
+        *slot = Rc::new(cfg);
+    });
+}
+
+/// Wire the program's memoize slot setup into future delegated Envs. The
+/// slot count is parse-time state on the `Filter`, invisible to the
+/// flattener — `Filter::compile_*` calls this after a successful compile.
+pub fn publish_delegate_memo_config(memo_slots: u32, memo_max_entries: usize) {
+    publish_delegate_cfg(|c| {
+        c.memo_slots = memo_slots;
+        c.memo_max_entries = memo_max_entries;
+    });
+}
+
+/// Install the published delegate config (funcs table + memoize slots) into
+/// a delegated Env unless it already carries the current generation.
+/// Returns the config so callers can seed `func_body_vars`.
+fn install_delegate_cfg(env: &Rc<RefCell<crate::eval::Env>>) -> Rc<DelegateCfg> {
+    let cfg = JIT_DELEGATE_CFG.with(|cell| cell.borrow().clone());
+    {
+        let mut e = env.borrow_mut();
+        if e.delegate_cfg_gen() != cfg.gen {
+            e.set_funcs(cfg.funcs.clone());
+            if cfg.memo_slots > 0 {
+                e.set_memo_slots(cfg.memo_slots);
+                e.set_memo_max_entries(cfg.memo_max_entries);
+            }
+            e.set_delegate_cfg_gen(cfg.gen);
+        }
+    }
+    cfg
 }
 
 /// Build a fresh `eval::Env` for a JIT→eval closure-op delegation, auto-seeded
@@ -11373,7 +11603,11 @@ fn seed_eval_env_from_jit(env: &Rc<RefCell<crate::eval::Env>>, exprs: &[&Expr]) 
 /// `Rc::new(RefCell::new(Env::new(vec![])))` from inside an `__xxx__:` dispatcher.
 fn new_delegated_env(exprs: &[&Expr]) -> Rc<RefCell<crate::eval::Env>> {
     let env = Rc::new(RefCell::new(crate::eval::Env::new(vec![])));
+    let cfg = install_delegate_cfg(&env);
     seed_eval_env_from_jit(&env, exprs);
+    if !cfg.funcs.is_empty() {
+        seed_var_indices(&env, &cfg.func_body_vars);
+    }
     env
 }
 
@@ -11383,7 +11617,11 @@ fn new_delegated_env(exprs: &[&Expr]) -> Rc<RefCell<crate::eval::Env>> {
 /// thread-local to amortize allocation.
 fn reset_delegated_env(env: &Rc<RefCell<crate::eval::Env>>, exprs: &[&Expr]) {
     env.borrow_mut().reset();
+    let cfg = install_delegate_cfg(env);
     seed_eval_env_from_jit(env, exprs);
+    if !cfg.funcs.is_empty() {
+        seed_var_indices(env, &cfg.func_body_vars);
+    }
 }
 
 fn with_jit_env<R>(f: impl FnOnce(&mut JitEnv) -> R) -> R {

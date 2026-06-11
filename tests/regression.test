@@ -13687,3 +13687,73 @@ null
 ["\(1,2)\(3,4)"]
 null
 ["13","23","14","24"]
+
+# #1059 Phase 3c: recursive def delegated whole to eval (tail position)
+def f: . as $x | if . == 0 then null else (. - 1 | f) as $r | [$x, $r] end; 3 | f
+0
+[3,[2,[1,null]]]
+
+# #1059 Phase 3c: branching recursion (fib) via the delegate
+def fib: . as $n | if $n < 2 then $n else ($n - 1 | fib) + ($n - 2 | fib) end; 10 | fib
+0
+55
+
+# #1059 Phase 3c: recursive def + memoize with wired memo slots
+def fib: memoize(if . < 2 then . else ((. - 1) | fib) + ((. - 2) | fib) end); 30 | fib
+0
+832040
+
+# #1059 Phase 3c: inlined 0-arity memoize body delegated in push mode
+def sq: memoize(. * .); [1, 2, 3, 2, 1] | map(sq)
+null
+[1,4,9,4,1]
+
+# #1059 Phase 3c: multi-output memoize body re-yields the cached stream
+def two: memoize(., . + 1); [1, 1, 2] | map([two]) | add
+null
+[1,2,1,2,2,3]
+
+# #1059 Phase 3c: param-blind memoize caching matches eval (cache key is the input)
+def f($x): memoize(. + $x); 10 | [f(1), f(2)]
+null
+[11,11]
+
+# #1059 Phase 3c: 2-arg memoize key expression through the closure-op delegate
+def by_id: memoize(.value * 2; .id); map(by_id)
+[{"id":1,"value":10},{"id":2,"value":20},{"id":1,"value":999}]
+[20,40,20]
+
+# #1059 Phase 3c: memoize inside sort_by errored "memoize slot 0 not allocated" before memo wiring
+sort_by(memoize(.a))
+[{"a":2},{"a":1}]
+[{"a":1},{"a":2}]
+
+# #1059 Phase 3c: recursive def body closing over an outer JIT-bound $var (func_body_vars seeding)
+5 as $k | def f: if . <= 0 then $k else . - 1 | f end; 10 | f
+null
+5
+
+# #1059 Phase 3c: recursive sort_by key resolves through the wired funcs table
+def d: if type == "array" then (.[0] | d) else . end; sort_by(d)
+[[5],[2],[9]]
+[[2],[5],[9]]
+
+# #1059 Phase 3c: recursive generator in collect context is push-rejected (bails to eval)
+def countdown: if . <= 0 then empty else ., (. - 1 | countdown) end; [3 | countdown]
+null
+[3,2,1]
+
+# #1059 Phase 3c: depth-shifted delegate rejection in a reduce source must bail, not drop the loop body
+def gcd($a;$b): if $b == 0 then $a else gcd($b; $a % $b) end; reduce (range(2;4) as $m | gcd($m;2)) as $g (0; . + $g)
+null
+3
+
+# #1059 Phase 3c: infinite recursive generator under a label stays lazy or bails (must not hang)
+[label $out | (def f: ., f; f) | ., break $out]
+1
+[1]
+
+# #1059 Phase 3c: self-recursive stream in tail position delegates lazily
+def t: if . < 4 then ., (. + 1 | t) else . end; [1 | t]
+null
+[1,2,3,4]

@@ -118,3 +118,28 @@ fn force_jit_pins_cranelift() {
     );
     assert_eq!(label, "jit");
 }
+
+/// A recursive def now lowers via the eval delegate (#1059 Phase 3c), but
+/// delegated programs stay off the default dispatch — whole-filter eval
+/// measures faster when the delegate dominates.
+#[test]
+fn recursive_def_stays_on_eval_by_default() {
+    let label = traced_label(
+        "def f: if . >= 5 then . else . + 1 | f end; . | f",
+        "0",
+        None,
+    );
+    assert_eq!(label, "eval");
+}
+
+/// `--force-jit` compiles the delegated recursive def (debug knob, full
+/// coverage for the backend self-diff).
+#[test]
+fn force_jit_compiles_recursive_def_delegate() {
+    let label = traced_label(
+        "def f: if . >= 5 then . else . + 1 | f end; . | f",
+        "0",
+        Some("--force-jit"),
+    );
+    assert_eq!(label, "jit");
+}
