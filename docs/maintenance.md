@@ -263,6 +263,21 @@ scalar dispatch は Reduce だけ probe してから委譲に切り替える（�
 reduce source に含む形がここに落ちる）。委譲可否は emit_delegate_gen の
 ガード（push-mode 無限 / limit budget / break / provenance）がそのまま裁く。
 
+**pre-emission fall-through 第2弾（#1059 PR-F）**: StringInterpolation の
+generator part / ObjectConstruct の generator key / RegexMatch・Capture の
+generator 引数 / Range の非数値 step / Limit の非リテラル count・generator
+pre-check 失敗 / TryCatch の pre-check 失敗（restore_dot 保持のため原 expr を
+flatten_gen_try_catch に渡す）/ flatten_gen_pipe 各 arm の pre-check 失敗
+（`delegate_pipe` が left|right を再合成して委譲）は、いずれも op 未 emit の
+`return false` を whole-node 委譲に変更。また gen dispatch の scalar 截取
+（PR-C の Reduce probe）を「Debug に Reduce/FuncCall を含む任意の scalar 式」
+に拡張 — `1 as $N | reduce (… rec(0) …) …` のような **scalar wrapper 下の
+Reduce/再帰 def** は dispatch から直接見えないため。さらに eval が legacy
+文字列形式（`__jqerror__:{json}`）で raise するエラー（limit の count 型
+エラー等）は `jit_error_from_anyhow` が prefix を剥がして `JitError::Raise`
+に昇格させる — 委譲境界を越えて JIT 側 catch に届く時に raw wrapper が
+露出していた（PR-F で修正）。
+
 **LetBinding の probe 截取（#1059 PR-E）**: `flatten_gen` の LetBinding arm
 は、サブツリーに path 意味論マーカー（Debug に PathExpr/Del/Pick/Paths）が
 ある場合だけ test flattener で whole-node を probe し、native flatten が
