@@ -128,7 +128,19 @@ fn jit_error_from_anyhow(e: &anyhow::Error) -> JitError {
     if let Some(b) = e.downcast_ref::<crate::signal::BreakError>() {
         return JitError::Break(b.0);
     }
-    JitError::Msg(format!("{}", e))
+    let msg = format!("{}", e);
+    // Some eval paths still raise the legacy string encoding of an error
+    // *value* (`bail!("__jqerror__:{json}")` — e.g. limit's count type
+    // errors). Eval's own catch strips the prefix (see Expr::TryCatch in
+    // eval.rs); errors crossing the delegation boundary into a JIT catch
+    // must be lifted the same way or the catch body sees the raw wrapper
+    // (#1059 PR-F).
+    if let Some(json) = msg.strip_prefix("__jqerror__:") {
+        if let Ok(v) = crate::value::json_to_value(json) {
+            return JitError::Raise(v);
+        }
+    }
+    JitError::Msg(msg)
 }
 
 fn set_jit_error(msg: String) {
@@ -2829,15 +2841,27 @@ impl Flattener {
     fn flatten_gen(&mut self, expr: &Expr, input_slot: SlotId) -> bool {
         // If scalar, just compute and yield once
         if is_scalar(expr) {
-            // A scalar-classified Reduce can still fail inside
-            // flatten_scalar (source not flattenable — the #683 pre-check
-            // raises the bail flag after the Null emit). In generator
-            // position the single-output contract is just emit_yield, so
-            // probe first and stream the whole node through the eval
-            // delegate instead of bailing the filter (#1059 PR-C; the
-            // recursive-def-in-reduce-source class). Probes skip this —
-            // the outer probe already covers the subtree (#641).
-            if matches!(expr, Expr::Reduce { .. }) && !self.is_test {
+            // A scalar-classified expr can still fail inside flatten_scalar
+            // (a Reduce whose source is not flattenable — the #683
+            // pre-check raises the bail flag after the Null emit — or a
+            // recursion-exempt FuncCall, which has no scalar lowering at
+            // all). The failure can sit under a scalar *wrapper* too:
+            // `1 as $N | reduce (… rec(0) …) as $i (…)` is a scalar
+            // LetBinding, so dispatch never sees the Reduce node itself
+            // (#1059 PR-F). In generator position the single-output
+            // contract is just emit_yield, so probe first and stream the
+            // whole node through the eval delegate instead of bailing the
+            // filter (#1059 PR-C). Gated on a Reduce/FuncCall marker —
+            // after inlining, FuncCall nodes only survive for
+            // recursion-exempt defs, so common scalars skip the probe.
+            // Probes skip this — the outer probe already covers the
+            // subtree (#641).
+            if !self.is_test
+                && (matches!(expr, Expr::Reduce { .. }) || {
+                    let d = format!("{:?}", expr);
+                    d.contains("Reduce") || d.contains("FuncCall")
+                })
+            {
                 let mut test = self.test_flattener();
                 test.has_unresolved_recursion = false;
                 let t_in = test.alloc_slot();
@@ -3204,8 +3228,12 @@ impl Flattener {
             }
 
             Expr::StringInterpolation { parts } => {
+                // Generator parts make the interpolation itself a generator
+                // (`"\(1,2)"` yields "1","2") — the StrBuf lowering is
+                // single-pass, so stream the whole node through the eval
+                // delegate instead (#1059 PR-F).
                 if !parts.iter().all(|p| match p { StringPart::Literal(_) => true, StringPart::Expr(e) => is_scalar(e) }) {
-                    return false;
+                    return self.emit_delegate_gen(expr, input_slot, false);
                 }
                 self.emit(JitOp::StrBufNew);
                 for part in parts {
@@ -3267,8 +3295,11 @@ impl Flattener {
 
             Expr::Range { from, to, step } => {
                 // #1084: non-numeric steps need eval's lazy add-error
-                // semantics; bail the whole filter to eval.
-                if !range_step_is_safe(step.as_deref()) { return false; }
+                // semantics — stream the whole node through the eval
+                // delegate (#1059 PR-F).
+                if !range_step_is_safe(step.as_deref()) {
+                    return self.emit_delegate_gen(expr, input_slot, false);
+                }
                 let step_scalar = step.as_ref().is_none_or(|s| is_scalar(s));
                 if !is_scalar(from) || !is_scalar(to) || !step_scalar {
                     // Convert to nested evaluation:
@@ -3337,7 +3368,7 @@ impl Flattener {
             }
 
             Expr::TryCatch { try_expr, catch_expr, .. } => {
-                self.flatten_gen_try_catch(try_expr, catch_expr, input_slot)
+                self.flatten_gen_try_catch(expr, try_expr, catch_expr, input_slot)
             }
 
             // RegexMatch/RegexCapture: 0-or-N output generator.
@@ -3347,7 +3378,11 @@ impl Flattener {
             // so emit_yield_each_if_array dispatches on the runtime result kind.
             Expr::RegexMatch { input_expr, re, flags } | Expr::RegexCapture { input_expr, re, flags } => {
                 let is_capture = matches!(expr, Expr::RegexCapture { .. });
-                if !is_scalar(input_expr) || !is_scalar(re) || !is_scalar(flags) { return false; }
+                // Generator re/flags (`match(("a","b"); ("","g"))`) need
+                // eval's cartesian argument iteration — delegate (#1059 PR-F).
+                if !is_scalar(input_expr) || !is_scalar(re) || !is_scalar(flags) {
+                    return self.emit_delegate_gen(expr, input_slot, false);
+                }
                 let inp = self.flatten_scalar(input_expr, input_slot);
                 let re_val = self.flatten_scalar(re, input_slot);
                 let flags_val = self.flatten_scalar(flags, input_slot);
@@ -3891,9 +3926,11 @@ impl Flattener {
                 // lazily — only once the generator yields (#806). ToF64Var
                 // would silently coerce all of those to 0. Only a numeric
                 // literal count (the overwhelmingly common case) is provably
-                // safe; everything else bails to eval. #1084
+                // safe; everything else streams the whole `limit(...)`
+                // through the eval delegate, which implements the count
+                // type semantics natively. #1084, #1059 PR-F
                 if !matches!(count.as_ref(), Expr::Literal(Literal::Num(..))) {
-                    return false;
+                    return self.emit_delegate_gen(expr, input_slot, false);
                 }
                 // Pre-check: generator must be compilable. Mirror the real
                 // emission context by installing a placeholder limit_state —
@@ -3907,7 +3944,11 @@ impl Flattener {
                     let mut test = self.test_flattener();
                     test.limit_state = Some((0, 0, 0, 0, test.collect_depth));
                     let t_in = test.alloc_slot();
-                    if !test.flatten_gen(generator, t_in) { return false; }
+                    if !test.flatten_gen(generator, t_in) {
+                        // Generator not lowerable even with the limit budget
+                        // — delegate the whole limit instead (#1059 PR-F).
+                        return self.emit_delegate_gen(expr, input_slot, false);
+                    }
                 }
                 let count_val = self.flatten_scalar(count, input_slot);
                 let counter_var = self.alloc_var();
@@ -4491,20 +4532,27 @@ impl Flattener {
     }
 
     /// Handle try-catch: try try_expr catch catch_expr
-    fn flatten_gen_try_catch(&mut self, try_expr: &Expr, catch_expr: &Expr, input_slot: SlotId) -> bool {
+    /// `expr` is the original `Expr::TryCatch` node (carries `restore_dot`),
+    /// used to delegate the whole construct when a pre-check rejects the
+    /// native lowering (#1059 PR-F).
+    fn flatten_gen_try_catch(&mut self, expr: &Expr, try_expr: &Expr, catch_expr: &Expr, input_slot: SlotId) -> bool {
         // Pre-check: the try body must be compilable
         {
             let mut test = self.test_flattener();
                     test.try_depth = self.try_depth + 1;
                     test.try_catch_target = Some((0, 0)); // dummy target for pre-check
             let t_in = test.alloc_slot();
-            if !test.flatten_gen(try_expr, t_in) { return false; }
+            if !test.flatten_gen(try_expr, t_in) {
+                return self.emit_delegate_gen(expr, input_slot, false);
+            }
         }
         // Pre-check: the catch body must be compilable
         {
             let mut test = self.test_flattener();
             let t_in = test.alloc_slot();
-            if !test.flatten_gen(catch_expr, t_in) { return false; }
+            if !test.flatten_gen(catch_expr, t_in) {
+                return self.emit_delegate_gen(expr, input_slot, false);
+            }
         }
 
         let catch_label = self.alloc_label();
@@ -4539,6 +4587,18 @@ impl Flattener {
 
         self.emit(JitOp::Label { id: done_label });
         true
+    }
+
+    /// Delegate `left | right` wholesale when a pipe arm cannot lower the
+    /// composition (#1059 PR-F). `flatten_gen_pipe` works on the split
+    /// halves, so the pipe node is recomposed for the closure op. Only
+    /// valid at pre-emission sites (no ops for this composition yet).
+    fn delegate_pipe(&mut self, left: &Expr, right: &Expr, input_slot: SlotId) -> bool {
+        let whole = Expr::Pipe {
+            left: Box::new(left.clone()),
+            right: Box::new(right.clone()),
+        };
+        self.emit_delegate_gen(&whole, input_slot, false)
     }
 
     /// Handle generator | anything: emit left generator's loop with right inline.
@@ -4586,7 +4646,9 @@ impl Flattener {
                 }
             }
             Expr::IfThenElse { cond, then_branch, else_branch } => {
-                if !is_scalar(cond) { return false; }
+                // A generator cond (`if values then ...`) has no native
+                // lowering here — delegate the composition (#1059 PR-F).
+                if !is_scalar(cond) { return self.delegate_pipe(left, right, input_slot); }
                 let then_pipe = Expr::Pipe {
                     left: Box::new((**then_branch).clone()),
                     right: Box::new(right.clone()),
@@ -4602,8 +4664,11 @@ impl Flattener {
                 if !self.is_test {
                     let mut test = self.test_flattener();
                     let t_in = test.alloc_slot();
-                    if !test.flatten_gen(&then_pipe, t_in) { return false; }
-                    if !test.flatten_gen(&else_pipe, t_in) { return false; }
+                    if !test.flatten_gen(&then_pipe, t_in)
+                        || !test.flatten_gen(&else_pipe, t_in)
+                    {
+                        return self.delegate_pipe(left, right, input_slot);
+                    }
                 }
                 let cond_val = self.flatten_scalar(cond, input_slot);
                 let then_lbl = self.alloc_label();
@@ -4622,14 +4687,19 @@ impl Flattener {
                 then_ok && else_ok
             }
             Expr::Range { from, to, step } => {
-                if !is_scalar(from) || !is_scalar(to) { return false; }
-                if !range_step_is_safe(step.as_deref()) { return false; }
-                if let Some(s) = step { if !is_scalar(s) { return false; } }
+                if !is_scalar(from) || !is_scalar(to)
+                    || !range_step_is_safe(step.as_deref())
+                    || step.as_deref().is_some_and(|s| !is_scalar(s))
+                {
+                    return self.delegate_pipe(left, right, input_slot);
+                }
                 // Pre-check: can we compile the body (right)?
                 {
                     let mut test = self.test_flattener();
                     let t_in = test.alloc_slot();
-                    if !test.flatten_gen(right, t_in) { return false; }
+                    if !test.flatten_gen(right, t_in) {
+                        return self.delegate_pipe(left, right, input_slot);
+                    }
                 }
                 let from_val = self.flatten_scalar(from, input_slot);
                 let to_val = self.flatten_scalar(to, input_slot);
@@ -4675,12 +4745,16 @@ impl Flattener {
                     test.try_depth = self.try_depth + 1;
                     test.try_catch_target = Some((0, 0));
                     let t_in = test.alloc_slot();
-                    if !test.flatten_gen(try_expr, t_in) { return false; }
+                    if !test.flatten_gen(try_expr, t_in) {
+                        return self.delegate_pipe(left, right, input_slot);
+                    }
                 }
                 {
                     let mut test = self.test_flattener();
                     let t_in = test.alloc_slot();
-                    if !test.flatten_gen(catch_expr, t_in) { return false; }
+                    if !test.flatten_gen(catch_expr, t_in) {
+                        return self.delegate_pipe(left, right, input_slot);
+                    }
                 }
                 // Pre-check: `right` must be compilable too. Both branches below
                 // pipe into it via `flatten_gen(right, …)` whose return value is
@@ -4692,7 +4766,9 @@ impl Flattener {
                 {
                     let mut test = self.test_flattener();
                     let t_in = test.alloc_slot();
-                    if !test.flatten_gen(right, t_in) { return false; }
+                    if !test.flatten_gen(right, t_in) {
+                        return self.delegate_pipe(left, right, input_slot);
+                    }
                 }
 
                 let catch_label = self.alloc_label();
@@ -4767,13 +4843,17 @@ impl Flattener {
                     let mut test = self.test_flattener();
                     test.collect_depth = self.collect_depth + 1;
                     let t_in = test.alloc_slot();
-                    if !test.flatten_gen(generator, t_in) { return false; }
+                    if !test.flatten_gen(generator, t_in) {
+                        return self.delegate_pipe(left, right, input_slot);
+                    }
                 }
                 // Pre-check: can we compile right?
                 {
                     let mut test = self.test_flattener();
                     let t_in = test.alloc_slot();
-                    if !test.flatten_gen(right, t_in) { return false; }
+                    if !test.flatten_gen(right, t_in) {
+                        return self.delegate_pipe(left, right, input_slot);
+                    }
                 }
                 self.emit(JitOp::CollectBegin);
                 self.collect_depth += 1;
@@ -4813,8 +4893,11 @@ impl Flattener {
                 if !self.is_test {
                     let mut test = self.test_flattener();
                     let t_in = test.alloc_slot();
-                    if !test.flatten_gen(left, t_in) { return false; }
-                    if !test.flatten_gen(right, t_in) { return false; }
+                    if !test.flatten_gen(left, t_in)
+                        || !test.flatten_gen(right, t_in)
+                    {
+                        return self.delegate_pipe(left, right, input_slot);
+                    }
                 }
                 let right_clone = right.clone();
                 self.flatten_gen_with_each_output(left, input_slot, &|this, elem| {
@@ -4826,8 +4909,13 @@ impl Flattener {
 
     /// Flatten ObjectConstruct with generator pairs by converting to LetBinding chain.
     fn flatten_obj_construct_gen(&mut self, pairs: &[(Expr, Expr)], _pair_idx: usize, input_slot: SlotId) -> bool {
-        // Only handle generator values (keys must be scalar)
-        if !pairs.iter().all(|(k, _)| is_scalar(k)) { return false; }
+        // Generator *keys* (`{(.a,.b): .c}`) need one object per key output
+        // — the LetBinding rewrite below only handles generator values, so
+        // stream the whole construct through the eval delegate (#1059 PR-F).
+        if !pairs.iter().all(|(k, _)| is_scalar(k)) {
+            let whole = Expr::ObjectConstruct { pairs: pairs.to_vec() };
+            return self.emit_delegate_gen(&whole, input_slot, false);
+        }
 
         // Convert: {k1: v1, k2: v2, ...} =>
         //   v1 as $__v0 | v2 as $__v1 | ... | {k1: $__v0, k2: $__v1, ...}
