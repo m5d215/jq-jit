@@ -771,7 +771,8 @@ struct Flattener {
     has_unresolved_recursion: bool,
     /// Set by `emit_delegate_gen` when the program contains a streaming
     /// eval delegation (#1059 Phase 3). The default-dispatch feasibility
-    /// probe rejects such programs (see `is_jit_compilable_with_funcs`).
+    /// historically gated default routing (the gate accepts delegated
+    /// programs since #1059 Phase 3.9; forced knobs never gated on it).
     emitted_delegate: bool,
     /// Function ids exempt from inlining: recursive defs discovered by
     /// `inline_with_recursion_exemption`. Calls to these stay as `FuncCall`
@@ -11914,17 +11915,45 @@ pub fn is_jit_compilable(expr: &Expr) -> bool {
     is_jit_compilable_with_funcs(expr, &[])
 }
 
-/// Default-dispatch feasibility: like the full probe, but rejects programs
-/// that would contain a `DelegateGen` op. Per-record eval delegation
-/// measures up to ~1.1x slower than whole-filter eval when the delegate
-/// dominates the filter (A/B on 200k-record NDJSON, #1059 Phase 3), so the
-/// default heuristics keep those filters on the tree-walking evaluator.
-/// The forced-mode knobs use [`is_jit_compilable_with_delegates`] so the
-/// backend self-diff still covers every delegable filter.
+/// Default-dispatch feasibility. Since #1059 Phase 3.9 this accepts
+/// programs that lower with streaming eval delegation (`DelegateGen`) —
+/// the same verdict as [`is_jit_compilable_with_delegates`]. The flip is
+/// safe because the remaining default-routing guards still apply: the
+/// interpreter fast paths are tried first (e.g. `del(.y)` / `walk(...)`
+/// stay on their dedicated routines), and the JitOp-interp tier requires
+/// `eligible_for_default_routing` (a delegate inside a loop body
+/// disqualifies the span). For the straight-line delegated class the
+/// A/B against whole-filter eval measures at parity (the per-record
+/// seed-list walk is memoized per compile generation, see
+/// `seed_eval_env_from_jit`).
 pub fn is_jit_compilable_with_funcs(expr: &Expr, funcs: &[CompiledFunc]) -> bool {
-    let (ok, emitted_delegate) = jit_feasibility(expr, funcs);
-    ok && !emitted_delegate
+    let (ok, emitted_delegate, native_ops) = jit_feasibility(expr, funcs);
+    if std::env::var_os("JQJIT_DEBUG_FEASIBILITY").is_some() {
+        eprintln!("[feasibility] ok={} delegate={} native_ops={}", ok, emitted_delegate, native_ops);
+    }
+    // The JIT lowering of `inputs` collects the stream eagerly, so a
+    // program that *observes* per-read input state (input_line_number /
+    // input_filename) or mixes several readers sees post-consumption
+    // state where eval interleaves lazily — `[inputs as $x |
+    // input_line_number]` is [1,2,3] in eval/jq and [3,3,3] eagerly.
+    // Keep such programs on eval in default routing (the forced knobs
+    // still compile them; the eager divergence predates the flip).
+    let dbg = format!("{:?}", expr);
+    let readers = dbg.matches("ReadInput").count();
+    let interleaved_io = readers >= 2
+        || (readers >= 1
+            && (dbg.contains("InputLineNumber") || dbg.contains("InputFilename")));
+    ok && !interleaved_io
+        && (!emitted_delegate || native_ops > DELEGATE_DOMINANT_NATIVE_OPS)
 }
+
+/// A delegated program with at most this many native (non-DelegateGen)
+/// ops is "delegate-dominant": nearly all per-record work happens inside
+/// eval anyway, and the delegation boundary (env reset + seeding + FFI)
+/// measures ~1.1x over whole-filter eval on 2M-record NDJSON. Such
+/// programs keep the eval route; mixed programs (real native work plus a
+/// delegated subtree) route to the JIT where the native part wins.
+const DELEGATE_DOMINANT_NATIVE_OPS: usize = 16;
 
 /// Forced-mode feasibility: accepts programs that lower with streaming
 /// eval delegation (`DelegateGen`).
@@ -11932,8 +11961,11 @@ pub fn is_jit_compilable_with_delegates(expr: &Expr, funcs: &[CompiledFunc]) -> 
     jit_feasibility(expr, funcs).0
 }
 
-/// Returns `(flattens, emitted_delegate)`.
-fn jit_feasibility(expr: &Expr, funcs: &[CompiledFunc]) -> (bool, bool) {
+/// Returns `(flattens, emitted_delegate, native_op_count)` where
+/// `native_op_count` is the number of lowered ops that are not
+/// `DelegateGen` — the default-routing gate uses it to spot
+/// delegate-dominant programs (#1059 Phase 3.9).
+fn jit_feasibility(expr: &Expr, funcs: &[CompiledFunc]) -> (bool, bool, usize) {
     let mut fl = Flattener::new();
     fl.funcs = funcs.to_vec();
     // Mirror `compile_with_funcs`'s inline step (including the recursion
@@ -11941,14 +11973,17 @@ fn jit_feasibility(expr: &Expr, funcs: &[CompiledFunc]) -> (bool, bool) {
     // compile would produce. Diverging here is the #648 failure mode: the
     // probe accepts a shape the compile then chokes on.
     let inlined = fl.inline_with_recursion_exemption(expr);
-    if fl.has_unresolved_recursion { return (false, false); }
+    if fl.has_unresolved_recursion { return (false, false, 0); }
     let input = fl.alloc_slot();
     let ok = fl.flatten_gen(&inlined, input);
     // Subtrees may set `has_unresolved_recursion` mid-flatten to request
     // a JIT bailout (see #683 — Reduce arm in flatten_scalar). Re-check
     // here so the feasibility query agrees with `compile_with_funcs`.
-    if fl.has_unresolved_recursion { return (false, false); }
-    (ok, fl.emitted_delegate)
+    if fl.has_unresolved_recursion { return (false, false, 0); }
+    let native_ops = fl.ops.iter()
+        .filter(|op| !matches!(op, JitOp::DelegateGen { .. }))
+        .count();
+    (ok, fl.emitted_delegate, native_ops)
 }
 
 unsafe extern "C" fn collect_callback(value: *const Value, ctx: *mut u8) -> i64 {
@@ -11975,11 +12010,41 @@ thread_local! {
 /// `Env::new` directly — they guarantee the JIT-set let-bindings are seeded so
 /// new closure ops can't silently regress.
 fn seed_eval_env_from_jit(env: &Rc<RefCell<crate::eval::Env>>, exprs: &[&Expr]) {
-    let mut indices: Vec<VarIdx> = Vec::new();
-    for e in exprs {
-        Flattener::collect_loadvar_indices(e, &mut indices);
+    // The walk over the delegated expression is compile-shaped work that
+    // used to run per record; memoize the per-expr seed list keyed by the
+    // expression's address (the closure-op table holds the Rc alive, so
+    // the pointer is stable) and the delegate-config generation (bumped on
+    // every compile, so republished tables can't alias stale entries).
+    // #1059 Phase 3.9. The size cap is a defensive bound in case a future
+    // dispatcher passes per-record temporaries.
+    thread_local! {
+        static SEED_VAR_CACHE: RefCell<(u64, std::collections::HashMap<usize, Rc<Vec<VarIdx>>>)> =
+            RefCell::new((0, std::collections::HashMap::new()));
     }
-    seed_var_indices(env, &indices);
+    let gen = JIT_DELEGATE_CFG.with(|cell| cell.borrow().gen);
+    for e in exprs {
+        let key = (*e) as *const Expr as usize;
+        let list = SEED_VAR_CACHE.with(|cell| {
+            let mut c = cell.borrow_mut();
+            if c.0 != gen {
+                c.0 = gen;
+                c.1.clear();
+            }
+            if let Some(l) = c.1.get(&key) {
+                return l.clone();
+            }
+            // Only *free* vars need seeding: a var bound inside the
+            // delegated expression is rebound by eval before any read
+            // (parser indices are unique per binder), so copying the JIT
+            // slot for it is dead work (#1059 Phase 3.9).
+            let l = Rc::new(Flattener::expr_free_vars(e));
+            if c.1.len() < 4096 {
+                c.1.insert(key, l.clone());
+            }
+            l
+        });
+        seed_var_indices(env, &list);
+    }
 }
 
 /// Copy the given JIT-env var slots into the eval Env (the seed loop shared
@@ -12288,14 +12353,13 @@ impl JitProgram {
                 }
             }
         }
-        // Delegated programs are excluded from the default sub-threshold
-        // routing (#1059 Phase 3): per-record delegation pays an eval-env
-        // reset that whole-filter eval does not, so until that class is
-        // A/B-measured the status quo (tree-walking eval) keeps those
-        // filters. Forced modes and above-threshold Cranelift still run
-        // them — that is where the delegation coverage pays off.
-        let var_only_loops = !flat.ops.iter().any(|op| matches!(op, JitOp::DelegateGen { .. }))
-            && Self::loops_are_var_only(&flat.ops, &label_pc);
+        // Delegated programs are routable since the #1059 Phase 3.9 flip
+        // (A/B-measured; the delegate-dominant class is filtered upstream
+        // in `is_jit_compilable_with_funcs`). A DelegateGen *inside a loop
+        // body* still disqualifies the span — it is not in the var-only
+        // allowlist below — so per-iteration delegation boundaries keep
+        // the eval route.
+        let var_only_loops = Self::loops_are_var_only(&flat.ops, &label_pc);
         Ok(JitProgram {
             ops: flat.ops,
             num_slots: flat.num_slots,

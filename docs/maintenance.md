@@ -312,15 +312,24 @@ probe 先行が必須（scalar-Reduce 截取と同形）。free var が残る場
 さらに外側の LetBinding 截取が拾う。`nth(n; g)` / `last(g)` の lowering も
 LetBinding スコープなので、`path(nth(2; .[]))` 級がここで委譲に乗る。
 
-**default dispatch は委譲プログラムをコンパイルしない**
-（`is_jit_compilable_with_funcs` が reject）。delegate 支配的な filter は
-whole-filter eval の方が速い（200k NDJSON A/B で委譲側が最大 ~1.1x 劣化、
-per-record の env reset 分）ため。forced knob（`JQJIT_FORCE_CRANELIFT` /
-`JQJIT_FORCE_JITOP_INTERP` / `--force-jit`）は
-`is_jit_compilable_with_delegates` / `compile_jit_with_delegates` 経由で
-委譲込みコンパイルし、backend self-diff がそこをカバーする。
-JIT_CLOSURE_OPS は `Vec<Rc<Expr>>`（per-record の Expr clone を排除、
-既存の closure-op delegate も同恩恵）。
+**default dispatch の委譲プログラム routing（#1059 Phase 3.9 で flip）**:
+`is_jit_compilable_with_funcs` は委譲プログラムを受理する。ただし
+2 つのガードが残る:
+1. **delegate-dominant 拒否**: native（非 DelegateGen）op 数が
+   `DELEGATE_DOMINANT_NATIVE_OPS`(=16) 以下のプログラムは eval 維持
+   （2M NDJSON A/B で委譲側 ~1.13x 劣化。mixed プログラムは native 部が
+   JIT 速度で走り最大 25% 勝ち、毎レコード委譲発火でも ~1.02x）
+2. **interleaved IO 拒否**: ReadInput 系が 2 回以上、または ReadInput 系 +
+   input_line_number/input_filename の組合せは eval 維持 — JIT の `inputs`
+   lowering は eager 収集なので `[inputs as $x | input_line_number]` が
+   [3,3,3] になる（eval/jq は [1,2,3]）。**この eager 乖離は forced 系では
+   従来から存在する未修正バグ**（flip が default に露出させかけた）
+委譲境界コストは 2 段で削減済み: `Env::reset` の Null-skip（eval 全経路にも
+~30% 効く）と、seed var list の per-compile memoize（`seed_eval_env_from_jit`、
+free var のみ seed — 委譲式内で束縛される var は eval が再束縛するので不要）。
+forced knob は従来どおり `is_jit_compilable_with_delegates` /
+`compile_jit_with_delegates` 経由（ガードなし全コンパイル）。
+JIT_CLOSURE_OPS は `Vec<Rc<Expr>>`（per-record の Expr clone を排除）。
 
 ### テスト出力
 

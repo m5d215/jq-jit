@@ -2659,12 +2659,12 @@ impl Filter {
         self.jit_fn.is_some()
     }
 
-    /// Like `compile_jit`, but also accepts programs that lower with
-    /// streaming eval delegation (#1059 Phase 3). Used by the forced-mode
-    /// knobs (`JQJIT_FORCE_CRANELIFT`, `--force-jit`) so the backend
-    /// self-diff covers delegable filters; the default heuristics keep
-    /// them on whole-filter eval, which measures faster when the delegate
-    /// dominates.
+    /// Like `compile_jit`, but skips the default-routing heuristics
+    /// entirely. Used by the forced-mode knobs (`JQJIT_FORCE_CRANELIFT`,
+    /// `--force-jit`) so the backend self-diff covers every delegable
+    /// filter. Since #1059 Phase 3.9 the default gate also accepts
+    /// delegated programs, so the remaining difference is historical
+    /// naming plus future heuristic divergence.
     pub fn compile_jit_with_delegates(&mut self) {
         if self.jit_fn.is_some() { return; }
         {

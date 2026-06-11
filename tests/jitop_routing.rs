@@ -91,12 +91,37 @@ fn straight_line_collect_range_routes_to_jitop() {
 }
 
 /// Programs that lower with a streaming eval delegate (#1059 Phase 3)
-/// stay on whole-filter eval in default dispatch: per-record delegation
-/// measures slower than eval when the delegate dominates. The forced-mode
-/// knobs compile them (tests/selfdiff_jitop_backend.rs covers that side).
+/// stay on whole-filter eval in default dispatch when the delegate
+/// *dominates* the program (few native ops — per-record delegation
+/// measures ~1.1x over eval, #1059 Phase 3.9). The forced-mode knobs
+/// compile them (tests/selfdiff_jitop_backend.rs covers that side).
 #[test]
 fn delegated_program_stays_on_eval_by_default() {
     let label = traced_label("[path(.a // .b)]", r#"{"b":1}"#, None);
+    assert_eq!(label, "eval");
+}
+
+/// A *mixed* program (real native work plus a delegated subtree) routes
+/// to the shared lowering by default since the #1059 Phase 3.9 flip —
+/// the native part runs at JIT speed and measures faster than
+/// whole-filter eval.
+#[test]
+fn mixed_delegated_program_routes_by_default() {
+    let label = traced_label(
+        "select(.x > 100) | path(. as [$a] | $a)",
+        r#"{"x":500}"#,
+        None,
+    );
+    assert_eq!(label, "jitop");
+}
+
+/// Programs observing per-read input state must keep eval's lazy
+/// interleaving: the JIT lowering collects `inputs` eagerly, so
+/// `[inputs as $x | input_line_number]` would report post-consumption
+/// line numbers. The routing gate keeps them on eval.
+#[test]
+fn interleaved_input_state_stays_on_eval() {
+    let label = traced_label("[inputs as $x | input_line_number]", "1", None);
     assert_eq!(label, "eval");
 }
 
@@ -119,9 +144,9 @@ fn force_jit_pins_cranelift() {
     assert_eq!(label, "jit");
 }
 
-/// A recursive def now lowers via the eval delegate (#1059 Phase 3c), but
-/// delegated programs stay off the default dispatch — whole-filter eval
-/// measures faster when the delegate dominates.
+/// A recursive def now lowers via the eval delegate (#1059 Phase 3c).
+/// This one is delegate-dominant (the call IS the program), so default
+/// dispatch keeps whole-filter eval, which measures faster.
 #[test]
 fn recursive_def_stays_on_eval_by_default() {
     let label = traced_label(
