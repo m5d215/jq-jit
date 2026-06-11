@@ -13757,3 +13757,48 @@ null
 def t: if . < 4 then ., (. + 1 | t) else . end; [1 | t]
 null
 [1,2,3,4]
+
+# #1059 PR-B: multi-output until under limit via the budgeted delegate
+[limit(4; until(.>=3; .+1, .+2))]
+0
+[3,4,3,3]
+
+# #1059 PR-B: infinite recursive generator bounded by the limit budget (push mode)
+def f: ., (. + 1 | f); [limit(4; f)]
+10
+[10,11,12,13]
+
+# #1059 PR-B: first() over a delegated generator stops after one yield
+first(combinations)
+[[1,2],[3,4]]
+[1,3]
+
+# #1059 PR-B: budget cut stops eval before a later error is reached
+try [limit(2; 1, 2, error("boom"))] catch .
+null
+[1,2]
+
+# #1059 PR-B: an error before the budget is consumed still surfaces (flag gates the done-jump)
+try [limit(2; 1, error("late"), 3)] catch .
+null
+"late"
+
+# #1059 PR-B: unbounded repeat in push mode is safe once budgeted
+[limit(1; repeat(7))]
+null
+[7]
+
+# #1059 PR-B: nested limits couple to the innermost counter
+[limit(3; limit(2; 1,2,3), 9)]
+null
+[1,2,9]
+
+# #1059 PR-B: first of an infinite delegated path stream
+first(path(recurse(.a)))
+null
+[]
+
+# #1059 PR-B: first(recursive def) stops the delegated recursion after one yield
+def f($n): if $n >= 3 then [$n] else (range(1;3) as $k | f($n + $k)) end; first(f(0))
+null
+[3]

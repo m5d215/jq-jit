@@ -550,9 +550,19 @@ enum JitOp {
     /// Collect. Unlike the eager collect-then-iterate delegates this
     /// preserves eval's streaming order and downstream early-stop.
     /// Returns the early-stop verdict (<= 0) when the callback stops the
-    /// stream; eval errors go through the pending-error flag like
-    /// CallBuiltin (the emitter appends CheckError / JumpIfError).
-    DelegateGen { input: SlotId, expr_idx: usize, push: bool },
+    /// stream, or `yielded + 1` (>= 1) when the delegate ran to completion
+    /// or hit its yield budget; eval errors go through the pending-error
+    /// flag like CallBuiltin (the emitter appends CheckError /
+    /// JumpIfError).
+    ///
+    /// `limit` couples the delegate to an enclosing `limit(n; ...)` (#1059
+    /// PR-B): `(counter_var, limit_var, done_label)`. The backend computes
+    /// the remaining yield budget (`limit - counter`) at call time, the
+    /// helper stops eval lazily once the budget is consumed, and the
+    /// backend then adds the yield count to the counter and jumps to
+    /// `done_label` when the limit is reached — the same bookkeeping
+    /// `emit_yield` plants after native yields, but batched per call.
+    DelegateGen { input: SlotId, expr_idx: usize, push: bool, limit: Option<(u32, u32, LabelId)> },
 
     // Control flow
     IfTruthy { src: SlotId, then_label: LabelId, else_label: LabelId },
@@ -1317,8 +1327,31 @@ impl Flattener {
         // the flag forces the whole-filter bail that `flatten_filter` and
         // the feasibility probes check after flattening. Same pattern as
         // the PathExpr arm / #683.
-        let mut rejected = self.limit_state.is_some();
-        if !rejected {
+        // Limit coupling (#1059 PR-B): a delegate yielding at the limit's
+        // install depth carries the counter/limit vars in the op — the
+        // backend passes the remaining yield budget to the runtime helper
+        // (which stops eval lazily) and does the counter/branch bookkeeping
+        // after the call. A delegate at a *deeper* collect depth sits in a
+        // synthetic collect nested under the limit: its pushes don't count
+        // toward the limit, so an unbounded delegated stream would still
+        // hang there where eval stops lazily (#1085) — keep the bail.
+        let limit_payload = match self.limit_state {
+            Some((counter_var, limit_var, _one, done_label, install_depth)) => {
+                if install_depth == self.collect_depth {
+                    Some((counter_var, limit_var, done_label))
+                } else {
+                    self.has_unresolved_recursion = true;
+                    return false;
+                }
+            }
+            None => None,
+        };
+        // With a yield budget attached, potentially-infinite delegates are
+        // bounded by the helper itself, so the push-mode eagerness guards
+        // below don't apply.
+        let bounded = limit_payload.is_some();
+        let mut rejected;
+        {
             let dbg = format!("{:?}", expr);
             rejected = dbg.contains("Break");
             // Push mode is eager: the delegate fills a collect stack the
@@ -1330,7 +1363,7 @@ impl Flattener {
             // Yield-mode (tail-position) delegates stay lazy through the
             // callback and are exempt.
             rejected = rejected
-                || (self.collect_depth > 0
+                || (self.collect_depth > 0 && !bounded
                     && (dbg.contains("Repeat") || dbg.contains("While")
                         || dbg.contains("Until") || dbg.contains("Recurse")));
             if !rejected && dbg.contains("FuncCall") {
@@ -1343,7 +1376,8 @@ impl Flattener {
                 // - a `break` inside a body cannot jump back across the
                 //   delegation boundary to a JIT label; path-semantic
                 //   nodes inside a body would lose $var provenance (#880)
-                rejected = self.collect_depth > 0 || self.funcs_bodies_block_delegation();
+                rejected = (self.collect_depth > 0 && !bounded)
+                    || self.funcs_bodies_block_delegation();
             }
         }
         if !rejected && path_semantic {
@@ -1362,6 +1396,7 @@ impl Flattener {
             input: input_slot,
             expr_idx: idx,
             push: self.collect_depth > 0,
+            limit: limit_payload,
         });
         true
     }
@@ -3734,9 +3769,17 @@ impl Flattener {
                 if !matches!(count.as_ref(), Expr::Literal(Literal::Num(..))) {
                     return false;
                 }
-                // Pre-check: generator must be compilable
+                // Pre-check: generator must be compilable. Mirror the real
+                // emission context by installing a placeholder limit_state —
+                // delegate emission couples to the enclosing limit (#1059
+                // PR-B), and probing without one would reject bounded
+                // delegates via the push-mode unbounded-stream guard
+                // (`[limit(5; recurse(.+1))]`). The placeholder vars/label
+                // are never executed (probe ops are discarded); only
+                // `is_some()` and the install depth steer the verdict.
                 {
                     let mut test = self.test_flattener();
+                    test.limit_state = Some((0, 0, 0, 0, test.collect_depth));
                     let t_in = test.alloc_slot();
                     if !test.flatten_gen(generator, t_in) { return false; }
                 }
@@ -7396,10 +7439,17 @@ extern "C" fn jit_rt_yield_field_ref(
 /// flag (the flattener emits CheckError / JumpIfError after the op, like
 /// CallBuiltin).
 extern "C" fn jit_rt_delegate_gen(
-    input: *const Value, expr_idx: usize, push: i64,
+    input: *const Value, expr_idx: usize, push: i64, max_yields: i64,
     cb: unsafe extern "C" fn(*const Value, *mut u8) -> i64, ctx: *mut u8,
     env: *mut JitEnv,
 ) -> i64 {
+    // An exhausted yield budget (enclosing limit already satisfied, or a
+    // saturated negative remainder) means the delegate must produce
+    // nothing; report zero yields so the caller's counter bookkeeping
+    // jumps to the limit's done label.
+    if max_yields <= 0 {
+        return 1;
+    }
     let expr = JIT_CLOSURE_OPS.with(|cell| unsafe { (&*cell.get()).get(expr_idx).cloned() });
     let Some(expr) = expr else {
         set_jit_error(format!("delegate_gen: missing closure op {}", expr_idx));
@@ -7419,17 +7469,20 @@ extern "C" fn jit_rt_delegate_gen(
     });
     let input_val = unsafe { (*input).clone() };
     let mut verdict: i64 = GEN_CONTINUE;
+    let mut yielded: i64 = 0;
     let result = crate::eval::eval(&expr, input_val, &eval_env, &mut |v| {
         if push != 0 {
             jit_rt_collect_push(env, &v as *const Value);
-            Ok(true)
+            yielded += 1;
+            Ok(yielded < max_yields)
         } else {
             let r = unsafe { cb(&v as *const Value, ctx) };
             if r <= 0 {
                 verdict = r;
                 Ok(false)
             } else {
-                Ok(true)
+                yielded += 1;
+                Ok(yielded < max_yields)
             }
         }
     });
@@ -7439,7 +7492,9 @@ extern "C" fn jit_rt_delegate_gen(
         // eval's BreakError sentinel, defensively — is a plain jq error.
         set_jit_error_from(&e);
     }
-    verdict
+    // Downstream stop verdicts win; otherwise report the yield count so a
+    // limit-coupled caller can advance its counter (n = return - 1).
+    if verdict <= 0 { verdict } else { yielded + 1 }
 }
 
 extern "C" fn jit_rt_index(dst: *mut Value, base: *const Value, key: *const Value) -> i64 {
@@ -10669,7 +10724,7 @@ impl JitCompiler {
                         b.switch_to_block(cont_blk);
                         b.seal_block(cont_blk);
                     }
-                    JitOp::DelegateGen { input, expr_idx, push } => {
+                    JitOp::DelegateGen { input, expr_idx, push, limit } => {
                         // Same early-return discipline as YieldFieldRef: a
                         // verdict <= 0 is the callback's stop signal and
                         // propagates out of the generator immediately; eval
@@ -10678,7 +10733,21 @@ impl JitCompiler {
                         let ia = slot_addr(&mut b, *input);
                         let idx = b.ins().iconst(ptr_ty, *expr_idx as i64);
                         let push_v = b.ins().iconst(ptr_ty, *push as i64);
-                        let call = b.ins().call(rt["delegate_gen"], &[ia, idx, push_v, cb_fn, cb_ctx, env_ptr]);
+                        // Remaining yield budget under an enclosing limit
+                        // (limit_var - counter_var, saturating to i64 like
+                        // the interpreter's `as i64` cast).
+                        let max_v = match limit {
+                            Some((c, l, _)) => {
+                                let c_bits = b.use_var(vars[*c as usize]);
+                                let l_bits = b.use_var(vars[*l as usize]);
+                                let c_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), c_bits);
+                                let l_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), l_bits);
+                                let rem = b.ins().fsub(l_f, c_f);
+                                b.ins().fcvt_to_sint_sat(ptr_ty, rem)
+                            }
+                            None => b.ins().iconst(ptr_ty, i64::MAX),
+                        };
+                        let call = b.ins().call(rt["delegate_gen"], &[ia, idx, push_v, max_v, cb_fn, cb_ctx, env_ptr]);
                         let result = b.inst_results(call)[0];
                         let zero = b.ins().iconst(ptr_ty, 0);
                         let stop = b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual, result, zero);
@@ -10690,6 +10759,35 @@ impl JitCompiler {
                         b.ins().return_(&[result]);
                         b.switch_to_block(cont_blk);
                         b.seal_block(cont_blk);
+                        if let Some((c, l, done)) = limit {
+                            // counter += n (n = result - 1); jump to the
+                            // limit's done label when the budget is
+                            // consumed — unless an eval error is pending,
+                            // which must fall through to the CheckError /
+                            // JumpIfError emitted after this op. NaN
+                            // mirrors the native F64Less path: !(c < l)
+                            // jumps to done.
+                            let one = b.ins().iconst(ptr_ty, 1);
+                            let n = b.ins().isub(result, one);
+                            let n_f = b.ins().fcvt_from_sint(types::F64, n);
+                            let c_bits = b.use_var(vars[*c as usize]);
+                            let c_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), c_bits);
+                            let new_c = b.ins().fadd(c_f, n_f);
+                            let new_bits = b.ins().bitcast(ptr_ty, cranelift_codegen::ir::MemFlags::new(), new_c);
+                            b.def_var(vars[*c as usize], new_bits);
+                            let l_bits = b.use_var(vars[*l as usize]);
+                            let l_f = b.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), l_bits);
+                            let lt = b.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::LessThan, new_c, l_f);
+                            let lt_zero = b.ins().icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, lt, 0);
+                            let flag_off = std::mem::offset_of!(JitEnv, error_flag) as i32;
+                            let flag_val = b.ins().load(types::I64, cranelift_codegen::ir::MemFlags::new(), env_ptr, flag_off);
+                            let flag_clear = b.ins().icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, flag_val, 0);
+                            let do_done = b.ins().band(lt_zero, flag_clear);
+                            let after_blk = b.create_block();
+                            b.ins().brif(do_done, label_blocks[*done as usize], &[], after_blk, &[]);
+                            b.switch_to_block(after_blk);
+                            b.seal_block(after_blk);
+                        }
                     }
                     JitOp::IfTruthy { src, then_label, else_label } => {
                         // Inline: null(0) and false(1) are falsy, everything else truthy
@@ -11369,7 +11467,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("index", [p, p, p], [p]);
     decl!("index_field", [p, p, p, p], [p]);
     decl!("yield_field_ref", [p, p, p, p, p], [p]);
-    decl!("delegate_gen", [p, p, p, p, p, p], [p]);  // input, expr_idx, push, cb, ctx, env -> verdict
+    decl!("delegate_gen", [p, p, p, p, p, p, p], [p]);  // input, expr_idx, push, max_yields, cb, ctx, env -> verdict or yields+1
     decl!("binop", [p, i, p, p], [p]);
     decl!("add_move", [p, p, p], [p]);
     decl!("unaryop", [p, i, p], [p]);
@@ -11809,6 +11907,7 @@ impl JitProgram {
                         check(*zero_label)?;
                     }
                     JitOp::CheckError { catch_label, .. } => check(*catch_label)?,
+                    JitOp::DelegateGen { limit: Some((_, _, done)), .. } => check(*done)?,
                     _ => {}
                 }
             }
@@ -11894,6 +11993,7 @@ impl JitProgram {
                     targets[2] = Some(*other_label);
                 }
                 JitOp::CheckError { catch_label, .. } => targets[0] = Some(*catch_label),
+                JitOp::DelegateGen { limit: Some((_, _, done)), .. } => targets[0] = Some(*done),
                 _ => {}
             }
             for t in targets.into_iter().flatten() {
@@ -12014,9 +12114,32 @@ impl JitProgram {
                     let r = jit_rt_yield_field_ref(sp(*base), field.as_ptr(), field.len(), cb, ctx);
                     if r <= 0 { return r; }
                 }
-                JitOp::DelegateGen { input, expr_idx, push } => {
-                    let r = jit_rt_delegate_gen(sp(*input), *expr_idx, *push as i64, cb, ctx, env_ptr);
+                JitOp::DelegateGen { input, expr_idx, push, limit } => {
+                    // Remaining yield budget under an enclosing limit;
+                    // Rust's saturating float->int cast maps +inf to MAX
+                    // and NaN/negative remainders to <= 0 (the helper
+                    // yields nothing for those).
+                    let max = match limit {
+                        Some((c, l, _)) =>
+                            (fbits(vars[*l as usize]) - fbits(vars[*c as usize])) as i64,
+                        None => i64::MAX,
+                    };
+                    let r = jit_rt_delegate_gen(sp(*input), *expr_idx, *push as i64, max, cb, ctx, env_ptr);
                     if r <= 0 { return r; }
+                    if let Some((c, l, done)) = limit {
+                        // Same bookkeeping emit_yield plants after native
+                        // yields, batched: counter += n, jump to the
+                        // limit's done label when the budget is consumed.
+                        // A pending eval error falls through instead so
+                        // the CheckError / JumpIfError the emitter placed
+                        // after this op can surface it.
+                        let new_c = fbits(vars[*c as usize]) + (r - 1) as f64;
+                        vars[*c as usize] = tbits(new_c);
+                        if env.error_flag == 0 && !(new_c < fbits(vars[*l as usize])) {
+                            pc = lp(*done);
+                            continue;
+                        }
+                    }
                 }
                 JitOp::IfTruthy { src, then_label, else_label } => {
                     let truthy = unsafe { (*sp(*src)).is_truthy() };
