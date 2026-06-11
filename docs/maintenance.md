@@ -192,14 +192,37 @@ downstream early-stop が保たれる（旧 eager delegate の #1085 hang は
 全体 bail を強制** — ignored-false 文脈で op が落ちる #1093 パターン防止）:
 
 - `limit(n; …)` 内（per-yield counter が helper 内で回せない）
-- サブツリーに `break`（委譲境界を越える break は label に戻れない）、
-  `FuncCall`（委譲 env に関数表が無い）、`memoize`（memo slot 未配線）
+- サブツリーに `break`（委譲境界を越える break は label に戻れない）
 - **push mode（collect 文脈）で無限になり得るサブツリー**
-  （Repeat/While/Until/Recurse）— pipe fallback の collect は eager なので
-  eval が lazy に切る stream が hang する（`first(repeat(7) | .+1)`）。
-  yield mode（tail position）は cb で lazy 停止できるので対象外
+  （Repeat/While/Until/Recurse、および再帰 def の `FuncCall`）— pipe
+  fallback の collect は eager なので eval が lazy に切る stream が hang
+  する（`first(repeat(7) | .+1)`）。yield mode（tail position）は cb で
+  lazy 停止できるので対象外
 - path 意味論ノード（`path`/`del`/`pick`）が `$var` を参照(値 seed では
   path provenance #880/#953 が失われ `. as $x | path($x)` が誤エラー化）
+- `FuncCall` を含む委譲で、**いずれかの関数 body** に `break` / path
+  意味論ノードがある場合（委譲は raw body を eval で実行するため、
+  emit 時の Debug probe では body 内が見えない →
+  `funcs_bodies_block_delegation` が関数表ごと probe する）
+
+**funcs / memoize は委譲 env に配線済み（#1059 Phase 3c）**。再帰 def は
+インライン免除（`inline_with_recursion_exemption` が検出 → `FuncCall`
+ノードのまま残す）され、`flatten_gen` の専用 arm が呼び出しごと委譲する。
+`flatten_filter` が `DelegateCfg`（関数表 + body 参照 $var + memo slot 数）
+を thread-local publish し、`reset_delegated_env` / `new_delegated_env` が
+generation 比較で遅延インストールする — sortby key / assign / paths など
+**既存の全 dispatcher にも同時に配線される**（`sort_by(memoize(.a))` が
+"memoize slot 0 not allocated" でエラーになる live bug もこれで解消）。
+memo slot 数は parse 時情報なので `Filter::compile_*`（interpreter.rs）が
+`publish_delegate_memo_config` で別途 publish する。
+
+**probe と実 emission の collect_depth ずれに注意**: 委譲ガードは
+collect_depth 依存（push mode 拒否）なので、「probe は depth 0 で受理 →
+実 emission は collect fallback の depth 1 で拒否」という #683 型の
+すれ違いが起こり得る。`flatten_gen_with_each_output` の generic fallback は
+実 flatten 失敗時に `has_unresolved_recursion` を立てて全体 bail を強制する
+（reduce 系 dispatch は戻り値を無視するため、plain false だとループ本体が
+落ちて init 値が返る — `reduce (range as $m | rec_f) …` で実際に踏んだ）。
 
 stream 消費 builtin（`fromstream`/`truncate_stream`）は CallBuiltin の
 generator-arg LetBinding 書き換え（cartesian 意味論）から除外し、原型

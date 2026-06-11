@@ -2644,6 +2644,10 @@ impl Filter {
                     if let Ok(func) = compiler.compile_with_funcs(expr, funcs) {
                         self.jit_fn = Some(func);
                         self._jit_compiler = Some(Box::new(compiler));
+                        // Wire the parse-time memoize slot count into the
+                        // delegated-eval config (#1059 Phase 3c).
+                        crate::jit::publish_delegate_memo_config(
+                            self.memo_slots, self.memo_max_entries);
                     }
                 }
             }
@@ -2670,6 +2674,10 @@ impl Filter {
                     if let Ok(func) = compiler.compile_with_funcs(expr, funcs) {
                         self.jit_fn = Some(func);
                         self._jit_compiler = Some(Box::new(compiler));
+                        // Wire the parse-time memoize slot count into the
+                        // delegated-eval config (#1059 Phase 3c).
+                        crate::jit::publish_delegate_memo_config(
+                            self.memo_slots, self.memo_max_entries);
                     }
                 }
             }
@@ -2688,6 +2696,8 @@ impl Filter {
         if crate::jit::is_jit_compilable_with_delegates(expr, funcs) {
             if let Ok(prog) = crate::jit::JitProgram::compile(expr, funcs) {
                 self.jit_program = Some(prog);
+                crate::jit::publish_delegate_memo_config(
+                    self.memo_slots, self.memo_max_entries);
             }
         }
     }
@@ -2710,6 +2720,8 @@ impl Filter {
             if let Ok(prog) = crate::jit::JitProgram::compile(expr, funcs) {
                 if prog.eligible_for_default_routing() {
                     self.jit_program = Some(prog);
+                    crate::jit::publish_delegate_memo_config(
+                        self.memo_slots, self.memo_max_entries);
                 }
             }
         }

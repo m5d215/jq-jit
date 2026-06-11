@@ -223,6 +223,12 @@ pub struct Env {
     /// `memoize(...)` so the Env stays small. Lifetime is the whole program
     /// execution (persists across NDJSON inputs).
     pub memo: Option<Box<MemoState>>,
+    /// Identity of the JIT delegate configuration (funcs table + memoize
+    /// slots) installed into this Env by the delegation helpers in
+    /// `src/jit.rs` (#1059). 0 = nothing installed. Lets a cached delegated
+    /// Env skip per-record reinstallation while still detecting a recompile
+    /// (which bumps the published generation).
+    delegate_cfg_gen: u64,
 }
 
 const DEFAULT_MEMO_MAX_ENTRIES: usize = 1_000_000;
@@ -237,10 +243,28 @@ fn fresh_memo_slots(n: u32) -> Vec<MemoSlot> {
 
 impl Env {
     pub fn new(funcs: Vec<CompiledFunc>) -> Self {
-        Env { vars: vec![Value::Null; 65536], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs: Vec::new(), closures: Vec::new(), recursive_cache: Vec::new(), subst_cache: Vec::new(), subst_ptr_cache: Vec::new(), memo: None }
+        Env { vars: vec![Value::Null; 65536], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs: Vec::new(), closures: Vec::new(), recursive_cache: Vec::new(), subst_cache: Vec::new(), subst_ptr_cache: Vec::new(), memo: None, delegate_cfg_gen: 0 }
     }
     pub fn with_lib_dirs(funcs: Vec<CompiledFunc>, lib_dirs: Vec<String>) -> Self {
-        Env { vars: vec![Value::Null; 65536], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs, closures: Vec::new(), recursive_cache: Vec::new(), subst_cache: Vec::new(), subst_ptr_cache: Vec::new(), memo: None }
+        Env { vars: vec![Value::Null; 65536], funcs: funcs.into_iter().map(Rc::new).collect(), next_label: 0, next_var: 256, lib_dirs, closures: Vec::new(), recursive_cache: Vec::new(), subst_cache: Vec::new(), subst_ptr_cache: Vec::new(), memo: None, delegate_cfg_gen: 0 }
+    }
+    /// Replace the function table. Used by the JIT delegation helpers
+    /// (#1059) to wire the program's `CompiledFunc`s into a cached delegated
+    /// Env so streamed `FuncCall` / `memoize` subtrees resolve. Clears the
+    /// per-func caches — they are keyed by `FuncId` / body pointers and
+    /// would alias across function tables.
+    pub fn set_funcs(&mut self, funcs: Vec<Rc<CompiledFunc>>) {
+        self.funcs = funcs;
+        self.recursive_cache.clear();
+        self.subst_cache.clear();
+        self.subst_ptr_cache.clear();
+    }
+    /// See `delegate_cfg_gen` field doc.
+    pub fn delegate_cfg_gen(&self) -> u64 {
+        self.delegate_cfg_gen
+    }
+    pub fn set_delegate_cfg_gen(&mut self, g: u64) {
+        self.delegate_cfg_gen = g;
     }
     /// Allocate `n` memo cache slots. Called once per program after parsing,
     /// using `ParseResult::memo_slots`. No-op when `n == 0` so non-memoize
