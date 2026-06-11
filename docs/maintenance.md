@@ -206,7 +206,12 @@ downstream early-stop が保たれる（旧 eager delegate の #1085 hang は
   （Repeat/While/Until/Recurse、および再帰 def の `FuncCall`）— pipe
   fallback の collect は eager なので eval が lazy に切る stream が hang
   する（`first(repeat(7) | .+1)`）。yield mode（tail position）は cb で
-  lazy 停止できるので対象外
+  lazy 停止できるので対象外。**例外: data-bounded な recurse**（#1059
+  PR-D）— 委譲ノードが `Recurse` そのもので、step が
+  `Each/EachOpt(navigation chain)` / `empty` /（select フィルタ付き、
+  cond に Recurse を含まない）なら出力は常に入力の真部分木なので有限
+  ドキュメントで必ず停止する（`[recurse(.[]?; cond)]` 級）。`recurse(.a)`
+  の field step は null が無限連鎖するので対象外（limit budget 下のみ可）
 - path 意味論ノード（`path`/`del`/`pick`）が `$var` を参照(値 seed では
   path provenance #880/#953 が失われ `. as $x | path($x)` が誤エラー化）
 - `FuncCall` を含む委譲で、**いずれかの関数 body** に `break` / path

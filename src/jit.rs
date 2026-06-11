@@ -1319,6 +1319,49 @@ impl Flattener {
     ///   was bound from — `. as $x | path($x)` is `[]` in eval and an
     ///   "Invalid path expression" through a value-only seed. Value-semantic
     ///   delegates (walk/skip/add) are fine with value seeding.
+    /// True for a recurse step whose every output is a strict subtree of
+    /// its input (possibly select-filtered): iterating such a step
+    /// terminates on any finite JSON document, so a delegated
+    /// `[recurse(step)]` collect is data-bounded even though the generic
+    /// probe treats `Recurse` as potentially infinite (#1059 PR-D). The
+    /// boundedness comes from the trailing Each/EachOpt — iterating a
+    /// scalar yields nothing (or errors). Field steps like `recurse(.a)`
+    /// are NOT bounded: `.a` of null is null, an infinite chain.
+    fn recurse_step_is_data_bounded(step: &Expr) -> bool {
+        fn is_nav(e: &Expr) -> bool {
+            match e {
+                Expr::Input => true,
+                Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => {
+                    is_nav(expr)
+                        && matches!(key.as_ref(), Expr::Literal(_) | Expr::LoadVar { .. })
+                }
+                _ => false,
+            }
+        }
+        match step {
+            Expr::Empty => true,
+            Expr::Each { input_expr } | Expr::EachOpt { input_expr } => is_nav(input_expr),
+            // `recurse(f; cond)` lowers to Pipe{f, IfThenElse{cond, ., empty}}
+            // (parser.rs). The select filter only removes — or, for a
+            // multi-output cond, duplicates — subtree values, so the
+            // boundedness is f's. The cond must not hide an unbounded
+            // generator of its own: Repeat/While/Until in it are caught by
+            // the caller's Debug probe either way, a nested Recurse needs
+            // this explicit check.
+            Expr::Pipe { left, right } => {
+                if let Expr::IfThenElse { cond, then_branch, else_branch } = right.as_ref() {
+                    matches!(then_branch.as_ref(), Expr::Input)
+                        && matches!(else_branch.as_ref(), Expr::Empty)
+                        && !format!("{:?}", cond).contains("Recurse")
+                        && Self::recurse_step_is_data_bounded(left)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
     fn emit_delegate_gen(&mut self, expr: &Expr, input_slot: SlotId, path_semantic: bool) -> bool {
         // Every rejection below also raises `has_unresolved_recursion`:
         // callers in ignored-false emission contexts would otherwise drop
@@ -1362,10 +1405,18 @@ impl Flattener {
             // flattening unbounded generators; mirror it for delegates.
             // Yield-mode (tail-position) delegates stay lazy through the
             // callback and are exempt.
+            // A whole-node recursive descent with a data-bounded step is
+            // finite on any finite document — exempt it from the eager
+            // push-mode rejection (#1059 PR-D). Only the directly-delegated
+            // Recurse node qualifies; a Recurse buried deeper in the
+            // subtree keeps the conservative Debug-probe rejection.
+            let bounded_recurse = matches!(expr, Expr::Recurse { input_expr }
+                if Self::recurse_step_is_data_bounded(input_expr));
             rejected = rejected
                 || (self.collect_depth > 0 && !bounded
                     && (dbg.contains("Repeat") || dbg.contains("While")
-                        || dbg.contains("Until") || dbg.contains("Recurse")));
+                        || dbg.contains("Until")
+                        || (dbg.contains("Recurse") && !bounded_recurse)));
             if !rejected && dbg.contains("FuncCall") {
                 // The delegate executes raw `CompiledFunc` bodies in eval
                 // (the funcs table is wired into the delegated env, #1059
