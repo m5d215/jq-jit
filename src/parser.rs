@@ -5,9 +5,10 @@
 //! higher-level form than jq's stack-based bytecode.
 
 use std::rc::Rc;
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 use crate::ir::*;
+use crate::parse_error::{ParseError, ParseErrorKind, SourceLoc};
 
 /// Variable scope for tracking user-defined variables and functions.
 struct Scope {
@@ -242,6 +243,14 @@ struct Lexer {
 }
 
 impl Lexer {
+    /// Typed parse error at char offset `offset` (#1037): the 1-based
+    /// source line is the newline count before the offset.
+    fn err_at(&self, offset: usize, kind: ParseErrorKind) -> anyhow::Error {
+        let end = offset.min(self.chars.len());
+        let line = self.chars[..end].iter().filter(|&&c| c == '\n').count() + 1;
+        ParseError::new(Some(SourceLoc { line, offset }), kind).into()
+    }
+
     fn new(input: &str) -> Self {
         Lexer {
             chars: input.chars().collect(),
@@ -346,7 +355,10 @@ impl Lexer {
                         self.pos += 1;
                         self.tokens.push(Token::Ne);
                     } else {
-                        bail!("unexpected character '!' at position {}", self.pos - 1);
+                        return Err(self.err_at(
+                            self.pos - 1,
+                            ParseErrorKind::UnexpectedChar { ch: '!', pos: self.pos - 1 },
+                        ));
                     }
                 }
                 '<' => {
@@ -401,7 +413,7 @@ impl Lexer {
                     self.pos += 1;
                     let name = self.read_ident_str();
                     if name.is_empty() {
-                        bail!("expected format name after @");
+                        return Err(self.err_at(self.pos, ParseErrorKind::ExpectedFormatName));
                     }
                     self.tokens.push(Token::Format(name));
                 }
@@ -409,7 +421,7 @@ impl Lexer {
                     self.pos += 1;
                     let name = self.read_ident_str();
                     if name.is_empty() {
-                        bail!("expected variable name after $");
+                        return Err(self.err_at(self.pos, ParseErrorKind::ExpectedVariableName));
                     }
                     self.tokens.push(Token::Variable(name));
                 }
@@ -451,7 +463,10 @@ impl Lexer {
                     self.pos += 1;
                 }
                 _ => {
-                    bail!("unexpected character '{}' at position {}", ch, self.pos);
+                    return Err(self.err_at(
+                        self.pos,
+                        ParseErrorKind::UnexpectedChar { ch, pos: self.pos },
+                    ));
                 }
             }
             // Attribute every token emitted this iteration (one, or several for
@@ -545,7 +560,12 @@ impl Lexer {
             }
         }
         let num_str: String = self.chars[start..self.pos].iter().collect();
-        let n: f64 = num_str.parse().map_err(|e| anyhow::anyhow!("invalid number '{}': {}", num_str, e))?;
+        let n: f64 = num_str.parse().map_err(|e: std::num::ParseFloatError| {
+            self.err_at(start, ParseErrorKind::InvalidNumber {
+                lexeme: num_str.clone(),
+                reason: e.to_string(),
+            })
+        })?;
         // Preserve original string when the canonical literal form (jq's
         // decnum-style uppercase `E+`, decimal-expanded when |te| is small)
         // differs from the f64-default form. Without this, scientific
@@ -668,7 +688,7 @@ impl Lexer {
                 '\\' => {
                     self.pos += 1;
                     if self.pos >= self.chars.len() {
-                        bail!("unterminated string escape");
+                        return Err(self.err_at(self.pos, ParseErrorKind::UnterminatedStringEscape));
                     }
                     let esc = self.chars[self.pos];
                     match esc {
@@ -713,11 +733,17 @@ impl Lexer {
                             let hex: String = self.chars[self.pos..self.pos.min(self.chars.len()).max(self.pos)+4]
                                 .iter().collect();
                             if hex.len() < 4 {
-                                bail!("incomplete unicode escape");
+                                return Err(self.err_at(
+                                    self.pos,
+                                    ParseErrorKind::IncompleteUnicodeEscape,
+                                ));
                             }
                             self.pos += 4;
                             let cp = u32::from_str_radix(&hex, 16)
-                                .map_err(|_| anyhow::anyhow!("invalid unicode escape: \\u{}", hex))?;
+                                .map_err(|_| self.err_at(
+                                    self.pos,
+                                    ParseErrorKind::InvalidUnicodeEscape { hex: Some(hex.clone()) },
+                                ))?;
 
                             // Handle surrogate pairs
                             if (0xD800..=0xDBFF).contains(&cp) {
@@ -727,22 +753,28 @@ impl Lexer {
                                 // surrogate, low-surrogate-with-junk) is a parse
                                 // error. Silently dropping it would diverge from
                                 // jq, which rejects the literal at parse time.
-                                let invalid_pair = || anyhow::anyhow!(
-                                    "Invalid \\uXXXX\\uXXXX surrogate pair escape"
-                                );
                                 if self.pos + 5 >= self.chars.len()
                                     || self.chars[self.pos] != '\\'
                                     || self.chars[self.pos + 1] != 'u'
                                 {
-                                    return Err(invalid_pair());
+                                    return Err(self.err_at(
+                                        self.pos,
+                                        ParseErrorKind::InvalidSurrogatePair,
+                                    ));
                                 }
                                 self.pos += 2;
                                 let hex2: String = self.chars[self.pos..self.pos+4].iter().collect();
                                 self.pos += 4;
                                 let cp2 = u32::from_str_radix(&hex2, 16)
-                                    .map_err(|_| anyhow::anyhow!("invalid unicode escape"))?;
+                                    .map_err(|_| self.err_at(
+                                        self.pos,
+                                        ParseErrorKind::InvalidUnicodeEscape { hex: None },
+                                    ))?;
                                 if !(0xDC00..=0xDFFF).contains(&cp2) {
-                                    return Err(invalid_pair());
+                                    return Err(self.err_at(
+                                        self.pos,
+                                        ParseErrorKind::InvalidSurrogatePair,
+                                    ));
                                 }
                                 let combined = ((cp - 0xD800) << 10) + (cp2 - 0xDC00) + 0x10000;
                                 if let Some(c) = char::from_u32(combined) {
@@ -770,7 +802,7 @@ impl Lexer {
                 }
             }
         }
-        bail!("unterminated string")
+        Err(self.err_at(self.pos, ParseErrorKind::UnterminatedString))
     }
 
     fn emit_interpolated_string(&mut self, segments: Vec<StringSegment>) {
@@ -820,6 +852,11 @@ pub struct Parser {
     /// for parsers built without line info, in which case lookups fall back
     /// to line 1.
     token_lines: Vec<usize>,
+    /// Source char offset where each token begins (parallel to `tokens`),
+    /// threaded from the lexer for parse-error locations (#1037). May be
+    /// empty for parsers built without position info, in which case typed
+    /// errors carry no location.
+    token_starts: Vec<usize>,
     pos: usize,
     scope: Scope,
     /// `var_index` of the reserved top-level `$ENV` binding. A `$ENV` reference
@@ -868,9 +905,11 @@ impl Parser {
         let mut lexer = Lexer::new(input);
         let tokens = lexer.tokenize()?;
         let token_lines = std::mem::take(&mut lexer.token_lines);
+        let token_starts = std::mem::take(&mut lexer.token_starts);
         let mut parser = Parser {
             tokens,
             token_lines,
+            token_starts,
             pos: 0,
             scope: Scope::new(),
             env_var_idx: VarIdx(0),
@@ -886,7 +925,10 @@ impl Parser {
 
         let expr = parser.parse_program()?;
         if !parser.at_eof() {
-            bail!("unexpected token {:?} at position {}", parser.current(), parser.pos);
+            return Err(parser.err(ParseErrorKind::UnexpectedTokenAt {
+                got: format!("{:?}", parser.current()),
+                pos: parser.pos,
+            }));
         }
         parser.check_unbound_reachability(&expr)?;
         Ok(ParseResult {
@@ -971,12 +1013,20 @@ impl Parser {
         };
         for (fid, name) in &self.deferred_unbound {
             if is_reachable(fid) {
-                bail!("${} is not defined", name);
+                return Err(ParseError::new(
+                    None,
+                    ParseErrorKind::UndefinedVariable { name: name.clone() },
+                )
+                .into());
             }
         }
         for (fid, name, nargs) in &self.deferred_unknown_func {
             if is_reachable(fid) {
-                bail!("{}/{} is not defined", name, nargs);
+                return Err(ParseError::new(
+                    None,
+                    ParseErrorKind::UndefinedFunction { name: name.clone(), nargs: *nargs },
+                )
+                .into());
             }
         }
         Ok(())
@@ -992,6 +1042,24 @@ impl Parser {
         self.token_lines.get(self.pos).copied().unwrap_or(1)
     }
 
+    /// Typed parse error located at token index `tok_idx` (#1037). The
+    /// index is clamped to the last token so an error at EOF still points
+    /// at the end of the program; location is `None` only when the parser
+    /// was built without position info.
+    fn err_at_tok(&self, tok_idx: usize, kind: ParseErrorKind) -> anyhow::Error {
+        let idx = tok_idx.min(self.token_lines.len().saturating_sub(1));
+        let loc = match (self.token_lines.get(idx), self.token_starts.get(idx)) {
+            (Some(&line), Some(&offset)) => Some(SourceLoc { line, offset }),
+            _ => None,
+        };
+        ParseError::new(loc, kind).into()
+    }
+
+    /// Typed parse error at the current token.
+    fn err(&self, kind: ParseErrorKind) -> anyhow::Error {
+        self.err_at_tok(self.pos, kind)
+    }
+
     fn peek(&self) -> &Token {
         self.tokens.get(self.pos + 1).unwrap_or(&Token::Eof)
     }
@@ -1005,7 +1073,10 @@ impl Parser {
     fn expect(&mut self, expected: &Token) -> Result<()> {
         let tok = self.advance();
         if &tok != expected {
-            bail!("expected {:?}, got {:?}", expected, tok);
+            return Err(self.err_at_tok(self.pos - 1, ParseErrorKind::ExpectedToken {
+                expected: format!("{:?}", expected),
+                got: format!("{:?}", tok),
+            }));
         }
         Ok(())
     }
@@ -1096,7 +1167,12 @@ impl Parser {
             ref t if Self::def_name_token(t).is_some() => {
                 Self::def_name_token(t).unwrap().to_string()
             }
-            t => bail!("expected function name, got {:?}", t),
+            t => {
+                return Err(self.err_at_tok(self.pos - 1, ParseErrorKind::Expected {
+                    what: "function name",
+                    got: format!("{:?}", t),
+                }))
+            }
         };
 
         // Parse parameters: both `x` (filter param) and `$x` (value param) syntax
@@ -1111,7 +1187,12 @@ impl Parser {
                     ref t if Self::def_name_token(t).is_some() => {
                         params.push((Self::def_name_token(t).unwrap().to_string(), false))
                     }
-                    t => bail!("expected parameter name, got {:?}", t),
+                    t => {
+                return Err(self.err_at_tok(self.pos - 1, ParseErrorKind::Expected {
+                    what: "parameter name",
+                    got: format!("{:?}", t),
+                }))
+            }
                 }
             }
         }
@@ -1215,7 +1296,12 @@ impl Parser {
         // Get module path
         let path = match self.advance() {
             Token::Str(s) => s,
-            t => bail!("expected string after import, got {:?}", t),
+            t => {
+                return Err(self.err_at_tok(self.pos - 1, ParseErrorKind::Expected {
+                    what: "string after import",
+                    got: format!("{:?}", t),
+                }))
+            }
         };
 
         // Parse optional metadata {search:"./"}
@@ -1268,7 +1354,11 @@ impl Parser {
                 // Data import: load JSON file and wrap in array
                 let json_path = self.resolve_data_module(&path, search_path.as_deref())?;
                 let json_content = std::fs::read_to_string(&json_path)
-                    .map_err(|e| anyhow::anyhow!("Cannot load data module '{}': {}", path, e))?;
+                    .map_err(|e| self.err(ParseErrorKind::ModuleLoad {
+                        path: path.clone(),
+                        err: e.to_string(),
+                        data: true,
+                    }))?;
                 // A data module is a JSON *text sequence*: jq reads every
                 // whitespace-separated value in the file and binds the array of
                 // them (`1 2` → [1,2], `42` → [42], empty → []). The old code
@@ -1282,7 +1372,10 @@ impl Parser {
                     ranges.push((s, e));
                     Ok(())
                 })
-                .map_err(|e| anyhow::anyhow!("Cannot parse data module '{}': {}", path, e))?;
+                .map_err(|e| self.err(ParseErrorKind::DataModuleParse {
+                    path: path.clone(),
+                    err: e.to_string(),
+                }))?;
                 let mut array_json = String::with_capacity(json_content.len() + 2);
                 array_json.push('[');
                 for (idx, (s, e)) in ranges.iter().enumerate() {
@@ -1329,7 +1422,12 @@ impl Parser {
                 self.load_code_module(&mod_path, &alias)?;
                 Ok(None)
             }
-            t => bail!("expected variable or identifier after 'as', got {:?}", t),
+            t => {
+                return Err(self.err_at_tok(self.pos - 1, ParseErrorKind::Expected {
+                    what: "variable or identifier after 'as'",
+                    got: format!("{:?}", t),
+                }))
+            }
         }
     }
 
@@ -1338,7 +1436,12 @@ impl Parser {
         self.advance(); // include
         let path = match self.advance() {
             Token::Str(s) => s,
-            t => bail!("expected string after include, got {:?}", t),
+            t => {
+                return Err(self.err_at_tok(self.pos - 1, ParseErrorKind::Expected {
+                    what: "string after include",
+                    got: format!("{:?}", t),
+                }))
+            }
         };
         // Optional metadata — capture `{search:"..."}` (the rest is ignored).
         // The old code skipped the whole block, dropping the search path so
@@ -1376,7 +1479,7 @@ impl Parser {
                 return Ok(json_path);
             }
         }
-        bail!("Cannot find data module '{}'", name)
+        Err(self.err(ParseErrorKind::ModuleNotFound { name: name.to_string(), data: true }))
     }
 
     /// Resolve a code module ("name" → path/name.jq or path/name/name.jq)
@@ -1393,7 +1496,7 @@ impl Parser {
                 return Ok(jq_path2);
             }
         }
-        bail!("Cannot find module '{}'", name)
+        Err(self.err(ParseErrorKind::ModuleNotFound { name: name.to_string(), data: false }))
     }
 
     /// Get search directories for module resolution
@@ -1420,11 +1523,16 @@ impl Parser {
     /// Load and parse a code module, registering its functions with namespace prefix
     fn load_code_module(&mut self, file_path: &str, namespace: &str) -> Result<()> {
         let content = std::fs::read_to_string(file_path)
-            .map_err(|e| anyhow::anyhow!("Cannot load module '{}': {}", file_path, e))?;
+            .map_err(|e| self.err(ParseErrorKind::ModuleLoad {
+                path: file_path.to_string(),
+                err: e.to_string(),
+                data: false,
+            }))?;
 
         let mut lexer = Lexer::new(&content);
         let tokens = lexer.tokenize()?;
         let mod_token_lines = std::mem::take(&mut lexer.token_lines);
+        let mod_token_starts = std::mem::take(&mut lexer.token_starts);
 
         // Add the module's directory to lib_dirs for resolving relative imports
         let mut mod_lib_dirs = self.lib_dirs.clone();
@@ -1449,6 +1557,7 @@ impl Parser {
         let mut mod_parser = Parser {
             tokens,
             token_lines: mod_token_lines,
+            token_starts: mod_token_starts,
             pos: 0,
             scope: mod_scope,
             env_var_idx: self.env_var_idx,
@@ -1932,7 +2041,10 @@ impl Parser {
                 // compile-time syntax error (it is a loc literal, not a BINDING).
                 // `$ENV` is allowed and shadows the built-in. See #886.
                 if name == "__loc__" {
-                    bail!("syntax error, unexpected $__loc__, expecting BINDING or '[' or '{{'");
+                    return Err(self.err(ParseErrorKind::SyntaxUnexpected {
+                        what: "$__loc__",
+                        expecting: Some("BINDING or '[' or '{'"),
+                    }));
                 }
                 self.advance();
                 Ok(Pattern::Var(name))
@@ -1945,14 +2057,20 @@ impl Parser {
                 // empty list error nor — for construction — a trailing comma).
                 // The old `while` loop accepted both. #999
                 if self.at(&Token::RBracket) {
-                    bail!("syntax error, unexpected ']', expecting BINDING or '[' or '{{'");
+                    return Err(self.err(ParseErrorKind::SyntaxUnexpected {
+                        what: "']'",
+                        expecting: Some("BINDING or '[' or '{'"),
+                    }));
                 }
                 let mut pats = Vec::new();
                 loop {
                     pats.push(self.parse_pattern()?);
                     if !self.eat(&Token::Comma) { break; }
                     if self.at(&Token::RBracket) {
-                        bail!("syntax error, unexpected ']', expecting BINDING or '[' or '{{'");
+                        return Err(self.err(ParseErrorKind::SyntaxUnexpected {
+                            what: "']'",
+                            expecting: Some("BINDING or '[' or '{'"),
+                        }));
                     }
                 }
                 self.expect(&Token::RBracket)?;
@@ -1964,7 +2082,10 @@ impl Parser {
                 // comma: `. as {}` and `. as {a:$x,}` / `. as {$a,}` are syntax
                 // errors. #999
                 if self.at(&Token::RBrace) {
-                    bail!("syntax error, unexpected '}}'");
+                    return Err(self.err(ParseErrorKind::SyntaxUnexpected {
+                        what: "'}'",
+                        expecting: None,
+                    }));
                 }
                 let mut pats = Vec::new();
                 loop {
@@ -1973,13 +2094,19 @@ impl Parser {
                     pats.push((key, pat));
                     if !self.eat(&Token::Comma) { break; }
                     if self.at(&Token::RBrace) {
-                        bail!("syntax error, unexpected '}}'");
+                        return Err(self.err(ParseErrorKind::SyntaxUnexpected {
+                            what: "'}'",
+                            expecting: None,
+                        }));
                     }
                 }
                 self.expect(&Token::RBrace)?;
                 Ok(Pattern::Object(pats))
             }
-            _ => bail!("expected pattern (variable, array, or object), got {:?}", self.current()),
+            _ => Err(self.err(ParseErrorKind::Expected {
+                what: "pattern (variable, array, or object)",
+                got: format!("{:?}", self.current()),
+            })),
         }
     }
 
@@ -1988,7 +2115,10 @@ impl Parser {
             Token::Variable(name) => {
                 // jq rejects `$__loc__` as a binding target (see parse_pattern).
                 if name == "__loc__" {
-                    bail!("syntax error, unexpected $__loc__, expecting BINDING or '[' or '{{'");
+                    return Err(self.err(ParseErrorKind::SyntaxUnexpected {
+                        what: "$__loc__",
+                        expecting: Some("BINDING or '[' or '{'"),
+                    }));
                 }
                 self.advance();
                 if self.eat(&Token::Colon) {
@@ -2028,7 +2158,7 @@ impl Parser {
                         Literal::Str(_) => None,
                     };
                     if let Some((ty, val)) = bad {
-                        bail!("Cannot use {} ({}) as object key", ty, val);
+                        return Err(self.err(ParseErrorKind::ObjectKeyType { ty, val }));
                     }
                 }
                 self.expect(&Token::Colon)?;
@@ -2042,7 +2172,10 @@ impl Parser {
                 let pat = self.parse_pattern()?;
                 Ok((Expr::Literal(Literal::Str(key)), pat))
             }
-            _ => bail!("expected object pattern key, got {:?}", self.current()),
+            _ => Err(self.err(ParseErrorKind::Expected {
+                what: "object pattern key",
+                got: format!("{:?}", self.current()),
+            })),
         }
     }
 
@@ -2513,11 +2646,17 @@ impl Parser {
                                 };
                             } else {
                                 if self.at(&Token::Colon) {
-                                    anyhow::bail!("syntax error, unexpected ':'");
+                                    return Err(self.err(ParseErrorKind::SyntaxUnexpected {
+                                        what: "':'",
+                                        expecting: None,
+                                    }));
                                 }
                                 let key = self.parse_pipe()?;
                                 if self.at(&Token::Colon) {
-                                    anyhow::bail!("syntax error, unexpected ':', expecting '|' or ',' or ']'");
+                                    return Err(self.err(ParseErrorKind::SyntaxUnexpected {
+                                        what: "':'",
+                                        expecting: Some("'|' or ',' or ']'"),
+                                    }));
                                 }
                                 self.expect(&Token::RBracket)?;
                                 let optional = self.eat(&Token::Question);
@@ -2564,7 +2703,10 @@ impl Parser {
                             // time; the explicit `.[null:null]` form is fine.
                             // See #438.
                             if first.is_none() && second.is_none() {
-                                anyhow::bail!("syntax error, unexpected ']'");
+                                return Err(self.err(ParseErrorKind::SyntaxUnexpected {
+                                    what: "']'",
+                                    expecting: None,
+                                }));
                             }
                             self.expect(&Token::RBracket)?;
                             let _optional = self.eat(&Token::Question);
@@ -2668,7 +2810,10 @@ impl Parser {
                                     Some(self.parse_pipe()?)
                                 };
                                 if first.is_none() && second.is_none() {
-                                    anyhow::bail!("syntax error, unexpected ']'");
+                                    return Err(self.err(ParseErrorKind::SyntaxUnexpected {
+                                        what: "']'",
+                                        expecting: None,
+                                    }));
                                 }
                                 self.expect(&Token::RBracket)?;
                                 Ok(Expr::Slice {
@@ -2807,7 +2952,12 @@ impl Parser {
                             body: Box::new(body),
                         })
                     }
-                    t => bail!("expected $variable after label, got {:?}", t),
+                    t => {
+                return Err(self.err_at_tok(self.pos - 1, ParseErrorKind::Expected {
+                    what: "$variable after label",
+                    got: format!("{:?}", t),
+                }))
+            }
                 }
             }
 
@@ -2816,13 +2966,20 @@ impl Parser {
                 match self.advance() {
                     Token::Variable(name) => {
                         let var_idx = self.scope.lookup_var(&format!("\x00label:{}", name))
-                            .ok_or_else(|| anyhow::anyhow!("${} is not defined", name))?;
+                            .ok_or_else(|| self.err(ParseErrorKind::UndefinedVariable {
+                                name: name.clone(),
+                            }))?;
                         Ok(Expr::Break {
                             var_index: var_idx,
                             value: Box::new(Expr::Input),
                         })
                     }
-                    t => bail!("expected $variable after break, got {:?}", t),
+                    t => {
+                return Err(self.err_at_tok(self.pos - 1, ParseErrorKind::Expected {
+                    what: "$variable after break",
+                    got: format!("{:?}", t),
+                }))
+            }
                 }
             }
 
@@ -2863,7 +3020,12 @@ impl Parser {
                         Token::Ident(_member) => {
                             // $var::name is equivalent to $var for data imports
                         }
-                        t => bail!("expected identifier after '::', got {:?}", t),
+                        t => {
+                return Err(self.err_at_tok(self.pos - 1, ParseErrorKind::Expected {
+                    what: "identifier after '::'",
+                    got: format!("{:?}", t),
+                }))
+            }
                     }
                 }
                 if name == "__loc__" {
@@ -2934,7 +3096,12 @@ impl Parser {
                     self.advance(); // second :
                     match self.advance() {
                         Token::Ident(member) => format!("{}::{}", name, member),
-                        t => bail!("expected identifier after '::', got {:?}", t),
+                        t => {
+                return Err(self.err_at_tok(self.pos - 1, ParseErrorKind::Expected {
+                    what: "identifier after '::'",
+                    got: format!("{:?}", t),
+                }))
+            }
                     }
                 } else {
                     name
@@ -2949,7 +3116,10 @@ impl Parser {
             }
 
             _ => {
-                bail!("unexpected token {:?}", tok);
+                // `tok` is a clone of the *current* token (not advanced past).
+                Err(self.err(ParseErrorKind::UnexpectedToken {
+                    got: format!("{:?}", tok),
+                }))
             }
         }
     }
@@ -3023,10 +3193,9 @@ impl Parser {
                 // and keep their runtime error.
                 if let Some(v) = crate::runtime::const_fold(&key_expr) {
                     if !matches!(v, crate::value::Value::Str(_)) {
-                        bail!(
-                            "Cannot use {} as object key",
-                            crate::runtime::errdesc_pub(&v)
-                        );
+                        return Err(self.err(ParseErrorKind::ObjectKeyNonString {
+                            desc: crate::runtime::errdesc_pub(&v).to_string(),
+                        }));
                     }
                 }
                 self.expect(&Token::Colon)?;
@@ -3080,7 +3249,10 @@ impl Parser {
                     ))
                 }
             }
-            _ => bail!("expected object key, got {:?}", self.current()),
+            _ => Err(self.err(ParseErrorKind::Expected {
+                what: "object key",
+                got: format!("{:?}", self.current()),
+            })),
         }
     }
 
@@ -4597,7 +4769,9 @@ impl Parser {
                     self.advance();
                 }
                 _ => {
-                    bail!("unexpected token in string interpolation: {:?}", self.current());
+                    return Err(self.err(ParseErrorKind::UnexpectedInterpToken {
+                        got: format!("{:?}", self.current()),
+                    }));
                 }
             }
         }
@@ -4670,11 +4844,7 @@ fn wrap_mutate(body: Expr) -> Result<Expr> {
         Expr::LetBinding { var_index, value, body } => Ok(Expr::LetBinding {
             var_index, value, body: Box::new(wrap_mutate(*body)?),
         }),
-        _ => bail!(
-            "mutate(...) body must be a top-level path-update operator \
-             (=, |=, +=, -=, *=, /=, %=, //=); wrap composite forms by \
-             distributing mutate inward across each leaf"
-        ),
+        _ => Err(ParseError::new(None, ParseErrorKind::MutateBodyForm).into()),
     }
 }
 
@@ -4947,7 +5117,11 @@ fn name_to_unary_op(name: &str) -> Result<UnaryOp> {
         "isnan" => Ok(UnaryOp::IsNan),
         "isnormal" => Ok(UnaryOp::IsNormal),
         "isfinite" => Ok(UnaryOp::IsFinite),
-        _ => bail!("unknown unary operation: {}", name),
+        _ => Err(ParseError::new(
+            None,
+            ParseErrorKind::UnknownUnaryOp { name: name.to_string() },
+        )
+        .into()),
     }
 }
 
