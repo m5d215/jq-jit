@@ -11725,7 +11725,7 @@ impl Filter {
         };
         let mut outputs = Vec::new();
         crate::eval::execute_ir_with_env_cb(expr, input.clone(), &env, &mut |v| {
-            match &v { Value::Error(e) => { eprintln!("jq: error: {}", e); }, _ => { outputs.push(v); } }
+            outputs.push(v);
             Ok(true)
         })?;
         Ok(outputs)
@@ -11781,13 +11781,7 @@ impl Filter {
         };
         crate::eval::execute_ir_with_env_cb(
             expr, input.clone(), &env,
-            &mut |val| {
-                if let Value::Error(e) = &val {
-                    eprintln!("jq: error: {}", e.as_str());
-                    return Ok(true);
-                }
-                cb(&val)
-            },
+            &mut |val| cb(&val),
         )
     }
 

@@ -257,52 +257,6 @@ fn jqjit_trace_fast_path(name: &str, filter_text: &str) {
     }
 }
 
-/// Decode a JSON-quoted string back to its raw character form, e.g.
-/// `"\"foo\\n\""` -> `foo\n`. Used when an `error(val)` sentinel carries
-/// a `JV_KIND_STRING`-shaped payload so we can strip the JSON quoting
-/// the way jq does. Returns None if the JSON is malformed.
-fn decode_json_string_literal(s: &str) -> Option<String> {
-    let b = s.as_bytes();
-    if b.len() < 2 || b[0] != b'"' || b[b.len()-1] != b'"' { return None; }
-    let inner = &b[1..b.len()-1];
-    let mut out = String::with_capacity(inner.len());
-    let mut i = 0;
-    while i < inner.len() {
-        let c = inner[i];
-        if c != b'\\' { out.push(c as char); i += 1; continue; }
-        if i + 1 >= inner.len() { return None; }
-        match inner[i+1] {
-            b'"' => out.push('"'),
-            b'\\' => out.push('\\'),
-            b'/' => out.push('/'),
-            b'b' => out.push('\u{08}'),
-            b'f' => out.push('\u{0C}'),
-            b'n' => out.push('\n'),
-            b'r' => out.push('\r'),
-            b't' => out.push('\t'),
-            b'u' => {
-                if i + 6 > inner.len() { return None; }
-                let hex = std::str::from_utf8(&inner[i+2..i+6]).ok()?;
-                let cp = u32::from_str_radix(hex, 16).ok()?;
-                out.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
-                i += 6;
-                continue;
-            }
-            _ => return None,
-        }
-        i += 2;
-    }
-    Some(out)
-}
-
-/// Emit a jq-style error line, matching jq 1.8.1's format:
-///   jq: error (at <stdin>:N)[ (not a string)]: <body>
-///
-/// `msg` is the raw error body we got from the anyhow chain. Strings
-/// produced by `error(val)` arrive prefixed with `__jqerror__:<JSON>`;
-/// the JSON form carries the type info jq normally reads from the
-/// original jv, so we use it to decide between the unquoted string
-/// branch and the ` (not a string)` branch.
 /// Validate a jq variable name from `--arg` / `--argjson`. Per jq, the binding
 /// must look like `[A-Za-z_][A-Za-z0-9_]*`; numeric or symbolic names are
 /// rejected at the CLI parser so the resulting `$<name>` reference doesn't
@@ -323,16 +277,26 @@ const RAW_OUTPUT0_NUL_ERR: &str =
 
 fn print_jq_error(msg: &str) {
     let line = jq_jit::eval::get_input_line_number();
-    if let Some(jq_msg) = msg.strip_prefix("__jqerror__:") {
-        if jq_msg.starts_with('"') && jq_msg.ends_with('"') {
-            if let Some(unwrapped) = decode_json_string_literal(jq_msg) {
-                eprintln!("jq: error (at <stdin>:{}): {}", line, unwrapped);
-                return;
-            }
+    eprintln!("jq: error (at <stdin>:{}): {}", line, msg);
+}
+
+/// Print a terminal filter error. An `error(value)` payload arrives as a
+/// typed [`jq_jit::signal::ErrorValue`] from every engine (#1034): strings
+/// print bare, any other payload gets jq's "(not a string)" marker with its
+/// JSON. Plain message errors print their display text as-is.
+fn print_jq_error_typed(e: &anyhow::Error) {
+    if let Some(ev) = e.downcast_ref::<jq_jit::signal::ErrorValue>() {
+        let line = jq_jit::eval::get_input_line_number();
+        match jq_jit::signal::take_error_payload(ev) {
+            Value::Str(s) => eprintln!("jq: error (at <stdin>:{}): {}", line, s.as_str()),
+            other => eprintln!(
+                "jq: error (at <stdin>:{}) (not a string): {}",
+                line,
+                jq_jit::value::value_to_json_precise(&other),
+            ),
         }
-        eprintln!("jq: error (at <stdin>:{}) (not a string): {}", line, jq_msg);
     } else {
-        eprintln!("jq: error (at <stdin>:{}): {}", line, msg);
+        print_jq_error(&format!("{}", e));
     }
 }
 
@@ -3746,11 +3710,6 @@ fn real_main() {
     let mut compact_buf: Vec<u8> = if use_compact_buf || use_pretty_buf || raw_csv_fields.is_some() { Vec::with_capacity(1 << 17) } else { Vec::new() };
     let process_input = |input: &Value, raw_bytes: Option<&[u8]>, out: &mut io::BufWriter<io::StdoutLock>, cbuf: &mut Vec<u8>, any_false: &mut bool, had_error: &mut bool| {
         let result = filter.execute_cb(input, &mut |result| {
-            if let Value::Error(e) = result {
-                print_jq_error(e.as_str());
-                *had_error = true;
-                return Ok(true);
-            }
             if exit_status {
                 if !result.is_true() {
                     *any_false = true;
@@ -3870,16 +3829,14 @@ fn real_main() {
             let _ = out.flush();
         }
         if let Err(e) = result {
-            let msg = format!("{}", e);
             // halt / halt_error: drain any buffered output, release our
             // hold on stdout, then terminate with the requested exit
             // status. Stderr (halt_error's message) was already written
-            // directly in eval.rs at raise time. The string form is the
-            // fallback for halts that crossed the JIT FFI boundary, where
-            // only the Display text survives (see src/signal.rs).
+            // directly in eval.rs at raise time. The signal arrives typed
+            // from every engine — the JIT boundary rebuilds it in
+            // JitError::into_anyhow (#1034).
             let halt_code = e.downcast_ref::<jq_jit::signal::HaltSignal>()
-                .map(|h| h.code)
-                .or_else(|| msg.strip_prefix("__halt__:").map(|c| c.parse().unwrap_or(0)));
+                .map(|h| h.code);
             if let Some(code) = halt_code {
                 if !cbuf.is_empty() {
                     let _ = out.write_all(cbuf);
@@ -3888,7 +3845,7 @@ fn real_main() {
                 let _ = out.flush();
                 std::process::exit(code);
             }
-            print_jq_error(&msg);
+            print_jq_error_typed(&e);
             *had_error = true;
         }
     };
