@@ -2748,6 +2748,23 @@ impl Flattener {
     fn flatten_gen(&mut self, expr: &Expr, input_slot: SlotId) -> bool {
         // If scalar, just compute and yield once
         if is_scalar(expr) {
+            // A scalar-classified Reduce can still fail inside
+            // flatten_scalar (source not flattenable — the #683 pre-check
+            // raises the bail flag after the Null emit). In generator
+            // position the single-output contract is just emit_yield, so
+            // probe first and stream the whole node through the eval
+            // delegate instead of bailing the filter (#1059 PR-C; the
+            // recursive-def-in-reduce-source class). Probes skip this —
+            // the outer probe already covers the subtree (#641).
+            if matches!(expr, Expr::Reduce { .. }) && !self.is_test {
+                let mut test = self.test_flattener();
+                test.has_unresolved_recursion = false;
+                let t_in = test.alloc_slot();
+                let _ = test.flatten_scalar(expr, t_in);
+                if test.has_unresolved_recursion {
+                    return self.emit_delegate_gen(expr, input_slot, false);
+                }
+            }
             let out = self.flatten_scalar(expr, input_slot);
             self.emit_yield(out);
             self.emit(JitOp::Drop { slot: out });
@@ -3102,7 +3119,7 @@ impl Flattener {
             }
 
             Expr::Reduce { source, init, var_index, acc_index, update } => {
-                if !is_scalar(init) || !is_scalar(update) { return false; }
+                if !is_scalar(init) || !is_scalar(update) { return self.emit_delegate_gen(expr, input_slot, false); }
                 let acc_val = self.flatten_scalar(init, input_slot);
                 let old_acc = self.alloc_slot();
                 self.emit(JitOp::GetVar { dst: old_acc, var_index: *acc_index });
@@ -3171,7 +3188,7 @@ impl Flattener {
             }
 
             Expr::While { cond, update } => {
-                if !is_scalar(cond) || !is_scalar(update) { return false; }
+                if !is_scalar(cond) || !is_scalar(update) { return self.emit_delegate_gen(expr, input_slot, false); }
                 let current = self.alloc_slot();
                 self.emit(JitOp::Clone { dst: current, src: input_slot });
                 let head = self.alloc_label();
@@ -3195,7 +3212,7 @@ impl Flattener {
             }
 
             Expr::Repeat { update } => {
-                if !is_scalar(update) { return false; }
+                if !is_scalar(update) { return self.emit_delegate_gen(expr, input_slot, false); }
                 // repeat(f) = def _repeat: f, _repeat; _repeat;
                 // Each iteration applies f to the SAME input (comma semantics),
                 // not chaining outputs.
@@ -3353,11 +3370,11 @@ impl Flattener {
 
             Expr::Foreach { source, init, var_index, acc_index, update, extract } if !is_scalar(init) => {
                 // Generator init: rewrite as init as $tmp | foreach source as $var ($tmp; update; extract)
-                if !is_scalar(update) { return false; }
+                if !is_scalar(update) { return self.emit_delegate_gen(expr, input_slot, false); }
                 if let Some(ext) = extract.as_ref() {
                     let mut test = self.test_flattener();
                     let t_in = test.alloc_slot();
-                    if !test.flatten_gen(ext, t_in) { return false; }
+                    if !test.flatten_gen(ext, t_in) { return self.emit_delegate_gen(expr, input_slot, false); }
                 }
                 let init_var = VarIdx(10500);
                 let rewritten = Expr::LetBinding {
@@ -3376,12 +3393,12 @@ impl Flattener {
             }
 
             Expr::Foreach { source, init, var_index, acc_index, update, extract } => {
-                if !is_scalar(update) { return false; }
+                if !is_scalar(update) { return self.emit_delegate_gen(expr, input_slot, false); }
                 // Pre-check: if extract exists, it must be compilable as a generator
                 if let Some(ext) = extract.as_ref() {
                     let mut test = self.test_flattener();
                     let t_in = test.alloc_slot();
-                    if !test.flatten_gen(ext, t_in) { return false; }
+                    if !test.flatten_gen(ext, t_in) { return self.emit_delegate_gen(expr, input_slot, false); }
                 }
 
                 // Evaluate init → accumulator
@@ -3844,7 +3861,7 @@ impl Flattener {
                     input_expr.as_ref(),
                     Expr::EachOpt { input_expr: inner } if matches!(**inner, Expr::Input)
                 );
-                if !is_default_descent { return false; }
+                if !is_default_descent { return self.emit_delegate_gen(expr, input_slot, false); }
                 // Seed is the pipeline input (jq's `def recurse: ., (.[]? | recurse);`).
                 let val = self.flatten_scalar(&Expr::Input, input_slot);
                 let arr = self.alloc_slot();
