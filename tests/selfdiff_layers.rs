@@ -13,7 +13,7 @@
 //! `JQJIT_DISABLE_RAW_BYTE=1` (issue #685) gates layer (a) at the
 //! `use_raw_fast_paths` check in `src/bin/jq-jit.rs`.
 //! `JQJIT_DISABLE_SIMPLIFY=1` gates layer (b) at the top of `simplify_expr`
-//! in `src/interpreter.rs`. `JQJIT_FORCE_INTERPRETER=1` (issue #323) gates
+//! in `src/simplify.rs`. `JQJIT_FORCE_INTERPRETER=1` (issue #323) gates
 //! (a)+(d) by routing `Filter::execute*` through the generic interpreter.
 //!
 //! Set `JIT_INTERP_DIFF_LIMIT=N` to truncate the corpus during local

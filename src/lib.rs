@@ -1,5 +1,7 @@
 pub mod value;
 pub mod interpreter;
+pub mod classify;
+pub mod simplify;
 pub mod ir;
 pub mod runtime;
 pub mod parser;

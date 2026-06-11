@@ -42,7 +42,7 @@
 //!                                       *(single-valued `gen` only)*
 //!
 //! The single-valued restriction on (4) and (6) mirrors
-//! `is_single_valued_expr` in `src/interpreter.rs` — it's the precondition
+//! `is_single_valued_expr` in `src/simplify.rs` — it's the precondition
 //! the corresponding rewrites guard themselves on. Testing the broader
 //! multi-valued case is a follow-up once the single-valued surface lands
 //! clean.
@@ -126,7 +126,7 @@ fn render_multi(f: &MultiFilter) -> String {
 
 /// Single-valued filter strategy. Every filter produced yields exactly
 /// one value per input (or errors). Mirrors the
-/// `is_single_valued_expr` precondition in `src/interpreter.rs`.
+/// `is_single_valued_expr` precondition in `src/simplify.rs`.
 ///
 /// Built on top of [`conservative_leaf_strategy`] from the shared
 /// `filter_strategy` module: the leaves are the safe single-valued

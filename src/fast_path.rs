@@ -3001,7 +3001,7 @@ where
 /// over a single numeric field).
 ///
 /// The detector rejects compile-time div-by-zero / mod-by-zero constants
-/// (`detect_field_arith_chain` in `src/interpreter.rs`), so the chain's
+/// (`detect_field_arith_chain` in `src/classify.rs`), so the chain's
 /// `Div`/`Mod` ops are guaranteed to have a non-zero divisor. The
 /// helper trusts this invariant — non-finite results (e.g. overflow)
 /// are emitted as-is, matching `push_jq_number_bytes`'s saturating
@@ -3673,7 +3673,7 @@ where
 /// on a single JSON record.
 ///
 /// The detector excludes compile-time div/mod-by-zero in the chain
-/// (`detect_select_arith_cmp` in `src/interpreter.rs`); the helper
+/// (`detect_select_arith_cmp` in `src/classify.rs`); the helper
 /// trusts this.
 ///
 /// Bail discipline:
@@ -3739,7 +3739,7 @@ where
 ///
 /// The detector excludes compile-time div/mod-by-zero constants in the
 /// arithmetic chain (`detect_arith_chain_cmp` in
-/// `src/interpreter.rs`), so the helper trusts the chain's divisors are
+/// `src/classify.rs`), so the helper trusts the chain's divisors are
 /// non-zero. Non-finite results from overflow are passed through to the
 /// comparison directly (matching the existing apply-site).
 ///

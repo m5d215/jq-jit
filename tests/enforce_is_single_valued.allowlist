@@ -1,5 +1,5 @@
 # Classification of every `Expr` variant for the `is_single_valued_expr`
-# helper in `src/interpreter.rs` (maintenance.md §3
+# helper in `src/simplify.rs` (maintenance.md §3
 # "`[gen] | add` は single-valued 要素のみ畳める").
 #
 # Format: `<Variant>  <classification>` per line.
