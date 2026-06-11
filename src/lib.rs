@@ -5,6 +5,7 @@ pub mod simplify;
 pub mod ir;
 pub mod runtime;
 pub mod parser;
+pub mod parse_error;
 pub mod eval;
 pub mod signal;
 pub mod module;
