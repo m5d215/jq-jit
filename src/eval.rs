@@ -2524,18 +2524,11 @@ pub fn eval(
         Expr::TryCatch { try_expr, catch_expr, .. } => {
             let cb_error = std::cell::Cell::new(false);
             let result = eval(try_expr, input.clone(), env, &mut |val| {
-                match &val {
-                    Value::Error(msg) => {
-                        eval(catch_expr, Value::from_str(msg.as_str()), env, cb)
-                    }
-                    _ => {
-                        let r = cb(val);
-                        if r.is_err() {
-                            cb_error.set(true);
-                        }
-                        r
-                    }
+                let r = cb(val);
+                if r.is_err() {
+                    cb_error.set(true);
                 }
+                r
             });
             match result {
                 Ok(cont) => Ok(cont),
@@ -4539,7 +4532,6 @@ pub fn eval_format(kind: &FormatKind, val: &Value) -> Result<String> {
                         v.type_name(),
                         crate::value::value_to_json(v),
                     ),
-                    _ => buf.push_str(&crate::value::value_to_json(v)),
                 }
             }
             return Ok(buf);
@@ -4573,7 +4565,6 @@ pub fn eval_format(kind: &FormatKind, val: &Value) -> Result<String> {
                         v.type_name(),
                         crate::value::value_to_json(v),
                     ),
-                    _ => buf.push_str(&crate::value::value_to_json(v)),
                 }
             }
             return Ok(buf);
@@ -7321,7 +7312,7 @@ fn input_length_is_zero(v: &Value) -> bool {
         Value::Obj(o) => o.is_empty(),
         Value::Str(s) => s.as_str().is_empty(),
         Value::Num(n, _) => *n == 0.0,
-        Value::True | Value::False | Value::Error(_) => false,
+        Value::True | Value::False => false,
     }
 }
 
@@ -7430,7 +7421,6 @@ fn stream_first_length(v: &Value) -> Result<i64> {
         Value::Arr(a) => a.len() as i64,
         Value::Obj(ObjInner(o)) => o.len() as i64,
         Value::True | Value::False => bail!("boolean ({}) has no length", crate::value::value_to_json(v)),
-        Value::Error(_) => bail!("error has no length"),
     })
 }
 
@@ -7916,7 +7906,6 @@ fn value_type_name(v: &Value) -> &'static str {
         Value::Str(..) => "string",
         Value::Arr(..) => "array",
         Value::Obj(..) => "object",
-        Value::Error(..) => "error",
     }
 }
 
@@ -8282,7 +8271,7 @@ pub fn execute_ir_with_libs(expr: &Expr, input: Value, funcs: Vec<CompiledFunc>,
     let env = Rc::new(RefCell::new(Env::with_lib_dirs(funcs, lib_dirs)));
     let mut outputs = Vec::new();
     let result = eval(expr, input, &env, &mut |val| {
-        match &val { Value::Error(e) => { eprintln!("jq: error: {}", e); }, _ => { outputs.push(val); } }
+        outputs.push(val);
         Ok(true)
     });
     match result {

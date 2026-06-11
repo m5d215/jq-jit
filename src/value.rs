@@ -433,7 +433,6 @@ pub enum Value {
     Str(KeyStr),
     Arr(Rc<Vec<Value>>),
     Obj(ObjInner),
-    Error(Rc<String>),
 }
 
 impl Clone for Value {
@@ -446,7 +445,6 @@ impl Clone for Value {
             Value::Str(s) => Value::Str(s.clone()),
             Value::Arr(a) => Value::Arr(Rc::clone(a)),
             Value::Obj(ObjInner(o)) => Value::Obj(ObjInner(Rc::clone(o))),
-            Value::Error(e) => Value::Error(Rc::clone(e)),
         }
     }
 }
@@ -506,7 +504,6 @@ impl ValueKey {
                         y.get(k.as_str()).is_some_and(|yv| Self::key_eq(v, yv))
                     })
             }
-            (Value::Error(x), Value::Error(y)) => x == y,
             _ => false,
         }
     }
@@ -549,10 +546,6 @@ impl ValueKey {
                     combined ^= h.finish();
                 }
                 combined.hash(state);
-            }
-            Value::Error(e) => {
-                7u8.hash(state);
-                e.as_str().hash(state);
             }
         }
     }
@@ -746,7 +739,6 @@ impl Value {
             Value::Str(_) => "string",
             Value::Arr(_) => "array",
             Value::Obj(_) => "object",
-            Value::Error(_) => "error",
         }
     }
 
@@ -780,7 +772,6 @@ impl Value {
             }
             Value::Arr(a) => Ok(Value::number(a.len() as f64)),
             Value::Obj(ObjInner(o)) => Ok(Value::number(o.len() as f64)),
-            Value::Error(_) => bail!("error has no length"),
         }
     }
 }
@@ -805,7 +796,6 @@ impl fmt::Debug for Value {
             Value::Str(s) => write!(f, "Str({:?})", s.as_str()),
             Value::Arr(a) => write!(f, "Arr({:?})", a.as_ref()),
             Value::Obj(ObjInner(o)) => write!(f, "Obj({:?})", o.as_ref()),
-            Value::Error(e) => write!(f, "Error({:?})", e.as_str()),
         }
     }
 }
@@ -6555,7 +6545,6 @@ fn push_value_tojson(v: &Value, out: &mut String, depth: usize) {
             }
             out.push('}');
         }
-        Value::Error(e) => push_json_string(out, e),
     }
 }
 
@@ -6649,11 +6638,6 @@ fn value_to_json_depth(v: &Value, depth: usize, precise: bool) -> String {
                 out.push_str(&value_to_json_depth(v, depth + 1, precise));
             }
             out.push('}');
-            out
-        }
-        Value::Error(e) => {
-            let mut out = String::with_capacity(e.len() + 2);
-            push_json_string(&mut out, e);
             out
         }
     }
@@ -6829,7 +6813,6 @@ fn write_pretty_to_string_impl<const COLOR: bool>(out: &mut String, v: &Value, d
             c!(COLOR_RESET);
         }
         Value::Str(s) => { c!(p.string.as_str()); push_json_string(out, s); c!(COLOR_RESET); }
-        Value::Error(e) => push_json_string(out, e),
         Value::Arr(a) if a.is_empty() => { c!(p.arr.as_str()); out.push_str("[]"); c!(COLOR_RESET); }
         Value::Obj(ObjInner(o)) if o.is_empty() => { c!(p.obj.as_str()); out.push_str("{}"); c!(COLOR_RESET); }
         Value::Arr(a) => {
@@ -6982,7 +6965,7 @@ pub fn write_value_pretty_line(w: &mut dyn io::Write, v: &Value, indent: usize, 
 pub fn write_value_pretty_line_color(w: &mut dyn io::Write, v: &Value, indent: usize, use_tab: bool, sort_keys: bool, color: bool) -> io::Result<()> {
     if !color {
         match v {
-            Value::Null | Value::True | Value::False | Value::Num(..) | Value::Str(_) | Value::Error(_) => {
+            Value::Null | Value::True | Value::False | Value::Num(..) | Value::Str(_) => {
                 // Scalar values: pretty == compact
                 let mut buf = [0u8; 512];
                 if let Some(n) = write_compact_to_buf(v, &mut buf) {
@@ -7093,7 +7076,6 @@ fn push_compact_value_color(buf: &mut Vec<u8>, v: &Value) {
             }
             c!(p.obj.as_str()); buf.push(b'}'); c!(COLOR_RESET);
         }
-        Value::Error(e) => push_json_string_to_vec(buf, e.as_str()),
     }
 }
 
@@ -7130,7 +7112,6 @@ fn push_pretty_value_impl<const COLOR: bool>(buf: &mut Vec<u8>, v: &Value, depth
             c!(COLOR_RESET);
         }
         Value::Str(s) => { c!(p.string.as_str()); push_json_string_to_vec(buf, s.as_str()); c!(COLOR_RESET); }
-        Value::Error(e) => push_json_string_to_vec(buf, e.as_str()),
         Value::Arr(a) if a.is_empty() => { c!(p.arr.as_str()); buf.extend_from_slice(b"[]"); c!(COLOR_RESET); }
         Value::Obj(ObjInner(o)) if o.is_empty() => { c!(p.obj.as_str()); buf.extend_from_slice(b"{}"); c!(COLOR_RESET); }
         Value::Arr(a) => {
@@ -7256,9 +7237,6 @@ fn push_compact_value(buf: &mut Vec<u8>, v: &Value) {
                 push_compact_value(buf, val);
             }
             buf.push(b'}');
-        }
-        Value::Error(e) => {
-            push_json_string_to_vec(buf, e.as_str());
         }
     }
 }
@@ -7443,16 +7421,6 @@ fn write_compact_buf_inner(v: &Value, buf: &mut [u8], pos: &mut usize) -> bool {
             }
             push!(b"}");
         }
-        Value::Error(e) => {
-            let bytes = e.as_bytes();
-            if *pos + bytes.len() + 2 > buf.len() { return false; }
-            buf[*pos] = b'"';
-            *pos += 1;
-            buf[*pos..*pos + bytes.len()].copy_from_slice(bytes);
-            *pos += bytes.len();
-            buf[*pos] = b'"';
-            *pos += 1;
-        }
     }
     true
 }
@@ -7499,6 +7467,5 @@ fn write_value_compact_ext_inner(w: &mut dyn io::Write, v: &Value, sort_keys: bo
             }
             w.write_all(b"}")
         }
-        Value::Error(e) => write_json_string(w, e),
     }
 }

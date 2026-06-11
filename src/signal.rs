@@ -76,7 +76,7 @@ thread_local! {
 /// [`ERROR_PAYLOAD`] instead; `Display` still emits the `__jqerror__:<JSON>`
 /// form so uncaught errors print exactly as before.
 #[derive(Debug)]
-pub(crate) struct ErrorValue {
+pub struct ErrorValue {
     display: String,
 }
 impl ErrorValue {
@@ -100,7 +100,7 @@ impl std::error::Error for ErrorValue {}
 
 /// Take the payload stashed by the most recent `error(value)`. Falls back to
 /// re-parsing the marker's `display` JSON if the slot is somehow empty.
-pub(crate) fn take_error_payload(ev: &ErrorValue) -> crate::value::Value {
+pub fn take_error_payload(ev: &ErrorValue) -> crate::value::Value {
     if let Some(v) = ERROR_PAYLOAD.with(|slot| slot.borrow_mut().take()) {
         return v;
     }

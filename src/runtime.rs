@@ -1463,7 +1463,6 @@ pub fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
             Value::Str(_) => 4,
             Value::Arr(_) => 5,
             Value::Obj(_) => 6,
-            Value::Error(_) => 7,
         }
     };
 
@@ -1641,7 +1640,6 @@ fn rt_reverse(v: &Value) -> Result<Value> {
         Value::Num(_, _) => bail!("Cannot index number with number"),
         // errdesc keeps repr/truncation consistent across error sites (#580).
         Value::True | Value::False => bail!("{} has no length", errdesc(v)),
-        _ => bail!("{} cannot be reversed", v.type_name()),
     }
 }
 
@@ -2325,7 +2323,6 @@ fn jq_kind_tag(v: &Value) -> u8 {
         Value::Str(_) => 4,
         Value::Arr(_) => 5,
         Value::Obj(_) => 6,
-        Value::Error(_) => 7,
     }
 }
 
@@ -2854,7 +2851,6 @@ pub fn index_err_desc(key: &Value) -> String {
         Value::True | Value::False => "boolean".to_string(),
         Value::Arr(_) => "array".to_string(),
         Value::Obj(_) => "object".to_string(),
-        Value::Error(_) => "error".to_string(),
     }
 }
 

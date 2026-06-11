@@ -80,18 +80,6 @@ pub(crate) enum JitError {
 }
 
 impl JitError {
-    /// The legacy string form — what the channel carried before it was
-    /// typed. Used where the consumer is still string-shaped: `Value::Error`
-    /// results from `execute_jit` and catch values for halt/break (#1043).
-    fn legacy_string(&self) -> String {
-        match self {
-            JitError::Msg(s) => s.clone(),
-            JitError::Raise(v) => format!("__jqerror__:{}", crate::value::value_to_json(v)),
-            JitError::Halt(c) => format!("__halt__:{}", c),
-            JitError::Break(id) => format!("__break__:{}:", id),
-        }
-    }
-
     /// Rebuild the typed anyhow signal at the JIT→caller boundary so
     /// downstream downcasts (try/catch in eval, the CLI halt handler) see
     /// the same types the eval engine raises.
@@ -111,7 +99,12 @@ impl JitError {
     fn into_catch_value(self) -> Value {
         match self {
             JitError::Raise(v) => v,
-            other => Value::from_str(&other.legacy_string()),
+            JitError::Msg(s) => Value::from_string(s),
+            // Halt and Break keep their historical sentinel-text shape
+            // (#1043 bug-compat; a pending Halt is normally refused by
+            // `jit_rt_get_error` and never lands here).
+            JitError::Halt(c) => Value::from_string(format!("__halt__:{}", c)),
+            JitError::Break(id) => Value::from_string(format!("__break__:{}:", id)),
         }
     }
 }
@@ -8048,7 +8041,6 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 }
                 Value::Arr(a) => Value::number(a.len() as f64),
                 Value::Obj(ObjInner(o)) => Value::number(o.len() as f64),
-                Value::Error(_) => Value::number(0.0),
             };
             std::ptr::write(dst, v);
             return 0;
@@ -8062,7 +8054,6 @@ extern "C" fn jit_rt_unaryop(dst: *mut Value, op: i32, input: *const Value) -> i
                 Value::Str(_) => "string",
                 Value::Arr(_) => "array",
                 Value::Obj(_) => "object",
-                Value::Error(_) => "error",
             };
             std::ptr::write(dst, Value::from_str(s));
             return 0;
@@ -8582,7 +8573,7 @@ extern "C" fn jit_rt_not(dst: *mut Value, input: *const Value) -> i64 {
 extern "C" fn jit_rt_kind(v: *const Value) -> i64 {
     unsafe {
         match &*v { Value::Null => 0, Value::False => 1, Value::True => 2, Value::Num(..) => 3,
-            Value::Str(_) => 4, Value::Arr(_) => 5, Value::Obj(_) => 6, Value::Error(_) => 7 }
+            Value::Str(_) => 4, Value::Arr(_) => 5, Value::Obj(_) => 6 }
     }
 }
 extern "C" fn jit_rt_len(v: *const Value) -> i64 {
@@ -9303,7 +9294,7 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, builtin: *const JitBuiltin,
         if rt == Some(crate::runtime::RtBuiltin::Join) && args.len() == 2 {
             if let (Value::Arr(a), Value::Str(sep)) = (&args[0], &args[1]) {
                 // Check all elements are scalar (not arr/obj) — otherwise fall through to runtime for error
-                let all_scalar = a.iter().all(|v| !matches!(v, Value::Arr(_) | Value::Obj(_) | Value::Error(_)));
+                let all_scalar = a.iter().all(|v| !matches!(v, Value::Arr(_) | Value::Obj(_)));
                 if all_scalar {
                     let cap = a.len() * (8 + sep.len());
                     let mut buf: Vec<u8> = Vec::with_capacity(cap);
@@ -9533,7 +9524,6 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, builtin: *const JitBuiltin,
                                 std::ptr::write(dst, Value::Null);
                                 return GEN_ERROR;
                             }
-                            _ => buf.extend_from_slice(crate::value::value_to_json(v).as_bytes()),
                         }
                     }
                     std::ptr::write(dst, Value::from_string(String::from_utf8_unchecked(buf)));
@@ -9582,7 +9572,6 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, builtin: *const JitBuiltin,
                                 std::ptr::write(dst, Value::Null);
                                 return GEN_ERROR;
                             }
-                            _ => buf.extend_from_slice(crate::value::value_to_json(v).as_bytes()),
                         }
                     }
                     std::ptr::write(dst, Value::from_string(String::from_utf8_unchecked(buf)));
@@ -12213,13 +12202,12 @@ fn execute_collect(run: impl FnOnce(&mut JitEnv, RawYieldCb, *mut u8) -> i64) ->
         let ctx = &mut results as *mut Vec<Value> as *mut u8;
         let result = run(env, collect_callback, ctx);
         if result == GEN_ERROR {
-            // This non-streaming entry returns errors as Value::Error, a
-            // string-shaped channel — keep the legacy text until the
-            // Value::Error variant itself is retired (#1034).
-            let err_msg = env.error.take()
-                .map(|e| e.legacy_string())
-                .unwrap_or_else(|| "JIT execution error".to_string());
-            results.push(Value::Error(Rc::new(err_msg)));
+            // Surface the terminal error as the typed anyhow signal, same
+            // as the streaming driver — outputs collected before the error
+            // are dropped, matching the whole-filter eval engine (#1034).
+            return Err(env.error.take()
+                .map(JitError::into_anyhow)
+                .unwrap_or_else(|| anyhow::anyhow!("JIT execution error")));
         }
         Ok(results)
     })
