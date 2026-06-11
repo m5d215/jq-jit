@@ -10254,6 +10254,24 @@ struct FlattenedFilter {
     value_constants: Vec<Box<Value>>,
 }
 
+/// A program that *observes* per-read input state (`input_line_number` /
+/// `input_filename`) or mixes several readers needs eval's lazy
+/// interleaving end to end: the flattener's generic generator fallbacks
+/// (let-binding values, pipe lefts) collect their stream eagerly, so a
+/// native lowering of `[inputs as $x | input_line_number]` reads all
+/// inputs before the body runs — [3,3,3] where eval/jq stream [1,2,3].
+/// Such programs lower as a single whole-program `DelegateGen` instead
+/// (the pull-mode delegate streams through the output callback, so
+/// laziness is preserved); a lone reader without state observation keeps
+/// the native lowering, where eager collection is unobservable.
+fn observes_interleaved_input_state(expr: &Expr) -> bool {
+    let dbg = format!("{:?}", expr);
+    let readers = dbg.matches("ReadInput").count();
+    readers >= 2
+        || (readers >= 1
+            && (dbg.contains("InputLineNumber") || dbg.contains("InputFilename")))
+}
+
 /// Shared lowering for both execution backends (Cranelift codegen and the
 /// direct JitOp interpreter, #1059): inline function calls, flatten to the
 /// linear JitOp sequence, publish closure ops for runtime delegation, and
@@ -10274,7 +10292,15 @@ fn flatten_filter(expr: &Expr, funcs: &[CompiledFunc]) -> Result<FlattenedFilter
     let input_slot = fl.alloc_slot(); // slot 0 = input ptr (read-only, owned by caller)
     // Use input_slot directly — flatten_gen only reads it, never writes/drops it.
     // Both backends handle Drop{slot:0} as a no-op.
-    if !fl.flatten_gen(&inlined, input_slot) {
+    if observes_interleaved_input_state(&inlined) {
+        // Whole-program delegation preserves the input-state interleaving
+        // that the native generic fallbacks' eager collects would break;
+        // a guard rejection here must bail to whole-filter eval, never
+        // fall through to the (incorrect) native lowering.
+        if !fl.emit_delegate_gen(&inlined, input_slot, false) {
+            bail!("Expression not JIT-compilable: interleaved input state");
+        }
+    } else if !fl.flatten_gen(&inlined, input_slot) {
         bail!("Expression not JIT-compilable");
     }
     // Sub-trees can request a JIT bailout mid-flatten (e.g. a reduce
@@ -11931,20 +11957,12 @@ pub fn is_jit_compilable_with_funcs(expr: &Expr, funcs: &[CompiledFunc]) -> bool
     if std::env::var_os("JQJIT_DEBUG_FEASIBILITY").is_some() {
         eprintln!("[feasibility] ok={} delegate={} native_ops={}", ok, emitted_delegate, native_ops);
     }
-    // The JIT lowering of `inputs` collects the stream eagerly, so a
-    // program that *observes* per-read input state (input_line_number /
-    // input_filename) or mixes several readers sees post-consumption
-    // state where eval interleaves lazily — `[inputs as $x |
-    // input_line_number]` is [1,2,3] in eval/jq and [3,3,3] eagerly.
-    // Keep such programs on eval in default routing (the forced knobs
-    // still compile them; the eager divergence predates the flip).
-    let dbg = format!("{:?}", expr);
-    let readers = dbg.matches("ReadInput").count();
-    let interleaved_io = readers >= 2
-        || (readers >= 1
-            && (dbg.contains("InputLineNumber") || dbg.contains("InputFilename")));
-    ok && !interleaved_io
-        && (!emitted_delegate || native_ops > DELEGATE_DOMINANT_NATIVE_OPS)
+    // Programs observing per-read input state lower as a whole-program
+    // eval delegate (see `observes_interleaved_input_state`), which makes
+    // them delegate-dominant by construction — the guard below keeps them
+    // on whole-filter eval in default routing, same verdict as the
+    // pre-fix explicit check.
+    ok && (!emitted_delegate || native_ops > DELEGATE_DOMINANT_NATIVE_OPS)
 }
 
 /// A delegated program with at most this many native (non-DelegateGen)
@@ -11975,7 +11993,14 @@ fn jit_feasibility(expr: &Expr, funcs: &[CompiledFunc]) -> (bool, bool, usize) {
     let inlined = fl.inline_with_recursion_exemption(expr);
     if fl.has_unresolved_recursion { return (false, false, 0); }
     let input = fl.alloc_slot();
-    let ok = fl.flatten_gen(&inlined, input);
+    // Mirror `flatten_filter`'s whole-program delegation of interleaved
+    // input-state programs so the feasibility verdict agrees with the
+    // real compile (#648 failure mode otherwise).
+    let ok = if observes_interleaved_input_state(&inlined) {
+        fl.emit_delegate_gen(&inlined, input, false)
+    } else {
+        fl.flatten_gen(&inlined, input)
+    };
     // Subtrees may set `has_unresolved_recursion` mid-flatten to request
     // a JIT bailout (see #683 — Reduce arm in flatten_scalar). Re-check
     // here so the feasibility query agrees with `compile_with_funcs`.

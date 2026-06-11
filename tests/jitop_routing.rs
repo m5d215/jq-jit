@@ -115,14 +115,53 @@ fn mixed_delegated_program_routes_by_default() {
     assert_eq!(label, "jitop");
 }
 
-/// Programs observing per-read input state must keep eval's lazy
-/// interleaving: the JIT lowering collects `inputs` eagerly, so
-/// `[inputs as $x | input_line_number]` would report post-consumption
-/// line numbers. The routing gate keeps them on eval.
+/// Programs observing per-read input state lower as a whole-program
+/// eval delegate (see `observes_interleaved_input_state` in src/jit.rs),
+/// which makes them delegate-dominant — default routing keeps them on
+/// whole-filter eval.
 #[test]
 fn interleaved_input_state_stays_on_eval() {
     let label = traced_label("[inputs as $x | input_line_number]", "1", None);
     assert_eq!(label, "eval");
+}
+
+/// Run the binary under one forced-backend env knob with `-n -c` and
+/// multi-line stdin, returning stdout.
+fn forced_output(knob: &str, filter: &str, stdin_data: &str) -> String {
+    let bin = env!("CARGO_BIN_EXE_jq-jit");
+    let mut cmd = Command::new(bin);
+    cmd.arg("-n").arg("-c").arg(filter);
+    cmd.env(knob, "1");
+    cmd.stdin(std::process::Stdio::piped());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn jq-jit");
+    {
+        use std::io::Write;
+        let mut stdin = child.stdin.take().expect("stdin");
+        let _ = stdin.write_all(stdin_data.as_bytes());
+    }
+    let out = child.wait_with_output().expect("wait jq-jit");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Forced-mode correctness for interleaved input state: such programs
+/// lower as a single whole-program `DelegateGen`, preserving eval's lazy
+/// read interleaving. The eager native lowering used to consume the
+/// whole stream before the binding body ran, reporting post-consumption
+/// line numbers ([3,3,3] instead of [1,2,3]).
+#[test]
+fn forced_modes_interleave_input_state_lazily() {
+    for knob in ["JQJIT_FORCE_JITOP_INTERP", "JQJIT_FORCE_CRANELIFT"] {
+        let out = forced_output(knob, "[inputs as $x | input_line_number]", "1\n2\n3\n");
+        assert_eq!(out, "[1,2,3]", "{knob}");
+        let out = forced_output(
+            knob,
+            "[input, input_line_number, input, input_line_number]",
+            "10\n20\n30\n",
+        );
+        assert_eq!(out, "[10,1,20,2]", "{knob}");
+    }
 }
 
 /// `--force-jit` accepts delegated programs (debug knob, full coverage).
