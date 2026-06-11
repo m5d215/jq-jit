@@ -14092,3 +14092,13 @@ first(while(true; .+1) | . * 2)
 [try (skip(-1; 1)) catch ., try (skip("x"; 1)) catch .]
 null
 ["skip doesn't support negative count","skip count must be a number"]
+
+# #1028: shortest-digit tie (…842.25) — tostring used Display digits (round-up) and drifted from jq's dtoa (round-even); unified core matches jq
+(919895839836842.3 + 0) | tostring
+null
+"919895839836842.2"
+
+# #1028: @csv renders the same tie through the unified core
+[919895839836842.3 + 0] | @csv
+null
+"919895839836842.2"

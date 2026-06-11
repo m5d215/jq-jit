@@ -5866,110 +5866,75 @@ pub fn is_valid_json_number(s: &str) -> bool {
     i == bytes.len()
 }
 
-pub fn format_jq_number(n: f64) -> String {
-    let mut buf = String::with_capacity(24);
-    push_jq_number_str(&mut buf, n);
-    buf
+/// Byte sink for the number formatters (#1028): one core routine renders
+/// each number and the public `String` / `Vec<u8>` entry points are thin
+/// adapters over it, so a formatting fix can never land in one sink's copy
+/// and drift from the other (the #616 class of bugs). Formatter output is
+/// pure ASCII, so taking `&str` lets the `String` impl append without
+/// revalidation. Monomorphized per sink — no dyn dispatch on the
+/// per-number hot paths.
+pub trait NumSink {
+    fn put(&mut self, s: &str);
 }
 
-/// Push a formatted jq number directly to a String buffer (avoids intermediate allocation).
+impl NumSink for String {
+    #[inline(always)]
+    fn put(&mut self, s: &str) {
+        self.push_str(s);
+    }
+}
+
+impl NumSink for Vec<u8> {
+    #[inline(always)]
+    fn put(&mut self, s: &str) {
+        self.extend_from_slice(s.as_bytes());
+    }
+}
+
+/// Single core behind `format_jq_number` / `push_jq_number_str` /
+/// `push_jq_number_bytes`: jq's rendering of a computed (repr-less) f64.
 #[inline]
-/// Push a number's canonical jq representation, preferring the original
-/// repr (so `1.0` stays `1.0`, `0e10` stays `0E+10`) when it round-trips
-/// through f64. Falls back to f64 dtoa otherwise. Used by @csv / @tsv
-/// formatters where jq preserves the literal shape (#475).
-pub fn push_value_num_repr_str(buf: &mut String, n: f64, repr: Option<&Rc<str>>) {
-    // jq renders a NaN cell as empty in CSV/TSV (not the JSON `null`). #771
-    if n.is_nan() { return; }
-    if let Some(r) = repr.filter(|r| is_valid_json_number(r) && repr_is_exact_for_f64(r, n)) {
-        if let Some(canonical) = normalize_jq_repr(r) {
-            buf.push_str(&canonical);
-        } else {
-            buf.push_str(r);
+fn write_jq_number<S: NumSink>(buf: &mut S, n: f64) {
+    // Integer fast path for common values (fits in i64, < 1e16). The i64
+    // roundtrip check (i as f64 == n) naturally rejects NaN, infinity and
+    // non-integers, so the specials below only run on the slow path.
+    let i = n as i64;
+    if i as f64 == n && i.unsigned_abs() < 10_000_000_000_000_000 {
+        // Negative zero round-trips through `as i64` as `0`, which would
+        // erase the sign: jq emits `-0` for arithmetic results that land
+        // on `-0.0` (e.g. `-0 * 1`, `-0 - 0`). Issue #110.
+        if i == 0 && n.is_sign_negative() {
+            buf.put("-0");
+            return;
         }
-    } else if let Some(canonical) = repr
-        .filter(|r| is_valid_json_number(r) && n.is_finite() && n != 0.0)
-        .and_then(|r| normalize_jq_repr(r))
-        .filter(|c| c.as_str().parse::<f64>().ok() == Some(n))
-    {
-        // Subnormal/precision-edge literals (#616): `repr_is_exact_for_f64` is
-        // too conservative for >15-sig-digit mantissas and exponents < -323,
-        // but the canonical literal still round-trips through f64 — e.g.
-        // DBL_MAX `1.7976931348623157e308` and the smallest subnormal `5e-324`.
-        // jq's @csv/@tsv preserve the literal's uppercase-E decnum form here
-        // exactly as `tostring`/tojson do, so mirror `push_value_tojson`
-        // instead of falling through to the lossy lowercase f64 dtoa form.
-        buf.push_str(&canonical);
-    } else {
-        push_jq_number_str(buf, n);
+        let mut ibuf = itoa::Buffer::new();
+        buf.put(ibuf.format(i));
+        return;
     }
-}
-
-/// Same as [`push_value_num_repr_str`] but writes UTF-8 bytes to a `Vec<u8>`.
-pub fn push_value_num_repr_bytes(buf: &mut Vec<u8>, n: f64, repr: Option<&Rc<str>>) {
-    // jq renders a NaN cell as empty in CSV/TSV (not the JSON `null`). #771
-    if n.is_nan() { return; }
-    if let Some(r) = repr.filter(|r| is_valid_json_number(r) && repr_is_exact_for_f64(r, n)) {
-        if let Some(canonical) = normalize_jq_repr(r) {
-            buf.extend_from_slice(canonical.as_bytes());
-        } else {
-            buf.extend_from_slice(r.as_bytes());
-        }
-    } else if let Some(canonical) = repr
-        .filter(|r| is_valid_json_number(r) && n.is_finite() && n != 0.0)
-        .and_then(|r| normalize_jq_repr(r))
-        .filter(|c| c.as_str().parse::<f64>().ok() == Some(n))
-    {
-        // Subnormal/precision-edge literals (#616) — see push_value_num_repr_str.
-        buf.extend_from_slice(canonical.as_bytes());
-    } else {
-        push_jq_number_bytes(buf, n);
-    }
-}
-
-pub fn push_jq_number_str(buf: &mut String, n: f64) {
     if n.is_nan() {
-        buf.push_str("null");
+        buf.put("null");
         return;
     }
     if n.is_infinite() {
-        buf.push_str(if n.is_sign_positive() { "1.7976931348623157e+308" } else { "-1.7976931348623157e+308" });
-        return;
-    }
-    if n == 0.0 {
-        // Preserve IEEE-754 negative zero: jq emits `-0` for arithmetic
-        // results that land on `-0.0` (e.g. `-0 * 1`, `-0 - 0`). Issue #110.
-        if n.is_sign_negative() {
-            buf.push_str("-0");
+        buf.put(if n.is_sign_positive() {
+            "1.7976931348623157e+308"
         } else {
-            buf.push_str("0");
-        }
+            "-1.7976931348623157e+308"
+        });
         return;
-    }
-
-    // Integer fast path for common values (fits in i64, reasonable length)
-    if n == n.trunc() && n.abs() < 1e16 {
-        let i = n as i64;
-        if i as f64 == n {
-            let mut ibuf = itoa::Buffer::new();
-            buf.push_str(ibuf.format(i));
-            return;
-        }
     }
 
     // jq's dtoa chooses fixed vs scientific from the *shortest* decimal: it
     // emits exponential form iff `decpt <= -4 || decpt > sigdigits + 15`,
     // where `decpt` is the decimal-point position (1 past the leading digit's
-    // place) and `sigdigits` is the count of significant digits. Rust's
-    // `Display` never uses scientific notation, so `s` is always the
-    // fixed-point form jq's dtoa would print.
-    let s = format!("{}", n);
+    // place) and `sigdigits` is the count of significant digits.
     let abs = n.abs();
 
     // Small side: `decpt <= -4` is exactly `abs < 1e-4` for finite nonzero
-    // values, so this matches jq without parsing the digits.
-    if abs != 0.0 && abs < 1e-4 {
-        buf.push_str(&format_as_scientific_lowercase(n));
+    // values, so this matches jq without parsing the digits. (Zero never
+    // reaches here — the integer fast path consumed it.)
+    if abs < 1e-4 {
+        buf.put(&format_as_scientific_lowercase(n));
         return;
     }
 
@@ -5985,12 +5950,91 @@ pub fn push_jq_number_str(buf: &mut String, n: f64) {
         let exp: i32 = exp.parse().expect("LowerExp exponent is an integer");
         let sigdigits = mantissa.bytes().filter(u8::is_ascii_digit).count() as i32;
         if exp + 1 > sigdigits + 15 {
-            buf.push_str(&format_as_scientific_lowercase(n));
-            return;
+            buf.put(&format_as_scientific_lowercase(n));
+        } else {
+            // Fixed-point expansion of a large high-precision value:
+            // Rust's `Display` never uses scientific notation, so it is
+            // exactly the fixed form jq's dtoa would print.
+            buf.put(&format!("{}", n));
         }
+        return;
     }
 
-    buf.push_str(&s);
+    // Common decimal case in [1e-4, 1e16): ryu's shortest round-trip form
+    // is fixed-point in this range and digit-identical to `Display`
+    // (both emit the unique shortest representation), without `Display`'s
+    // intermediate `String` allocation.
+    let mut rbuf = ryu::Buffer::new();
+    buf.put(rbuf.format(n));
+}
+
+pub fn format_jq_number(n: f64) -> String {
+    let mut buf = String::with_capacity(24);
+    write_jq_number(&mut buf, n);
+    buf
+}
+
+/// Push a formatted jq number directly to a String buffer (avoids intermediate allocation).
+#[inline]
+pub fn push_jq_number_str(buf: &mut String, n: f64) {
+    write_jq_number(buf, n);
+}
+
+/// Repr-selection core shared by the literal-preserving number writers
+/// (`push_value_num_repr_str` / `push_value_num_repr_bytes` /
+/// `push_num_tojson_str`): the text to emit when the original literal repr
+/// should be kept, or `None` when the caller must fall back to the
+/// computed-f64 writer ([`write_jq_number`]).
+///
+/// The repr is kept in two cases:
+/// - it round-trips exactly per `repr_is_exact_for_f64` (emitted in jq's
+///   canonical uppercase-E decnum form, so `1.0` stays `1.0` and `0e10`
+///   becomes `0E+10`);
+/// - subnormal/precision-edge literals (#616): `repr_is_exact_for_f64` is
+///   too conservative for >15-sig-digit mantissas and exponents < -323,
+///   but the canonical literal still round-trips through f64 — e.g.
+///   DBL_MAX `1.7976931348623157e308` and the smallest subnormal `5e-324`.
+fn num_repr_text<'a>(n: f64, repr: Option<&'a Rc<str>>) -> Option<std::borrow::Cow<'a, str>> {
+    if let Some(r) = repr.filter(|r| is_valid_json_number(r) && repr_is_exact_for_f64(r, n)) {
+        return Some(match normalize_jq_repr(r) {
+            Some(canonical) => std::borrow::Cow::Owned(canonical),
+            None => std::borrow::Cow::Borrowed(&**r),
+        });
+    }
+    repr.filter(|r| is_valid_json_number(r) && n.is_finite() && n != 0.0)
+        .and_then(|r| normalize_jq_repr(r))
+        .filter(|c| c.as_str().parse::<f64>().ok() == Some(n))
+        .map(std::borrow::Cow::Owned)
+}
+
+/// Core behind the @csv / @tsv number writers: jq preserves the literal
+/// shape there (#475) with the same repr selection as `tostring`/tojson
+/// (see [`num_repr_text`]), except a NaN cell renders as empty rather than
+/// the JSON `null` (#771).
+#[inline]
+fn write_value_num_repr<S: NumSink>(buf: &mut S, n: f64, repr: Option<&Rc<str>>) {
+    if n.is_nan() {
+        return;
+    }
+    match num_repr_text(n, repr) {
+        Some(text) => buf.put(&text),
+        None => write_jq_number(buf, n),
+    }
+}
+
+/// Push a number's canonical jq representation, preferring the original
+/// repr (so `1.0` stays `1.0`, `0e10` stays `0E+10`) when it round-trips
+/// through f64. Falls back to f64 dtoa otherwise. Used by @csv / @tsv
+/// formatters where jq preserves the literal shape (#475).
+#[inline]
+pub fn push_value_num_repr_str(buf: &mut String, n: f64, repr: Option<&Rc<str>>) {
+    write_value_num_repr(buf, n, repr);
+}
+
+/// Same as [`push_value_num_repr_str`] but writes UTF-8 bytes to a `Vec<u8>`.
+#[inline]
+pub fn push_value_num_repr_bytes(buf: &mut Vec<u8>, n: f64, repr: Option<&Rc<str>>) {
+    write_value_num_repr(buf, n, repr);
 }
 
 /// Pick the bytes to emit for `Value::Num(_, repr)` — either the canonical
@@ -6493,26 +6537,12 @@ pub fn value_to_json_tojson(v: &Value) -> String {
 /// NaN or non-canonical lexeme cannot leak through one formatter after being
 /// fixed in another (#771, #1021).
 pub fn push_num_tojson_str(out: &mut String, n: f64, repr: Option<&Rc<str>>) {
-    if let Some(r) = repr.filter(|r| is_valid_json_number(r) && repr_is_exact_for_f64(r, n)) {
-        if let Some(canonical) = normalize_jq_repr(r) {
-            out.push_str(&canonical);
-        } else {
-            out.push_str(r);
-        }
-    } else if let Some(canonical) = repr
-        .filter(|r| is_valid_json_number(r) && n.is_finite() && n != 0.0)
-        .and_then(|r| normalize_jq_repr(r))
-        .filter(|c| c.as_str().parse::<f64>().ok() == Some(n))
-    {
-        // Subnormal-edge case (#616): `repr_is_exact_for_f64` is too
-        // conservative for tiny exponents (< -323), but the literal
-        // can still round-trip through f64 — e.g. `5e-324` is the
-        // canonical form for the smallest positive subnormal. Prefer
-        // the normalised repr when it parses back to the same bits;
-        // otherwise fall through to the lossy f64 dtoa form.
-        out.push_str(&canonical);
-    } else {
-        push_jq_number_str(out, n);
+    // Same repr selection as the @csv/@tsv writers (see `num_repr_text`);
+    // here a NaN — whose repr never qualifies — falls through to the
+    // canonical f64 writer and renders as `null`.
+    match num_repr_text(n, repr) {
+        Some(text) => out.push_str(&text),
+        None => push_jq_number_str(out, n),
     }
 }
 
@@ -6775,19 +6805,6 @@ fn push_json_string(out: &mut String, s: &str) {
     out.push('"');
 }
 
-#[inline]
-fn push_jq_number(out: &mut String, n: f64) {
-    if n == n.trunc() && n.abs() < 1e15 {
-        let i = n as i64;
-        if i as f64 == n {
-            let mut buf = itoa::Buffer::new();
-            out.push_str(buf.format(i));
-            return;
-        }
-    }
-    out.push_str(&format_jq_number(n));
-}
-
 fn write_pretty_to_string_impl<const COLOR: bool>(out: &mut String, v: &Value, depth: usize, step: usize, use_tab: bool, sort_keys: bool) {
     // jq's --tab uses exactly one tab per indent level regardless of --indent.
     let step = if use_tab { 1 } else { step };
@@ -6808,7 +6825,7 @@ fn write_pretty_to_string_impl<const COLOR: bool>(out: &mut String, v: &Value, d
                     out.push_str(r);
                 }
             } else {
-                push_jq_number(out, *n);
+                push_jq_number_str(out, *n);
             }
             c!(COLOR_RESET);
         }
@@ -6921,33 +6938,6 @@ fn write_json_string(w: &mut dyn io::Write, s: &str) -> io::Result<()> {
     }
     if start < bytes.len() { w.write_all(&bytes[start..])?; }
     w.write_all(b"\"")
-}
-
-fn write_jq_number(w: &mut dyn io::Write, n: f64) -> io::Result<()> {
-    if n.is_nan() { return w.write_all(b"null"); }
-    if n.is_infinite() {
-        return if n.is_sign_positive() { w.write_all(b"1.7976931348623157e+308") }
-        else { w.write_all(b"-1.7976931348623157e+308") };
-    }
-    if n == 0.0 {
-        // jq normalises negative zero to "0" on output; match that.
-        return w.write_all(b"0");
-    }
-    // Integer fast path
-    if n == n.trunc() && n.abs() < 1e16 {
-        let i = n as i64;
-        if i as f64 == n {
-            let mut buf = itoa::Buffer::new();
-            return w.write_all(buf.format(i).as_bytes());
-        }
-    }
-    let abs = n.abs();
-    // Very small or very large numbers need special formatting
-    if (abs != 0.0 && abs < 1e-4) || abs >= 1e16 {
-        return w.write_all(format_jq_number(n).as_bytes());
-    }
-    // Common case: write directly without String allocation
-    write!(w, "{}", n)
 }
 
 // Reusable String buffer for pretty-print output. Per-thread to keep
@@ -7244,37 +7234,7 @@ fn push_compact_value(buf: &mut Vec<u8>, v: &Value) {
 /// Write a jq-formatted number directly to a Vec<u8> buffer, avoiding intermediate String allocation.
 #[inline]
 pub fn push_jq_number_bytes(buf: &mut Vec<u8>, n: f64) {
-    // Fast path: exact integer in displayable range (covers vast majority of JSON numbers).
-    // The i64 roundtrip check (i as f64 == n) naturally rejects NaN, infinity, and non-integers.
-    let i = n as i64;
-    if i as f64 == n && i.unsigned_abs() < 10_000_000_000_000_000 {
-        // Negative zero round-trips through `as i64` as `0`, which would
-        // erase the sign. Emit `-0` directly (issue #110).
-        if i == 0 && n.is_sign_negative() {
-            buf.extend_from_slice(b"-0");
-            return;
-        }
-        let mut ibuf = itoa::Buffer::new();
-        buf.extend_from_slice(ibuf.format(i).as_bytes());
-        return;
-    }
-    // Slow path: NaN, infinity, decimals, very large numbers
-    if n.is_nan() { buf.extend_from_slice(b"null"); return; }
-    if n.is_infinite() {
-        if n.is_sign_positive() { buf.extend_from_slice(b"1.7976931348623157e+308"); }
-        else { buf.extend_from_slice(b"-1.7976931348623157e+308"); }
-        return;
-    }
-    let abs = n.abs();
-    if (abs != 0.0 && abs < 1e-4) || abs >= 1e16 {
-        let s = format_jq_number(n);
-        buf.extend_from_slice(s.as_bytes());
-        return;
-    }
-    // Common decimal case: use ryu for fast f64-to-decimal conversion
-    let mut rbuf = ryu::Buffer::new();
-    let s = rbuf.format(n);
-    buf.extend_from_slice(s.as_bytes());
+    write_jq_number(buf, n);
 }
 
 #[inline]
@@ -7434,7 +7394,11 @@ fn write_value_compact_ext_inner(w: &mut dyn io::Write, v: &Value, sort_keys: bo
             if let Some(r) = repr.as_ref().filter(|r| is_valid_json_number(r)) {
                 w.write_all(canonical_repr_bytes(r).as_bytes())
             } else {
-                write_jq_number(w, *n)
+                // Slow (--sort-keys / fallback) writer path: route through
+                // the shared core. A standalone copy here used to normalise
+                // `-0` to `0`, splitting `--sort-keys` output from every
+                // other formatter (#110 drift; unified in #1028).
+                w.write_all(format_jq_number(*n).as_bytes())
             }
         }
         Value::Str(s) => write_json_string(w, s),
