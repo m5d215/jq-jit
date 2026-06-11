@@ -13847,3 +13847,28 @@ null
 first(while(true; empty), 88)
 null
 null
+
+# #1059 PR-D: conditional recursive descent is data-bounded, delegated in push mode
+[recurse(.[]?; . != null)]
+[[1],2]
+[[[1],2],[1],1,2]
+
+# #1059 PR-D: navigation-chain recurse step (tree walk by field)
+[recurse(.children[]?; . != null) | .name]
+{"name":"a","children":[{"name":"b","children":[]}]}
+["a","b"]
+
+# #1059 PR-D: recurse(empty) yields just the input
+[recurse(empty)]
+3
+[3]
+
+# #1059 PR-D: multi-output cond duplicates subtree values but stays finite
+[recurse(.[]?; true, . != null)]
+[[1]]
+[[[1]],[1],1,1,[1],1,1]
+
+# #1059 PR-D: field recurse stays unbounded (delegated only under a limit budget)
+[limit(3; recurse(.a))]
+{"a":{"a":1}}
+[{"a":{"a":1}},{"a":1},1]
