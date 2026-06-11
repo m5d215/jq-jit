@@ -392,8 +392,11 @@ pub fn call_builtin_op(op: RtBuiltin, args: &[Value]) -> Result<Value> {
             Ok(v.clone())
         }),
         RtBuiltin::Input | RtBuiltin::Inputs => {
-            // These need special handling with the input source
-            Ok(Value::Null)
+            // Wired to the input source in the engines (Expr::ReadInput /
+            // Expr::ReadInputs); reaching the value dispatcher means a
+            // lowering routed them here by mistake. Fail loudly instead of
+            // yielding a silent null (#1034 placeholder audit).
+            bail!("{} is not value-dispatchable (input source required)", op.name())
         }
         RtBuiltin::Now => Ok(Value::number(std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -515,10 +518,13 @@ pub fn call_builtin_op(op: RtBuiltin, args: &[Value]) -> Result<Value> {
                 bail!("{} requires 3 arguments", op.name());
             }
         }
-        RtBuiltin::Limit => binary_arg(args, |_a, _b| {
-            // limit needs special handling as a generator
-            Ok(Value::Null)
-        }),
+        RtBuiltin::Limit => {
+            // A generator builtin: the engines lower `limit` structurally
+            // (Expr::Limit). Reaching the value dispatcher means a lowering
+            // routed it here by mistake — fail loudly instead of yielding a
+            // silent null (#1034 placeholder audit).
+            bail!("{} is not value-dispatchable (generator)", op.name())
+        }
         RtBuiltin::RangeBoundsGuard => {
             // JIT-only (#1084): the range loops run on unboxed f64 counters
             // that silently coerce non-numbers, so validate the bounds with
@@ -554,15 +560,20 @@ pub fn call_builtin_op(op: RtBuiltin, args: &[Value]) -> Result<Value> {
                     }
                 }
                 RtBuiltin::Delpaths => binary_arg(args, rt_delpaths),
-                _ => Ok(Value::Null),
+                // Generator builtins (first/last/nth/range/while/until/
+                // repeat/recurse) are lowered structurally by the engines;
+                // see the Limit arm (#1034 placeholder audit).
+                _ => bail!("{} is not value-dispatchable (generator)", op.name()),
             }
         }
-        RtBuiltin::SortBy | RtBuiltin::GroupBy | RtBuiltin::UniqueBy | RtBuiltin::MinBy | RtBuiltin::MaxBy => {
-            // Closure-based operations need special handling
-            Ok(args.first().cloned().unwrap_or(Value::Null))
-        }
-        RtBuiltin::Map | RtBuiltin::Select | RtBuiltin::MapValues | RtBuiltin::WithEntries => {
-            Ok(args.first().cloned().unwrap_or(Value::Null))
+        RtBuiltin::SortBy | RtBuiltin::GroupBy | RtBuiltin::UniqueBy | RtBuiltin::MinBy | RtBuiltin::MaxBy
+        | RtBuiltin::Map | RtBuiltin::Select | RtBuiltin::MapValues | RtBuiltin::WithEntries => {
+            // Closure-taking builtins run through their dedicated
+            // dispatchers (__sortby__-style closure ops / structural
+            // lowering). The old placeholder returned the input unchanged —
+            // a silent wrong answer if ever reached. Fail loudly (#1034
+            // placeholder audit).
+            bail!("{} is not value-dispatchable (closure argument)", op.name())
         }
         // flatten with depth already handled above
         RtBuiltin::Pow => ternary_arg(args, rt_pow),
@@ -997,6 +1008,9 @@ pub fn errdesc_pub(v: &Value) -> String { errdesc(v) }
 /// error (e.g. `1 + "a"`) returns `None` so the runtime error surfaces
 /// normally. Returns the folded value, or `None` when the expression is not a
 /// compile-time constant under jq's rules.
+///
+/// Audited for #1034: `None` is genuine absence ("not a constant"), not a
+/// swallowed error — fold-rejected expressions evaluate normally at runtime.
 pub fn const_fold(expr: &crate::ir::Expr) -> Option<Value> {
     use crate::ir::{BinOp, Expr, Literal};
     use std::cmp::Ordering;
@@ -4187,6 +4201,9 @@ fn time_arr_to_broken(a: &[Value]) -> Result<BrokenTime> {
 /// matching libc's `timegm` calendar walk: `mday=0` rolls back a day,
 /// `mon=12` rolls forward a year, and so on. Returns `None` if year/mon
 /// land outside chrono's representable range.
+///
+/// Audited for #1034: `None` is genuine absence (unrepresentable datetime),
+/// not a swallowed error — the caller attaches jq's canonical message.
 fn mktime_normalize(t: &BrokenTime) -> Option<chrono::NaiveDateTime> {
     use chrono::{Duration, NaiveDate};
     let mut year = t.year;
@@ -4500,6 +4517,9 @@ fn rt_strptime(v: &Value, fmt: &Value) -> Result<Value> {
 /// conflict. Returns `None` if any item fails to match, an out-of-range field
 /// is seen, or input is left over (trailing garbage) — all of which jq treats
 /// as an error.
+///
+/// Audited for #1034: every `None` cause maps to the single canonical
+/// "does not match format" error at the caller — nothing is swallowed.
 fn strptime_last_wins(s: &str, f: &str) -> Option<BrokenTime> {
     use chrono::format::{parse_and_remainder, Parsed, StrftimeItems};
     // Each item parses against the remaining input with its own `Parsed`, so a
