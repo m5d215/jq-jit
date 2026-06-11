@@ -127,9 +127,12 @@ JIT_INTERP_DIFF_LIMIT=200 cargo test --release --test selfdiff_jit_interp -- --n
 新しい fast path を足した直後 / 既存の fast path を弄った直後はこれが落ちる
 ことがある。落ちたら基本的に「fast path 側が正しい」（差分テストで jq と
 照合済み）／「interpreter 側が drift してる」のどちらか。両側を直すか、
-どうしても今すぐ直せない invariant 違反は `KNOWN_DIVERGENCES` に line 番号と
-理由を書いて allowlist する。allowlist は audit trail なので、ケースを直したら
-必ずエントリも消す（ハーネスは「known なのに今 pass した」も検知して落ちる）。
+どうしても今すぐ直せない invariant 違反は `KNOWN_DIVERGENCES` に
+`(filter, input)` の content key と理由を書いて allowlist する（#1026 で
+line 番号 key から移行済み — regression.test はどこに挿入してもよい）。
+allowlist は audit trail なので、ケースを直したら必ずエントリも消す
+（ハーネスは「known なのに今 pass した」と「どのケースにもマッチしない
+エントリ」の両方を検知して落ちる）。
 
 ### JitOp backend self-diff（`tests/selfdiff_jitop_backend.rs` / #1059）
 

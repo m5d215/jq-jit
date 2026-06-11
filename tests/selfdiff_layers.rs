@@ -215,13 +215,30 @@ fn normalize(output: &str) -> String {
 /// (`tests/selfdiff_jit_interp.rs`). The 4-way harness inherits these so
 /// known upstream-tracked divergences do not double-fail. Keep in sync
 /// with `selfdiff_jit_interp.rs::KNOWN_DIVERGENCES`.
-const KNOWN_DIVERGENCES: &[usize] = &[2230, 2235, 2240, 2366, 2371];
+///
+/// Entries are keyed by `(filter, input)` content — not
+/// `tests/regression.test` line numbers — so the corpus can be edited
+/// anywhere without renumbering the allowlist (#1026).
+const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
+    ("tojson", "1e1000"),
+    ("tojson", "[1.5e-10, 1e1000, 17.5]"),
+    ("tojson", r#"{"a": 1.5e-10, "b": 1e1000}"#),
+    ("tojson", "-1e1000"),
+];
+
+/// Index of the allowlist entry matching this case's content, if any.
+fn known_divergence_idx(case: &Case) -> Option<usize> {
+    KNOWN_DIVERGENCES
+        .iter()
+        .position(|&(f, i)| f == case.filter && i == case.input)
+}
 
 /// Per-case verdict, produced in parallel and folded sequentially so the
 /// counters and reporting stay identical to the original serial loop.
 enum Outcome {
-    /// Agreed across all configs. `Some(line)` if the case is on the allowlist
-    /// yet agreed anyway — counts as a pass *and* flags a stale entry.
+    /// Agreed across all configs. `Some(idx)` if the case matches allowlist
+    /// entry `idx` yet agreed anyway — counts as a pass *and* flags a stale
+    /// entry.
     Pass(Option<usize>),
     KnownDiverged,
     SpawnFail(String),
@@ -238,10 +255,27 @@ fn layer_pinned_self_diff() {
     let mut cases = parse_corpus(&content);
     assert!(!cases.is_empty(), "regression corpus is empty");
 
+    let mut limited = false;
     if let Ok(limit) = std::env::var("JIT_INTERP_DIFF_LIMIT") {
         if let Ok(n) = limit.parse::<usize>() {
             cases.truncate(n);
+            limited = true;
         }
+    }
+
+    // Every allowlist entry must match at least one corpus case, or it is
+    // dead weight (e.g. the case was rewritten without updating the entry).
+    // Skipped under JIT_INTERP_DIFF_LIMIT — truncation drops cases.
+    if !limited {
+        let dangling: Vec<&(&str, &str)> = KNOWN_DIVERGENCES
+            .iter()
+            .filter(|(f, i)| !cases.iter().any(|c| c.filter == *f && c.input == *i))
+            .collect();
+        assert!(
+            dangling.is_empty(),
+            "KNOWN_DIVERGENCES entries match no corpus case (filter, input): {:?}",
+            dangling
+        );
     }
 
     let mut pass = 0usize;
@@ -255,7 +289,7 @@ fn layer_pinned_self_diff() {
     // config); no shared in-process state, so fan out across cores and fold
     // the verdicts back in input order.
     let outcomes = common::parallel::par_map(&cases, |case| {
-        let known = KNOWN_DIVERGENCES.contains(&case.line);
+        let known = known_divergence_idx(case);
 
         // Run all four configs. Baseline is the oracle every other config
         // is compared against.
@@ -291,9 +325,9 @@ fn layer_pinned_self_diff() {
         }
 
         if disagreeing.is_empty() {
-            return Outcome::Pass(known.then_some(case.line));
+            return Outcome::Pass(known);
         }
-        if known {
+        if known.is_some() {
             return Outcome::KnownDiverged;
         }
 
@@ -331,10 +365,10 @@ fn layer_pinned_self_diff() {
 
     for outcome in outcomes {
         match outcome {
-            Outcome::Pass(maybe_line) => {
+            Outcome::Pass(maybe_idx) => {
                 pass += 1;
-                if let Some(line) = maybe_line {
-                    unexpected_pass.push(line);
+                if let Some(idx) = maybe_idx {
+                    unexpected_pass.push(idx);
                 }
             }
             Outcome::KnownDiverged => known_diverged += 1,
@@ -374,9 +408,15 @@ fn layer_pinned_self_diff() {
         cases.len(),
     );
 
+    unexpected_pass.sort_unstable();
+    unexpected_pass.dedup();
+    let stale: Vec<&(&str, &str)> = unexpected_pass
+        .iter()
+        .map(|&idx| &KNOWN_DIVERGENCES[idx])
+        .collect();
     assert!(
-        unexpected_pass.is_empty(),
-        "KNOWN_DIVERGENCES is stale — these line(s) now agree across all four configs and should be removed (also check `selfdiff_jit_interp.rs::KNOWN_DIVERGENCES`): {:?}",
-        unexpected_pass,
+        stale.is_empty(),
+        "KNOWN_DIVERGENCES is stale — these entries now agree across all four configs and should be removed (also check `selfdiff_jit_interp.rs::KNOWN_DIVERGENCES`, filter, input): {:?}",
+        stale,
     );
 }
