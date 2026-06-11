@@ -191,7 +191,16 @@ downstream early-stop が保たれる（旧 eager delegate の #1085 hang は
 再発しない）。委譲しない条件（**拒否時は `has_unresolved_recursion` で
 全体 bail を強制** — ignored-false 文脈で op が落ちる #1093 パターン防止）:
 
-- `limit(n; …)` 内（per-yield counter が helper 内で回せない）
+- `limit(n; …)` 内は **install depth が一致する場合のみ委譲可**（#1059 PR-B）。
+  op が counter/limit var を持ち、backend が残 budget（limit - counter）を
+  helper に渡して eval を lazy 停止 → 戻り値 `yields+1` で counter を
+  まとめて進め、budget 消費時は done label へ jump（pending error がある時は
+  jump せず後続の CheckError に落とす）。budget 付き委譲は無限 generator
+  でも有限なので push-mode の Repeat/FuncCall ガードも免除される
+  （`[limit(1; repeat(7))]` が委譲で動く）。**install depth と異なる
+  collect 深度**（limit 配下の合成 collect 内）は budget が数えられないので
+  従来どおり bail。Limit arm の pre-check は placeholder limit_state を
+  立てて probe する（probe/real の文脈ずれ防止）
 - サブツリーに `break`（委譲境界を越える break は label に戻れない）
 - **push mode（collect 文脈）で無限になり得るサブツリー**
   （Repeat/While/Until/Recurse、および再帰 def の `FuncCall`）— pipe
