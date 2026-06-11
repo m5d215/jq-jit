@@ -4560,7 +4560,17 @@ impl Flattener {
                 ok
             }
             _ => {
-                // Generic fallback: collect all outputs, then iterate
+                // Generic fallback: collect all outputs, then iterate.
+                // Refuse a potentially-infinite gen_expr — the eager
+                // collect would hang where eval stays lazy (#1059 PR-H).
+                // The flag forces the whole-filter bail even from callers
+                // that ignore the return value (#683 pattern); the pipe
+                // arm delegates before reaching here, so this is the
+                // backstop for the remaining each_output callers.
+                if Self::gen_may_be_unbounded(gen_expr) {
+                    self.has_unresolved_recursion = true;
+                    return false;
+                }
                 // Pre-check: can we compile gen_expr?
                 {
                     let mut test = self.test_flattener();
@@ -4649,6 +4659,24 @@ impl Flattener {
 
         self.emit(JitOp::Label { id: done_label });
         true
+    }
+
+    /// True when a generator may produce unboundedly many outputs:
+    /// carries a loop marker (Repeat/While/Until/Recurse) in its Debug
+    /// form, except a whole-node recursive descent with a data-bounded
+    /// step (finite on any finite document, PR-D). Used to keep
+    /// potentially-infinite generators out of the *eager* collect
+    /// fallbacks — an eager collect of `repeat(7) | …` hangs where eval
+    /// (and jq) stop lazily under `limit`/`first` (#1059 PR-H).
+    fn gen_may_be_unbounded(e: &Expr) -> bool {
+        if let Expr::Recurse { input_expr } = e {
+            if Self::recurse_step_is_data_bounded(input_expr) {
+                return false;
+            }
+        }
+        let dbg = format!("{:?}", e);
+        dbg.contains("Repeat") || dbg.contains("While") || dbg.contains("Until")
+            || dbg.contains("Recurse")
     }
 
     /// Delegate `left | right` wholesale when a pipe arm cannot lower the
@@ -4950,6 +4978,17 @@ impl Flattener {
 
             // Generic fallback: for any generator left, iterate its outputs and apply right
             _ => {
+                // A potentially-infinite left would be eagerly collected by
+                // the each_output fallback below, hanging where eval stops
+                // lazily (`first(repeat(7) | .+1)` = `limit(1; …)` — the
+                // pre-existing forced-mode hang). Delegate the composition
+                // instead: under a limit the delegate carries the yield
+                // budget (PR-B) and stops lazily; in an unbudgeted push
+                // context the delegate guard rejects and the filter bails
+                // to eval (#1059 PR-H).
+                if Self::gen_may_be_unbounded(left) {
+                    return self.delegate_pipe(left, right, input_slot);
+                }
                 // Pre-check: can we compile both left and right? Skipped when
                 // we're already in a probe pass (#641 — see IfThenElse case).
                 if !self.is_test {

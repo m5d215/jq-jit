@@ -14057,3 +14057,33 @@ import "issue_638" as M; M::f
 . as $x | def f: if . < 1 then $x else (.-1)|f end; path(f)
 0
 []
+
+# #1059 PR-H: lazy stop over an infinite pipe-left (was a forced-mode hang)
+first(repeat(7) | .+1)
+null
+8
+
+# #1059 PR-H: isempty over an infinite generator stops at the first output
+isempty(repeat(1))
+null
+false
+
+# #1059 PR-H: limit budget over an infinite pipe-left composition
+[limit(3; repeat(5) | .+1)]
+null
+[6,6,6]
+
+# #1059 PR-H: while-driven infinite pipe-left under first
+first(while(true; .+1) | . * 2)
+0
+0
+
+# #1059 PR-H: computational recurse pipe-left under a limit budget
+[limit(2; recurse(.+1) | tostring)]
+0
+["0","1"]
+
+# #1059 PR-H: data-bounded descent pipe keeps the native eager collect
+[.. | numbers]
+{"a":1,"b":[2,3]}
+[1,2,3]
