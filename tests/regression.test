@@ -13872,3 +13872,58 @@ null
 [limit(3; recurse(.a))]
 {"a":{"a":1}}
 [{"a":{"a":1}},{"a":1},1]
+
+# #1059 PR-E: var bound inside a delegated path() keeps eval provenance
+path(. as [$a] | $a)
+[5]
+[0]
+
+# #1059 PR-E: whole-binding delegation when the bound var feeds path()
+. as $x | path($x)
+{"x":{"y":1}}
+[]
+
+# #1059 PR-E: bound var navigated further inside path()
+. as $x | path($x | .a)
+{"a":1}
+["a"]
+
+# #1059 PR-E: shadowing — outer free var bubbles to the enclosing binding's delegation
+. as $y | (. as $x | path($y))
+{"a":1}
+[]
+
+# #1059 PR-E: destructuring chain bound inside del()
+del(. as [$a] | $a)
+[5,6]
+[6]
+
+# #1059 PR-E: nested object destructuring inside path()
+path(. as {x:{y:$a}} | $a)
+{"x":{"y":1}}
+["x","y"]
+
+# #1059 PR-E: ?// alternative destructuring inside path()
+path(. as [$a] ?// $a | .x)
+{"x":1}
+["x"]
+
+# #1059 PR-E: foreach element var inside a collected path()
+[path(foreach .[] as $x (0; .; $x.b))]
+[{"b":1}]
+[[0,"b"]]
+
+# #1059 PR-E: multiple outputs from one delegated binding scope
+[path(. as [$a] | $a, $a)]
+[5]
+[[0],[0]]
+
+# #1059 PR-E: nth lowering (binding scope) inside path()
+path(nth(2; .[]))
+[1,2,3]
+[2]
+
+# #1059 PR-E: recursive def closing over an outer var must not delegate inside path()
+. as $x | def f: if . < 1 then $x else (.-1)|f end; path(f)
+0
+[]

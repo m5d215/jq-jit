@@ -774,6 +774,9 @@ struct Flattener {
     /// Cached verdict of `funcs_bodies_block_delegation` (the function
     /// table is fixed for the lifetime of a Flattener).
     funcs_body_block: Option<bool>,
+    /// Cached verdict of `funcs_bodies_close_over_vars` (same lifetime
+    /// argument as `funcs_body_block`).
+    funcs_body_closure: Option<bool>,
 }
 
 impl Flattener {
@@ -785,7 +788,8 @@ impl Flattener {
                      expanding_funcs: HashSet::new(), value_constants: Vec::new(),
                      is_test: false, has_unresolved_recursion: false,
                      emitted_delegate: false, inline_exempt: HashSet::new(),
-                     recursion_detected: HashSet::new(), funcs_body_block: None }
+                     recursion_detected: HashSet::new(), funcs_body_block: None,
+                     funcs_body_closure: None }
     }
 
     /// Materialize a Literal into a heap-allocated Value and return a stable pointer.
@@ -824,6 +828,7 @@ impl Flattener {
         t.has_unresolved_recursion = self.has_unresolved_recursion;
         t.inline_exempt = self.inline_exempt.clone();
         t.funcs_body_block = self.funcs_body_block;
+        t.funcs_body_closure = self.funcs_body_closure;
         t
     }
 
@@ -1292,6 +1297,25 @@ impl Flattener {
         b
     }
 
+    /// True when some function body closes over an outer `$var` (a free
+    /// variable that is not one of the function's own params). A delegated
+    /// path-semantic expression reaches such a body through the funcs
+    /// table, where the var arrives as a value-only seed with no path
+    /// provenance — the same hazard the free-var check on the delegated
+    /// expression guards against, invisible to that walk (#1059 PR-E).
+    /// Params are exempt: eval binds them at the call site inside the
+    /// delegate, provenance intact.
+    fn funcs_bodies_close_over_vars(&mut self) -> bool {
+        if let Some(b) = self.funcs_body_closure { return b; }
+        let b = self.funcs.iter().any(|f| {
+            Self::expr_free_vars(&f.body)
+                .iter()
+                .any(|v| !f.param_vars.contains(v))
+        });
+        self.funcs_body_closure = Some(b);
+        b
+    }
+
     /// Emit a streaming eval delegation for `expr` (#1059 Phase 3), or
     /// return false when the context cannot host one:
     ///
@@ -1314,11 +1338,17 @@ impl Flattener {
     ///   function body contains `break` / path-semantic nodes (see
     ///   `funcs_bodies_block_delegation`).
     /// - `path_semantic` nodes (`path(...)`, `del(...)`, `pick(...)`)
-    ///   referencing any `$var`: the env seeding copies plain values, but
-    ///   eval's path provenance (#880/#953) also tracks *where* a variable
-    ///   was bound from — `. as $x | path($x)` is `[]` in eval and an
-    ///   "Invalid path expression" through a value-only seed. Value-semantic
-    ///   delegates (walk/skip/add) are fine with value seeding.
+    ///   referencing a *free* `$var`: the env seeding copies plain values,
+    ///   but eval's path provenance (#880/#953) also tracks *where* a
+    ///   variable was bound from — `. as $x | path($x)` is `[]` in eval and
+    ///   an "Invalid path expression" through a value-only seed. A var
+    ///   bound *inside* the delegated subtree (`path(. as [$a] | $a)`,
+    ///   foreach/reduce element vars) is fine — eval performs the binding
+    ///   itself, provenance intact (#1059 PR-E). Function bodies reached
+    ///   through the funcs table are invisible to the free-var walk, so a
+    ///   body closing over an outer var rejects the whole delegate
+    ///   (`funcs_bodies_close_over_vars`). Value-semantic delegates
+    ///   (walk/skip/add) are fine with value seeding either way.
     /// True for a recurse step whose every output is a strict subtree of
     /// its input (possibly select-filtered): iterating such a step
     /// terminates on any finite JSON document, so a delegated
@@ -1432,9 +1462,9 @@ impl Flattener {
             }
         }
         if !rejected && path_semantic {
-            let mut vars = Vec::new();
-            Self::collect_loadvar_indices(expr, &mut vars);
-            rejected = !vars.is_empty();
+            rejected = !Self::expr_free_vars(expr).is_empty()
+                || (format!("{:?}", expr).contains("FuncCall")
+                    && self.funcs_bodies_close_over_vars());
         }
         if rejected {
             self.has_unresolved_recursion = true;
@@ -3060,6 +3090,34 @@ impl Flattener {
             }
 
             Expr::LetBinding { var_index, value, body } => {
+                // A binding whose body needs eval's path provenance for the
+                // bound var (`. as $x | path($x)`) cannot flatten natively,
+                // and delegating just the *body* would seed `$x` by value,
+                // losing the provenance. Delegating the whole binding scope
+                // lets eval perform the binding itself (#1059 PR-E). Probe
+                // on a discardable test flattener first — the native arm
+                // below has already emitted ops by the time the body fails
+                // (same shape as the scalar-Reduce interception, #683).
+                // Gated on a path-semantic marker so the common binding
+                // skips the probe; `path_semantic: true` engages the
+                // free-var check, which bubbles a still-free outer var
+                // (`. as $y | (. as $x | path($y))`) up to the enclosing
+                // binding's interception.
+                if !self.is_test {
+                    let dbg = format!("{:?}", expr);
+                    if dbg.contains("PathExpr") || dbg.contains("Del")
+                        || dbg.contains("Pick") || dbg.contains("Paths") {
+                        let mut test = self.test_flattener();
+                        test.has_unresolved_recursion = false;
+                        let t_in = test.alloc_slot();
+                        let ok = test.flatten_gen(expr, t_in);
+                        if (!ok || test.has_unresolved_recursion)
+                            && self.emit_delegate_gen(expr, input_slot, true)
+                        {
+                            return true;
+                        }
+                    }
+                }
                 if is_scalar(value) {
                     let val = self.flatten_scalar(value, input_slot);
                     let old = self.alloc_slot();
@@ -5628,157 +5686,185 @@ impl Flattener {
     /// variant here silently loses any `$var` buried inside and degrades the
     /// delegated call to `null`.
     fn collect_loadvar_indices(expr: &Expr, out: &mut Vec<VarIdx>) {
+        let mut binders = Vec::new();
+        Self::collect_vars(expr, out, &mut binders);
+    }
+
+    /// The *free* variables of `expr`: `$var` references whose binder lies
+    /// outside the subtree. The parser allocates a fresh `VarIdx` per
+    /// binder (`next_var` is monotonic), so set difference against the
+    /// binders collected in the same walk is scope-exact — a shadowing
+    /// inner `as $x` has a different index than the outer one (#1059 PR-E).
+    fn expr_free_vars(expr: &Expr) -> Vec<VarIdx> {
+        let mut refs = Vec::new();
+        let mut binders = Vec::new();
+        Self::collect_vars(expr, &mut refs, &mut binders);
+        refs.retain(|v| !binders.contains(v));
+        refs
+    }
+
+    /// Shared walk behind `collect_loadvar_indices` / `expr_free_vars`:
+    /// every `LoadVar` index goes into `refs`, every binder-introduced
+    /// index (`as $x`, reduce/foreach element and accumulator vars) into
+    /// `binders`. Label vars are a separate namespace (`Break` carries the
+    /// label index outside any `LoadVar`) and are not collected.
+    fn collect_vars(expr: &Expr, refs: &mut Vec<VarIdx>, binders: &mut Vec<VarIdx>) {
         use crate::ir::StringPart;
         match expr {
             Expr::LoadVar { var_index } => {
-                if !out.contains(var_index) { out.push(*var_index); }
+                if !refs.contains(var_index) { refs.push(*var_index); }
             }
             Expr::Input | Expr::Empty | Expr::Literal(_) | Expr::Not
             | Expr::Loc { .. } | Expr::Env | Expr::Builtins
             | Expr::ReadInput | Expr::ReadInputs
             | Expr::ModuleMeta | Expr::GenLabel => {}
             Expr::BinOp { lhs, rhs, .. } => {
-                Self::collect_loadvar_indices(lhs, out);
-                Self::collect_loadvar_indices(rhs, out);
+                Self::collect_vars(lhs, refs, binders);
+                Self::collect_vars(rhs, refs, binders);
             }
             Expr::UnaryOp { operand, .. } | Expr::Negate { operand } => {
-                Self::collect_loadvar_indices(operand, out);
+                Self::collect_vars(operand, refs, binders);
             }
             Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => {
-                Self::collect_loadvar_indices(expr, out);
-                Self::collect_loadvar_indices(key, out);
+                Self::collect_vars(expr, refs, binders);
+                Self::collect_vars(key, refs, binders);
             }
             Expr::Pipe { left, right } | Expr::Comma { left, right } => {
-                Self::collect_loadvar_indices(left, out);
-                Self::collect_loadvar_indices(right, out);
+                Self::collect_vars(left, refs, binders);
+                Self::collect_vars(right, refs, binders);
             }
             Expr::IfThenElse { cond, then_branch, else_branch } => {
-                Self::collect_loadvar_indices(cond, out);
-                Self::collect_loadvar_indices(then_branch, out);
-                Self::collect_loadvar_indices(else_branch, out);
+                Self::collect_vars(cond, refs, binders);
+                Self::collect_vars(then_branch, refs, binders);
+                Self::collect_vars(else_branch, refs, binders);
             }
             Expr::TryCatch { try_expr, catch_expr, .. } => {
-                Self::collect_loadvar_indices(try_expr, out);
-                Self::collect_loadvar_indices(catch_expr, out);
+                Self::collect_vars(try_expr, refs, binders);
+                Self::collect_vars(catch_expr, refs, binders);
             }
             Expr::Each { input_expr } | Expr::EachOpt { input_expr }
             | Expr::Recurse { input_expr } => {
-                Self::collect_loadvar_indices(input_expr, out);
+                Self::collect_vars(input_expr, refs, binders);
             }
-            Expr::LetBinding { value, body, .. } => {
-                Self::collect_loadvar_indices(value, out);
-                Self::collect_loadvar_indices(body, out);
+            Expr::LetBinding { var_index, value, body } => {
+                if !binders.contains(var_index) { binders.push(*var_index); }
+                Self::collect_vars(value, refs, binders);
+                Self::collect_vars(body, refs, binders);
             }
-            Expr::Reduce { source, init, update, .. } => {
-                Self::collect_loadvar_indices(source, out);
-                Self::collect_loadvar_indices(init, out);
-                Self::collect_loadvar_indices(update, out);
+            Expr::Reduce { source, init, update, var_index, acc_index } => {
+                if !binders.contains(var_index) { binders.push(*var_index); }
+                if !binders.contains(acc_index) { binders.push(*acc_index); }
+                Self::collect_vars(source, refs, binders);
+                Self::collect_vars(init, refs, binders);
+                Self::collect_vars(update, refs, binders);
             }
-            Expr::Foreach { source, init, update, extract, .. } => {
-                Self::collect_loadvar_indices(source, out);
-                Self::collect_loadvar_indices(init, out);
-                Self::collect_loadvar_indices(update, out);
-                if let Some(e) = extract { Self::collect_loadvar_indices(e, out); }
+            Expr::Foreach { source, init, update, extract, var_index, acc_index } => {
+                if !binders.contains(var_index) { binders.push(*var_index); }
+                if !binders.contains(acc_index) { binders.push(*acc_index); }
+                Self::collect_vars(source, refs, binders);
+                Self::collect_vars(init, refs, binders);
+                Self::collect_vars(update, refs, binders);
+                if let Some(e) = extract { Self::collect_vars(e, refs, binders); }
             }
-            Expr::Collect { generator } => Self::collect_loadvar_indices(generator, out),
+            Expr::Collect { generator } => Self::collect_vars(generator, refs, binders),
             Expr::ObjectConstruct { pairs } => {
                 for (k, v) in pairs {
-                    Self::collect_loadvar_indices(k, out);
-                    Self::collect_loadvar_indices(v, out);
+                    Self::collect_vars(k, refs, binders);
+                    Self::collect_vars(v, refs, binders);
                 }
             }
             Expr::Alternative { primary, fallback } => {
-                Self::collect_loadvar_indices(primary, out);
-                Self::collect_loadvar_indices(fallback, out);
+                Self::collect_vars(primary, refs, binders);
+                Self::collect_vars(fallback, refs, binders);
             }
             Expr::Range { from, to, step } => {
-                Self::collect_loadvar_indices(from, out);
-                Self::collect_loadvar_indices(to, out);
-                if let Some(s) = step { Self::collect_loadvar_indices(s, out); }
+                Self::collect_vars(from, refs, binders);
+                Self::collect_vars(to, refs, binders);
+                if let Some(s) = step { Self::collect_vars(s, refs, binders); }
             }
-            Expr::Label { body, .. } => Self::collect_loadvar_indices(body, out),
-            Expr::Break { value, .. } => Self::collect_loadvar_indices(value, out),
+            Expr::Label { body, .. } => Self::collect_vars(body, refs, binders),
+            Expr::Break { value, .. } => Self::collect_vars(value, refs, binders),
             Expr::Update { path_expr, update_expr } => {
-                Self::collect_loadvar_indices(path_expr, out);
-                Self::collect_loadvar_indices(update_expr, out);
+                Self::collect_vars(path_expr, refs, binders);
+                Self::collect_vars(update_expr, refs, binders);
             }
             Expr::Assign { path_expr, value_expr } => {
-                Self::collect_loadvar_indices(path_expr, out);
-                Self::collect_loadvar_indices(value_expr, out);
+                Self::collect_vars(path_expr, refs, binders);
+                Self::collect_vars(value_expr, refs, binders);
             }
             Expr::Mutate { path_expr, value_expr, .. } => {
-                Self::collect_loadvar_indices(path_expr, out);
-                Self::collect_loadvar_indices(value_expr, out);
+                Self::collect_vars(path_expr, refs, binders);
+                Self::collect_vars(value_expr, refs, binders);
             }
-            Expr::PathExpr { expr } => Self::collect_loadvar_indices(expr, out),
+            Expr::PathExpr { expr } => Self::collect_vars(expr, refs, binders),
             Expr::SetPath { path, value } => {
-                Self::collect_loadvar_indices(path, out);
-                Self::collect_loadvar_indices(value, out);
+                Self::collect_vars(path, refs, binders);
+                Self::collect_vars(value, refs, binders);
             }
-            Expr::GetPath { path } => Self::collect_loadvar_indices(path, out),
-            Expr::DelPaths { paths } => Self::collect_loadvar_indices(paths, out),
+            Expr::GetPath { path } => Self::collect_vars(path, refs, binders),
+            Expr::DelPaths { paths } => Self::collect_vars(paths, refs, binders),
             Expr::FuncCall { args, .. } => {
-                for a in args { Self::collect_loadvar_indices(a, out); }
+                for a in args { Self::collect_vars(a, refs, binders); }
             }
             Expr::StringInterpolation { parts } => {
                 for p in parts {
-                    if let StringPart::Expr(e) = p { Self::collect_loadvar_indices(e, out); }
+                    if let StringPart::Expr(e) = p { Self::collect_vars(e, refs, binders); }
                 }
             }
             Expr::Limit { count, generator } => {
-                Self::collect_loadvar_indices(count, out);
-                Self::collect_loadvar_indices(generator, out);
+                Self::collect_vars(count, refs, binders);
+                Self::collect_vars(generator, refs, binders);
             }
             Expr::While { cond, update } | Expr::Until { cond, update } => {
-                Self::collect_loadvar_indices(cond, out);
-                Self::collect_loadvar_indices(update, out);
+                Self::collect_vars(cond, refs, binders);
+                Self::collect_vars(update, refs, binders);
             }
-            Expr::Repeat { update } => Self::collect_loadvar_indices(update, out),
+            Expr::Repeat { update } => Self::collect_vars(update, refs, binders),
             Expr::AllShort { generator, predicate }
             | Expr::AnyShort { generator, predicate } => {
-                Self::collect_loadvar_indices(generator, out);
-                Self::collect_loadvar_indices(predicate, out);
+                Self::collect_vars(generator, refs, binders);
+                Self::collect_vars(predicate, refs, binders);
             }
             Expr::Error { msg } => {
-                if let Some(m) = msg { Self::collect_loadvar_indices(m, out); }
+                if let Some(m) = msg { Self::collect_vars(m, refs, binders); }
             }
-            Expr::Format { expr, .. } => Self::collect_loadvar_indices(expr, out),
+            Expr::Format { expr, .. } => Self::collect_vars(expr, refs, binders),
             Expr::ClosureOp { input_expr, key_expr, .. } => {
-                Self::collect_loadvar_indices(input_expr, out);
-                Self::collect_loadvar_indices(key_expr, out);
+                Self::collect_vars(input_expr, refs, binders);
+                Self::collect_vars(key_expr, refs, binders);
             }
             Expr::RegexTest { input_expr, re, flags }
             | Expr::RegexMatch { input_expr, re, flags }
             | Expr::RegexCapture { input_expr, re, flags }
             | Expr::RegexScan { input_expr, re, flags } => {
-                Self::collect_loadvar_indices(input_expr, out);
-                Self::collect_loadvar_indices(re, out);
-                Self::collect_loadvar_indices(flags, out);
+                Self::collect_vars(input_expr, refs, binders);
+                Self::collect_vars(re, refs, binders);
+                Self::collect_vars(flags, refs, binders);
             }
             Expr::RegexSub { input_expr, re, tostr, flags }
             | Expr::RegexGsub { input_expr, re, tostr, flags } => {
-                Self::collect_loadvar_indices(input_expr, out);
-                Self::collect_loadvar_indices(re, out);
-                Self::collect_loadvar_indices(tostr, out);
-                Self::collect_loadvar_indices(flags, out);
+                Self::collect_vars(input_expr, refs, binders);
+                Self::collect_vars(re, refs, binders);
+                Self::collect_vars(tostr, refs, binders);
+                Self::collect_vars(flags, refs, binders);
             }
             Expr::AlternativeDestructure { alternatives } => {
-                for a in alternatives { Self::collect_loadvar_indices(a, out); }
+                for a in alternatives { Self::collect_vars(a, refs, binders); }
             }
             Expr::Slice { expr, from, to } => {
-                Self::collect_loadvar_indices(expr, out);
-                if let Some(f) = from { Self::collect_loadvar_indices(f, out); }
-                if let Some(t) = to { Self::collect_loadvar_indices(t, out); }
+                Self::collect_vars(expr, refs, binders);
+                if let Some(f) = from { Self::collect_vars(f, refs, binders); }
+                if let Some(t) = to { Self::collect_vars(t, refs, binders); }
             }
             Expr::Debug { expr } | Expr::Stderr { expr } => {
-                Self::collect_loadvar_indices(expr, out);
+                Self::collect_vars(expr, refs, binders);
             }
             Expr::CallBuiltin { args, .. } => {
-                for a in args { Self::collect_loadvar_indices(a, out); }
+                for a in args { Self::collect_vars(a, refs, binders); }
             }
             Expr::Memoize { key, body, .. } => {
-                if let Some(k) = key { Self::collect_loadvar_indices(k, out); }
-                Self::collect_loadvar_indices(body, out);
+                if let Some(k) = key { Self::collect_vars(k, refs, binders); }
+                Self::collect_vars(body, refs, binders);
             }
         }
     }

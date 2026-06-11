@@ -1,5 +1,6 @@
 //! Enforce maintenance.md §3 "JIT → eval 委譲時の env seeding":
-//! `Flattener::collect_loadvar_indices` (in `src/jit.rs`) must mention every
+//! `Flattener::collect_vars` (in `src/jit.rs`, the shared walk behind
+//! `collect_loadvar_indices` / `expr_free_vars`) must mention every
 //! `Expr` variant defined in `src/ir.rs`.
 //!
 //! Every JIT→eval closure-op dispatcher walks the delegated expression with
@@ -9,7 +10,7 @@
 //! arg, ...) and the closure op runs against a `null`-shaped env.
 //!
 //! This test parses the `Expr` enum out of `src/ir.rs` and the body of
-//! `collect_loadvar_indices` out of `src/jit.rs`, then asserts that every
+//! `collect_vars` out of `src/jit.rs`, then asserts that every
 //! variant name appears at least once in the function body — either in an
 //! explicit recurse arm or in a no-children leaf arm. Add a new variant and
 //! forget to extend the walker → this test fails with the missing names.
@@ -102,7 +103,7 @@ fn collect_loadvar_indices_covers_every_expr_variant() {
         variants.len(), variants,
     );
 
-    let body = extract_fn_body(&jit_src, "collect_loadvar_indices");
+    let body = extract_fn_body(&jit_src, "collect_vars");
 
     let mut missing: Vec<&str> = Vec::new();
     for v in &variants {
@@ -113,19 +114,19 @@ fn collect_loadvar_indices_covers_every_expr_variant() {
     }
 
     eprintln!();
-    eprintln!("=== `collect_loadvar_indices` Expr exhaustiveness ===");
+    eprintln!("=== `collect_vars` Expr exhaustiveness ===");
     eprintln!("parsed Expr variants:  {}", variants.len());
     eprintln!("walker mentions:       {}", variants.len() - missing.len());
 
     if !missing.is_empty() {
         eprintln!();
-        eprintln!("=== Expr variants missing from `collect_loadvar_indices` ===");
+        eprintln!("=== Expr variants missing from `collect_vars` ===");
         for v in &missing {
             eprintln!("  Expr::{}", v);
         }
         eprintln!();
         eprintln!("Every variant must appear at least once in");
-        eprintln!("`Flattener::collect_loadvar_indices` (src/jit.rs). For variants");
+        eprintln!("`Flattener::collect_vars` (src/jit.rs). For variants");
         eprintln!("that hold sub-expressions, recurse into each one. For leaf");
         eprintln!("variants without sub-expressions, add them to the no-children");
         eprintln!("arm. Skipping a variant silently drops any `$var` buried inside");
@@ -136,7 +137,7 @@ fn collect_loadvar_indices_covers_every_expr_variant() {
 
     assert!(
         missing.is_empty(),
-        "collect_loadvar_indices missing {} Expr variant(s): {:?}",
+        "collect_vars missing {} Expr variant(s): {:?}",
         missing.len(), missing,
     );
 }
