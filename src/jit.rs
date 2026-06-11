@@ -128,19 +128,9 @@ fn jit_error_from_anyhow(e: &anyhow::Error) -> JitError {
     if let Some(b) = e.downcast_ref::<crate::signal::BreakError>() {
         return JitError::Break(b.0);
     }
-    let msg = format!("{}", e);
-    // Some eval paths still raise the legacy string encoding of an error
-    // *value* (`bail!("__jqerror__:{json}")` — e.g. limit's count type
-    // errors). Eval's own catch strips the prefix (see Expr::TryCatch in
-    // eval.rs); errors crossing the delegation boundary into a JIT catch
-    // must be lifted the same way or the catch body sees the raw wrapper
-    // (#1059 PR-F).
-    if let Some(json) = msg.strip_prefix("__jqerror__:") {
-        if let Ok(v) = crate::value::json_to_value(json) {
-            return JitError::Raise(v);
-        }
-    }
-    JitError::Msg(msg)
+    // Every `error(value)` raise in eval is a typed `ErrorValue` (#1034),
+    // so anything else is a plain message error — no sentinel parsing.
+    JitError::Msg(format!("{}", e))
 }
 
 fn set_jit_error(msg: String) {

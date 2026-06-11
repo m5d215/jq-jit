@@ -14087,3 +14087,8 @@ first(while(true; .+1) | . * 2)
 [.. | numbers]
 {"a":1,"b":[2,3]}
 [1,2,3]
+
+# #1034: typed error(value) channel — skip count errors bind losslessly in catch
+[try (skip(-1; 1)) catch ., try (skip("x"; 1)) catch .]
+null
+["skip doesn't support negative count","skip count must be a number"]
