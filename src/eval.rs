@@ -283,10 +283,17 @@ impl Env {
     /// Reset env state for reuse across multiple inputs.
     /// Keeps allocated buffers (vars, caches) but resets mutable state.
     pub fn reset(&mut self) {
-        // Only reset vars that were actually used (0..next_var), not all 65536
+        // Only reset vars that were actually used (0..next_var), not all
+        // 65536 — and skip slots that are already Null: per-record
+        // delegated-env resets (#1059) walk this every input, and the
+        // unconditional store paid a drop-check + cache-line dirty per
+        // slot for a region that is almost entirely Null after the first
+        // reset.
         let used = self.next_var as usize;
         for v in self.vars[..used].iter_mut() {
-            *v = Value::Null;
+            if !matches!(*v, Value::Null) {
+                *v = Value::Null;
+            }
         }
         self.next_label = 0;
         self.next_var = 256;
