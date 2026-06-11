@@ -237,6 +237,16 @@ stream 消費 builtin（`fromstream`/`truncate_stream`）は CallBuiltin の
 generator-arg LetBinding 書き換え（cartesian 意味論）から除外し、原型
 ノードごと委譲する。
 
+**失敗 arm の fall-through 委譲（#1059 PR-C）**: Reduce / Foreach / While /
+Repeat / Recurse の native arm が **op 未 emit の地点**（is_scalar pre-check
+や extract probe の失敗）で `return false` していた箇所は、whole-node の
+`emit_delegate_gen` に fall-through する。partial emission 後の false は
+対象外（ops 汚染、#1093）。また `is_scalar(Reduce)` が真でも source が
+flatten 不能なら flatten_scalar 内で flag が立つため、`flatten_gen` の
+scalar dispatch は Reduce だけ probe してから委譲に切り替える（再帰 def を
+reduce source に含む形がここに落ちる）。委譲可否は emit_delegate_gen の
+ガード（push-mode 無限 / limit budget / break / provenance）がそのまま裁く。
+
 **default dispatch は委譲プログラムをコンパイルしない**
 （`is_jit_compilable_with_funcs` が reject）。delegate 支配的な filter は
 whole-filter eval の方が速い（200k NDJSON A/B で委譲側が最大 ~1.1x 劣化、
