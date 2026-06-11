@@ -4981,7 +4981,7 @@ fn optimize_pipe(left: Expr, right: Expr) -> Expr {
                 // multi-valued branches like `range`/`.[]`/`recurse` would stream
                 // every value through the surrounding fold instead of being
                 // collected first (issue #152).
-                let all_single = elems.iter().all(crate::interpreter::is_single_valued_expr);
+                let all_single = elems.iter().all(crate::simplify::is_single_valued_expr);
                 if all_single && elems.len() >= 2 {
                     // Rewrite [a, b, c, ...] | add → a + b + c + ...
                     let mut result = elems.remove(0);

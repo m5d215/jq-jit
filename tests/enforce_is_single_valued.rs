@@ -1,6 +1,6 @@
 //! Enforce maintenance.md §3 "`[gen] | add` は single-valued 要素のみ畳める":
 //! every `Expr` variant must have a deliberate classification in
-//! `is_single_valued_expr` (`src/interpreter.rs`), driven by an external
+//! `is_single_valued_expr` (`src/simplify.rs`), driven by an external
 //! allowlist that classifies each variant as:
 //!
 //! * `reject`           — explicit reject arm returning `false`, for variants
@@ -122,10 +122,10 @@ fn load_allowlist() -> BTreeMap<String, Classification> {
 #[test]
 fn is_single_valued_expr_classifies_every_variant() {
     let ir_src = read_source("src/ir.rs");
-    let interp_src = read_source("src/interpreter.rs");
+    let simplify_src = read_source("src/simplify.rs");
     let variants = parse_expr_variants(&ir_src);
     let allowlist = load_allowlist();
-    let body = extract_fn_body(&interp_src, "is_single_valued_expr");
+    let body = extract_fn_body(&simplify_src, "is_single_valued_expr");
 
     eprintln!();
     eprintln!("=== `is_single_valued_expr` variant-classification enforcement ===");
@@ -206,7 +206,7 @@ fn is_single_valued_expr_classifies_every_variant() {
         }
         eprintln!();
         eprintln!("Either add the explicit arm to `is_single_valued_expr` in");
-        eprintln!("`src/interpreter.rs`, or downgrade the classification to");
+        eprintln!("`src/simplify.rs`, or downgrade the classification to");
         eprintln!("`default_false` in the allowlist.");
     }
 

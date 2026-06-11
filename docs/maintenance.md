@@ -393,7 +393,7 @@ $ JQJIT_TRACE=1 jq-jit '{a:.x, a:.x+1}' <<< '{"x":1}'
 
 どの fast path も match しない場合は `matched=eval` か `matched=jit` が出るので、generic path に落ちたことが判る。
 
-### (b) `src/interpreter.rs` の `simplify_expr`
+### (b) `src/simplify.rs` の `simplify_expr`
 
 構文木レベルの書き換え。`Pipe(Collect(…), UnaryOp(Add))` を `a + b + …` に畳む類。単一出力前提の置換が generator を壊すパターンをよく踏む（`Empty` branch、comma list、etc）。
 
@@ -436,7 +436,7 @@ jq は `{a:1, a:2}` → `{"a":2}`（後勝ち、最初の位置を保持）。
 削減方向にしか更新できない）。
 
 pair list を他形式（JSON バイト、Vec<(String, RemapExpr)> など）に変換する前に
-dedup だけしたい場合は従来の `interpreter.rs::normalize_object_pairs<K, V>`
+dedup だけしたい場合は従来の `classify.rs::normalize_object_pairs<K, V>`
 を使う（キー型は `PartialEq` でよい）。`| length` 系で個数だけ欲しい場合は
 dedup 後の `.len()` を取れば jq と一致する。
 
@@ -452,7 +452,7 @@ invariant 回帰は `tests/regression.test` の "Issue #30" ブロックと
 
 該当箇所:
 - `src/parser.rs` の `finalize_pipe` 系
-- `src/interpreter.rs` の `simplify_expr` pipe ハンドラ（`is_single_valued` ローカル helper）
+- `src/simplify.rs` の `simplify_expr` pipe ハンドラ（`is_single_valued` ローカル helper）
 
 新しい generator-ish な `Expr` variant を足したら `is_single_valued` の reject リストにも入れる。判定が微妙なら "safe default は false" で、rewrite を発火させない方にブレる。
 `tests/enforce_is_single_valued.rs` が `is_single_valued_expr` の全 variant 分類を
@@ -461,7 +461,7 @@ invariant 回帰は `tests/regression.test` の "Issue #30" ブロックと
 
 ### `first()` / `limit(1)` 書き換えのスコープ
 
-`limit(n; a, b, c, …)` で `n == 1` の時だけ先頭 branch に潰せる（`first(g)` 相当）。`n >= 1` だと 4 値欲しい時に 1 値しか返さなくなる。修正箇所は `interpreter.rs` の `simplify_expr` の `Expr::Limit` ハンドラ。
+`limit(n; a, b, c, …)` で `n == 1` の時だけ先頭 branch に潰せる（`first(g)` 相当）。`n >= 1` だと 4 値欲しい時に 1 値しか返さなくなる。修正箇所は `simplify.rs` の `simplify_expr` の `Expr::Limit` ハンドラ。
 
 ### JIT → eval 委譲時の env seeding
 
@@ -605,6 +605,6 @@ jq（Oniguruma）の `$` は Perl 流で「文字列末尾 **または** 末尾�
 
 1. **まず diff ループで再現** — input と filter の最小組を特定
 2. **どの fast path が走ってるか特定** — `JQJIT_TRACE=1` を付けて stderr を見る（§2(a) 参照）。generic path 落ちは `matched=eval` / `matched=jit`
-3. **発火していない場合は eval / simplify** — `src/eval.rs` と `src/interpreter.rs` の `simplify_expr`
+3. **発火していない場合は eval / simplify** — `src/eval.rs` と `src/simplify.rs` の `simplify_expr`
 4. **JIT でしか起きない**: JIT は input が大きい時 or `has_loop_constructs` の時にしか使われない。`echo null | …` で再現する時は後者（Update/Reduce/Foreach を含む filter）
 5. **直したら regression test に入れる** — `tests/regression.test` に 3 行形式で追加。1 修正 = 1 テスト以上
