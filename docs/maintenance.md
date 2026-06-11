@@ -212,12 +212,23 @@ downstream early-stop が保たれる（旧 eager delegate の #1085 hang は
   cond に Recurse を含まない）なら出力は常に入力の真部分木なので有限
   ドキュメントで必ず停止する（`[recurse(.[]?; cond)]` 級）。`recurse(.a)`
   の field step は null が無限連鎖するので対象外（limit budget 下のみ可）
-- path 意味論ノード（`path`/`del`/`pick`）が `$var` を参照(値 seed では
-  path provenance #880/#953 が失われ `. as $x | path($x)` が誤エラー化）
+- path 意味論ノード（`path`/`del`/`pick`）が **free な** `$var` を参照
+  （値 seed では path provenance #880/#953 が失われ `. as $x | path($x)` が
+  誤エラー化）。**委譲サブツリー内で束縛される var は対象外**（#1059
+  PR-E）— eval が束縛自体を実行するので provenance が保たれる
+  （`path(. as [$a] | $a)` / `path(foreach .[] as $x …)` 級が委譲で動く）。
+  free 判定は `expr_free_vars`（参照 − binder の集合差。parser の VarIdx は
+  binder ごとに一意なので shadowing も正しく扱える）。外側で束縛された var
+  （`. as $x | path($x)`）は LetBinding arm の probe 截取が**束縛スコープ
+  ごと**委譲する — body だけの委譲は値 seed になるため不可
 - `FuncCall` を含む委譲で、**いずれかの関数 body** に `break` / path
   意味論ノードがある場合（委譲は raw body を eval で実行するため、
   emit 時の Debug probe では body 内が見えない →
-  `funcs_bodies_block_delegation` が関数表ごと probe する）
+  `funcs_bodies_block_delegation` が関数表ごと probe する）。
+  path 意味論の委譲ではさらに、**body が外側 $var を close over する**
+  （body の free var が param 以外にある）場合も拒否
+  （`funcs_bodies_close_over_vars`、#1059 PR-E — 値 seed 経由で
+  `. as $x | def f: …$x…; path(f)` の provenance が落ちる live bug を修正）
 
 **funcs / memoize は委譲 env に配線済み（#1059 Phase 3c）**。再帰 def は
 インライン免除（`inline_with_recursion_exemption` が検出 → `FuncCall`
@@ -251,6 +262,16 @@ flatten 不能なら flatten_scalar 内で flag が立つため、`flatten_gen` 
 scalar dispatch は Reduce だけ probe してから委譲に切り替える（再帰 def を
 reduce source に含む形がここに落ちる）。委譲可否は emit_delegate_gen の
 ガード（push-mode 無限 / limit budget / break / provenance）がそのまま裁く。
+
+**LetBinding の probe 截取（#1059 PR-E）**: `flatten_gen` の LetBinding arm
+は、サブツリーに path 意味論マーカー（Debug に PathExpr/Del/Pick/Paths）が
+ある場合だけ test flattener で whole-node を probe し、native flatten が
+失敗するなら束縛スコープごと `emit_delegate_gen(…, path_semantic=true)` に
+切り替える。native arm は body 失敗時点で既に ops を emit しているため
+probe 先行が必須（scalar-Reduce 截取と同形）。free var が残る場合
+（`. as $y | (. as $x | path($y))` の内側）は free-var チェックが拒否し、
+さらに外側の LetBinding 截取が拾う。`nth(n; g)` / `last(g)` の lowering も
+LetBinding スコープなので、`path(nth(2; .[]))` 級がここで委譲に乗る。
 
 **default dispatch は委譲プログラムをコンパイルしない**
 （`is_jit_compilable_with_funcs` が reject）。delegate 支配的な filter は
