@@ -197,9 +197,15 @@ gate を通れば tree-walking eval ではなく JitOp interpreter で実行さ�
 4. **self-diff の主役**: `tests/selfdiff_jitop_backend.rs`（jitop-interp vs
    cranelift — 同一 op 列の真の backend diff）。`selfdiff_jit_interp.rs`
    （default vs eval）は委譲経路と routing 境界の検証として存続
-5. **既知の残骸**: forced 系の eager `inputs` 収集による
-   `[inputs as $x | input_line_number]` 乖離（default は routing guard で
-   回避、forced のみ残存・未修正）
+5. **interleaved input-state は丸ごと委譲**: `input_line_number` /
+   `input_filename` を読者と組み合わせる（or 複数読者の）プログラムは、
+   `flatten_filter` 入口の `observes_interleaved_input_state` 判定で
+   **プログラム全体を 1 個の pull-mode `DelegateGen`** に lower する。
+   generic fallback（let-binding 値 / pipe left）の eager collect が
+   `inputs` を本体実行前に全消費し `[inputs as $x | input_line_number]` が
+   [3,3,3] になる乖離（#1059 完了時の既知残骸）はこれで forced 系も解消。
+   default routing は delegate-dominant guard により従来どおり eval 行き
+   （明示の interleaved-IO チェックは冗長になり撤去）
 
 #### streaming eval delegate（#1059 Phase 3 / `JitOp::DelegateGen`）
 
@@ -337,17 +343,19 @@ probe 先行が必須（scalar-Reduce 截取と同形）。free var が残る場
 LetBinding スコープなので、`path(nth(2; .[]))` 級がここで委譲に乗る。
 
 **default dispatch の委譲プログラム routing（#1059 Phase 3.9 で flip）**:
-`is_jit_compilable_with_funcs` は委譲プログラムを受理する。ただし
-2 つのガードが残る:
-1. **delegate-dominant 拒否**: native（非 DelegateGen）op 数が
-   `DELEGATE_DOMINANT_NATIVE_OPS`(=16) 以下のプログラムは eval 維持
-   （2M NDJSON A/B で委譲側 ~1.13x 劣化。mixed プログラムは native 部が
-   JIT 速度で走り最大 25% 勝ち、毎レコード委譲発火でも ~1.02x）
-2. **interleaved IO 拒否**: ReadInput 系が 2 回以上、または ReadInput 系 +
-   input_line_number/input_filename の組合せは eval 維持 — JIT の `inputs`
-   lowering は eager 収集なので `[inputs as $x | input_line_number]` が
-   [3,3,3] になる（eval/jq は [1,2,3]）。**この eager 乖離は forced 系では
-   従来から存在する未修正バグ**（flip が default に露出させかけた）
+`is_jit_compilable_with_funcs` は委譲プログラムを受理する。残るガードは
+**delegate-dominant 拒否**: native（非 DelegateGen）op 数が
+`DELEGATE_DOMINANT_NATIVE_OPS`(=16) 以下のプログラムは eval 維持
+（2M NDJSON A/B で委譲側 ~1.13x 劣化。mixed プログラムは native 部が
+JIT 速度で走り最大 25% 勝ち、毎レコード委譲発火でも ~1.02x）。
+interleaved input-state プログラム（ReadInput 系 2 回以上、または
+ReadInput 系 + input_line_number/input_filename）は flip 当初は明示拒否
+していたが、現在は `flatten_filter` 入口で**プログラム全体が 1 個の
+pull-mode DelegateGen に lower される**（forced 系の eager 収集乖離の
+修正、上記 endgame 地図 5 点目）ため delegate-dominant 拒否に包摂され、
+明示チェックは撤去した（routing 検証は
+tests/jitop_routing.rs の interleaved_input_state_stays_on_eval /
+forced_modes_interleave_input_state_lazily）。
 委譲境界コストは 2 段で削減済み: `Env::reset` の Null-skip（eval 全経路にも
 ~30% 効く）と、seed var list の per-compile memoize（`seed_eval_env_from_jit`、
 free var のみ seed — 委譲式内で束縛される var は eval が再束縛するので不要）。
