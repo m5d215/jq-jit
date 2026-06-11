@@ -263,6 +263,15 @@ scalar dispatch は Reduce だけ probe してから委譲に切り替える（�
 reduce source に含む形がここに落ちる）。委譲可否は emit_delegate_gen の
 ガード（push-mode 無限 / limit budget / break / provenance）がそのまま裁く。
 
+**unbounded pipe-left の laziness（#1059 PR-H）**: each_output の generic
+fallback は出力を **eager collect** するため、`first(repeat(7) | .+1)`
+（= `limit(1; …)`）の無限 pipe-left が forced 系で hang していた（e60269b
+からの既存バグ）。`gen_may_be_unbounded`（Debug に Repeat/While/Until/Recurse、
+ただし data-bounded recurse は除外 — `.. | f` は native のまま）が真の left は
+flatten_gen_pipe の generic arm が `delegate_pipe` で委譲し、limit 配下なら
+PR-B の yield budget で lazy 停止する。each_output 側にも backstop
+（flag + return false → 無 budget 文脈は eval bail）。
+
 **label-scoped break と Collect/Label 截取（#1059 PR-G、bail 面ゼロ到達）**:
 emit_delegate_gen の break 一律拒否（Debug probe）を `expr_free_breaks`
 （break 対象 − label binder の集合差）に緩和 — label binder が委譲式内に
