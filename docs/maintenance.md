@@ -263,6 +263,21 @@ scalar dispatch は Reduce だけ probe してから委譲に切り替える（�
 reduce source に含む形がここに落ちる）。委譲可否は emit_delegate_gen の
 ガード（push-mode 無限 / limit budget / break / provenance）がそのまま裁く。
 
+**label-scoped break と Collect/Label 截取（#1059 PR-G、bail 面ゼロ到達）**:
+emit_delegate_gen の break 一律拒否（Debug probe）を `expr_free_breaks`
+（break 対象 − label binder の集合差）に緩和 — label binder が委譲式内に
+あれば break は eval 内で完結する。`flatten_gen` の Collect arm（失敗
+マーカー gate 付き）と Label arm に probe 截取を追加: 内側 generator が
+lower 不能（push-mode 無限 / 再帰 def / scoped break / path 拒否）なら
+whole-`[...]` / whole-`label` を委譲する。yield-mode の whole-Collect 委譲は
+eager でも jq 意味論どおり（`[repeat(1)]` は jq 自身も hang する）。
+`funcs_bodies_close_over_vars` は binder-aware に精緻化
+（`funcs_bodies_close_over_vars_outside`）: body の free var（param 除く）が
+**委譲式内の binder で束縛される**なら許可 —
+`. as $x | def f: …$x…; path(f)` は束縛スコープごと委譲され provenance が
+保たれる。これで regression + corpus の forced-jitop eval-bail は **0**
+（131→0、#1059 Phase 3 完了。残る eval 経路は DelegateGen 委譲のみ）。
+
 **pre-emission fall-through 第2弾（#1059 PR-F）**: StringInterpolation の
 generator part / ObjectConstruct の generator key / RegexMatch・Capture の
 generator 引数 / Range の非数値 step / Limit の非リテラル count・generator

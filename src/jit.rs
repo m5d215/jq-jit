@@ -786,9 +786,11 @@ struct Flattener {
     /// Cached verdict of `funcs_bodies_block_delegation` (the function
     /// table is fixed for the lifetime of a Flattener).
     funcs_body_block: Option<bool>,
-    /// Cached verdict of `funcs_bodies_close_over_vars` (same lifetime
-    /// argument as `funcs_body_block`).
-    funcs_body_closure: Option<bool>,
+    /// Cached union of every function body's free vars minus its own
+    /// params — the outer `$var`s the bodies close over. Computed once per
+    /// Flattener (same lifetime argument as `funcs_body_block`); consumed
+    /// by `funcs_bodies_close_over_vars_outside`.
+    funcs_body_closure_vars: Option<Rc<Vec<VarIdx>>>,
 }
 
 impl Flattener {
@@ -801,7 +803,7 @@ impl Flattener {
                      is_test: false, has_unresolved_recursion: false,
                      emitted_delegate: false, inline_exempt: HashSet::new(),
                      recursion_detected: HashSet::new(), funcs_body_block: None,
-                     funcs_body_closure: None }
+                     funcs_body_closure_vars: None }
     }
 
     /// Materialize a Literal into a heap-allocated Value and return a stable pointer.
@@ -840,7 +842,7 @@ impl Flattener {
         t.has_unresolved_recursion = self.has_unresolved_recursion;
         t.inline_exempt = self.inline_exempt.clone();
         t.funcs_body_block = self.funcs_body_block;
-        t.funcs_body_closure = self.funcs_body_closure;
+        t.funcs_body_closure_vars = self.funcs_body_closure_vars.clone();
         t
     }
 
@@ -1309,23 +1311,32 @@ impl Flattener {
         b
     }
 
-    /// True when some function body closes over an outer `$var` (a free
-    /// variable that is not one of the function's own params). A delegated
-    /// path-semantic expression reaches such a body through the funcs
-    /// table, where the var arrives as a value-only seed with no path
-    /// provenance — the same hazard the free-var check on the delegated
-    /// expression guards against, invisible to that walk (#1059 PR-E).
-    /// Params are exempt: eval binds them at the call site inside the
-    /// delegate, provenance intact.
-    fn funcs_bodies_close_over_vars(&mut self) -> bool {
-        if let Some(b) = self.funcs_body_closure { return b; }
-        let b = self.funcs.iter().any(|f| {
-            Self::expr_free_vars(&f.body)
-                .iter()
-                .any(|v| !f.param_vars.contains(v))
-        });
-        self.funcs_body_closure = Some(b);
-        b
+    /// True when some function body closes over a `$var` bound *outside*
+    /// the delegated expression. A delegated path-semantic expression
+    /// reaches such a body through the funcs table, where the var arrives
+    /// as a value-only seed with no path provenance — the same hazard the
+    /// free-var check on the delegated expression guards against,
+    /// invisible to that walk (#1059 PR-E). Two exemptions: the function's
+    /// own params (eval binds them at the call site inside the delegate)
+    /// and vars whose binder sits inside the delegated expression itself
+    /// (eval performs that binding too, #1059 PR-G) — only a var that
+    /// must come from the value seed rejects.
+    fn funcs_bodies_close_over_vars_outside(&mut self, expr: &Expr) -> bool {
+        if self.funcs_body_closure_vars.is_none() {
+            let mut union: Vec<VarIdx> = Vec::new();
+            for f in &self.funcs {
+                for v in Self::expr_free_vars(&f.body) {
+                    if !f.param_vars.contains(&v) && !union.contains(&v) {
+                        union.push(v);
+                    }
+                }
+            }
+            self.funcs_body_closure_vars = Some(Rc::new(union));
+        }
+        let union = self.funcs_body_closure_vars.clone().unwrap();
+        if union.is_empty() { return false; }
+        let binders = Self::expr_binder_indices(expr);
+        union.iter().any(|v| !binders.contains(v))
     }
 
     /// Emit a streaming eval delegation for `expr` (#1059 Phase 3), or
@@ -1339,11 +1350,12 @@ impl Flattener {
     ///   generator left in a CollectBegin, and an infinite delegated stream
     ///   (`limit(1; path(recurse(.+1)) | .)`) would hang there where eval
     ///   stops lazily.
-    /// - the subtree contains `break` (cannot unwind across the delegation
-    ///   boundary — it would surface as a plain eval error). The scan is a
-    ///   conservative Debug-format substring probe — a false positive
-    ///   (e.g. a literal string "Break") merely keeps the eval bail of the
-    ///   caller. `FuncCall` / `memoize` are no longer blanket-rejected:
+    /// - the subtree contains a *free* `break` (target label outside the
+    ///   delegation boundary — it cannot unwind back to a JIT label and
+    ///   would surface as a plain eval error). A break whose `label`
+    ///   binder is inside the subtree resolves within eval and is fine
+    ///   (#1059 PR-G, `expr_free_breaks`). `FuncCall` / `memoize` are no
+    ///   longer blanket-rejected:
     ///   the delegated env carries the funcs table and memo slots (#1059
     ///   Phase 3c). A delegated `FuncCall` is still rejected in push mode
     ///   (a recursive def can be an unbounded generator) and when any
@@ -1438,7 +1450,11 @@ impl Flattener {
         let mut rejected;
         {
             let dbg = format!("{:?}", expr);
-            rejected = dbg.contains("Break");
+            // A `break` whose `label` binder sits *inside* the delegated
+            // subtree resolves entirely within eval; only a free break
+            // (target label outside the delegation boundary) cannot
+            // unwind back to a JIT label (#1059 PR-G).
+            rejected = !Self::expr_free_breaks(expr).is_empty();
             // Push mode is eager: the delegate fills a collect stack the
             // lowering materialized (pipe fallback, explicit collect), so a
             // potentially-infinite delegated stream would hang where eval
@@ -1476,7 +1492,7 @@ impl Flattener {
         if !rejected && path_semantic {
             rejected = !Self::expr_free_vars(expr).is_empty()
                 || (format!("{:?}", expr).contains("FuncCall")
-                    && self.funcs_bodies_close_over_vars());
+                    && self.funcs_bodies_close_over_vars_outside(expr));
         }
         if rejected {
             self.has_unresolved_recursion = true;
@@ -3158,6 +3174,34 @@ impl Flattener {
             }
 
             Expr::Collect { generator } => {
+                // When the inner generator cannot lower (push-mode
+                // unbounded loop, recursive def, scoped break, path
+                // rejection), delegate the whole `[...]` instead: in the
+                // caller's context the collect yields a single array, and
+                // eval's eager evaluation of a collect IS jq's semantics —
+                // an infinite inner stream hangs identically in jq itself
+                // (#1059 PR-G). Probe-first (the native path below emits
+                // CollectBegin before the failure is known), gated on the
+                // failure-class markers so plain collects skip the probe.
+                if !self.is_test {
+                    let dbg = format!("{:?}", generator);
+                    if dbg.contains("While") || dbg.contains("Until")
+                        || dbg.contains("Repeat") || dbg.contains("Recurse")
+                        || dbg.contains("FuncCall") || dbg.contains("Break")
+                        || dbg.contains("PathExpr") || dbg.contains("Del")
+                        || dbg.contains("Pick") || dbg.contains("Paths")
+                    {
+                        let mut test = self.test_flattener();
+                        test.has_unresolved_recursion = false;
+                        let t_in = test.alloc_slot();
+                        let ok = test.flatten_gen(expr, t_in);
+                        if (!ok || test.has_unresolved_recursion)
+                            && self.emit_delegate_gen(expr, input_slot, false)
+                        {
+                            return true;
+                        }
+                    }
+                }
                 self.emit(JitOp::CollectBegin);
                 self.collect_depth += 1;
                 let ok = self.flatten_gen(generator, input_slot);
@@ -3867,6 +3911,24 @@ impl Flattener {
             }
 
             Expr::Label { var_index, body } => {
+                // If the labeled body cannot lower natively (e.g. a
+                // reduce/foreach whose update breaks out — the loop arm's
+                // delegate is rejected there because the break is free
+                // relative to that subtree), delegate the whole label
+                // scope: the break then targets a label *inside* the
+                // delegated expr and resolves within eval (#1059 PR-G).
+                // Probe-first, same shape as the LetBinding interception.
+                if !self.is_test {
+                    let mut test = self.test_flattener();
+                    test.has_unresolved_recursion = false;
+                    let t_in = test.alloc_slot();
+                    let ok = test.flatten_gen(expr, t_in);
+                    if (!ok || test.has_unresolved_recursion)
+                        && self.emit_delegate_gen(expr, input_slot, false)
+                    {
+                        return true;
+                    }
+                }
                 let done_label = self.alloc_label();
                 self.label_targets.insert(*var_index, (done_label, self.try_depth));
                 let ok = self.flatten_gen(body, input_slot);
@@ -5774,8 +5836,8 @@ impl Flattener {
     /// variant here silently loses any `$var` buried inside and degrades the
     /// delegated call to `null`.
     fn collect_loadvar_indices(expr: &Expr, out: &mut Vec<VarIdx>) {
-        let mut binders = Vec::new();
-        Self::collect_vars(expr, out, &mut binders);
+        let (mut binders, mut breaks, mut labels) = (Vec::new(), Vec::new(), Vec::new());
+        Self::collect_vars(expr, out, &mut binders, &mut breaks, &mut labels);
     }
 
     /// The *free* variables of `expr`: `$var` references whose binder lies
@@ -5784,19 +5846,44 @@ impl Flattener {
     /// binders collected in the same walk is scope-exact — a shadowing
     /// inner `as $x` has a different index than the outer one (#1059 PR-E).
     fn expr_free_vars(expr: &Expr) -> Vec<VarIdx> {
-        let mut refs = Vec::new();
-        let mut binders = Vec::new();
-        Self::collect_vars(expr, &mut refs, &mut binders);
+        let (mut refs, mut binders, mut breaks, mut labels) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        Self::collect_vars(expr, &mut refs, &mut binders, &mut breaks, &mut labels);
         refs.retain(|v| !binders.contains(v));
         refs
     }
 
-    /// Shared walk behind `collect_loadvar_indices` / `expr_free_vars`:
-    /// every `LoadVar` index goes into `refs`, every binder-introduced
-    /// index (`as $x`, reduce/foreach element and accumulator vars) into
-    /// `binders`. Label vars are a separate namespace (`Break` carries the
-    /// label index outside any `LoadVar`) and are not collected.
-    fn collect_vars(expr: &Expr, refs: &mut Vec<VarIdx>, binders: &mut Vec<VarIdx>) {
+    /// Every binder-introduced index within `expr` (`as $x`,
+    /// reduce/foreach element and accumulator vars). Used to exempt
+    /// function-body closures over vars that eval itself binds inside a
+    /// delegated scope (#1059 PR-G).
+    fn expr_binder_indices(expr: &Expr) -> Vec<VarIdx> {
+        let (mut refs, mut binders, mut breaks, mut labels) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        Self::collect_vars(expr, &mut refs, &mut binders, &mut breaks, &mut labels);
+        binders
+    }
+
+    /// The *free* `break` targets of `expr`: breaks whose `label $name`
+    /// binder lies outside the subtree. Same set-difference argument as
+    /// `expr_free_vars` — label vars come from the same monotonic parser
+    /// counter, so indices are unique per `label` binder (#1059 PR-G).
+    fn expr_free_breaks(expr: &Expr) -> Vec<VarIdx> {
+        let (mut refs, mut binders, mut breaks, mut labels) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        Self::collect_vars(expr, &mut refs, &mut binders, &mut breaks, &mut labels);
+        breaks.retain(|b| !labels.contains(b));
+        breaks
+    }
+
+    /// Shared walk behind `collect_loadvar_indices` / `expr_free_vars` /
+    /// `expr_free_breaks`: every `LoadVar` index goes into `refs`, every
+    /// binder-introduced index (`as $x`, reduce/foreach element and
+    /// accumulator vars) into `binders`, every `break $l` target into
+    /// `breaks` and every `label $l` binder into `labels` (a separate
+    /// namespace from value vars, but the same unique-per-binder index
+    /// space).
+    fn collect_vars(expr: &Expr, refs: &mut Vec<VarIdx>, binders: &mut Vec<VarIdx>, breaks: &mut Vec<VarIdx>, labels: &mut Vec<VarIdx>) {
         use crate::ir::StringPart;
         match expr {
             Expr::LoadVar { var_index } => {
@@ -5807,152 +5894,158 @@ impl Flattener {
             | Expr::ReadInput | Expr::ReadInputs
             | Expr::ModuleMeta | Expr::GenLabel => {}
             Expr::BinOp { lhs, rhs, .. } => {
-                Self::collect_vars(lhs, refs, binders);
-                Self::collect_vars(rhs, refs, binders);
+                Self::collect_vars(lhs, refs, binders, breaks, labels);
+                Self::collect_vars(rhs, refs, binders, breaks, labels);
             }
             Expr::UnaryOp { operand, .. } | Expr::Negate { operand } => {
-                Self::collect_vars(operand, refs, binders);
+                Self::collect_vars(operand, refs, binders, breaks, labels);
             }
             Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => {
-                Self::collect_vars(expr, refs, binders);
-                Self::collect_vars(key, refs, binders);
+                Self::collect_vars(expr, refs, binders, breaks, labels);
+                Self::collect_vars(key, refs, binders, breaks, labels);
             }
             Expr::Pipe { left, right } | Expr::Comma { left, right } => {
-                Self::collect_vars(left, refs, binders);
-                Self::collect_vars(right, refs, binders);
+                Self::collect_vars(left, refs, binders, breaks, labels);
+                Self::collect_vars(right, refs, binders, breaks, labels);
             }
             Expr::IfThenElse { cond, then_branch, else_branch } => {
-                Self::collect_vars(cond, refs, binders);
-                Self::collect_vars(then_branch, refs, binders);
-                Self::collect_vars(else_branch, refs, binders);
+                Self::collect_vars(cond, refs, binders, breaks, labels);
+                Self::collect_vars(then_branch, refs, binders, breaks, labels);
+                Self::collect_vars(else_branch, refs, binders, breaks, labels);
             }
             Expr::TryCatch { try_expr, catch_expr, .. } => {
-                Self::collect_vars(try_expr, refs, binders);
-                Self::collect_vars(catch_expr, refs, binders);
+                Self::collect_vars(try_expr, refs, binders, breaks, labels);
+                Self::collect_vars(catch_expr, refs, binders, breaks, labels);
             }
             Expr::Each { input_expr } | Expr::EachOpt { input_expr }
             | Expr::Recurse { input_expr } => {
-                Self::collect_vars(input_expr, refs, binders);
+                Self::collect_vars(input_expr, refs, binders, breaks, labels);
             }
             Expr::LetBinding { var_index, value, body } => {
                 if !binders.contains(var_index) { binders.push(*var_index); }
-                Self::collect_vars(value, refs, binders);
-                Self::collect_vars(body, refs, binders);
+                Self::collect_vars(value, refs, binders, breaks, labels);
+                Self::collect_vars(body, refs, binders, breaks, labels);
             }
             Expr::Reduce { source, init, update, var_index, acc_index } => {
                 if !binders.contains(var_index) { binders.push(*var_index); }
                 if !binders.contains(acc_index) { binders.push(*acc_index); }
-                Self::collect_vars(source, refs, binders);
-                Self::collect_vars(init, refs, binders);
-                Self::collect_vars(update, refs, binders);
+                Self::collect_vars(source, refs, binders, breaks, labels);
+                Self::collect_vars(init, refs, binders, breaks, labels);
+                Self::collect_vars(update, refs, binders, breaks, labels);
             }
             Expr::Foreach { source, init, update, extract, var_index, acc_index } => {
                 if !binders.contains(var_index) { binders.push(*var_index); }
                 if !binders.contains(acc_index) { binders.push(*acc_index); }
-                Self::collect_vars(source, refs, binders);
-                Self::collect_vars(init, refs, binders);
-                Self::collect_vars(update, refs, binders);
-                if let Some(e) = extract { Self::collect_vars(e, refs, binders); }
+                Self::collect_vars(source, refs, binders, breaks, labels);
+                Self::collect_vars(init, refs, binders, breaks, labels);
+                Self::collect_vars(update, refs, binders, breaks, labels);
+                if let Some(e) = extract { Self::collect_vars(e, refs, binders, breaks, labels); }
             }
-            Expr::Collect { generator } => Self::collect_vars(generator, refs, binders),
+            Expr::Collect { generator } => Self::collect_vars(generator, refs, binders, breaks, labels),
             Expr::ObjectConstruct { pairs } => {
                 for (k, v) in pairs {
-                    Self::collect_vars(k, refs, binders);
-                    Self::collect_vars(v, refs, binders);
+                    Self::collect_vars(k, refs, binders, breaks, labels);
+                    Self::collect_vars(v, refs, binders, breaks, labels);
                 }
             }
             Expr::Alternative { primary, fallback } => {
-                Self::collect_vars(primary, refs, binders);
-                Self::collect_vars(fallback, refs, binders);
+                Self::collect_vars(primary, refs, binders, breaks, labels);
+                Self::collect_vars(fallback, refs, binders, breaks, labels);
             }
             Expr::Range { from, to, step } => {
-                Self::collect_vars(from, refs, binders);
-                Self::collect_vars(to, refs, binders);
-                if let Some(s) = step { Self::collect_vars(s, refs, binders); }
+                Self::collect_vars(from, refs, binders, breaks, labels);
+                Self::collect_vars(to, refs, binders, breaks, labels);
+                if let Some(s) = step { Self::collect_vars(s, refs, binders, breaks, labels); }
             }
-            Expr::Label { body, .. } => Self::collect_vars(body, refs, binders),
-            Expr::Break { value, .. } => Self::collect_vars(value, refs, binders),
+            Expr::Label { var_index, body } => {
+                if !labels.contains(var_index) { labels.push(*var_index); }
+                Self::collect_vars(body, refs, binders, breaks, labels);
+            }
+            Expr::Break { var_index, value } => {
+                if !breaks.contains(var_index) { breaks.push(*var_index); }
+                Self::collect_vars(value, refs, binders, breaks, labels);
+            }
             Expr::Update { path_expr, update_expr } => {
-                Self::collect_vars(path_expr, refs, binders);
-                Self::collect_vars(update_expr, refs, binders);
+                Self::collect_vars(path_expr, refs, binders, breaks, labels);
+                Self::collect_vars(update_expr, refs, binders, breaks, labels);
             }
             Expr::Assign { path_expr, value_expr } => {
-                Self::collect_vars(path_expr, refs, binders);
-                Self::collect_vars(value_expr, refs, binders);
+                Self::collect_vars(path_expr, refs, binders, breaks, labels);
+                Self::collect_vars(value_expr, refs, binders, breaks, labels);
             }
             Expr::Mutate { path_expr, value_expr, .. } => {
-                Self::collect_vars(path_expr, refs, binders);
-                Self::collect_vars(value_expr, refs, binders);
+                Self::collect_vars(path_expr, refs, binders, breaks, labels);
+                Self::collect_vars(value_expr, refs, binders, breaks, labels);
             }
-            Expr::PathExpr { expr } => Self::collect_vars(expr, refs, binders),
+            Expr::PathExpr { expr } => Self::collect_vars(expr, refs, binders, breaks, labels),
             Expr::SetPath { path, value } => {
-                Self::collect_vars(path, refs, binders);
-                Self::collect_vars(value, refs, binders);
+                Self::collect_vars(path, refs, binders, breaks, labels);
+                Self::collect_vars(value, refs, binders, breaks, labels);
             }
-            Expr::GetPath { path } => Self::collect_vars(path, refs, binders),
-            Expr::DelPaths { paths } => Self::collect_vars(paths, refs, binders),
+            Expr::GetPath { path } => Self::collect_vars(path, refs, binders, breaks, labels),
+            Expr::DelPaths { paths } => Self::collect_vars(paths, refs, binders, breaks, labels),
             Expr::FuncCall { args, .. } => {
-                for a in args { Self::collect_vars(a, refs, binders); }
+                for a in args { Self::collect_vars(a, refs, binders, breaks, labels); }
             }
             Expr::StringInterpolation { parts } => {
                 for p in parts {
-                    if let StringPart::Expr(e) = p { Self::collect_vars(e, refs, binders); }
+                    if let StringPart::Expr(e) = p { Self::collect_vars(e, refs, binders, breaks, labels); }
                 }
             }
             Expr::Limit { count, generator } => {
-                Self::collect_vars(count, refs, binders);
-                Self::collect_vars(generator, refs, binders);
+                Self::collect_vars(count, refs, binders, breaks, labels);
+                Self::collect_vars(generator, refs, binders, breaks, labels);
             }
             Expr::While { cond, update } | Expr::Until { cond, update } => {
-                Self::collect_vars(cond, refs, binders);
-                Self::collect_vars(update, refs, binders);
+                Self::collect_vars(cond, refs, binders, breaks, labels);
+                Self::collect_vars(update, refs, binders, breaks, labels);
             }
-            Expr::Repeat { update } => Self::collect_vars(update, refs, binders),
+            Expr::Repeat { update } => Self::collect_vars(update, refs, binders, breaks, labels),
             Expr::AllShort { generator, predicate }
             | Expr::AnyShort { generator, predicate } => {
-                Self::collect_vars(generator, refs, binders);
-                Self::collect_vars(predicate, refs, binders);
+                Self::collect_vars(generator, refs, binders, breaks, labels);
+                Self::collect_vars(predicate, refs, binders, breaks, labels);
             }
             Expr::Error { msg } => {
-                if let Some(m) = msg { Self::collect_vars(m, refs, binders); }
+                if let Some(m) = msg { Self::collect_vars(m, refs, binders, breaks, labels); }
             }
-            Expr::Format { expr, .. } => Self::collect_vars(expr, refs, binders),
+            Expr::Format { expr, .. } => Self::collect_vars(expr, refs, binders, breaks, labels),
             Expr::ClosureOp { input_expr, key_expr, .. } => {
-                Self::collect_vars(input_expr, refs, binders);
-                Self::collect_vars(key_expr, refs, binders);
+                Self::collect_vars(input_expr, refs, binders, breaks, labels);
+                Self::collect_vars(key_expr, refs, binders, breaks, labels);
             }
             Expr::RegexTest { input_expr, re, flags }
             | Expr::RegexMatch { input_expr, re, flags }
             | Expr::RegexCapture { input_expr, re, flags }
             | Expr::RegexScan { input_expr, re, flags } => {
-                Self::collect_vars(input_expr, refs, binders);
-                Self::collect_vars(re, refs, binders);
-                Self::collect_vars(flags, refs, binders);
+                Self::collect_vars(input_expr, refs, binders, breaks, labels);
+                Self::collect_vars(re, refs, binders, breaks, labels);
+                Self::collect_vars(flags, refs, binders, breaks, labels);
             }
             Expr::RegexSub { input_expr, re, tostr, flags }
             | Expr::RegexGsub { input_expr, re, tostr, flags } => {
-                Self::collect_vars(input_expr, refs, binders);
-                Self::collect_vars(re, refs, binders);
-                Self::collect_vars(tostr, refs, binders);
-                Self::collect_vars(flags, refs, binders);
+                Self::collect_vars(input_expr, refs, binders, breaks, labels);
+                Self::collect_vars(re, refs, binders, breaks, labels);
+                Self::collect_vars(tostr, refs, binders, breaks, labels);
+                Self::collect_vars(flags, refs, binders, breaks, labels);
             }
             Expr::AlternativeDestructure { alternatives } => {
-                for a in alternatives { Self::collect_vars(a, refs, binders); }
+                for a in alternatives { Self::collect_vars(a, refs, binders, breaks, labels); }
             }
             Expr::Slice { expr, from, to } => {
-                Self::collect_vars(expr, refs, binders);
-                if let Some(f) = from { Self::collect_vars(f, refs, binders); }
-                if let Some(t) = to { Self::collect_vars(t, refs, binders); }
+                Self::collect_vars(expr, refs, binders, breaks, labels);
+                if let Some(f) = from { Self::collect_vars(f, refs, binders, breaks, labels); }
+                if let Some(t) = to { Self::collect_vars(t, refs, binders, breaks, labels); }
             }
             Expr::Debug { expr } | Expr::Stderr { expr } => {
-                Self::collect_vars(expr, refs, binders);
+                Self::collect_vars(expr, refs, binders, breaks, labels);
             }
             Expr::CallBuiltin { args, .. } => {
-                for a in args { Self::collect_vars(a, refs, binders); }
+                for a in args { Self::collect_vars(a, refs, binders, breaks, labels); }
             }
             Expr::Memoize { key, body, .. } => {
-                if let Some(k) = key { Self::collect_vars(k, refs, binders); }
-                Self::collect_vars(body, refs, binders);
+                if let Some(k) = key { Self::collect_vars(k, refs, binders, breaks, labels); }
+                Self::collect_vars(body, refs, binders, breaks, labels);
             }
         }
     }
@@ -7729,9 +7822,11 @@ extern "C" fn jit_rt_delegate_gen(
         }
     });
     if let Err(e) = result {
-        // The delegated subtree is break-free by construction (the emitter
-        // skips subtrees containing `break`), so any error here — including
-        // eval's BreakError sentinel, defensively — is a plain jq error.
+        // The delegated subtree has no *free* breaks by construction (the
+        // emitter rejects breaks whose label binder is outside the
+        // subtree; an inside-label break is consumed by eval's own Label
+        // handling, #1059 PR-G), so any error here — including eval's
+        // BreakError sentinel, defensively — is a plain jq error.
         set_jit_error_from(&e);
     }
     // Downstream stop verdicts win; otherwise report the yield count so a

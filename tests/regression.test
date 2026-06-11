@@ -13992,3 +13992,68 @@ null
 [isempty(combinations)]
 [[1,2],[3,4]]
 [false]
+
+# #1059 PR-G: break out of a delegated foreach resolves at the inside label
+[label $out | foreach range(10) as $i (0; if . > 3 then ., break $out else . + 1 end; .)]
+null
+[1,2,3,4,4]
+
+# #1059 PR-G: break aborting a reduce yields nothing (label scope delegated)
+[label $out | reduce range(100) as $i (0; if . >= 5 then ., break $out else . + 1 end)]
+null
+[]
+
+# #1059 PR-G: nested labels inside a delegated recurse step
+[label $a | recurse(if . < 5 then (label $b | (.+1, break $b)) else empty end)]
+0
+[0,1,2,3,4,5]
+
+# #1059 PR-G: infinite recursive def cut by a scoped break
+[label $out | (def f: ., f; f) | ., break $out]
+7
+[7]
+
+# #1059 PR-G: recursive def generator inside a collect delegates wholesale
+def countdown: if . <= 0 then empty else ., (. - 1 | countdown) end; [3 | countdown]
+null
+[3,2,1]
+
+# #1059 PR-G: recursive def with element-var chaining inside a collect
+def f($chain): if ($chain | length) >= 2 then $chain else [10, 20][] as $n | f($chain + [$n]) end; [f([])]
+null
+[[10,10],[10,20],[20,10],[20,20]]
+
+# #1059 PR-G: imported module function with nested recursive def in a collect
+import "issue_638" as M; M::f
+5
+[5,4,3,2,1]
+
+# #1059 PR-G: bounded computational recurse inside a collect
+[recurse(if . < 3 then .+1 else empty end)]
+0
+[0,1,2,3]
+
+# #1059 PR-G: multi-output while update inside a collect pipe
+[while(.<3; .+1, .+10) | .]
+0
+[0,1,2]
+
+# #1059 PR-G: empty-update until inside a collect
+[until(.>3; empty)]
+0
+[]
+
+# #1059 PR-G: path(recurse(field|filter)) inside a collect
+[path(recurse(.a | objects))]
+{"a":{"a":1}}
+[[],["a"]]
+
+# #1059 PR-G: path over an infinite repeat errors inside the delegated collect
+[try path(repeat(5)) catch .]
+1
+["Invalid path expression with result 5"]
+
+# #1059 PR-G: recursive def body closing over a var bound inside the delegated scope
+. as $x | def f: if . < 1 then $x else (.-1)|f end; path(f)
+0
+[]
